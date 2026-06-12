@@ -42,6 +42,13 @@ Edges represent relationships, evidence, provenance, supersession, contradiction
 
 `moa-memory-vector` owns vector storage for semantic retrieval. Embeddings are written for graph nodes that should participate in retrieval, and hybrid retrieval fuses graph/sidecar candidates with vector hits. The default backend is pgvector; large or isolation-sensitive workspaces can opt into Turbopuffer namespaces through `workspace_state.vector_backend`.
 
+`moa.node_index` also carries derived ranking metadata. `quality_score` is a
+neutral-by-default `0.5` prior that FeatureV1 centers to zero contribution; a
+score above or below that value can promote or demote otherwise similar facts
+without changing graph truth. The value lives in the sidecar row rather than
+node properties so candidate hydration does not parse dynamic properties per
+query.
+
 Embedder selection is per workspace. `cohere-embed-v4` and `gemini-embedding-2` use incompatible vector spaces, so switching a workspace requires re-embedding its graph nodes before retrieval can safely use the new model. Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API supports multimodal inputs, but MOA needs a separate multimodal chunker and embedder trait before image, audio, video, or PDF chunks are indexed.
 
 Gemini Embedding 2 does not use a `task_type` request field. MOA encodes asymmetric retrieval through role-specific prompt prefixes inside the embedder: ingestion-side embedders use the document prefix and retrieval-side embedders use a search-query prefix.
@@ -67,6 +74,11 @@ The memory processor runs after query rewriting and before history compilation. 
 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
+When `memory.retrieval.lineage_enabled` is true, retrieval records best-effort
+lineage rows after ranking: workspace, user, session, turn sequence, node UID,
+rank, and timestamp. The write is fire-and-forget and flag-dark by default, so
+normal retrieval does not wait on lineage persistence.
+
 ## Consolidation
 
 Workspace consolidation is a scheduled maintenance pass. In cloud mode it is the `Consolidate` Restate workflow. Locally and in eval it runs through the shared `moa-memory-lifecycle` crate. The workflow is a thin durable wrapper; the memory logic does not depend on Restate, so hermetic eval runs and scheduled maintenance call the same code.
@@ -82,6 +94,14 @@ Consolidation v1 runs five deterministic operations:
 The v1 pass deliberately does not do semantic near-duplicate merging, LLM-polished digest prose, episode building, scope-drift repair, or destructive expiry. `at_floor` is reported for future policy design, but floor-bound facts remain active unless another write supersedes them.
 
 Successful consolidation appends a `memory_updated` entry to `learning_log`.
+
+The lifecycle crate also owns the dark quality-scoring job. It joins
+`moa.retrieval_lineage` to persisted task-segment outcomes and writes
+Beta(1,1)-smoothed scores, `(1 + successes) / (2 + uses)`, back to
+`moa.node_index.quality_score` with epsilon-guarded idempotent updates. If the
+task-segment outcome source is unavailable, the job logs and reports a skip
+without writing. Scheduling and pruning policy are deferred until live lineage
+exists.
 
 ## Learning Relationship
 

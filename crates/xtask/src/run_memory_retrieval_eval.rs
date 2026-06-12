@@ -24,6 +24,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .with_lane(options.lane)
                 .with_consolidation(options.consolidate)
                 .with_digests(options.digests)
+                .with_inverted_quality_priors(options.invert_quality_priors)
                 .apply_budget_usd(options.budget_usd)
                 .apply_extractions_path(options.extractions_path.clone())
                 .apply_merges_path(options.merges_path.clone()),
@@ -88,6 +89,7 @@ struct Options {
     budget_usd: Option<f64>,
     consolidate: bool,
     digests: bool,
+    invert_quality_priors: bool,
 }
 
 impl Options {
@@ -103,6 +105,7 @@ impl Options {
         let mut budget_usd = None;
         let mut consolidate = false;
         let mut digests = false;
+        let mut invert_quality_priors = false;
         let mut extractor_specified = false;
         let mut args = args.peekable();
 
@@ -135,6 +138,9 @@ impl Options {
                 }
                 "--digests" => {
                     digests = true;
+                }
+                "--invert-quality-priors" => {
+                    invert_quality_priors = true;
                 }
                 "--ranking" => {
                     let value = args
@@ -188,6 +194,12 @@ impl Options {
                         .context("--ranking-overlap requires a numeric weight")?;
                     ranking_config.weights.overlap = parse_f64(&value, "--ranking-overlap")?;
                 }
+                "--quality-weight" => {
+                    let value = args
+                        .next()
+                        .context("--quality-weight requires a numeric weight")?;
+                    ranking_config.weights.quality = parse_f64(&value, "--quality-weight")?;
+                }
                 "--ranking-scope-user" => {
                     let value = args
                         .next()
@@ -232,12 +244,13 @@ impl Options {
             budget_usd,
             consolidate,
             digests,
+            invert_quality_priors,
         })
     }
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {

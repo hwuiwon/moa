@@ -138,7 +138,8 @@ impl GraphMemoryRetriever {
                 PiiClass::Restricted,
             )
             .with_k_final(self.result_limit)
-            .with_reranker(self.reranker_enabled());
+            .with_reranker(self.reranker_enabled())
+            .with_lineage_context(lineage_context_from_context(ctx));
             crate::planning::retrieve_for_query(&query, &query_ctx)
                 .await
                 .map_err(|error| {
@@ -163,6 +164,8 @@ impl GraphMemoryRetriever {
                 self.result_limit,
                 self.reranker_enabled(),
             );
+            let mut request = request;
+            request.lineage = Some(lineage_context_from_context(ctx));
             runtime
                 .hybrid
                 .retrieve(&planned, request)
@@ -423,6 +426,21 @@ fn memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
 fn turn_id_from_context(ctx: &WorkingContext) -> Option<TurnId> {
     let value = ctx.metadata().get("_moa.turn_id")?.as_str()?;
     Uuid::parse_str(value).ok().map(TurnId)
+}
+
+fn lineage_context_from_context(ctx: &WorkingContext) -> crate::retrieval::LineageContext {
+    crate::retrieval::LineageContext {
+        session_id: ctx.session_id,
+        turn_seq: turn_seq_from_context(ctx).unwrap_or(0),
+    }
+}
+
+fn turn_seq_from_context(ctx: &WorkingContext) -> Option<i64> {
+    let value = ctx.metadata().get("_moa.turn_seq")?;
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|seq| i64::try_from(seq).ok()))
+        .or_else(|| value.as_str().and_then(|seq| seq.parse().ok()))
 }
 
 fn query_expansions_from_context(ctx: &WorkingContext) -> Vec<String> {

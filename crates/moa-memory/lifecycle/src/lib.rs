@@ -2,6 +2,7 @@
 
 pub mod consolidate;
 pub mod digest;
+pub mod quality;
 
 pub use consolidate::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, MergeStats, Result,
@@ -12,3 +13,4 @@ pub use digest::{
     DIGEST_RENDER_VERSION, DigestFact, DigestScopeKind, DigestStats, RenderedDigest,
     rebuild_digests, render_digest,
 };
+pub use quality::{QualityStats, beta_smoothed_quality, compute_quality_scores};

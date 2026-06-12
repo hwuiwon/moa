@@ -359,7 +359,8 @@ async fn fetch_source_candidates(ctx: &IngestCtx, fact: &LedgerFact) -> Result<V
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at,
+               COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
         WHERE label = 'Fact'
           AND workspace_id = $1
@@ -383,7 +384,8 @@ async fn fetch_workspace_fact_candidates(
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at,
+               COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
         WHERE label = 'Fact'
           AND workspace_id = $1
@@ -1252,6 +1254,8 @@ mod tests {
             answer: format!("{subject} {predicate} {object}."),
             supersedes: Vec::new(),
             restates: None,
+            prior_uses: None,
+            prior_successes: None,
             source_session_id: SessionId(uuid::Uuid::from_u128(1)),
             source_turn_seq: 1,
             pii_class: PiiClass::None,
@@ -1275,6 +1279,7 @@ mod tests {
                 "object": object,
             })),
             last_accessed_at: timestamp(),
+            quality_score: 0.5,
         }
     }
 

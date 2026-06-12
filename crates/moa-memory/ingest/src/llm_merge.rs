@@ -222,6 +222,7 @@ mod tests {
             valid_from: chrono::Utc::now(),
             properties_summary: Some(serde_json::json!({})),
             last_accessed_at: chrono::Utc::now(),
+            quality_score: 0.5,
         }
     }
 }

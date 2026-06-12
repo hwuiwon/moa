@@ -237,6 +237,7 @@ fn row(uid: Uuid, name: &str) -> NodeIndexRow {
         valid_from: Utc::now(),
         properties_summary: None,
         last_accessed_at: Utc::now(),
+        quality_score: 0.5,
     }
 }
 

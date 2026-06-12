@@ -13,7 +13,7 @@ use moa_memory_vector::{VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::retrieval::hybrid::{LegSources, Result, RetrievalRequest};
+use crate::retrieval::hybrid::{LegSources, LineageContext, Result, RetrievalRequest};
 use crate::retrieval::ranking::normalize_tokens;
 
 /// Reciprocal-rank fusion denominator offset.
@@ -402,7 +402,8 @@ pub async fn hydrate_nodes(
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at,
+               COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
         WHERE uid = ANY("#,
     );
@@ -433,6 +434,49 @@ pub async fn bump_last_accessed(
         .bind(&uids)
         .execute(conn.as_mut())
         .await?;
+    conn.commit().await?;
+    Ok(())
+}
+
+/// Writes narrow retrieval lineage rows for later quality-score computation.
+pub async fn write_retrieval_lineage(
+    pool: PgPool,
+    scope: MemoryScope,
+    lineage: LineageContext,
+    ranked_uids: Vec<Uuid>,
+    retrieved_at: DateTime<Utc>,
+    assume_app_role: bool,
+) -> Result<()> {
+    if ranked_uids.is_empty() {
+        return Ok(());
+    }
+    let MemoryScope::User {
+        workspace_id,
+        user_id,
+    } = scope
+    else {
+        return Ok(());
+    };
+
+    let write_scope = MemoryScope::User {
+        workspace_id: workspace_id.clone(),
+        user_id: user_id.clone(),
+    };
+    let mut conn = begin_scoped(&pool, &write_scope, assume_app_role).await?;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO moa.retrieval_lineage \
+         (workspace_id, user_id, session_id, turn_seq, uid, rank, retrieved_at) ",
+    );
+    builder.push_values(ranked_uids.iter().enumerate(), |mut row, (index, uid)| {
+        row.push_bind(workspace_id.as_str())
+            .push_bind(user_id.as_str())
+            .push_bind(lineage.session_id.0)
+            .push_bind(lineage.turn_seq)
+            .push_bind(*uid)
+            .push_bind(i32::try_from(index + 1).unwrap_or(i32::MAX))
+            .push_bind(retrieved_at);
+    });
+    builder.build().execute(conn.as_mut()).await?;
     conn.commit().await?;
     Ok(())
 }
@@ -913,6 +957,7 @@ mod tests {
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            lineage: None,
             disable_leg_timeouts: true,
             disable_graph_expansion: false,
         }
@@ -1009,6 +1054,7 @@ mod tests {
             valid_from: chrono::Utc::now(),
             properties_summary: None,
             last_accessed_at: chrono::Utc::now(),
+            quality_score: 0.5,
         }
     }
 }

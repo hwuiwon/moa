@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 
 mod check_eval_budgets;
 mod compare_eval_reports;
+mod compute_memory_quality_scores;
 mod generate_memory_eval_corpus;
 mod record_memory_extractions;
 mod record_memory_merges;
@@ -20,6 +21,7 @@ fn main() -> Result<()> {
         Some("audit-paths") => cmd_audit_paths(),
         Some("check-eval-budgets") => check_eval_budgets::run(args),
         Some("compare-eval-reports") => compare_eval_reports::run(args),
+        Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
         Some("generate-memory-eval-corpus") => generate_memory_eval_corpus::run(args),
         Some("migrate-test-db") => cmd_migrate_test_db(),
         Some("record-memory-extractions") => record_memory_extractions::run(args),

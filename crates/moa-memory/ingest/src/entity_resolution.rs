@@ -253,7 +253,8 @@ impl EntityResolver {
         let rows = sqlx::query_as::<_, NodeIndexRow>(
             r#"
             SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-                   valid_to, valid_from, properties_summary, last_accessed_at
+                   valid_to, valid_from, properties_summary, last_accessed_at,
+                   COALESCE(quality_score, 0.5) AS quality_score
             FROM moa.node_index
             WHERE valid_to IS NULL
               AND label = $1
@@ -331,7 +332,8 @@ impl EntityResolver {
         let rows = sqlx::query_as::<_, NodeIndexRow>(
             r#"
             SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-                   valid_to, valid_from, properties_summary, last_accessed_at
+                   valid_to, valid_from, properties_summary, last_accessed_at,
+                   COALESCE(quality_score, 0.5) AS quality_score
             FROM moa.node_index
             WHERE valid_to IS NULL
               AND label = $1

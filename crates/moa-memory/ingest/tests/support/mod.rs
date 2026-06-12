@@ -252,7 +252,7 @@ pub(crate) async fn workspace_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Ve
     let mut conn = scoped_conn(pool, workspace_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
-         properties_summary, last_accessed_at \
+         properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
          WHERE workspace_id = $1 AND label = 'Fact' AND scope = 'workspace' \
          ORDER BY name",
@@ -269,7 +269,7 @@ pub(crate) async fn user_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<Nod
     let mut conn = user_scoped_conn(pool, workspace_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
-         properties_summary, last_accessed_at \
+         properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
          WHERE workspace_id = $1 AND user_id = $2 AND label = 'Fact' AND scope = 'user' \
          ORDER BY name",
@@ -291,7 +291,7 @@ pub(crate) async fn workspace_entity_rows(pool: &PgPool, workspace_id: Uuid) -> 
     let mut conn = scoped_conn(pool, workspace_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
-         properties_summary, last_accessed_at \
+         properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
          WHERE workspace_id = $1 AND label = 'Entity' AND scope = 'workspace' \
          ORDER BY name",
@@ -308,7 +308,7 @@ pub(crate) async fn user_entity_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<N
     let mut conn = user_scoped_conn(pool, workspace_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
-         properties_summary, last_accessed_at \
+         properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
          WHERE workspace_id = $1 AND user_id = $2 AND label = 'Entity' AND scope = 'user' \
          ORDER BY name",

@@ -141,6 +141,10 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "032_memory_digests.sql",
         sql: include_str!("../migrations/postgres/032_memory_digests.sql"),
     },
+    SessionMigration {
+        name: "033_quality_score_and_lineage.sql",
+        sql: include_str!("../migrations/postgres/033_quality_score_and_lineage.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;

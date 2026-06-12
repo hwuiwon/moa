@@ -214,7 +214,6 @@ pub fn generate_memory_eval_corpus_with_style(
 
     let schedule = builder.finish();
     validate_schedule_categories(&schedule.facts)?;
-    let ledger = schedule.ledger();
     let sessions = schedule.render_sessions(transcript_style);
     let probes = build_probes(
         profile,
@@ -224,6 +223,8 @@ pub fn generate_memory_eval_corpus_with_style(
         &workspace_refs,
         &user_refs,
     )?;
+    let mut ledger = schedule.ledger();
+    assign_quality_priors(&mut ledger, &probes)?;
     let embedding_inputs = build_embedding_inputs(&ledger, &probes);
     let manifest = CorpusManifest {
         version: CORPUS_SCHEMA_VERSION,
@@ -379,6 +380,8 @@ impl ScheduleBuilder {
             answer: draft.answer,
             supersedes: draft.supersedes,
             restates: None,
+            prior_uses: None,
+            prior_successes: None,
             source_session_id: assignment.plan.session_id,
             source_turn_seq: turn_seq,
             pii_class: draft.pii_class,
@@ -416,6 +419,8 @@ impl ScheduleBuilder {
             answer: draft.answer,
             supersedes: draft.supersedes,
             restates: Some(canonical_fact_id.to_string()),
+            prior_uses: None,
+            prior_successes: None,
             source_session_id: assignment.plan.session_id,
             source_turn_seq: turn_seq,
             pii_class: draft.pii_class,
@@ -1323,6 +1328,57 @@ fn build_probes(
     Ok(probes)
 }
 
+fn assign_quality_priors(ledger: &mut [LedgerFact], probes: &[Probe]) -> Result<()> {
+    let expected_fact_ids = probes
+        .iter()
+        .flat_map(|probe| probe.expected_fact_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let expected_keys = ledger
+        .iter()
+        .filter(|fact| expected_fact_ids.contains(&fact.fact_id))
+        .map(quality_prior_group_key)
+        .collect::<BTreeSet<_>>();
+    let mut low_prior_count = 0_usize;
+
+    for fact in ledger.iter_mut() {
+        if expected_fact_ids.contains(&fact.fact_id) {
+            fact.prior_uses = Some(8);
+            fact.prior_successes = Some(7);
+            continue;
+        }
+        if fact.restates.is_none() && expected_keys.contains(&quality_prior_group_key(fact)) {
+            fact.prior_uses = Some(8);
+            fact.prior_successes = Some(1);
+            low_prior_count += 1;
+        }
+    }
+
+    if expected_fact_ids.is_empty() || low_prior_count == 0 {
+        return invalid_config(
+            "quality prior assignment requires expected facts and same-subject colliders"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn quality_prior_group_key(fact: &LedgerFact) -> (String, Option<String>, &'static str, String) {
+    (
+        fact.workspace_id.to_string(),
+        (fact.scope == ScopeTier::User).then(|| fact.user_id.to_string()),
+        scope_tier_str(fact.scope),
+        fact.subject.clone(),
+    )
+}
+
+fn scope_tier_str(scope: ScopeTier) -> &'static str {
+    match scope {
+        ScopeTier::Global => "global",
+        ScopeTier::Workspace => "workspace",
+        ScopeTier::User => "user",
+    }
+}
+
 fn build_embedding_inputs(facts: &[LedgerFact], probes: &[Probe]) -> Vec<EmbeddingInput> {
     let mut inputs = Vec::with_capacity(facts.len() + probes.len());
     for fact in facts {
@@ -2180,6 +2236,65 @@ mod tests {
                 assert!(!restating.contains(fact_id));
             }
         }
+    }
+
+    #[test]
+    fn generator_prior_assignment_is_deterministic_and_disjoint() {
+        // Pins: synthetic quality priors mark expected facts high and colliders low without overlap.
+        let first = generate_memory_eval_corpus_with_style(
+            CorpusProfile::Pr,
+            vec![1, 2, 3],
+            TranscriptStyle::Marked,
+        )
+        .expect("generate first PR corpus");
+        let second = generate_memory_eval_corpus_with_style(
+            CorpusProfile::Pr,
+            vec![1, 2, 3],
+            TranscriptStyle::Marked,
+        )
+        .expect("generate second PR corpus");
+        let expected = first
+            .probes
+            .iter()
+            .flat_map(|probe| probe.expected_fact_ids.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>();
+        let first_priors = first
+            .ledger
+            .iter()
+            .map(|fact| {
+                (
+                    fact.fact_id.as_str(),
+                    (fact.prior_uses, fact.prior_successes),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let second_priors = second
+            .ledger
+            .iter()
+            .map(|fact| {
+                (
+                    fact.fact_id.as_str(),
+                    (fact.prior_uses, fact.prior_successes),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(first_priors, second_priors);
+        assert!(
+            expected
+                .iter()
+                .all(|fact_id| first_priors.get(fact_id).copied() == Some((Some(8), Some(7))))
+        );
+        let low_prior_ids = first_priors
+            .iter()
+            .filter_map(|(fact_id, prior)| (*prior == (Some(8), Some(1))).then_some(*fact_id))
+            .collect::<BTreeSet<_>>();
+        assert!(!low_prior_ids.is_empty());
+        assert!(low_prior_ids.is_disjoint(&expected));
+        assert!(first.ledger.iter().all(|fact| {
+            fact.restates.is_none()
+                || first_priors.get(fact.fact_id.as_str()).copied() == Some((None, None))
+        }));
     }
 
     fn turns_by_fact_id(sessions: &[SyntheticSession]) -> BTreeMap<&str, &SyntheticTurn> {

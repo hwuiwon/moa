@@ -34,6 +34,8 @@ pub struct NodeIndexRow {
     pub properties_summary: Option<serde_json::Value>,
     /// Last retrieval/access timestamp.
     pub last_accessed_at: DateTime<Utc>,
+    /// Outcome-derived retrieval quality prior, centered at neutral 0.5.
+    pub quality_score: f64,
 }
 
 impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
@@ -52,6 +54,7 @@ impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
             valid_from: row.try_get("valid_from")?,
             properties_summary: row.try_get("properties_summary")?,
             last_accessed_at: row.try_get("last_accessed_at")?,
+            quality_score: row.try_get("quality_score")?,
         })
     }
 }
@@ -255,7 +258,8 @@ pub async fn lookup_seed_by_name(
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
-               valid_to, valid_from, properties_summary, last_accessed_at
+               valid_to, valid_from, properties_summary, last_accessed_at,
+               COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
         WHERE "#,
     );

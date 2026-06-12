@@ -70,6 +70,13 @@ final top-4 candidate facts. The existing `preference_application` retrieval
 slice remains retrieval-only; the gap between the two numbers shows how much
 standing context is helping without hiding ranking misses.
 
+Quality-weighted ranking is also a memory-suite extension. Ledger facts can
+carry synthetic `prior_uses` and `prior_successes`; the runner resolves those
+facts to graph UIDs and seeds `moa.node_index.quality_score` before probing.
+The ranker treats the neutral default `0.5` as zero contribution, so reports
+with unset priors preserve the pre-quality ordering except for the ranking
+pipeline version.
+
 The graph leg is a seeded expansion leg. Retrieval runs vector and lexical
 first, then expands from planner NER seeds plus the top phase-one fused hits.
 Expansion applies the same as-of validity window as the other legs, scores
@@ -112,7 +119,7 @@ Promote the kernel to a separate crate only when a second suite needs it.
 `CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
 text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
 reference time, and a stable ranking fingerprint made from the ranking config
-plus `RANKING_PIPELINE_VERSION`.
+plus `RANKING_PIPELINE_VERSION` 5.
 
 The memory eval runner still uses the production planner, cache, and hybrid
 retriever, but its default ranking config is time-neutral. Recorded extraction
@@ -225,6 +232,63 @@ env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --digests \
   --output target/memory-eval/natural-recorded-digests.json
 ```
+
+To exercise outcome-weighted ranking, run the same corpus twice: once with the
+quality term zeroed and once with the default weight. The default quality
+weight is 0.6, calibrated against the paired gate below. The generated natural
+corpus seeds expected facts with high synthetic priors and same-subject lexical
+colliders with low synthetic priors:
+
+```bash
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --extractor recorded \
+  --quality-weight 0.0 \
+  --output target/memory-eval/q0.json
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --extractor recorded \
+  --output target/memory-eval/q.json
+cargo run -p xtask -- compare-eval-reports \
+  --baseline target/memory-eval/q0.json \
+  --candidate target/memory-eval/q.json
+```
+
+Then run the inverted-prior negative control. It must regress MRR with a
+confidence interval excluding zero, proving the quality term has enough weight
+to matter rather than acting as a no-op:
+
+```bash
+env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+  --corpus target/memory-eval/pr-natural \
+  --extractor recorded \
+  --invert-quality-priors \
+  --output target/memory-eval/qinv.json
+cargo run -p xtask -- compare-eval-reports \
+  --baseline target/memory-eval/q.json \
+  --candidate target/memory-eval/qinv.json
+```
+
+This gate proves mechanism and weight magnitude, not production prior quality.
+The priors are synthetic by design. Production quality is owned by live lineage
+data and task-segment outcomes after `memory.retrieval.lineage_enabled` is
+enabled.
+
+Lineage capture is dark by default. When
+`memory.retrieval.lineage_enabled = true`, retrieval writes best-effort rows to
+`moa.retrieval_lineage` with workspace, user, session, turn sequence, UID,
+rank, and timestamp; write errors trace and never fail retrieval. The dark
+scoring job is manual:
+
+```bash
+cargo run -p xtask -- compute-memory-quality-scores --workspace <workspace-uuid>
+```
+
+It applies Beta(1,1) smoothing, `(1 + successes) / (2 + uses)`, over lineage
+rows joined to persisted task segments. If no outcome source is present, the
+job logs a structured warning, reports `skipped_no_outcome_source`, and writes
+nothing. It is not scheduled; production enablement also needs a lineage
+pruning policy.
 
 Extraction fixtures are keyed by the SHA-256 hex hash of the raw chunk text the
 extractor saw. The file name and every record carry the extraction prompt
@@ -449,6 +513,8 @@ Examples:
   facts were merged, superseded, or expired incorrectly.
 - Add outcome-weighting only after top-k candidates contain the right facts but
   `mrr` or `ndcg_at_4` shows ranking quality is the bottleneck.
+  The hermetic quality gate only validates the ranking mechanism; production
+  prior quality belongs to the live lane after lineage and task outcomes exist.
 - Add adaptive gating only after the report shows predictable over-retrieval or
   under-retrieval patterns that fixed cutoffs cannot address.
 - Add LLM extraction or scope classification only after the natural profile's

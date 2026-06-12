@@ -28,7 +28,7 @@ use moa_memory_ingest::{
     RecordedEntityMergeVerifier, RecordedFactExtractor, SessionTurn, TurnChunk, chunk_turn,
     normalize_entity_name,
 };
-use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome};
+use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoothed_quality};
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
@@ -77,6 +77,7 @@ pub struct MemoryRetrievalEvalOptions {
     budget_usd: Option<f64>,
     consolidate: bool,
     digests: bool,
+    invert_quality_priors: bool,
 }
 
 impl MemoryRetrievalEvalOptions {
@@ -101,6 +102,7 @@ impl MemoryRetrievalEvalOptions {
             budget_usd: None,
             consolidate: false,
             digests: false,
+            invert_quality_priors: false,
         }
     }
 
@@ -181,6 +183,20 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
+    /// Overrides the FeatureV1 quality term weight for A/B evaluation.
+    #[must_use]
+    pub fn with_quality_weight(mut self, quality_weight: f64) -> Self {
+        self.ranking_config.weights.quality = quality_weight;
+        self
+    }
+
+    /// Inverts synthetic quality priors for the negative-control eval lane.
+    #[must_use]
+    pub fn with_inverted_quality_priors(mut self, invert_quality_priors: bool) -> Self {
+        self.invert_quality_priors = invert_quality_priors;
+        self
+    }
+
     /// Returns the corpus directory.
     #[must_use]
     pub fn corpus_dir(&self) -> &Path {
@@ -241,6 +257,12 @@ impl MemoryRetrievalEvalOptions {
         self.digests
     }
 
+    /// Returns whether seeded quality priors should be inverted.
+    #[must_use]
+    pub fn invert_quality_priors(&self) -> bool {
+        self.invert_quality_priors
+    }
+
     fn validate(&self) -> Result<()> {
         self.validate_with_env(|name| env::var(name).ok())
     }
@@ -252,6 +274,11 @@ impl MemoryRetrievalEvalOptions {
         {
             return Err(EvalError::InvalidConfig(
                 "--budget-usd must be a finite non-negative number".to_string(),
+            ));
+        }
+        if !self.ranking_config.weights.quality.is_finite() {
+            return Err(EvalError::InvalidConfig(
+                "--quality-weight must be finite".to_string(),
             ));
         }
         if self.lane == EvalLane::Pr {
@@ -477,6 +504,13 @@ async fn run_memory_retrieval_eval_in_store(
     } else {
         HashMap::new()
     };
+    seed_eval_quality_scores(
+        store.pool(),
+        &corpus.ledger,
+        &gold_resolution,
+        options.invert_quality_priors(),
+    )
+    .await?;
     let extraction_precision =
         extraction_precision_counts(store.pool(), &corpus.ledger, &fact_ids_by_uid).await?;
     let entity_fragmentation = entity_fragmentation_counts(store.pool(), &corpus.ledger).await?;
@@ -1002,6 +1036,10 @@ pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]
         .bind(&workspace_ids)
         .execute(pool)
         .await?;
+    sqlx::query("DELETE FROM moa.retrieval_lineage WHERE workspace_id = ANY($1)")
+        .bind(&workspace_ids)
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM moa.graph_changelog WHERE workspace_id = ANY($1)")
         .bind(&workspace_ids)
         .execute(pool)
@@ -1114,6 +1152,38 @@ async fn stabilize_eval_access_times(pool: &PgPool, ledger: &[LedgerFact]) -> Re
     .bind(&workspace_ids)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn seed_eval_quality_scores(
+    pool: &PgPool,
+    ledger: &[LedgerFact],
+    gold_resolution: &GoldResolutionReport,
+    invert_priors: bool,
+) -> Result<()> {
+    let facts = ledger_by_fact_id(ledger);
+    for record in &gold_resolution.records {
+        let Some(fact) = facts.get(record.fact_id.as_str()) else {
+            continue;
+        };
+        let (Some(uses), Some(successes)) = (fact.prior_uses, fact.prior_successes) else {
+            continue;
+        };
+        if record.node_uids.is_empty() {
+            continue;
+        }
+        let successes = if invert_priors {
+            uses.saturating_sub(successes)
+        } else {
+            successes
+        };
+        let quality_score = beta_smoothed_quality(u64::from(uses), u64::from(successes));
+        sqlx::query("UPDATE moa.node_index SET quality_score = $1 WHERE uid = ANY($2)")
+            .bind(quality_score)
+            .bind(&record.node_uids)
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1387,7 +1457,7 @@ fn all_expected_found_at_k(
         candidates.iter().any(|candidate| {
             candidate.rank > 0
                 && candidate.rank <= k
-                && candidate.fact_id.as_deref() == Some(expected_fact_id.as_str())
+                && candidate_fact_ids(candidate).any(|fact_id| fact_id == expected_fact_id)
         })
     })
 }
@@ -1399,11 +1469,17 @@ fn any_blocked_found_at_k(candidates: &[RetrievedCandidate], blocked: &[String],
     candidates.iter().any(|candidate| {
         candidate.rank > 0
             && candidate.rank <= k
-            && candidate
-                .fact_id
-                .as_ref()
-                .is_some_and(|fact_id| blocked.contains(fact_id))
+            && candidate_fact_ids(candidate)
+                .any(|fact_id| blocked.iter().any(|blocked| blocked == fact_id))
     })
+}
+
+fn candidate_fact_ids(candidate: &RetrievedCandidate) -> impl Iterator<Item = &str> {
+    candidate
+        .fact_id
+        .as_deref()
+        .into_iter()
+        .chain(candidate.equivalent_fact_ids.iter().map(String::as_str))
 }
 
 fn fact_ids_by_uid(gold_resolution: &GoldResolutionReport) -> HashMap<Uuid, String> {

@@ -10,7 +10,8 @@ pub use cache::{
     CacheKey, CachedEntry, CachedHybridRetriever, CachedHybridRetrieverConfig, RetrievalBackend,
 };
 pub use hybrid::{
-    HybridRetriever, LegSources, Result, RetrievalError, RetrievalHit, RetrievalRequest,
+    HybridRetriever, LegSources, LineageContext, Result, RetrievalError, RetrievalHit,
+    RetrievalRequest,
 };
 pub use legs::{GRAPH_WEIGHT, LEXICAL_WEIGHT, RRF_K, VECTOR_WEIGHT, rrf_fuse};
 pub use ranking::{

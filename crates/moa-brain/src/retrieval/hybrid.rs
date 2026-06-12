@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, MoaConfig, ScopeContext, ScopedConn};
+use moa_core::{MemoryScope, MoaConfig, ScopeContext, ScopedConn, SessionId};
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
@@ -19,7 +19,7 @@ use crate::planning::Strategy;
 use crate::retrieval::legs::{
     GRAPH_BUDGET, GRAPH_WEIGHT, LEXICAL_BUDGET, LEXICAL_WEIGHT, LegCandidate, VECTOR_BUDGET,
     VECTOR_WEIGHT, bump_last_accessed, graph_expansion_leg, hydrate_nodes, lexical_leg, rrf_fuse,
-    timed_leg, vector_leg as run_vector_leg,
+    timed_leg, vector_leg as run_vector_leg, write_retrieval_lineage,
 };
 use crate::retrieval::ranking::{
     FeatureRanker, RankingConfig, RankingMode, normalize_tokens, ranking_fingerprint,
@@ -79,10 +79,21 @@ pub struct RetrievalRequest {
     pub as_of: Option<DateTime<Utc>>,
     /// Optional deterministic clock for post-hydration ranking features.
     pub ranking_reference_time: Option<DateTime<Utc>>,
+    /// Optional turn context for fire-and-forget retrieval lineage capture.
+    pub lineage: Option<LineageContext>,
     /// Whether retrieval legs should run without timeout budgets.
     pub disable_leg_timeouts: bool,
     /// Whether graph expansion should be skipped for this request.
     pub disable_graph_expansion: bool,
+}
+
+/// Per-turn context needed to record retrieved facts for quality scoring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineageContext {
+    /// Session that issued the retrieval.
+    pub session_id: SessionId,
+    /// Monotonic turn sequence when known.
+    pub turn_seq: i64,
 }
 
 /// Retrieval legs that contributed to one fused candidate.
@@ -119,6 +130,7 @@ pub struct HybridRetriever {
     reranker: Arc<dyn Reranker>,
     ranking_config: RankingConfig,
     assume_app_role: bool,
+    lineage_enabled: bool,
 }
 
 impl HybridRetriever {
@@ -133,6 +145,7 @@ impl HybridRetriever {
             reranker: Arc::new(NoopReranker),
             ranking_config: RankingConfig::default(),
             assume_app_role: false,
+            lineage_enabled: false,
         }
     }
 
@@ -172,6 +185,7 @@ impl HybridRetriever {
             .with_turbopuffer(turbopuffer)
             .with_reranker(reranker)
             .with_ranking_config(RankingConfig::from(&config.memory.retrieval.ranking))
+            .with_lineage_enabled(config.memory.retrieval.lineage_enabled)
     }
 
     /// Adds an optional Turbopuffer target backend for promoted workspaces.
@@ -192,6 +206,13 @@ impl HybridRetriever {
     #[must_use]
     pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
         self.ranking_config = ranking_config;
+        self
+    }
+
+    /// Enables or disables fire-and-forget retrieval lineage sidecar writes.
+    #[must_use]
+    pub fn with_lineage_enabled(mut self, enabled: bool) -> Self {
+        self.lineage_enabled = enabled;
         self
     }
 
@@ -293,6 +314,29 @@ impl HybridRetriever {
                     bump_last_accessed(pool, scope, touched_uids, assume_app_role).await
                 {
                     tracing::debug!(error = %error, "failed to bump graph-memory access timestamps");
+                }
+            });
+        }
+        if self.lineage_enabled
+            && let Some(lineage) = req.lineage
+        {
+            let ranked_uids = final_hits.iter().map(|hit| hit.uid).collect::<Vec<_>>();
+            let pool = self.pool.clone();
+            let scope = req.scope.clone();
+            let assume_app_role = self.assume_app_role;
+            let retrieved_at = Utc::now();
+            tokio::spawn(async move {
+                if let Err(error) = write_retrieval_lineage(
+                    pool,
+                    scope,
+                    lineage,
+                    ranked_uids,
+                    retrieved_at,
+                    assume_app_role,
+                )
+                .await
+                {
+                    tracing::debug!(error = %error, "failed to write graph-memory retrieval lineage");
                 }
             });
         }
@@ -694,6 +738,7 @@ mod tests {
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
         };
@@ -741,6 +786,7 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: None,
+                lineage: None,
                 disable_leg_timeouts: false,
                 disable_graph_expansion: false,
             },
@@ -803,6 +849,7 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: Some(reference_time),
+                lineage: None,
                 disable_leg_timeouts: false,
                 disable_graph_expansion: false,
             },
@@ -858,6 +905,7 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: Some(reference_time),
+                lineage: None,
                 disable_leg_timeouts: false,
                 disable_graph_expansion: false,
             },
@@ -913,6 +961,7 @@ mod tests {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: Some(reference_time),
+                lineage: None,
                 disable_leg_timeouts: false,
                 disable_graph_expansion: false,
             },
@@ -1028,6 +1077,7 @@ mod tests {
                 valid_from: Utc::now(),
                 properties_summary: None,
                 last_accessed_at: Utc::now(),
+                quality_score: 0.5,
             },
         }
     }
@@ -1045,6 +1095,7 @@ mod tests {
             valid_from: Utc::now(),
             properties_summary: None,
             last_accessed_at: Utc::now(),
+            quality_score: 0.5,
         }
     }
 

@@ -573,8 +573,8 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_pipeline_version_bump() {
-        // Pins: entity-resolution and typed-edge candidate-pool changes require ranking fingerprint version 3.
-        assert_eq!(RANKING_PIPELINE_VERSION, 3);
+        // Pins: quality-score row-shape and ranking changes require ranking fingerprint version 5.
+        assert_eq!(RANKING_PIPELINE_VERSION, 5);
     }
 
     #[derive(Default)]
@@ -621,6 +621,7 @@ mod tests {
                     valid_from: Utc::now(),
                     properties_summary: None,
                     last_accessed_at: Utc::now(),
+                    quality_score: 0.5,
                 },
             }])
         }
@@ -681,6 +682,7 @@ mod tests {
             strategy: Some(planned.strategy),
             as_of: planned.temporal_filter,
             ranking_reference_time: None,
+            lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
         }

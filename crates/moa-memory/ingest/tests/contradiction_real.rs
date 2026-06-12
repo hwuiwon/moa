@@ -42,6 +42,7 @@ fn candidate_with(
         valid_from: Utc::now() - Duration::days(1),
         properties_summary: Some(properties),
         last_accessed_at: Utc::now(),
+        quality_score: 0.5,
     }
 }
 

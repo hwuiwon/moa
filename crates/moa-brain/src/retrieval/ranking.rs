@@ -8,7 +8,7 @@ use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 3;
+pub const RANKING_PIPELINE_VERSION: u32 = 5;
 
 /// Ranking mode for hydrated hybrid retrieval candidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,7 @@ pub enum RankingMode {
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RankingWeights {
     /// Normalized reciprocal-rank fusion contribution.
     pub rrf: f64,
@@ -34,6 +35,8 @@ pub struct RankingWeights {
     pub subject_match: f64,
     /// Query-to-summary token overlap contribution.
     pub overlap: f64,
+    /// Outcome-derived quality prior contribution.
+    pub quality: f64,
     /// Additive score for user-scoped rows.
     pub scope_user: f64,
     /// Additive score for workspace-scoped rows.
@@ -52,6 +55,7 @@ impl Default for RankingWeights {
             access: 0.15,
             subject_match: 0.5,
             overlap: 0.35,
+            quality: 0.6,
             scope_user: 0.2,
             scope_workspace: 0.1,
             recency_half_life_days: 90.0,
@@ -98,6 +102,7 @@ impl From<&MemoryRankingWeights> for RankingWeights {
             access: value.access,
             subject_match: value.subject_match,
             overlap: value.overlap,
+            quality: value.quality,
             scope_user: value.scope_user,
             scope_workspace: value.scope_workspace,
             recency_half_life_days: value.recency_half_life_days,
@@ -170,6 +175,7 @@ impl<'a> FeatureRanker<'a> {
             + weights.access * access
             + weights.subject_match * subject
             + weights.overlap * overlap
+            + weights.quality * (row.quality_score - 0.5) * 2.0
             + scope_term
     }
 
@@ -565,6 +571,140 @@ mod tests {
         assert!(ranker.score(1.0, 1.0, &query_tokens, &past_access) > 0.0);
     }
 
+    #[test]
+    fn quality_term_contributes_zero_at_neutral_default() {
+        // Pins: the default migrated quality score is behavior-preserving.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let mut config_with_quality = RankingConfig::default();
+        let mut config_without_quality = config_with_quality.clone();
+        config_without_quality.weights.quality = 0.0;
+        let query_tokens = normalize_tokens("checkout service");
+        let candidate = row(
+            "workspace",
+            "checkout service",
+            reference_time,
+            reference_time,
+            None,
+        );
+
+        assert_eq!(
+            FeatureRanker::new(&config_with_quality, reference_time).score(
+                1.0,
+                1.0,
+                &query_tokens,
+                &candidate,
+            ),
+            FeatureRanker::new(&config_without_quality, reference_time).score(
+                1.0,
+                1.0,
+                &query_tokens,
+                &candidate,
+            )
+        );
+        config_with_quality.weights.quality = 0.8;
+        assert_eq!(
+            FeatureRanker::new(&config_with_quality, reference_time).score(
+                1.0,
+                1.0,
+                &query_tokens,
+                &candidate,
+            ),
+            FeatureRanker::new(&config_without_quality, reference_time).score(
+                1.0,
+                1.0,
+                &query_tokens,
+                &candidate,
+            )
+        );
+    }
+
+    #[test]
+    fn quality_term_is_centered_and_symmetric() {
+        // Pins: high and low priors move the score by equal opposite amounts.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let config = RankingConfig::default();
+        let ranker = FeatureRanker::new(&config, reference_time);
+        let query_tokens = normalize_tokens("checkout service");
+        let mut high = row(
+            "workspace",
+            "checkout service",
+            reference_time,
+            reference_time,
+            None,
+        );
+        let mut neutral = high.clone();
+        let mut low = high.clone();
+        high.quality_score = 0.8;
+        neutral.quality_score = 0.5;
+        low.quality_score = 0.2;
+
+        let high_delta = ranker.score(1.0, 1.0, &query_tokens, &high)
+            - ranker.score(1.0, 1.0, &query_tokens, &neutral);
+        let low_delta = ranker.score(1.0, 1.0, &query_tokens, &neutral)
+            - ranker.score(1.0, 1.0, &query_tokens, &low);
+
+        assert!((high_delta - low_delta).abs() < f64::EPSILON);
+        assert!((high_delta - 0.36).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn feature_ranking_with_all_neutral_scores_matches_prompt_eleven_ordering() {
+        // Pins: neutral quality priors do not perturb FeatureV1 candidate ordering.
+        let reference_time = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("test timestamp should be valid");
+        let mut without_quality = RankingConfig::default();
+        without_quality.weights.quality = 0.0;
+        let with_quality = RankingConfig::default();
+        let query_tokens = normalize_tokens("checkout deploy target");
+        let candidates = [
+            row(
+                "workspace",
+                "checkout",
+                reference_time,
+                reference_time,
+                None,
+            ),
+            row(
+                "user",
+                "deploy target",
+                reference_time - chrono::Duration::days(7),
+                reference_time,
+                Some(json!({"summary": "checkout deploy target"})),
+            ),
+            row(
+                "workspace",
+                "billing",
+                reference_time - chrono::Duration::days(30),
+                reference_time,
+                Some(json!({"summary": "checkout deploy target"})),
+            ),
+        ];
+        let order = |config: &RankingConfig| {
+            let ranker = FeatureRanker::new(config, reference_time);
+            let mut scored = candidates
+                .iter()
+                .map(|row| (row.uid, ranker.score(1.0, 1.0, &query_tokens, row)))
+                .collect::<Vec<_>>();
+            scored.sort_by(|left, right| {
+                right
+                    .1
+                    .total_cmp(&left.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            scored.into_iter().map(|(uid, _)| uid).collect::<Vec<_>>()
+        };
+
+        assert_eq!(order(&with_quality), order(&without_quality));
+    }
+
     fn row(
         scope: &str,
         name: &str,
@@ -585,6 +725,7 @@ mod tests {
             valid_from,
             properties_summary,
             last_accessed_at,
+            quality_score: 0.5,
         }
     }
 }

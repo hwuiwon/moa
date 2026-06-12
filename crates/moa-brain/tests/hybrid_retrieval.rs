@@ -328,6 +328,7 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
         strategy: None,
         as_of: None,
         ranking_reference_time: None,
+        lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
     };
@@ -369,6 +370,7 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
         })
@@ -397,6 +399,7 @@ async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
             strategy: None,
             as_of: None,
             ranking_reference_time: None,
+            lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: true,
         })
@@ -487,6 +490,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: None,
+                lineage: None,
                 disable_leg_timeouts: true,
                 disable_graph_expansion: false,
             })
@@ -520,6 +524,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 strategy: None,
                 as_of: None,
                 ranking_reference_time: None,
+                lineage: None,
                 disable_leg_timeouts: true,
                 disable_graph_expansion: false,
             })
@@ -590,6 +595,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         strategy: None,
         as_of: Some(utc("2026-03-01T00:00:00Z")),
         ranking_reference_time: None,
+        lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
     };
@@ -618,6 +624,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         strategy: None,
         as_of: None,
         ranking_reference_time: None,
+        lineage: None,
         disable_leg_timeouts: false,
         disable_graph_expansion: false,
     };
@@ -696,6 +703,7 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
             strategy: None,
             as_of: Some(utc("2026-03-01T00:00:00Z")),
             ranking_reference_time: None,
+            lineage: None,
             disable_leg_timeouts: false,
             disable_graph_expansion: false,
         })

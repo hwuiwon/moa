@@ -100,6 +100,9 @@ pub(crate) async fn prepare_turn_request(
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
+    if let Some(sequence_num) = active_user_sequence_num {
+        context.insert_metadata("_moa.turn_seq", serde_json::json!(sequence_num));
+    }
     if let Some(cache) = cached_query_rewrite
         .filter(|cache| Some(cache.user_sequence_num) == active_user_sequence_num)
     {

@@ -97,6 +97,12 @@ pub struct LedgerFact {
     /// Canonical fact id restated verbatim by this fact.
     #[serde(default)]
     pub restates: Option<String>,
+    /// Synthetic prior retrieval uses for quality-score seeding.
+    #[serde(default)]
+    pub prior_uses: Option<u32>,
+    /// Synthetic prior successful retrieval uses for quality-score seeding.
+    #[serde(default)]
+    pub prior_successes: Option<u32>,
     /// Synthetic session containing the source turn for this fact.
     pub source_session_id: SessionId,
     /// Synthetic source turn sequence inside the session.
@@ -122,6 +128,20 @@ impl LedgerFact {
         }
         if let Some(restates) = &self.restates {
             ensure_non_empty("ledger fact restates", restates)?;
+        }
+        if let Some(successes) = self.prior_successes {
+            let Some(uses) = self.prior_uses else {
+                return invalid_config(format!(
+                    "ledger fact {} has prior_successes without prior_uses",
+                    self.fact_id
+                ));
+            };
+            if successes > uses {
+                return invalid_config(format!(
+                    "ledger fact {} has prior_successes {} greater than prior_uses {}",
+                    self.fact_id, successes, uses
+                ));
+            }
         }
         Ok(())
     }
@@ -534,8 +554,8 @@ mod tests {
     };
 
     #[test]
-    fn ledger_fact_deserializes_without_restates_field() {
-        // Pins: old corpus ledger rows remain readable after adding restatement metadata.
+    fn ledger_fact_deserializes_without_optional_lifecycle_fields() {
+        // Pins: old corpus ledger rows remain readable after adding lifecycle metadata.
         let raw = serde_json::json!({
             "workspace_id": "workspace-a",
             "user_id": "user-a",
@@ -557,6 +577,8 @@ mod tests {
         let fact: LedgerFact = serde_json::from_value(raw).expect("legacy ledger fact parses");
 
         assert_eq!(fact.restates, None);
+        assert_eq!(fact.prior_uses, None);
+        assert_eq!(fact.prior_successes, None);
     }
 
     #[test]
@@ -584,6 +606,20 @@ mod tests {
         assert!(error.to_string().contains("mismatched"));
     }
 
+    #[test]
+    fn validate_ledger_rejects_prior_successes_above_uses() {
+        // Pins: synthetic quality priors cannot encode impossible success counts.
+        let mut fact = fact("fact-prior", "repo/control-plane", None, 1);
+        fact.prior_uses = Some(2);
+        fact.prior_successes = Some(3);
+
+        let error = fact
+            .validate()
+            .expect_err("successes above uses should fail");
+
+        assert!(error.to_string().contains("greater than prior_uses"));
+    }
+
     fn fact(
         fact_id: &str,
         object: &str,
@@ -603,6 +639,8 @@ mod tests {
             answer: format!("user-a uses {object}."),
             supersedes: Vec::new(),
             restates,
+            prior_uses: None,
+            prior_successes: None,
             source_session_id: SessionId(Uuid::from_u128(session_suffix)),
             source_turn_seq: 1,
             pii_class: PiiClass::None,

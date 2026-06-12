@@ -96,6 +96,8 @@ impl Default for MemoryExtractionConfig {
 pub struct MemoryRetrievalConfig {
     /// Runtime/eval mode for post-fusion memory reranking.
     pub reranker_mode: MemoryRerankerMode,
+    /// Whether retrieval writes narrow quality-scoring lineage rows.
+    pub lineage_enabled: bool,
     /// Deterministic post-hydration ranking behavior.
     pub ranking: MemoryRankingConfig,
 }
@@ -166,6 +168,8 @@ pub struct MemoryRankingWeights {
     pub subject_match: f64,
     /// Query-to-summary token overlap contribution.
     pub overlap: f64,
+    /// Outcome-derived quality prior contribution.
+    pub quality: f64,
     /// Additive score for user-scoped rows.
     pub scope_user: f64,
     /// Additive score for workspace-scoped rows.
@@ -184,6 +188,7 @@ impl Default for MemoryRankingWeights {
             access: 0.15,
             subject_match: 0.5,
             overlap: 0.35,
+            quality: 0.6,
             scope_user: 0.2,
             scope_workspace: 0.1,
             recency_half_life_days: 90.0,
