@@ -1,4 +1,4 @@
-//! Stage 6: graph memory retrieval and prompt injection.
+//! Stage 7: graph memory retrieval and prompt injection.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -118,6 +118,12 @@ impl GraphMemoryRetriever {
     pub fn with_result_limit(mut self, result_limit: usize) -> Self {
         self.result_limit = result_limit;
         self
+    }
+
+    /// Returns whether this retriever can run the vector leg.
+    #[must_use]
+    pub fn has_vector_retrieval(&self) -> bool {
+        self.embedder.is_some()
     }
 
     async fn retrieve_hits(
@@ -446,7 +452,7 @@ fn turn_seq_from_context(ctx: &WorkingContext) -> Option<i64> {
 fn query_expansions_from_context(ctx: &WorkingContext) -> Vec<String> {
     ctx.metadata()
         .get("query_rewrite")
-        .and_then(rewritten_query_from_rewrite_metadata)
+        .and_then(retrieval_query_from_rewritten_metadata)
         .into_iter()
         .collect()
 }
@@ -496,16 +502,16 @@ fn extract_search_query(ctx: &WorkingContext) -> Option<String> {
 
 fn query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
     let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
-    let query = result.rewritten_query.trim();
+    let query = result.retrieval_query.trim();
     (!query.is_empty()).then(|| query.to_string())
 }
 
-fn rewritten_query_from_rewrite_metadata(value: &serde_json::Value) -> Option<String> {
+fn retrieval_query_from_rewritten_metadata(value: &serde_json::Value) -> Option<String> {
     let result = serde_json::from_value::<QueryRewriteResult>(value.clone()).ok()?;
     if result.source != RewriteSource::Rewritten {
         return None;
     }
-    let query = result.rewritten_query.trim();
+    let query = result.retrieval_query.trim();
     (!query.is_empty()).then(|| query.to_string())
 }
 
@@ -576,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_graph_memory_retriever_preserves_processor_identity() {
-        // Pins: shared graph-memory runtime remains the stage-6 memory processor.
+        // Pins: shared graph-memory runtime remains the stage-7 memory processor.
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
@@ -585,7 +591,7 @@ mod tests {
         ));
 
         assert_eq!(shared.name(), "graph_memory");
-        assert_eq!(shared.stage(), 6);
+        assert_eq!(shared.stage(), 7);
     }
 
     #[test]
@@ -607,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_rewrite_metadata_uses_full_query_for_retrieval() {
+    fn original_rewrite_metadata_uses_full_query_for_retrieval() {
         // Pins: fail-open rewrites preserve the full semantic query instead of keyword-only fallback.
         let mut ctx = WorkingContext::new(
             &SessionMeta {
@@ -622,11 +628,35 @@ mod tests {
         );
         ctx.insert_metadata(
             "query_rewrite",
-            serde_json::to_value(QueryRewriteResult::passthrough(
+            serde_json::to_value(QueryRewriteResult::original(
                 "Please explain the OAuth refresh token race condition bug",
             ))
             .expect("rewrite result should serialize"),
         );
+
+        assert_eq!(
+            extract_search_query(&ctx),
+            Some("Please explain the OAuth refresh token race condition bug".to_string())
+        );
+    }
+
+    #[test]
+    fn original_rewrite_metadata_uses_latest_user_query_for_retrieval() {
+        // Pins: skipped rewrite metadata preserves the full natural-language retrieval query.
+        let mut ctx = WorkingContext::new(
+            &SessionMeta {
+                id: SessionId::new(),
+                workspace_id: WorkspaceId::new("workspace"),
+                user_id: UserId::new("user"),
+                platform: Platform::Api,
+                model: ModelId::new("mock"),
+                ..SessionMeta::default()
+            },
+            capabilities(),
+        );
+        ctx.append_message(moa_core::ContextMessage::user(
+            "Please explain the OAuth refresh token race condition bug",
+        ));
 
         assert_eq!(
             extract_search_query(&ctx),

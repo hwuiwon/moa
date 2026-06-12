@@ -111,7 +111,7 @@ and deployment setup. Key groups:
 | `MOA_MODELS_*` and `MOA_PROVIDERS_*` | model routing and provider API key env names |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
-| `MOA_QUERY_REWRITE_*` | fail-open query rewriter behavior |
+| `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated resolution scoring weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
 | `MOA_CLOUD_*` | cloud mode and hand provider settings |

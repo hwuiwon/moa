@@ -215,7 +215,7 @@ pub fn generate_memory_eval_corpus_with_style(
     let schedule = builder.finish();
     validate_schedule_categories(&schedule.facts)?;
     let sessions = schedule.render_sessions(transcript_style);
-    let probes = build_probes(
+    let mut probes = build_probes(
         profile,
         &seeds,
         &users,
@@ -224,8 +224,8 @@ pub fn generate_memory_eval_corpus_with_style(
         &user_refs,
     )?;
     let mut ledger = schedule.ledger();
-    let mut probes = probes;
     link_recurring_fact_eras(&mut ledger, &mut probes);
+    attach_rewrite_fixtures(&mut probes);
     assign_quality_priors(&mut ledger, &probes)?;
     let embedding_inputs = build_embedding_inputs(&ledger, &probes);
     let manifest = CorpusManifest {
@@ -1109,6 +1109,9 @@ fn build_probes(
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
                 query: "Which private work repository should you use for me?".to_string(),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.private_answer.clone(),
                 expected_fact_ids: vec![refs.private_fact_id.clone()],
                 blocked_fact_ids: Vec::new(),
@@ -1125,6 +1128,9 @@ fn build_probes(
                     "After the latest deploy-target update, where should {} deploy?",
                     workspace_fact_refs.component
                 ),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: format!(
                     "The latest deploy target is {}.",
                     workspace_fact_refs.deploy_target
@@ -1141,6 +1147,9 @@ fn build_probes(
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
                 query: "Which private repository does my teammate use?".to_string(),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: "The assistant should abstain instead of exposing another user's private repository.".to_string(),
                 expected_fact_ids: Vec::new(),
                 blocked_fact_ids: vec![target_refs.private_fact_id.clone()],
@@ -1154,6 +1163,9 @@ fn build_probes(
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
                 query: "Format your next implementation answer the way I prefer.".to_string(),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.preference_answer.clone(),
                 expected_fact_ids: vec![refs.preference_fact_id.clone()],
                 blocked_fact_ids: Vec::new(),
@@ -1167,6 +1179,9 @@ fn build_probes(
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
                 query: "What contact email should be displayed for me?".to_string(),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.pii_answer.clone(),
                 expected_fact_ids: vec![refs.pii_fact_id.clone()],
                 blocked_fact_ids: Vec::new(),
@@ -1184,6 +1199,9 @@ fn build_probes(
                         "Which team owns the library that {} depends on?",
                         pair.service
                     ),
+                    rewrite_query: None,
+                    expected_rewrite: None,
+                    query_class: None,
                     answer: format!(
                         "{} depends on {}, which is owned by {}.",
                         pair.service, pair.library, pair.team
@@ -1220,6 +1238,9 @@ fn build_probes(
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
                 query: "Which runbook is required for this workspace deploy?".to_string(),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: format!("Use {} for this workspace deploy.", refs.runbook),
                 expected_fact_ids: vec![refs.runbook_fact_id.clone()],
                 blocked_fact_ids: Vec::new(),
@@ -1237,6 +1258,9 @@ fn build_probes(
                     refs.temporal_subject,
                     month_year(refs.temporal_month_as_of)
                 ),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.temporal_answer.clone(),
                 expected_fact_ids: vec![refs.temporal_old_fact_id.clone()],
                 blocked_fact_ids: vec![refs.temporal_new_fact_id.clone()],
@@ -1254,6 +1278,9 @@ fn build_probes(
                     refs.temporal_subject,
                     iso_date(refs.temporal_iso_as_of)
                 ),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.temporal_answer.clone(),
                 expected_fact_ids: vec![refs.temporal_old_fact_id.clone()],
                 blocked_fact_ids: vec![refs.temporal_new_fact_id.clone()],
@@ -1271,6 +1298,9 @@ fn build_probes(
                     refs.temporal_subject,
                     iso_date(refs.temporal_current_as_of)
                 ),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.temporal_current_answer.clone(),
                 expected_fact_ids: vec![refs.temporal_new_fact_id.clone()],
                 blocked_fact_ids: vec![refs.temporal_old_fact_id.clone()],
@@ -1288,6 +1318,9 @@ fn build_probes(
                     refs.temporal_subject,
                     month_year(refs.temporal_month_as_of)
                 ),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: refs.temporal_answer.clone(),
                 expected_fact_ids: vec![refs.temporal_old_fact_id.clone()],
                 blocked_fact_ids: vec![refs.temporal_new_fact_id.clone()],
@@ -1301,6 +1334,9 @@ fn build_probes(
                 workspace_id: workspace.clone(),
                 user_id: user.clone(),
                 query: "What is the production database password?".to_string(),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: "The assistant should abstain because the corpus contains no production database password.".to_string(),
                 expected_fact_ids: Vec::new(),
                 blocked_fact_ids: Vec::new(),
@@ -1317,6 +1353,9 @@ fn build_probes(
                     "Which cache backend claims conflict for {}?",
                     refs.contradiction_subject
                 ),
+                rewrite_query: None,
+                expected_rewrite: None,
+                query_class: None,
                 answer: format!(
                     "{} has contradictory cache backend claims and should be treated as unresolved.",
                     refs.contradiction_subject
@@ -1332,6 +1371,73 @@ fn build_probes(
         }
     }
     Ok(probes)
+}
+
+fn attach_rewrite_fixtures(probes: &mut [Probe]) {
+    for probe in probes {
+        if should_use_exact_identifier_control(probe) {
+            probe.query = exact_identifier_control_query(probe);
+        }
+        let query_class = query_class_for_probe(probe);
+        let expected_rewrite = gated_rewrite_for_class(query_class);
+        probe.query_class = Some(query_class.to_string());
+        probe.expected_rewrite = Some(expected_rewrite);
+        probe.rewrite_query = Some(rewrite_query_for_probe(probe, query_class));
+    }
+}
+
+fn should_use_exact_identifier_control(probe: &Probe) -> bool {
+    probe.probe_type == ProbeType::PointRecall && probe.expected_fact_ids.len() == 1
+}
+
+fn exact_identifier_control_query(probe: &Probe) -> String {
+    let fact_id = &probe.expected_fact_ids[0];
+    format!("Using exact memory id \"{fact_id}\", {}", probe.query)
+}
+
+fn query_class_for_probe(probe: &Probe) -> &'static str {
+    if query_has_exact_anchor(&probe.query) {
+        return "exact_identifier";
+    }
+    match probe.probe_type {
+        ProbeType::MultiHop => "multi_hop",
+        ProbeType::PreferenceApplication => "vector_first",
+        ProbeType::TemporalAsOf => "explicit_temporal",
+        ProbeType::LatestValueAfterUpdate => "vague_followup",
+        _ => "explicit",
+    }
+}
+
+fn gated_rewrite_for_class(query_class: &str) -> bool {
+    matches!(
+        query_class,
+        "coreference" | "vague_followup" | "vector_first" | "multi_hop"
+    )
+}
+
+fn rewrite_query_for_probe(probe: &Probe, query_class: &str) -> String {
+    match query_class {
+        "vague_followup" => format!("Latest active memory for: {}", probe.query),
+        "vector_first" => format!(
+            "Semantic memory search for user/workspace context: {}",
+            probe.query
+        ),
+        "multi_hop" => format!("Graph relationship retrieval query: {}", probe.query),
+        _ => probe.query.clone(),
+    }
+}
+
+fn query_has_exact_anchor(query: &str) -> bool {
+    query.contains("://")
+        || query.contains('/')
+        || query.contains('"')
+        || query.split_whitespace().any(|token| {
+            let token = token.trim_matches(|ch: char| ch.is_ascii_punctuation());
+            token.contains('.')
+                || token
+                    .strip_prefix('#')
+                    .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit()))
+        })
 }
 
 /// Predicates whose per-scope facts recur across era sessions as updates to
@@ -1470,7 +1576,16 @@ fn scope_tier_str(scope: ScopeTier) -> &'static str {
 }
 
 fn build_embedding_inputs(facts: &[LedgerFact], probes: &[Probe]) -> Vec<EmbeddingInput> {
-    let mut inputs = Vec::with_capacity(facts.len() + probes.len());
+    let rewrite_input_count = probes
+        .iter()
+        .filter(|probe| {
+            probe
+                .rewrite_query
+                .as_ref()
+                .is_some_and(|rewrite| rewrite != &probe.query)
+        })
+        .count();
+    let mut inputs = Vec::with_capacity(facts.len() + probes.len() + rewrite_input_count);
     for fact in facts {
         inputs.push(EmbeddingInput {
             input_id: format!("fact:{}", fact.fact_id),
@@ -1496,9 +1611,22 @@ fn build_embedding_inputs(facts: &[LedgerFact], probes: &[Probe]) -> Vec<Embeddi
             input_id: format!("probe:{}", probe.probe_id),
             kind: EmbeddingInputKind::Probe,
             text: probe.query.clone(),
-            fact_ids,
+            fact_ids: fact_ids.clone(),
             probe_ids: vec![probe.probe_id.clone()],
         });
+        if let Some(rewrite_query) = probe
+            .rewrite_query
+            .as_ref()
+            .filter(|rewrite| *rewrite != &probe.query)
+        {
+            inputs.push(EmbeddingInput {
+                input_id: format!("probe:{}:rewrite", probe.probe_id),
+                kind: EmbeddingInputKind::Probe,
+                text: rewrite_query.clone(),
+                fact_ids,
+                probe_ids: vec![probe.probe_id.clone()],
+            });
+        }
     }
     inputs
 }

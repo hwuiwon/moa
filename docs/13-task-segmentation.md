@@ -42,7 +42,9 @@ Important fields:
 
 Query rewriting produces `QueryRewriteResult`:
 
-- `rewritten_query`
+- `retrieval_query`
+- `source`
+- `reason`
 - `is_new_task`
 - `task_summary`
 
@@ -52,7 +54,7 @@ When a turn is prepared, `SegmentTracker` uses the query rewrite metadata and se
 - create the first segment
 - close the previous segment and start a new one
 
-Other `QueryRewriteResult` fields are advisory prompt-preparation and retrieval hints. They do not define a durable session intent taxonomy and they do not choose tools for the agent.
+Segment tracking reads only `is_new_task` and `task_summary`. Query rewrite metadata does not define a durable session intent taxonomy and does not choose tools for the agent.
 
 The event log records `SegmentStarted` and `SegmentCompleted` events.
 

@@ -158,22 +158,23 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
                     .with_snapshot_config(config.context_snapshot.clone()),
             )
         };
+    let graph_memory_retriever = shared_graph_memory_retriever.unwrap_or_else(|| {
+        build_default_graph_memory_retriever(config, graph_pool.clone(), lineage.clone())
+    });
+    let vector_retrieval_available = graph_memory_retriever.has_vector_retrieval();
     let query_rewriter: Option<Box<dyn ContextProcessor>> = if config.query_rewrite.enabled {
         query_rewrite_llm_provider.map(|llm_provider| {
             Box::new(
                 QueryRewriter::new(config.query_rewrite.clone(), llm_provider)
-                    .with_session_store(session_store.clone()),
+                    .with_session_store(session_store.clone())
+                    .with_retrieval_availability(true, vector_retrieval_available),
             ) as Box<dyn ContextProcessor>
         })
     } else {
         None
     };
-    let graph_memory: Box<dyn ContextProcessor> = match shared_graph_memory_retriever {
-        Some(retriever) => Box::new(SharedGraphMemoryRetriever::new(retriever)),
-        None => Box::new(SharedGraphMemoryRetriever::new(
-            build_default_graph_memory_retriever(config, graph_pool.clone(), lineage.clone()),
-        )),
-    };
+    let graph_memory: Box<dyn ContextProcessor> =
+        Box::new(SharedGraphMemoryRetriever::new(graph_memory_retriever));
 
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::default()),

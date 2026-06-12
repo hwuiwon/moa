@@ -52,6 +52,14 @@ The metric surface is:
 - `preference_context_rate`
 - `per_leg_recall`
 
+Top-level query rewrite fields report the retrieval rewrite policy and call
+accounting: `query_rewrite_policy`, `query_rewrite_call_count`,
+`query_rewrite_skip_count`, `query_rewrite_call_rate`,
+`query_rewrite_p50_latency_ms`, `query_rewrite_p95_latency_ms`,
+`query_rewrite_input_tokens`, `query_rewrite_output_tokens`,
+`query_rewrite_est_usd`, `retrieval_plus_rewrite_p95_latency_ms`, and
+`query_rewrite_by_class`.
+
 `per_leg_recall` attributes expected fact recall to graph, vector, and lexical
 retrieval legs. Use it to localize the first bottleneck before proposing a new
 ranking or indexing feature.
@@ -456,6 +464,24 @@ cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr -
 cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking feature_v1 --output target/memory-eval/feature_v1.json
 cargo run -p xtask -- compare-eval-reports --baseline target/memory-eval/legacy.json --candidate target/memory-eval/feature_v1.json
 ```
+
+Query rewrite policy A/B uses the same corpus and retrieval metrics. PR runs are
+hermetic: `always` and `gated` use deterministic rewrite fixtures and report
+rewrite call accounting without calling a provider. The generated PR corpus
+includes exact-identifier negative controls and treats temporal-as-of probes as
+explicit temporal retrieval, because the temporal parser owns the as-of instant.
+
+```bash
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-off.json --rewrite-policy off
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-always.json --rewrite-policy always
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/rewrite-gated.json --rewrite-policy gated
+MOA_EVAL_PREVIOUS_MEMORY_REPORT=target/memory-eval/rewrite-always.json cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/rewrite-gated.json
+```
+
+The rewrite budget gate compares `gated` against `always` for recall@4,
+recall@25, MRR, nDCG@4, rewrite-inclusive p95 latency, and at least 50% fewer
+rewrite calls. It also requires exact-identifier controls to be present and to
+skip rewriting in gated mode.
 
 The comparison refuses cross-corpus inputs with exit code 2. It checks corpus
 identity, seeds, final cutoff, and exact probe-id set equality before computing

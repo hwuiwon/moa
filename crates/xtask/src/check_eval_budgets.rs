@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
-    CorpusProfile, MemoryRetrievalEvalReport, ProbeResult, ProbeType, TranscriptStyle,
+    CorpusProfile, MemoryRetrievalEvalReport, ProbeResult, ProbeType, QueryRewritePolicy,
+    TranscriptStyle,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,6 +22,7 @@ const MEMORY_PR_ZERO_RECALL_RATE_MAX: f64 = 0.10;
 const MEMORY_RERANKER_RECALL_REGRESSION_MAX: f64 = 0.03;
 const MEMORY_RERANKER_RECALL_GAIN_MIN_FOR_LATENCY: f64 = 0.03;
 const MEMORY_RERANKER_P95_LATENCY_MS_MAX: u64 = 2_000;
+const MEMORY_REWRITE_P95_LATENCY_MS_MAX: u64 = 2_000;
 const PREVIOUS_MEMORY_REPORT_ENV: &str = "MOA_EVAL_PREVIOUS_MEMORY_REPORT";
 
 /// Runs the requested eval budget gate.
@@ -357,6 +359,22 @@ fn memory_retrieval_gate_violations(report: &MemoryRetrievalEvalReport) -> Vec<V
         }
     }
 
+    if report.query_rewrite_policy == QueryRewritePolicy::Gated {
+        match report.query_rewrite_by_class.get("exact_identifier") {
+            Some(metrics) if metrics.total_count > 0 && metrics.call_count == 0 => {}
+            Some(metrics) if metrics.total_count > 0 => violations.push(Violation::new(
+                "query_rewrite.exact_identifier_call_count",
+                "0",
+                metrics.call_count.to_string(),
+            )),
+            _ => violations.push(Violation::new(
+                "query_rewrite.exact_identifier_controls",
+                "present with at least 1 probe",
+                "missing".to_string(),
+            )),
+        }
+    }
+
     violations
 }
 
@@ -405,11 +423,16 @@ fn compare_memory_regression(
     previous: &MemoryRetrievalEvalReport,
     max_regression_pct: f64,
 ) -> Vec<Violation> {
-    [
+    let mut violations = [
         (
             "retrieval.recall_at_4",
             current.metrics.recall_at_4.value,
             previous.metrics.recall_at_4.value,
+        ),
+        (
+            "retrieval.recall_at_25",
+            current.metrics.recall_at_25.value,
+            previous.metrics.recall_at_25.value,
         ),
         (
             "retrieval.mrr",
@@ -436,7 +459,53 @@ fn compare_memory_regression(
                 )
             })
     })
-    .collect()
+    .collect::<Vec<_>>();
+
+    violations.extend(compare_query_rewrite_regression(current, previous));
+    violations
+}
+
+fn compare_query_rewrite_regression(
+    current: &MemoryRetrievalEvalReport,
+    previous: &MemoryRetrievalEvalReport,
+) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    if current.query_rewrite_policy != QueryRewritePolicy::Gated
+        || previous.query_rewrite_policy != QueryRewritePolicy::Always
+    {
+        return violations;
+    }
+
+    if previous.query_rewrite_call_count > 0
+        && current.query_rewrite_call_count.saturating_mul(2) > previous.query_rewrite_call_count
+    {
+        let reduction = 1.0
+            - (current.query_rewrite_call_count as f64 / previous.query_rewrite_call_count as f64);
+        violations.push(Violation::new(
+            "query_rewrite.call_count_reduction",
+            ">= 50.00% fewer calls than always",
+            format!(
+                "{:.2}% fewer ({} gated calls vs {} always calls)",
+                reduction * 100.0,
+                current.query_rewrite_call_count,
+                previous.query_rewrite_call_count
+            ),
+        ));
+    }
+
+    let current_p95 = current.retrieval_plus_rewrite_p95_latency_ms;
+    let previous_p95 = previous.retrieval_plus_rewrite_p95_latency_ms;
+    if current_p95 > MEMORY_REWRITE_P95_LATENCY_MS_MAX
+        && (previous_p95 == 0 || current_p95 > previous_p95)
+    {
+        violations.push(Violation::new(
+            "query_rewrite.retrieval_plus_rewrite_p95_latency_ms",
+            format!("<= {MEMORY_REWRITE_P95_LATENCY_MS_MAX} or <= always baseline {previous_p95}"),
+            current_p95.to_string(),
+        ));
+    }
+
+    violations
 }
 
 fn cross_user_leak_count(probe_results: &[ProbeResult]) -> usize {
@@ -1301,6 +1370,11 @@ fn print_failures(failures: &[ScenarioFailure]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moa_eval::kernel::RetrievalCoreMetrics;
+    use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
+    use moa_eval::memory_eval::{
+        CorpusManifest, GoldResolutionReport, MetricSummary, PerLegRecall, RetrievalMetrics,
+    };
 
     #[test]
     fn check_eval_budgets_min_metric_fails_below_floor() {
@@ -1350,5 +1424,159 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn memory_regression_checks_recall25_and_rewrite_budget() {
+        // Pins: gated-vs-always comparison enforces recall@25, call reduction, and rewrite p95.
+        let previous = memory_report(QueryRewritePolicy::Always, 147, 0, 2_100, 0, 0, 0.96);
+        let current = memory_report(QueryRewritePolicy::Gated, 84, 63, 2_200, 5, 0, 0.80);
+
+        let violations = compare_memory_regression(&current, &previous, 5.0);
+        let metrics = violations
+            .iter()
+            .map(|violation| violation.metric.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(metrics.contains("retrieval.recall_at_25"));
+        assert!(metrics.contains("query_rewrite.call_count_reduction"));
+        assert!(metrics.contains("query_rewrite.retrieval_plus_rewrite_p95_latency_ms"));
+    }
+
+    #[test]
+    fn memory_gate_requires_gated_exact_identifier_controls() {
+        // Pins: gated reports prove exact-anchor controls exist and do not invoke rewriting.
+        let missing = memory_report(QueryRewritePolicy::Gated, 10, 10, 100, 0, 0, 1.0);
+        let missing_violations = memory_retrieval_gate_violations(&missing);
+        assert!(
+            missing_violations
+                .iter()
+                .any(|violation| violation.metric == "query_rewrite.exact_identifier_controls")
+        );
+
+        let rewritten = memory_report(QueryRewritePolicy::Gated, 10, 10, 100, 3, 1, 1.0);
+        let rewritten_violations = memory_retrieval_gate_violations(&rewritten);
+        assert!(rewritten_violations.iter().any(|violation| {
+            violation.metric == "query_rewrite.exact_identifier_call_count"
+                && violation.actual == "1"
+        }));
+
+        let skipped = memory_report(QueryRewritePolicy::Gated, 10, 10, 100, 3, 0, 1.0);
+        assert!(
+            memory_retrieval_gate_violations(&skipped)
+                .iter()
+                .all(|violation| !violation
+                    .metric
+                    .starts_with("query_rewrite.exact_identifier"))
+        );
+    }
+
+    fn memory_report(
+        policy: QueryRewritePolicy,
+        call_count: usize,
+        skip_count: usize,
+        rewrite_p95_ms: u64,
+        exact_total: usize,
+        exact_calls: usize,
+        recall_at_25: f64,
+    ) -> MemoryRetrievalEvalReport {
+        let mut by_class = BTreeMap::new();
+        if exact_total > 0 {
+            by_class.insert(
+                "exact_identifier".to_string(),
+                QueryRewriteClassMetrics {
+                    total_count: exact_total,
+                    call_count: exact_calls,
+                    skip_count: exact_total.saturating_sub(exact_calls),
+                    call_rate: exact_calls as f64 / exact_total as f64,
+                },
+            );
+        }
+
+        MemoryRetrievalEvalReport {
+            manifest: CorpusManifest {
+                version: 1,
+                corpus_id: "test-corpus".to_string(),
+                profile: CorpusProfile::Pr,
+                description: "test corpus".to_string(),
+                seeds: vec![1, 2, 3],
+                transcript_style: TranscriptStyle::Marked,
+            },
+            candidate_k: 25,
+            final_k: 4,
+            reranker_enabled: false,
+            query_rewrite_policy: policy,
+            query_rewrite_call_count: call_count,
+            query_rewrite_skip_count: skip_count,
+            query_rewrite_call_rate: if call_count + skip_count == 0 {
+                0.0
+            } else {
+                call_count as f64 / (call_count + skip_count) as f64
+            },
+            query_rewrite_p50_latency_ms: 0,
+            query_rewrite_p95_latency_ms: 0,
+            query_rewrite_input_tokens: 0,
+            query_rewrite_output_tokens: 0,
+            query_rewrite_est_usd: 0.0,
+            retrieval_plus_rewrite_p95_latency_ms: rewrite_p95_ms,
+            query_rewrite_by_class: by_class,
+            aborted_over_budget: false,
+            cost: None,
+            providers: None,
+            metrics: retrieval_metrics(recall_at_25),
+            probe_results: Vec::new(),
+            bootstrap: Vec::new(),
+            cross_user_leak_probe_ids: Vec::new(),
+            gold_resolution: GoldResolutionReport {
+                ingest_reports: Vec::new(),
+                records: Vec::new(),
+            },
+            consolidation: None,
+        }
+    }
+
+    fn retrieval_metrics(recall_at_25: f64) -> RetrievalMetrics {
+        RetrievalMetrics {
+            core: RetrievalCoreMetrics {
+                recall_at_4: metric(0.90),
+                recall_at_25: metric(recall_at_25),
+                mrr: metric(0.90),
+                ndcg_at_4: metric(0.90),
+                zero_recall_rate: MetricSummary::default(),
+                per_leg_recall: PerLegRecall {
+                    graph: MetricSummary::default(),
+                    vector: MetricSummary::default(),
+                    lexical: MetricSummary::default(),
+                },
+                p50_retrieval_latency_ms: 0,
+                p95_retrieval_latency_ms: 0,
+                cross_user_leak_count: 0,
+                pii_unredacted_count: 0,
+            },
+            ingestion_coverage: MetricSummary::default(),
+            scope_match_rate: MetricSummary::default(),
+            scope_match_rate_user: MetricSummary::default(),
+            scope_match_rate_workspace: MetricSummary::default(),
+            extraction_precision: MetricSummary::default(),
+            entity_fragmentation: MetricSummary::default(),
+            pre_rerank_recall_at_4: MetricSummary::default(),
+            pre_rerank_recall_at_25: MetricSummary::default(),
+            post_rerank_recall_at_4: MetricSummary::default(),
+            answer_faithfulness: MetricSummary::default(),
+            abstention_correctness: MetricSummary::default(),
+            pii_redaction_rate: MetricSummary::default(),
+            temporal_as_of_accuracy: MetricSummary::default(),
+            temporal_parse_rate: MetricSummary::default(),
+            temporal_parse_mismatch_count: 0,
+            preference_context_rate: MetricSummary::default(),
+        }
+    }
+
+    fn metric(value: f64) -> MetricSummary {
+        MetricSummary {
+            numerator: value,
+            denominator: 1,
+            value,
+        }
     }
 }

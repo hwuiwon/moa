@@ -85,7 +85,7 @@ PII classification runs before durable memory writes. Sensitive text is either f
 
 The standing digest processor runs after query rewriting and before graph-memory retrieval when `memory.digest.enabled` is true. It reads exactly the current user's digest row and the workspace digest row from `moa.memory_digests` and injects them as background context. Digest rows are rebuilt on the consolidation cadence with a minimum interval, so this block changes on the digest rebuild cadence rather than every turn.
 
-The memory processor runs after query rewriting and before history compilation. It uses the rewritten query when available, otherwise it extracts keywords from the latest user message.
+The memory processor runs after query rewriting and before history compilation. It reads the effective `retrieval_query` metadata when present. If the rewrite source is `original` or metadata is absent, it uses the latest user message unchanged as the retrieval query. Rewrite gating stays in `QueryRewriter`; graph memory retrieval does not run rewrite logic.
 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 

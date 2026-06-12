@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use moa_core::{
-    CompletionRequest, JsonResponseFormat, ModelId, QueryRewriteResult, Result, WorkingContext,
+    CompletionRequest, JsonResponseFormat, ModelId, QueryRewriteResult, Result, RewriteReason,
+    WorkingContext,
 };
 use serde_json::json;
 
@@ -19,6 +20,7 @@ impl QueryRewriter {
         &self,
         input: &RewriteInput,
         ctx: &WorkingContext,
+        reason: RewriteReason,
     ) -> Result<QueryRewriteResult> {
         let prompt = build_rewriter_prompt(input, ctx);
         let mut request = CompletionRequest::new(prompt);
@@ -35,15 +37,15 @@ impl QueryRewriter {
 
         let stream = self.llm.complete(request).await?;
         let response = stream.collect().await?;
-        let parsed = parse_rewrite_response(&response.text)?;
-        Ok(validate_rewrite_result(parsed, input, ctx))
+        let parsed = parse_rewrite_response(&response.text, reason)?;
+        Ok(validate_rewrite_result(parsed, input, ctx, reason))
     }
 }
 
 fn query_rewrite_response_format() -> JsonResponseFormat {
     JsonResponseFormat::strict_json_schema(
         "query_rewrite_result",
-        "Self-contained query rewrite, task kind, and retrieval hints.",
+        "Self-contained retrieval query and task-boundary signal.",
         QueryRewriteResult::response_schema(),
     )
 }

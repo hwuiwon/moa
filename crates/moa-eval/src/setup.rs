@@ -195,7 +195,8 @@ async fn build_pipeline(
     if let Some(query_rewrite_provider) = query_rewrite_provider {
         stages.push(Box::new(
             QueryRewriter::new(base_config.query_rewrite.clone(), query_rewrite_provider)
-                .with_session_store(session_store.clone()),
+                .with_session_store(session_store.clone())
+                .with_retrieval_availability(true, false),
         ));
     }
     stages.extend([

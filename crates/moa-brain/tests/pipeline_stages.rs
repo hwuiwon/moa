@@ -20,9 +20,9 @@ use moa_brain::{
 };
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
-    ContextProcessor, LLMProvider, MemoryAction, MemoryScope, MessageRole, MoaConfig,
-    ModelCapabilities, ModelId, NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result,
-    RewriteSource, ScopeContext, StopReason, TaskKind, TokenUsage, WorkingContext, WorkspaceId,
+    ContextProcessor, LLMProvider, MemoryScope, MessageRole, MoaConfig, ModelCapabilities, ModelId,
+    NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
+    RewriteSource, ScopeContext, StopReason, TokenUsage, WorkingContext, WorkspaceId,
     stable_prefix_fingerprint,
 };
 use moa_memory_graph::{NodeLabel, PiiClass};
@@ -290,92 +290,41 @@ async fn query_rewrite_stage_emits_one_leg_per_strategy_for_a_user_query() -> Re
         .with_messages(vec![
             ContextMessage::user("The auth refresh jwt bug is in auth.rs"),
             ContextMessage::assistant("I found the auth.rs refresh path."),
-            ContextMessage::user("fix the auth refresh jwt bug and add a regression test"),
+            ContextMessage::user("fix that and add a regression test"),
         ])
         .build();
     let provider = Arc::new(RewriteProvider {
         response: json!({
-            "rewritten_query": "fix the auth refresh jwt bug in auth.rs and add a regression test",
-            "task_kind": "coding",
-            "sub_queries": [
-                "fix the auth refresh jwt bug in auth.rs",
-                "add a regression test"
-            ],
-            "suggested_tools": ["file_read", "bash"],
-            "freshness_required": false,
-            "repo_context_required": true,
-            "memory_action": "retrieve",
-            "needs_clarification": false,
-            "clarification_question": null,
+            "retrieval_query": "fix the auth refresh jwt bug in auth.rs and add a regression test",
             "is_new_task": false,
-            "task_summary": null,
-            "tool_bias": ["repo_inspection", "read_before_write"],
-            "suggested_promptlets": ["observe_first"]
+            "task_summary": null
         })
         .to_string(),
         model_id: "rewrite-fixture".to_string(),
     });
 
-    // QueryRewriter stores one structured rewrite result with preserved strategy sub-queries.
+    // QueryRewriter stores one retrieval-focused rewrite result.
     let output = QueryRewriter::new(QueryRewriteConfig::default(), provider)
+        .with_retrieval_availability(true, true)
         .process(&mut fixture.ctx)
         .await?;
 
     assert_eq!(
         output.metadata.get("rewrite_source"),
-        Some(&json!("rewritten")),
-        "QueryRewriter: metadata should record rewritten source"
+        Some(&json!("rewrite")),
+        "QueryRewriter: metadata should record rewrite decision"
     );
     let result = rewrite_result(&fixture.ctx);
-    assert_eq!(
-        result.task_kind,
-        TaskKind::Coding,
-        "QueryRewriter: task kind changed"
-    );
     assert_eq!(
         result.source,
         RewriteSource::Rewritten,
         "QueryRewriter: source changed"
     );
     assert_eq!(
-        result.sub_queries,
-        vec![
-            "fix the auth refresh jwt bug in auth.rs".to_string(),
-            "add a regression test".to_string()
-        ],
-        "QueryRewriter: strategy sub-query legs changed"
+        result.retrieval_query, "fix the auth refresh jwt bug in auth.rs and add a regression test",
+        "QueryRewriter: retrieval query changed"
     );
-    assert_eq!(
-        result.suggested_tools,
-        vec!["file_read".to_string(), "bash".to_string()],
-        "QueryRewriter: suggested tool filtering changed"
-    );
-    assert!(
-        !result.freshness_required,
-        "QueryRewriter: freshness router flag changed"
-    );
-    assert!(
-        result.repo_context_required,
-        "QueryRewriter: repo-context router flag changed"
-    );
-    assert_eq!(
-        result.memory_action,
-        MemoryAction::Retrieve,
-        "QueryRewriter: memory router action changed"
-    );
-    assert_eq!(
-        result.tool_bias,
-        vec![
-            "repo_inspection".to_string(),
-            "read_before_write".to_string()
-        ],
-        "QueryRewriter: tool bias hints changed"
-    );
-    assert_eq!(
-        result.suggested_promptlets,
-        vec!["observe_first".to_string()],
-        "QueryRewriter: suggested promptlets changed"
-    );
+    assert_eq!(result.reason, Some(RewriteReason::CoreferenceWithHistory));
     Ok(())
 }
 

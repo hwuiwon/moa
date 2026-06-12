@@ -13,12 +13,13 @@ use moa_core::{
 };
 use moa_eval::EvalError;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
+use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
 use moa_eval::memory_eval::{
     BinaryProbeOutcome, BootstrapConfig, CORPUS_SCHEMA_VERSION, CachedEmbeddingProvider,
     CandidateLegs, CorpusManifest, CorpusProfile, EmbeddingInputKind, EntityFragmentationCounts,
     ExtractionPrecisionCounts, GeneratedMemoryEvalCorpus, GoldNodeRecord, GoldPiiStatus,
     GoldResolutionReport, GoldResolutionStatus, LedgerFact, MemoryRetrievalEvalOptions,
-    MemoryRetrievalEvalReport, MetricSummary, Probe, ProbeResult, ProbeType,
+    MemoryRetrievalEvalReport, MetricSummary, Probe, ProbeResult, ProbeType, QueryRewritePolicy,
     RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, RetrievedCandidate, SyntheticSession,
     SyntheticTurn, TranscriptStyle, aggregate_retrieval_eval_from_counts,
     aggregate_retrieval_eval_from_diagnostic_counts, aggregate_retrieval_eval_with_diagnostics,
@@ -128,6 +129,9 @@ async fn memory_eval_corpus_rejects_cross_user_probe_owned_by_asking_user() {
         workspace_id: workspace("workspace-payments"),
         user_id: user("user-bob"),
         query: "What editor does Bob prefer?".to_string(),
+        rewrite_query: None,
+        expected_rewrite: None,
+        query_class: None,
         answer: "The assistant should abstain instead of exposing Bob's private preference."
             .to_string(),
         expected_fact_ids: Vec::new(),
@@ -209,7 +213,23 @@ async fn memory_eval_pr_generator_writes_byte_stable_ledger_first_corpus() {
             .expect("read generated embedding inputs");
 
     validate_corpus(&manifest, &ledger, &sessions, &probes).expect("generated corpus validates");
-    assert_eq!(embedding_inputs.len(), ledger.len() + probes.len());
+    assert!(
+        probes.iter().all(|probe| probe.query_class.is_some()
+            && probe.expected_rewrite.is_some()
+            && probe.rewrite_query.is_some()),
+        "each generated probe should carry deterministic query-rewrite fixtures"
+    );
+    assert!(
+        probes.iter().any(|probe| probe
+            .rewrite_query
+            .as_ref()
+            .is_some_and(|rewrite| rewrite != &probe.query)),
+        "at least one generated rewrite fixture should differ from the original query"
+    );
+    assert!(
+        embedding_inputs.len() > ledger.len() + probes.len(),
+        "embedding inputs should include original probes plus rewrite fixtures"
+    );
     assert_eq!(
         embedding_inputs
             .iter()
@@ -217,12 +237,13 @@ async fn memory_eval_pr_generator_writes_byte_stable_ledger_first_corpus() {
             .count(),
         ledger.len()
     );
-    assert_eq!(
+    assert!(
         embedding_inputs
             .iter()
             .filter(|input| input.kind == EmbeddingInputKind::Probe)
-            .count(),
-        probes.len()
+            .count()
+            > probes.len(),
+        "probe embedding inputs should include rewrite fixture variants"
     );
 }
 
@@ -2266,6 +2287,25 @@ fn memory_budget_report_with_reranker(
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled,
+        query_rewrite_policy: QueryRewritePolicy::Gated,
+        query_rewrite_call_count: 0,
+        query_rewrite_skip_count: 0,
+        query_rewrite_call_rate: 0.0,
+        query_rewrite_p50_latency_ms: 0,
+        query_rewrite_p95_latency_ms: 0,
+        query_rewrite_input_tokens: 0,
+        query_rewrite_output_tokens: 0,
+        query_rewrite_est_usd: 0.0,
+        retrieval_plus_rewrite_p95_latency_ms: retrieval.metrics.p95_retrieval_latency_ms,
+        query_rewrite_by_class: BTreeMap::from([(
+            "exact_identifier".to_string(),
+            QueryRewriteClassMetrics {
+                total_count: 1,
+                call_count: 0,
+                skip_count: 1,
+                call_rate: 0.0,
+            },
+        )]),
         aborted_over_budget: false,
         cost: None,
         providers: None,
@@ -2846,6 +2886,9 @@ fn probe(spec: ProbeSpec<'_>) -> Probe {
         workspace_id: spec.workspace_id,
         user_id: spec.user_id,
         query: spec.query.to_string(),
+        rewrite_query: None,
+        expected_rewrite: None,
+        query_class: None,
         answer: spec.answer.to_string(),
         expected_fact_ids: spec
             .expected_fact_ids

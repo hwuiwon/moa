@@ -53,7 +53,8 @@ pub use recording::{
 };
 pub use runner::{
     EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
-    RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K, run_memory_retrieval_eval,
+    QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
+    run_memory_retrieval_eval,
 };
 
 impl crate::kernel::FixtureRecord for moa_memory_ingest::ExtractionFixtureRecord {

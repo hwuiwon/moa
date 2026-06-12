@@ -70,6 +70,7 @@ pub struct MemoryRetrievalEvalOptions {
     bootstrap_config: BootstrapConfig,
     reranker_enabled: bool,
     ranking_config: RankingConfig,
+    rewrite_policy: QueryRewritePolicy,
     extractor_mode: MemoryEvalExtractorMode,
     extractions_path: Option<PathBuf>,
     merges_path: Option<PathBuf>,
@@ -95,6 +96,7 @@ impl MemoryRetrievalEvalOptions {
             },
             reranker_enabled: false,
             ranking_config,
+            rewrite_policy: QueryRewritePolicy::Gated,
             extractor_mode: MemoryEvalExtractorMode::Heuristic,
             extractions_path: None,
             merges_path: None,
@@ -131,6 +133,13 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
         self.ranking_config = ranking_config;
+        self
+    }
+
+    /// Overrides the query rewrite policy used by retrieval probes.
+    #[must_use]
+    pub fn with_rewrite_policy(mut self, rewrite_policy: QueryRewritePolicy) -> Self {
+        self.rewrite_policy = rewrite_policy;
         self
     }
 
@@ -225,6 +234,12 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn ranking_config(&self) -> &RankingConfig {
         &self.ranking_config
+    }
+
+    /// Returns the configured query rewrite policy.
+    #[must_use]
+    pub fn rewrite_policy(&self) -> QueryRewritePolicy {
+        self.rewrite_policy
     }
 
     /// Returns the configured eval extractor mode.
@@ -388,6 +403,19 @@ pub enum MemoryEvalExtractorMode {
     Recorded,
 }
 
+/// Query rewrite policy used by the memory retrieval eval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryRewritePolicy {
+    /// Use the original probe query for every retrieval.
+    Off,
+    /// Treat every probe as rewritten by a deterministic fixture.
+    Always,
+    /// Use deterministic query-class gating to decide whether a rewrite fixture applies.
+    #[default]
+    Gated,
+}
+
 fn default_extractions_path(manifest: &CorpusManifest) -> PathBuf {
     PathBuf::from("crates/moa-eval/fixtures/memory").join(format!(
         "extractions-{}-{}.jsonl",
@@ -414,6 +442,39 @@ pub struct MemoryRetrievalEvalReport {
     /// Whether the eval collected a post-rerank top-4 retrieval pass.
     #[serde(default)]
     pub reranker_enabled: bool,
+    /// Query rewrite policy used by this run.
+    #[serde(default)]
+    pub query_rewrite_policy: QueryRewritePolicy,
+    /// Number of probes whose retrieval query came from a rewrite fixture.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub query_rewrite_call_count: usize,
+    /// Number of probes that used the original query.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub query_rewrite_skip_count: usize,
+    /// Fraction of probes that used a rewrite fixture.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub query_rewrite_call_rate: f64,
+    /// PR-lane deterministic p50 rewrite latency.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub query_rewrite_p50_latency_ms: u64,
+    /// PR-lane deterministic p95 rewrite latency.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub query_rewrite_p95_latency_ms: u64,
+    /// Estimated rewrite input tokens.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub query_rewrite_input_tokens: u64,
+    /// Estimated rewrite output tokens.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub query_rewrite_output_tokens: u64,
+    /// Estimated rewrite cost in USD.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub query_rewrite_est_usd: f64,
+    /// p95 latency with rewrite latency included.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub retrieval_plus_rewrite_p95_latency_ms: u64,
+    /// Query rewrite accounting grouped by deterministic query class.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub query_rewrite_by_class: BTreeMap<String, QueryRewriteClassMetrics>,
     /// Whether the runner stopped after crossing the configured live-lane budget.
     #[serde(default, skip_serializing_if = "is_false")]
     pub aborted_over_budget: bool,
@@ -436,6 +497,19 @@ pub struct MemoryRetrievalEvalReport {
     /// Optional consolidation outcome collected after gold resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consolidation: Option<ConsolidationOutcome>,
+}
+
+/// Query rewrite accounting for one deterministic query class.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueryRewriteClassMetrics {
+    /// Total probes in this class.
+    pub total_count: usize,
+    /// Probes rewritten in this class.
+    pub call_count: usize,
+    /// Probes skipped in this class.
+    pub skip_count: usize,
+    /// Fraction rewritten in this class.
+    pub call_rate: f64,
 }
 
 /// Runs the hermetic memory-retrieval eval and writes `report.json`.
@@ -527,6 +601,7 @@ async fn run_memory_retrieval_eval_in_store(
             extraction_precision,
             entity_fragmentation,
             reranker_enabled: options.reranker_enabled(),
+            rewrite_summary: QueryRewriteSummary::empty(options.rewrite_policy()),
             aborted_over_budget: true,
             cost: Some(cost_snapshot(&providers.ledger).await),
             providers: Some(providers.provenance),
@@ -545,14 +620,17 @@ async fn run_memory_retrieval_eval_in_store(
     };
     let planner = QueryPlanner::new();
     let mut probe_results = Vec::with_capacity(corpus.probes.len());
+    let mut rewrite_accounting = QueryRewriteAccounting::new(options.rewrite_policy());
 
     for (probe_index, probe) in corpus.probes.iter().enumerate() {
+        let rewrite_decision = rewrite_accounting.record(probe);
+        let retrieval_probe = probe_for_rewrite_policy(probe, rewrite_decision);
         let retrieval = retrieve_probe(
             store.pool(),
             &planner,
             providers.embedder.as_ref(),
             providers.reranker.clone(),
-            probe,
+            &retrieval_probe,
             ProbeRetrieveOptions {
                 use_reranker: options.reranker_enabled(),
                 ranking_config: options.ranking_config().clone(),
@@ -597,6 +675,7 @@ async fn run_memory_retrieval_eval_in_store(
                 extraction_precision,
                 entity_fragmentation,
                 reranker_enabled: options.reranker_enabled(),
+                rewrite_summary: rewrite_accounting.summary(),
                 aborted_over_budget: true,
                 cost: Some(cost_snapshot(&providers.ledger).await),
                 providers: Some(providers.provenance),
@@ -617,6 +696,7 @@ async fn run_memory_retrieval_eval_in_store(
             extraction_precision,
             entity_fragmentation,
             reranker_enabled: options.reranker_enabled(),
+            rewrite_summary: rewrite_accounting.summary(),
             aborted_over_budget: true,
             cost: Some(cost_snapshot(&providers.ledger).await),
             providers: Some(providers.provenance),
@@ -635,6 +715,7 @@ async fn run_memory_retrieval_eval_in_store(
         extraction_precision,
         entity_fragmentation,
         reranker_enabled: options.reranker_enabled(),
+        rewrite_summary: rewrite_accounting.summary(),
         aborted_over_budget: false,
         cost: Some(cost_snapshot(&providers.ledger).await),
         providers: Some(providers.provenance),
@@ -967,6 +1048,161 @@ fn default_live_budget_usd(profile: super::CorpusProfile) -> f64 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeRewriteDecision {
+    Original,
+    Rewritten,
+}
+
+#[derive(Debug, Clone)]
+struct QueryRewriteSummary {
+    policy: QueryRewritePolicy,
+    call_count: usize,
+    skip_count: usize,
+    input_tokens: u64,
+    output_tokens: u64,
+    by_class: BTreeMap<String, QueryRewriteClassMetrics>,
+}
+
+impl QueryRewriteSummary {
+    fn empty(policy: QueryRewritePolicy) -> Self {
+        Self {
+            policy,
+            call_count: 0,
+            skip_count: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            by_class: BTreeMap::new(),
+        }
+    }
+
+    fn total_count(&self) -> usize {
+        self.call_count + self.skip_count
+    }
+
+    fn call_rate(&self) -> f64 {
+        let total = self.total_count();
+        if total == 0 {
+            0.0
+        } else {
+            self.call_count as f64 / total as f64
+        }
+    }
+}
+
+struct QueryRewriteAccounting {
+    summary: QueryRewriteSummary,
+}
+
+impl QueryRewriteAccounting {
+    fn new(policy: QueryRewritePolicy) -> Self {
+        Self {
+            summary: QueryRewriteSummary::empty(policy),
+        }
+    }
+
+    fn record(&mut self, probe: &Probe) -> ProbeRewriteDecision {
+        let class = query_class_for_probe(probe);
+        let rewritten = match self.summary.policy {
+            QueryRewritePolicy::Off => false,
+            QueryRewritePolicy::Always => true,
+            QueryRewritePolicy::Gated => probe
+                .expected_rewrite
+                .unwrap_or_else(|| gated_rewrite_for_class(&class)),
+        };
+        let class_entry = self.summary.by_class.entry(class).or_default();
+        class_entry.total_count += 1;
+        if rewritten {
+            self.summary.call_count += 1;
+            class_entry.call_count += 1;
+            self.summary.input_tokens += approximate_tokens(&probe.query) as u64;
+            self.summary.output_tokens +=
+                approximate_tokens(&deterministic_rewrite_query(probe)) as u64;
+            ProbeRewriteDecision::Rewritten
+        } else {
+            self.summary.skip_count += 1;
+            class_entry.skip_count += 1;
+            ProbeRewriteDecision::Original
+        }
+    }
+
+    fn summary(mut self) -> QueryRewriteSummary {
+        for metrics in self.summary.by_class.values_mut() {
+            metrics.call_rate = if metrics.total_count == 0 {
+                0.0
+            } else {
+                metrics.call_count as f64 / metrics.total_count as f64
+            };
+        }
+        self.summary
+    }
+}
+
+fn query_class_for_probe(probe: &Probe) -> String {
+    if let Some(query_class) = probe.query_class.as_deref() {
+        return query_class.to_string();
+    }
+    if query_has_exact_anchor(&probe.query) {
+        return "exact_identifier".to_string();
+    }
+    match probe.probe_type {
+        ProbeType::MultiHop => "multi_hop",
+        ProbeType::PreferenceApplication => "vector_first",
+        ProbeType::TemporalAsOf => "explicit_temporal",
+        ProbeType::LatestValueAfterUpdate => "vague_followup",
+        _ => "explicit",
+    }
+    .to_string()
+}
+
+fn gated_rewrite_for_class(class: &str) -> bool {
+    matches!(
+        class,
+        "coreference" | "vague_followup" | "vector_first" | "multi_hop"
+    )
+}
+
+fn probe_for_rewrite_policy(probe: &Probe, decision: ProbeRewriteDecision) -> Probe {
+    if decision == ProbeRewriteDecision::Original {
+        return probe.clone();
+    }
+    let mut rewritten = probe.clone();
+    rewritten.query = deterministic_rewrite_query(probe);
+    rewritten
+}
+
+fn deterministic_rewrite_query(probe: &Probe) -> String {
+    if let Some(rewrite_query) = probe.rewrite_query.as_ref() {
+        return rewrite_query.clone();
+    }
+    match query_class_for_probe(probe).as_str() {
+        "vague_followup" => format!("Latest active memory for: {}", probe.query),
+        "vector_first" => format!(
+            "Semantic memory search for user/workspace context: {}",
+            probe.query
+        ),
+        "multi_hop" => format!("Graph relationship retrieval query: {}", probe.query),
+        _ => probe.query.clone(),
+    }
+}
+
+fn query_has_exact_anchor(query: &str) -> bool {
+    query.contains("://")
+        || query.contains('/')
+        || query.contains('"')
+        || query.split_whitespace().any(|token| {
+            let token = token.trim_matches(|ch: char| ch.is_ascii_punctuation());
+            token.contains('.')
+                || token
+                    .strip_prefix('#')
+                    .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit()))
+        })
+}
+
+fn approximate_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
 struct ReportBuildInput {
     manifest: CorpusManifest,
     gold_resolution: GoldResolutionReport,
@@ -975,6 +1211,7 @@ struct ReportBuildInput {
     extraction_precision: ExtractionPrecisionCounts,
     entity_fragmentation: super::EntityFragmentationCounts,
     reranker_enabled: bool,
+    rewrite_summary: QueryRewriteSummary,
     aborted_over_budget: bool,
     cost: Option<CostLedger>,
     providers: Option<ProviderProvenance>,
@@ -982,6 +1219,8 @@ struct ReportBuildInput {
 }
 
 fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
+    let rewrite_p50_latency_ms = deterministic_rewrite_latency_ms(input.rewrite_summary.call_count);
+    let rewrite_p95_latency_ms = deterministic_rewrite_latency_ms(input.rewrite_summary.call_count);
     let retrieval = super::aggregate_retrieval_eval_with_diagnostics(
         &input.gold_resolution,
         input.probe_results,
@@ -989,11 +1228,26 @@ fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
         input.extraction_precision,
         input.entity_fragmentation,
     );
+    let retrieval_plus_rewrite_p95_latency_ms = retrieval
+        .metrics
+        .p95_retrieval_latency_ms
+        .saturating_add(rewrite_p95_latency_ms);
     MemoryRetrievalEvalReport {
         manifest: input.manifest,
         candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
         final_k: RETRIEVAL_EVAL_FINAL_K,
         reranker_enabled: input.reranker_enabled,
+        query_rewrite_policy: input.rewrite_summary.policy,
+        query_rewrite_call_count: input.rewrite_summary.call_count,
+        query_rewrite_skip_count: input.rewrite_summary.skip_count,
+        query_rewrite_call_rate: input.rewrite_summary.call_rate(),
+        query_rewrite_p50_latency_ms: rewrite_p50_latency_ms,
+        query_rewrite_p95_latency_ms: rewrite_p95_latency_ms,
+        query_rewrite_input_tokens: input.rewrite_summary.input_tokens,
+        query_rewrite_output_tokens: input.rewrite_summary.output_tokens,
+        query_rewrite_est_usd: 0.0,
+        retrieval_plus_rewrite_p95_latency_ms,
+        query_rewrite_by_class: input.rewrite_summary.by_class,
         aborted_over_budget: input.aborted_over_budget,
         cost: input.cost,
         providers: input.providers,
@@ -1004,6 +1258,10 @@ fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
         gold_resolution: input.gold_resolution,
         consolidation: input.consolidation,
     }
+}
+
+fn deterministic_rewrite_latency_ms(call_count: usize) -> u64 {
+    if call_count == 0 { 0 } else { 1 }
 }
 
 async fn check_budget(
@@ -1018,6 +1276,18 @@ async fn cost_snapshot(ledger: &SharedCostLedger) -> CostLedger {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
 }
 
 pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
@@ -2311,6 +2581,58 @@ mod tests {
 
         let keys = texts.into_keys().collect::<Vec<_>>();
         assert_eq!(keys, vec!["email redacted", "ops example com"]);
+    }
+
+    #[test]
+    fn rewrite_accounting_gates_by_query_class() {
+        // Pins: gated PR rewrite policy records fewer calls than always and preserves exact controls.
+        let mut always = QueryRewriteAccounting::new(QueryRewritePolicy::Always);
+        let mut gated = QueryRewriteAccounting::new(QueryRewritePolicy::Gated);
+        let explicit = Probe {
+            probe_id: "explicit".to_string(),
+            probe_type: ProbeType::PointRecall,
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: moa_core::UserId::new("user"),
+            query: "Which runbook is required for deploy?".to_string(),
+            rewrite_query: None,
+            expected_rewrite: None,
+            query_class: None,
+            answer: "Use the workspace deploy runbook.".to_string(),
+            expected_fact_ids: Vec::new(),
+            blocked_fact_ids: Vec::new(),
+            as_of: None,
+            expected_redacted: false,
+        };
+        let exact = Probe {
+            probe_id: "exact".to_string(),
+            query: "Find docs/runbook.md".to_string(),
+            ..explicit.clone()
+        };
+        let multi_hop = Probe {
+            probe_id: "multi-hop".to_string(),
+            probe_type: ProbeType::MultiHop,
+            query: "Which team owns the library that api depends on?".to_string(),
+            ..explicit.clone()
+        };
+
+        for probe in [&explicit, &exact, &multi_hop] {
+            always.record(probe);
+            gated.record(probe);
+        }
+        let always = always.summary();
+        let gated = gated.summary();
+
+        assert_eq!(always.call_count, 3);
+        assert_eq!(gated.call_count, 1);
+        assert_eq!(gated.skip_count, 2);
+        assert_eq!(
+            gated
+                .by_class
+                .get("exact_identifier")
+                .expect("exact class should be recorded")
+                .call_count,
+            0
+        );
     }
 
     #[tokio::test]

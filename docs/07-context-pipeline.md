@@ -40,19 +40,19 @@ The brain does not emit provider cache breakpoints, TTLs, or cached-content name
 
 ## Query Rewriting
 
-`QueryRewriter` is fail-open. On timeout, parsing error, circuit-breaker open, or skipped input, it stores a passthrough `QueryRewriteResult` and lets the turn continue. A turn execution reuses the same rewrite metadata across repeated compile steps for one user message, so tool-result follow-up requests do not call the rewriter again.
+`QueryRewriter` is retrieval-scoped and gated. It only calls the rewrite LLM when graph memory retrieval and a vector leg are available and cheap heuristics indicate that memory search is likely to benefit, such as multi-turn coreference, vague follow-ups, vector-first history/preference/similarity questions, or multi-hop queries without clear seeds. Empty, command-like, exact-identifier, file/path-heavy, URL-heavy, and explicit first-turn queries use the original query.
+
+The stage is fail-open. On timeout, parsing error, circuit-breaker open, or skipped input, it stores an original-query `QueryRewriteResult` and lets the turn continue. A turn execution reuses the same rewrite metadata across repeated compile steps for one user message, so tool-result follow-up requests do not call the rewriter again.
 
 The rewriter produces:
 
-- `rewritten_query`
-- `sub_queries`
+- `retrieval_query`
+- `source`
+- `reason`
 - `is_new_task`
 - `task_summary`
-- `source`
 
-Compatibility fields such as `task_kind`, `suggested_tools`, `needs_clarification`, `tool_bias`, and `suggested_promptlets` are advisory preparation hints only. They are not a durable session intent taxonomy and do not route tool execution; the main agent model still chooses actions from the compiled context and tool schemas.
-
-`is_new_task` and `task_summary` feed the segment tracker. The rewritten query feeds memory retrieval. When the rewriter falls back to passthrough, memory retrieval uses the full original query for semantic retrieval rather than reducing it to keyword-only text.
+The query rewrite result is not an intent router. The old advisory tool, freshness, repository, memory-action, clarification, and promptlet fields are not part of the response contract. `is_new_task` and `task_summary` feed the segment tracker. `retrieval_query` feeds memory retrieval. When rewriting is skipped or fails, memory retrieval uses the full original user query rather than reducing it to keyword-only text.
 
 ## Skill Injection
 
@@ -84,7 +84,7 @@ memory crates. See
 current privacy boundary and `crates/moa-memory/README.md` for crate-level
 details.
 
-Search uses the rewritten query when available, otherwise the full passthrough or latest user query. Lexical search still derives terms internally, while semantic retrieval keeps the natural-language query intact. Retrieval can be keyword, semantic, or hybrid depending on the memory store configuration.
+Search uses `retrieval_query` metadata when present, otherwise the full latest user query. Lexical search still derives terms internally, while semantic retrieval keeps the natural-language query intact. Retrieval can be keyword, semantic, or hybrid depending on the memory store configuration.
 
 Memory is inserted as a reminder near the active turn so runtime facts and retrieved context do not disturb the stable prefix.
 

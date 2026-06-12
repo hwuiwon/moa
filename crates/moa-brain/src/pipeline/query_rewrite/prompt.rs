@@ -14,35 +14,22 @@ pub(super) fn build_rewriter_prompt(input: &RewriteInput, ctx: &WorkingContext) 
 
     format!(
         "You are a query rewriter for an AI agent system. Rewrite the user's query\n\
-         into a self-contained, unambiguous request. Resolve pronouns and references\n\
-         using the conversation history.\n\n\
+         into a self-contained retrieval query for graph memory search. Resolve\n\
+         pronouns and references using the conversation history.\n\n\
          Rules:\n\
          - Do NOT invent information not present in the conversation history\n\
          - Do NOT add entities, file paths, or technical details not mentioned\n\
          - DO resolve \"that\", \"it\", \"the bug\", etc. to their concrete referents\n\
-         - DO decompose compound requests into sub_queries\n\
+         - Preserve exact identifiers, file paths, URLs, UUIDs, issue IDs, and quoted strings\n\
          - Determine if this message starts a NEW task or continues the current one\n\
          - A new task means the user is asking about something unrelated to the current work\n\
          - Set is_new_task=true only when the topic genuinely shifts, not for follow-up questions\n\
          - Treat coreferences like \"that file\", \"the error above\", and \"try again\" as continuations\n\
-         - Produce retrieval and segment-boundary metadata only; do not decide the agent's final actions\n\
-         - Set freshness_required=true when answering requires current, external, or time-sensitive information\n\
-         - Set repo_context_required=true when the agent should inspect repository files, code, config, logs, or tests before answering\n\
-         - Set memory_action to one of: none, retrieve, remember, forget, supersede, ingest\n\
-         - Use memory_action=retrieve when existing workspace or user memory is likely needed before answering\n\
-         - Use needs_clarification only when the query cannot be interpreted even with history\n\
-         - Treat suggested_tools, tool_bias, and suggested_promptlets as best-effort advisory hints, not routing decisions\n\
-         - Prefer empty hint arrays when uncertain; the main agent model chooses tools and actions from context\n\
+         - Produce retrieval and segment-boundary metadata only\n\
+         - Do not classify intent, choose tools, request clarification, or add prompt advice\n\
          - Respond ONLY with valid JSON matching the schema below. No preamble.\n\n\
-         Schema: {{\"rewritten_query\": string, \"task_kind\": string, \"sub_queries\": [string],\n\
-         \"suggested_tools\": [string], \"freshness_required\": bool,\n\
-         \"repo_context_required\": bool, \"memory_action\": string,\n\
-         \"needs_clarification\": bool,\n\
-         \"clarification_question\": string|null, \"is_new_task\": bool,\n\
-         \"task_summary\": string|null, \"tool_bias\": [string],\n\
-         \"suggested_promptlets\": [string]}}\n\
-         task_kind must be one of: coding, research, file_operation, system_admin,\n\
-         creative, question, conversation, unknown.\n\n\
+         Schema: {{\"retrieval_query\": string, \"is_new_task\": bool,\n\
+         \"task_summary\": string|null}}\n\n\
          Available tools: {tools}\n\n\
          Available skills:\n{skills}\n\n\
          Conversation history (last 5 turns):\n{history}\n\n\

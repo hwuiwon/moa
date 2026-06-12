@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
-    EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, RankingConfig, RankingMode,
-    run_memory_retrieval_eval,
+    EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, QueryRewritePolicy,
+    RankingConfig, RankingMode, run_memory_retrieval_eval,
 };
 
 /// Runs the hermetic memory retrieval evaluation command.
@@ -20,6 +20,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             MemoryRetrievalEvalOptions::new(&options.corpus, &options.output)
                 .with_reranker(options.reranker_enabled)
                 .with_ranking_config(options.ranking_config.clone())
+                .with_rewrite_policy(options.rewrite_policy)
                 .with_extractor_mode(options.extractor_mode)
                 .with_lane(options.lane)
                 .with_consolidation(options.consolidate)
@@ -43,11 +44,15 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} rewrite_policy={:?} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
         options.ranking_config.mode,
+        options.rewrite_policy,
+        report.query_rewrite_call_count,
+        report.query_rewrite_skip_count,
+        report.query_rewrite_call_rate,
         if report.reranker_enabled { "on" } else { "off" },
         reported_extractor,
         options.consolidate,
@@ -71,7 +76,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         report.metrics.post_rerank_recall_at_4.value,
         report.metrics.ndcg_at_4.value,
         report.metrics.preference_context_rate.value,
-        report.metrics.p95_retrieval_latency_ms
+        report.metrics.p95_retrieval_latency_ms,
+        report.retrieval_plus_rewrite_p95_latency_ms
     );
     Ok(())
 }
@@ -82,6 +88,7 @@ struct Options {
     output: PathBuf,
     reranker_enabled: bool,
     ranking_config: RankingConfig,
+    rewrite_policy: QueryRewritePolicy,
     extractor_mode: MemoryEvalExtractorMode,
     extractions_path: Option<PathBuf>,
     merges_path: Option<PathBuf>,
@@ -98,6 +105,7 @@ impl Options {
         let mut output = None;
         let mut reranker_enabled = false;
         let mut ranking_config = RankingConfig::default();
+        let mut rewrite_policy = QueryRewritePolicy::Gated;
         let mut extractor_mode = MemoryEvalExtractorMode::Heuristic;
         let mut extractions_path = None;
         let mut merges_path = None;
@@ -122,6 +130,12 @@ impl Options {
                 "--reranker" => {
                     let value = args.next().context("--reranker requires off|on")?;
                     reranker_enabled = parse_reranker(&value)?;
+                }
+                "--rewrite-policy" => {
+                    let value = args
+                        .next()
+                        .context("--rewrite-policy requires off|always|gated")?;
+                    rewrite_policy = parse_rewrite_policy(&value)?;
                 }
                 "--lane" => {
                     let value = args.next().context("--lane requires pr|live")?;
@@ -237,6 +251,7 @@ impl Options {
             output: output.context("--output <path> is required")?,
             reranker_enabled,
             ranking_config,
+            rewrite_policy,
             extractor_mode,
             extractions_path,
             merges_path,
@@ -250,7 +265,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {
@@ -274,6 +289,15 @@ fn parse_lane(value: &str) -> Result<EvalLane> {
         "pr" => Ok(EvalLane::Pr),
         "live" => Ok(EvalLane::Live),
         other => bail!("unsupported --lane value `{other}`; expected pr|live"),
+    }
+}
+
+fn parse_rewrite_policy(value: &str) -> Result<QueryRewritePolicy> {
+    match value {
+        "off" => Ok(QueryRewritePolicy::Off),
+        "always" => Ok(QueryRewritePolicy::Always),
+        "gated" => Ok(QueryRewritePolicy::Gated),
+        other => bail!("unsupported --rewrite-policy value `{other}`; expected off|always|gated"),
     }
 }
 

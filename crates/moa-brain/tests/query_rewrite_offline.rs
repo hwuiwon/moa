@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::{
-    ContextMessage, ContextProcessor, LLMProvider, MemoryAction, MoaConfig, Platform,
-    QueryRewriteResult, RewriteSource, SessionMeta, UserId, WorkspaceId,
+    ContextMessage, ContextProcessor, LLMProvider, MoaConfig, Platform, QueryRewriteResult,
+    RewriteSource, SessionMeta, UserId, WorkspaceId,
 };
 use moa_providers::OpenAIProvider;
 use serde_json::json;
@@ -21,19 +21,9 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
     mount_openai_text(
         &server,
         json!({
-            "rewritten_query": "Fix the OAuth refresh token race condition in auth/refresh.rs and add regression tests.",
-            "task_kind": "coding",
-            "sub_queries": ["patch auth/refresh.rs", "add regression tests"],
-            "suggested_tools": ["file_read", "file_write"],
-            "freshness_required": false,
-            "repo_context_required": true,
-            "memory_action": "retrieve",
-            "needs_clarification": false,
-            "clarification_question": null,
+            "retrieval_query": "Fix the OAuth refresh token race condition in auth/refresh.rs and add regression tests.",
             "is_new_task": false,
             "task_summary": null,
-            "tool_bias": ["read_before_write", "repo_inspection", "repo_inspection"],
-            "suggested_promptlets": ["observe_first", "test_authoring"]
         })
         .to_string(),
         0,
@@ -77,6 +67,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
     ctx.append_message(ContextMessage::user("fix that and add tests"));
 
     QueryRewriter::new(config.query_rewrite, provider.clone())
+        .with_retrieval_availability(true, true)
         .process(&mut ctx)
         .await?;
 
@@ -87,41 +78,15 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
             .clone(),
     )?;
     assert_eq!(result.source, RewriteSource::Rewritten);
-    assert!(result.rewritten_query.contains("auth/refresh.rs"));
-    assert!(result.rewritten_query.to_lowercase().contains("oauth"));
+    assert!(result.retrieval_query.contains("auth/refresh.rs"));
+    assert!(result.retrieval_query.to_lowercase().contains("oauth"));
     assert!(
         result
-            .rewritten_query
+            .retrieval_query
             .to_lowercase()
             .contains("refresh token")
     );
-    assert!(!result.rewritten_query.to_lowercase().contains("kubernetes"));
-    assert!(
-        result.repo_context_required,
-        "query rewrite should mark repo inspection before coding"
-    );
-    assert!(
-        !result.freshness_required,
-        "query rewrite should not require current external information"
-    );
-    assert_eq!(
-        result.memory_action,
-        MemoryAction::Retrieve,
-        "query rewrite should preserve the memory action hint"
-    );
-    assert_eq!(
-        result.tool_bias,
-        vec![
-            "read_before_write".to_string(),
-            "repo_inspection".to_string()
-        ],
-        "query rewrite should trim and dedupe tool bias hints"
-    );
-    assert_eq!(
-        result.suggested_promptlets,
-        vec!["observe_first".to_string(), "test_authoring".to_string()],
-        "query rewrite should preserve promptlet hints"
-    );
+    assert!(!result.retrieval_query.to_lowercase().contains("kubernetes"));
 
     let bodies = captured_json_bodies(&server).await;
     assert_eq!(bodies.len(), 1);
@@ -131,40 +96,24 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         .expect("query rewrite request should include prompt text");
     assert!(
         prompt.contains("Produce retrieval and segment-boundary metadata only"),
-        "query rewrite prompt should avoid final action routing"
+        "query rewrite prompt should stay retrieval-scoped"
     );
     assert!(
-        prompt.contains("main agent model chooses tools and actions"),
-        "query rewrite prompt should leave action choice to the main agent"
+        prompt.contains("Do not classify intent, choose tools"),
+        "query rewrite prompt should not act as an intent router"
     );
     assert!(
-        !prompt.contains("mode router"),
-        "query rewrite prompt should not describe itself as a mode router"
-    );
-    assert!(
-        prompt.contains("freshness_required"),
-        "query rewrite prompt should request freshness metadata"
+        !prompt.contains("freshness_required"),
+        "query rewrite prompt should not request advisory freshness metadata"
     );
     let schema = &bodies[0]["text"]["format"]["schema"];
-    assert_eq!(
-        schema["properties"]["memory_action"]["enum"],
-        json!([
-            "none",
-            "retrieve",
-            "remember",
-            "forget",
-            "supersede",
-            "ingest"
-        ]),
-        "query rewrite schema should constrain memory actions"
-    );
     assert!(
         schema["required"]
             .as_array()
             .expect("query rewrite schema required list should be an array")
             .iter()
-            .any(|field| field == "suggested_promptlets"),
-        "query rewrite schema should require promptlet hints"
+            .any(|field| field == "retrieval_query"),
+        "query rewrite schema should require retrieval_query"
     );
 
     Ok(())

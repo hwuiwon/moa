@@ -307,9 +307,14 @@ async fn brain_turn_cache_replay_e2e() -> Result<()> {
         "Anthropic caching should be enabled by provider-owned top-level cache_control; body={turn_six_body:#}"
     );
     assert_eq!(
-        nested_cache_control_count(&turn_six_body),
+        provider_stable_prefix_cache_control_count(&turn_six_body),
+        1,
+        "Anthropic provider should mark exactly one stable-prefix boundary"
+    );
+    assert_eq!(
+        dynamic_cache_control_count(&turn_six_body),
         0,
-        "brain requests should not annotate provider block-level cache markers"
+        "dynamic messages and tools should not carry provider block-level cache markers"
     );
 
     let turn_seven_request = requests
@@ -525,7 +530,7 @@ fn static_prefix_message_count(request: &CompletionRequest) -> usize {
         .count()
 }
 
-fn nested_cache_control_count(body: &Value) -> usize {
+fn provider_stable_prefix_cache_control_count(body: &Value) -> usize {
     let mut count = 0;
 
     if let Some(system) = body["system"].as_array() {
@@ -535,6 +540,12 @@ fn nested_cache_control_count(body: &Value) -> usize {
             }
         }
     }
+
+    count
+}
+
+fn dynamic_cache_control_count(body: &Value) -> usize {
+    let mut count = 0;
 
     if let Some(tools) = body["tools"].as_array() {
         for tool in tools {

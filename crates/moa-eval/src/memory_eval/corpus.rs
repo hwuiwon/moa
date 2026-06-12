@@ -222,6 +222,15 @@ pub struct Probe {
     pub user_id: UserId,
     /// Natural-language query passed into retrieval.
     pub query: String,
+    /// Deterministic rewritten retrieval query for rewrite-policy A/B runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_query: Option<String>,
+    /// Expected gated rewrite decision for this probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_rewrite: Option<bool>,
+    /// Query class label used by rewrite-policy metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_class: Option<String>,
     /// Gold answer expected from a faithful answerer.
     pub answer: String,
     /// Facts that should support a successful answer.
@@ -243,6 +252,12 @@ impl Probe {
         ensure_non_empty("probe workspace_id", self.workspace_id.as_str())?;
         ensure_non_empty("probe user_id", self.user_id.as_str())?;
         ensure_non_empty("probe query", &self.query)?;
+        if let Some(rewrite_query) = &self.rewrite_query {
+            ensure_non_empty("probe rewrite_query", rewrite_query)?;
+        }
+        if let Some(query_class) = &self.query_class {
+            ensure_non_empty("probe query_class", query_class)?;
+        }
         ensure_non_empty("probe answer", &self.answer)?;
         for fact_id in self.referenced_fact_ids() {
             ensure_non_empty("probe referenced fact_id", fact_id)?;

@@ -185,7 +185,7 @@ fn completed_from_active(segment: &ActiveSegment, now: DateTime<Utc>) -> Segment
 mod tests {
     use chrono::{Duration, TimeZone};
     use moa_core::{
-        ActiveSegment, MemoryAction, QueryRewriteResult, RewriteSource, SessionId, TaskKind,
+        ActiveSegment, QueryRewriteResult, RewriteReason, RewriteSource, SessionId,
         deterministic_segment_id,
     };
     use serde_json::json;
@@ -194,20 +194,11 @@ mod tests {
 
     fn rewrite(is_new_task: bool) -> serde_json::Value {
         serde_json::to_value(QueryRewriteResult {
-            rewritten_query: "Update the README".to_string(),
-            task_kind: TaskKind::FileOperation,
-            sub_queries: Vec::new(),
-            suggested_tools: Vec::new(),
-            freshness_required: false,
-            repo_context_required: false,
-            memory_action: MemoryAction::None,
-            needs_clarification: false,
-            clarification_question: None,
+            retrieval_query: "Update the README".to_string(),
+            source: RewriteSource::Rewritten,
+            reason: Some(RewriteReason::CoreferenceWithHistory),
             is_new_task,
             task_summary: Some("Update the README".to_string()),
-            tool_bias: Vec::new(),
-            suggested_promptlets: Vec::new(),
-            source: RewriteSource::Rewritten,
         })
         .expect("rewrite result should serialize")
     }
@@ -312,6 +303,47 @@ mod tests {
                 chrono::Utc::now(),
             )
             .is_some()
+        );
+    }
+
+    #[test]
+    fn segment_tracker_reads_only_boundary_fields() {
+        // Pins: segment creation depends only on boundary fields from query rewrite metadata.
+        let session_id = SessionId::new();
+        let started_at = chrono::Utc::now();
+        let current = Some(ActiveSegment {
+            id: deterministic_segment_id(session_id, 0),
+            segment_index: 0,
+            task_summary: Some("Fix auth".to_string()),
+            started_at,
+            tools_used: Vec::new(),
+            skills_activated: Vec::new(),
+            turn_count: 1,
+            token_cost: 42,
+        });
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "query_rewrite".to_string(),
+            json!({
+                "retrieval_query": "Write release notes",
+                "source": "original",
+                "is_new_task": true,
+                "task_summary": "Write release notes"
+            }),
+        );
+
+        let transition = SegmentTracker::transition_from_metadata(
+            &metadata,
+            session_id,
+            "tenant",
+            &current,
+            started_at + Duration::seconds(1),
+        )
+        .expect("new task should transition from slim rewrite metadata");
+
+        assert_eq!(
+            transition.started.task_summary,
+            Some("Write release notes".to_string())
         );
     }
 }
