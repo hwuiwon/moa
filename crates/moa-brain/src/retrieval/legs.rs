@@ -232,12 +232,17 @@ pub async fn vector_leg(
 }
 
 /// Runs the Postgres tsvector lexical leg over `moa.node_index`.
+///
+/// The query matches ANY extracted term (plus stemmed variants) and orders
+/// by `ts_rank`, because conversational queries rarely contain every token
+/// of a stored fact name.
 pub async fn lexical_leg(
     pool: &PgPool,
     req: &RetrievalRequest,
     assume_app_role: bool,
 ) -> Result<Vec<LegCandidate>> {
-    if req.query_text.trim().is_empty() {
+    let tsquery = lexical_or_tsquery(&req.query_text);
+    if tsquery.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -251,9 +256,9 @@ pub async fn lexical_leg(
     push_validity_filter(&mut builder, None, req.as_of);
     builder.push(
         r#"
-          AND name_tsv @@ plainto_tsquery('simple', "#,
+          AND name_tsv @@ to_tsquery('simple', "#,
     );
-    builder.push_bind(&req.query_text);
+    builder.push_bind(tsquery.clone());
     builder.push(
         r#")
           AND CASE pii_class
@@ -270,9 +275,9 @@ pub async fn lexical_leg(
     builder.push(")");
     builder.push(
         r#"
-        ORDER BY ts_rank(name_tsv, plainto_tsquery('simple', "#,
+        ORDER BY ts_rank(name_tsv, to_tsquery('simple', "#,
     );
-    builder.push_bind(&req.query_text);
+    builder.push_bind(tsquery);
     builder.push(")) DESC, ");
     push_accessed_ordering(&mut builder, None, req.ranking_reference_time);
     builder.push(" LIMIT ");
@@ -292,6 +297,25 @@ pub async fn lexical_leg(
         return Ok(Vec::new());
     }
     lexical_fallback_leg(pool, req, assume_app_role, &terms).await
+}
+
+/// Builds an OR `to_tsquery` input from query terms and their stems.
+fn lexical_or_tsquery(query: &str) -> String {
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+    let mut variants = Vec::new();
+    for term in lexical_fallback_terms(query) {
+        let stemmed = stemmer.stem(&term).into_owned();
+        for variant in [term, stemmed] {
+            if !variant.is_empty() && !variants.contains(&variant) {
+                variants.push(variant);
+            }
+        }
+    }
+    variants
+        .into_iter()
+        .map(|term| format!("'{}'", term.replace('\'', "")))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 async fn lexical_fallback_leg(
