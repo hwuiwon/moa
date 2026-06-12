@@ -11,10 +11,17 @@ pub(super) fn build_request_body(
 ) -> Result<Value> {
     let mut system_messages = Vec::new();
     let mut messages = Vec::new();
+    let mut in_leading_system_prefix = true;
 
     for message in &request.messages {
-        if message.role == MessageRole::System {
+        if in_leading_system_prefix && message.role == MessageRole::System {
             system_messages.push(anthropic_text_block(message.content.clone()));
+            continue;
+        }
+        in_leading_system_prefix = false;
+
+        if message.role == MessageRole::System {
+            messages.push(anthropic_late_system_message(message));
             continue;
         }
 
@@ -53,6 +60,9 @@ pub(super) fn build_request_body(
                 .iter()
                 .map(provider_native_tool_json),
         );
+    }
+    if should_mark_stable_prefix(request) {
+        mark_stable_prefix_cache_control(&mut system_messages, &mut tools);
     }
 
     body.insert("messages".to_string(), Value::Array(messages));
@@ -96,6 +106,13 @@ fn anthropic_text_block(text: impl Into<String>) -> Value {
     })
 }
 
+fn anthropic_late_system_message(message: &ContextMessage) -> Value {
+    json!({
+        "role": "user",
+        "content": message.content,
+    })
+}
+
 fn anthropic_output_config(format: &JsonResponseFormat) -> Value {
     json!({
         "format": {
@@ -117,4 +134,38 @@ fn should_enable_automatic_cache_control(request: &CompletionRequest) -> bool {
         .map(|message| estimate_text_tokens(&message.content))
         .sum::<usize>();
     tool_tokens + message_tokens >= MIN_CACHEABLE_TOKENS
+}
+
+fn should_mark_stable_prefix(request: &CompletionRequest) -> bool {
+    stable_prefix_tokens(request) >= MIN_CACHEABLE_TOKENS
+}
+
+fn stable_prefix_tokens(request: &CompletionRequest) -> usize {
+    let tool_tokens = request
+        .tools
+        .iter()
+        .map(|tool| estimate_text_tokens(&tool.to_string()))
+        .sum::<usize>();
+    let system_tokens = request
+        .messages
+        .iter()
+        .take_while(|message| message.role == MessageRole::System)
+        .map(|message| estimate_text_tokens(&message.content))
+        .sum::<usize>();
+    tool_tokens + system_tokens
+}
+
+fn mark_stable_prefix_cache_control(system_messages: &mut [Value], tools: &mut [Value]) {
+    if let Some(last_system) = system_messages.last_mut()
+        && let Some(object) = last_system.as_object_mut()
+    {
+        object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+        return;
+    }
+
+    if let Some(last_tool) = tools.last_mut()
+        && let Some(object) = last_tool.as_object_mut()
+    {
+        object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    }
 }

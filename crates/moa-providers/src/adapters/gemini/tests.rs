@@ -261,6 +261,10 @@ fn gemini_request_body_keeps_cacheable_prompt_inline() {
         body["systemInstruction"]["parts"][0]["text"],
         "cached rules"
     );
+    assert_eq!(
+        body["contents"][1]["parts"][0]["text"], "late rule",
+        "late system messages should stay in the dynamic contents stream"
+    );
 }
 
 #[tokio::test]

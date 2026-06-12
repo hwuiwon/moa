@@ -401,6 +401,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
     sonnet_config.general.default_provider = "anthropic".to_string();
     sonnet_config.models.main = "claude-sonnet-4-6".to_string();
     sonnet_config.local.sandbox_dir = repo_root.display().to_string();
+    sonnet_config.permissions.auto_approve = vec!["bash".to_string()];
 
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     let store = Arc::new(store);
@@ -755,6 +756,7 @@ fn live_cache_config(provider: &str, model: &str, repo_root: &Path) -> MoaConfig
     config.general.workspace_instructions =
         Some("Cache audit static padding. Keep this prefix identical across turns.\n".repeat(220));
     config.local.sandbox_dir = repo_root.display().to_string();
+    config.permissions.auto_approve = vec!["bash".to_string()];
     config
 }
 

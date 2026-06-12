@@ -24,12 +24,14 @@ pub(crate) fn build_responses_request(
 ) -> Result<CreateResponse> {
     let mut instructions = Vec::new();
     let mut input_items = Vec::new();
+    let mut in_leading_system_prefix = true;
 
     for message in &request.messages {
-        if message.role == MessageRole::System {
+        if in_leading_system_prefix && message.role == MessageRole::System {
             instructions.push(message.content.clone());
             continue;
         }
+        in_leading_system_prefix = false;
 
         if let Some(invocation) = message.tool_invocation.as_ref() {
             input_items.push(InputItem::Item(Item::FunctionCall(FunctionToolCall {
@@ -60,7 +62,11 @@ pub(crate) fn build_responses_request(
 
         input_items.push(InputItem::EasyMessage(EasyInputMessage {
             r#type: Default::default(),
-            role: responses_role(message),
+            role: if message.role == MessageRole::System {
+                OpenAiRole::User
+            } else {
+                responses_role(message)
+            },
             content: EasyInputContent::Text(message.content.clone()),
             phase: None,
         }));

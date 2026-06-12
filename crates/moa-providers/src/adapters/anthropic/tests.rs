@@ -99,8 +99,46 @@ fn completion_request_sets_structured_output_config() {
 }
 
 #[test]
+fn completion_request_keeps_late_system_messages_out_of_stable_system_prefix() {
+    // Pins: only leading system messages are lifted into Anthropic's system array.
+    let request = CompletionRequest {
+        model: Some(ModelId::new(MODEL_SONNET_4_6)),
+        messages: vec![
+            ContextMessage::system("Stable rules"),
+            ContextMessage::user("First task"),
+            ContextMessage::system("Dynamic security reminder"),
+            ContextMessage::user("Second task"),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(512),
+        temperature: None,
+        response_format: None,
+        metadata: Default::default(),
+    };
+
+    let body = build_request_body(
+        &request,
+        &canonical_model_id(MODEL_SONNET_4_6).expect("valid model"),
+        &capabilities_for_model(MODEL_SONNET_4_6).expect("valid capabilities"),
+        false,
+    )
+    .expect("request should build");
+
+    assert_eq!(
+        body["system"].as_array().expect("system array").len(),
+        1,
+        "late system messages should not enter the stable Anthropic system array"
+    );
+    assert_eq!(body["system"][0]["text"], "Stable rules");
+    assert_eq!(body["messages"][0]["content"], "First task");
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "Dynamic security reminder");
+    assert_eq!(body["messages"][2]["content"], "Second task");
+}
+
+#[test]
 fn completion_request_enables_top_level_cache_control_for_large_prompt() {
-    // Pins: Anthropic cache behavior is provider-owned and top-level, not block-annotated.
+    // Pins: Anthropic cache behavior is provider-owned at the stable prefix boundary.
     let request = CompletionRequest {
         model: Some(ModelId::new(MODEL_SONNET_4_6)),
         messages: vec![
@@ -133,7 +171,7 @@ fn completion_request_enables_top_level_cache_control_for_large_prompt() {
     .expect("request should build");
 
     assert_eq!(body["cache_control"]["type"], "ephemeral");
-    assert!(body["system"][0].get("cache_control").is_none());
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert!(body["tools"][0].get("cache_control").is_none());
     assert!(
         !body["messages"].to_string().contains("cache_control"),
@@ -194,6 +232,7 @@ fn completion_request_counts_tool_tokens_toward_automatic_cache_control() {
     .expect("request should build");
 
     assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert!(body["tools"][0].get("cache_control").is_none());
 }
 

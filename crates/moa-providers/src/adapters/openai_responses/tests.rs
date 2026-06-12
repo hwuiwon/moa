@@ -153,6 +153,38 @@ fn build_responses_request_sets_structured_output_schema() {
 }
 
 #[test]
+fn build_responses_request_keeps_late_system_messages_in_input_items() {
+    // Pins: only leading system messages become OpenAI instructions.
+    let request = CompletionRequest {
+        model: None,
+        messages: vec![
+            ContextMessage::system("Stable instructions"),
+            ContextMessage::user("First task"),
+            ContextMessage::system("Dynamic security reminder"),
+            ContextMessage::user("Second task"),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(128),
+        temperature: None,
+        response_format: None,
+        metadata: HashMap::new(),
+    };
+
+    let built =
+        build_responses_request(&request, "gpt-5.4", "medium", &[]).expect("request should build");
+    let serialized = serde_json::to_value(&built).expect("request should serialize");
+
+    assert_eq!(built.instructions.as_deref(), Some("Stable instructions"));
+    assert_eq!(serialized["input"][0]["content"], "First task");
+    assert_eq!(serialized["input"][1]["role"], "user");
+    assert_eq!(
+        serialized["input"][1]["content"],
+        "Dynamic security reminder"
+    );
+    assert_eq!(serialized["input"][2]["content"], "Second task");
+}
+
+#[test]
 fn prompt_cache_key_ignores_dynamic_tail_messages() {
     // Pins: OpenAI prompt_cache_key remains stable when only non-system tail messages change.
     let mut first = CompletionRequest {

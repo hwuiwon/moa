@@ -150,9 +150,10 @@ fn build_contents_from_messages(messages: &[ContextMessage]) -> (Option<Value>, 
     let mut model_parts = Vec::new();
     let mut tool_response_parts = Vec::new();
     let mut tool_names_by_id = HashMap::new();
+    let mut in_leading_system_prefix = true;
 
     for message in messages {
-        if message.role == MessageRole::System {
+        if in_leading_system_prefix && message.role == MessageRole::System {
             flush_pending_parts(&mut contents, &mut model_parts, &mut tool_response_parts);
             if !message.content.is_empty() || message.thought_signature.is_some() {
                 system_parts.push(text_part(
@@ -162,8 +163,9 @@ fn build_contents_from_messages(messages: &[ContextMessage]) -> (Option<Value>, 
             }
             continue;
         }
+        in_leading_system_prefix = false;
 
-        if is_standard_user_message(message) {
+        if is_standard_user_message(message) || message.role == MessageRole::System {
             flush_pending_parts(&mut contents, &mut model_parts, &mut tool_response_parts);
             contents.push(content_message(
                 "user",

@@ -69,8 +69,9 @@ runtime facts it needs for the active turn.
   may derive a stable `prompt_cache_key` from the ordered static prefix, but
   the shared request type does not expose OpenAI cache policy.
 - Anthropic prompt caching is provider-owned. The Anthropic adapter may enable
-  top-level automatic `cache_control` for cache-eligible requests, but the brain
-  does not emit block-level markers.
+  top-level automatic `cache_control` for cache-eligible requests and may add
+  one provider-owned marker at the stable prefix boundary. The brain does not
+  emit block-level markers or TTL policy.
 - Gemini uses implicit caching for the default request path. Explicit
   `cachedContents` resources are a separate provider feature and are not part
   of the default MOA prompt compilation path.

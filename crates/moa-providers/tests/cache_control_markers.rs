@@ -11,12 +11,14 @@ const LATEST_USER_TURN_A: &str = "Summarize only the new deployment risk.";
 const LATEST_USER_TURN_B: &str = "Summarize only the new rollback risk.";
 
 #[test]
-fn anthropic_large_request_uses_top_level_cache_control_only() {
-    // Pins: Anthropic cache control is provider-owned and not encoded as prompt block markers.
+fn anthropic_large_request_uses_top_level_and_stable_prefix_cache_control() {
+    // Pins: Anthropic cache control is provider-owned with one stable-prefix marker.
     let body = anthropic_body(&four_segment_request(LATEST_USER_TURN_A, true));
 
     assert_eq!(body["cache_control"]["type"], "ephemeral");
-    assert_eq!(nested_cache_control_markers(&body), 0);
+    assert_eq!(nested_cache_control_markers(&body), 1);
+    assert_eq!(body["system"][1]["cache_control"]["type"], "ephemeral");
+    assert!(!body["messages"].to_string().contains("cache_control"));
 }
 
 #[test]
@@ -126,7 +128,7 @@ fn assert_four_segment_layout(body: &Value, expected_latest_turn: &str, include_
     let system = array_field(body, "system");
     assert_eq!(system.len(), 2);
     assert!(system[0].get("cache_control").is_none());
-    assert!(system[1].get("cache_control").is_none());
+    assert_eq!(system[1]["cache_control"]["type"], "ephemeral");
 
     let messages = array_field(body, "messages");
     assert_eq!(messages.len(), 3);
