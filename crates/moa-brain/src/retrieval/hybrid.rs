@@ -609,7 +609,13 @@ where
     F: std::future::Future<Output = Result<T>>,
 {
     if disable_timeout {
-        return future.await;
+        let started = std::time::Instant::now();
+        let result = future.await;
+        let elapsed = started.elapsed().as_millis();
+        if elapsed > 200 {
+            eprintln!("[leg-timing] {name} took {elapsed}ms");
+        }
+        return result;
     }
     leg_or_empty(name, timed_leg(name, budget, future).await)
 }
@@ -663,7 +669,7 @@ fn apply_feature_ranking(
             hit.score += config.weights.overlap;
         }
         if hit.legs.graph && !hit.legs.vector && !hit.legs.lexical {
-            hit.score += config.weights.overlap;
+            hit.score += config.weights.graph_rescue;
         }
     }
     hits.sort_by(|left, right| {

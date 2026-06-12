@@ -224,6 +224,8 @@ pub fn generate_memory_eval_corpus_with_style(
         &user_refs,
     )?;
     let mut ledger = schedule.ledger();
+    let mut probes = probes;
+    link_recurring_fact_eras(&mut ledger, &mut probes);
     assign_quality_priors(&mut ledger, &probes)?;
     let embedding_inputs = build_embedding_inputs(&ledger, &probes);
     let manifest = CorpusManifest {
@@ -1326,6 +1328,91 @@ fn build_probes(
         }
     }
     Ok(probes)
+}
+
+/// Predicates whose per-scope facts recur across era sessions as updates to
+/// one logical value rather than as independent facts.
+const RECURRING_UPDATE_PREDICATES: &[&str] = &[
+    "response_style",
+    "contact_email",
+    "private_repository",
+    "require_runbook",
+];
+
+/// Links recurring facts across era sessions into one supersession chain.
+///
+/// Later eras supersede earlier ones and close their validity windows, so a
+/// present-tense probe targets exactly one active fact. Probes that expect a
+/// superseded era are rewritten into explicit as-of queries inside that era's
+/// window, and every linked probe blocks the other eras of its family.
+fn link_recurring_fact_eras(ledger: &mut [LedgerFact], probes: &mut [Probe]) {
+    let mut families: BTreeMap<(String, Option<String>, String), Vec<usize>> = BTreeMap::new();
+    for (index, fact) in ledger.iter().enumerate() {
+        if !RECURRING_UPDATE_PREDICATES.contains(&fact.predicate.as_str())
+            || fact.restates.is_some()
+        {
+            continue;
+        }
+        let user_key =
+            (fact.scope == ScopeTier::User).then(|| fact.user_id.as_str().to_string());
+        families
+            .entry((
+                fact.workspace_id.as_str().to_string(),
+                user_key,
+                fact.predicate.clone(),
+            ))
+            .or_default()
+            .push(index);
+    }
+
+    let mut family_ids_by_fact: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for indices in families.values() {
+        let mut ordered = indices.clone();
+        ordered.sort_by_key(|&index| ledger[index].valid_from);
+        for window in ordered.windows(2) {
+            let successor_from = ledger[window[1]].valid_from;
+            let predecessor_id = ledger[window[0]].fact_id.clone();
+            ledger[window[0]].valid_to = Some(successor_from);
+            ledger[window[1]].supersedes.push(predecessor_id);
+        }
+        let ids = ordered
+            .iter()
+            .map(|&index| ledger[index].fact_id.clone())
+            .collect::<Vec<_>>();
+        for id in &ids {
+            family_ids_by_fact.insert(id.clone(), ids.clone());
+        }
+    }
+
+    let closed_from_by_fact = ledger
+        .iter()
+        .filter(|fact| fact.valid_to.is_some())
+        .map(|fact| (fact.fact_id.clone(), fact.valid_from))
+        .collect::<BTreeMap<_, _>>();
+
+    for probe in probes.iter_mut() {
+        let [expected_id] = probe.expected_fact_ids.as_slice() else {
+            continue;
+        };
+        let Some(family) = family_ids_by_fact.get(expected_id) else {
+            continue;
+        };
+        let expected_id = expected_id.clone();
+        probe
+            .blocked_fact_ids
+            .extend(family.iter().filter(|id| **id != expected_id).cloned());
+        if probe.as_of.is_none()
+            && let Some(valid_from) = closed_from_by_fact.get(&expected_id)
+        {
+            let as_of = *valid_from + Duration::days(2);
+            probe.query = format!(
+                "{} as of {}?",
+                probe.query.trim_end_matches(['?', ' ']),
+                as_of.format("%Y-%m-%d")
+            );
+            probe.as_of = Some(as_of);
+        }
+    }
 }
 
 fn assign_quality_priors(ledger: &mut [LedgerFact], probes: &[Probe]) -> Result<()> {
