@@ -38,18 +38,6 @@
       ],
       "title": "Journal depth",
       "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
-      "id": 4,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single", "sort": "none" } },
-      "targets": [
-        { "expr": "time() - moa_lineage_cold_last_export_timestamp_seconds", "legendFormat": "{{instance}}", "refId": "A" }
-      ],
-      "title": "Cold-tier export lag seconds",
-      "type": "timeseries"
     }
   ],
   "refresh": "30s",
