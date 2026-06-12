@@ -133,6 +133,28 @@ impl SessionVoState {
         segment.token_cost = segment.token_cost.saturating_add(token_cost);
     }
 
+    /// Adds a root-owned child sub-agent reference if it is not already registered.
+    pub fn register_child(&mut self, child: SubAgentChildRef) -> bool {
+        if self.children.iter().any(|existing| existing.id == child.id) {
+            return false;
+        }
+        self.children.push(child);
+        true
+    }
+
+    /// Removes a root-owned child sub-agent reference by id.
+    pub fn remove_child(&mut self, sub_agent_id: &str) -> bool {
+        let before = self.children.len();
+        self.children.retain(|child| child.id != sub_agent_id);
+        self.children.len() != before
+    }
+
+    /// Returns whether the session currently owns the child sub-agent id.
+    #[must_use]
+    pub fn owns_child(&self, sub_agent_id: &str) -> bool {
+        self.children.iter().any(|child| child.id == sub_agent_id)
+    }
+
     pub(super) fn set_status(&mut self, status: SessionStatus, now: DateTime<Utc>) {
         self.status = Some(status.clone());
         if let Some(meta) = self.meta.as_mut() {
@@ -258,11 +280,55 @@ mod tests {
         state.children.push(moa_core::SubAgentChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),
+            budget_tokens: 0,
         });
         state.last_turn_summary = Some("summary".to_string());
         state.set_cancel_flag(moa_core::CancelMode::Hard);
         state.destroy();
 
         assert_eq!(state, SessionVoState::default());
+    }
+
+    #[test]
+    fn session_child_registry_is_idempotent_by_child_id() {
+        // Pins: root delegation registration preserves one active child ref per id.
+        let mut state = SessionVoState::default();
+        let child = moa_core::SubAgentChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+            budget_tokens: 128,
+        };
+
+        assert!(state.register_child(child.clone()));
+        assert!(!state.register_child(child));
+        assert_eq!(state.children.len(), 1);
+        assert!(state.owns_child("child-1"));
+    }
+
+    #[test]
+    fn session_child_registry_remove_is_exact() {
+        // Pins: root delegation cleanup removes only the requested active child ref.
+        let mut state = SessionVoState::default();
+        state.register_child(moa_core::SubAgentChildRef {
+            id: "child-1".to_string(),
+            task_hash: "hash-1".to_string(),
+            budget_tokens: 128,
+        });
+        state.register_child(moa_core::SubAgentChildRef {
+            id: "child-2".to_string(),
+            task_hash: "hash-2".to_string(),
+            budget_tokens: 256,
+        });
+
+        assert!(state.remove_child("child-1"));
+        assert!(!state.remove_child("missing"));
+        assert_eq!(
+            state.children,
+            vec![moa_core::SubAgentChildRef {
+                id: "child-2".to_string(),
+                task_hash: "hash-2".to_string(),
+                budget_tokens: 256,
+            }]
+        );
     }
 }

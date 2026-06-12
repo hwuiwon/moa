@@ -30,6 +30,15 @@ pub struct RunTurnRequest {
     pub model: Option<String>,
 }
 
+/// Input accepted by one `SubAgentTurnExecution` workflow run.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RunSubAgentTurnRequest {
+    /// Sub-agent object key whose queued messages should be processed.
+    pub sub_agent_id: String,
+    /// Stable turn identifier and workflow key.
+    pub turn_id: String,
+}
+
 /// Durable lifecycle phase for one turn workflow.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub enum TurnPhase {

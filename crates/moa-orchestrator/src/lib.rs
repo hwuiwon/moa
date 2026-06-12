@@ -3,6 +3,7 @@
 mod brain_bridge;
 pub mod config;
 pub mod ctx;
+mod delegation;
 pub mod handlers;
 pub mod lineage;
 pub mod objects;

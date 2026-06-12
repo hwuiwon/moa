@@ -58,6 +58,7 @@ use moa_orchestrator::{
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
         eval_run::{EvalRun, EvalRunImpl},
+        sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
     },
 };
@@ -103,6 +104,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "SessionStore",
     "Skills",
     "SubAgent",
+    "SubAgentTurnExecution",
     "Tenants",
     "ToolExecutor",
     "TurnExecution",
@@ -255,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(WhoamiImpl.serve())
         .bind(ConsolidateImpl.serve())
         .bind(EvalRunImpl.serve())
+        .bind(SubAgentTurnExecutionImpl.serve())
         .bind(TurnExecutionImpl.serve())
         .build();
 

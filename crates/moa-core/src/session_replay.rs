@@ -394,6 +394,33 @@ fn event_payload_size(event: &Event) -> usize {
             decision,
             ..
         } => decided_by.len() + approval_decision_size(decision),
+        Event::SubAgentSpawned {
+            sub_agent_id,
+            parent_sub_agent_id,
+            path,
+            task,
+            ..
+        } => {
+            sub_agent_id.len()
+                + parent_sub_agent_id.as_ref().map_or(0, String::len)
+                + path.len()
+                + task.len()
+        }
+        Event::SubAgentMessageSent {
+            sub_agent_id,
+            parent_sub_agent_id,
+            text,
+        } => sub_agent_id.len() + parent_sub_agent_id.as_ref().map_or(0, String::len) + text.len(),
+        Event::SubAgentStatusChanged {
+            sub_agent_id,
+            summary,
+            ..
+        } => sub_agent_id.len() + summary.as_ref().map_or(0, String::len),
+        Event::SubAgentNotificationDelivered {
+            sub_agent_id,
+            summary,
+            ..
+        } => sub_agent_id.len() + summary.len(),
         Event::MemoryRead { path, scope } => path.len() + scope.len(),
         Event::MemoryWrite {
             path,

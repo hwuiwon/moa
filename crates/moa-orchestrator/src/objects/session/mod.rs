@@ -84,6 +84,16 @@ pub trait Session {
     #[shared]
     async fn snapshot() -> Result<Json<SessionSnapshot>, HandlerError>;
 
+    /// Registers a root-owned child sub-agent for later turns and cancellation.
+    async fn register_child(child: Json<SubAgentChildRef>) -> Result<(), HandlerError>;
+
+    /// Removes a root-owned child sub-agent from the active registry.
+    async fn remove_child(sub_agent_id: String) -> Result<(), HandlerError>;
+
+    /// Lists root-owned active child sub-agents.
+    #[shared]
+    async fn child_refs() -> Result<Json<Vec<SubAgentChildRef>>, HandlerError>;
+
     /// Clears all persisted VO state for this session key.
     async fn destroy() -> Result<(), HandlerError>;
 }

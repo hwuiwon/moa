@@ -255,6 +255,46 @@ impl Session for SessionImpl {
         }))
     }
 
+    #[tracing::instrument(skip(self, ctx, child))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn register_child(
+        &self,
+        ctx: ObjectContext<'_>,
+        child: Json<SubAgentChildRef>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "register_child");
+        let mut state = SessionVoState::load_from(&ctx).await?;
+        if state.register_child(child.into_inner()) {
+            state.persist_into(&ctx);
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn remove_child(
+        &self,
+        ctx: ObjectContext<'_>,
+        sub_agent_id: String,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "remove_child");
+        let mut state = SessionVoState::load_from(&ctx).await?;
+        if state.remove_child(&sub_agent_id) {
+            state.persist_into(&ctx);
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn child_refs(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<Vec<SubAgentChildRef>>, HandlerError> {
+        annotate_restate_handler_span("Session", "child_refs");
+        Ok(Json::from(SessionVoState::load_from(&ctx).await?.children))
+    }
+
     #[tracing::instrument(skip(self, ctx))]
     async fn destroy(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "destroy");

@@ -1,10 +1,11 @@
 //! Pure turn helpers shared by the durable session and sub-agent runners.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, SessionId,
-    StopReason, ToolCallContent, ToolCallId, ToolOutput, TurnOutcome,
+    StopReason, ToolCallContent, ToolCallId, ToolOutput, TurnOutcome, delegation_tool_schemas,
     dispatch_sub_agent_tool_schema,
 };
 use uuid::Uuid;
@@ -19,6 +20,29 @@ pub(crate) fn response_tool_calls(response: &CompletionResponse) -> Vec<&ToolCal
             CompletionContent::Text(_) | CompletionContent::ProviderToolResult { .. } => None,
         })
         .collect()
+}
+
+/// Returns the names of tools the provider was allowed to call for one request.
+pub(crate) fn allowed_tool_names(request: &CompletionRequest) -> BTreeSet<String> {
+    request
+        .tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Returns whether a provider-emitted tool call is allowed by the compiled request.
+pub(crate) fn tool_call_is_allowed(allowed_tools: &BTreeSet<String>, tool_name: &str) -> bool {
+    allowed_tools.contains(tool_name)
+}
+
+/// Drops empty cancellation reasons so they do not resolve workflow cancellation.
+pub(crate) fn meaningful_cancel_reason(reason: Option<String>) -> Option<String> {
+    reason.filter(|value| !value.trim().is_empty())
 }
 
 /// Maps one completion response into the next durable turn outcome.
@@ -47,14 +71,36 @@ pub(crate) fn summarize_response_text(response: &CompletionResponse) -> Option<S
 
 /// Ensures the shared `dispatch_sub_agent` schema is available on the request.
 pub(crate) fn ensure_dispatch_tool_schema(request: &mut CompletionRequest) {
-    let has_dispatch_tool = request.tools.iter().any(|tool| {
+    ensure_tool_schema(request, dispatch_sub_agent_tool_schema());
+}
+
+/// Ensures the v2 delegation tool schemas are available on the request.
+pub(crate) fn ensure_delegation_tool_schemas(request: &mut CompletionRequest) {
+    for schema in delegation_tool_schemas() {
+        ensure_tool_schema(request, schema);
+    }
+}
+
+fn ensure_tool_schema(request: &mut CompletionRequest, schema: serde_json::Value) {
+    let Some(name) = schema.get("name").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let has_tool = request.tools.iter().any(|tool| {
         tool.get("name")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|name| name == "dispatch_sub_agent")
+            .is_some_and(|existing| existing == name)
     });
-    if !has_dispatch_tool {
-        request.tools.push(dispatch_sub_agent_tool_schema());
+    if !has_tool {
+        request.tools.push(schema);
     }
+}
+
+/// Builds the synthetic tool output returned when a provider calls a disallowed tool.
+pub(crate) fn disallowed_tool_output(tool_name: &str) -> ToolOutput {
+    ToolOutput::error(
+        format!("Tool {tool_name} is not allowed for this agent turn."),
+        Duration::ZERO,
+    )
 }
 
 /// Computes a stable tool-call identifier from provider output.
@@ -142,28 +188,22 @@ pub(crate) fn denied_tool_output(message: impl Into<String>) -> ToolOutput {
     ToolOutput::error(message.into(), Duration::ZERO)
 }
 
-/// Returns the assistant-tool-call status text for one dispatched sub-agent result.
-pub(crate) fn dispatch_history_text(output: &ToolOutput) -> String {
-    let rendered = output.to_text();
-    if let Some(remainder) = rendered.strip_prefix("Sub-agent ")
-        && let Some((sub_agent_id, _)) = remainder.split_once(' ')
-    {
-        return format!("Dispatching sub-agent for {sub_agent_id}");
-    }
-
-    "Calling tool dispatch_sub_agent".to_string()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use moa_core::{
-        CompletionContent, CompletionResponse, ModelId, SessionId, TokenUsage, ToolInvocation,
-        TurnOutcome,
+        CompletionContent, CompletionRequest, CompletionResponse, ModelId, SessionId, TokenUsage,
+        ToolInvocation, TurnOutcome,
     };
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{stable_tool_call_id, summarize_response_text, turn_outcome_for_response};
+    use super::{
+        allowed_tool_names, disallowed_tool_output, ensure_delegation_tool_schemas,
+        ensure_dispatch_tool_schema, meaningful_cancel_reason, stable_tool_call_id,
+        summarize_response_text, tool_call_is_allowed, turn_outcome_for_response,
+    };
 
     fn completion_response(
         text: &str,
@@ -197,6 +237,18 @@ mod tests {
         );
 
         assert_eq!(turn_outcome_for_response(&response), TurnOutcome::Continue);
+    }
+
+    #[test]
+    fn meaningful_cancel_reason_ignores_blank_values() {
+        // Pins: workflow cancellation promises are not resolved by empty caller input.
+        assert_eq!(meaningful_cancel_reason(None), None);
+        assert_eq!(meaningful_cancel_reason(Some(String::new())), None);
+        assert_eq!(meaningful_cancel_reason(Some("   \n".to_string())), None);
+        assert_eq!(
+            meaningful_cancel_reason(Some("stop now".to_string())),
+            Some("stop now".to_string())
+        );
     }
 
     #[test]
@@ -244,5 +296,57 @@ mod tests {
 
         let summary = summarize_response_text(&response).expect("summary should exist");
         assert_eq!(summary.len(), 240);
+    }
+
+    #[test]
+    fn allowed_tool_names_extracts_only_schema_names() {
+        // Pins: runtime tool policy is derived from the compiled request, not from provider output.
+        let mut request = CompletionRequest::new("use tools carefully");
+        request.tools = vec![
+            json!({"name": "file_read", "input_schema": {"type": "object"}}),
+            json!({"name": "dispatch_sub_agent", "input_schema": {"type": "object"}}),
+            json!({"input_schema": {"type": "object"}}),
+            json!({"name": 42, "input_schema": {"type": "object"}}),
+        ];
+
+        let allowed = allowed_tool_names(&request);
+
+        assert_eq!(
+            allowed,
+            BTreeSet::from(["dispatch_sub_agent".to_string(), "file_read".to_string()])
+        );
+        assert!(tool_call_is_allowed(&allowed, "file_read"));
+        assert!(!tool_call_is_allowed(&allowed, "bash"));
+    }
+
+    #[test]
+    fn disallowed_tool_output_names_the_blocked_tool() {
+        // Pins: failed-closed provider tool calls produce a model-visible tool error.
+        let output = disallowed_tool_output("bash");
+
+        assert!(output.is_error);
+        assert_eq!(
+            output.to_text(),
+            "Tool bash is not allowed for this agent turn."
+        );
+    }
+
+    #[test]
+    fn delegation_tool_schema_injection_is_idempotent() {
+        // Pins: v2 delegation tools are injected once and recognized as runner-handled tools.
+        let mut request = CompletionRequest::new("delegate");
+
+        ensure_dispatch_tool_schema(&mut request);
+        ensure_delegation_tool_schemas(&mut request);
+        ensure_delegation_tool_schemas(&mut request);
+
+        let names = allowed_tool_names(&request);
+        assert_eq!(names.len(), 6);
+        assert!(moa_core::is_delegation_tool_name("dispatch_sub_agent"));
+        assert!(moa_core::is_delegation_tool_name("spawn_sub_agent"));
+        assert!(moa_core::is_delegation_tool_name("wait_sub_agent"));
+        assert!(moa_core::is_delegation_tool_name("message_sub_agent"));
+        assert!(moa_core::is_delegation_tool_name("list_sub_agents"));
+        assert!(moa_core::is_delegation_tool_name("cancel_sub_agent"));
     }
 }

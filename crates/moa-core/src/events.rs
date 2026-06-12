@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use crate::types::{
     ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, ModelTier,
-    RiskLevel, SegmentId, SessionStatus, SubAgentId, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    RiskLevel, SegmentId, SessionStatus, SubAgentId, SubAgentState, ToolCallId, ToolOutput, UserId,
+    WorkspaceId,
 };
 
 pub use tool_approval::*;
@@ -197,6 +198,52 @@ pub enum Event {
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
     },
+    /// A child sub-agent was spawned by a root session or parent sub-agent.
+    SubAgentSpawned {
+        /// Child sub-agent identifier.
+        sub_agent_id: SubAgentId,
+        /// Parent sub-agent identifier for nested children.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_sub_agent_id: Option<SubAgentId>,
+        /// Stable model-visible child path.
+        path: String,
+        /// Delegated task text.
+        task: String,
+        /// Reserved token budget for the child.
+        budget_tokens: u64,
+    },
+    /// A parent sent a follow-up or steering message to a child sub-agent.
+    SubAgentMessageSent {
+        /// Child sub-agent identifier.
+        sub_agent_id: SubAgentId,
+        /// Parent sub-agent identifier for nested children.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_sub_agent_id: Option<SubAgentId>,
+        /// Message text sent to the child.
+        text: String,
+    },
+    /// A child sub-agent lifecycle state changed.
+    SubAgentStatusChanged {
+        /// Child sub-agent identifier.
+        sub_agent_id: SubAgentId,
+        /// Previous known state, when available.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<SubAgentState>,
+        /// New state.
+        to: SubAgentState,
+        /// Optional status summary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    /// A child sub-agent terminal notification was delivered to the parent session log.
+    SubAgentNotificationDelivered {
+        /// Child sub-agent identifier.
+        sub_agent_id: SubAgentId,
+        /// Terminal state delivered.
+        state: SubAgentState,
+        /// Short result or error summary.
+        summary: String,
+    },
     /// Memory read operation.
     MemoryRead {
         /// Logical page path.
@@ -303,6 +350,10 @@ impl Event {
             Self::ToolError { .. } => EventType::ToolError,
             Self::ApprovalRequested { .. } => EventType::ApprovalRequested,
             Self::ApprovalDecided { .. } => EventType::ApprovalDecided,
+            Self::SubAgentSpawned { .. } => EventType::SubAgentSpawned,
+            Self::SubAgentMessageSent { .. } => EventType::SubAgentMessageSent,
+            Self::SubAgentStatusChanged { .. } => EventType::SubAgentStatusChanged,
+            Self::SubAgentNotificationDelivered { .. } => EventType::SubAgentNotificationDelivered,
             Self::MemoryRead { .. } => EventType::MemoryRead,
             Self::MemoryWrite { .. } => EventType::MemoryWrite,
             Self::MemoryIngest { .. } => EventType::MemoryIngest,
@@ -333,6 +384,10 @@ impl Event {
             Self::ToolError { .. } => "ToolError",
             Self::ApprovalRequested { .. } => "ApprovalRequested",
             Self::ApprovalDecided { .. } => "ApprovalDecided",
+            Self::SubAgentSpawned { .. } => "SubAgentSpawned",
+            Self::SubAgentMessageSent { .. } => "SubAgentMessageSent",
+            Self::SubAgentStatusChanged { .. } => "SubAgentStatusChanged",
+            Self::SubAgentNotificationDelivered { .. } => "SubAgentNotificationDelivered",
             Self::MemoryRead { .. } => "MemoryRead",
             Self::MemoryWrite { .. } => "MemoryWrite",
             Self::MemoryIngest { .. } => "MemoryIngest",
@@ -504,5 +559,56 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize approval request");
         let decoded: Event = serde_json::from_str(&json).expect("deserialize approval request");
         assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn sub_agent_lifecycle_events_use_stable_type_names() {
+        // Pins: sub-agent lifecycle events have stable event-log discriminators.
+        let events = [
+            (
+                Event::SubAgentSpawned {
+                    sub_agent_id: "child-1".to_string(),
+                    parent_sub_agent_id: None,
+                    path: "/root/research".to_string(),
+                    task: "research".to_string(),
+                    budget_tokens: 512,
+                },
+                EventType::SubAgentSpawned,
+                "SubAgentSpawned",
+            ),
+            (
+                Event::SubAgentMessageSent {
+                    sub_agent_id: "child-1".to_string(),
+                    parent_sub_agent_id: None,
+                    text: "continue".to_string(),
+                },
+                EventType::SubAgentMessageSent,
+                "SubAgentMessageSent",
+            ),
+            (
+                Event::SubAgentStatusChanged {
+                    sub_agent_id: "child-1".to_string(),
+                    from: Some(SubAgentState::Running),
+                    to: SubAgentState::Completed,
+                    summary: Some("done".to_string()),
+                },
+                EventType::SubAgentStatusChanged,
+                "SubAgentStatusChanged",
+            ),
+            (
+                Event::SubAgentNotificationDelivered {
+                    sub_agent_id: "child-1".to_string(),
+                    state: SubAgentState::Completed,
+                    summary: "done".to_string(),
+                },
+                EventType::SubAgentNotificationDelivered,
+                "SubAgentNotificationDelivered",
+            ),
+        ];
+
+        for (event, expected_type, expected_name) in events {
+            assert_eq!(event.event_type(), expected_type);
+            assert_eq!(event.type_name(), expected_name);
+        }
     }
 }

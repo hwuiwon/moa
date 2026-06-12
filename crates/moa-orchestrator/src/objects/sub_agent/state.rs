@@ -21,6 +21,9 @@ pub(super) const K_MODEL: &str = "model";
 pub(super) const K_HISTORY: &str = "history";
 pub(super) const K_TOOLS_INVOKED: &str = "tools_invoked";
 pub(super) const K_CANCEL_REASON: &str = "cancel_reason";
+pub(super) const K_ACTIVE_TURN_ID: &str = "active_turn_id";
+pub(super) const K_LAST_OUTCOME: &str = "last_outcome";
+pub(super) const K_NOTIFICATION_DELIVERED: &str = "notification_delivered";
 pub(super) const MAX_TURNS_PER_POST: usize = 50;
 
 /// Serializable projection of the SubAgent VO's durable state keys.
@@ -64,6 +67,12 @@ pub struct SubAgentVoState {
     pub tools_invoked: u32,
     /// Cooperative cancellation reason, when requested.
     pub cancel_reason: Option<String>,
+    /// Active workflow-backed sub-agent turn id, when one is running.
+    pub active_turn_id: Option<String>,
+    /// Last workflow terminal outcome recorded for this child.
+    pub last_outcome: Option<moa_core::wire::TurnOutcome>,
+    /// Whether the terminal parent-session notification has been appended.
+    pub notification_delivered: bool,
 }
 
 impl SubAgentVoState {
@@ -93,7 +102,11 @@ impl SubAgentVoState {
         self.depth = *depth;
         self.budget_remaining = *budget_tokens;
         self.tokens_used = 0;
-        self.result_awakeable_id = Some(result_awakeable_id.clone());
+        self.result_awakeable_id = if result_awakeable_id.trim().is_empty() {
+            None
+        } else {
+            Some(result_awakeable_id.clone())
+        };
         self.task = Some(task.clone());
         self.tool_subset = tool_subset.clone();
         self.workspace_id = Some(workspace_id.clone());
@@ -109,6 +122,9 @@ impl SubAgentVoState {
         self.last_turn_summary = None;
         self.tools_invoked = 0;
         self.cancel_reason = None;
+        self.active_turn_id = None;
+        self.last_outcome = None;
+        self.notification_delivered = false;
         Ok(())
     }
 
@@ -143,6 +159,31 @@ impl SubAgentVoState {
         });
         self.status = Some(SubAgentState::Running);
         Ok(())
+    }
+
+    /// Records a workflow turn as active when no other turn is running.
+    pub(super) fn start_workflow_turn(&mut self, turn_id: String) -> bool {
+        if self.active_turn_id.is_some() {
+            return false;
+        }
+        self.active_turn_id = Some(turn_id);
+        self.status = Some(SubAgentState::Running);
+        true
+    }
+
+    /// Returns whether the supplied workflow id owns the current active turn.
+    #[must_use]
+    pub(super) fn active_turn_matches(&self, turn_id: &str) -> bool {
+        self.active_turn_id.as_deref() == Some(turn_id)
+    }
+
+    /// Clears the active workflow turn if it matches the supplied id.
+    pub(super) fn clear_active_turn(&mut self, turn_id: &str) -> bool {
+        if !self.active_turn_matches(turn_id) {
+            return false;
+        }
+        self.active_turn_id = None;
+        true
     }
 
     /// Applies the latest turn outcome to the lifecycle state.
@@ -239,6 +280,12 @@ impl VoState for SubAgentVoState {
             last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
             tools_invoked: reader.get_json(K_TOOLS_INVOKED).await?.unwrap_or_default(),
             cancel_reason: reader.get_json(K_CANCEL_REASON).await?,
+            active_turn_id: reader.get_json(K_ACTIVE_TURN_ID).await?,
+            last_outcome: reader.get_json(K_LAST_OUTCOME).await?,
+            notification_delivered: reader
+                .get_json(K_NOTIFICATION_DELIVERED)
+                .await?
+                .unwrap_or_default(),
         })
     }
 
@@ -266,6 +313,14 @@ impl VoState for SubAgentVoState {
         set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
         set_or_clear_scalar(ctx, K_TOOLS_INVOKED, self.tools_invoked, 0);
         set_or_clear_opt(ctx, K_CANCEL_REASON, self.cancel_reason.as_ref());
+        set_or_clear_opt(ctx, K_ACTIVE_TURN_ID, self.active_turn_id.as_ref());
+        set_or_clear_opt(ctx, K_LAST_OUTCOME, self.last_outcome.as_ref());
+        set_or_clear_scalar(
+            ctx,
+            K_NOTIFICATION_DELIVERED,
+            self.notification_delivered,
+            false,
+        );
     }
 }
 
@@ -373,5 +428,33 @@ mod tests {
             .expect("initial task should seed state");
 
         assert_eq!(state.task_hash(), "9be010055aa996c5");
+    }
+
+    #[test]
+    fn workflow_turn_ownership_is_single_active_id() {
+        // Pins: sub-agent workflow admission keeps exactly one active turn owner.
+        let mut state = SubAgentVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+
+        assert!(state.start_workflow_turn("turn-1".to_string()));
+        assert!(!state.start_workflow_turn("turn-2".to_string()));
+        assert_eq!(state.active_turn_id.as_deref(), Some("turn-1"));
+    }
+
+    #[test]
+    fn workflow_turn_clear_requires_matching_owner() {
+        // Pins: stale workflow completions cannot clear a newer active sub-agent turn.
+        let mut state = SubAgentVoState::default();
+        state
+            .initialize(&initial_task())
+            .expect("initial task should seed state");
+        assert!(state.start_workflow_turn("turn-1".to_string()));
+
+        assert!(!state.clear_active_turn("turn-2"));
+        assert_eq!(state.active_turn_id.as_deref(), Some("turn-1"));
+        assert!(state.clear_active_turn("turn-1"));
+        assert_eq!(state.active_turn_id, None);
     }
 }

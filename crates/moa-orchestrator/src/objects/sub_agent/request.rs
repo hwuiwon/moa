@@ -10,11 +10,12 @@ pub(super) fn build_completion_request(
         .clone()
         .ok_or_else(|| TerminalError::new("sub-agent model missing"))?;
     let capabilities = configured_model_capabilities(&model)?;
+    let max_output_tokens = clamp_sub_agent_max_output(&capabilities, state.budget_remaining);
     let mut request = CompletionRequest {
         model: Some(model),
         messages: vec![ContextMessage::system(sub_agent_system_prompt(state))],
         tools: filtered_tool_schemas(&state.tool_subset)?,
-        max_output_tokens: Some(capabilities.max_output),
+        max_output_tokens: Some(max_output_tokens),
         temperature: None,
         response_format: None,
         metadata: HashMap::new(),
@@ -23,6 +24,11 @@ pub(super) fn build_completion_request(
         .metadata
         .insert("_moa.sub_agent_id".to_string(), json!(state.task_hash()));
     Ok(request)
+}
+
+fn clamp_sub_agent_max_output(capabilities: &ModelCapabilities, budget_remaining: u64) -> usize {
+    let budget_remaining = usize::try_from(budget_remaining).unwrap_or(usize::MAX);
+    capabilities.max_output.min(budget_remaining)
 }
 
 pub(super) fn filtered_tool_schemas(
@@ -45,6 +51,13 @@ pub(super) fn filtered_tool_schemas(
         .collect::<Vec<_>>();
     if allowed.contains("dispatch_sub_agent") {
         tools.push(dispatch_sub_agent_tool_schema());
+    }
+    for schema in delegation_tool_schemas() {
+        if let Some(name) = schema.get("name").and_then(serde_json::Value::as_str)
+            && allowed.contains(name)
+        {
+            tools.push(schema);
+        }
     }
     Ok(tools)
 }
@@ -127,5 +140,17 @@ mod tests {
         assert!(prompt.contains("State the outcome and the evidence that supports it."));
         assert!(prompt.contains("unresolved questions"));
         assert!(prompt.contains("do not return raw logs"));
+    }
+
+    #[test]
+    fn max_output_tokens_are_clamped_to_remaining_child_budget() {
+        // Pins: a child cannot ask the provider for more output tokens than its remaining budget.
+        let capabilities = ModelCapabilities {
+            max_output: 4096,
+            ..ModelCapabilities::default()
+        };
+
+        assert_eq!(clamp_sub_agent_max_output(&capabilities, 512), 512);
+        assert_eq!(clamp_sub_agent_max_output(&capabilities, 8192), 4096);
     }
 }

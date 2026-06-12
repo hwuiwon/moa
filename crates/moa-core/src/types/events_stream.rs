@@ -48,6 +48,14 @@ pub enum EventType {
     ApprovalRequested,
     /// `ApprovalDecided`.
     ApprovalDecided,
+    /// `SubAgentSpawned`.
+    SubAgentSpawned,
+    /// `SubAgentMessageSent`.
+    SubAgentMessageSent,
+    /// `SubAgentStatusChanged`.
+    SubAgentStatusChanged,
+    /// `SubAgentNotificationDelivered`.
+    SubAgentNotificationDelivered,
     /// `MemoryRead`.
     MemoryRead,
     /// `MemoryWrite`.

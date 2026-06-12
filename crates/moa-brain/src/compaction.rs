@@ -231,6 +231,42 @@ fn event_summary_line(record: &EventRecord) -> String {
         Event::ApprovalDecided { decision, .. } => {
             format!("#{} approval_decided: {decision:?}", record.sequence_num)
         }
+        Event::SubAgentSpawned {
+            sub_agent_id,
+            path,
+            task,
+            ..
+        } => format!(
+            "#{} sub_agent_spawned {sub_agent_id} path={path}: {}",
+            record.sequence_num,
+            truncate(task)
+        ),
+        Event::SubAgentMessageSent {
+            sub_agent_id, text, ..
+        } => format!(
+            "#{} sub_agent_message {sub_agent_id}: {}",
+            record.sequence_num,
+            truncate(text)
+        ),
+        Event::SubAgentStatusChanged {
+            sub_agent_id,
+            to,
+            summary,
+            ..
+        } => format!(
+            "#{} sub_agent_status {sub_agent_id} -> {to:?}: {}",
+            record.sequence_num,
+            truncate(summary.as_deref().unwrap_or(""))
+        ),
+        Event::SubAgentNotificationDelivered {
+            sub_agent_id,
+            state,
+            summary,
+        } => format!(
+            "#{} sub_agent_notification {sub_agent_id} state={state:?}: {}",
+            record.sequence_num,
+            truncate(summary)
+        ),
         Event::MemoryRead { path, scope } => {
             format!("#{} memory read {scope}:{path}", record.sequence_num)
         }

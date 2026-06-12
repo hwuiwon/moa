@@ -80,6 +80,7 @@ fn session_vo_destroy_clears_state() {
     state.children.push(moa_core::SubAgentChildRef {
         id: "child-1".to_string(),
         task_hash: "hash-1".to_string(),
+        budget_tokens: 0,
     });
     state.set_cancel_flag(CancelMode::Hard);
     state.destroy();

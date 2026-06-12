@@ -1,14 +1,9 @@
-//! Helper functions for spawning sub-agent virtual objects and awaiting their results.
+//! Pure helpers for sub-agent dispatch limits, budgets, paths, and model-visible outputs.
 
 use std::time::Duration;
 
-use moa_core::{
-    DispatchSubAgentInput, ModelId, SessionId, SubAgentChildRef, SubAgentId, SubAgentResult,
-    ToolOutput, UserId, WorkspaceId,
-};
+use moa_core::{SubAgentChildRef, SubAgentId, SubAgentResult, ToolOutput};
 use restate_sdk::prelude::*;
-
-use crate::objects::sub_agent::SubAgentClient;
 
 /// Maximum nested sub-agent depth allowed for one tree.
 pub const MAX_SUB_AGENT_DEPTH: u32 = 3;
@@ -76,82 +71,83 @@ pub fn validate_dispatch_limits(
     Ok(hash)
 }
 
-/// Spawns a child sub-agent, waits durably for its result, and removes it from the parent state.
-#[allow(clippy::too_many_arguments)]
-pub async fn dispatch_sub_agent(
-    ctx: &mut ObjectContext<'_>,
-    children_key: &str,
-    budget_key: Option<&str>,
-    parent_session: SessionId,
-    parent_sub_agent: Option<SubAgentId>,
-    current_depth: u32,
-    request: DispatchSubAgentInput,
-    workspace_id: WorkspaceId,
-    user_id: UserId,
-    model: ModelId,
-) -> Result<DispatchedSubAgent, HandlerError> {
-    let mut children = ctx
-        .get::<Json<Vec<SubAgentChildRef>>>(children_key)
-        .await?
-        .map(Json::into_inner)
-        .unwrap_or_default();
-    let hash = validate_dispatch_limits(
-        current_depth,
-        &children,
-        request.task.as_str(),
-        &request.tool_subset,
-    )?;
-
-    let parent_key = ctx.key().to_string();
-    let sub_id = format!("{parent_key}-{}", ctx.rand_uuid());
-    children.push(SubAgentChildRef {
-        id: sub_id.clone(),
-        task_hash: hash,
-    });
-    ctx.set(children_key, Json::from(children));
-
-    if let Some(budget_key) = budget_key {
-        let remaining = ctx
-            .get::<Json<u64>>(budget_key)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(u64::MAX);
-        ctx.set(
-            budget_key,
-            Json::from(remaining.saturating_sub(request.budget_tokens)),
+/// Validates that a requested child budget can be reserved from its parent.
+pub(crate) fn validate_dispatch_budget(
+    requested_budget: u64,
+    remaining_parent_budget: Option<u64>,
+) -> Result<(), HandlerError> {
+    if requested_budget == 0 {
+        return Err(
+            TerminalError::new("sub-agent budget must be greater than zero".to_string()).into(),
         );
     }
 
-    let (awakeable_id, result_future) = ctx.awakeable::<String>();
-    let initial = request.into_initial_message(
-        parent_session,
-        parent_sub_agent,
-        current_depth + 1,
-        awakeable_id,
-        workspace_id,
-        user_id,
-        model,
-    );
-
-    ctx.object_client::<SubAgentClient>(sub_id.clone())
-        .post_message(Json::from(initial))
-        .send();
-
-    let result = parse_sub_agent_result(&result_future.await?)?;
-
-    let mut children = ctx
-        .get::<Json<Vec<SubAgentChildRef>>>(children_key)
-        .await?
-        .map(Json::into_inner)
-        .unwrap_or_default();
-    children.retain(|child| child.id != sub_id);
-    if children.is_empty() {
-        ctx.clear(children_key);
-    } else {
-        ctx.set(children_key, Json::from(children));
+    if let Some(remaining) = remaining_parent_budget
+        && requested_budget > remaining
+    {
+        return Err(TerminalError::new(format!(
+            "sub-agent budget request ({requested_budget}) exceeds remaining parent budget ({remaining})"
+        ))
+        .into());
     }
 
-    Ok(DispatchedSubAgent { id: sub_id, result })
+    Ok(())
+}
+
+/// Returns the parent budget remaining after reserving the requested child budget.
+pub(crate) fn reserve_child_budget(
+    remaining_parent_budget: u64,
+    requested_budget: u64,
+) -> Result<u64, HandlerError> {
+    validate_dispatch_budget(requested_budget, Some(remaining_parent_budget))?;
+    Ok(remaining_parent_budget - requested_budget)
+}
+
+/// Returns the parent budget after refunding any unused child reservation.
+#[must_use]
+pub(crate) fn refund_child_budget(
+    current_parent_budget: u64,
+    requested_budget: u64,
+    child_tokens_used: u64,
+) -> u64 {
+    current_parent_budget.saturating_add(requested_budget.saturating_sub(child_tokens_used))
+}
+
+/// Returns whether the given child id is owned by this parent state.
+pub(crate) fn child_is_owned(children: &[SubAgentChildRef], sub_agent_id: &str) -> bool {
+    children.iter().any(|child| child.id == sub_agent_id)
+}
+
+/// Removes a completed or cancelled child reference from parent state.
+pub(crate) fn remove_child_ref(children: &mut Vec<SubAgentChildRef>, sub_agent_id: &str) {
+    children.retain(|child| child.id != sub_agent_id);
+}
+
+pub(crate) fn child_agent_path(parent_key: &str, sub_id: &str, task_name: Option<&str>) -> String {
+    let segment = task_name
+        .map(sanitize_path_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| sub_id.to_string());
+    format!("/{parent_key}/{segment}")
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch == '-' || ch == '_' {
+                Some(ch)
+            } else if ch.is_whitespace() || ch == '/' {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 /// Converts a completed child result into the synthetic tool output returned to the parent LLM.
@@ -161,7 +157,8 @@ pub fn sub_agent_result_tool_output(result: &SubAgentResult) -> ToolOutput {
         return ToolOutput::text(
             format!(
                 "Sub-agent {} completed successfully.\n{}",
-                result.sub_agent_id, result.output
+                result.sub_agent_id,
+                truncate_result_text(&result.output)
             ),
             Duration::ZERO,
         );
@@ -173,25 +170,36 @@ pub fn sub_agent_result_tool_output(result: &SubAgentResult) -> ToolOutput {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(result.output.as_str());
     ToolOutput::error(
-        format!("Sub-agent {} failed: {detail}", result.sub_agent_id),
+        format!(
+            "Sub-agent {} failed: {}",
+            result.sub_agent_id,
+            truncate_result_text(detail)
+        ),
         Duration::ZERO,
     )
 }
 
-fn parse_sub_agent_result(raw: &str) -> Result<SubAgentResult, HandlerError> {
-    serde_json::from_str(raw).map_err(|error| {
-        TerminalError::new(format!(
-            "failed to deserialize sub-agent result from awakeable: {error}"
-        ))
-        .into()
-    })
+const MAX_SUB_AGENT_RESULT_CHARS: usize = 12_000;
+
+fn truncate_result_text(value: &str) -> String {
+    let Some((cutoff, _)) = value.char_indices().nth(MAX_SUB_AGENT_RESULT_CHARS) else {
+        return value.to_string();
+    };
+
+    let mut truncated = value[..cutoff].to_string();
+    truncated.push_str("\n\n[truncated sub-agent result]");
+    truncated
 }
 
 #[cfg(test)]
 mod tests {
     use moa_core::SubAgentChildRef;
 
-    use super::{MAX_SUB_AGENT_DEPTH, MAX_SUB_AGENT_FAN_OUT, task_hash, validate_dispatch_limits};
+    use super::{
+        MAX_SUB_AGENT_DEPTH, MAX_SUB_AGENT_FAN_OUT, MAX_SUB_AGENT_RESULT_CHARS,
+        refund_child_budget, reserve_child_budget, sub_agent_result_tool_output, task_hash,
+        validate_dispatch_budget, validate_dispatch_limits,
+    };
 
     #[test]
     fn task_hash_is_stable_for_sorted_tool_subsets() {
@@ -222,6 +230,7 @@ mod tests {
             .map(|index| SubAgentChildRef {
                 id: format!("child-{index}"),
                 task_hash: format!("hash-{index}"),
+                budget_tokens: 0,
             })
             .collect::<Vec<_>>();
         let error = validate_dispatch_limits(0, &children, "task", &[])
@@ -236,10 +245,115 @@ mod tests {
         let children = vec![SubAgentChildRef {
             id: "child-1".to_string(),
             task_hash: existing_hash,
+            budget_tokens: 0,
         }];
         let error = validate_dispatch_limits(0, &children, "repeat", &["bash".to_string()])
             .expect_err("duplicate task hash should fail");
 
         assert!(format!("{error:?}").contains("duplicate sub-agent task"));
+    }
+
+    #[test]
+    fn validate_dispatch_limits_allows_deepest_runnable_child() {
+        // Pins: max depth is the deepest child that may run, not an off-by-one rejected state.
+        let hash = validate_dispatch_limits(MAX_SUB_AGENT_DEPTH - 1, &[], "task", &[])
+            .expect("parent just before max depth should be able to create the deepest child");
+
+        assert_eq!(hash, task_hash("task", &[]));
+    }
+
+    #[test]
+    fn validate_dispatch_budget_rejects_zero_and_over_reservation() {
+        // Pins: child dispatch cannot silently reserve no budget or more than the parent has left.
+        let zero_error = validate_dispatch_budget(0, Some(100))
+            .expect_err("zero-token child budgets should fail");
+        let over_error = validate_dispatch_budget(101, Some(100))
+            .expect_err("over-budget child dispatch should fail");
+
+        assert!(format!("{zero_error:?}").contains("greater than zero"));
+        assert!(format!("{over_error:?}").contains("exceeds remaining parent budget"));
+    }
+
+    #[test]
+    fn child_budget_reservation_and_refund_are_zero_sum() {
+        // Pins: parent budgets reserve requested child tokens and refund only the unused amount.
+        let after_reserve =
+            reserve_child_budget(1_000, 400).expect("reservation within budget should succeed");
+        let after_refund = refund_child_budget(after_reserve, 400, 125);
+
+        assert_eq!(after_reserve, 600);
+        assert_eq!(after_refund, 875);
+    }
+
+    #[test]
+    fn sub_agent_result_tool_output_truncates_oversized_success_payloads() {
+        // Pins: child results cannot return unbounded synthetic tool output to the parent turn.
+        let result = moa_core::SubAgentResult {
+            sub_agent_id: "child-1".to_string(),
+            success: true,
+            output: "a".repeat(MAX_SUB_AGENT_RESULT_CHARS + 10),
+            tokens_used: 42,
+            tools_invoked: 1,
+            error: None,
+        };
+
+        let output = sub_agent_result_tool_output(&result);
+        let rendered = output.to_text();
+
+        assert!(!output.is_error);
+        let payload = rendered
+            .strip_prefix("Sub-agent child-1 completed successfully.\n")
+            .expect("successful output should include the sub-agent result header");
+        let (visible_payload, marker) = payload
+            .split_once("\n\n[truncated sub-agent result]")
+            .expect("oversized output should include the truncation marker");
+        assert_eq!(visible_payload.len(), MAX_SUB_AGENT_RESULT_CHARS);
+        assert_eq!(marker, "");
+    }
+
+    #[test]
+    fn child_ownership_and_removal_are_exact() {
+        // Pins: v2 message/wait/cancel cannot target children outside the current parent registry.
+        let mut children = vec![
+            SubAgentChildRef {
+                id: "child-a".to_string(),
+                task_hash: "hash-a".to_string(),
+                budget_tokens: 100,
+            },
+            SubAgentChildRef {
+                id: "child-b".to_string(),
+                task_hash: "hash-b".to_string(),
+                budget_tokens: 200,
+            },
+        ];
+
+        assert!(super::child_is_owned(&children, "child-a"));
+        assert!(!super::child_is_owned(&children, "child-c"));
+        super::remove_child_ref(&mut children, "child-a");
+        assert_eq!(
+            children,
+            vec![SubAgentChildRef {
+                id: "child-b".to_string(),
+                task_hash: "hash-b".to_string(),
+                budget_tokens: 200,
+            }]
+        );
+    }
+
+    #[test]
+    fn child_agent_path_uses_sanitized_task_name_when_available() {
+        // Pins: v2 spawn returns a stable model-visible path independent of raw UUID formatting.
+        assert_eq!(
+            super::child_agent_path(
+                "session-1",
+                "session-1-child",
+                Some("Research Vendors/Cloud")
+            ),
+            "/session-1/research-vendors-cloud"
+        );
+        assert_eq!(
+            super::child_agent_path("session-1", "session-1-child", Some("!!!")),
+            "/session-1/session-1-child"
+        );
     }
 }
