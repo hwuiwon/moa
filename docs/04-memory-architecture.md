@@ -49,6 +49,21 @@ without changing graph truth. The value lives in the sidecar row rather than
 node properties so candidate hydration does not parse dynamic properties per
 query.
 
+FeatureV1 token features (subject match, overlap) stem pure-alphabetic tokens
+with Snowball so morphological variants match; identifier-like tokens with
+digits are compared verbatim. First-person queries ("the way I prefer") double
+the caller's user-scope term, because such queries rarely share tokens with
+the caller's stored facts. The lexical leg matches an OR `to_tsquery` over
+extracted terms plus stems and ranks by `ts_rank`; the prior AND semantics
+meant conversational queries almost never matched short fact names.
+
+Known scaling caveat: graph expansion scans the AGE vertex union under RLS
+policies that evaluate `moa.age_property` per row, so its cost grows with
+total graph size across tenants rather than with the caller's workspace. A
+sidecar vertex-id column on `moa.node_index` would let expansion drive from
+the RLS-filtered sidecar instead; until then the 250ms graph budget bounds the
+latency and silently trims as-of expansion on large shared databases.
+
 Embedder selection is per workspace. `cohere-embed-v4` and `gemini-embedding-2` use incompatible vector spaces, so switching a workspace requires re-embedding its graph nodes before retrieval can safely use the new model. Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API supports multimodal inputs, but MOA needs a separate multimodal chunker and embedder trait before image, audio, video, or PDF chunks are indexed.
 
 Gemini Embedding 2 does not use a `task_type` request field. MOA encodes asymmetric retrieval through role-specific prompt prefixes inside the embedder: ingestion-side embedders use the document prefix and retrieval-side embedders use a search-query prefix.

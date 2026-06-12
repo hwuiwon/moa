@@ -8,7 +8,7 @@ use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 5;
+pub const RANKING_PIPELINE_VERSION: u32 = 6;
 
 /// Ranking mode for hydrated hybrid retrieval candidates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,8 @@ pub struct RankingWeights {
     pub subject_match: f64,
     /// Query-to-summary token overlap contribution.
     pub overlap: f64,
+    /// Rescue bonus for candidates only graph expansion found.
+    pub graph_rescue: f64,
     /// Outcome-derived quality prior contribution.
     pub quality: f64,
     /// Additive score for user-scoped rows.
@@ -55,6 +57,7 @@ impl Default for RankingWeights {
             access: 0.15,
             subject_match: 0.5,
             overlap: 0.35,
+            graph_rescue: 0.6,
             quality: 0.6,
             scope_user: 0.2,
             scope_workspace: 0.1,
@@ -102,6 +105,7 @@ impl From<&MemoryRankingWeights> for RankingWeights {
             access: value.access,
             subject_match: value.subject_match,
             overlap: value.overlap,
+            graph_rescue: value.graph_rescue,
             quality: value.quality,
             scope_user: value.scope_user,
             scope_workspace: value.scope_workspace,
@@ -116,6 +120,7 @@ pub struct FeatureRanker<'a> {
     config: &'a RankingConfig,
     reference_time: DateTime<Utc>,
     request_scope: Option<&'a MemoryScope>,
+    first_person_query: bool,
 }
 
 impl<'a> FeatureRanker<'a> {
@@ -126,6 +131,7 @@ impl<'a> FeatureRanker<'a> {
             config,
             reference_time,
             request_scope: None,
+            first_person_query: false,
         }
     }
 
@@ -133,6 +139,16 @@ impl<'a> FeatureRanker<'a> {
     #[must_use]
     pub fn with_request_scope(mut self, request_scope: &'a MemoryScope) -> Self {
         self.request_scope = Some(request_scope);
+        self
+    }
+
+    /// Doubles the caller's user-scope term for first-person queries.
+    ///
+    /// "What do I prefer" should favor the caller's own facts over
+    /// workspace facts with similar text.
+    #[must_use]
+    pub fn with_first_person_query(mut self, query_text: &str) -> Self {
+        self.first_person_query = is_first_person_query(query_text);
         self
     }
 
@@ -163,9 +179,14 @@ impl<'a> FeatureRanker<'a> {
         );
         let subject = subject_match_score(query_tokens, &row.name);
         let overlap = overlap_score(query_tokens, row);
+        let user_scope_weight = if self.first_person_query {
+            weights.scope_user * 2.0
+        } else {
+            weights.scope_user
+        };
         let scope_term = match row.scope.as_str() {
-            "user" if self.user_row_matches_request(row) => weights.scope_user,
-            "user" if self.request_scope.is_none() => weights.scope_user,
+            "user" if self.user_row_matches_request(row) => user_scope_weight,
+            "user" if self.request_scope.is_none() => user_scope_weight,
             "workspace" => weights.scope_workspace,
             _ => 0.0,
         };
@@ -193,12 +214,24 @@ impl<'a> FeatureRanker<'a> {
 }
 
 /// Tokenizes text using lowercase ASCII alphanumeric token splits.
+///
+/// Pure-alphabetic tokens are Snowball-stemmed so morphological variants
+/// match across query and fact text (`deploys` ↔ `deploy`, `required` ↔
+/// `require`). Tokens containing digits are kept verbatim because they act
+/// as stable identifiers.
 #[must_use]
 pub fn normalize_tokens(text: &str) -> BTreeSet<String> {
+    let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
     text.split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter_map(|raw| {
             let token = raw.to_ascii_lowercase();
-            (token.len() >= 3 || token.chars().any(|ch| ch.is_ascii_digit())).then_some(token)
+            if token.len() < 3 && !token.chars().any(|ch| ch.is_ascii_digit()) {
+                return None;
+            }
+            if token.chars().any(|ch| ch.is_ascii_digit()) {
+                return Some(token);
+            }
+            Some(stemmer.stem(&token).into_owned())
         })
         .collect()
 }
@@ -212,6 +245,17 @@ pub fn ranking_fingerprint(config: &RankingConfig) -> [u8; 32] {
             .expect("ranking config contains only serializable primitive fields"),
     );
     *blake3::hash(canonical.as_bytes()).as_bytes()
+}
+
+fn is_first_person_query(query_text: &str) -> bool {
+    query_text
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "i" | "me" | "my" | "mine"
+            )
+        })
 }
 
 fn subject_match_score(query_tokens: &BTreeSet<String>, name: &str) -> f64 {

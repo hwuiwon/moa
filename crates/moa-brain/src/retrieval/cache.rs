@@ -573,8 +573,8 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_pipeline_version_bump() {
-        // Pins: quality-score row-shape and ranking changes require ranking fingerprint version 5.
-        assert_eq!(RANKING_PIPELINE_VERSION, 5);
+        // Pins: stemmed ranking tokens and graph-activation scoring require version 6.
+        assert_eq!(RANKING_PIPELINE_VERSION, 6);
     }
 
     #[derive(Default)]

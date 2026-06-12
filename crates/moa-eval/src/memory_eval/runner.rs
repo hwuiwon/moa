@@ -446,6 +446,10 @@ pub async fn run_memory_retrieval_eval(
     let corpus = LoadedMemoryEvalCorpus::load_for_lane(options.corpus_dir(), options.lane).await?;
     let store = IsolatedEvalStore::create().await?;
     let result = run_memory_retrieval_eval_in_store(&options, corpus, &store).await;
+    if env::var("MOA_EVAL_KEEP_STORE").is_ok() {
+        eprintln!("[keep-store] schema kept: {}", store.schema_name);
+        return result;
+    }
     let cleanup = store.cleanup().await;
 
     match (result, cleanup) {
@@ -637,7 +641,9 @@ async fn run_memory_retrieval_eval_in_store(
         consolidation,
     });
     write_report(options.output_path(), &report).await?;
-    cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
+    if env::var("MOA_EVAL_KEEP_STORE").is_err() {
+        cleanup_eval_graph_rows(store.pool(), &corpus.ledger).await?;
+    }
     Ok(report)
 }
 

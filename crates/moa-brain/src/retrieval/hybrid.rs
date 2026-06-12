@@ -656,14 +656,16 @@ fn apply_feature_ranking(
     let max_fused_score = hits.iter().map(|hit| hit.score).fold(0.0_f64, f64::max);
     let query_tokens = normalize_tokens(&req.query_text);
     let reference_time = req.ranking_reference_time.unwrap_or_else(Utc::now);
-    let ranker = FeatureRanker::new(config, reference_time).with_request_scope(&req.scope);
+    let ranker = FeatureRanker::new(config, reference_time)
+        .with_request_scope(&req.scope)
+        .with_first_person_query(&req.query_text);
     for hit in hits.iter_mut() {
         hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &hit.node);
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
             hit.score += config.weights.overlap;
         }
         if hit.legs.graph && !hit.legs.vector && !hit.legs.lexical {
-            hit.score += config.weights.overlap;
+            hit.score += config.weights.graph_rescue;
         }
     }
     hits.sort_by(|left, right| {

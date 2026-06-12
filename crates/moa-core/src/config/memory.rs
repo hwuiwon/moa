@@ -168,6 +168,8 @@ pub struct MemoryRankingWeights {
     pub subject_match: f64,
     /// Query-to-summary token overlap contribution.
     pub overlap: f64,
+    /// Rescue bonus for candidates only graph expansion found.
+    pub graph_rescue: f64,
     /// Outcome-derived quality prior contribution.
     pub quality: f64,
     /// Additive score for user-scoped rows.
@@ -188,6 +190,7 @@ impl Default for MemoryRankingWeights {
             access: 0.15,
             subject_match: 0.5,
             overlap: 0.35,
+            graph_rescue: 0.6,
             quality: 0.6,
             scope_user: 0.2,
             scope_workspace: 0.1,
