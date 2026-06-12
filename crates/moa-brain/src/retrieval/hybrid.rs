@@ -609,13 +609,7 @@ where
     F: std::future::Future<Output = Result<T>>,
 {
     if disable_timeout {
-        let started = std::time::Instant::now();
-        let result = future.await;
-        let elapsed = started.elapsed().as_millis();
-        if elapsed > 200 {
-            eprintln!("[leg-timing] {name} took {elapsed}ms");
-        }
-        return result;
+        return future.await;
     }
     leg_or_empty(name, timed_leg(name, budget, future).await)
 }

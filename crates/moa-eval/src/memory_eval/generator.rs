@@ -1357,8 +1357,7 @@ fn link_recurring_fact_eras(ledger: &mut [LedgerFact], probes: &mut [Probe]) {
         {
             continue;
         }
-        let user_key =
-            (fact.scope == ScopeTier::User).then(|| fact.user_id.as_str().to_string());
+        let user_key = (fact.scope == ScopeTier::User).then(|| fact.user_id.as_str().to_string());
         families
             .entry((
                 fact.workspace_id.as_str().to_string(),

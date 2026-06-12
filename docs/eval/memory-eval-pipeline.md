@@ -119,7 +119,11 @@ Promote the kernel to a separate crate only when a second suite needs it.
 `CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
 text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
 reference time, and a stable ranking fingerprint made from the ranking config
-plus `RANKING_PIPELINE_VERSION` 5.
+plus `RANKING_PIPELINE_VERSION` 6. Version 6 stems pure-alphabetic ranking
+tokens with Snowball, doubles the caller's user-scope term for first-person
+queries, gives graph-only expansion finds a dedicated `graph_rescue` weight,
+and switches the lexical leg to an OR `to_tsquery` over extracted terms plus
+their stems so conversational queries can match short fact names.
 
 The memory eval runner still uses the production planner, cache, and hybrid
 retriever, but its default ranking config is time-neutral. Recorded extraction
@@ -167,6 +171,17 @@ credentials and gates `ingestion_coverage >= 0.85`,
 `scope_match_rate >= 0.90`, `extraction_precision >= 0.80`,
 `entity_fragmentation >= 0.90`, plus the hard blockers
 `cross_user_leak_count == 0` and `pii_unredacted_count == 0`.
+
+Recurring single-valued facts (`response_style`, `contact_email`,
+`private_repository`, `require_runbook`) are linked across era sessions into
+one supersession chain: later eras close the previous era's validity window,
+probes that target a superseded era are rewritten into explicit
+`as of YYYY-MM-DD` queries inside that era's window, and every linked probe
+blocks its family's other eras. Without this the corpus issued identical
+present-tense queries that expected three different gold facts, capping those
+slices near one third. Supersession and contradiction marked transcripts also
+carry the scope marker derived from the ledger scope; omitting it stored
+workspace facts as user scope and made them invisible to other users' probes.
 
 The PR natural corpus also plants verbatim restatement pairs in later sessions
 for the same user. These restating facts carry `restates: <canonical fact_id>`
@@ -450,6 +465,13 @@ For the `FeatureV1` default selected in this change, the PR-profile sweep picked
 `overlap = 0.35` and `subject_match = 0.5`: it improved `recall_at_4` by +0.098
 over legacy on the current corpus with CI `[+0.059,+0.142]` and adjusted p-value
 `0.010`.
+
+With ranking pipeline version 6 (stemmed tokens, first-person scope boost,
+graph rescue weight, OR lexical leg) on the era-linked marked corpus, FeatureV1
+improves `recall_at_4` by +0.187 over legacy with CI `[+0.154,+0.239]` and
+adjusted p-value `0.000`. The remaining hermetic top-4 gap is concentrated in
+multi-hop probes, where both chain facts must fit the final window; that slice
+is reranker territory and should be judged in the live lane.
 
 ## Nightly And Manual Scale Check
 
