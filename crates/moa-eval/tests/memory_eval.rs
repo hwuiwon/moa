@@ -1507,14 +1507,84 @@ impl GoldResolutionStack {
     }
 
     async fn cleanup(self) -> TestResult {
+        cleanup_gold_resolution_rows(&self.pool, &self.workspace_ids()).await?;
         testing::cleanup_test_schema(&self.database_url, &self.schema_name)
             .await
             .map_err(Box::<dyn Error + Send + Sync>::from)
     }
+
+    fn workspace_ids(&self) -> Vec<String> {
+        vec![
+            format!("gold-resolution-explicit-workspace-{}", self.schema_name),
+            format!("gold-resolution-partial-workspace-{}", self.schema_name),
+        ]
+    }
 }
 
+async fn cleanup_gold_resolution_rows(pool: &PgPool, workspace_ids: &[String]) -> TestResult {
+    cleanup_gold_resolution_age_rows(pool, workspace_ids).await?;
+    for table in [
+        "embeddings",
+        "ingest_dlq",
+        "ingest_dedup",
+        "memory_digests",
+        "retrieval_lineage",
+        "graph_changelog",
+        "node_index",
+        "workspace_state",
+    ] {
+        let sql = format!("DELETE FROM moa.{table} WHERE workspace_id = ANY($1)");
+        sqlx::query(&sql).bind(workspace_ids).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_gold_resolution_age_rows(pool: &PgPool, workspace_ids: &[String]) -> TestResult {
+    for label in GOLD_RESOLUTION_AGE_EDGE_LABELS {
+        cleanup_gold_resolution_age_table(pool, label, workspace_ids).await?;
+    }
+    for label in GOLD_RESOLUTION_AGE_NODE_LABELS {
+        cleanup_gold_resolution_age_table(pool, label, workspace_ids).await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_gold_resolution_age_table(
+    pool: &PgPool,
+    label: &str,
+    workspace_ids: &[String],
+) -> TestResult {
+    let sql = format!(
+        r#"
+        DELETE FROM moa_graph."{label}"
+        WHERE trim(both '"' from moa.age_property(properties, 'workspace_id')::text) = $1
+        "#
+    );
+    for workspace_id in workspace_ids {
+        sqlx::query(&sql).bind(workspace_id).execute(pool).await?;
+    }
+    Ok(())
+}
+
+const GOLD_RESOLUTION_AGE_NODE_LABELS: &[&str] = &[
+    "Entity", "Concept", "Decision", "Incident", "Lesson", "Fact", "Source",
+];
+
+const GOLD_RESOLUTION_AGE_EDGE_LABELS: &[&str] = &[
+    "RELATES_TO",
+    "DEPENDS_ON",
+    "OWNED_BY",
+    "SUPERSEDES",
+    "CONTRADICTS",
+    "DERIVED_FROM",
+    "MENTIONED_IN",
+    "CAUSED",
+    "LEARNED_FROM",
+    "APPLIES_TO",
+];
+
 async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
-    let (ledger, sessions) = explicit_gold_resolution_corpus();
+    let (ledger, sessions) = explicit_gold_resolution_corpus(&stack.schema_name);
     let report = resolve_gold_nodes(stack.ingest_ctx(), &ledger, &sessions).await?;
 
     assert_eq!(report.ingestion_coverage(), 1.0);
@@ -1527,15 +1597,23 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
     for record in &report.records {
         assert_eq!(record.resolution_status, GoldResolutionStatus::Resolved);
         assert_eq!(record.node_uids.len(), 1);
-        assert_eq!(
-            record.scope.as_deref(),
-            Some("workspace"),
-            "gold_nodes should record actual stored node_index.scope"
-        );
         assert!(record.active);
         assert!(record.valid_from.is_some());
         assert_eq!(record.valid_to, None);
     }
+    assert_eq!(report.scope_match_rate(), 1.0);
+
+    let workspace_fact = report
+        .records
+        .iter()
+        .find(|record| record.fact_id == "fact-explicit-runtime")
+        .expect("workspace-scope ledger fact has a gold record");
+    assert_eq!(workspace_fact.expected_scope, "workspace");
+    assert_eq!(
+        workspace_fact.scope.as_deref(),
+        Some("workspace"),
+        "gold_nodes should record actual stored node_index.scope"
+    );
 
     let user_fact = report
         .records
@@ -1545,8 +1623,8 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
     assert_eq!(user_fact.expected_scope, "user");
     assert_eq!(
         user_fact.scope.as_deref(),
-        Some("workspace"),
-        "actual stored scope is retained so scope bugs stay diagnosable"
+        Some("user"),
+        "unmarked user-preference facts should stay user scoped in slow-path ingest"
     );
     assert_eq!(user_fact.pii_status, GoldPiiStatus::NotExpected);
 
@@ -1584,7 +1662,7 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
 }
 
 async fn run_partial_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
-    let (ledger, sessions) = partial_gold_resolution_corpus();
+    let (ledger, sessions) = partial_gold_resolution_corpus(&stack.schema_name);
     let report = resolve_gold_nodes(stack.ingest_ctx(), &ledger, &sessions).await?;
 
     assert!(
@@ -1615,9 +1693,12 @@ async fn run_partial_gold_resolution_case(stack: &GoldResolutionStack) -> TestRe
     Ok(())
 }
 
-fn explicit_gold_resolution_corpus() -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
+fn explicit_gold_resolution_corpus(
+    workspace_suffix: &str,
+) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
     let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d01");
-    let workspace_id = workspace("gold-resolution-explicit-workspace");
+    let workspace_name = format!("gold-resolution-explicit-workspace-{workspace_suffix}");
+    let workspace_id = workspace(&workspace_name);
     let user_id = user("gold-resolution-explicit-user");
     let facts = vec![
         gold_fact(GoldFactSpec {
@@ -1654,7 +1735,7 @@ fn explicit_gold_resolution_corpus() -> (Vec<LedgerFact>, Vec<SyntheticSession>)
         turns: vec![
             SyntheticTurn {
                 turn_seq: 1,
-                transcript: "Fact: runtime uses restate.".to_string(),
+                transcript: "Fact: workspace shared runtime uses restate.".to_string(),
                 fact_ids: vec!["fact-explicit-runtime".to_string()],
             },
             SyntheticTurn {
@@ -1667,9 +1748,12 @@ fn explicit_gold_resolution_corpus() -> (Vec<LedgerFact>, Vec<SyntheticSession>)
     (facts, sessions)
 }
 
-fn partial_gold_resolution_corpus() -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
+fn partial_gold_resolution_corpus(
+    workspace_suffix: &str,
+) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
     let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d02");
-    let workspace_id = workspace("gold-resolution-partial-workspace");
+    let workspace_name = format!("gold-resolution-partial-workspace-{workspace_suffix}");
+    let workspace_id = workspace(&workspace_name);
     let user_id = user("gold-resolution-partial-user");
     let facts = vec![
         gold_fact(GoldFactSpec {
