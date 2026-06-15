@@ -650,51 +650,74 @@ async fn install_default_cron_jobs(ingress_url: &str) -> anyhow::Result<()> {
         .build()
         .context("build cron-bootstrap HTTP client")?;
     let ingress_url = ingress_url.trim_end_matches('/');
-    let jobs = [
-        (
-            "graph_memory_compact",
-            serde_json::json!({
+
+    for job in default_cron_jobs() {
+        let response = client
+            .post(format!("{ingress_url}/CronJob/{}/configure", job.key))
+            .header(
+                "idempotency-key",
+                format!("cron-config-{}-{}", job.key, job.version),
+            )
+            .header("content-type", "application/json")
+            .json(&job.body)
+            .send()
+            .await
+            .with_context(|| format!("configure cron job {}", job.key))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            bail!("cron configure {} returned {status}: {text}", job.key);
+        }
+
+        tracing::info!(key = job.key, "cron job configured");
+    }
+
+    Ok(())
+}
+
+struct DefaultCronJob {
+    key: &'static str,
+    body: serde_json::Value,
+    version: &'static str,
+}
+
+fn default_cron_jobs() -> Vec<DefaultCronJob> {
+    vec![
+        DefaultCronJob {
+            key: "graph_memory_compact",
+            body: serde_json::json!({
                 "schedule": "0 0 * * * *",
                 "timezone": "UTC",
                 "target_service": "GraphMemoryMaint",
                 "target_handler": "compact",
                 "payload": {}
             }),
-            "v1",
-        ),
-        (
-            "neon_prune_branches",
-            serde_json::json!({
+            version: "v1",
+        },
+        DefaultCronJob {
+            key: "segment_materialized_views_refresh",
+            body: serde_json::json!({
+                "schedule": "0 */15 * * * *",
+                "timezone": "UTC",
+                "target_service": "SessionStore",
+                "target_handler": "refresh_segment_materialized_views",
+                "payload": {}
+            }),
+            version: "v1",
+        },
+        DefaultCronJob {
+            key: "neon_prune_branches",
+            body: serde_json::json!({
                 "schedule": "0 0 0,6,12,18 * * *",
                 "timezone": "UTC",
                 "target_service": "NeonMaint",
                 "target_handler": "prune_branches",
                 "payload": null
             }),
-            "v1",
-        ),
-    ];
-
-    for (key, body, version) in jobs {
-        let response = client
-            .post(format!("{ingress_url}/CronJob/{key}/configure"))
-            .header("idempotency-key", format!("cron-config-{key}-{version}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("configure cron job {key}"))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            bail!("cron configure {key} returned {status}: {text}");
-        }
-
-        tracing::info!(key, "cron job configured");
-    }
-
-    Ok(())
+            version: "v1",
+        },
+    ]
 }
 
 async fn bind_listener(port: u16) -> anyhow::Result<TcpListener> {

@@ -105,7 +105,9 @@ pub trait RestateSessionStore {
     ) -> Result<Json<Vec<SkillResolutionRate>>, HandlerError>;
 
     /// Refreshes materialized views derived from task segments.
-    async fn refresh_segment_materialized_views() -> Result<(), HandlerError>;
+    async fn refresh_segment_materialized_views(
+        request: Json<serde_json::Value>,
+    ) -> Result<(), HandlerError>;
 
     /// Records a tool name on a session's active segment.
     async fn record_segment_tool_use(

@@ -69,13 +69,13 @@ impl CitationVerifier for Bm25Verifier {
     }
 }
 
-/// Optional NLI verifier facade.
+/// Optional verifier facade for a future NLI-backed stage.
 ///
 /// HHEM-2.1-open is Apache-2.0 licensed. MOA does not commit ONNX binaries to
 /// git; production deployments should download the model via an operational
 /// step and construct this verifier with the loaded runtime. Until that runtime
-/// is attached, this verifier uses a deterministic lexical entailment fallback
-/// so the cascade remains testable in default CI.
+/// is attached, this verifier records its deterministic lexical-overlap
+/// fallback honestly so durable lineage does not claim an NLI model ran.
 #[derive(Clone)]
 pub struct NliVerifier {
     model_name: Arc<str>,
@@ -120,7 +120,7 @@ impl CitationVerifier for NliVerifier {
                         bm25_score: None,
                         nli_entailment: Some(overlap),
                         nli_contradiction: Some(contradiction),
-                        method: "bm25+nli".to_string(),
+                        method: "lexical_overlap".to_string(),
                     },
                 )
             })

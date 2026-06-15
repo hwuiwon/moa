@@ -332,10 +332,11 @@ impl RestateSessionStore for SessionStoreImpl {
             .await?)
     }
 
-    #[tracing::instrument(skip(self, ctx))]
+    #[tracing::instrument(skip(self, ctx, _request))]
     async fn refresh_segment_materialized_views(
         &self,
         ctx: Context<'_>,
+        _request: Json<serde_json::Value>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SessionStore", "refresh_segment_materialized_views");
         let store = self.store.clone();

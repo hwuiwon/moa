@@ -9,7 +9,7 @@ mod prompt;
 mod terms;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ pub struct QueryRewriter {
     config: QueryRewriteConfig,
     llm: Arc<dyn LLMProvider>,
     session_store: Option<Arc<dyn SessionStore>>,
-    circuit_breaker: CircuitBreaker,
+    circuit_breaker: Arc<CircuitBreaker>,
     memory_retrieval_available: bool,
     vector_retrieval_available: bool,
 }
@@ -39,11 +39,29 @@ pub struct QueryRewriter {
 impl QueryRewriter {
     /// Creates a query rewriter backed by the provided LLM.
     pub fn new(config: QueryRewriteConfig, llm: Arc<dyn LLMProvider>) -> Self {
-        let circuit_breaker = CircuitBreaker::new(
+        let circuit_breaker = Arc::new(CircuitBreaker::new(
             config.circuit_breaker_threshold,
             config.circuit_breaker_window_secs,
             config.circuit_breaker_cooldown_secs,
-        );
+        ));
+        Self::with_circuit_breaker(config, llm, circuit_breaker)
+    }
+
+    /// Creates a query rewriter that shares circuit-breaker state across fresh instances.
+    pub fn new_with_shared_circuit(
+        config: QueryRewriteConfig,
+        llm: Arc<dyn LLMProvider>,
+        namespace: impl AsRef<str>,
+    ) -> Self {
+        let circuit_breaker = shared_circuit_breaker(namespace.as_ref(), &config);
+        Self::with_circuit_breaker(config, llm, circuit_breaker)
+    }
+
+    fn with_circuit_breaker(
+        config: QueryRewriteConfig,
+        llm: Arc<dyn LLMProvider>,
+        circuit_breaker: Arc<CircuitBreaker>,
+    ) -> Self {
         Self {
             config,
             llm,
@@ -71,6 +89,34 @@ impl QueryRewriter {
         self.vector_retrieval_available = vector_retrieval_available;
         self
     }
+}
+
+static SHARED_CIRCUIT_BREAKERS: OnceLock<Mutex<HashMap<String, Arc<CircuitBreaker>>>> =
+    OnceLock::new();
+
+fn shared_circuit_breaker(namespace: &str, config: &QueryRewriteConfig) -> Arc<CircuitBreaker> {
+    let key = format!(
+        "{}:{:.6}:{}:{}",
+        namespace,
+        config.circuit_breaker_threshold,
+        config.circuit_breaker_window_secs,
+        config.circuit_breaker_cooldown_secs
+    );
+    let registry = SHARED_CIRCUIT_BREAKERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = match registry.lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    registry
+        .entry(key)
+        .or_insert_with(|| {
+            Arc::new(CircuitBreaker::new(
+                config.circuit_breaker_threshold,
+                config.circuit_breaker_window_secs,
+                config.circuit_breaker_cooldown_secs,
+            ))
+        })
+        .clone()
 }
 
 #[async_trait]
@@ -521,6 +567,55 @@ mod tests {
             .expect("open circuit should skip");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(metadata_result(&second).source, RewriteSource::Original);
+    }
+
+    #[tokio::test]
+    async fn shared_circuit_breaker_trips_across_rewriter_instances() {
+        // Pins: production pipeline rebuilds reuse breaker state after rewrite failures.
+        let namespace = format!("test-{}", uuid::Uuid::now_v7());
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let first_provider = MockProvider {
+            response: Arc::new(std::sync::Mutex::new("not json".to_string())),
+            delay: Duration::ZERO,
+            calls: first_calls.clone(),
+        };
+        let second_provider = MockProvider {
+            response: Arc::new(std::sync::Mutex::new(response_json("unused"))),
+            delay: Duration::ZERO,
+            calls: second_calls.clone(),
+        };
+        let first_rewriter = QueryRewriter::new_with_shared_circuit(
+            QueryRewriteConfig::default(),
+            Arc::new(first_provider),
+            &namespace,
+        )
+        .with_retrieval_availability(true, true);
+        let second_rewriter = QueryRewriter::new_with_shared_circuit(
+            QueryRewriteConfig::default(),
+            Arc::new(second_provider),
+            &namespace,
+        )
+        .with_retrieval_availability(true, true);
+        let mut first = context_with_messages(vec![
+            ContextMessage::user("OAuth refresh token race condition"),
+            ContextMessage::assistant("I found it."),
+            ContextMessage::user("fix that"),
+        ]);
+        let mut second = first.clone();
+
+        first_rewriter
+            .process(&mut first)
+            .await
+            .expect("first failure should fail open");
+        second_rewriter
+            .process(&mut second)
+            .await
+            .expect("second instance should fail open through shared breaker");
+
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
         assert_eq!(metadata_result(&second).source, RewriteSource::Original);
     }
 

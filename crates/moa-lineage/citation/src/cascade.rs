@@ -225,9 +225,12 @@ impl CitationVerifier for CascadeVerifier {
                     bm25_score: None,
                     nli_entailment: None,
                     nli_contradiction: None,
-                    method: "bm25+nli".to_string(),
+                    method: "bm25+lexical_overlap".to_string(),
                 });
                 verifier.bm25_score = Some(bm25_score);
+                if verifier.method == "lexical_overlap" {
+                    verifier.method = "bm25+lexical_overlap".to_string();
+                }
                 verifier.verified = verifier.nli_entailment.unwrap_or(0.0)
                     >= self.config.nli_threshold
                     && verifier.nli_contradiction.unwrap_or(0.0) < 0.5;
@@ -284,10 +287,10 @@ pub fn emit_verifier_scores(
             target: ScoreTarget::Turn { turn_id },
             workspace_id: workspace_id.clone(),
             user_id: None,
-            name: "nli_entailment".to_string(),
+            name: "lexical_overlap".to_string(),
             value: ScoreValue::Numeric(f64::from(entailment)),
             source: ScoreSource::OnlineJudge,
-            model_or_evaluator: "hhem-2.1-open".to_string(),
+            model_or_evaluator: citation.verifier.method.clone(),
             run_id: None,
             dataset_id: None,
             comment: None,

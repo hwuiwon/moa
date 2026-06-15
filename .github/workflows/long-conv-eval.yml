@@ -151,6 +151,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run scripted-user nightly gate
-        run: |
-          echo "scripted_user long-conversation mode is feature-gated by MOA_ENABLE_SCRIPTED_USER_NIGHTLY."
-          echo "Enable this job after the scripted_user runner lands and uses the same score-card budget gate."
+        run: cargo test -p moa-eval --test scripted_user_mode --locked

@@ -240,7 +240,7 @@ async fn build_citation_lineage(
         verifier_used: if citation_sources.is_empty() {
             None
         } else {
-            Some("cascade-bm25+nli-lexical".to_string())
+            Some("cascade-bm25+lexical-overlap".to_string())
         },
     }
 }
@@ -251,7 +251,7 @@ fn context_citation_verifier() -> CascadeVerifier {
             bm25_min_candidates: 1,
             ..CascadeConfig::default()
         },
-        Some(NliVerifier::new("hhem-2.1-open-lexical-fallback")),
+        Some(NliVerifier::new("lexical-overlap-fallback")),
     )
 }
 
@@ -292,7 +292,7 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
                 },
                 workspace_id: citation.workspace_id.clone(),
                 user_id: Some(citation.user_id.clone()),
-                name: "nli_entailment".to_string(),
+                name: "lexical_overlap".to_string(),
                 value: ScoreValue::Numeric(f64::from(entailment)),
                 source: ScoreSource::OnlineJudge,
                 model_or_evaluator: source.verifier.method.clone(),
@@ -427,12 +427,12 @@ mod tests {
         assert_eq!(record.vendor_used, None);
         assert_eq!(
             record.verifier_used.as_deref(),
-            Some("cascade-bm25+nli-lexical")
+            Some("cascade-bm25+lexical-overlap")
         );
         assert_eq!(record.citations.len(), 1);
         assert_eq!(record.citations[0].source_chunk_id, source_chunk_id);
         assert!(record.citations[0].verifier.verified);
-        assert_eq!(record.citations[0].verifier.method, "bm25+nli");
+        assert_eq!(record.citations[0].verifier.method, "bm25+lexical_overlap");
         assert_eq!(
             record.citations[0].cited_text.as_deref(),
             Some("OAuth uses access tokens for delegated API access.")

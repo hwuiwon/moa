@@ -165,9 +165,13 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     let query_rewriter: Option<Box<dyn ContextProcessor>> = if config.query_rewrite.enabled {
         query_rewrite_llm_provider.map(|llm_provider| {
             Box::new(
-                QueryRewriter::new(config.query_rewrite.clone(), llm_provider)
-                    .with_session_store(session_store.clone())
-                    .with_retrieval_availability(true, vector_retrieval_available),
+                QueryRewriter::new_with_shared_circuit(
+                    config.query_rewrite.clone(),
+                    llm_provider,
+                    "default_pipeline",
+                )
+                .with_session_store(session_store.clone())
+                .with_retrieval_availability(true, vector_retrieval_available),
             ) as Box<dyn ContextProcessor>
         })
     } else {

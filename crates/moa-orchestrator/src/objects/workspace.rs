@@ -92,6 +92,18 @@ impl WorkspaceVoState {
             TerminalError::new("workspace not initialized; call Workspace/init first").into()
         })
     }
+
+    /// Marks a consolidation workflow as active without requiring scheduler config.
+    pub fn mark_consolidation_started(&mut self) {
+        self.consolidation_in_progress = true;
+    }
+
+    /// Records a completed consolidation and returns whether a daily VO reschedule is configured.
+    pub fn record_consolidation_completed(&mut self, ran_at: DateTime<Utc>) -> bool {
+        self.last_consolidation = Some(ran_at);
+        self.consolidation_in_progress = false;
+        self.config.is_some()
+    }
 }
 
 impl VoState for WorkspaceVoState {
@@ -275,8 +287,7 @@ impl WorkspaceObject for WorkspaceImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Workspace", "mark_consolidation_started");
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
-        let _ = state.ensure_initialized()?;
-        state.consolidation_in_progress = true;
+        state.mark_consolidation_started();
         state.persist_into(&ctx);
         Ok(())
     }
@@ -292,9 +303,7 @@ impl WorkspaceObject for WorkspaceImpl {
         validate_workspace_key(ctx.key(), &report.workspace_id)?;
 
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
-        let _ = state.ensure_initialized()?;
-        state.last_consolidation = Some(report.ran_at);
-        state.consolidation_in_progress = false;
+        let should_reschedule = state.record_consolidation_completed(report.ran_at);
         tracing::info!(
             workspace_id = %report.workspace_id,
             target_date = %report.target_date,
@@ -304,7 +313,9 @@ impl WorkspaceObject for WorkspaceImpl {
             errors = ?report.errors,
             "workspace consolidation completed"
         );
-        schedule_consolidation_inner(&ctx, &mut state).await?;
+        if should_reschedule {
+            schedule_consolidation_inner(&ctx, &mut state).await?;
+        }
         state.persist_into(&ctx);
         Ok(())
     }
@@ -444,4 +455,59 @@ fn to_handler_error(error: MoaError) -> HandlerError {
     }
 
     HandlerError::from(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixed_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
+            .expect("fixed timestamp parses")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn consolidation_started_accepts_uninitialized_workspace() {
+        // Pins: graph-memory cron can mark an active workspace even when Workspace/init never ran.
+        let mut state = WorkspaceVoState::default();
+
+        state.mark_consolidation_started();
+
+        assert!(state.consolidation_in_progress);
+        assert!(state.config.is_none());
+    }
+
+    #[test]
+    fn consolidation_completed_uninitialized_workspace_skips_vo_reschedule() {
+        // Pins: cron-dispatched consolidation completion does not require daily scheduler config.
+        let mut state = WorkspaceVoState {
+            consolidation_in_progress: true,
+            ..WorkspaceVoState::default()
+        };
+        let ran_at = fixed_time();
+
+        let should_reschedule = state.record_consolidation_completed(ran_at);
+
+        assert!(!should_reschedule);
+        assert_eq!(state.last_consolidation, Some(ran_at));
+        assert!(!state.consolidation_in_progress);
+    }
+
+    #[test]
+    fn consolidation_completed_initialized_workspace_keeps_daily_reschedule() {
+        // Pins: initialized Workspace VOs still use their daily self-scheduler after completion.
+        let mut state = WorkspaceVoState {
+            config: Some(WorkspaceConfig {
+                id: WorkspaceId::new("workspace"),
+                name: "workspace".to_string(),
+                consolidation_hour_utc: 3,
+                approval_policy: WorkspaceApprovalPolicy::default(),
+            }),
+            consolidation_in_progress: true,
+            ..WorkspaceVoState::default()
+        };
+
+        assert!(state.record_consolidation_completed(fixed_time()));
+    }
 }
