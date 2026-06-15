@@ -1,7 +1,6 @@
 //! Flat single-underscore environment overlay for Kubernetes runtime config.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use serde::Deserialize;
 
@@ -16,7 +15,13 @@ use super::{CloudFlyioConfig, CloudHandsConfig, MoaConfig};
 const OPENFGA_DEFAULT_TIMEOUT_MS: u64 = 5000;
 
 /// Optional flat environment overrides for `MoaConfig`.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// envy deserializes `MOA_*` environment variables directly into these typed
+/// fields. Only URL validation, header maps, and comma-separated lists need
+/// bespoke handling (`validate_urls`, `deserialize_optional_headers`, and
+/// `deserialize_optional_list`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct MoaEnvOverlay {
     /// `MOA_GENERAL_DEFAULT_PROVIDER`.
     pub general_default_provider: Option<String>,
@@ -197,8 +202,10 @@ pub struct MoaEnvOverlay {
     /// `MOA_PERMISSIONS_DEFAULT_POSTURE`.
     pub permissions_default_posture: Option<String>,
     /// `MOA_PERMISSIONS_AUTO_APPROVE`.
+    #[serde(deserialize_with = "deserialize_optional_list")]
     pub permissions_auto_approve: Option<Vec<String>>,
     /// `MOA_PERMISSIONS_ALWAYS_DENY`.
+    #[serde(deserialize_with = "deserialize_optional_list")]
     pub permissions_always_deny: Option<Vec<String>>,
     /// `MOA_SESSION_BLOB_THRESHOLD_BYTES`.
     pub session_blob_threshold_bytes: Option<usize>,
@@ -239,6 +246,7 @@ pub struct MoaEnvOverlay {
     /// `MOA_OBSERVABILITY_OTLP_PROTOCOL`.
     pub observability_otlp_protocol: Option<OtlpProtocol>,
     /// `MOA_OBSERVABILITY_OTLP_HEADERS`.
+    #[serde(deserialize_with = "deserialize_optional_headers")]
     pub observability_otlp_headers: Option<HashMap<String, String>>,
     /// `MOA_OBSERVABILITY_ENVIRONMENT`.
     pub observability_environment: Option<String>,
@@ -343,13 +351,55 @@ pub struct MoaEnvOverlay {
 impl MoaEnvOverlay {
     /// Loads a flat `MOA_` environment overlay from process environment variables.
     pub fn from_env() -> Result<Self> {
-        RawMoaEnvOverlay::from_env()?.try_into()
+        let overlay: Self = envy::prefixed("MOA_").from_env().map_err(map_env_error)?;
+        overlay.validate_urls()?;
+        Ok(overlay)
     }
 
     /// Loads a flat `MOA_` environment overlay from deterministic key-value pairs.
     #[allow(clippy::should_implement_trait)]
     pub fn from_iter(iter: impl IntoIterator<Item = (String, String)>) -> Result<Self> {
-        RawMoaEnvOverlay::from_iter(iter)?.try_into()
+        let overlay: Self = envy::prefixed("MOA_")
+            .from_iter(iter)
+            .map_err(map_env_error)?;
+        overlay.validate_urls()?;
+        Ok(overlay)
+    }
+
+    /// Validates that each URL-shaped overlay value parses as a URL.
+    ///
+    /// envy/serde populate the string fields without validation, so this mirrors
+    /// the previous per-field checks while keeping the canonical `MOA_*` env-var
+    /// name in any error message.
+    fn validate_urls(&self) -> Result<()> {
+        for (env_name, value) in [
+            ("MOA_DATABASE_URL", &self.database_url),
+            ("MOA_DATABASE_ADMIN_URL", &self.database_admin_url),
+            ("MOA_AUTH_OIDC_ISSUER", &self.auth_oidc_issuer),
+            ("MOA_AUTH_OIDC_JWKS_URL", &self.auth_oidc_jwks_url),
+            ("MOA_AUTHZ_OPENFGA_URL", &self.authz_openfga_url),
+            ("MOA_PII_SERVICE_URL", &self.pii_service_url),
+            ("MOA_TURBOPUFFER_BASE_URL", &self.turbopuffer_base_url),
+            (
+                "MOA_CLOUD_HANDS_DAYTONA_API_URL",
+                &self.cloud_hands_daytona_api_url,
+            ),
+            ("MOA_CLOUD_HANDS_E2B_API_URL", &self.cloud_hands_e2b_api_url),
+            ("MOA_RESTATE_INGRESS_URL", &self.restate_ingress_url),
+            ("MOA_RESTATE_ADMIN_URL", &self.restate_admin_url),
+            ("MOA_RESTATE_LLM_GATEWAY_URL", &self.restate_llm_gateway_url),
+            ("MOA_ORCHESTRATOR_ENDPOINT", &self.orchestrator_endpoint),
+            ("MOA_ORCHESTRATOR_HEALTH_URL", &self.orchestrator_health_url),
+            (
+                "MOA_OBSERVABILITY_OTLP_ENDPOINT",
+                &self.observability_otlp_endpoint,
+            ),
+        ] {
+            if let Some(value) = value {
+                reqwest::Url::parse(value).map_err(|error| parse_error(env_name, value, error))?;
+            }
+        }
+        Ok(())
     }
 
     /// Applies this overlay to a typed MOA config.
@@ -1001,739 +1051,65 @@ impl MoaEnvOverlay {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct RawMoaEnvOverlay {
-    general_default_provider: Option<String>,
-    general_reasoning_effort: Option<String>,
-    general_web_search_enabled: Option<String>,
-    general_workspace_instructions: Option<String>,
-    general_user_instructions: Option<String>,
-    models_main: Option<String>,
-    models_auxiliary: Option<String>,
-    providers_anthropic_api_key_env: Option<String>,
-    providers_openai_api_key_env: Option<String>,
-    providers_google_api_key_env: Option<String>,
-    database_url: Option<String>,
-    database_admin_url: Option<String>,
-    database_schema: Option<String>,
-    database_max_connections: Option<String>,
-    database_connect_timeout_seconds: Option<String>,
-    database_neon_enabled: Option<String>,
-    database_neon_api_key_env: Option<String>,
-    database_neon_project_id: Option<String>,
-    database_neon_parent_branch_id: Option<String>,
-    database_neon_max_checkpoints: Option<String>,
-    database_neon_checkpoint_ttl_hours: Option<String>,
-    database_neon_pooled: Option<String>,
-    database_neon_suspend_timeout_seconds: Option<String>,
-    auth_provider: Option<String>,
-    auth_header_trust: Option<String>,
-    auth_auth0_domain: Option<String>,
-    auth_auth0_audience: Option<String>,
-    auth_auth0_client_id_env: Option<String>,
-    auth_auth0_client_secret_env: Option<String>,
-    auth_oidc_issuer: Option<String>,
-    auth_oidc_audience: Option<String>,
-    auth_oidc_jwks_url: Option<String>,
-    authz_engine: Option<String>,
-    authz_openfga_url: Option<String>,
-    authz_openfga_preshared_key: Option<String>,
-    authz_openfga_store_id: Option<String>,
-    authz_openfga_model_id: Option<String>,
-    authz_openfga_timeout_ms: Option<String>,
-    token_vault_provider: Option<String>,
-    async_authz_provider: Option<String>,
-    async_authz_default_timeout_secs: Option<String>,
-    audit_security_emit_authz_allows: Option<String>,
-    local_docker_enabled: Option<String>,
-    local_sandbox_dir: Option<String>,
-    local_memory_dir: Option<String>,
-    memory_auto_bootstrap: Option<String>,
-    memory_embedding_provider: Option<String>,
-    memory_embedding_model: Option<String>,
-    memory_retrieval_reranker_mode: Option<String>,
-    memory_retrieval_lineage_enabled: Option<String>,
-    memory_digest_enabled: Option<String>,
-    memory_digest_max_tokens: Option<String>,
-    memory_digest_rebuild_min_interval_hours: Option<String>,
-    memory_extraction_enabled: Option<String>,
-    memory_extraction_api_key_env: Option<String>,
-    memory_extraction_model: Option<String>,
-    memory_extraction_max_facts_per_chunk: Option<String>,
-    memory_extraction_timeout_ms: Option<String>,
-    memory_vector_embedder_name: Option<String>,
-    memory_vector_embedder_output_dim: Option<String>,
-    memory_vector_embedder_cohere_api_key_env: Option<String>,
-    memory_vector_embedder_gemini_api_key_env: Option<String>,
-    memory_vector_embedder_gemini_default_role: Option<String>,
-    pii_service_url: Option<String>,
-    turbopuffer_api_key_env: Option<String>,
-    turbopuffer_base_url: Option<String>,
-    turbopuffer_environment: Option<String>,
-    turbopuffer_baa: Option<String>,
-    cloud_enabled: Option<String>,
-    cloud_memory_dir: Option<String>,
-    cloud_flyio_api_token_env: Option<String>,
-    cloud_flyio_app_name: Option<String>,
-    cloud_flyio_region: Option<String>,
-    cloud_flyio_internal_port: Option<String>,
-    cloud_flyio_health_bind: Option<String>,
-    cloud_flyio_graceful_shutdown_timeout_secs: Option<String>,
-    cloud_hands_default_provider: Option<String>,
-    cloud_hands_daytona_api_key_env: Option<String>,
-    cloud_hands_daytona_api_url: Option<String>,
-    cloud_hands_daytona_default_image: Option<String>,
-    cloud_hands_e2b_api_key_env: Option<String>,
-    cloud_hands_e2b_api_url: Option<String>,
-    cloud_hands_e2b_domain: Option<String>,
-    cloud_hands_e2b_template: Option<String>,
-    gateway_telegram_token_env: Option<String>,
-    gateway_slack_token_env: Option<String>,
-    gateway_slack_app_token_env: Option<String>,
-    gateway_discord_token_env: Option<String>,
-    permissions_default_posture: Option<String>,
-    permissions_auto_approve: Option<String>,
-    permissions_always_deny: Option<String>,
-    session_blob_threshold_bytes: Option<String>,
-    session_blob_dir: Option<String>,
-    compaction_enabled: Option<String>,
-    compaction_event_threshold: Option<String>,
-    compaction_token_ratio_threshold: Option<String>,
-    compaction_recent_turns_verbatim: Option<String>,
-    compaction_preserve_errors: Option<String>,
-    compaction_tier2_trigger_blocks_past_bp4: Option<String>,
-    compaction_tier3_trigger_fraction: Option<String>,
-    compaction_max_input_tokens_per_turn: Option<String>,
-    restate_ingress_url: Option<String>,
-    restate_admin_url: Option<String>,
-    restate_llm_gateway_url: Option<String>,
-    orchestrator_endpoint: Option<String>,
-    orchestrator_health_url: Option<String>,
-    observability_enabled: Option<String>,
-    observability_service_name: Option<String>,
-    observability_otlp_endpoint: Option<String>,
-    observability_otlp_protocol: Option<String>,
-    observability_otlp_headers: Option<String>,
-    observability_environment: Option<String>,
-    observability_release: Option<String>,
-    observability_sample_rate: Option<String>,
-    observability_lineage_enabled: Option<String>,
-    observability_lineage_channel_capacity: Option<String>,
-    observability_lineage_batch_size: Option<String>,
-    observability_lineage_batch_max_age_secs: Option<String>,
-    observability_lineage_journal_path: Option<String>,
-    observability_lineage_sample_pgvector_explain: Option<String>,
-    metrics_enabled: Option<String>,
-    metrics_listen: Option<String>,
-    budgets_daily_workspace_cents: Option<String>,
-    session_limits_max_turns: Option<String>,
-    session_limits_loop_detection_threshold: Option<String>,
-    tool_output_max_replay_chars: Option<String>,
-    tool_output_max_bash_lines: Option<String>,
-    tool_output_head_ratio: Option<String>,
-    tool_budgets_file_read: Option<String>,
-    tool_budgets_bash_stdout: Option<String>,
-    tool_budgets_bash_stderr: Option<String>,
-    tool_budgets_grep: Option<String>,
-    tool_budgets_file_search: Option<String>,
-    tool_budgets_memory_search: Option<String>,
-    tool_budgets_file_outline: Option<String>,
-    tool_budgets_default: Option<String>,
-    skill_budget_max_manifest_chars: Option<String>,
-    skill_budget_max_per_skill_chars: Option<String>,
-    skill_budget_show_token_estimates: Option<String>,
-    query_rewrite_enabled: Option<String>,
-    query_rewrite_model: Option<String>,
-    query_rewrite_timeout_ms: Option<String>,
-    query_rewrite_min_query_tokens: Option<String>,
-    query_rewrite_skip_single_turn: Option<String>,
-    query_rewrite_circuit_breaker_threshold: Option<String>,
-    query_rewrite_circuit_breaker_window_secs: Option<String>,
-    query_rewrite_circuit_breaker_cooldown_secs: Option<String>,
-    resolution_enabled: Option<String>,
-    resolution_weights_tool: Option<String>,
-    resolution_weights_verification: Option<String>,
-    resolution_weights_continuation: Option<String>,
-    resolution_weights_self_assessment: Option<String>,
-    resolution_weights_structural: Option<String>,
-    resolution_use_llm_self_assessment: Option<String>,
-    resolution_self_assessment_timeout_ms: Option<String>,
-    resolution_rephrase_similarity_threshold: Option<String>,
-    resolution_structural_min_samples: Option<String>,
-    resolution_idle_timeout_minutes: Option<String>,
-    context_snapshot_enabled: Option<String>,
-    context_snapshot_max_size_bytes: Option<String>,
+/// Wraps an `envy` deserialization error as a `MoaError`, restoring the `MOA_`
+/// prefix that `envy::prefixed` strips from the variable name in value-parse
+/// failures so the message still names the canonical env var.
+fn map_env_error(error: envy::Error) -> MoaError {
+    MoaError::ConfigError(format!(
+        "MOA env overlay: {}",
+        restore_env_prefix(&error.to_string())
+    ))
 }
 
-impl RawMoaEnvOverlay {
-    fn from_env() -> Result<Self> {
-        envy::prefixed("MOA_")
-            .from_env()
-            .map_err(|error| MoaError::ConfigError(format!("MOA env overlay: {error}")))
-    }
-
-    fn from_iter(iter: impl IntoIterator<Item = (String, String)>) -> Result<Self> {
-        envy::prefixed("MOA_")
-            .from_iter(iter)
-            .map_err(|error| MoaError::ConfigError(format!("MOA env overlay: {error}")))
+/// Re-attaches the `MOA_` prefix to the variable name in an envy parse-error
+/// message.
+///
+/// envy reports value-parse failures as `... provided by <KEY>` with the prefix
+/// already stripped; enum/variant errors carry no key and pass through unchanged.
+fn restore_env_prefix(message: &str) -> String {
+    match message.rsplit_once("provided by ") {
+        Some((head, key)) => format!("{head}provided by MOA_{key}"),
+        None => message.to_string(),
     }
 }
 
-impl TryFrom<RawMoaEnvOverlay> for MoaEnvOverlay {
-    type Error = MoaError;
-
-    fn try_from(raw: RawMoaEnvOverlay) -> Result<Self> {
-        Ok(Self {
-            general_default_provider: raw.general_default_provider,
-            general_reasoning_effort: raw.general_reasoning_effort,
-            general_web_search_enabled: parse_optional(
-                "MOA_GENERAL_WEB_SEARCH_ENABLED",
-                raw.general_web_search_enabled,
-            )?,
-            general_workspace_instructions: raw.general_workspace_instructions,
-            general_user_instructions: raw.general_user_instructions,
-            models_main: raw.models_main,
-            models_auxiliary: raw.models_auxiliary,
-            providers_anthropic_api_key_env: raw.providers_anthropic_api_key_env,
-            providers_openai_api_key_env: raw.providers_openai_api_key_env,
-            providers_google_api_key_env: raw.providers_google_api_key_env,
-            database_url: parse_optional_url("MOA_DATABASE_URL", raw.database_url)?,
-            database_admin_url: parse_optional_url(
-                "MOA_DATABASE_ADMIN_URL",
-                raw.database_admin_url,
-            )?,
-            database_schema: raw.database_schema,
-            database_max_connections: parse_optional(
-                "MOA_DATABASE_MAX_CONNECTIONS",
-                raw.database_max_connections,
-            )?,
-            database_connect_timeout_seconds: parse_optional(
-                "MOA_DATABASE_CONNECT_TIMEOUT_SECONDS",
-                raw.database_connect_timeout_seconds,
-            )?,
-            database_neon_enabled: parse_optional(
-                "MOA_DATABASE_NEON_ENABLED",
-                raw.database_neon_enabled,
-            )?,
-            database_neon_api_key_env: raw.database_neon_api_key_env,
-            database_neon_project_id: raw.database_neon_project_id,
-            database_neon_parent_branch_id: raw.database_neon_parent_branch_id,
-            database_neon_max_checkpoints: parse_optional(
-                "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
-                raw.database_neon_max_checkpoints,
-            )?,
-            database_neon_checkpoint_ttl_hours: parse_optional(
-                "MOA_DATABASE_NEON_CHECKPOINT_TTL_HOURS",
-                raw.database_neon_checkpoint_ttl_hours,
-            )?,
-            database_neon_pooled: parse_optional(
-                "MOA_DATABASE_NEON_POOLED",
-                raw.database_neon_pooled,
-            )?,
-            database_neon_suspend_timeout_seconds: parse_optional(
-                "MOA_DATABASE_NEON_SUSPEND_TIMEOUT_SECONDS",
-                raw.database_neon_suspend_timeout_seconds,
-            )?,
-            auth_provider: parse_optional_enum(
-                "MOA_AUTH_PROVIDER",
-                raw.auth_provider,
-                parse_auth_provider,
-            )?,
-            auth_header_trust: parse_optional_enum(
-                "MOA_AUTH_HEADER_TRUST",
-                raw.auth_header_trust,
-                parse_auth_header_trust,
-            )?,
-            auth_auth0_domain: raw.auth_auth0_domain,
-            auth_auth0_audience: raw.auth_auth0_audience,
-            auth_auth0_client_id_env: raw.auth_auth0_client_id_env,
-            auth_auth0_client_secret_env: raw.auth_auth0_client_secret_env,
-            auth_oidc_issuer: parse_optional_url("MOA_AUTH_OIDC_ISSUER", raw.auth_oidc_issuer)?,
-            auth_oidc_audience: raw.auth_oidc_audience,
-            auth_oidc_jwks_url: parse_optional_url(
-                "MOA_AUTH_OIDC_JWKS_URL",
-                raw.auth_oidc_jwks_url,
-            )?,
-            authz_engine: parse_optional_enum(
-                "MOA_AUTHZ_ENGINE",
-                raw.authz_engine,
-                parse_authz_engine,
-            )?,
-            authz_openfga_url: parse_optional_url("MOA_AUTHZ_OPENFGA_URL", raw.authz_openfga_url)?,
-            authz_openfga_preshared_key: raw.authz_openfga_preshared_key,
-            authz_openfga_store_id: raw.authz_openfga_store_id,
-            authz_openfga_model_id: raw.authz_openfga_model_id,
-            authz_openfga_timeout_ms: parse_optional(
-                "MOA_AUTHZ_OPENFGA_TIMEOUT_MS",
-                raw.authz_openfga_timeout_ms,
-            )?,
-            token_vault_provider: parse_optional_enum(
-                "MOA_TOKEN_VAULT_PROVIDER",
-                raw.token_vault_provider,
-                parse_token_vault_provider,
-            )?,
-            async_authz_provider: parse_optional_enum(
-                "MOA_ASYNC_AUTHZ_PROVIDER",
-                raw.async_authz_provider,
-                parse_async_authz_provider,
-            )?,
-            async_authz_default_timeout_secs: parse_optional(
-                "MOA_ASYNC_AUTHZ_DEFAULT_TIMEOUT_SECS",
-                raw.async_authz_default_timeout_secs,
-            )?,
-            audit_security_emit_authz_allows: parse_optional(
-                "MOA_AUDIT_SECURITY_EMIT_AUTHZ_ALLOWS",
-                raw.audit_security_emit_authz_allows,
-            )?,
-            local_docker_enabled: parse_optional(
-                "MOA_LOCAL_DOCKER_ENABLED",
-                raw.local_docker_enabled,
-            )?,
-            local_sandbox_dir: raw.local_sandbox_dir,
-            local_memory_dir: raw.local_memory_dir,
-            memory_auto_bootstrap: parse_optional(
-                "MOA_MEMORY_AUTO_BOOTSTRAP",
-                raw.memory_auto_bootstrap,
-            )?,
-            memory_embedding_provider: raw.memory_embedding_provider,
-            memory_embedding_model: raw.memory_embedding_model,
-            memory_retrieval_reranker_mode: parse_optional(
-                "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
-                raw.memory_retrieval_reranker_mode,
-            )?,
-            memory_retrieval_lineage_enabled: parse_optional(
-                "MOA_MEMORY_RETRIEVAL_LINEAGE_ENABLED",
-                raw.memory_retrieval_lineage_enabled,
-            )?,
-            memory_digest_enabled: parse_optional(
-                "MOA_MEMORY_DIGEST_ENABLED",
-                raw.memory_digest_enabled,
-            )?,
-            memory_digest_max_tokens: parse_optional(
-                "MOA_MEMORY_DIGEST_MAX_TOKENS",
-                raw.memory_digest_max_tokens,
-            )?,
-            memory_digest_rebuild_min_interval_hours: parse_optional(
-                "MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS",
-                raw.memory_digest_rebuild_min_interval_hours,
-            )?,
-            memory_extraction_enabled: parse_optional(
-                "MOA_MEMORY_EXTRACTION_ENABLED",
-                raw.memory_extraction_enabled,
-            )?,
-            memory_extraction_api_key_env: raw.memory_extraction_api_key_env,
-            memory_extraction_model: raw.memory_extraction_model,
-            memory_extraction_max_facts_per_chunk: parse_optional(
-                "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
-                raw.memory_extraction_max_facts_per_chunk,
-            )?,
-            memory_extraction_timeout_ms: parse_optional(
-                "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
-                raw.memory_extraction_timeout_ms,
-            )?,
-            memory_vector_embedder_name: raw.memory_vector_embedder_name,
-            memory_vector_embedder_output_dim: parse_optional(
-                "MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM",
-                raw.memory_vector_embedder_output_dim,
-            )?,
-            memory_vector_embedder_cohere_api_key_env: raw
-                .memory_vector_embedder_cohere_api_key_env,
-            memory_vector_embedder_gemini_api_key_env: raw
-                .memory_vector_embedder_gemini_api_key_env,
-            memory_vector_embedder_gemini_default_role: raw
-                .memory_vector_embedder_gemini_default_role,
-            pii_service_url: parse_optional_url("MOA_PII_SERVICE_URL", raw.pii_service_url)?,
-            turbopuffer_api_key_env: raw.turbopuffer_api_key_env,
-            turbopuffer_base_url: parse_optional_url(
-                "MOA_TURBOPUFFER_BASE_URL",
-                raw.turbopuffer_base_url,
-            )?,
-            turbopuffer_environment: raw.turbopuffer_environment,
-            turbopuffer_baa: parse_optional("MOA_TURBOPUFFER_BAA", raw.turbopuffer_baa)?,
-            cloud_enabled: parse_optional("MOA_CLOUD_ENABLED", raw.cloud_enabled)?,
-            cloud_memory_dir: raw.cloud_memory_dir,
-            cloud_flyio_api_token_env: raw.cloud_flyio_api_token_env,
-            cloud_flyio_app_name: raw.cloud_flyio_app_name,
-            cloud_flyio_region: raw.cloud_flyio_region,
-            cloud_flyio_internal_port: parse_optional(
-                "MOA_CLOUD_FLYIO_INTERNAL_PORT",
-                raw.cloud_flyio_internal_port,
-            )?,
-            cloud_flyio_health_bind: raw.cloud_flyio_health_bind,
-            cloud_flyio_graceful_shutdown_timeout_secs: parse_optional(
-                "MOA_CLOUD_FLYIO_GRACEFUL_SHUTDOWN_TIMEOUT_SECS",
-                raw.cloud_flyio_graceful_shutdown_timeout_secs,
-            )?,
-            cloud_hands_default_provider: raw.cloud_hands_default_provider,
-            cloud_hands_daytona_api_key_env: raw.cloud_hands_daytona_api_key_env,
-            cloud_hands_daytona_api_url: parse_optional_url(
-                "MOA_CLOUD_HANDS_DAYTONA_API_URL",
-                raw.cloud_hands_daytona_api_url,
-            )?,
-            cloud_hands_daytona_default_image: raw.cloud_hands_daytona_default_image,
-            cloud_hands_e2b_api_key_env: raw.cloud_hands_e2b_api_key_env,
-            cloud_hands_e2b_api_url: parse_optional_url(
-                "MOA_CLOUD_HANDS_E2B_API_URL",
-                raw.cloud_hands_e2b_api_url,
-            )?,
-            cloud_hands_e2b_domain: raw.cloud_hands_e2b_domain,
-            cloud_hands_e2b_template: raw.cloud_hands_e2b_template,
-            gateway_telegram_token_env: raw.gateway_telegram_token_env,
-            gateway_slack_token_env: raw.gateway_slack_token_env,
-            gateway_slack_app_token_env: raw.gateway_slack_app_token_env,
-            gateway_discord_token_env: raw.gateway_discord_token_env,
-            permissions_default_posture: raw.permissions_default_posture,
-            permissions_auto_approve: raw.permissions_auto_approve.map(split_list),
-            permissions_always_deny: raw.permissions_always_deny.map(split_list),
-            session_blob_threshold_bytes: parse_optional(
-                "MOA_SESSION_BLOB_THRESHOLD_BYTES",
-                raw.session_blob_threshold_bytes,
-            )?,
-            session_blob_dir: raw.session_blob_dir,
-            compaction_enabled: parse_optional("MOA_COMPACTION_ENABLED", raw.compaction_enabled)?,
-            compaction_event_threshold: parse_optional(
-                "MOA_COMPACTION_EVENT_THRESHOLD",
-                raw.compaction_event_threshold,
-            )?,
-            compaction_token_ratio_threshold: parse_optional(
-                "MOA_COMPACTION_TOKEN_RATIO_THRESHOLD",
-                raw.compaction_token_ratio_threshold,
-            )?,
-            compaction_recent_turns_verbatim: parse_optional(
-                "MOA_COMPACTION_RECENT_TURNS_VERBATIM",
-                raw.compaction_recent_turns_verbatim,
-            )?,
-            compaction_preserve_errors: parse_optional(
-                "MOA_COMPACTION_PRESERVE_ERRORS",
-                raw.compaction_preserve_errors,
-            )?,
-            compaction_tier2_trigger_blocks_past_bp4: parse_optional(
-                "MOA_COMPACTION_TIER2_TRIGGER_BLOCKS_PAST_BP4",
-                raw.compaction_tier2_trigger_blocks_past_bp4,
-            )?,
-            compaction_tier3_trigger_fraction: parse_optional(
-                "MOA_COMPACTION_TIER3_TRIGGER_FRACTION",
-                raw.compaction_tier3_trigger_fraction,
-            )?,
-            compaction_max_input_tokens_per_turn: parse_optional(
-                "MOA_COMPACTION_MAX_INPUT_TOKENS_PER_TURN",
-                raw.compaction_max_input_tokens_per_turn,
-            )?,
-            restate_ingress_url: parse_optional_url(
-                "MOA_RESTATE_INGRESS_URL",
-                raw.restate_ingress_url,
-            )?,
-            restate_admin_url: parse_optional_url("MOA_RESTATE_ADMIN_URL", raw.restate_admin_url)?,
-            restate_llm_gateway_url: parse_optional_url(
-                "MOA_RESTATE_LLM_GATEWAY_URL",
-                raw.restate_llm_gateway_url,
-            )?,
-            orchestrator_endpoint: parse_optional_url(
-                "MOA_ORCHESTRATOR_ENDPOINT",
-                raw.orchestrator_endpoint,
-            )?,
-            orchestrator_health_url: parse_optional_url(
-                "MOA_ORCHESTRATOR_HEALTH_URL",
-                raw.orchestrator_health_url,
-            )?,
-            observability_enabled: parse_optional(
-                "MOA_OBSERVABILITY_ENABLED",
-                raw.observability_enabled,
-            )?,
-            observability_service_name: raw.observability_service_name,
-            observability_otlp_endpoint: parse_optional_url(
-                "MOA_OBSERVABILITY_OTLP_ENDPOINT",
-                raw.observability_otlp_endpoint,
-            )?,
-            observability_otlp_protocol: parse_optional_enum(
-                "MOA_OBSERVABILITY_OTLP_PROTOCOL",
-                raw.observability_otlp_protocol,
-                parse_otlp_protocol,
-            )?,
-            observability_otlp_headers: raw
-                .observability_otlp_headers
-                .map(|value| parse_headers("MOA_OBSERVABILITY_OTLP_HEADERS", &value))
-                .transpose()?,
-            observability_environment: raw.observability_environment,
-            observability_release: raw.observability_release,
-            observability_sample_rate: parse_optional(
-                "MOA_OBSERVABILITY_SAMPLE_RATE",
-                raw.observability_sample_rate,
-            )?,
-            observability_lineage_enabled: parse_optional(
-                "MOA_OBSERVABILITY_LINEAGE_ENABLED",
-                raw.observability_lineage_enabled,
-            )?,
-            observability_lineage_channel_capacity: parse_optional(
-                "MOA_OBSERVABILITY_LINEAGE_CHANNEL_CAPACITY",
-                raw.observability_lineage_channel_capacity,
-            )?,
-            observability_lineage_batch_size: parse_optional(
-                "MOA_OBSERVABILITY_LINEAGE_BATCH_SIZE",
-                raw.observability_lineage_batch_size,
-            )?,
-            observability_lineage_batch_max_age_secs: parse_optional(
-                "MOA_OBSERVABILITY_LINEAGE_BATCH_MAX_AGE_SECS",
-                raw.observability_lineage_batch_max_age_secs,
-            )?,
-            observability_lineage_journal_path: raw.observability_lineage_journal_path,
-            observability_lineage_sample_pgvector_explain: parse_optional(
-                "MOA_OBSERVABILITY_LINEAGE_SAMPLE_PGVECTOR_EXPLAIN",
-                raw.observability_lineage_sample_pgvector_explain,
-            )?,
-            metrics_enabled: parse_optional("MOA_METRICS_ENABLED", raw.metrics_enabled)?,
-            metrics_listen: raw.metrics_listen,
-            budgets_daily_workspace_cents: parse_optional(
-                "MOA_BUDGETS_DAILY_WORKSPACE_CENTS",
-                raw.budgets_daily_workspace_cents,
-            )?,
-            session_limits_max_turns: parse_optional(
-                "MOA_SESSION_LIMITS_MAX_TURNS",
-                raw.session_limits_max_turns,
-            )?,
-            session_limits_loop_detection_threshold: parse_optional(
-                "MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD",
-                raw.session_limits_loop_detection_threshold,
-            )?,
-            tool_output_max_replay_chars: parse_optional(
-                "MOA_TOOL_OUTPUT_MAX_REPLAY_CHARS",
-                raw.tool_output_max_replay_chars,
-            )?,
-            tool_output_max_bash_lines: parse_optional(
-                "MOA_TOOL_OUTPUT_MAX_BASH_LINES",
-                raw.tool_output_max_bash_lines,
-            )?,
-            tool_output_head_ratio: parse_optional(
-                "MOA_TOOL_OUTPUT_HEAD_RATIO",
-                raw.tool_output_head_ratio,
-            )?,
-            tool_budgets_file_read: parse_optional(
-                "MOA_TOOL_BUDGETS_FILE_READ",
-                raw.tool_budgets_file_read,
-            )?,
-            tool_budgets_bash_stdout: parse_optional(
-                "MOA_TOOL_BUDGETS_BASH_STDOUT",
-                raw.tool_budgets_bash_stdout,
-            )?,
-            tool_budgets_bash_stderr: parse_optional(
-                "MOA_TOOL_BUDGETS_BASH_STDERR",
-                raw.tool_budgets_bash_stderr,
-            )?,
-            tool_budgets_grep: parse_optional("MOA_TOOL_BUDGETS_GREP", raw.tool_budgets_grep)?,
-            tool_budgets_file_search: parse_optional(
-                "MOA_TOOL_BUDGETS_FILE_SEARCH",
-                raw.tool_budgets_file_search,
-            )?,
-            tool_budgets_memory_search: parse_optional(
-                "MOA_TOOL_BUDGETS_MEMORY_SEARCH",
-                raw.tool_budgets_memory_search,
-            )?,
-            tool_budgets_file_outline: parse_optional(
-                "MOA_TOOL_BUDGETS_FILE_OUTLINE",
-                raw.tool_budgets_file_outline,
-            )?,
-            tool_budgets_default: parse_optional(
-                "MOA_TOOL_BUDGETS_DEFAULT",
-                raw.tool_budgets_default,
-            )?,
-            skill_budget_max_manifest_chars: parse_optional(
-                "MOA_SKILL_BUDGET_MAX_MANIFEST_CHARS",
-                raw.skill_budget_max_manifest_chars,
-            )?,
-            skill_budget_max_per_skill_chars: parse_optional(
-                "MOA_SKILL_BUDGET_MAX_PER_SKILL_CHARS",
-                raw.skill_budget_max_per_skill_chars,
-            )?,
-            skill_budget_show_token_estimates: parse_optional(
-                "MOA_SKILL_BUDGET_SHOW_TOKEN_ESTIMATES",
-                raw.skill_budget_show_token_estimates,
-            )?,
-            query_rewrite_enabled: parse_optional(
-                "MOA_QUERY_REWRITE_ENABLED",
-                raw.query_rewrite_enabled,
-            )?,
-            query_rewrite_model: raw.query_rewrite_model,
-            query_rewrite_timeout_ms: parse_optional(
-                "MOA_QUERY_REWRITE_TIMEOUT_MS",
-                raw.query_rewrite_timeout_ms,
-            )?,
-            query_rewrite_min_query_tokens: parse_optional(
-                "MOA_QUERY_REWRITE_MIN_QUERY_TOKENS",
-                raw.query_rewrite_min_query_tokens,
-            )?,
-            query_rewrite_skip_single_turn: parse_optional(
-                "MOA_QUERY_REWRITE_SKIP_SINGLE_TURN",
-                raw.query_rewrite_skip_single_turn,
-            )?,
-            query_rewrite_circuit_breaker_threshold: parse_optional(
-                "MOA_QUERY_REWRITE_CIRCUIT_BREAKER_THRESHOLD",
-                raw.query_rewrite_circuit_breaker_threshold,
-            )?,
-            query_rewrite_circuit_breaker_window_secs: parse_optional(
-                "MOA_QUERY_REWRITE_CIRCUIT_BREAKER_WINDOW_SECS",
-                raw.query_rewrite_circuit_breaker_window_secs,
-            )?,
-            query_rewrite_circuit_breaker_cooldown_secs: parse_optional(
-                "MOA_QUERY_REWRITE_CIRCUIT_BREAKER_COOLDOWN_SECS",
-                raw.query_rewrite_circuit_breaker_cooldown_secs,
-            )?,
-            resolution_enabled: parse_optional("MOA_RESOLUTION_ENABLED", raw.resolution_enabled)?,
-            resolution_weights_tool: parse_optional(
-                "MOA_RESOLUTION_WEIGHTS_TOOL",
-                raw.resolution_weights_tool,
-            )?,
-            resolution_weights_verification: parse_optional(
-                "MOA_RESOLUTION_WEIGHTS_VERIFICATION",
-                raw.resolution_weights_verification,
-            )?,
-            resolution_weights_continuation: parse_optional(
-                "MOA_RESOLUTION_WEIGHTS_CONTINUATION",
-                raw.resolution_weights_continuation,
-            )?,
-            resolution_weights_self_assessment: parse_optional(
-                "MOA_RESOLUTION_WEIGHTS_SELF_ASSESSMENT",
-                raw.resolution_weights_self_assessment,
-            )?,
-            resolution_weights_structural: parse_optional(
-                "MOA_RESOLUTION_WEIGHTS_STRUCTURAL",
-                raw.resolution_weights_structural,
-            )?,
-            resolution_use_llm_self_assessment: parse_optional(
-                "MOA_RESOLUTION_USE_LLM_SELF_ASSESSMENT",
-                raw.resolution_use_llm_self_assessment,
-            )?,
-            resolution_self_assessment_timeout_ms: parse_optional(
-                "MOA_RESOLUTION_SELF_ASSESSMENT_TIMEOUT_MS",
-                raw.resolution_self_assessment_timeout_ms,
-            )?,
-            resolution_rephrase_similarity_threshold: parse_optional(
-                "MOA_RESOLUTION_REPHRASE_SIMILARITY_THRESHOLD",
-                raw.resolution_rephrase_similarity_threshold,
-            )?,
-            resolution_structural_min_samples: parse_optional(
-                "MOA_RESOLUTION_STRUCTURAL_MIN_SAMPLES",
-                raw.resolution_structural_min_samples,
-            )?,
-            resolution_idle_timeout_minutes: parse_optional(
-                "MOA_RESOLUTION_IDLE_TIMEOUT_MINUTES",
-                raw.resolution_idle_timeout_minutes,
-            )?,
-            context_snapshot_enabled: parse_optional(
-                "MOA_CONTEXT_SNAPSHOT_ENABLED",
-                raw.context_snapshot_enabled,
-            )?,
-            context_snapshot_max_size_bytes: parse_optional(
-                "MOA_CONTEXT_SNAPSHOT_MAX_SIZE_BYTES",
-                raw.context_snapshot_max_size_bytes,
-            )?,
-        })
-    }
-}
-
-fn parse_auth_header_trust(value: &str) -> Option<AuthHeaderTrustKind> {
-    match value {
-        "strict" => Some(AuthHeaderTrustKind::Strict),
-        "lenient" => Some(AuthHeaderTrustKind::Lenient),
-        _ => None,
-    }
-}
-
-fn parse_auth_provider(value: &str) -> Option<AuthProviderKind> {
-    match value {
-        "local" => Some(AuthProviderKind::Local),
-        "disabled" | "none" => Some(AuthProviderKind::Disabled),
-        "auth0" => Some(AuthProviderKind::Auth0),
-        "oidc" => Some(AuthProviderKind::Oidc),
-        _ => None,
-    }
-}
-
-fn parse_authz_engine(value: &str) -> Option<AuthzEngine> {
-    match value {
-        "openfga" => Some(AuthzEngine::Openfga),
-        "auth0_fga" => Some(AuthzEngine::Auth0Fga),
-        _ => None,
-    }
-}
-
-fn parse_token_vault_provider(value: &str) -> Option<TokenVaultKind> {
-    match value {
-        "none" => Some(TokenVaultKind::None),
-        "auth0" => Some(TokenVaultKind::Auth0),
-        _ => None,
-    }
-}
-
-fn parse_async_authz_provider(value: &str) -> Option<AsyncAuthzKind> {
-    match value {
-        "builtin" => Some(AsyncAuthzKind::Builtin),
-        "auth0" => Some(AsyncAuthzKind::Auth0),
-        _ => None,
-    }
-}
-
-fn parse_otlp_protocol(value: &str) -> Option<OtlpProtocol> {
-    match value {
-        "grpc" => Some(OtlpProtocol::Grpc),
-        "http" => Some(OtlpProtocol::Http),
-        _ => None,
-    }
-}
-
-fn parse_optional<T>(env_name: &'static str, raw: Option<String>) -> Result<Option<T>>
+/// Deserializes a comma-separated env value into a trimmed, non-empty list.
+fn deserialize_optional_list<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
 where
-    T: FromStr,
-    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
 {
-    raw.map(|value| parse_value(env_name, &value)).transpose()
+    let raw = String::deserialize(deserializer)?;
+    Ok(Some(split_list(raw)))
 }
 
-fn parse_value<T>(env_name: &'static str, value: &str) -> Result<T>
+/// Deserializes a comma-separated `key=value` env value into a header map.
+fn deserialize_optional_headers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<HashMap<String, String>>, D::Error>
 where
-    T: FromStr,
-    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
 {
-    value
-        .parse::<T>()
-        .map_err(|error| parse_error(env_name, value, error))
+    let raw = String::deserialize(deserializer)?;
+    parse_headers(&raw)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
-fn parse_optional_enum<T>(
-    env_name: &'static str,
-    raw: Option<String>,
-    parse: impl Fn(&str) -> Option<T>,
-) -> Result<Option<T>> {
-    raw.map(|value| {
-        parse(&value).ok_or_else(|| {
-            MoaError::ConfigError(format!("{env_name} has unsupported value `{value}`"))
-        })
-    })
-    .transpose()
-}
-
-fn parse_optional_url(env_name: &'static str, raw: Option<String>) -> Result<Option<String>> {
-    raw.map(|value| {
-        reqwest::Url::parse(&value).map_err(|error| parse_error(env_name, &value, error))?;
-        Ok(value)
-    })
-    .transpose()
-}
-
-fn parse_headers(env_name: &'static str, value: &str) -> Result<HashMap<String, String>> {
+/// Parses a comma-separated `key=value` list into a header map.
+fn parse_headers(value: &str) -> std::result::Result<HashMap<String, String>, String> {
     let mut headers = HashMap::new();
     if value.trim().is_empty() {
         return Ok(headers);
     }
     for entry in value.split(',') {
-        let (key, header_value) = entry.split_once('=').ok_or_else(|| {
-            MoaError::ConfigError(format!("{env_name} entry `{entry}` must use key=value"))
-        })?;
+        let (key, header_value) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("header entry `{entry}` must use key=value"))?;
         let key = key.trim();
         if key.is_empty() {
-            return Err(MoaError::ConfigError(format!(
-                "{env_name} contains an empty header name"
-            )));
+            return Err("header entry contains an empty header name".to_string());
         }
         headers.insert(key.to_string(), header_value.trim().to_string());
     }
@@ -1958,11 +1334,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_enum_reports_env_name() {
-        // Pins: enum parse failures name the canonical env var.
+    fn invalid_enum_reports_offending_value() {
+        // Pins: unsupported enum values are rejected. envy/serde deserialize
+        // enums directly, so the message names the rejected variant rather than
+        // the `MOA_` env var (see `restore_env_prefix`).
         assert_config_error_contains(
             MoaEnvOverlay::from_iter(env_pairs([("MOA_AUTH_PROVIDER", "saml")])),
-            "MOA_AUTH_PROVIDER",
+            "saml",
         );
     }
 
@@ -1984,7 +1362,7 @@ mod tests {
         );
         assert_config_error_contains(
             MoaEnvOverlay::from_iter(env_pairs([("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "auto")])),
-            "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
+            "auto",
         );
     }
 

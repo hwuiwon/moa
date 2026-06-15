@@ -1,9 +1,10 @@
 //! Async lineage writer worker.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
+use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
 use moa_lineage_core::chain::{HashChain, canonical_payload_hash, hash_from_slice};
 use moa_lineage_core::{LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
@@ -265,39 +266,37 @@ async fn write_pending_rows_with_retry(
     pool: &sqlx::PgPool,
     rows: &[PendingRow],
 ) -> std::result::Result<(), WriteFailure> {
-    let mut delay = Duration::from_millis(100);
-    for attempt in 1..=WRITE_RETRY_MAX_ATTEMPTS {
-        match write_pending_rows(pool, rows).await {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                if !should_retry_write(&error, attempt) {
-                    tracing::error!(
-                        %error,
-                        attempt,
-                        max_attempts = WRITE_RETRY_MAX_ATTEMPTS,
-                        "lineage write failed permanently"
-                    );
-                    return Err(WriteFailure {
-                        error,
-                        attempts: attempt,
-                    });
-                }
-                tracing::warn!(
-                    %error,
-                    attempt,
-                    max_attempts = WRITE_RETRY_MAX_ATTEMPTS,
-                    retry_after_ms = delay.as_millis(),
-                    "lineage write failed"
-                );
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(5));
-            }
-        }
-    }
+    let backoff = ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(100))
+        .with_max_delay(Duration::from_secs(5))
+        .with_max_times(WRITE_RETRY_MAX_ATTEMPTS as usize - 1);
+    let attempts = AtomicU32::new(0);
 
-    Err(WriteFailure {
-        error: Error::Invalid("lineage write retry loop exhausted unexpectedly".to_string()),
-        attempts: WRITE_RETRY_MAX_ATTEMPTS,
+    (|| async {
+        attempts.fetch_add(1, Ordering::Relaxed);
+        write_pending_rows(pool, rows).await
+    })
+    .retry(backoff)
+    .when(is_retryable_write_error)
+    .notify(|error, delay| {
+        tracing::warn!(
+            %error,
+            attempt = attempts.load(Ordering::Relaxed),
+            max_attempts = WRITE_RETRY_MAX_ATTEMPTS,
+            retry_after_ms = delay.as_millis(),
+            "lineage write failed"
+        );
+    })
+    .await
+    .map_err(|error| {
+        let attempts = attempts.load(Ordering::Relaxed);
+        tracing::error!(
+            %error,
+            attempts,
+            max_attempts = WRITE_RETRY_MAX_ATTEMPTS,
+            "lineage write failed permanently"
+        );
+        WriteFailure { error, attempts }
     })
 }
 
@@ -373,10 +372,6 @@ fn row_turn_id(row: &PendingRow) -> Option<Uuid> {
         PendingRow::Lineage(row) => Some(row.turn_id),
         PendingRow::Score(row) => row.turn_id,
     }
-}
-
-fn should_retry_write(error: &Error, attempt: u32) -> bool {
-    attempt < WRITE_RETRY_MAX_ATTEMPTS && is_retryable_write_error(error)
 }
 
 fn is_retryable_write_error(error: &Error) -> bool {
@@ -1064,21 +1059,19 @@ mod tests {
     }
 
     #[test]
-    fn write_retry_policy_is_bounded_and_sqlstate_aware() {
-        // Pins: lineage writer retries transient database failures but never loops forever.
+    fn write_retry_classification_is_sqlstate_aware() {
+        // Pins: lineage writer retries transient database failures but not
+        // permanent ones. The attempt count is bounded structurally by the
+        // backon `with_max_times(WRITE_RETRY_MAX_ATTEMPTS - 1)` budget.
         assert!(super::is_retryable_postgres_sqlstate("08006"));
         assert!(super::is_retryable_postgres_sqlstate("40001"));
         assert!(!super::is_retryable_postgres_sqlstate("23505"));
 
         let permanent = super::Error::Invalid("poison row".to_string());
-        assert!(!super::should_retry_write(&permanent, 1));
+        assert!(!super::is_retryable_write_error(&permanent));
 
         let transient = super::Error::Sqlx(sqlx::Error::PoolTimedOut);
-        assert!(super::should_retry_write(&transient, 1));
-        assert!(!super::should_retry_write(
-            &transient,
-            super::WRITE_RETRY_MAX_ATTEMPTS
-        ));
+        assert!(super::is_retryable_write_error(&transient));
     }
 
     #[test]

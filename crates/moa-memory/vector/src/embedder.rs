@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use backon::{ExponentialBuilder, Retryable};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
 
 use moa_core::traits::EmbeddingProvider;
 
@@ -15,6 +15,8 @@ use crate::{Error, Result, VECTOR_DIMENSION, validate_dimension};
 const COHERE_EMBED_URL: &str = "https://api.cohere.com/v2/embed";
 const COHERE_MODEL: &str = "embed-v4.0";
 const COHERE_MAX_TEXTS: usize = 96;
+const RETRY_MIN_DELAY: Duration = Duration::from_millis(200);
+const RETRY_ATTEMPTS: usize = 2;
 
 /// Cohere Embed v4 client configured for 1024-dimensional float embeddings.
 #[derive(Clone)]
@@ -54,39 +56,48 @@ impl CohereV4Embedder {
             embedding_types: ["float"],
             output_dimension: VECTOR_DIMENSION,
         };
+        let backoff = ExponentialBuilder::default()
+            .with_min_delay(RETRY_MIN_DELAY)
+            .with_max_times(RETRY_ATTEMPTS);
 
-        let mut attempt = 0_u32;
-        loop {
-            let response = self
-                .client
-                .post(&self.endpoint)
-                .bearer_auth(self.api_key.expose_secret())
-                .json(&request)
-                .send()
-                .await?;
-            let status = response.status();
-            if status.is_success() {
-                let body = response.json::<CohereEmbedResponse>().await?;
-                return Ok(body.embeddings.float);
-            }
-
-            let retryable = status.as_u16() == 429 || status.is_server_error();
-            let body = match response.text().await {
-                Ok(body) => body,
-                Err(error) => format!("failed to read error body: {error}"),
-            };
-            if retryable && attempt < 2 {
-                attempt += 1;
-                sleep(Duration::from_millis(200 * u64::from(attempt))).await;
-                continue;
-            }
-
-            return Err(Error::ProviderStatus {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        (|| async { self.embed_chunk_once(&request).await })
+            .retry(backoff)
+            .when(is_retryable)
+            .await
     }
+
+    async fn embed_chunk_once(&self, request: &CohereEmbedRequest<'_>) -> Result<Vec<Vec<f32>>> {
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(self.api_key.expose_secret())
+            .json(request)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            let body = response.json::<CohereEmbedResponse>().await?;
+            return Ok(body.embeddings.float);
+        }
+
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => format!("failed to read error body: {error}"),
+        };
+        Err(Error::ProviderStatus {
+            status: status.as_u16(),
+            body,
+        })
+    }
+}
+
+/// Retries only on Cohere rate-limit (429) and server (5xx) responses, matching
+/// the previous hand-rolled loop; transport errors propagate immediately.
+fn is_retryable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::ProviderStatus { status, .. } if *status == 429 || (500..=599).contains(status)
+    )
 }
 
 #[async_trait]

@@ -113,6 +113,7 @@ async-openai = { version = "0.34", default-features = false, features = [
     "rustls",
 ] }
 axum = "0.8"
+backon = "1"
 base64 = "0.22"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }

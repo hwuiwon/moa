@@ -3,6 +3,7 @@ use std::time::Duration;
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
+use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
@@ -258,33 +259,33 @@ impl PostgresSessionStore {
         connect_timeout_secs: u64,
         max_retries: u32,
     ) -> Result<PgPool> {
-        for attempt in 1..=max_retries {
-            let options = PgPoolOptions::new()
+        let backoff = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(500))
+            .with_max_times(max_retries.saturating_sub(1) as usize);
+
+        (|| async {
+            PgPoolOptions::new()
                 .min_connections(pool_min)
                 .max_connections(pool_max)
-                .acquire_timeout(Duration::from_secs(connect_timeout_secs));
-            match options.connect(database_url).await {
-                Ok(pool) => return Ok(pool),
-                Err(error) if attempt < max_retries => {
-                    warn!(
-                        attempt,
-                        max_retries,
-                        error = %error,
-                        "postgres connection failed, retrying"
-                    );
-                    tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
-                }
-                Err(error) => {
-                    return Err(MoaError::StorageError(format!(
-                        "postgres connection failed after {max_retries} attempts: {error}"
-                    )));
-                }
-            }
-        }
-
-        Err(MoaError::StorageError(
-            "postgres connection retry loop terminated unexpectedly".to_string(),
-        ))
+                .acquire_timeout(Duration::from_secs(connect_timeout_secs))
+                .connect(database_url)
+                .await
+        })
+        .retry(backoff)
+        .notify(|error, delay| {
+            warn!(
+                max_retries,
+                delay_ms = delay.as_millis(),
+                error = %error,
+                "postgres connection failed, retrying"
+            );
+        })
+        .await
+        .map_err(|error| {
+            MoaError::StorageError(format!(
+                "postgres connection failed after {max_retries} attempts: {error}"
+            ))
+        })
     }
 
     fn table_name(&self, table_name: &str) -> String {
