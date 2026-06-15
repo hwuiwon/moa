@@ -1,0 +1,403 @@
+[matrix]
+description = "Task-conditioned learning reuse coverage across domains, actions, artifacts, languages, and risk classes."
+min_cases = 50
+
+[[cases]]
+id = "auth_rust_contract_regression"
+category = "auth"
+task_summary = "Fix Rust auth API contract regression and run validator."
+expected_skill = "auth-rust-contract-repair"
+skill_description = "Rust auth API contract repair workflow with validator verification, request response shape checks, and contract-focused debugging."
+tags = ["auth", "rust", "contract"]
+
+[[cases]]
+id = "auth_token_rotation_config"
+category = "auth"
+task_summary = "Implement Rust auth token rotation config and run validator."
+expected_skill = "auth-token-rotation-config"
+skill_description = "Rust auth token rotation configuration workflow with validator verification, credential safety checks, and rollout guardrails."
+tags = ["auth", "rust", "config"]
+
+[[cases]]
+id = "auth_oauth_callback_test"
+category = "auth"
+task_summary = "Add Rust oauth callback test scenario and run validator."
+expected_skill = "auth-oauth-callback-test"
+skill_description = "Rust oauth callback test authoring workflow with validator verification, redirect fixtures, and auth edge-case coverage."
+tags = ["auth", "oauth", "test"]
+
+[[cases]]
+id = "auth_credential_redaction_review"
+category = "auth"
+task_summary = "Review Rust auth credential redaction code and run validator."
+expected_skill = "auth-credential-redaction-review"
+skill_description = "Rust auth credential redaction review workflow with validator verification, secret handling checks, and security risk notes."
+tags = ["auth", "credential", "review"]
+
+[[cases]]
+id = "auth_oidc_login_release"
+category = "auth"
+task_summary = "Deploy Rust oidc login release config and run validator."
+expected_skill = "auth-oidc-login-release"
+skill_description = "Rust oidc login release configuration workflow with validator verification, deployment sequencing, and rollback checks."
+tags = ["auth", "oidc", "deploy"]
+
+[[cases]]
+id = "memory_graph_retrieval_regression"
+category = "memory"
+task_summary = "Fix Rust memory graph retrieval regression and run validator."
+expected_skill = "memory-graph-retrieval-repair"
+skill_description = "Rust memory graph retrieval repair workflow with validator verification, graph candidate checks, and recall regression triage."
+tags = ["memory", "graph", "rust"]
+
+[[cases]]
+id = "memory_embedding_index_migration"
+category = "memory"
+task_summary = "Implement Postgres memory embedding index migration and run validator."
+expected_skill = "memory-embedding-index-migration"
+skill_description = "Postgres memory embedding index migration workflow with validator verification, pgvector safety checks, and backfill planning."
+tags = ["memory", "postgres", "migration"]
+
+[[cases]]
+id = "memory_consolidation_policy_review"
+category = "memory"
+task_summary = "Review Rust memory consolidation policy code and run validator."
+expected_skill = "memory-consolidation-policy-review"
+skill_description = "Rust memory consolidation policy review workflow with validator verification, privacy checks, and durable learning audit notes."
+tags = ["memory", "policy", "review"]
+
+[[cases]]
+id = "memory_retrieval_eval_scenario"
+category = "memory"
+task_summary = "Add Rust memory retrieval eval test scenario and run validator."
+expected_skill = "memory-retrieval-eval-authoring"
+skill_description = "Rust memory retrieval eval scenario authoring workflow with validator verification, planted facts, and budget-gate assertions."
+tags = ["memory", "eval", "test"]
+
+[[cases]]
+id = "memory_privacy_filter_config"
+category = "memory"
+task_summary = "Fix Rust memory privacy filter config and run validator."
+expected_skill = "memory-privacy-filter-config"
+skill_description = "Rust memory privacy filter configuration workflow with validator verification, scope isolation checks, and leakage prevention."
+tags = ["memory", "privacy", "config"]
+
+[[cases]]
+id = "skill_distillation_regression"
+category = "skills"
+task_summary = "Fix Rust skill distillation regression and run validator."
+expected_skill = "skill-distillation-repair"
+skill_description = "Rust skill distillation repair workflow with validator verification, package generation checks, and learning-log validation."
+tags = ["skill", "distillation", "rust"]
+
+[[cases]]
+id = "skill_manifest_budget_test"
+category = "skills"
+task_summary = "Add Rust skill manifest budget test and run validator."
+expected_skill = "skill-manifest-budget-test"
+skill_description = "Rust skill manifest budget test workflow with validator verification, deterministic ranking checks, and prompt-budget assertions."
+tags = ["skill", "manifest", "test"]
+
+[[cases]]
+id = "skill_learning_policy_docs"
+category = "skills"
+task_summary = "Document Rust skill learning policy README and run validator."
+expected_skill = "skill-learning-policy-docs"
+skill_description = "Rust skill learning policy documentation workflow with validator verification, README structure, and promotion-gate notes."
+tags = ["skill", "docs", "policy"]
+
+[[cases]]
+id = "skill_activation_ranking_code"
+category = "skills"
+task_summary = "Implement Rust skill activation ranking code and run validator."
+expected_skill = "skill-activation-ranking-code"
+skill_description = "Rust skill activation ranking implementation workflow with validator verification, task-rate weighting, and deterministic sorting."
+tags = ["skill", "ranking", "rust"]
+
+[[cases]]
+id = "skill_package_import_config"
+category = "skills"
+task_summary = "Fix Rust skill package import config and run validator."
+expected_skill = "skill-package-import-config"
+skill_description = "Rust skill package import configuration workflow with validator verification, manifest parsing checks, and package-file safety."
+tags = ["skill", "import", "config"]
+
+[[cases]]
+id = "postgres_migration_rollback"
+category = "database"
+task_summary = "Fix Postgres schema migration rollback code and run validator."
+expected_skill = "postgres-migration-rollback-repair"
+skill_description = "Postgres schema migration rollback repair workflow with validator verification, transaction safety, and compatibility checks."
+tags = ["postgres", "migration", "rollback"]
+
+[[cases]]
+id = "sql_view_refresh_regression"
+category = "database"
+task_summary = "Fix SQL materialized view refresh regression and run validator."
+expected_skill = "sql-view-refresh-repair"
+skill_description = "SQL materialized view refresh repair workflow with validator verification, aggregate consistency checks, and refresh ordering."
+tags = ["sql", "view", "regression"]
+
+[[cases]]
+id = "pgvector_index_config"
+category = "database"
+task_summary = "Implement Postgres pgvector index config and run validator."
+expected_skill = "pgvector-index-config"
+skill_description = "Postgres pgvector index configuration workflow with validator verification, query-plan checks, and retrieval latency notes."
+tags = ["postgres", "pgvector", "config"]
+
+[[cases]]
+id = "database_rls_policy_review"
+category = "database"
+task_summary = "Review Postgres RLS policy migration and run validator."
+expected_skill = "database-rls-policy-review"
+skill_description = "Postgres RLS policy migration review workflow with validator verification, tenant isolation checks, and privilege boundary notes."
+tags = ["postgres", "policy", "review"]
+
+[[cases]]
+id = "schema_changelog_test"
+category = "database"
+task_summary = "Add Postgres schema changelog test and run validator."
+expected_skill = "schema-changelog-test"
+skill_description = "Postgres schema changelog test workflow with validator verification, DAG invariants, and migration fixture coverage."
+tags = ["postgres", "schema", "test"]
+
+[[cases]]
+id = "restate_workflow_resume"
+category = "runtime"
+task_summary = "Fix Rust Restate workflow resume regression and run validator."
+expected_skill = "restate-workflow-resume-repair"
+skill_description = "Rust Restate workflow resume repair workflow with validator verification, replay safety checks, and session continuity."
+tags = ["restate", "workflow", "rust"]
+
+[[cases]]
+id = "orchestrator_session_queue"
+category = "runtime"
+task_summary = "Implement Rust orchestrator session queue code and run validator."
+expected_skill = "orchestrator-session-queue-code"
+skill_description = "Rust orchestrator session queue implementation workflow with validator verification, FIFO checks, and runtime lifecycle assertions."
+tags = ["orchestrator", "session", "rust"]
+
+[[cases]]
+id = "runtime_approval_pause_test"
+category = "runtime"
+task_summary = "Add Rust runtime approval pause test and run validator."
+expected_skill = "runtime-approval-pause-test"
+skill_description = "Rust runtime approval pause test workflow with validator verification, pause-resume sequencing, and approval event assertions."
+tags = ["runtime", "approval", "test"]
+
+[[cases]]
+id = "workflow_cancel_policy"
+category = "runtime"
+task_summary = "Review Rust workflow cancel policy and run validator."
+expected_skill = "workflow-cancel-policy-review"
+skill_description = "Rust workflow cancel policy review workflow with validator verification, cancellation boundaries, and persisted-state checks."
+tags = ["workflow", "policy", "review"]
+
+[[cases]]
+id = "session_checkpoint_config"
+category = "runtime"
+task_summary = "Fix Rust session checkpoint config and run validator."
+expected_skill = "session-checkpoint-config"
+skill_description = "Rust session checkpoint configuration workflow with validator verification, compaction thresholds, and replay-safe defaults."
+tags = ["session", "checkpoint", "config"]
+
+[[cases]]
+id = "docs_migration_readme"
+category = "docs"
+task_summary = "Document Rust migration README updates and run validator."
+expected_skill = "docs-migration-readme"
+skill_description = "Rust migration README documentation workflow with validator verification, reader path cleanup, and implementation alignment."
+tags = ["docs", "migration", "readme"]
+
+[[cases]]
+id = "docs_auth_policy_review"
+category = "docs"
+task_summary = "Review auth policy docs and run validator."
+expected_skill = "docs-auth-policy-review"
+skill_description = "Auth policy documentation review workflow with validator verification, authorization ordering, and security review notes."
+tags = ["docs", "auth", "policy"]
+
+[[cases]]
+id = "docs_release_notes"
+category = "docs"
+task_summary = "Document deploy release notes config and run validator."
+expected_skill = "docs-release-notes-config"
+skill_description = "Deploy release notes documentation workflow with validator verification, config references, and rollout-risk summaries."
+tags = ["docs", "deploy", "config"]
+
+[[cases]]
+id = "docs_memory_graph"
+category = "docs"
+task_summary = "Document memory graph README and run validator."
+expected_skill = "docs-memory-graph-readme"
+skill_description = "Memory graph README documentation workflow with validator verification, graph concepts, and retrieval source-of-truth notes."
+tags = ["docs", "memory", "graph"]
+
+[[cases]]
+id = "docs_skill_onboarding"
+category = "docs"
+task_summary = "Document skill onboarding README and run validator."
+expected_skill = "docs-skill-onboarding-readme"
+skill_description = "Skill onboarding README documentation workflow with validator verification, package layout, and progressive-disclosure guidance."
+tags = ["docs", "skill", "readme"]
+
+[[cases]]
+id = "react_login_ui_bug"
+category = "frontend"
+task_summary = "Fix React login UI code regression and run validator."
+expected_skill = "react-login-ui-repair"
+skill_description = "React login UI repair workflow with validator verification, auth screen checks, and TypeScript component guardrails."
+tags = ["react", "ui", "auth"]
+
+[[cases]]
+id = "next_auth_config"
+category = "frontend"
+task_summary = "Implement Next auth config and run validator."
+expected_skill = "next-auth-config"
+skill_description = "Next auth configuration workflow with validator verification, route setup checks, and frontend authentication defaults."
+tags = ["next", "auth", "config"]
+
+[[cases]]
+id = "typescript_memory_panel_test"
+category = "frontend"
+task_summary = "Add TypeScript memory panel test and run validator."
+expected_skill = "typescript-memory-panel-test"
+skill_description = "TypeScript memory panel test workflow with validator verification, UI state assertions, and memory recall fixtures."
+tags = ["typescript", "memory", "test"]
+
+[[cases]]
+id = "css_approval_banner"
+category = "frontend"
+task_summary = "Fix CSS approval banner UI code and run validator."
+expected_skill = "css-approval-banner-repair"
+skill_description = "CSS approval banner UI repair workflow with validator verification, layout checks, and approval state styling."
+tags = ["css", "approval", "ui"]
+
+[[cases]]
+id = "frontend_docs_review"
+category = "frontend"
+task_summary = "Review React UI docs and run validator."
+expected_skill = "frontend-react-docs-review"
+skill_description = "React UI documentation review workflow with validator verification, component guidance, and frontend interaction notes."
+tags = ["react", "docs", "review"]
+
+[[cases]]
+id = "research_deploy_latency"
+category = "research"
+task_summary = "Research deploy latency config and run validator."
+expected_skill = "research-deploy-latency-config"
+skill_description = "Deploy latency research workflow with validator verification, config evidence collection, and quality-cost tradeoff notes."
+tags = ["research", "deploy", "latency"]
+
+[[cases]]
+id = "analyze_auth_failures"
+category = "research"
+task_summary = "Analyze Rust auth failure code and run validator."
+expected_skill = "analyze-auth-failure-code"
+skill_description = "Rust auth failure analysis workflow with validator verification, trace inspection, and regression root-cause notes."
+tags = ["analyze", "auth", "rust"]
+
+[[cases]]
+id = "investigate_memory_cost"
+category = "research"
+task_summary = "Investigate memory retrieval cost config and run validator."
+expected_skill = "investigate-memory-cost-config"
+skill_description = "Memory retrieval cost investigation workflow with validator verification, token accounting, and latency-cost comparison."
+tags = ["investigate", "memory", "cost"]
+
+[[cases]]
+id = "research_postgres_query_plan"
+category = "research"
+task_summary = "Research Postgres query plan migration and run validator."
+expected_skill = "research-postgres-query-plan"
+skill_description = "Postgres query plan research workflow with validator verification, migration impact checks, and explain-plan notes."
+tags = ["research", "postgres", "migration"]
+
+[[cases]]
+id = "analyze_skill_adoption"
+category = "research"
+task_summary = "Analyze skill adoption test scenario and run validator."
+expected_skill = "analyze-skill-adoption-test"
+skill_description = "Skill adoption analysis workflow with validator verification, scenario evidence review, and learning-loop metrics."
+tags = ["analyze", "skill", "test"]
+
+[[cases]]
+id = "bash_release_script_bug"
+category = "shell"
+task_summary = "Fix bash release script config and run validator."
+expected_skill = "bash-release-script-repair"
+skill_description = "Bash release script repair workflow with validator verification, shell command safety, and deployment config checks."
+tags = ["bash", "release", "config"]
+
+[[cases]]
+id = "yaml_deploy_config"
+category = "shell"
+task_summary = "Implement deploy yaml config and run validator."
+expected_skill = "yaml-deploy-config"
+skill_description = "Deploy YAML configuration workflow with validator verification, environment mapping, and safe rollout defaults."
+tags = ["yaml", "deploy", "config"]
+
+[[cases]]
+id = "json_policy_config_review"
+category = "shell"
+task_summary = "Review policy json config and run validator."
+expected_skill = "json-policy-config-review"
+skill_description = "Policy JSON configuration review workflow with validator verification, schema checks, and approval policy risk notes."
+tags = ["json", "policy", "config"]
+
+[[cases]]
+id = "shell_approval_rule_test"
+category = "shell"
+task_summary = "Add shell approval rule test and run validator."
+expected_skill = "shell-approval-rule-test"
+skill_description = "Shell approval rule test workflow with validator verification, command-pattern assertions, and bypass-prevention coverage."
+tags = ["shell", "approval", "test"]
+
+[[cases]]
+id = "zsh_dev_setup_docs"
+category = "shell"
+task_summary = "Document zsh dev setup README and run validator."
+expected_skill = "zsh-dev-setup-docs"
+skill_description = "Zsh dev setup README documentation workflow with validator verification, shell setup steps, and local environment checks."
+tags = ["zsh", "docs", "readme"]
+
+[[cases]]
+id = "python_data_migration"
+category = "python"
+task_summary = "Fix Python data migration code and run validator."
+expected_skill = "python-data-migration-repair"
+skill_description = "Python data migration repair workflow with validator verification, migration safety, and rollback-aware code checks."
+tags = ["python", "migration", "code"]
+
+[[cases]]
+id = "python_research_scraper"
+category = "python"
+task_summary = "Implement Python research scraper code and run validator."
+expected_skill = "python-research-scraper-code"
+skill_description = "Python research scraper implementation workflow with validator verification, source handling, and parsing edge-case checks."
+tags = ["python", "research", "code"]
+
+[[cases]]
+id = "python_auth_client_test"
+category = "python"
+task_summary = "Add Python auth client test and run validator."
+expected_skill = "python-auth-client-test"
+skill_description = "Python auth client test workflow with validator verification, token fixture safety, and client response assertions."
+tags = ["python", "auth", "test"]
+
+[[cases]]
+id = "python_memory_report_docs"
+category = "python"
+task_summary = "Document Python memory report README and run validator."
+expected_skill = "python-memory-report-docs"
+skill_description = "Python memory report README documentation workflow with validator verification, report schema notes, and retrieval metrics."
+tags = ["python", "memory", "docs"]
+
+[[cases]]
+id = "python_deploy_verifier_config"
+category = "python"
+task_summary = "Implement Python deploy verifier config and run validator."
+expected_skill = "python-deploy-verifier-config"
+skill_description = "Python deploy verifier configuration workflow with validator verification, release checks, and deployment evidence capture."
+tags = ["python", "deploy", "config"]

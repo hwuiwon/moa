@@ -34,6 +34,11 @@ Long scenarios live under:
 crates/moa-eval/scenarios/long_conversation/<scenario>/
 ```
 
+High-value failures can also create `eval` learning candidates. These
+candidates store bounded reproduction context and remain proposed until a human
+or eval-authoring workflow turns them into a real scenario. They do not replace
+`ScoreCard` or `ScoreRecord`; they are a queue of possible future coverage.
+
 Expected files:
 
 | File | Required | Purpose |

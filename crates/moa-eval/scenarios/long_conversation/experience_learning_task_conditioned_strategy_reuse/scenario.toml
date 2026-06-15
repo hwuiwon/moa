@@ -1,0 +1,23 @@
+[suite]
+name = "experience_learning_task_conditioned_strategy_reuse"
+description = "Phase one materializes experience learning; phase two reuses task-conditioned strategy evidence under a tight skill budget."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "experience", "learning", "skills"]
+
+[[cases]]
+kind = "long"
+name = "experience_learning_task_conditioned_strategy_reuse"
+goal_card = "scenarios/long_conversation/experience_learning_task_conditioned_strategy_reuse/goal_card.md"
+transcript = "scenarios/long_conversation/experience_learning_task_conditioned_strategy_reuse/transcript.jsonl"
+expectations = "scenarios/long_conversation/experience_learning_task_conditioned_strategy_reuse/expectations.toml"
+mode = "recorded"
+
+[cases.metadata.learning_phase]
+materialize_after_primary = true
+task_summary = "Fix Rust auth API contract regression and verify cargo test."
+skills_activated = ["api-contract-repair"]
+confidence = 0.9
+
+[cases.secondary_session]
+transcript = "scenarios/long_conversation/experience_learning_task_conditioned_strategy_reuse/secondary_transcript.jsonl"
+interleaving = "phased"

@@ -24,6 +24,9 @@ MOA does not require a durable session intent taxonomy. The agent loop selects t
 
 - task segments capture tool and skill usage
 - segment assessment records whether the task worked
+- experience records group similar work with task fingerprints and deterministic facets
+- attribution records explain which skills, tools, memory, policy, or verification patterns helped
+- learning candidates gate proposed mutations before promotion
 - skill distillation and improvement create reusable Agent Skills
 - memory consolidation updates graph memory
 - the learning log records provenance and rollback metadata
@@ -59,7 +62,18 @@ Current learning types include:
 
 Skills are stored through the skill registry, while ranking uses tenant-level outcomes. `skill_resolution_rates` aggregates resolved, partial, and failed segments by tenant and skill name.
 
-`SkillInjector` combines those rates with query relevance, use count, and recency to decide which skill metadata fits inside the prompt budget.
+`SkillInjector` combines those rates with task-conditioned strategy rates,
+query relevance, use count, and recency to decide which skill metadata fits
+inside the prompt budget. Task-conditioned rates are keyed by task fingerprint,
+not by a fixed intent taxonomy.
+
+## Learning Candidates
+
+`learning_candidates` stores proposal state for skill, memory, policy, prompt,
+and eval updates. Candidates carry source experience IDs, task fingerprints,
+payloads, evaluation payloads, risk class, promotion requirements, and status.
+The initial status is `proposed`; promotion requires explicit transitions such
+as `evaluating -> promoted` and is not inferred from a single segment outcome.
 
 ## Memory Learning
 

@@ -3,6 +3,7 @@
 pub mod compaction;
 #[cfg(feature = "eval-harness")]
 pub mod harness;
+pub mod learning;
 pub mod loop_detector;
 pub mod pipeline;
 pub mod planning;

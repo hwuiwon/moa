@@ -199,6 +199,7 @@ mod tests {
             reason: Some(RewriteReason::CoreferenceWithHistory),
             is_new_task,
             task_summary: Some("Update the README".to_string()),
+            task_facets: None,
         })
         .expect("rewrite result should serialize")
     }

@@ -346,6 +346,7 @@ mod tests {
             "retrieval_query": retrieval_query,
             "is_new_task": false,
             "task_summary": null,
+            "task_facets": null,
         })
         .to_string()
     }

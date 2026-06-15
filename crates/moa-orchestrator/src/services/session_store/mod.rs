@@ -7,15 +7,19 @@
 use std::sync::Arc;
 
 use moa_core::wire::{
-    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
-    GetSegmentBaselineRequest, InitSessionVoRequest, ListSessionsRequest,
-    ListSkillResolutionRatesRequest, RecordSegmentSkillActivationRequest,
-    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, SearchEventsRequest,
+    AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
+    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
+    GetSegmentBaselineRequest, InitSessionVoRequest, ListExperienceAttributionsRequest,
+    ListExperienceRecordsRequest, ListLearningCandidatesRequest, ListSessionsRequest,
+    ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
+    RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
+    RecordSegmentTurnUsageRequest, SearchEventsRequest, UpdateLearningCandidateStatusRequest,
     UpdateSegmentAssessmentRequest, UpdateStatusRequest, WorkspaceCostSinceRequest,
 };
 use moa_core::{
-    Event, EventRecord, SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore,
-    SessionSummary, SkillResolutionRate, TaskSegment, record_session_error,
+    Event, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
+    SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore, SessionSummary,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, record_session_error,
 };
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
@@ -97,6 +101,46 @@ pub trait RestateSessionStore {
     async fn list_skill_resolution_rates(
         request: Json<ListSkillResolutionRatesRequest>,
     ) -> Result<Json<Vec<SkillResolutionRate>>, HandlerError>;
+
+    /// Lists task-conditioned strategy success aggregates.
+    async fn list_task_strategy_success_rates(
+        request: Json<ListTaskStrategySuccessRatesRequest>,
+    ) -> Result<Json<Vec<TaskStrategySuccessRate>>, HandlerError>;
+
+    /// Appends or refreshes one experience record.
+    async fn append_experience_record(
+        request: Json<AppendExperienceRecordRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Lists experience records for one session.
+    async fn list_experience_records(
+        request: Json<ListExperienceRecordsRequest>,
+    ) -> Result<Json<Vec<ExperienceRecord>>, HandlerError>;
+
+    /// Appends or refreshes experience attributions.
+    async fn append_experience_attributions(
+        request: Json<AppendExperienceAttributionsRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Lists attributions for one experience.
+    async fn list_experience_attributions(
+        request: Json<ListExperienceAttributionsRequest>,
+    ) -> Result<Json<Vec<ExperienceAttribution>>, HandlerError>;
+
+    /// Appends or refreshes one learning candidate.
+    async fn append_learning_candidate(
+        request: Json<AppendLearningCandidateRequest>,
+    ) -> Result<(), HandlerError>;
+
+    /// Lists learning candidates for a tenant.
+    async fn list_learning_candidates(
+        request: Json<ListLearningCandidatesRequest>,
+    ) -> Result<Json<Vec<LearningCandidate>>, HandlerError>;
+
+    /// Applies a learning-candidate status transition.
+    async fn update_learning_candidate_status(
+        request: Json<UpdateLearningCandidateStatusRequest>,
+    ) -> Result<(), HandlerError>;
 
     /// Refreshes materialized views derived from task segments.
     async fn refresh_segment_materialized_views(

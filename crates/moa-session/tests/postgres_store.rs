@@ -5,10 +5,13 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    AssessmentPhase, ContextSnapshot, Event, FileReadDedupState, LearningEntry, MoaError, ModelId,
-    SegmentAssessment, SegmentCompletion, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionStore, TaskSegment,
-    ToolCallId, ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
+    AssessmentPhase, AttributionEffect, AttributionSubjectType, ContextSnapshot, Event,
+    ExperienceAttribution, ExperienceRecord, FileReadDedupState, LearningCandidate,
+    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry,
+    LearningRiskClass, MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence,
+    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta,
+    SessionStore, TaskFacetSet, TaskFingerprint, TaskSegment, ToolCallId, ToolOutput, UserId,
+    WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -480,6 +483,201 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
     assert_eq!(baseline.sample_count, 20);
     assert!((baseline.avg_turns - 2.0_f64).abs() < f64::EPSILON);
     assert!((baseline.avg_cost - 500.0_f64).abs() < f64::EPSILON);
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn experience_records_and_candidates_round_trip() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: WorkspaceId::new("pg-experience"),
+            user_id: UserId::new("user"),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session");
+    let segment_id = deterministic_segment_id(session_id, 0);
+    let now = Utc::now();
+    let assessment = SegmentAssessment {
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        phase: AssessmentPhase::Immediate,
+        evidence: vec![SegmentEvidence {
+            kind: SegmentEvidenceKind::Verification,
+            polarity: SegmentEvidencePolarity::SupportsResolved,
+            strength: 0.95,
+            summary: "cargo test passed".to_string(),
+        }],
+        assessed_at: now,
+        policy_version: "assessment-test".to_string(),
+    };
+    store
+        .create_segment(&TaskSegment {
+            id: segment_id,
+            session_id,
+            tenant_id: "pg-experience".to_string(),
+            segment_index: 0,
+            task_summary: Some("Fix Rust auth failure".to_string()),
+            started_at: now,
+            ended_at: Some(now),
+            turn_count: 2,
+            tools_used: vec!["bash".to_string()],
+            skills_activated: vec!["moa-rust".to_string()],
+            token_cost: 500,
+            previous_segment_id: None,
+            outcome: Some("resolved".to_string()),
+            assessment: Some(assessment.clone()),
+            outcome_confidence: Some(assessment.confidence),
+        })
+        .await
+        .expect("create assessed segment");
+
+    let fingerprint = TaskFingerprint {
+        hash: "task-hash".to_string(),
+        normalized_summary: "auth failure fix rust".to_string(),
+        policy_version: "experience_v1".to_string(),
+    };
+    let facets = TaskFacetSet {
+        domain: Some("auth".to_string()),
+        action: Some("debug".to_string()),
+        artifact_kind: Some("code".to_string()),
+        language_or_framework: Some("rust".to_string()),
+        verification_style: Some("command".to_string()),
+        risk_class: Some("high".to_string()),
+        tool_pattern: vec!["bash".to_string()],
+        skill_pattern: vec!["moa-rust".to_string()],
+    };
+    let experience = ExperienceRecord {
+        id: Uuid::now_v7(),
+        segment_id,
+        session_id,
+        tenant_id: "pg-experience".to_string(),
+        workspace_id: WorkspaceId::new("pg-experience"),
+        user_id: UserId::new("user"),
+        task_summary: Some("Fix Rust auth failure".to_string()),
+        task_fingerprint: fingerprint.clone(),
+        task_facets: facets.clone(),
+        actions: vec!["debug".to_string()],
+        resources: Vec::new(),
+        outcome: SegmentOutcome::Resolved,
+        confidence: 0.9,
+        evidence: assessment.evidence.clone(),
+        tools_used: vec!["bash".to_string()],
+        skills_activated: vec!["moa-rust".to_string()],
+        turn_count: 2,
+        token_cost: 500,
+        duration_ms: Some(1_000),
+        assessment_policy_version: assessment.policy_version.clone(),
+        extraction_policy_version: "experience_v1".to_string(),
+        created_at: now,
+    };
+    store
+        .append_experience_record(&experience)
+        .await
+        .expect("append experience");
+    let attribution = ExperienceAttribution {
+        id: Uuid::now_v7(),
+        experience_id: experience.id,
+        tenant_id: "pg-experience".to_string(),
+        workspace_id: WorkspaceId::new("pg-experience"),
+        user_id: Some(UserId::new("user")),
+        subject_type: AttributionSubjectType::Skill,
+        subject_id: "moa-rust".to_string(),
+        effect: AttributionEffect::Helpful,
+        confidence: 0.9,
+        evidence: vec!["skill was active during a resolved segment".to_string()],
+        created_at: now,
+    };
+    store
+        .append_experience_attributions(std::slice::from_ref(&attribution))
+        .await
+        .expect("append attribution");
+    let candidate = LearningCandidate {
+        id: Uuid::now_v7(),
+        tenant_id: "pg-experience".to_string(),
+        workspace_id: WorkspaceId::new("pg-experience"),
+        user_id: None,
+        candidate_type: LearningCandidateType::Skill,
+        status: LearningCandidateStatus::Proposed,
+        target_id: Some("skills/moa-rust/SKILL.md".to_string()),
+        target_label: Some("moa-rust".to_string()),
+        task_fingerprint: Some(fingerprint.clone()),
+        task_facets: Some(facets),
+        payload: serde_json::json!({"skill_markdown": "# moa-rust"}),
+        evaluation_payload: None,
+        source_experience_ids: vec![experience.id],
+        confidence: Some(0.9),
+        risk_class: LearningRiskClass::Medium,
+        promotion_requirements: vec!["regression_comparison".to_string()],
+        status_reason: None,
+        batch_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    store
+        .append_learning_candidate(&candidate)
+        .await
+        .expect("append candidate");
+    store
+        .update_learning_candidate_status(&LearningCandidateStatusUpdate {
+            candidate_id: candidate.id,
+            status: LearningCandidateStatus::Evaluating,
+            status_reason: Some("running regression".to_string()),
+            evaluation_payload: Some(serde_json::json!({"suite": "generated"})),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("candidate status update");
+
+    let experiences = store
+        .list_experience_records(session_id)
+        .await
+        .expect("list experiences");
+    assert_eq!(experiences.len(), 1);
+    assert_eq!(experiences[0].id, experience.id);
+    assert_eq!(experiences[0].task_fingerprint.hash, "task-hash");
+    assert_eq!(experiences[0].task_facets.domain.as_deref(), Some("auth"));
+    let attributions = store
+        .list_experience_attributions(experience.id)
+        .await
+        .expect("list attributions");
+    assert_eq!(attributions.len(), 1);
+    assert_eq!(attributions[0].subject_type, AttributionSubjectType::Skill);
+    assert_eq!(attributions[0].subject_id, "moa-rust");
+    let candidates = store
+        .list_learning_candidates(
+            "pg-experience",
+            Some(LearningCandidateStatus::Evaluating),
+            10,
+        )
+        .await
+        .expect("list candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, candidate.id);
+    assert_eq!(
+        candidates[0].evaluation_payload,
+        Some(serde_json::json!({"suite": "generated"}))
+    );
+
+    store
+        .refresh_segment_materialized_views()
+        .await
+        .expect("refresh experience views");
+    let rates = store
+        .list_task_strategy_success_rates("pg-experience", "task-hash")
+        .await
+        .expect("list task strategy rates");
+    assert_eq!(rates.len(), 1);
+    assert_eq!(rates[0].subject_type, AttributionSubjectType::Skill);
+    assert_eq!(rates[0].subject_id, "moa-rust");
+    assert_eq!(rates[0].uses, 1);
+    assert!((rates[0].success_rate - 1.0_f64).abs() < f64::EPSILON);
+    assert!((rates[0].avg_confidence - 0.9_f64).abs() < f64::EPSILON);
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;

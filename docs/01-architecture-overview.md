@@ -21,7 +21,8 @@ Brain and execution
         v
 Product data in Postgres / Neon
   sessions, events, pending_signals, context_snapshots
-  task_segments, segment analytics materialized views
+  task_segments, experience_records, experience_attributions,
+  learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
   learning_log
   analytics.turn_lineage, analytics.scores, compliance audit tables
@@ -29,8 +30,10 @@ Product data in Postgres / Neon
         |
         v
 Learning loop
-  segments -> segment assessments -> learning log
-  learning log -> skill ranking, memory consolidation
+  segments -> segment assessments -> experience records
+  experience records -> attributions -> learning candidates
+  task-conditioned strategy rates -> skill ranking
+  learning log -> skill ranking, memory consolidation, rollback audit
 ```
 
 Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes.
@@ -64,7 +67,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | Trait | Purpose | Main implementations |
 |---|---|---|
 | `BrainOrchestrator` | Start, resume, signal, list, observe sessions; schedule background work | Restate services/objects through `moa-orchestrator` |
-| `SessionStore` | Append-only event log, sessions, pending signals, snapshots, task segments, analytics, skill rates | `PostgresSessionStore` |
+| `SessionStore` | Append-only event log, sessions, pending signals, snapshots, task segments, experience records, learning candidates, analytics, skill rates | `PostgresSessionStore` |
 | `BlobStore` | Claim-check storage for large session artifacts | `FileBlobStore` |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
@@ -127,7 +130,9 @@ User message
   -> BrainResponse and tool events are persisted
   -> Segment counters are updated
   -> SegmentAssessor assesses completed or idle segments
-  -> LearningEntry rows record segment, skill, or memory learning
+  -> Assessed segments emit experience records and attributions
+  -> Learning candidates propose skill, memory, policy, prompt, or eval updates
+  -> LearningEntry rows record promoted segment, skill, or memory learning
 ```
 
 If query rewriting is disabled, stage 5 is omitted and the remaining processors still report their configured stage numbers.
@@ -138,6 +143,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 |---|---|---|
 | Session metadata and events | Postgres | `sessions`, `events`, `pending_signals`, `context_snapshots` |
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
+| Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, task-conditioned strategy rates |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
 | Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes for global, workspace, and user scopes; selected packages are materialized into hands on demand |

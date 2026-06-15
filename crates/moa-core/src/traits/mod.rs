@@ -14,11 +14,12 @@ use crate::events::Event;
 use crate::types::{
     CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
     ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange, EventRecord,
-    HandHandle, HandSpec, HandStatus, InboundMessage, MessageId, ModelCapabilities,
+    ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus, InboundMessage,
+    LearningCandidate, LearningCandidateStatusUpdate, MessageId, ModelCapabilities,
     OutboundMessage, Platform, PlatformCapabilities, ProcessorOutput, SandboxFile,
     SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter,
     SessionId, SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment,
-    ToolOutput, WorkingContext, WorkspaceId,
+    TaskStrategySuccessRate, ToolOutput, WorkingContext, WorkspaceId,
 };
 
 pub use auth::*;
@@ -201,6 +202,75 @@ pub trait SessionStore: Send + Sync {
         _tenant_id: &str,
     ) -> Result<Vec<SkillResolutionRate>> {
         Ok(Vec::new())
+    }
+
+    /// Lists task-conditioned strategy success aggregates for one task fingerprint.
+    async fn list_task_strategy_success_rates(
+        &self,
+        _tenant_id: &str,
+        _task_fingerprint: &str,
+    ) -> Result<Vec<TaskStrategySuccessRate>> {
+        Ok(Vec::new())
+    }
+
+    /// Appends or idempotently refreshes one derived experience record.
+    async fn append_experience_record(&self, _experience: &ExperienceRecord) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "experience records are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Lists experience records for a session in creation order.
+    async fn list_experience_records(
+        &self,
+        _session_id: SessionId,
+    ) -> Result<Vec<ExperienceRecord>> {
+        Ok(Vec::new())
+    }
+
+    /// Appends attribution records for one or more experiences.
+    async fn append_experience_attributions(
+        &self,
+        _attributions: &[ExperienceAttribution],
+    ) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "experience attributions are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Lists attributions for one experience.
+    async fn list_experience_attributions(
+        &self,
+        _experience_id: uuid::Uuid,
+    ) -> Result<Vec<ExperienceAttribution>> {
+        Ok(Vec::new())
+    }
+
+    /// Appends or idempotently refreshes one learning candidate.
+    async fn append_learning_candidate(&self, _candidate: &LearningCandidate) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "learning candidates are not supported by this session store".to_string(),
+        ))
+    }
+
+    /// Lists current learning candidates for a tenant and optional status.
+    async fn list_learning_candidates(
+        &self,
+        _tenant_id: &str,
+        _status: Option<crate::types::LearningCandidateStatus>,
+        _limit: usize,
+    ) -> Result<Vec<LearningCandidate>> {
+        Ok(Vec::new())
+    }
+
+    /// Applies an explicit candidate status transition.
+    async fn update_learning_candidate_status(
+        &self,
+        _update: &LearningCandidateStatusUpdate,
+    ) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "learning candidate status updates are not supported by this session store".to_string(),
+        ))
     }
 
     /// Refreshes materialized analytics views derived from task segments.

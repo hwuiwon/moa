@@ -6,7 +6,10 @@ use std::sync::OnceLock;
 
 use chrono::Utc;
 #[cfg(feature = "internal-eval-runner")]
-use moa_core::{CompletionRequest, MemoryScope, ModelTask};
+use moa_core::{
+    CompletionRequest, LearningCandidate, LearningCandidateStatus, LearningCandidateType,
+    LearningRiskClass, MemoryScope, ModelTask,
+};
 use moa_core::{Event, EventRecord, MoaConfig, Result, SessionMeta, SkillMetadata};
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -197,6 +200,47 @@ async fn improve_skill_with_learning_inner(
     record_successful_use_with_baseline(&mut improved, &current, now);
 
     let candidate_markdown = render_skill_markdown(&improved)?;
+    let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
+    let candidate = LearningCandidate {
+        id: uuid::Uuid::now_v7(),
+        tenant_id: session.workspace_id.to_string(),
+        workspace_id: session.workspace_id.clone(),
+        user_id: None,
+        candidate_type: LearningCandidateType::Skill,
+        status: LearningCandidateStatus::Proposed,
+        target_id: Some(metadata.path.clone()),
+        target_label: Some(metadata.name.clone()),
+        task_fingerprint: None,
+        task_facets: None,
+        payload: serde_json::json!({
+            "operation": "skill_improved",
+            "name": metadata.name.clone(),
+            "path": metadata.path.clone(),
+            "previous_version": previous_version.clone(),
+            "candidate_version": improved.frontmatter.version(),
+            "skill_markdown": candidate_markdown.clone(),
+            "source_session_id": session.id.to_string(),
+        }),
+        evaluation_payload: None,
+        source_experience_ids: Vec::new(),
+        confidence: Some(1.0),
+        risk_class: LearningRiskClass::Medium,
+        promotion_requirements: vec!["regression_comparison".to_string()],
+        status_reason: None,
+        batch_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    store.append_learning_candidate(&candidate).await?;
+    store
+        .update_learning_candidate_status(&crate::candidates::candidate_status_update(
+            candidate.id,
+            LearningCandidateStatus::Evaluating,
+            "candidate skill revision staged for regression",
+            None,
+            Utc::now(),
+        ))
+        .await?;
     registry
         .upsert_by_name(NewSkill::from_package(
             scope.clone(),
@@ -235,11 +279,31 @@ async fn improve_skill_with_learning_inner(
                 package_with_replaced_skill_md(&stored_package.files, markdown),
             ))
             .await?;
+        store
+            .update_learning_candidate_status(&crate::candidates::candidate_status_update(
+                candidate.id,
+                LearningCandidateStatus::Rejected,
+                "skill regression rejected candidate",
+                Some(serde_json::json!({
+                    "decision": format!("{:?}", report.decision),
+                    "detail": report.detail.clone(),
+                })),
+                Utc::now(),
+            ))
+            .await?;
         return Ok(ImprovementResult::Rejected { report });
     }
 
-    let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
     let version = improved.frontmatter.version();
+    store
+        .update_learning_candidate_status(&crate::candidates::candidate_status_update(
+            candidate.id,
+            LearningCandidateStatus::Promoted,
+            "skill regression accepted candidate",
+            Some(serde_json::json!({ "version": version.clone() })),
+            Utc::now(),
+        ))
+        .await?;
     crate::distiller::append_skill_learning(
         store.as_ref(),
         session,
@@ -250,6 +314,7 @@ async fn improve_skill_with_learning_inner(
             "name": metadata.name.clone(),
             "previous_version": previous_version,
             "version": version,
+            "candidate_id": candidate.id,
             "originating_session_id": session.id.to_string(),
             "diff_summary": summarize_diff(&current_markdown, &candidate_markdown),
         }),

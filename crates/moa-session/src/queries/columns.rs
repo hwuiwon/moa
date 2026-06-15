@@ -37,3 +37,35 @@ pub(crate) const LEARNING_ENTRY_COLUMNS: &str = concat!(
     "confidence::DOUBLE PRECISION AS confidence, source_refs, actor, valid_from, valid_to, ",
     "batch_id, version"
 );
+
+/// Canonical column list for selecting experience records.
+pub(crate) const EXPERIENCE_RECORD_COLUMNS: &str = concat!(
+    "id, segment_id, session_id, tenant_id, workspace_id, user_id, task_summary, ",
+    "task_fingerprint, task_fingerprint_payload, task_facets, actions, resources, outcome, ",
+    "confidence::DOUBLE PRECISION AS confidence, evidence, tools_used, skills_activated, ",
+    "turn_count, token_cost, duration_ms, assessment_policy_version, extraction_policy_version, ",
+    "created_at"
+);
+
+/// Canonical column list for selecting experience attributions.
+pub(crate) const EXPERIENCE_ATTRIBUTION_COLUMNS: &str = concat!(
+    "id, experience_id, tenant_id, workspace_id, user_id, subject_type, subject_id, effect, ",
+    "confidence::DOUBLE PRECISION AS confidence, evidence, created_at"
+);
+
+/// Canonical column list for selecting learning candidates.
+pub(crate) const LEARNING_CANDIDATE_COLUMNS: &str = concat!(
+    "id, tenant_id, workspace_id, user_id, candidate_type, status, target_id, target_label, ",
+    "task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, ",
+    "source_experience_ids, confidence::DOUBLE PRECISION AS confidence, risk_class, ",
+    "promotion_requirements, status_reason, batch_id, created_at, updated_at"
+);
+
+/// Canonical column list for selecting task-conditioned strategy rates.
+pub(crate) const TASK_STRATEGY_SUCCESS_RATE_COLUMNS: &str = concat!(
+    "tenant_id, task_fingerprint, subject_type, subject_id, uses, ",
+    "success_rate::DOUBLE PRECISION AS success_rate, ",
+    "avg_confidence::DOUBLE PRECISION AS avg_confidence, ",
+    "avg_token_cost::DOUBLE PRECISION AS avg_token_cost, ",
+    "avg_turn_count::DOUBLE PRECISION AS avg_turn_count"
+);

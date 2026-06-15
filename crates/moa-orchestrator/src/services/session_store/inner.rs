@@ -220,6 +220,86 @@ impl SessionStoreImpl {
             .map_err(HandlerError::from)
     }
 
+    pub(super) async fn list_task_strategy_success_rates_inner(
+        &self,
+        request: ListTaskStrategySuccessRatesRequest,
+    ) -> Result<Vec<TaskStrategySuccessRate>, HandlerError> {
+        self.store
+            .list_task_strategy_success_rates(&request.tenant_id, &request.task_fingerprint)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn append_experience_record_inner(
+        &self,
+        request: AppendExperienceRecordRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .append_experience_record(&request.experience)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn list_experience_records_inner(
+        &self,
+        request: ListExperienceRecordsRequest,
+    ) -> Result<Vec<ExperienceRecord>, HandlerError> {
+        self.store
+            .list_experience_records(request.session_id)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn append_experience_attributions_inner(
+        &self,
+        request: AppendExperienceAttributionsRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .append_experience_attributions(&request.attributions)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn list_experience_attributions_inner(
+        &self,
+        request: ListExperienceAttributionsRequest,
+    ) -> Result<Vec<ExperienceAttribution>, HandlerError> {
+        self.store
+            .list_experience_attributions(request.experience_id)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn append_learning_candidate_inner(
+        &self,
+        request: AppendLearningCandidateRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .append_learning_candidate(&request.candidate)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn list_learning_candidates_inner(
+        &self,
+        request: ListLearningCandidatesRequest,
+    ) -> Result<Vec<LearningCandidate>, HandlerError> {
+        self.store
+            .list_learning_candidates(&request.tenant_id, request.status, request.limit)
+            .await
+            .map_err(HandlerError::from)
+    }
+
+    pub(super) async fn update_learning_candidate_status_inner(
+        &self,
+        request: UpdateLearningCandidateStatusRequest,
+    ) -> Result<(), HandlerError> {
+        self.store
+            .update_learning_candidate_status(&request.update)
+            .await
+            .map_err(HandlerError::from)
+    }
+
     pub(super) async fn refresh_segment_materialized_views_inner(
         &self,
     ) -> Result<(), HandlerError> {

@@ -8,9 +8,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, IdempotencyClass, MemoryScope,
-    SegmentAssessment, SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta,
-    SessionStatus, TaskSegment, ToolDefinition, UserId, WorkspaceId,
+    Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, ExperienceAttribution,
+    ExperienceRecord, IdempotencyClass, LearningCandidate, LearningCandidateStatus,
+    LearningCandidateStatusUpdate, MemoryScope, SegmentAssessment, SegmentCompletion, SegmentId,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate,
+    ToolDefinition, UserId, WorkspaceId,
 };
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -259,6 +261,77 @@ pub struct GetSegmentBaselineRequest {
 pub struct ListSkillResolutionRatesRequest {
     /// Tenant/workspace identifier.
     pub tenant_id: String,
+}
+
+/// Request payload for `SessionStore/list_task_strategy_success_rates`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListTaskStrategySuccessRatesRequest {
+    /// Tenant/workspace identifier.
+    pub tenant_id: String,
+    /// Task fingerprint hash to aggregate against.
+    pub task_fingerprint: String,
+}
+
+/// Response payload for task-conditioned strategy aggregates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListTaskStrategySuccessRatesResponse {
+    /// Matching task-conditioned strategy rows.
+    #[serde(default)]
+    pub rates: Vec<TaskStrategySuccessRate>,
+}
+
+/// Request payload for `SessionStore/append_experience_record`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendExperienceRecordRequest {
+    /// Experience record to append or idempotently refresh.
+    pub experience: ExperienceRecord,
+}
+
+/// Request payload for `SessionStore/append_experience_attributions`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendExperienceAttributionsRequest {
+    /// Attribution records to append or idempotently refresh.
+    #[serde(default)]
+    pub attributions: Vec<ExperienceAttribution>,
+}
+
+/// Request payload for `SessionStore/list_experience_records`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListExperienceRecordsRequest {
+    /// Session whose experience records should be listed.
+    pub session_id: SessionId,
+}
+
+/// Request payload for `SessionStore/list_experience_attributions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListExperienceAttributionsRequest {
+    /// Experience whose attribution records should be listed.
+    pub experience_id: Uuid,
+}
+
+/// Request payload for `SessionStore/append_learning_candidate`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendLearningCandidateRequest {
+    /// Candidate to append or idempotently refresh.
+    pub candidate: LearningCandidate,
+}
+
+/// Request payload for `SessionStore/list_learning_candidates`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListLearningCandidatesRequest {
+    /// Tenant/workspace identifier.
+    pub tenant_id: String,
+    /// Optional candidate status filter.
+    pub status: Option<LearningCandidateStatus>,
+    /// Maximum rows to return.
+    pub limit: usize,
+}
+
+/// Request payload for `SessionStore/update_learning_candidate_status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateLearningCandidateStatusRequest {
+    /// Candidate status transition.
+    pub update: LearningCandidateStatusUpdate,
 }
 
 /// Request payload for recording active-segment tool usage.

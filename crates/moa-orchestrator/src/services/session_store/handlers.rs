@@ -315,6 +315,167 @@ impl RestateSessionStore for SessionStoreImpl {
             .await?)
     }
 
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_task_strategy_success_rates(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ListTaskStrategySuccessRatesRequest>,
+    ) -> Result<Json<Vec<TaskStrategySuccessRate>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_task_strategy_success_rates");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_task_strategy_success_rates_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("list_task_strategy_success_rates")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn append_experience_record(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AppendExperienceRecordRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "append_experience_record");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.append_experience_record_inner(request).await })
+            .name("append_experience_record")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_experience_records(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ListExperienceRecordsRequest>,
+    ) -> Result<Json<Vec<ExperienceRecord>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_experience_records");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        authorize_session_read(&ctx, request.session_id).await?;
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_experience_records_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("list_experience_records")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn append_experience_attributions(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AppendExperienceAttributionsRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "append_experience_attributions");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.append_experience_attributions_inner(request).await })
+            .name("append_experience_attributions")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_experience_attributions(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ListExperienceAttributionsRequest>,
+    ) -> Result<Json<Vec<ExperienceAttribution>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_experience_attributions");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_experience_attributions_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("list_experience_attributions")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn append_learning_candidate(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AppendLearningCandidateRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "append_learning_candidate");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move { service.append_learning_candidate_inner(request).await })
+            .name("append_learning_candidate")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn list_learning_candidates(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ListLearningCandidatesRequest>,
+    ) -> Result<Json<Vec<LearningCandidate>>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "list_learning_candidates");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .list_learning_candidates_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("list_learning_candidates")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn update_learning_candidate_status(
+        &self,
+        ctx: Context<'_>,
+        request: Json<UpdateLearningCandidateStatusRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("SessionStore", "update_learning_candidate_status");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .update_learning_candidate_status_inner(request)
+                    .await
+            })
+            .name("update_learning_candidate_status")
+            .await?)
+    }
+
     #[tracing::instrument(skip(self, ctx, _request))]
     async fn refresh_segment_materialized_views(
         &self,

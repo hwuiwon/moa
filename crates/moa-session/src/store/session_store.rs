@@ -622,6 +622,60 @@ impl SessionStore for PostgresSessionStore {
         PostgresSessionStore::list_skill_resolution_rates(self, tenant_id).await
     }
 
+    async fn list_task_strategy_success_rates(
+        &self,
+        tenant_id: &str,
+        task_fingerprint: &str,
+    ) -> Result<Vec<TaskStrategySuccessRate>> {
+        PostgresSessionStore::list_task_strategy_success_rates(self, tenant_id, task_fingerprint)
+            .await
+    }
+
+    async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()> {
+        PostgresSessionStore::append_experience_record(self, experience).await
+    }
+
+    async fn list_experience_records(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Vec<ExperienceRecord>> {
+        PostgresSessionStore::list_experience_records(self, session_id).await
+    }
+
+    async fn append_experience_attributions(
+        &self,
+        attributions: &[ExperienceAttribution],
+    ) -> Result<()> {
+        PostgresSessionStore::append_experience_attributions(self, attributions).await
+    }
+
+    async fn list_experience_attributions(
+        &self,
+        experience_id: uuid::Uuid,
+    ) -> Result<Vec<ExperienceAttribution>> {
+        PostgresSessionStore::list_experience_attributions(self, experience_id).await
+    }
+
+    async fn append_learning_candidate(&self, candidate: &LearningCandidate) -> Result<()> {
+        PostgresSessionStore::append_learning_candidate(self, candidate).await
+    }
+
+    async fn list_learning_candidates(
+        &self,
+        tenant_id: &str,
+        status: Option<LearningCandidateStatus>,
+        limit: usize,
+    ) -> Result<Vec<LearningCandidate>> {
+        PostgresSessionStore::list_learning_candidates(self, tenant_id, status, limit).await
+    }
+
+    async fn update_learning_candidate_status(
+        &self,
+        update: &LearningCandidateStatusUpdate,
+    ) -> Result<()> {
+        PostgresSessionStore::update_learning_candidate_status(self, update).await
+    }
+
     async fn refresh_segment_materialized_views(&self) -> Result<()> {
         PostgresSessionStore::refresh_segment_materialized_views(self).await
     }

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::TaskFacetSet;
+
 /// Result produced by the query-rewrite context processor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryRewriteResult {
@@ -19,6 +21,9 @@ pub struct QueryRewriteResult {
     /// Short summary of the new task when a segment transition is detected.
     #[serde(default)]
     pub task_summary: Option<String>,
+    /// Optional deterministic task facets supplied by the rewriter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_facets: Option<TaskFacetSet>,
 }
 
 impl QueryRewriteResult {
@@ -31,6 +36,7 @@ impl QueryRewriteResult {
             reason: None,
             is_new_task: false,
             task_summary: None,
+            task_facets: None,
         }
     }
 
@@ -43,6 +49,7 @@ impl QueryRewriteResult {
             reason: Some(reason),
             is_new_task: false,
             task_summary: None,
+            task_facets: None,
         }
     }
 
@@ -57,6 +64,26 @@ impl QueryRewriteResult {
                 "is_new_task": { "type": "boolean" },
                 "task_summary": {
                     "type": ["string", "null"]
+                },
+                "task_facets": {
+                    "type": ["object", "null"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "domain": { "type": ["string", "null"] },
+                        "action": { "type": ["string", "null"] },
+                        "artifact_kind": { "type": ["string", "null"] },
+                        "language_or_framework": { "type": ["string", "null"] },
+                        "verification_style": { "type": ["string", "null"] },
+                        "risk_class": { "type": ["string", "null"] },
+                        "tool_pattern": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "skill_pattern": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    }
                 }
             },
             "required": [

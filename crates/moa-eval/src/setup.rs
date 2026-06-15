@@ -13,6 +13,7 @@ use moa_brain::{
         memory::GraphMemoryRetriever,
         query_rewrite::QueryRewriter,
         runtime_context::RuntimeContextProcessor,
+        skills::SkillInjector,
         tools::ToolDefinitionProcessor,
     },
 };
@@ -199,6 +200,11 @@ async fn build_pipeline(
                 .with_retrieval_availability(true, false),
         ));
     }
+    stages.push(Box::new(
+        SkillInjector::new(graph_pool.clone())
+            .with_session_store(session_store.clone())
+            .with_budget_config(base_config.skill_budget.clone()),
+    ));
     stages.extend([
         Box::new(GraphMemoryRetriever::new(graph_pool, None)) as Box<dyn ContextProcessor>,
         Box::new(HistoryCompiler::with_compaction(

@@ -12,7 +12,7 @@ Segments answer:
 - Which tools and skills were used?
 - How many turns and tokens did it cost?
 - What outcome was assessed?
-- What learning should be recorded from the outcome?
+- What learning evidence should be derived from the outcome?
 
 ## Data Model
 
@@ -102,6 +102,10 @@ Assessment phases:
 - `final`: when cancellation or timeout closes the segment
 
 Each assessment updates the segment row and appends `segment_assessed` to `learning_log`.
+After the assessment is persisted, MOA derives an `ExperienceRecord` from the
+segment. The segment remains the measurement boundary; the experience record is
+the learning object used for attribution, candidates, and task-conditioned
+ranking.
 
 ## Materialized Views
 
@@ -111,6 +115,7 @@ Segment rows drive learning views:
 |---|---|
 | `skill_resolution_rates` | Ranks skills by tenant-level resolution outcomes |
 | `segment_baselines` | Provides structural baselines for segment assessment |
+| `task_strategy_success_rates` | Ranks skills and other strategy components by task fingerprint |
 
 Refresh is handled through the session store's materialized-view refresh path.
 
@@ -126,7 +131,10 @@ User messages
   -> segment start/continue/complete
   -> tool and skill counters
   -> segment assessment
-  -> learning_log
+  -> experience record
+  -> attribution records
+  -> learning candidates
+  -> learning_log after promotion
   -> skill ranking and memory learning
 ```
 

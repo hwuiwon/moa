@@ -141,6 +141,7 @@ fn cmd_audit_paths() -> Result<()> {
     )?;
 
     audit_removed_segment_score_names()?;
+    audit_learning_candidate_promotion_paths()?;
     audit_moa_test_support_dev_dependency_only()?;
 
     println!("path audit clean");
@@ -175,6 +176,15 @@ fn audit_removed_segment_score_names() -> Result<()> {
             "--glob",
             "!docs/engineering-discipline/plans/2026-06-15-segment-assessment-architecture.md",
         ],
+    )
+}
+
+fn audit_learning_candidate_promotion_paths() -> Result<()> {
+    rg_forbid(
+        "direct learning-candidate promoted construction",
+        r"status:\s*LearningCandidateStatus::Promoted",
+        &["crates/"],
+        &["--type", "rust"],
     )
 }
 
