@@ -32,9 +32,8 @@ The full architecture specification is in `docs/`. Read the relevant section bef
 8. **Run `cargo clippy` and `cargo fmt` before considering any step complete.**
 9. **No `unwrap()` in library code.** Use `?` or explicit error handling.
 10. **Feature flags** control optional dependencies: `telegram`, `slack`, `discord`, `cloud`.
-11. **If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration or raw-file search.**
-12. **MOA crates live under `crates/`.** If a prompt references `<name>/...` for a workspace crate, translate it to `crates/<name>/...`.
-13. **Prefer direct imports from the owning crate/module.** Do not add compatibility shim modules, wrapper functions, or `pub use` re-exports just to preserve old paths. When shared code moves, update call sites to import the source of truth directly.
+11. **MOA crates live under `crates/`.** If a prompt references `<name>/...` for a workspace crate, translate it to `crates/<name>/...`.
+12. **Prefer direct imports from the owning crate/module.** Do not add compatibility shim modules, wrapper functions, or `pub use` re-exports just to preserve old paths. When shared code moves, update call sites to import the source of truth directly.
 
 ## Conventions
 

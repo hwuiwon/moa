@@ -13,7 +13,6 @@ This reference condenses the repository-specific instructions that matter when a
 - Do not use `unwrap()` in library code.
 - Optional integrations stay behind feature flags: `telegram`, `slack`, `discord`, `cloud`.
 - Close-out for Rust work is `cargo fmt --all` and `cargo clippy ... -D warnings`.
-- If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration.
 
 ## Workspace Facts
 

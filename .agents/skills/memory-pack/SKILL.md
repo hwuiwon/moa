@@ -50,15 +50,14 @@ Do not use this skill for:
 ## Required Orientation
 
 1. Read `AGENTS.md`.
-2. If `graphify-out/GRAPH_REPORT.md` exists, skim it before broad exploration.
-3. Read the doc file that matches the step:
+2. Read the doc file that matches the step:
    - memory architecture: `docs/04-memory-architecture.md`
    - orchestration and Restate: `docs/02-brain-orchestration.md`
    - event log and Postgres persistence: `docs/05-session-event-log.md`
    - context and retrieval pipeline: `docs/07-context-pipeline.md`
    - security, privacy, RLS implications: `docs/08-security.md`
    - skills graph work: `docs/09-skills-and-learning.md`
-4. Inspect existing code before editing. Prefer local patterns over the prompt's sketch when they differ.
+3. Inspect existing code before editing. Prefer local patterns over the prompt's sketch when they differ.
 
 ## Path Translation
 

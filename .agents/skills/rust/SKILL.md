@@ -45,8 +45,7 @@ Do not use this skill for:
 
 1. Read [references/repo-rules.md](references/repo-rules.md) first. It contains the non-negotiable repo conventions.
 2. Read the relevant design doc under `docs/` before editing. `docs/01-architecture-overview.md` is the interface source of truth.
-3. If `graphify-out/GRAPH_REPORT.md` exists, consult it before broad repo exploration or raw-file search.
-4. For deeper Rust guidance, load only the relevant chapter from [references/apollo/README.md](references/apollo/README.md).
+3. For deeper Rust guidance, load only the relevant chapter from [references/apollo/README.md](references/apollo/README.md).
 
 ## Default Stance
 

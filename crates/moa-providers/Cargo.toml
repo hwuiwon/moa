@@ -6,7 +6,8 @@ license.workspace = true
 
 [features]
 default = []
-test-util = []
+scripted-provider = []
+test-util = ["scripted-provider"]
 
 [dependencies]
 async-openai.workspace = true

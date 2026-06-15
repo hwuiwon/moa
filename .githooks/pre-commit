@@ -6,7 +6,7 @@ cd "$repo_root"
 
 # Paths that never affect Rust compilation/tests. When a commit only touches
 # files under these prefixes, skip the expensive cargo pipeline.
-DOC_ONLY_PREFIXES=("docs/" "graphify-out/" "sequence/")
+DOC_ONLY_PREFIXES=("docs/" "sequence/")
 
 staged="$(git diff --cached --name-only)"
 
