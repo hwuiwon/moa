@@ -1,21 +1,33 @@
 //! Smoke tests for committed long-conversation recorded scenarios.
 
+use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::transcript::Transcript;
+use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
     ApprovalDecision, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
-    MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallId,
+    MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId,
+    ToolInvocation,
 };
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
-use moa_eval::{AgentConfig, EngineOptions, PermissionOverride, TestSuite, load_suite};
+use moa_eval::{
+    AgentConfig, EngineOptions, LongConversationMode, LongSessionInterleaving, LongTestCase,
+    PermissionOverride, SecondaryLongSession, TestCase, TestCaseKind, TestSuite, load_suite,
+};
 use serde::Deserialize;
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 const SCENARIO_ROOT: &str = "scenarios/long_conversation";
+const EXPERIENCE_LEARNING_SCENARIO: &str = "experience_learning_task_conditioned_strategy_reuse";
+const EXPERIENCE_LEARNING_MATRIX_FILE: &str = "task_matrix.toml";
+const MATRIX_MAX_MANIFEST_CHARS: usize = 510;
+const MATRIX_MAX_PER_SKILL_CHARS: usize = 128;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -53,6 +65,20 @@ async fn concurrent_workspace_writes_to_same_subgraph_meets_budgets() -> TestRes
 #[ignore = "requires MOA_TEST_POSTGRES_URL"]
 async fn skill_distillation_after_complex_run_then_reuse_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("skill_distillation_after_complex_run_then_reuse").await
+}
+
+#[tokio::test]
+#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+async fn experience_learning_task_conditioned_strategy_reuse_meets_budgets() -> TestResult {
+    assert_scenario_meets_expectations(EXPERIENCE_LEARNING_SCENARIO).await
+}
+
+#[tokio::test]
+#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+async fn experience_learning_task_conditioned_strategy_reuse_matrix_covers_task_variety()
+-> TestResult {
+    // Pins: task-conditioned learning reuses the expected skill across varied task profiles.
+    assert_experience_learning_matrix_cases().await
 }
 
 #[tokio::test]
@@ -119,13 +145,22 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     let mut base_config = moa_core::MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
+    let agent_config = agent_config_for(scenario_name);
+    if scenario_name == EXPERIENCE_LEARNING_SCENARIO {
+        base_config.skill_budget.max_manifest_chars = Some(510);
+        base_config.skill_budget.max_per_skill_chars = 128;
+        seed_experience_learning_skills(
+            &base_config.database.url,
+            &eval_workspace_id_for_agent(&agent_config.name),
+        )
+        .await?;
+    }
     if scenario_name == "context_compaction_under_sustained_token_pressure" {
         base_config.compaction.event_threshold = 80;
         base_config.compaction.recent_turns_verbatim = 1;
         base_config.compaction.token_ratio_threshold = 1.0;
     }
 
-    let agent_config = agent_config_for(scenario_name);
     let report = run_scenario_with_provider(
         &base_config,
         &agent_config,
@@ -155,7 +190,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
         );
     }
     expectations.assert_safety_exact(scenario_name, &report.score_card.safety);
-    assert_scenario_specific_invariants(scenario_name, &report.events, &report.score_card);
+    assert_scenario_specific_invariants(scenario_name, &report);
 
     Ok(())
 }
@@ -220,11 +255,595 @@ fn load_expectations(path: &Path) -> Result<ScenarioExpectations, Box<dyn Error>
     Ok(toml::from_str(&raw)?)
 }
 
+async fn assert_experience_learning_matrix_cases() -> TestResult {
+    let matrix_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(SCENARIO_ROOT)
+        .join(EXPERIENCE_LEARNING_SCENARIO)
+        .join(EXPERIENCE_LEARNING_MATRIX_FILE);
+    let matrix = load_learning_matrix(&matrix_path)?;
+    assert_learning_matrix_shape(&matrix);
+    if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
+        return Ok(());
+    }
+
+    for (case_index, matrix_case) in matrix.cases.iter().enumerate() {
+        run_learning_matrix_case(case_index, matrix_case).await?;
+    }
+    Ok(())
+}
+
+fn load_learning_matrix(path: &Path) -> Result<LearningMatrix, Box<dyn Error>> {
+    let raw = std::fs::read_to_string(path)?;
+    Ok(toml::from_str(&raw)?)
+}
+
+fn assert_learning_matrix_shape(matrix: &LearningMatrix) {
+    assert!(
+        !matrix.matrix.description.trim().is_empty(),
+        "learning matrix should document the coverage intent"
+    );
+    assert!(
+        matrix.cases.len() >= matrix.matrix.min_cases,
+        "learning matrix should contain at least {} cases, found {}",
+        matrix.matrix.min_cases,
+        matrix.cases.len()
+    );
+    assert!(
+        matrix.cases.len() >= 50,
+        "learning matrix should contain at least 50 cases"
+    );
+
+    let mut ids = BTreeSet::new();
+    let mut skills = BTreeSet::new();
+    let categories = matrix
+        .cases
+        .iter()
+        .map(|case| {
+            assert!(
+                !case.tags.is_empty(),
+                "matrix case {} should include tags for ranking coverage",
+                case.id
+            );
+            assert!(
+                ids.insert(case.id.clone()),
+                "duplicate matrix case id {}",
+                case.id
+            );
+            assert!(
+                skills.insert(case.expected_skill.clone()),
+                "duplicate expected skill {}",
+                case.expected_skill
+            );
+            case.category.clone()
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_categories = [
+        "auth", "database", "docs", "frontend", "memory", "python", "research", "runtime", "shell",
+        "skills",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        categories, expected_categories,
+        "learning matrix should cover the intended task families exactly"
+    );
+}
+
+async fn run_learning_matrix_case(
+    case_index: usize,
+    matrix_case: &LearningMatrixCase,
+) -> TestResult {
+    let temp_dir = tempdir()?;
+    let (primary_path, secondary_path) =
+        write_learning_matrix_transcripts(temp_dir.path(), case_index, matrix_case)?;
+    let test_case = learning_matrix_test_case(matrix_case, primary_path, secondary_path);
+    let primary_transcript = Transcript::read_jsonl(&test_case.long_case()?.transcript)?;
+    let provider: Arc<dyn LLMProvider> = Arc::new(RecordedScriptedProvider::with_strict_matching(
+        primary_transcript,
+    ));
+
+    let mut base_config = moa_core::MoaConfig::default();
+    base_config.database.url = moa_test_support::postgres::test_database_url();
+    base_config.query_rewrite.enabled = false;
+    base_config.skill_budget.max_manifest_chars = Some(MATRIX_MAX_MANIFEST_CHARS);
+    base_config.skill_budget.max_per_skill_chars = MATRIX_MAX_PER_SKILL_CHARS;
+
+    let agent_config = learning_matrix_agent_config(matrix_case);
+    seed_learning_matrix_skills(
+        &base_config.database.url,
+        &eval_workspace_id_for_agent(&agent_config.name),
+        matrix_case,
+    )
+    .await?;
+
+    let report = run_scenario_with_provider(
+        &base_config,
+        &agent_config,
+        &EngineOptions {
+            temp_dir: temp_dir.path().join("runs"),
+            ..EngineOptions::default()
+        },
+        &test_case,
+        provider,
+    )
+    .await?;
+    write_report_artifacts(
+        &format!("{EXPERIENCE_LEARNING_SCENARIO}_matrix_{}", matrix_case.id),
+        &report,
+    )?;
+    assert_learning_matrix_case_value(matrix_case, &report);
+    Ok(())
+}
+
+fn write_learning_matrix_transcripts(
+    temp_root: &Path,
+    case_index: usize,
+    matrix_case: &LearningMatrixCase,
+) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    let transcript_dir = temp_root.join("transcripts");
+    let primary_path = transcript_dir.join(format!("{}-primary.jsonl", matrix_case.id));
+    let secondary_path = transcript_dir.join(format!("{}-secondary.jsonl", matrix_case.id));
+    learning_matrix_primary_transcript(case_index, matrix_case).write_jsonl(&primary_path)?;
+    learning_matrix_secondary_transcript(matrix_case).write_jsonl(&secondary_path)?;
+    Ok((primary_path, secondary_path))
+}
+
+fn learning_matrix_primary_transcript(
+    case_index: usize,
+    matrix_case: &LearningMatrixCase,
+) -> Transcript {
+    Transcript {
+        version: 1,
+        scenario: format!(
+            "{EXPERIENCE_LEARNING_SCENARIO}_matrix_{}_primary",
+            matrix_case.id
+        ),
+        turns: vec![
+            Turn {
+                user: UserUtterance {
+                    text: matrix_case.task_summary.clone(),
+                },
+                expected: vec![
+                    ProviderEvent::ToolCall {
+                        call: ToolCallContent {
+                            invocation: ToolInvocation {
+                                id: Some(deterministic_tool_call_id(case_index)),
+                                name: "file_write".to_string(),
+                                input: json!({
+                                    "path": format!("matrix/{}.txt", matrix_case.id),
+                                    "content": "matrix learning artifact\n"
+                                }),
+                            },
+                            provider_metadata: None,
+                        },
+                    },
+                    ProviderEvent::Terminal {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ],
+            },
+            Turn {
+                user: UserUtterance {
+                    text: matrix_case.task_summary.clone(),
+                },
+                expected: vec![
+                    ProviderEvent::TextDelta {
+                        text: format!(
+                            "Phase one completed {} with {} active.",
+                            matrix_case.id, matrix_case.expected_skill
+                        ),
+                    },
+                    ProviderEvent::Usage {
+                        usage: TokenUsage {
+                            input_tokens_uncached: 140,
+                            input_tokens_cache_write: 0,
+                            input_tokens_cache_read: 280,
+                            output_tokens: 22,
+                        },
+                    },
+                    ProviderEvent::Terminal {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+            },
+            Turn {
+                user: UserUtterance {
+                    text: "Summarize reusable learning.".to_string(),
+                },
+                expected: vec![
+                    ProviderEvent::TextDelta {
+                        text: format!(
+                            "Reusable learning captured for {} using {}.",
+                            matrix_case.id, matrix_case.expected_skill
+                        ),
+                    },
+                    ProviderEvent::Usage {
+                        usage: TokenUsage {
+                            input_tokens_uncached: 135,
+                            input_tokens_cache_write: 0,
+                            input_tokens_cache_read: 275,
+                            output_tokens: 18,
+                        },
+                    },
+                    ProviderEvent::Terminal {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+            },
+            Turn {
+                user: UserUtterance {
+                    text: "Confirm validator evidence.".to_string(),
+                },
+                expected: vec![
+                    ProviderEvent::TextDelta {
+                        text: format!(
+                            "Validator evidence confirmed for {} and {}.",
+                            matrix_case.id, matrix_case.expected_skill
+                        ),
+                    },
+                    ProviderEvent::Usage {
+                        usage: TokenUsage {
+                            input_tokens_uncached: 130,
+                            input_tokens_cache_write: 0,
+                            input_tokens_cache_read: 270,
+                            output_tokens: 16,
+                        },
+                    },
+                    ProviderEvent::Terminal {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+fn learning_matrix_secondary_transcript(matrix_case: &LearningMatrixCase) -> Transcript {
+    Transcript {
+        version: 1,
+        scenario: format!(
+            "{EXPERIENCE_LEARNING_SCENARIO}_matrix_{}_secondary",
+            matrix_case.id
+        ),
+        turns: vec![Turn {
+            user: UserUtterance {
+                text: matrix_case.task_summary.clone(),
+            },
+            expected: vec![
+                ProviderEvent::TextDelta {
+                    text: format!(
+                        "Phase two reused {} for {} with less effort.",
+                        matrix_case.expected_skill, matrix_case.id
+                    ),
+                },
+                ProviderEvent::Usage {
+                    usage: TokenUsage {
+                        input_tokens_uncached: 70,
+                        input_tokens_cache_write: 0,
+                        input_tokens_cache_read: 150,
+                        output_tokens: 10,
+                    },
+                },
+                ProviderEvent::Terminal {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        }],
+    }
+}
+
+fn deterministic_tool_call_id(case_index: usize) -> String {
+    format!("00000000-0000-0000-0000-{:012}", 60_000 + case_index)
+}
+
+fn learning_matrix_test_case(
+    matrix_case: &LearningMatrixCase,
+    transcript: PathBuf,
+    secondary_transcript: PathBuf,
+) -> TestCase {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "learning_phase".to_string(),
+        json!({
+            "materialize_after_primary": true,
+            "task_summary": matrix_case.task_summary.clone(),
+            "skills_activated": [matrix_case.expected_skill.clone()],
+            "confidence": 0.9
+        }),
+    );
+
+    TestCase {
+        kind: TestCaseKind::Long,
+        name: format!("{EXPERIENCE_LEARNING_SCENARIO}_matrix_{}", matrix_case.id),
+        metadata,
+        long: Some(LongTestCase {
+            goal_card: None,
+            transcript,
+            scripted_user: None,
+            secondary_session: Some(SecondaryLongSession {
+                transcript: secondary_transcript,
+                interleaving: LongSessionInterleaving::Phased,
+            }),
+            expectations: PathBuf::from(format!(
+                "{SCENARIO_ROOT}/{EXPERIENCE_LEARNING_SCENARIO}/expectations.toml"
+            )),
+            mode: LongConversationMode::Recorded,
+        }),
+        ..TestCase::default()
+    }
+}
+
+fn learning_matrix_agent_config(matrix_case: &LearningMatrixCase) -> AgentConfig {
+    AgentConfig {
+        name: format!("{EXPERIENCE_LEARNING_SCENARIO}-{}-agent", matrix_case.id),
+        permissions: PermissionOverride {
+            auto_approve_all: true,
+            ..PermissionOverride::default()
+        },
+        ..AgentConfig::default()
+    }
+}
+
+fn assert_learning_matrix_case_value(
+    matrix_case: &LearningMatrixCase,
+    report: &moa_eval::long_conversation::LongRunReport,
+) {
+    assert_eq!(
+        report.learning.experience_count, 1,
+        "matrix case {} should materialize one experience",
+        matrix_case.id
+    );
+    assert_eq!(
+        report.learning.attribution_count, 3,
+        "matrix case {} should attribute skill, file_write, and verification",
+        matrix_case.id
+    );
+    assert_eq!(
+        report.learning.proposed_candidate_count, 2,
+        "matrix case {} should propose memory and policy candidates",
+        matrix_case.id
+    );
+    assert_eq!(
+        report.learning.task_strategy_skill_subjects,
+        vec![matrix_case.expected_skill.clone()],
+        "matrix case {} should publish the expected task-conditioned skill subject",
+        matrix_case.id
+    );
+
+    let repeated_task = report
+        .skill_manifest_observations
+        .iter()
+        .find(|observation| observation.user_message.as_deref() == Some(&matrix_case.task_summary))
+        .unwrap_or_else(|| {
+            panic!(
+                "matrix case {} should compile a phase-two skill manifest",
+                matrix_case.id
+            )
+        });
+    assert_eq!(
+        repeated_task.selected_skills,
+        vec![matrix_case.expected_skill.clone()],
+        "matrix case {} should select only the learned skill under manifest pressure",
+        matrix_case.id
+    );
+
+    let comparison = report
+        .phase_comparison
+        .unwrap_or_else(|| panic!("matrix case {} should report phase effort", matrix_case.id));
+    assert_eq!(
+        comparison.primary_turns, 3,
+        "matrix case {} should have three primary user turns",
+        matrix_case.id
+    );
+    assert_eq!(
+        comparison.secondary_turns, 1,
+        "matrix case {} should have one repeated secondary turn",
+        matrix_case.id
+    );
+    assert!(
+        comparison.secondary_input_tokens < comparison.primary_input_tokens,
+        "matrix case {} should use fewer input tokens after learning",
+        matrix_case.id
+    );
+    assert!(
+        comparison.secondary_output_tokens < comparison.primary_output_tokens,
+        "matrix case {} should use fewer output tokens after learning",
+        matrix_case.id
+    );
+}
+
+async fn seed_experience_learning_skills(database_url: &str, workspace_id: &str) -> TestResult {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let names = vec![
+        "api-contract-repair".to_string(),
+        "generic-debugger".to_string(),
+    ];
+    sqlx::query("DELETE FROM moa.skill WHERE workspace_id = $1 AND name = ANY($2)")
+        .bind(workspace_id)
+        .bind(&names)
+        .execute(&pool)
+        .await?;
+    insert_eval_skill(
+        &pool,
+        workspace_id,
+        "generic-debugger",
+        "General troubleshooting workflow for broad software incidents.",
+        &["general"],
+        500,
+    )
+    .await?;
+    insert_eval_skill(
+        &pool,
+        workspace_id,
+        "api-contract-repair",
+        "Rust auth API contract repair workflow for cargo test verification.",
+        &["api-contract", "rust-auth"],
+        1,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn seed_learning_matrix_skills(
+    database_url: &str,
+    workspace_id: &str,
+    matrix_case: &LearningMatrixCase,
+) -> TestResult {
+    let pool = sqlx::PgPool::connect(database_url).await?;
+    let category_decoy = format!("{}-general-playbook", matrix_case.category);
+    let names = vec![
+        matrix_case.expected_skill.clone(),
+        "general-troubleshooting-runbook".to_string(),
+        category_decoy.clone(),
+    ];
+    sqlx::query("DELETE FROM moa.skill WHERE workspace_id = $1 AND name = ANY($2)")
+        .bind(workspace_id)
+        .bind(&names)
+        .execute(&pool)
+        .await?;
+    insert_eval_skill(
+        &pool,
+        workspace_id,
+        "general-troubleshooting-runbook",
+        "Very broad troubleshooting workflow for software work, debugging, validation, config updates, code edits, and documentation cleanup.",
+        &["general", "debug", "validator"],
+        1_000,
+    )
+    .await?;
+    insert_eval_skill(
+        &pool,
+        workspace_id,
+        &category_decoy,
+        &format!(
+            "Broad {} playbook for common fixes, implementation, review, docs, tests, deploys, and validator checks.",
+            matrix_case.category
+        ),
+        &[matrix_case.category.as_str(), "general", "validator"],
+        750,
+    )
+    .await?;
+    insert_eval_skill(
+        &pool,
+        workspace_id,
+        &matrix_case.expected_skill,
+        &matrix_case.skill_description,
+        &matrix_case.tags,
+        1,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn insert_eval_skill<T: AsRef<str>>(
+    pool: &sqlx::PgPool,
+    workspace_id: &str,
+    name: &str,
+    description: &str,
+    tags: &[T],
+    use_count: u32,
+) -> TestResult {
+    let skill_uid = Uuid::now_v7();
+    let file_uid = Uuid::now_v7();
+    let skill_md =
+        format!("---\nname: {name}\ndescription: \"{description}\"\n---\n\n{description}\n")
+            .into_bytes();
+    let hash = Sha256::digest(&skill_md).to_vec();
+    let size = i64::try_from(skill_md.len())?;
+    let tag_values = tags
+        .iter()
+        .map(|tag| tag.as_ref().to_string())
+        .collect::<Vec<_>>();
+    let manifest = json!({
+        "schema_version": 1,
+        "skill_md_path": "SKILL.md",
+        "skill_md_estimated_tokens": 24,
+        "allowed_tools": ["file_write"],
+        "use_count": use_count,
+        "last_used": null,
+        "success_rate": 1.0,
+        "auto_generated": false,
+        "files": [{
+            "path": "SKILL.md",
+            "size_bytes": size,
+            "sha256": hex_string(&hash),
+            "content_type": "text/markdown; charset=utf-8",
+            "executable": false
+        }]
+    });
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.skill (
+            skill_uid, workspace_id, name, description, package_hash,
+            skill_md_hash, file_count, total_size_bytes, manifest, tags
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9)
+        "#,
+    )
+    .bind(skill_uid)
+    .bind(workspace_id)
+    .bind(name)
+    .bind(description)
+    .bind(&hash)
+    .bind(&hash)
+    .bind(size)
+    .bind(manifest)
+    .bind(&tag_values)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.skill_file (
+            file_uid, skill_uid, workspace_id, path, content,
+            content_sha256, content_type, executable, file_size_bytes
+        )
+        VALUES ($1, $2, $3, 'SKILL.md', $4, $5, 'text/markdown; charset=utf-8', false, $6)
+        "#,
+    )
+    .bind(file_uid)
+    .bind(skill_uid)
+    .bind(workspace_id)
+    .bind(&skill_md)
+    .bind(&hash)
+    .bind(size)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn eval_workspace_id_for_agent(agent_name: &str) -> String {
+    let mut slug = String::from("eval");
+    let trimmed = agent_name.trim();
+    if trimmed.is_empty() {
+        return slug;
+    }
+    slug.push('-');
+    for character in trimmed.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
 fn assert_scenario_specific_invariants(
     scenario_name: &str,
-    events: &[Event],
-    score_card: &moa_eval::long_conversation::ScoreCard,
+    report: &moa_eval::long_conversation::LongRunReport,
 ) {
+    let events = &report.events;
+    let score_card = &report.score_card;
     match scenario_name {
         "prompt_injection_in_tool_results" => {
             assert!(
@@ -250,6 +869,9 @@ fn assert_scenario_specific_invariants(
         }
         "canary_token_must_not_leak_through_tool_chain" => {
             assert_canary_leak_blocked(events, score_card);
+        }
+        EXPERIENCE_LEARNING_SCENARIO => {
+            assert_experience_learning_value(report);
         }
         _ => {}
     }
@@ -491,6 +1113,56 @@ fn assert_canary_leak_blocked(
     assert_eq!(score_card.safety.canary_leaks, 0);
 }
 
+fn assert_experience_learning_value(report: &moa_eval::long_conversation::LongRunReport) {
+    assert_eq!(
+        report.learning.experience_count, 1,
+        "phase one should materialize exactly one experience record"
+    );
+    assert_eq!(
+        report.learning.attribution_count, 3,
+        "experience should attribute the selected skill, file_write tool, and verification signal"
+    );
+    assert_eq!(
+        report.learning.proposed_candidate_count, 2,
+        "resolved verified experience should propose memory and policy learning candidates"
+    );
+    assert_eq!(
+        report.learning.task_strategy_skill_subjects,
+        vec!["api-contract-repair".to_string()],
+        "task-conditioned strategy view should expose the learned skill subject"
+    );
+
+    let first_repeated_task = report
+        .skill_manifest_observations
+        .iter()
+        .find(|observation| {
+            observation.user_message.as_deref()
+                == Some("Fix Rust auth API contract regression and verify cargo test.")
+        })
+        .expect("phase two should compile a skill manifest for the repeated task");
+    assert_eq!(
+        first_repeated_task.selected_skills,
+        vec!["api-contract-repair".to_string()],
+        "phase two should select only the task-specific skill under the tight manifest budget"
+    );
+
+    let comparison = report
+        .phase_comparison
+        .expect("phased scenario should report primary and secondary effort");
+    assert!(
+        comparison.secondary_turns < comparison.primary_turns,
+        "phase two should finish in fewer turns than phase one"
+    );
+    assert!(
+        comparison.secondary_input_tokens < comparison.primary_input_tokens,
+        "phase two should use fewer input tokens than phase one"
+    );
+    assert!(
+        comparison.secondary_output_tokens < comparison.primary_output_tokens,
+        "phase two should use fewer output tokens than phase one"
+    );
+}
+
 fn agent_config_for(scenario_name: &str) -> AgentConfig {
     let approval_gated = matches!(
         scenario_name,
@@ -521,6 +1193,28 @@ fn agent_config_for(scenario_name: &str) -> AgentConfig {
         permissions,
         ..AgentConfig::default()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct LearningMatrix {
+    matrix: LearningMatrixMetadata,
+    cases: Vec<LearningMatrixCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LearningMatrixMetadata {
+    description: String,
+    min_cases: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct LearningMatrixCase {
+    id: String,
+    category: String,
+    task_summary: String,
+    expected_skill: String,
+    skill_description: String,
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

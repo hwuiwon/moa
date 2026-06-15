@@ -256,12 +256,6 @@ fn canonical_fingerprint_input(summary: &str, facets: &TaskFacetSet) -> String {
             parts.push(format!("{name}={value}"));
         }
     }
-    if !facets.tool_pattern.is_empty() {
-        parts.push(format!("tools={}", facets.tool_pattern.join(",")));
-    }
-    if !facets.skill_pattern.is_empty() {
-        parts.push(format!("skills={}", facets.skill_pattern.join(",")));
-    }
     parts.join("|")
 }
 
@@ -569,5 +563,36 @@ mod tests {
         );
         assert_eq!(experience.task_facets.tool_pattern, vec!["bash"]);
         assert_eq!(experience.resources.len(), 2);
+    }
+
+    #[test]
+    fn task_fingerprint_ignores_observed_strategy_patterns() {
+        // Pins: task-conditioned ranking can retrieve prior outcomes before selecting tools/skills.
+        let mut first = TaskFacetSet {
+            domain: Some("auth".to_string()),
+            action: Some("debug".to_string()),
+            artifact_kind: Some("code".to_string()),
+            language_or_framework: Some("rust".to_string()),
+            verification_style: Some("command".to_string()),
+            risk_class: Some("high".to_string()),
+            tool_pattern: vec!["bash".to_string()],
+            skill_pattern: vec!["api-contract-repair".to_string()],
+        };
+        let mut second = first.clone();
+        second.tool_pattern = vec!["file_read".to_string(), "grep".to_string()];
+        second.skill_pattern = vec!["generic-debugger".to_string()];
+
+        let first_fingerprint = fingerprint_for_task("Fix Rust auth API contract", &first);
+        let second_fingerprint = fingerprint_for_task("Fix Rust auth API contract", &second);
+
+        assert_eq!(first_fingerprint.hash, second_fingerprint.hash);
+        assert_ne!(first.tool_pattern, second.tool_pattern);
+        assert_ne!(first.skill_pattern, second.skill_pattern);
+        first.tool_pattern.clear();
+        first.skill_pattern.clear();
+        assert_eq!(
+            first_fingerprint.hash,
+            fingerprint_for_task("Fix Rust auth API contract", &first).hash
+        );
     }
 }

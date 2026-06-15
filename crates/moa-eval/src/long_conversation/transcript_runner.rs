@@ -1,15 +1,26 @@
 //! Multi-turn transcript runner for long-conversation eval cases.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::Utc;
-use moa_brain::{StreamedTurnResult, run_streamed_turn_with_signals};
+use moa_brain::{
+    StreamedTurnResult,
+    learning::{
+        attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
+        experience::experience_from_assessment,
+    },
+    run_streamed_turn_with_signals,
+};
 use moa_core::transcript::Transcript;
 use moa_core::{
-    Event, EventRange, EventRecord, LLMProvider, MoaConfig, RuntimeEvent, SessionId, SessionMeta,
-    SessionSignal, record_broadcast_lag,
+    AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, Event,
+    EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
+    ModelCapabilities, RuntimeEvent, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionSignal, TaskSegment,
+    deterministic_segment_id, record_broadcast_lag,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -43,6 +54,51 @@ pub struct LongRunReport {
     pub score_records: Vec<moa_lineage_core::ScoreRecord>,
     /// Persisted event payloads emitted during the run.
     pub events: Vec<Event>,
+    /// Learning artifacts persisted while the scenario ran.
+    pub learning: LearningRunSummary,
+    /// Skill manifests observed in provider requests during replay.
+    pub skill_manifest_observations: Vec<SkillManifestObservation>,
+    /// Primary-vs-secondary comparison for phased multi-session scenarios.
+    pub phase_comparison: Option<PhaseComparison>,
+}
+
+/// Persisted learning artifact counts for a long-conversation run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LearningRunSummary {
+    /// Number of experience records linked to the scenario sessions.
+    pub experience_count: usize,
+    /// Number of experience attribution rows linked to the scenario sessions.
+    pub attribution_count: usize,
+    /// Number of proposed learning candidates for the scenario tenant.
+    pub proposed_candidate_count: usize,
+    /// Skill subject IDs present in task-conditioned strategy-rate rows.
+    pub task_strategy_skill_subjects: Vec<String>,
+}
+
+/// Skill manifest parsed from one recorded provider request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillManifestObservation {
+    /// Latest user message associated with the request.
+    pub user_message: Option<String>,
+    /// Skill names listed in the compact manifest for the request.
+    pub selected_skills: Vec<String>,
+}
+
+/// Deterministic primary-vs-secondary effort comparison for phased scenarios.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhaseComparison {
+    /// User turns in the primary phase.
+    pub primary_turns: usize,
+    /// User turns in the secondary phase.
+    pub secondary_turns: usize,
+    /// Provider input tokens in the primary phase.
+    pub primary_input_tokens: usize,
+    /// Provider input tokens in the secondary phase.
+    pub secondary_input_tokens: usize,
+    /// Provider output tokens in the primary phase.
+    pub primary_output_tokens: usize,
+    /// Provider output tokens in the secondary phase.
+    pub secondary_output_tokens: usize,
 }
 
 /// Runs a long-conversation test case with an explicit provider.
@@ -228,7 +284,8 @@ async fn drive_transcript(
 
     let completed_at = Utc::now();
     let events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
-    Ok(finish_report(FinishReportInput {
+    let learning = collect_learning_summary(&environment, &[primary.session_id]).await?;
+    let mut report = finish_report(FinishReportInput {
         case,
         agent_config,
         options,
@@ -237,7 +294,9 @@ async fn drive_transcript(
         user_turn_count: primary.user_turn_count,
         started_at,
         completed_at,
-    }))
+    });
+    report.learning = learning;
+    Ok(report)
 }
 
 async fn drive_multi_session_transcripts(
@@ -250,9 +309,8 @@ async fn drive_multi_session_transcripts(
     environment: crate::AgentEnvironment,
 ) -> Result<LongRunReport> {
     let started_at = Utc::now();
-    let secondary_provider = Arc::new(RecordedScriptedProvider::with_strict_matching(
-        secondary_transcript.clone(),
-    ));
+    let secondary_observer = ObservedRecordedProvider::new(secondary_transcript.clone());
+    let secondary_provider: Arc<dyn LLMProvider> = Arc::new(secondary_observer.clone());
     let secondary_session_id =
         create_secondary_session(&environment, secondary_provider.clone()).await?;
     let mut primary = TranscriptSession::new(
@@ -271,6 +329,7 @@ async fn drive_multi_session_transcripts(
             while primary.has_next_user_turn() {
                 primary.drive_next_turn(case, &environment).await?;
             }
+            materialize_primary_learning_if_requested(case, &environment, &primary).await?;
             while secondary.has_next_user_turn() {
                 secondary.drive_next_turn(case, &environment).await?;
             }
@@ -288,10 +347,15 @@ async fn drive_multi_session_transcripts(
     }
 
     let completed_at = Utc::now();
-    let events =
-        collect_events_for_sessions(&environment, &[primary.session_id, secondary.session_id])
-            .await?;
-    Ok(finish_report(FinishReportInput {
+    let primary_events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
+    let secondary_events =
+        collect_events_for_sessions(&environment, &[secondary.session_id]).await?;
+    let mut events = primary_events.clone();
+    events.extend(secondary_events.clone());
+    events.sort_by_key(|record| (record.timestamp, record.sequence_num));
+    let learning =
+        collect_learning_summary(&environment, &[primary.session_id, secondary.session_id]).await?;
+    let mut report = finish_report(FinishReportInput {
         case,
         agent_config,
         options,
@@ -300,7 +364,16 @@ async fn drive_multi_session_transcripts(
         user_turn_count: primary.user_turn_count + secondary.user_turn_count,
         started_at,
         completed_at,
-    }))
+    });
+    report.learning = learning;
+    report.skill_manifest_observations = secondary_observer.observations();
+    report.phase_comparison = Some(phase_comparison(
+        primary.user_turn_count,
+        secondary.user_turn_count,
+        &primary_events,
+        &secondary_events,
+    ));
+    Ok(report)
 }
 
 async fn drive_scripted_user(
@@ -320,7 +393,8 @@ async fn drive_scripted_user(
 
     let completed_at = Utc::now();
     let events = collect_events_for_sessions(&environment, &[primary.session_id]).await?;
-    let report = finish_report(FinishReportInput {
+    let learning = collect_learning_summary(&environment, &[primary.session_id]).await?;
+    let mut report = finish_report(FinishReportInput {
         case,
         agent_config,
         options,
@@ -330,6 +404,7 @@ async fn drive_scripted_user(
         started_at,
         completed_at,
     });
+    report.learning = learning;
     validate_scripted_final_answer(&script, &report)?;
     Ok(report)
 }
@@ -420,6 +495,9 @@ fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
         score_card,
         score_records,
         events: event_payloads,
+        learning: LearningRunSummary::default(),
+        skill_manifest_observations: Vec::new(),
+        phase_comparison: None,
     }
 }
 
@@ -682,6 +760,404 @@ async fn collect_events_for_sessions(
     }
     events.sort_by_key(|record| (record.timestamp, record.sequence_num));
     Ok(events)
+}
+
+async fn materialize_primary_learning_if_requested(
+    case: &TestCase,
+    environment: &crate::AgentEnvironment,
+    primary: &TranscriptSession,
+) -> Result<()> {
+    let Some(config) = primary_learning_config(case)? else {
+        return Ok(());
+    };
+    let events = collect_events_for_sessions(environment, &[primary.session_id]).await?;
+    if events.is_empty() {
+        return Err(EvalError::InvalidConfig(format!(
+            "learning materialization for '{}' requires primary events",
+            case.name
+        )));
+    }
+
+    let meta = environment
+        .session_store
+        .get_session(primary.session_id)
+        .await?;
+    let now = Utc::now();
+    let started_at = events.first().map(|record| record.timestamp).unwrap_or(now);
+    let ended_at = events.last().map(|record| record.timestamp).unwrap_or(now);
+    let duration_ms = ended_at
+        .signed_duration_since(started_at)
+        .num_milliseconds()
+        .max(0) as u64;
+    let segment_id = deterministic_segment_id(primary.session_id, 0);
+    let tools_used = tool_names_for_events(&events);
+    let token_cost = token_cost_for_events(&events);
+    let assessment = SegmentAssessment {
+        outcome: SegmentOutcome::Resolved,
+        confidence: config.confidence,
+        phase: AssessmentPhase::Final,
+        evidence: vec![SegmentEvidence {
+            kind: SegmentEvidenceKind::Verification,
+            polarity: SegmentEvidencePolarity::SupportsResolved,
+            strength: config.confidence,
+            summary: "eval phase-one verification completed successfully".to_string(),
+        }],
+        assessed_at: now,
+        policy_version: "long-conversation-learning-eval-v1".to_string(),
+    };
+    let segment = TaskSegment {
+        id: segment_id,
+        session_id: primary.session_id,
+        tenant_id: meta.workspace_id.to_string(),
+        segment_index: 0,
+        task_summary: Some(config.task_summary),
+        started_at,
+        ended_at: Some(ended_at),
+        turn_count: primary.user_turn_count as u32,
+        tools_used,
+        skills_activated: config.skills_activated,
+        token_cost,
+        previous_segment_id: None,
+        outcome: Some(assessment.outcome.as_str().to_string()),
+        assessment: Some(assessment.clone()),
+        outcome_confidence: Some(assessment.confidence),
+    };
+
+    environment.session_store.create_segment(&segment).await?;
+    let experience = experience_from_assessment(
+        &meta,
+        &segment,
+        &assessment,
+        &events,
+        None,
+        Some(duration_ms),
+        now,
+    );
+    let attributions = attributions_for_experience(&experience, &events, now);
+    let candidates = propose_candidates_for_experience(&experience, &attributions, now);
+    environment
+        .session_store
+        .append_experience_record(&experience)
+        .await?;
+    environment
+        .session_store
+        .append_experience_attributions(&attributions)
+        .await?;
+    for candidate in candidates {
+        environment
+            .session_store
+            .append_learning_candidate(&candidate)
+            .await?;
+    }
+    environment
+        .session_store
+        .refresh_segment_materialized_views()
+        .await?;
+    Ok(())
+}
+
+async fn collect_learning_summary(
+    environment: &crate::AgentEnvironment,
+    session_ids: &[SessionId],
+) -> Result<LearningRunSummary> {
+    let mut experience_count = 0usize;
+    let mut attribution_count = 0usize;
+    let mut skill_subjects = BTreeSet::new();
+    for session_id in session_ids {
+        let experiences = environment
+            .session_store
+            .list_experience_records(*session_id)
+            .await?;
+        experience_count += experiences.len();
+        for experience in experiences {
+            let attributions = environment
+                .session_store
+                .list_experience_attributions(experience.id)
+                .await?;
+            attribution_count += attributions.len();
+            let rates = environment
+                .session_store
+                .list_task_strategy_success_rates(
+                    environment.workspace_id.as_str(),
+                    &experience.task_fingerprint.hash,
+                )
+                .await?;
+            for rate in rates {
+                if rate.subject_type == AttributionSubjectType::Skill {
+                    skill_subjects.insert(rate.subject_id);
+                }
+            }
+        }
+    }
+
+    let candidates = environment
+        .session_store
+        .list_learning_candidates(
+            environment.workspace_id.as_str(),
+            Some(LearningCandidateStatus::Proposed),
+            256,
+        )
+        .await?;
+
+    Ok(LearningRunSummary {
+        experience_count,
+        attribution_count,
+        proposed_candidate_count: candidates.len(),
+        task_strategy_skill_subjects: skill_subjects.into_iter().collect(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct PrimaryLearningConfig {
+    task_summary: String,
+    skills_activated: Vec<String>,
+    confidence: f64,
+}
+
+fn primary_learning_config(case: &TestCase) -> Result<Option<PrimaryLearningConfig>> {
+    let Some(value) = case.metadata.get("learning_phase") else {
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return Err(EvalError::InvalidConfig(format!(
+            "case '{}' metadata.learning_phase must be a table",
+            case.name
+        )));
+    };
+    if !object
+        .get("materialize_after_primary")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let task_summary = object
+        .get("task_summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            EvalError::InvalidConfig(format!(
+                "case '{}' metadata.learning_phase.task_summary must be non-empty",
+                case.name
+            ))
+        })?
+        .to_string();
+    let skills_activated = string_array_metadata(case, object, "skills_activated")?;
+    if skills_activated.is_empty() {
+        return Err(EvalError::InvalidConfig(format!(
+            "case '{}' metadata.learning_phase.skills_activated must not be empty",
+            case.name
+        )));
+    }
+    let confidence = object
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.9)
+        .clamp(0.0, 1.0);
+    Ok(Some(PrimaryLearningConfig {
+        task_summary,
+        skills_activated,
+        confidence,
+    }))
+}
+
+fn string_array_metadata(
+    case: &TestCase,
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<String>> {
+    let Some(values) = object.get(key).and_then(Value::as_array) else {
+        return Err(EvalError::InvalidConfig(format!(
+            "case '{}' metadata.learning_phase.{key} must be an array",
+            case.name
+        )));
+    };
+    let mut strings = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(text) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(EvalError::InvalidConfig(format!(
+                "case '{}' metadata.learning_phase.{key} must contain only non-empty strings",
+                case.name
+            )));
+        };
+        strings.push(text.to_string());
+    }
+    strings.sort();
+    strings.dedup();
+    Ok(strings)
+}
+
+fn tool_names_for_events(events: &[EventRecord]) -> Vec<String> {
+    let mut tools = events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ToolCall { tool_name, .. } | Event::ToolError { tool_name, .. } => {
+                Some(tool_name.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+fn token_cost_for_events(events: &[EventRecord]) -> u64 {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::BrainResponse {
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                output_tokens,
+                ..
+            } => Some(
+                input_tokens_uncached
+                    + input_tokens_cache_write
+                    + input_tokens_cache_read
+                    + output_tokens,
+            ),
+            _ => None,
+        })
+        .sum::<usize>() as u64
+}
+
+fn phase_comparison(
+    primary_turns: usize,
+    secondary_turns: usize,
+    primary_events: &[EventRecord],
+    secondary_events: &[EventRecord],
+) -> PhaseComparison {
+    let (primary_input_tokens, primary_output_tokens) = token_totals(primary_events);
+    let (secondary_input_tokens, secondary_output_tokens) = token_totals(secondary_events);
+    PhaseComparison {
+        primary_turns,
+        secondary_turns,
+        primary_input_tokens,
+        secondary_input_tokens,
+        primary_output_tokens,
+        secondary_output_tokens,
+    }
+}
+
+fn token_totals(events: &[EventRecord]) -> (usize, usize) {
+    let mut input_tokens = 0usize;
+    let mut output_tokens = 0usize;
+    for record in events {
+        if let Event::BrainResponse {
+            input_tokens_uncached,
+            input_tokens_cache_write,
+            input_tokens_cache_read,
+            output_tokens: response_output_tokens,
+            ..
+        } = &record.event
+        {
+            input_tokens +=
+                input_tokens_uncached + input_tokens_cache_write + input_tokens_cache_read;
+            output_tokens += response_output_tokens;
+        }
+    }
+    (input_tokens, output_tokens)
+}
+
+#[derive(Clone)]
+struct ObservedRecordedProvider {
+    recorded: RecordedScriptedProvider,
+    observations: Arc<Mutex<Vec<SkillManifestObservation>>>,
+}
+
+impl ObservedRecordedProvider {
+    fn new(transcript: Transcript) -> Self {
+        Self {
+            recorded: RecordedScriptedProvider::with_strict_matching(transcript),
+            observations: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn observations(&self) -> Vec<SkillManifestObservation> {
+        self.observations
+            .lock()
+            .map(|observations| observations.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_observation(&self, request: &CompletionRequest) -> moa_core::Result<()> {
+        let selected_skills = selected_skills_from_request(request);
+        if selected_skills.is_empty() {
+            return Ok(());
+        }
+        let observation = SkillManifestObservation {
+            user_message: latest_non_manifest_user_message(request),
+            selected_skills,
+        };
+        let mut observations = self
+            .observations
+            .lock()
+            .map_err(|error| MoaError::ProviderError(error.to_string()))?;
+        observations.push(observation);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ObservedRecordedProvider {
+    fn name(&self) -> &str {
+        self.recorded.name()
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        self.recorded.capabilities()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+        self.record_observation(&request)?;
+        self.recorded
+            .complete_recorded(&request)
+            .map_err(|error| MoaError::ProviderError(error.to_string()))
+    }
+}
+
+fn selected_skills_from_request(request: &CompletionRequest) -> Vec<String> {
+    let mut skills = Vec::new();
+    for message in &request.messages {
+        if !message.content.contains("<available_skills>") {
+            continue;
+        }
+        for line in message.content.lines() {
+            let Some(rest) = line.strip_prefix("- ") else {
+                continue;
+            };
+            let Some((name, _)) = rest.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.is_empty() {
+                skills.push(name.to_string());
+            }
+        }
+    }
+    skills.sort();
+    skills.dedup();
+    skills
+}
+
+fn latest_non_manifest_user_message(request: &CompletionRequest) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == moa_core::MessageRole::User
+                && !message.content.starts_with("<system-reminder>")
+                && !message.content.contains("<available_skills>")
+        })
+        .map(|message| message.content.clone())
 }
 
 struct TurnSignalState {
