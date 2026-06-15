@@ -10,7 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use moa_brain::{
     planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
@@ -414,7 +414,8 @@ impl RetrievalHarness {
             PiiClass::Restricted,
         )
         .with_k_final(5)
-        .with_reranker(false);
+        .with_reranker(false)
+        .with_ranking_reference_time(golden_ranking_reference_time());
         retrieve_for_query(query, &ctx).await.map_err(box_error)
     }
 
@@ -444,6 +445,12 @@ impl RetrievalHarness {
             .await
             .map_err(box_error)
     }
+}
+
+fn golden_ranking_reference_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 4, 2, 0, 0, 0)
+        .single()
+        .expect("golden ranking reference time must be valid")
 }
 
 fn fixture_root() -> PathBuf {

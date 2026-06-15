@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status loadtest-mock loadtest-live
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status e2e-clean e2e-clean-live loadtest-mock loadtest-live
 
 dev:
 ifeq ($(MOA_SKIP_FGA),1)
@@ -15,8 +15,8 @@ fga-bootstrap:
 	@echo ">> waiting for OpenFGA"
 	@./scripts/wait-for-fga.sh
 	@echo ">> running moa-fga-bootstrap"
-	@MOA_OPENFGA_URL=$${MOA_OPENFGA_URL:-http://localhost:10030} \
-	 MOA_OPENFGA_PRESHARED_KEY=$${MOA_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod} \
+	@MOA_AUTHZ_OPENFGA_URL=$${MOA_AUTHZ_OPENFGA_URL:-http://localhost:10030} \
+	 MOA_AUTHZ_OPENFGA_PRESHARED_KEY=$${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod} \
 	 cargo run -q -p moa-fga-bootstrap
 	@echo ">> store/model IDs written to .env.fga"
 
@@ -43,6 +43,13 @@ dev-logs:
 
 dev-restate-ui:
 	@echo "open http://localhost:10011"
+
+e2e-clean:
+	./scripts/run-clean-e2e.sh
+
+e2e-clean-live:
+	@: $${MOA_RUN_LIVE_E2E:?set MOA_RUN_LIVE_E2E=1 to run live/billed E2E checks}
+	./scripts/run-clean-e2e.sh --live
 
 loadtest-mock:
 	@echo "restarting orchestrator with scripted providers..."

@@ -1,4 +1,4 @@
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 DROP TABLE IF EXISTS moa.embeddings_old CASCADE;
 
@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS moa.embeddings (
     label TEXT NOT NULL CHECK (label = ANY(moa.age_vertex_labels())),
     pii_class TEXT NOT NULL DEFAULT 'none'
         CHECK (pii_class IN ('none', 'pii', 'phi', 'restricted')),
-    embedding halfvec(1024) NOT NULL,
+    embedding public.halfvec(1024) NOT NULL,
     embedding_model TEXT NOT NULL,
     embedding_model_version INT NOT NULL,
     valid_to TIMESTAMPTZ,
@@ -36,7 +36,7 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS embeddings_workspace_uid_unique
     ON moa.embeddings (workspace_id, uid) NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS embeddings_embedding_hnsw_idx
-    ON moa.embeddings USING hnsw (embedding halfvec_cosine_ops)
+    ON moa.embeddings USING hnsw (embedding public.halfvec_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 CREATE INDEX IF NOT EXISTS embeddings_ws_scope_label_idx
     ON moa.embeddings (workspace_id, scope, label)

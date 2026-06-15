@@ -53,6 +53,41 @@ for every later request. `tool_calls` entries have `name`, `input`, and optional
 The load-test smoke fixture is checked in at
 `crates/moa-loadtest/scripts/perf-gate.json`.
 
+## Clean E2E Runner
+
+Use the clean runner for certification instead of the persistent compose
+Restate and `moa` database. It creates a temporary Postgres database, starts an
+ephemeral `restate-server` with random ports, bootstraps OpenFGA into a temp env
+file, and cleans those resources up on exit.
+
+```bash
+make e2e-clean
+```
+
+Ignored/live Restate E2E requires an explicit opt-in:
+
+```bash
+MOA_RUN_LIVE_E2E=1 make e2e-clean-live
+```
+
+The live Restate lane uses `moa-orchestrator/provider-overrides` for approval
+flow tests that need deterministic tool calls. Billed provider coverage remains
+in the separate provider lane below.
+
+Optional provider and long-eval lanes remain explicit because they can be
+billed or slow:
+
+```bash
+MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 \
+  ./scripts/run-clean-e2e.sh --live --providers
+
+MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-eval
+```
+
+The runner may start `postgres`, `openfga`, and `moa-pii-service` if compose is
+not already running. If it starts compose itself, it stops compose at the end
+with volumes preserved.
+
 ## Snapshot Testing
 
 Use snapshots when exact rendered output is the contract:

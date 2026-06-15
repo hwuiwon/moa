@@ -1,10 +1,16 @@
 //! End-to-end approval-flow coverage through a local Restate ingress.
 
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use std::{
+    fs,
+    path::Path,
+    process::{Child, Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
-use moa_core::{ApprovalDecision, Event, EventRange, ModelId, SessionId, SessionStatus};
+use moa_core::{
+    ApprovalDecision, Event, EventRange, EventRecord, ModelId, SessionId, SessionStatus,
+};
 use sqlx::PgPool;
 use tokio::time::sleep;
 
@@ -23,8 +29,10 @@ fn spawn_orchestrator(
     ports: OrchestratorPorts,
     memory_dir: &tempfile::TempDir,
     sandbox_dir: &tempfile::TempDir,
+    provider_override_fixture: Option<&Path>,
 ) -> Result<Child> {
-    Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"));
+    command
         .arg("--port")
         .arg(ports.restate.to_string())
         .arg("--health-port")
@@ -35,32 +43,25 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
+        .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("RUST_LOG", "info")
         .env_remove("COHERE_API_KEY")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(path) = provider_override_fixture {
+        command
+            .env(
+                "MOA_PROVIDERS_OVERRIDE",
+                format!("scripted:{}", path.display()),
+            )
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("GOOGLE_API_KEY");
+    }
+
+    command
         .spawn()
         .context("spawn moa-orchestrator binary for approval integration")
-}
-
-fn configured_env(key: &str) -> bool {
-    std::env::var(key)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn live_model() -> Option<&'static str> {
-    if configured_env("ANTHROPIC_API_KEY") {
-        return Some("claude-sonnet-4-6");
-    }
-    if configured_env("OPENAI_API_KEY") {
-        return Some("gpt-5.4-mini");
-    }
-    if configured_env("GOOGLE_API_KEY") {
-        return Some("gemini-3-flash-preview");
-    }
-
-    None
 }
 
 fn object_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
@@ -71,12 +72,12 @@ fn object_url(ingress: &str, session_id: SessionId, handler: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
+#[ignore = "requires a local restate-server, Postgres, and provider-overrides feature"]
 async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
-    let Some(model) = live_model() else {
+    if !cfg!(feature = "provider-overrides") {
         return Ok(());
-    };
+    }
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
@@ -86,14 +87,17 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let mut meta = test_session_meta("session-approval-e2e");
-    meta.model = ModelId::new(model);
+    meta.model = ModelId::new("scripted-loadtest");
     let identity = test_user_identity();
     grant_workspace_member(&identity, &meta.workspace_id).await?;
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
     let pool = PgPool::connect(&test_database_url())
         .await
         .context("connect to test Postgres")?;
     let approval_token = format!("APPROVAL-{}", uuid::Uuid::now_v7());
+    let fixture_path = memory_dir.path().join("approval-script.json");
+    write_scripted_approval_fixture(&fixture_path, &approval_token)?;
+    let mut orchestrator =
+        spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
@@ -194,12 +198,12 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, and at least one provider API key"]
+#[ignore = "requires a local restate-server, Postgres, and provider-overrides feature"]
 async fn approval_wait_cancel_records_system_denial_without_running_tool() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
-    let Some(model) = live_model() else {
+    if !cfg!(feature = "provider-overrides") {
         return Ok(());
-    };
+    }
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
@@ -209,11 +213,14 @@ async fn approval_wait_cancel_records_system_denial_without_running_tool() -> Re
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let mut meta = test_session_meta("session-approval-cancel-e2e");
-    meta.model = ModelId::new(model);
+    meta.model = ModelId::new("scripted-loadtest");
     let identity = test_user_identity();
     grant_workspace_member(&identity, &meta.workspace_id).await?;
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
     let approval_token = format!("APPROVAL-CANCEL-{}", uuid::Uuid::now_v7());
+    let fixture_path = memory_dir.path().join("approval-cancel-script.json");
+    write_scripted_approval_fixture(&fixture_path, &approval_token)?;
+    let mut orchestrator =
+        spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
@@ -246,7 +253,8 @@ async fn approval_wait_cancel_records_system_denial_without_running_tool() -> Re
 
         let prompt = format!(
             "Use the bash tool exactly once to run `printf '{approval_token}\\n'`. \
-             Do not answer from memory. Wait for approval before running the tool."
+             Do not answer from memory. Wait for approval before running the tool. \
+             After the tool succeeds, answer with exactly {approval_token}."
         );
         let post_message = client.post(object_url(ingress, session_id, "post_message"));
         with_identity(post_message, &identity)
@@ -368,6 +376,7 @@ async fn wait_for_approval_request(
     identity: &moa_core::traits::Identity,
     session_id: SessionId,
 ) -> Result<Vec<moa_core::EventRecord>> {
+    let mut last_events = Vec::new();
     for _attempt in 0..60 {
         let request = client.post(format!(
             "{}/SessionStore/get_events",
@@ -388,11 +397,61 @@ async fn wait_for_approval_request(
         {
             return Ok(events);
         }
+        last_events = events;
 
         sleep(Duration::from_secs(1)).await;
     }
 
-    bail!("timed out waiting for approval request for session {session_id}")
+    bail!(
+        "timed out waiting for approval request for session {session_id}; observed events: {}",
+        summarize_events(&last_events)
+    )
+}
+
+fn summarize_events(events: &[EventRecord]) -> String {
+    if events.is_empty() {
+        return "<none>".to_string();
+    }
+
+    events
+        .iter()
+        .map(|record| format!("#{} {:?}", record.sequence_num, record.event_type))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn write_scripted_approval_fixture(path: &Path, approval_token: &str) -> Result<()> {
+    let fixture = serde_json::json!({
+        "default": {
+            "completion": {
+                "content": "OK",
+                "tool_calls": []
+            }
+        },
+        "responses": [
+            {
+                "completion": {
+                    "content": "",
+                    "tool_calls": [{
+                        "name": "bash",
+                        "id": "approval-e2e-tool-call",
+                        "input": {
+                            "cmd": format!("printf '{}\\n'", approval_token)
+                        }
+                    }]
+                }
+            },
+            {
+                "completion": {
+                    "content": approval_token,
+                    "tool_calls": []
+                }
+            }
+        ]
+    });
+    let body =
+        serde_json::to_vec_pretty(&fixture).context("serialize scripted approval fixture")?;
+    fs::write(path, body).context("write scripted approval fixture")
 }
 
 async fn wait_for_brain_response_count(
