@@ -30,13 +30,14 @@ use moa_core::wire::{
 };
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse, Event,
-    EventRange, EventRecord, EventType, LearningEntry, MoaError, PolicyAction, QueryRewriteResult,
-    ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus, SessionStore as _,
-    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput, TurnLatencyCounters,
-    TurnOutcome as CoreTurnOutcome, TurnReplayCounters, is_delegation_tool_name,
-    record_approval_wait, record_session_error, record_turn_event_persist_duration,
-    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
-    scope_turn_latency_counters, scope_turn_replay_counters,
+    EventRange, EventRecord, EventType, LearningEntry, MoaError, ModelTier, PolicyAction,
+    QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus,
+    SessionStore as _, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
+    TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
+    is_delegation_tool_name, record_approval_wait, record_session_error,
+    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
+    record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
+    scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -127,6 +128,7 @@ impl TurnExecution for TurnExecutionImpl {
         );
 
         let session_id = parse_session_id(&request.session_id)?;
+        let workflow_started = Instant::now();
         let outcome = match run_turn_inside_workflow(&ctx, &request, session_id).await {
             Ok(body) => {
                 let phase = match body.kind {
@@ -154,6 +156,12 @@ impl TurnExecution for TurnExecutionImpl {
             }
         };
 
+        record_turn_workflow_outcome(
+            "root",
+            turn_outcome_kind_label(&outcome.kind),
+            ModelTier::Main,
+            workflow_started.elapsed(),
+        );
         notify_session_of_outcome(&ctx, &request.session_id, &outcome);
         Ok(Json::from(outcome))
     }
@@ -1528,6 +1536,14 @@ fn is_terminal_phase(phase: &TurnPhase) -> bool {
         phase,
         TurnPhase::Completed | TurnPhase::Cancelled | TurnPhase::Failed
     )
+}
+
+fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
+    match kind {
+        TurnOutcomeKind::Completed => "completed",
+        TurnOutcomeKind::Cancelled => "cancelled",
+        TurnOutcomeKind::Failed => "failed",
+    }
 }
 
 #[cfg(test)]

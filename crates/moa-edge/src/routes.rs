@@ -51,6 +51,17 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
+#[tracing::instrument(
+    skip(state, headers, body),
+    fields(
+        http.method = %method,
+        http.target = %uri,
+        http.route = "/v1/{*rest}",
+        http.status_code = tracing::field::Empty,
+        moa.edge.auth.provider = tracing::field::Empty,
+        moa.edge.auth.result = tracing::field::Empty,
+    )
+)]
 async fn handle_proxy(
     State(state): State<AppState>,
     method: Method,
@@ -58,9 +69,11 @@ async fn handle_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    let span = tracing::Span::current();
     let credential = match credential_for_request(state.auth.as_ref(), &headers) {
         Some(credential) => credential,
         None => {
+            span.record("moa.edge.auth.result", "missing_credential");
             if let Err(error) = moa_ocsf::emit_authn_failure(
                 &state.pool,
                 Uuid::nil(),
@@ -72,8 +85,10 @@ async fn handle_proxy(
             .await
             {
                 tracing::error!(error = %error, "security audit write failed for missing credential");
+                span.record("http.status_code", 500_i64);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
             }
+            span.record("http.status_code", 401_i64);
             return (StatusCode::UNAUTHORIZED, "missing credential").into_response();
         }
     };
@@ -81,6 +96,11 @@ async fn handle_proxy(
     let identity = match state.auth.authenticate(&credential).await {
         Ok(identity) => identity,
         Err(error) => {
+            span.record(
+                "moa.edge.auth.provider",
+                tracing::field::display(state.auth.name()),
+            );
+            span.record("moa.edge.auth.result", "rejected");
             if let Err(audit_error) = moa_ocsf::emit_authn_failure(
                 &state.pool,
                 Uuid::nil(),
@@ -96,12 +116,19 @@ async fn handle_proxy(
                     auth_error = %error,
                     "security audit write failed for rejected credential"
                 );
+                span.record("http.status_code", 500_i64);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
             }
             tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
+            span.record("http.status_code", 401_i64);
             return (StatusCode::UNAUTHORIZED, "invalid credential").into_response();
         }
     };
+    span.record(
+        "moa.edge.auth.provider",
+        tracing::field::display(state.auth.name()),
+    );
+    span.record("moa.edge.auth.result", "accepted");
     if let Err(error) = moa_ocsf::emit_authn_success(
         &state.pool,
         identity.tenant_id,
@@ -112,6 +139,7 @@ async fn handle_proxy(
     .await
     {
         tracing::error!(error = %error, "security audit write failed for authenticated request");
+        span.record("http.status_code", 500_i64);
         return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
     }
 
@@ -124,6 +152,7 @@ async fn handle_proxy(
         RouteTranslation::Forward { method, path, body } => (method, path, body),
         RouteTranslation::NoChange => (method, original_path, body.to_vec()),
         RouteTranslation::BadRequest(message) => {
+            span.record("http.status_code", 400_i64);
             return (StatusCode::BAD_REQUEST, message).into_response();
         }
     };
@@ -135,10 +164,12 @@ async fn handle_proxy(
         Ok(response) => response,
         Err(error) => {
             tracing::error!(error = %error, "proxy forward failed");
+            span.record("http.status_code", 502_i64);
             return (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response();
         }
     };
 
+    span.record("http.status_code", response.status().as_u16() as i64);
     response_to_axum(response).await
 }
 

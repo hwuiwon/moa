@@ -78,6 +78,25 @@ pub fn session_turn_span(
     span
 }
 
+/// Root span for one sub-agent turn iteration.
+pub fn sub_agent_turn_span(
+    meta: &SessionMeta,
+    sub_agent_id: &str,
+    turn_id: &str,
+    turn_number: i64,
+    environment: Option<&str>,
+) -> tracing::Span {
+    let span = session_turn_span(meta, None, turn_number, environment);
+    span.record("moa.sub_agent.id", sub_agent_id);
+    span.set_attribute(
+        "otel.name",
+        format!("MOA sub-agent {sub_agent_id} turn {turn_number}"),
+    );
+    span.set_attribute("moa.turn.scope", "sub_agent");
+    span.set_attribute("moa.turn.id", turn_id.to_string());
+    span
+}
+
 /// Child span around one provider completion call.
 pub fn llm_call_span(meta: &SessionMeta) -> tracing::Span {
     match current_turn_root_span() {

@@ -3,8 +3,9 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, TokenPricing, TokenUsage,
-    record_cache_hit_rate, record_llm_request, record_llm_streaming_duration, record_llm_ttft,
-    record_tokens_input_cached, record_tokens_input_uncached, record_tokens_output,
+    record_cache_hit_rate, record_llm_failure, record_llm_request, record_llm_request_duration,
+    record_llm_streaming_duration, record_llm_ttft, record_tokens_input_cached,
+    record_tokens_input_uncached, record_tokens_output,
 };
 use opentelemetry::trace::Status;
 use serde::Serialize;
@@ -72,6 +73,7 @@ pub(crate) struct LLMSpanAttributes {
 pub(crate) struct LLMSpanRecorder {
     span: Span,
     system: &'static str,
+    request_model: String,
     pricing: TokenPricing,
     cached_input_tokens: usize,
     cache_creation_input_tokens: usize,
@@ -118,6 +120,7 @@ impl LLMSpanRecorder {
         Self {
             span,
             system,
+            request_model,
             pricing,
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
@@ -229,6 +232,7 @@ impl LLMSpanRecorder {
         );
         let provider = self.system;
         let model = response.model.to_string();
+        record_llm_request_duration(provider, &model, "success", self.started_at.elapsed());
         record_tokens_input_uncached(
             provider,
             &model,
@@ -243,8 +247,7 @@ impl LLMSpanRecorder {
         }
     }
 
-    /// Marks the span as failed and records any partial output that was seen.
-    pub(crate) fn fail(&self, error: &impl std::fmt::Display) {
+    fn fail_with_class(&self, class: &'static str, error: &impl std::fmt::Display) {
         self.span.set_status(Status::error(error.to_string()));
         if !self.streamed_output.is_empty() {
             record_llm_span_attributes(
@@ -255,12 +258,19 @@ impl LLMSpanRecorder {
                 },
             );
         }
+        record_llm_failure(self.system, &self.request_model, class);
+        record_llm_request_duration(
+            self.system,
+            &self.request_model,
+            "error",
+            self.started_at.elapsed(),
+        );
     }
 
     /// Marks the span as failed while also recording the provider phase.
     pub(crate) fn fail_at_stage(&self, phase: &'static str, error: &impl std::fmt::Display) {
         self.set_phase(phase);
-        self.fail(error);
+        self.fail_with_class(phase, error);
     }
 
     fn merged_usage(&self, response: &CompletionResponse) -> TokenUsage {
@@ -459,7 +469,11 @@ fn truncate_attribute_value(mut value: String) -> String {
         return value;
     }
 
-    value.truncate(ATTRIBUTE_VALUE_LIMIT);
+    let mut truncate_at = ATTRIBUTE_VALUE_LIMIT;
+    while !value.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    value.truncate(truncate_at);
     value.push('…');
     value
 }
@@ -480,7 +494,8 @@ mod tests {
     use moa_core::TokenPricing;
 
     use super::{
-        calculate_cost, calculate_cost_with_cached, llm_span_name, serialize_provider_debug_payload,
+        calculate_cost, calculate_cost_with_cached, llm_span_name,
+        serialize_provider_debug_payload, truncate_attribute_value,
     };
 
     #[test]
@@ -534,5 +549,16 @@ mod tests {
         assert!(serialized.starts_with('{'));
         assert!(serialized.len() > 100);
         assert!(serialized.ends_with('…'));
+    }
+
+    #[test]
+    fn attribute_truncation_preserves_utf8_boundaries() {
+        // Pins: exported prompt/output/debug attributes stay valid UTF-8 when truncated.
+        let value = "가".repeat(20_000);
+
+        let truncated = truncate_attribute_value(value);
+
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }

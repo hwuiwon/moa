@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use moa_core::{
     ContextProcessor, ContextSnapshotConfig, MessageRole, ProcessorOutput, Result, WorkingContext,
+    record_query_rewrite_decision,
 };
 use tracing::Instrument;
 
@@ -109,6 +110,9 @@ impl ContextPipeline {
                     moa.pipeline.stage.items_excluded = tracing::field::Empty,
                     moa.pipeline.stage.tokens_before = tracing::field::Empty,
                     moa.pipeline.stage.tokens_after = tracing::field::Empty,
+                    moa.query_rewrite.decision = tracing::field::Empty,
+                    moa.query_rewrite.reason = tracing::field::Empty,
+                    moa.query_rewrite.llm_called = tracing::field::Empty,
                 );
 
                 let started_at = Instant::now();
@@ -138,6 +142,9 @@ impl ContextPipeline {
                     output.items_excluded.len() as i64,
                 );
                 stage_span.record("moa.pipeline.stage.tokens_after", tokens_after as i64);
+                if stage.name() == "query_rewrite" {
+                    record_query_rewrite_stage_metadata(&stage_span, &output);
+                }
 
                 tracing::info!(
                     stage = stage.stage(),
@@ -171,6 +178,30 @@ impl ContextPipeline {
         .instrument(instrument_pipeline_span)
         .await
     }
+}
+
+fn record_query_rewrite_stage_metadata(span: &tracing::Span, output: &ProcessorOutput) {
+    let Some(decision) = metadata_str(output, "moa.query_rewrite.decision") else {
+        return;
+    };
+    let reason = metadata_str(output, "moa.query_rewrite.reason").unwrap_or(decision);
+    let llm_called = output
+        .metadata
+        .get("moa.query_rewrite.llm_called")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    span.record(
+        "moa.query_rewrite.decision",
+        tracing::field::display(decision),
+    );
+    span.record("moa.query_rewrite.reason", tracing::field::display(reason));
+    span.record("moa.query_rewrite.llm_called", llm_called);
+    record_query_rewrite_decision(decision, reason, llm_called, output.duration);
+}
+
+fn metadata_str<'a>(output: &'a ProcessorOutput, key: &str) -> Option<&'a str> {
+    output.metadata.get(key).and_then(serde_json::Value::as_str)
 }
 
 fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {

@@ -29,6 +29,22 @@ its own rollups on the write path.
 Do not write session aggregate counters from application code. The trigger and
 generated columns are the only supported write path for these values.
 
+## Dashboard source selection
+
+Behavioral tool dashboards must use one source per panel:
+
+- Use `tool_call_analytics`, `tool_call_summary`, or `session_turn_metrics`
+  when the panel answers product questions such as tool count, success rate,
+  duration, or per-turn tool time.
+- Use `moa_tool_calls_total` and `moa_tool_call_duration_seconds` only for
+  operational SLOs and alerting on the live tool router.
+- Use OTEL spans such as brain `tool_dispatch`, hands `tool_execution`, and
+  provider-specific hand spans for trace drilldown only.
+
+Do not combine brain spans, hand spans, and durable `ToolCall`/`ToolResult`
+events in the same behavioral count. That double-counts one logical tool call
+at multiple layers of the execution stack.
+
 ## Views
 
 ### `session_summary`

@@ -26,16 +26,21 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,moa_edge=debug")),
-        )
-        .json()
-        .init();
-
     let args = Args::parse();
     let moa_config = moa_core::MoaConfig::load_from_env().context("load MOA config")?;
+    let mut telemetry_config = moa_config.clone();
+    if telemetry_config.observability.service_name == "moa" {
+        telemetry_config.observability.service_name = "moa-edge".to_string();
+    }
+    let _telemetry_guard = moa_core::init_observability(
+        &telemetry_config,
+        &moa_core::TelemetryConfig {
+            json_stdout: true,
+            ..moa_core::TelemetryConfig::default()
+        },
+    )
+    .context("initialize edge observability")?;
+
     let database_url = moa_config.database.url.clone();
     let upstream = edge_upstream_url(&moa_config, args.upstream);
     tracing::info!(bind = %args.bind, upstream = %upstream, "starting moa-edge");

@@ -9,7 +9,7 @@ use moa_brain::{StreamedTurnResult, run_streamed_turn_with_signals};
 use moa_core::transcript::Transcript;
 use moa_core::{
     Event, EventRange, EventRecord, LLMProvider, MoaConfig, RuntimeEvent, SessionId, SessionMeta,
-    SessionSignal,
+    SessionSignal, record_broadcast_lag,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -738,6 +738,14 @@ fn spawn_scripted_signal_task(
                     break;
                 }
                 Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    record_broadcast_lag("runtime", "skip_with_gap", dropped);
+                    tracing::warn!(
+                        scenario = %case_name,
+                        dropped,
+                        "runtime stream subscriber fell behind before scripted approval request"
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         scenario = %case_name,

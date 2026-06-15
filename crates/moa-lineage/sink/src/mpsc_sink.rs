@@ -147,26 +147,41 @@ impl LineageHandle for MpscSink {
     }
 
     fn record_span_attributes(&self, span: &tracing::Span, evt_json: &serde_json::Value) {
-        match serde_json::from_value::<LineageEvent>(evt_json.clone()) {
-            Ok(LineageEvent::Retrieval(record)) => {
-                moa_lineage_otel::emit_retrieval_attrs(span, &record);
-            }
-            Ok(LineageEvent::Context(record)) => {
-                moa_lineage_otel::emit_context_attrs(span, &record);
-            }
-            Ok(LineageEvent::Generation(record)) => {
-                moa_lineage_otel::emit_generation_attrs(span, &record);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                metrics::counter!("moa_lineage_malformed_total").increment(1);
-                tracing::warn!(%error, "malformed lineage event for span attributes");
-            }
-        }
+        emit_lineage_span_attributes(span, evt_json);
     }
 
     fn dropped_count(&self) -> u64 {
         LineageSink::dropped_count(self)
+    }
+}
+
+/// Span-attributes-only lineage sink for `MOA_LINEAGE_SINK=otel`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OtelSink;
+
+impl OtelSink {
+    /// Creates a span-attributes-only lineage sink.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl LineageSink for OtelSink {
+    fn record(&self, _evt: LineageEvent) {}
+
+    fn dropped_count(&self) -> u64 {
+        0
+    }
+}
+
+impl LineageHandle for OtelSink {
+    fn record(&self, evt_json: serde_json::Value) {
+        emit_lineage_span_attributes(&tracing::Span::current(), &evt_json);
+    }
+
+    fn record_span_attributes(&self, span: &tracing::Span, evt_json: &serde_json::Value) {
+        emit_lineage_span_attributes(span, evt_json);
     }
 }
 
@@ -197,6 +212,25 @@ impl LineageSink for NullSink {
 impl LineageHandle for NullSink {
     fn record(&self, evt_json: serde_json::Value) {
         self.inner.record(evt_json);
+    }
+}
+
+fn emit_lineage_span_attributes(span: &tracing::Span, evt_json: &serde_json::Value) {
+    match serde_json::from_value::<LineageEvent>(evt_json.clone()) {
+        Ok(LineageEvent::Retrieval(record)) => {
+            moa_lineage_otel::emit_retrieval_attrs(span, &record);
+        }
+        Ok(LineageEvent::Context(record)) => {
+            moa_lineage_otel::emit_context_attrs(span, &record);
+        }
+        Ok(LineageEvent::Generation(record)) => {
+            moa_lineage_otel::emit_generation_attrs(span, &record);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            metrics::counter!("moa_lineage_malformed_total").increment(1);
+            tracing::warn!(%error, "malformed lineage event for span attributes");
+        }
     }
 }
 

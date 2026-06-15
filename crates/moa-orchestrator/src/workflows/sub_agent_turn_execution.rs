@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_core::restate_observability::{
-    annotate_restate_handler_span, event_persist_span, llm_call_span, tool_dispatch_span,
+    annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
+    tool_dispatch_span,
 };
 use moa_core::wire::{
     AppendEventRequest, RecordSegmentToolUseRequest, RunSubAgentTurnRequest, TurnOutcome,
@@ -18,12 +19,12 @@ use moa_core::wire::{
 };
 use moa_core::{
     ApprovalDecision, ApprovalPrompt, ClearSubAgentPendingApprovalInput, CompletionRequest, Event,
-    PolicyAction, SessionId, SessionMeta, SetSubAgentPendingApprovalInput, SubAgentToolRecord,
-    SubAgentTurnOutcomeRecord, SubAgentTurnPreparation, SubAgentTurnResponseRecord,
-    ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
-    TurnOutcome as CoreTurnOutcome, is_delegation_tool_name, record_approval_wait,
+    ModelTier, PolicyAction, SessionId, SessionMeta, SetSubAgentPendingApprovalInput,
+    SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
+    SubAgentTurnResponseRecord, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
+    ToolOutput, TurnOutcome as CoreTurnOutcome, is_delegation_tool_name, record_approval_wait,
     record_turn_event_persist_duration, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration,
+    record_turn_tool_dispatch_duration, record_turn_workflow_outcome,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,12 @@ struct PendingApprovalState {
 struct ApprovalOutcome {
     allow_execution: bool,
     denied_output: ToolOutput,
+}
+
+#[derive(Clone, Debug)]
+enum SubAgentIterationOutcome {
+    Core(CoreTurnOutcome),
+    Cancelled(String),
 }
 
 impl ApprovalOutcome {
@@ -106,6 +113,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
         let request = request.into_inner();
         ctx.set(K_PHASE, Json::from(TurnPhase::Compiling));
 
+        let workflow_started = Instant::now();
         let outcome = match run_sub_agent_inside_workflow(&ctx, &request).await {
             Ok(outcome) => outcome,
             Err(error) => TurnOutcome {
@@ -114,6 +122,12 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
                 message: format!("{error:?}"),
             },
         };
+        record_turn_workflow_outcome(
+            "sub_agent",
+            turn_outcome_kind_label(&outcome.kind),
+            ModelTier::Auxiliary,
+            workflow_started.elapsed(),
+        );
         if matches!(outcome.kind, TurnOutcomeKind::Cancelled) {
             cleanup_pending_approval_after_cancel(
                 &ctx,
@@ -182,7 +196,7 @@ async fn run_sub_agent_inside_workflow(
     ctx: &WorkflowContext<'_>,
     request: &RunSubAgentTurnRequest,
 ) -> Result<TurnOutcome, HandlerError> {
-    for _turn_number in 1..=MAX_SUB_AGENT_TURNS_PER_WORKFLOW {
+    for turn_number in 1..=MAX_SUB_AGENT_TURNS_PER_WORKFLOW {
         if let Some(reason) = cancel_requested(ctx).await? {
             ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
                 .cancel(reason.clone())
@@ -201,7 +215,7 @@ async fn run_sub_agent_inside_workflow(
             .call()
             .await?
             .into_inner();
-        let (mut completion_request, active_canary, meta, parent_session) = match preparation {
+        let (completion_request, active_canary, meta, parent_session) = match preparation {
             SubAgentTurnPreparation::Outcome { outcome } => {
                 return Ok(workflow_outcome_from_core(request, outcome));
             }
@@ -212,90 +226,47 @@ async fn run_sub_agent_inside_workflow(
                 parent_session,
             } => (*request, active_canary, *session_meta, parent_session),
         };
-        attach_active_segment_metadata(ctx, parent_session, &mut completion_request).await?;
-        let allowed_tools = allowed_tool_names(&completion_request);
-
-        ctx.set(K_PHASE, Json::from(TurnPhase::Streaming));
-        let span = llm_call_span(&meta);
-        let llm_started = Instant::now();
-        let response = {
-            let _guard = span.enter();
-            restate_sdk::select! {
-                reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
-                    let reason = reason?;
-                    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
-                        .cancel(reason.clone())
-                        .send();
-                    return Ok(TurnOutcome {
-                        turn_id: request.turn_id.clone(),
-                        kind: TurnOutcomeKind::Cancelled,
-                        message: reason,
-                    });
-                },
-                response = ctx
-                    .service_client::<LLMGatewayClient>()
-                    .complete(Json::from(completion_request))
-                    .call() => {
-                        response?.into_inner()
-                    }
-            }
-        };
-        record_turn_llm_call_duration(llm_started.elapsed());
-
-        ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
-            .record_response(Json::from(SubAgentTurnResponseRecord {
-                turn_id: request.turn_id.clone(),
-                response: response.clone(),
-            }))
-            .call()
-            .await?;
-
-        for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
-            if let Some(reason) = cancel_requested(ctx).await? {
-                ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
-                    .cancel(reason.clone())
-                    .send();
+        let turn_span = sub_agent_turn_span(
+            &meta,
+            &request.sub_agent_id,
+            &request.turn_id,
+            turn_number as i64,
+            None,
+        );
+        let outcome = run_sub_agent_iteration(
+            ctx,
+            request,
+            completion_request,
+            active_canary,
+            meta,
+            parent_session,
+        )
+        .instrument(turn_span)
+        .await?;
+        match outcome {
+            SubAgentIterationOutcome::Cancelled(message) => {
                 return Ok(TurnOutcome {
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Cancelled,
-                    message: reason,
+                    message,
                 });
             }
-            let tool_context = SubAgentToolContext {
-                turn_id: &request.turn_id,
-                sub_agent_id: &request.sub_agent_id,
-                meta: &meta,
-                session_id: parent_session,
-                active_canary: active_canary.as_deref(),
-            };
-            handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
-        }
-
-        let outcome = turn_outcome_for_response(&response);
-        ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
-            .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
-                turn_id: request.turn_id.clone(),
-                outcome,
-            }))
-            .call()
-            .await?;
-        match outcome {
-            CoreTurnOutcome::Continue => continue,
-            CoreTurnOutcome::Idle => {
+            SubAgentIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
+            SubAgentIterationOutcome::Core(CoreTurnOutcome::Idle) => {
                 return Ok(TurnOutcome {
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Completed,
                     message: "sub-agent turn completed".to_string(),
                 });
             }
-            CoreTurnOutcome::WaitingApproval => {
+            SubAgentIterationOutcome::Core(CoreTurnOutcome::WaitingApproval) => {
                 return Ok(TurnOutcome {
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Completed,
                     message: "sub-agent turn is waiting for approval".to_string(),
                 });
             }
-            CoreTurnOutcome::Cancelled => {
+            SubAgentIterationOutcome::Core(CoreTurnOutcome::Cancelled) => {
                 return Ok(TurnOutcome {
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Cancelled,
@@ -310,6 +281,76 @@ async fn run_sub_agent_inside_workflow(
         kind: TurnOutcomeKind::Failed,
         message: format!("sub-agent turn budget exceeded ({MAX_SUB_AGENT_TURNS_PER_WORKFLOW})"),
     })
+}
+
+async fn run_sub_agent_iteration(
+    ctx: &WorkflowContext<'_>,
+    request: &RunSubAgentTurnRequest,
+    mut completion_request: CompletionRequest,
+    active_canary: Option<String>,
+    meta: SessionMeta,
+    parent_session: SessionId,
+) -> Result<SubAgentIterationOutcome, HandlerError> {
+    attach_active_segment_metadata(ctx, parent_session, &mut completion_request).await?;
+    let allowed_tools = allowed_tool_names(&completion_request);
+
+    ctx.set(K_PHASE, Json::from(TurnPhase::Streaming));
+    let span = llm_call_span(&meta);
+    let llm_started = Instant::now();
+    let response = {
+        let _guard = span.enter();
+        restate_sdk::select! {
+            reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
+                let reason = reason?;
+                ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+                    .cancel(reason.clone())
+                    .send();
+                return Ok(SubAgentIterationOutcome::Cancelled(reason));
+            },
+            response = ctx
+                .service_client::<LLMGatewayClient>()
+                .complete(Json::from(completion_request))
+                .call() => {
+                    response?.into_inner()
+                }
+        }
+    };
+    record_turn_llm_call_duration(llm_started.elapsed());
+
+    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        .record_response(Json::from(SubAgentTurnResponseRecord {
+            turn_id: request.turn_id.clone(),
+            response: response.clone(),
+        }))
+        .call()
+        .await?;
+
+    for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
+        if let Some(reason) = cancel_requested(ctx).await? {
+            ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+                .cancel(reason.clone())
+                .send();
+            return Ok(SubAgentIterationOutcome::Cancelled(reason));
+        }
+        let tool_context = SubAgentToolContext {
+            turn_id: &request.turn_id,
+            sub_agent_id: &request.sub_agent_id,
+            meta: &meta,
+            session_id: parent_session,
+            active_canary: active_canary.as_deref(),
+        };
+        handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
+    }
+
+    let outcome = turn_outcome_for_response(&response);
+    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
+            turn_id: request.turn_id.clone(),
+            outcome,
+        }))
+        .call()
+        .await?;
+    Ok(SubAgentIterationOutcome::Core(outcome))
 }
 
 async fn attach_active_segment_metadata(
@@ -944,6 +985,14 @@ fn is_terminal_phase(phase: &TurnPhase) -> bool {
         phase,
         TurnPhase::Completed | TurnPhase::Cancelled | TurnPhase::Failed
     )
+}
+
+fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
+    match kind {
+        TurnOutcomeKind::Completed => "completed",
+        TurnOutcomeKind::Cancelled => "cancelled",
+        TurnOutcomeKind::Failed => "failed",
+    }
 }
 
 #[cfg(test)]

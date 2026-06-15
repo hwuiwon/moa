@@ -15,6 +15,7 @@ pub struct LineageSinkRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineageSinkMode {
     Null,
+    Otel,
     Postgres,
 }
 
@@ -23,7 +24,8 @@ impl LineageSinkMode {
         let normalized = value.map(str::trim).filter(|value| !value.is_empty());
         match normalized.map(str::to_ascii_lowercase).as_deref() {
             Some("postgres") => Ok(Self::Postgres),
-            Some("null") | Some("otel") | None => Ok(Self::Null),
+            Some("otel") => Ok(Self::Otel),
+            Some("null") | None => Ok(Self::Null),
             Some(other) => Err(MoaError::ConfigError(format!(
                 "unknown MOA_LINEAGE_SINK value: {other}; expected postgres|null|otel"
             ))),
@@ -75,6 +77,13 @@ pub async fn build_lineage_sink_from_env_value(
                 writer: None,
             })
         }
+        LineageSinkMode::Otel => {
+            tracing::info!("lineage sink: otel span attributes only");
+            Ok(LineageSinkRuntime {
+                handle: Arc::new(moa_lineage_sink::OtelSink::new()),
+                writer: None,
+            })
+        }
     }
 }
 
@@ -83,7 +92,7 @@ mod tests {
     use super::LineageSinkMode;
 
     #[test]
-    fn lineage_sink_mode_defaults_unset_and_otel_to_null() {
+    fn lineage_sink_mode_defaults_unset_to_null_and_accepts_otel() {
         assert_eq!(
             LineageSinkMode::from_env_value(None).expect("unset should default to null"),
             LineageSinkMode::Null
@@ -93,8 +102,8 @@ mod tests {
             LineageSinkMode::Null
         );
         assert_eq!(
-            LineageSinkMode::from_env_value(Some("otel")).expect("otel should alias null"),
-            LineageSinkMode::Null
+            LineageSinkMode::from_env_value(Some("otel")).expect("otel should parse"),
+            LineageSinkMode::Otel
         );
     }
 

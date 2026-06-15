@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use moa_authz::require_authz_with_delegation;
@@ -14,7 +15,9 @@ use moa_core::wire::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
-use moa_core::{MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId};
+use moa_core::{
+    MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId, record_memory_operation,
+};
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
     StageTimings, TurnId, VecHit,
@@ -110,6 +113,7 @@ impl Memory for MemoryImpl {
         let user_id = checked_ingest_user_id(request.user_id.as_ref(), &identity)
             .map_err(user_scope_handler_error)?;
 
+        let started = Instant::now();
         let mut results = Vec::with_capacity(request.documents.len());
         for (index, document) in request.documents.into_iter().enumerate() {
             let workspace_id = request.workspace_id.clone();
@@ -139,6 +143,12 @@ impl Memory for MemoryImpl {
                 .into_inner();
             results.push(ingest_result_from_report(document.source_name, report));
         }
+        record_memory_operation(
+            "ingest_documents",
+            "success",
+            results.len() as u64,
+            started.elapsed(),
+        );
 
         Ok(Json(MemoryIngestResponse {
             workspace_id: request.workspace_id,
@@ -271,6 +281,7 @@ async fn search_inner(
     request: MemorySearchRequest,
     scope: MemoryScope,
 ) -> Result<MemorySearchResponse, HandlerError> {
+    let started = Instant::now();
     let (graph, retriever) = memory_stack(&scope);
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
     let hits = retrieve_hits(
@@ -286,6 +297,8 @@ async fn search_inner(
         },
     )
     .await?;
+    let result_count = hits.len() as u64;
+    record_memory_operation("search", "success", result_count, started.elapsed());
 
     Ok(MemorySearchResponse {
         query: request.query,
@@ -294,6 +307,7 @@ async fn search_inner(
 }
 
 async fn show_inner(request: MemoryShowRequest) -> Result<MemoryShowResponse, HandlerError> {
+    let started = Instant::now();
     let scope = MemoryScope::Workspace {
         workspace_id: request.workspace_id,
     };
@@ -315,7 +329,7 @@ async fn show_inner(request: MemoryShowRequest) -> Result<MemoryShowResponse, Ha
             .map_err(memory_handler_error)?
     };
 
-    Ok(MemoryShowResponse {
+    let response = MemoryShowResponse {
         uid: node.uid,
         label: node.label.as_str().to_string(),
         name: node.name,
@@ -334,7 +348,9 @@ async fn show_inner(request: MemoryShowRequest) -> Result<MemoryShowResponse, Ha
                 relationship: None,
             })
             .collect(),
-    })
+    };
+    record_memory_operation("show", "success", 1, started.elapsed());
+    Ok(response)
 }
 
 async fn retrieve_debug_inner(
@@ -342,6 +358,7 @@ async fn retrieve_debug_inner(
     scope: MemoryScope,
     identity: &Identity,
 ) -> Result<MemoryRetrieveDebugResponse, HandlerError> {
+    let started = Instant::now();
     let (graph, retriever) = memory_stack(&scope);
     let seeds = lookup_seed_uids(graph.as_ref(), &request.query, request.limit).await?;
     let hits = retrieve_hits(
@@ -373,6 +390,8 @@ async fn retrieve_debug_inner(
     } else {
         None
     };
+    let result_count = hits.len() as u64;
+    record_memory_operation("retrieve_debug", "success", result_count, started.elapsed());
 
     Ok(MemoryRetrieveDebugResponse {
         query: request.query,

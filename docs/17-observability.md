@@ -72,14 +72,16 @@ not treat that as fatal for best-effort live previews.
 Signals to watch:
 
 - warn logs containing `broadcast subscriber fell behind, dropped events`;
-- `moa_broadcast_lag_events_dropped_total`;
-- `moa_broadcast_lag_events_dropped_by_channel_total`.
+- `moa_broadcast_lag_events_dropped_total`.
 
 Important labels:
 
 - `channel=event`
 - `channel=runtime`
-- `session_id=<uuid>` on the high-cardinality counter
+- `policy=skip_with_gap|backfill_from_store|abort`
+
+Do not put `session_id` on this Prometheus counter. Keep session-specific lag
+details in logs or traces and use durable event replay for drilldown.
 
 Runtime behavior:
 

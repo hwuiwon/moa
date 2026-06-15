@@ -97,6 +97,28 @@ pub fn record_llm_request(provider: &str, model: &str) {
     .increment(1);
 }
 
+/// Records one completed LLM request duration sample.
+pub fn record_llm_request_duration(provider: &str, model: &str, status: &str, duration: Duration) {
+    histogram!(
+        "moa_llm_request_duration_seconds",
+        "provider" => provider.to_string(),
+        "model" => model.to_string(),
+        "status" => status.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records one failed LLM request by bounded error class.
+pub fn record_llm_failure(provider: &str, model: &str, class: &str) {
+    counter!(
+        "moa_llm_failures_total",
+        "provider" => provider.to_string(),
+        "model" => model.to_string(),
+        "class" => class.to_string()
+    )
+    .increment(1);
+}
+
 /// Records uncached input tokens, including cache-write prompt tokens.
 pub fn record_tokens_input_uncached(provider: &str, model: &str, tokens: u64) {
     if tokens == 0 {
@@ -269,9 +291,55 @@ pub fn record_turn_latency(duration: Duration) {
     histogram!("moa_turn_latency_seconds").record(duration.as_secs_f64());
 }
 
+/// Records one terminal turn-workflow outcome and its total workflow latency.
+pub fn record_turn_workflow_outcome(
+    scope: &str,
+    result: &str,
+    model_tier: ModelTier,
+    duration: Duration,
+) {
+    counter!(
+        "moa_turn_outcomes_total",
+        "scope" => scope.to_string(),
+        "result" => result.to_string(),
+        "model_tier" => model_tier.as_str().to_string()
+    )
+    .increment(1);
+    histogram!(
+        "moa_turn_workflow_latency_seconds",
+        "scope" => scope.to_string(),
+        "result" => result.to_string(),
+        "model_tier" => model_tier.as_str().to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
 /// Records one pipeline compilation duration sample.
 pub fn record_pipeline_compile_duration_metric(duration: Duration) {
     histogram!("moa_pipeline_compile_seconds").record(duration.as_secs_f64());
+}
+
+/// Records one query-rewrite gate outcome.
+pub fn record_query_rewrite_decision(
+    decision: &str,
+    reason: &str,
+    llm_called: bool,
+    duration: Duration,
+) {
+    let llm_called = if llm_called { "true" } else { "false" };
+    counter!(
+        "moa_query_rewrite_decisions_total",
+        "decision" => decision.to_string(),
+        "reason" => reason.to_string(),
+        "llm_called" => llm_called.to_string()
+    )
+    .increment(1);
+    histogram!(
+        "moa_query_rewrite_duration_seconds",
+        "decision" => decision.to_string(),
+        "llm_called" => llm_called.to_string()
+    )
+    .record(duration.as_secs_f64());
 }
 
 /// Records one sandbox provisioning duration sample.
@@ -344,6 +412,47 @@ pub fn record_tool_idempotency_scan(event_type: &str, scanned_events: u64, durat
         "event_type" => event_type.to_string()
     )
     .record(scanned_events as f64);
+}
+
+/// Records one memory service operation.
+pub fn record_memory_operation(
+    operation: &str,
+    status: &str,
+    result_count: u64,
+    duration: Duration,
+) {
+    counter!(
+        "moa_memory_operations_total",
+        "operation" => operation.to_string(),
+        "status" => status.to_string()
+    )
+    .increment(1);
+    histogram!(
+        "moa_memory_operation_duration_seconds",
+        "operation" => operation.to_string(),
+        "status" => status.to_string()
+    )
+    .record(duration.as_secs_f64());
+    histogram!(
+        "moa_memory_operation_results",
+        "operation" => operation.to_string(),
+        "status" => status.to_string()
+    )
+    .record(result_count as f64);
+}
+
+/// Records live broadcast events dropped because a receiver lagged.
+pub fn record_broadcast_lag(channel: &str, policy: &str, dropped_events: u64) {
+    if dropped_events == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_broadcast_lag_events_dropped_total",
+        "channel" => channel.to_string(),
+        "policy" => policy.to_string()
+    )
+    .increment(dropped_events);
 }
 
 /// Records the time spent validating an API key.
@@ -441,6 +550,14 @@ fn register_metric_descriptions() {
         "Total outbound LLM API requests, labeled by provider and model."
     );
     describe_counter!(
+        "moa_llm_failures_total",
+        "Total failed outbound LLM API requests, labeled by provider, model, and bounded error class."
+    );
+    describe_histogram!(
+        "moa_llm_request_duration_seconds",
+        "Total outbound LLM request duration in seconds, labeled by provider, model, and status."
+    );
+    describe_counter!(
         "moa_tokens_input_cached_total",
         "Total cached input tokens served from provider-side caches."
     );
@@ -482,7 +599,7 @@ fn register_metric_descriptions() {
     );
     describe_counter!(
         "moa_broadcast_lag_events_dropped_total",
-        "Live broadcast events dropped because a subscriber lagged behind."
+        "Live broadcast events dropped because a subscriber lagged behind, labeled by channel and handling policy."
     );
     describe_counter!(
         "moa_compaction_tier_applied_total",
@@ -524,6 +641,14 @@ fn register_metric_descriptions() {
         "moa_turn_latency_seconds",
         "End-to-end turn latency in seconds."
     );
+    describe_counter!(
+        "moa_turn_outcomes_total",
+        "Terminal turn workflow outcomes, labeled by scope, result, and model tier."
+    );
+    describe_histogram!(
+        "moa_turn_workflow_latency_seconds",
+        "End-to-end turn workflow latency in seconds, labeled by scope, result, and model tier."
+    );
     describe_histogram!(
         "moa_llm_ttft_seconds",
         "Time to first token for LLM requests in seconds."
@@ -543,6 +668,14 @@ fn register_metric_descriptions() {
     describe_histogram!(
         "moa_pipeline_compile_seconds",
         "Context pipeline compilation duration in seconds."
+    );
+    describe_counter!(
+        "moa_query_rewrite_decisions_total",
+        "Query rewrite gate decisions, labeled by decision, reason, and LLM-call status."
+    );
+    describe_histogram!(
+        "moa_query_rewrite_duration_seconds",
+        "Query rewrite stage duration in seconds, labeled by decision and LLM-call status."
     );
     describe_histogram!(
         "moa_sandbox_provision_seconds",
@@ -595,6 +728,18 @@ fn register_metric_descriptions() {
     describe_histogram!(
         "moa_api_key_validation_seconds",
         "API-key validation duration in seconds, labeled by result."
+    );
+    describe_counter!(
+        "moa_memory_operations_total",
+        "Memory service operations, labeled by operation and status."
+    );
+    describe_histogram!(
+        "moa_memory_operation_duration_seconds",
+        "Memory service operation duration in seconds, labeled by operation and status."
+    );
+    describe_histogram!(
+        "moa_memory_operation_results",
+        "Memory service result counts, labeled by operation and status."
     );
 }
 
