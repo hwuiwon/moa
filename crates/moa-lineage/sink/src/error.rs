@@ -15,6 +15,9 @@ pub enum Error {
     /// JSON serialization failed.
     #[error("lineage json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Lineage hash-chain canonicalization or verification failed.
+    #[error("lineage hash chain: {0}")]
+    Chain(#[from] moa_lineage_core::chain::LineageChainError),
     /// Writer task join failed.
     #[error("lineage writer join: {0}")]
     Join(#[from] tokio::task::JoinError),

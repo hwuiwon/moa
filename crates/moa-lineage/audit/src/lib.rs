@@ -14,19 +14,12 @@
 //! audited by its authors. Internal engineering forensics are not blocked by
 //! that gate.
 
-pub mod chain;
-pub mod decision;
 pub mod error;
 pub mod export;
 pub mod merkle;
 pub mod signing;
 pub mod vault;
 
-pub use chain::{HashChain, canonical_json_bytes, canonical_payload_hash, hash_from_slice};
-pub use decision::{
-    AclFilterDecision, DecisionKind, DecisionRecord, PiiRedactionDecision, PrivacyEraseDecision,
-    PrivacyExportDecision, ScopeEnforcementDecision,
-};
 pub use error::{AuditError, Result};
 pub use export::{DsarBundle, DsarExporter, DsarJsonlExport, ExportOptions, RootWindow};
 pub use merkle::{

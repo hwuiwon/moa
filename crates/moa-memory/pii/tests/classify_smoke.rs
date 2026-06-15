@@ -1,8 +1,9 @@
 //! Smoke coverage for the HTTP-backed PII classifier.
 
+use moa_memory_graph::PiiClass;
 use moa_memory_pii::{
-    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClass, PiiClassifier, PiiSpan,
-    PrivacyFilterThresholds, openai_filter::resolve_class,
+    OpenAiPrivacyFilterClassifier, PiiCategory, PiiClassifier, PiiSpan, PrivacyFilterThresholds,
+    openai_filter::resolve_class,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

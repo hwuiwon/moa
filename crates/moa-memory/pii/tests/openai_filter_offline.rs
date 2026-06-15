@@ -1,6 +1,7 @@
 //! Wiremock offline counterpart for the privacy-filter sidecar live coverage.
 
-use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClass, PiiClassifier};
+use moa_memory_graph::PiiClass;
+use moa_memory_pii::{OpenAiPrivacyFilterClassifier, PiiClassifier};
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use moa_core::ApprovalDecision;
 
+const APPROVAL_TIMEOUT_SECS_ENV: &str = "MOA_APPROVAL_TIMEOUT_SECS";
+const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 30 * 60;
 const CANCELLED_APPROVAL_PREFIX: &str = "Cancelled while waiting for approval:";
 
 /// Parses an approval wait timeout from an optional environment value.
@@ -12,6 +14,14 @@ pub(crate) fn timeout_from_env(raw: Option<&str>, default_secs: u64) -> Duration
         .filter(|value| *value > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(default_secs))
+}
+
+/// Returns the configured approval wait timeout for workflow approval gates.
+pub(crate) fn configured_timeout() -> Duration {
+    timeout_from_env(
+        std::env::var(APPROVAL_TIMEOUT_SECS_ENV).ok().as_deref(),
+        DEFAULT_APPROVAL_TIMEOUT_SECS,
+    )
 }
 
 /// Builds the deterministic auto-deny reason for an approval wait timeout.

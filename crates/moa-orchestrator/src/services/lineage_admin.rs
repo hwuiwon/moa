@@ -11,9 +11,8 @@ use moa_core::wire::{
     LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
 };
 use moa_core::{SessionId, UserId, WorkspaceId};
-use moa_lineage_audit::{
-    DsarExporter, HashChain, PiiVault, SigningKey, blake3_merkle_root, hash_from_slice,
-};
+use moa_lineage_audit::{DsarExporter, PiiVault, SigningKey, blake3_merkle_root};
+use moa_lineage_core::chain::{HashChain, hash_from_slice};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sqlx::{PgPool, Row};

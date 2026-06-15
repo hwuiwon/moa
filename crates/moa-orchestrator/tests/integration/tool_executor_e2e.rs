@@ -222,7 +222,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         let descriptors = list_response
             .error_for_status()
             .context("list_tools should succeed")?
-            .json::<Vec<moa_orchestrator::services::tool_executor::ToolDescriptor>>()
+            .json::<Vec<moa_core::wire::ToolDescriptor>>()
             .await
             .context("deserialize tool descriptors")?;
         for expected in ["bash", "file_read", "file_write"] {

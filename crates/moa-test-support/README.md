@@ -15,10 +15,10 @@ let cents = table.cost_cents("anthropic", "claude-sonnet-4", 125_000, 20_000, 50
 
 ## Recorded Transcripts
 
-`moa_test_support::transcript` reads and writes JSONL transcripts with one metadata line followed by one turn per line. Every turn must end with a terminal provider event.
+`moa_core::transcript` reads and writes JSONL transcripts with one metadata line followed by one turn per line. Every turn must end with a terminal provider event.
 
 ```rust
-use moa_test_support::transcript::Transcript;
+use moa_core::transcript::Transcript;
 
 let transcript = Transcript::read_jsonl("crates/moa-test-support/fixtures/transcripts/example_minimal.jsonl".as_ref())?;
 transcript.validate()?;

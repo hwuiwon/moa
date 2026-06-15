@@ -1071,8 +1071,8 @@ enum ApplyOutcome {
 mod tests {
     use chrono::Utc;
     use moa_core::{ContextMessage, SessionId, UserId, WorkspaceId};
-    use moa_memory_graph::EdgeLabel;
-    use moa_memory_pii::{PiiCategory, PiiClass, PiiResult, PiiSpan, classify_heuristic};
+    use moa_memory_graph::{EdgeLabel, PiiClass};
+    use moa_memory_pii::{PiiCategory, PiiResult, PiiSpan, classify_heuristic};
 
     use super::{
         entity_fact_edge_intent, fact_entity_edge_intent, fact_object_edge_label, redact_fact,

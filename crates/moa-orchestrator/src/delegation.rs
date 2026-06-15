@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use moa_core::wire::AppendEventRequest;
 use moa_core::{
     AttachSubAgentResultWaiterInput, CancelSubAgentInput, CompleteSubAgentChildInput,
     ConsumeSubAgentChildResultInput, DelegationTool, DispatchSubAgentInput, Event,
@@ -17,7 +18,7 @@ use tracing::Instrument;
 
 use crate::objects::session::SessionClient;
 use crate::objects::sub_agent::SubAgentClient;
-use crate::services::session_store::{AppendEventRequest, RestateSessionStoreClient};
+use crate::services::session_store::RestateSessionStoreClient;
 use crate::sub_agent_dispatch::{
     DispatchedSubAgent, child_agent_path, child_is_owned, sub_agent_result_tool_output,
     validate_dispatch_budget, validate_dispatch_limits,

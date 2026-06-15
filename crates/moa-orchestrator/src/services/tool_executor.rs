@@ -3,8 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub use moa_core::wire::ToolDescriptor;
-use moa_core::wire::tool_descriptor;
+use moa_core::wire::{AppendEventRequest, ToolDescriptor, tool_descriptor};
 use moa_core::{
     Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, SessionStore as _, ToolCallId, ToolCallRequest, ToolDefinition,
@@ -18,7 +17,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
-use crate::services::session_store::{AppendEventRequest, RestateSessionStoreClient};
+use crate::services::session_store::RestateSessionStoreClient;
 use moa_core::restate_observability::annotate_restate_handler_span;
 
 /// Restate service surface for durable tool execution.

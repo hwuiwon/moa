@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::wire::ToolDescriptor;
 use moa_core::{
     BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, ToolCallId, ToolCallRequest,
     ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
@@ -12,8 +13,7 @@ use moa_core::{
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::tool_executor::{
-    ToolDescriptor, ToolExecutorImpl, build_tool_run_plan, has_prior_non_idempotent_result,
-    tool_run_name,
+    ToolExecutorImpl, build_tool_run_plan, has_prior_non_idempotent_result, tool_run_name,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;

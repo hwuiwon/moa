@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signature, Signer, SigningKey as DalekSigningKey, Verifier, VerifyingKey};
 use tokio::fs;
 
-use crate::chain::canonical_json_bytes;
 use crate::error::{AuditError, Result};
+use moa_lineage_core::chain::canonical_json_bytes;
 
 /// Ed25519 signing key handle.
 #[derive(Clone)]

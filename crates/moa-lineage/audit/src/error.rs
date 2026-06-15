@@ -24,6 +24,9 @@ pub enum AuditError {
     /// Zip bundle write failed.
     #[error("audit zip: {0}")]
     Zip(#[from] zip::result::ZipError),
+    /// Lineage chain canonicalization or verification failed.
+    #[error("audit lineage chain: {0}")]
+    Chain(#[from] moa_lineage_core::chain::LineageChainError),
     /// Signature verification failed.
     #[error("audit signature verification failed")]
     Signature,

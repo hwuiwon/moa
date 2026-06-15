@@ -46,7 +46,6 @@ pub use metrics::{
     aggregate_retrieval_eval_with_diagnostics, aggregate_retrieval_eval_with_extraction_precision,
     candidates_from_retrieval_hits,
 };
-pub use moa_brain::retrieval::{RankingConfig, RankingMode, RankingWeights};
 pub use recording::{
     MemoryExtractionRecordingOptions, MemoryExtractionRecordingReport, MemoryMergeRecordingOptions,
     MemoryMergeRecordingReport, record_memory_extractions, record_memory_merges,

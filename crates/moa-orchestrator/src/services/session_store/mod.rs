@@ -6,6 +6,14 @@
 
 use std::sync::Arc;
 
+use moa_core::wire::{
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
+    GetSegmentBaselineRequest, InitSessionVoRequest, ListSessionsRequest,
+    ListSkillResolutionRatesRequest, RecordSegmentSkillActivationRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, SearchEventsRequest,
+    UpdateSegmentResolutionRequest, UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
+    WorkspaceCostSinceRequest,
+};
 use moa_core::{
     Event, EventRecord, SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore,
     SessionSummary, SkillResolutionRate, TaskSegment, record_session_error,
@@ -18,18 +26,8 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
 mod inner;
-mod requests;
 #[cfg(test)]
 mod tests;
-
-pub use requests::{
-    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
-    GetSegmentBaselineRequest, InitSessionVoRequest, ListSessionsRequest,
-    ListSkillResolutionRatesRequest, RecordSegmentSkillActivationRequest,
-    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, SearchEventsRequest,
-    UpdateSegmentResolutionRequest, UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
-    WorkspaceCostSinceRequest,
-};
 
 /// Restate service surface for durable session/event storage.
 #[restate_sdk::service]

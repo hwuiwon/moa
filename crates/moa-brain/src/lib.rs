@@ -23,7 +23,6 @@ pub use pipeline::{
 };
 pub use tool_stats::{ToolStats, WorkspaceToolStats, update_ema};
 pub use turn::{
-    PendingToolApproval, StoredApprovalDecision, StreamSignalDisposition, StreamedCompletion,
-    find_pending_approval_request, find_pending_tool_approval, find_resolved_pending_tool_approval,
+    StreamSignalDisposition, StreamedCompletion, find_pending_approval_request,
     stream_completion_response,
 };

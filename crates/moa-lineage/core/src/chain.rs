@@ -1,12 +1,32 @@
-//! BLAKE3 canonical-payload hash-chain primitives.
+//! Shared canonical-payload hash-chain primitives for lineage writers and verifiers.
 
 use blake3::{Hash, Hasher};
 use serde::Serialize;
 use serde_canonical_json::CanonicalFormatter;
 
-use crate::error::{AuditError, Result};
+/// Result type used by lineage hash-chain helpers.
+pub type Result<T> = std::result::Result<T, LineageChainError>;
 
 const GENESIS_DOMAIN: &[u8] = b"\0\0\0\0moa-audit-genesis-v1\0\0\0\0";
+
+/// Errors returned by canonical payload hashing and chain verification.
+#[derive(Debug, thiserror::Error)]
+pub enum LineageChainError {
+    /// JSON canonicalization or serialization failed.
+    #[error("lineage chain json: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A stored hash was not exactly 32 bytes.
+    #[error("lineage chain invalid hash: expected a 32-byte hash")]
+    InvalidHash,
+    /// A payload did not match its stored chain hash.
+    #[error("lineage chain mismatch at index {index}: {message}")]
+    ChainMismatch {
+        /// Failing record index.
+        index: usize,
+        /// Human-readable mismatch details.
+        message: String,
+    },
+}
 
 /// Canonicalizes a serializable payload to deterministic JSON bytes.
 pub fn canonical_json_bytes<T: Serialize>(payload: &T) -> Result<Vec<u8>> {
@@ -56,7 +76,7 @@ impl HashChain {
         for (index, (payload, expected)) in records.into_iter().enumerate() {
             let (actual, _) = Self::link(prev, payload)?;
             if actual.as_bytes() != expected {
-                return Err(AuditError::ChainMismatch {
+                return Err(LineageChainError::ChainMismatch {
                     index,
                     message: "stored integrity hash did not match canonical payload".to_string(),
                 });
@@ -71,7 +91,7 @@ impl HashChain {
 pub fn hash_from_slice(bytes: &[u8]) -> Result<Hash> {
     let array: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| AuditError::Invalid("expected a 32-byte hash".to_string()))?;
+        .map_err(|_| LineageChainError::InvalidHash)?;
     Ok(Hash::from(array))
 }
 

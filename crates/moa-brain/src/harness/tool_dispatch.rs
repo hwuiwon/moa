@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use moa_core::events::tool_approval::PendingToolApproval;
 use moa_core::{
     ApprovalRequest, Event, EventRecord, MoaError, PolicyAction, Result, RuntimeEvent, SessionId,
     SessionMeta, SessionSignal, SessionStatus, SessionStore, ToolCallContent, ToolCallId,
@@ -439,7 +440,7 @@ pub(super) async fn execute_pending_tool(
     tool_router: &ToolRouter,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    pending: crate::turn::PendingToolApproval,
+    pending: PendingToolApproval,
     active_canary: Option<&str>,
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
@@ -521,9 +522,7 @@ fn provider_thought_signature(call: &ToolCallContent) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn resumed_tool_invocation_id(
-    pending: &crate::turn::PendingToolApproval,
-) -> Option<String> {
+pub(super) fn resumed_tool_invocation_id(pending: &PendingToolApproval) -> Option<String> {
     pending
         .provider_tool_use_id
         .clone()

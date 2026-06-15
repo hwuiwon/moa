@@ -13,6 +13,7 @@ pub mod session_replay;
 pub mod shell;
 pub mod telemetry;
 pub mod traits;
+pub mod transcript;
 pub mod truncation;
 pub mod turn_latency;
 pub mod types;

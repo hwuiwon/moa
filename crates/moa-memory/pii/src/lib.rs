@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub mod mock;
 pub mod openai_filter;
 
-pub use moa_memory_graph::PiiClass;
+use moa_memory_graph::PiiClass;
 pub use mock::MockClassifier;
 pub use openai_filter::{OpenAiPrivacyFilterClassifier, PrivacyFilterThresholds};
 

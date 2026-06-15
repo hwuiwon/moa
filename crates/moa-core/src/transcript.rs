@@ -1,12 +1,13 @@
-//! JSONL transcript fixtures for recorded long-conversation replay.
+//! Shared JSONL transcript fixtures for recorded provider-response tests.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-use moa_core::{StopReason, TokenUsage, ToolCallContent};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::{StopReason, TokenUsage, ToolCallContent};
 
 /// A recorded scenario transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

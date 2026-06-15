@@ -5,13 +5,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_core::transcript::Transcript;
 use moa_core::{
     ApprovalDecision, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
     MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallId,
 };
-use moa_eval::long_conversation::{
-    Budgets, RecordedScriptedProvider, Transcript, run_scenario_with_provider,
-};
+use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
 use moa_eval::{AgentConfig, EngineOptions, PermissionOverride, TestSuite, load_suite};
 use serde::Deserialize;
 use tempfile::tempdir;

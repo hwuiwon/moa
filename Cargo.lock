@@ -3670,7 +3670,6 @@ dependencies = [
  "object_store",
  "rand 0.8.5",
  "serde",
- "serde_canonical_json",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
@@ -3704,10 +3703,13 @@ dependencies = [
 name = "moa-lineage-core"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "moa-core",
  "serde",
+ "serde_canonical_json",
  "serde_json",
+ "thiserror 2.0.18",
  "uuid",
  "workspace-hack",
 ]
@@ -3728,7 +3730,6 @@ dependencies = [
 name = "moa-lineage-sink"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "chrono",
  "fjall",
  "metrics",
@@ -3736,7 +3737,6 @@ dependencies = [
  "moa-lineage-core",
  "moa-lineage-otel",
  "serde",
- "serde_canonical_json",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",

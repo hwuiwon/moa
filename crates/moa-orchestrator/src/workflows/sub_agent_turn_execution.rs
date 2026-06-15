@@ -13,7 +13,8 @@ use moa_core::restate_observability::{
     annotate_restate_handler_span, event_persist_span, llm_call_span, tool_dispatch_span,
 };
 use moa_core::wire::{
-    RunSubAgentTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+    AppendEventRequest, RecordSegmentToolUseRequest, RunSubAgentTurnRequest, TurnOutcome,
+    TurnOutcomeKind, TurnPhase, TurnProgress,
 };
 use moa_core::{
     ApprovalDecision, ApprovalPrompt, ClearSubAgentPendingApprovalInput, CompletionRequest, Event,
@@ -31,7 +32,7 @@ use tracing::Instrument;
 use crate::objects::sub_agent::{MAX_SUB_AGENT_TURNS_PER_WORKFLOW, SubAgentClient};
 use crate::services::{
     llm_gateway::LLMGatewayClient,
-    session_store::{AppendEventRequest, RecordSegmentToolUseRequest, RestateSessionStoreClient},
+    session_store::RestateSessionStoreClient,
     tool_executor::ToolExecutorClient,
     workspace_store::{PrepareToolApprovalRequest, StoreApprovalRuleRequest, WorkspaceStoreClient},
 };
@@ -45,8 +46,6 @@ use crate::workflows::approval_wait;
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PENDING_APPROVAL: &str = "pending_approval";
 const K_PHASE: &str = "phase";
-const APPROVAL_TIMEOUT_SECS_ENV: &str = "MOA_APPROVAL_TIMEOUT_SECS";
-const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 30 * 60;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct PendingApprovalState {
@@ -632,7 +631,7 @@ async fn handle_approval_gate(
     )
     .await?;
 
-    let approval_timeout = approval_wait_timeout();
+    let approval_timeout = approval_wait::configured_timeout();
     let timed_out_reason = approval_wait::timeout_reason(approval_timeout);
     let approval_started = Instant::now();
     let decision = restate_sdk::select! {
@@ -930,13 +929,6 @@ fn workflow_outcome_from_core(
             message: "sub-agent turn cancelled".to_string(),
         },
     }
-}
-
-fn approval_wait_timeout() -> Duration {
-    approval_wait::timeout_from_env(
-        std::env::var(APPROVAL_TIMEOUT_SECS_ENV).ok().as_deref(),
-        DEFAULT_APPROVAL_TIMEOUT_SECS,
-    )
 }
 
 async fn durable_utc_now(ctx: &WorkflowContext<'_>) -> Result<DateTime<Utc>, HandlerError> {

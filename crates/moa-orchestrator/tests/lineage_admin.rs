@@ -1,7 +1,8 @@
 //! LineageAdmin helper coverage.
 
 use chrono::Utc;
-use moa_lineage_audit::{HashChain, blake3_merkle_root};
+use moa_lineage_audit::blake3_merkle_root;
+use moa_lineage_core::chain::HashChain;
 use moa_orchestrator::services::lineage_admin::{
     ComplianceRow, prepare_lineage_sql, verify_compliance_rows,
 };

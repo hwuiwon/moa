@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_brain::{StreamedTurnResult, run_streamed_turn_with_signals};
+use moa_core::transcript::Transcript;
 use moa_core::{
     Event, EventRange, EventRecord, LLMProvider, MoaConfig, RuntimeEvent, SessionId, SessionMeta,
     SessionSignal,
@@ -22,7 +23,6 @@ use super::score_card::{
     SafetyScores, ScoreCard, ToolScores,
 };
 use super::scripted_user::{ScriptedApprovalDecision, ScriptedUserScript, ScriptedUserTurn};
-use super::transcript::Transcript;
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
 use crate::{

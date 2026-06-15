@@ -4,6 +4,7 @@
 //! subcrates depend on it; it depends only on `moa-core` for shared identity
 //! and scope types.
 
+pub mod chain;
 pub mod ids;
 pub mod records;
 pub mod sink;

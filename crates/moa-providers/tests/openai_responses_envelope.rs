@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
+use moa_core::transcript::ProviderEvent;
 use moa_core::{
     CompletionContent, CompletionRequest, ContextMessage, LLMProvider, ModelId, StopReason,
     TokenUsage, ToolCallContent, ToolInvocation,
 };
 use moa_providers::{OpenAIProvider, debug_build_openai_request_body};
-use moa_test_support::transcript::ProviderEvent;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

@@ -2,7 +2,7 @@
 
 mod support;
 
-use moa_lineage_audit::AuditError;
+use moa_lineage_core::chain::{LineageChainError, genesis_hash};
 use support::{
     external_tip_hash, minimal_chain_records, push_wrong_prev_hash_record, verify_chain,
 };
@@ -19,11 +19,7 @@ fn hash_chain_verifies_intact_chain_of_5_records_returns_ok() {
     );
     assert_eq!(
         records[0].prev_hash.as_deref(),
-        Some(
-            moa_lineage_audit::chain::genesis_hash()
-                .as_bytes()
-                .as_slice()
-        )
+        Some(genesis_hash().as_bytes().as_slice())
     );
 }
 
@@ -80,9 +76,9 @@ fn hash_chain_replay_against_external_witness_matches() {
     assert_eq!(verifier_tip, witness_tip);
 }
 
-fn assert_chain_mismatch_at(error: AuditError, expected_index: usize) {
+fn assert_chain_mismatch_at(error: LineageChainError, expected_index: usize) {
     match error {
-        AuditError::ChainMismatch { index, message } => {
+        LineageChainError::ChainMismatch { index, message } => {
             assert_eq!(index, expected_index);
             assert!(
                 message.contains("stored integrity hash"),

@@ -22,7 +22,12 @@ use moa_core::restate_observability::{
     annotate_restate_handler_span, emit_turn_latency_summary, emit_turn_replay_summary,
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
-use moa_core::wire::{RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
+use moa_core::wire::{
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
+    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentResolutionScoreRequest,
+    UpdateStatusRequest,
+};
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse, Event,
     EventRange, EventRecord, EventType, LearningEntry, MoaError, PolicyAction, QueryRewriteResult,
@@ -41,11 +46,7 @@ use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
 use crate::services::{
     llm_gateway::LLMGatewayClient,
-    session_store::{
-        AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest,
-        GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
-        RestateSessionStoreClient, UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
-    },
+    session_store::RestateSessionStoreClient,
     tool_executor::ToolExecutorClient,
     workspace_store::{PrepareToolApprovalRequest, StoreApprovalRuleRequest, WorkspaceStoreClient},
 };
@@ -62,8 +63,6 @@ const K_PENDING_APPROVAL: &str = "pending_approval";
 const K_PHASE: &str = "phase";
 const K_USER_MESSAGE_SEQUENCE: &str = "user_message_sequence";
 const K_QUERY_REWRITE_CACHE: &str = "query_rewrite_cache";
-const APPROVAL_TIMEOUT_SECS_ENV: &str = "MOA_APPROVAL_TIMEOUT_SECS";
-const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 30 * 60;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct PendingApprovalState {
@@ -659,7 +658,7 @@ async fn handle_approval_gate(
 
     score_current_active_segment(ctx, session_id, ScoringPhase::Immediate, &[]).await?;
     update_session_status(ctx, session_id, SessionStatus::WaitingApproval).await?;
-    let approval_timeout = approval_wait_timeout();
+    let approval_timeout = approval_wait::configured_timeout();
     let timed_out_reason = approval_wait::timeout_reason(approval_timeout);
     let approval_started = Instant::now();
     let decision = restate_sdk::select! {
@@ -1494,13 +1493,6 @@ fn parse_session_id(raw: &str) -> Result<SessionId, HandlerError> {
     uuid::Uuid::parse_str(raw)
         .map(SessionId)
         .map_err(|error| TerminalError::new(format!("invalid session_id `{raw}`: {error}")).into())
-}
-
-fn approval_wait_timeout() -> Duration {
-    approval_wait::timeout_from_env(
-        std::env::var(APPROVAL_TIMEOUT_SECS_ENV).ok().as_deref(),
-        DEFAULT_APPROVAL_TIMEOUT_SECS,
-    )
 }
 
 async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, HandlerError> {

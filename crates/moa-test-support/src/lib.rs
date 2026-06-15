@@ -9,7 +9,6 @@
 
 pub mod postgres;
 pub mod pricing;
-pub mod transcript;
 
 mod orchestrator_fixture;
 

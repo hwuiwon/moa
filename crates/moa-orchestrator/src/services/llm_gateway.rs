@@ -5,6 +5,7 @@ use std::time::Duration;
 use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
+use moa_core::wire::AppendEventRequest;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig,
     MoaError, ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, StopReason,
@@ -21,7 +22,7 @@ use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-use crate::services::session_store::{AppendEventRequest, RestateSessionStoreClient};
+use crate::services::session_store::RestateSessionStoreClient;
 use moa_core::restate_observability::annotate_restate_handler_span;
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";

@@ -17,6 +17,7 @@ use moa_brain::build_default_graph_memory_retriever;
 use moa_core::config::{AsyncAuthzKind, AuthHeaderTrustKind};
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
+use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
 use moa_orchestrator::{
     OrchestratorCtx,
     config::{
@@ -29,7 +30,6 @@ use moa_orchestrator::{
     objects::session::{Session, SessionImpl},
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
-    restate_register::{IngestionVO, IngestionVOImpl},
     services::{
         admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
         agents::{Agents, AgentsImpl},

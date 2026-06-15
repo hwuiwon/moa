@@ -2,10 +2,11 @@
 
 use std::time::Duration;
 
+use moa_memory_graph::PiiClass;
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{PiiCategory, PiiClass, PiiClassifier, PiiError, PiiResult, PiiSpan, Result};
+use crate::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, Result};
 
 const DEFAULT_MODEL_VERSION: &str = "openai/privacy-filter:v1.0";
 

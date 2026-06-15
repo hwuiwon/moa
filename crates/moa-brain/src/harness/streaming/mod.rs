@@ -6,6 +6,7 @@ mod signals;
 use std::sync::Arc;
 use std::time::Instant;
 
+use moa_core::events::tool_approval::find_pending_tool_approval;
 use moa_core::{
     CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
     ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus,
@@ -22,8 +23,7 @@ use self::lineage::{emit_context_lineage, emit_generation_lineage};
 use self::signals::{drain_signal_queue, handle_stream_signal};
 use crate::pipeline::ContextPipeline;
 use crate::turn::{
-    StreamSignalDisposition, find_pending_approval_request, find_pending_tool_approval,
-    stream_completion_response,
+    StreamSignalDisposition, find_pending_approval_request, stream_completion_response,
 };
 
 use super::StreamedTurnResult;

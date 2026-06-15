@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use moa_core::events::tool_approval::PendingToolApproval;
 use moa_core::{
     ApprovalDecision, Event, EventRecord, MoaError, PolicyAction, Result, RuntimeEvent, SessionId,
     SessionMeta, SessionSignal, SessionStore, ToolCardStatus, ToolInvocation, ToolUpdate,
@@ -10,8 +11,6 @@ use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-
-use crate::turn::PendingToolApproval;
 
 use super::super::context_build::{append_event, approval_decision_label};
 use super::super::tool_dispatch::{ToolCallOutcome, execute_tool, resumed_tool_invocation_id};

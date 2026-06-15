@@ -3,13 +3,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use moa_core::transcript::{ProviderEvent, Transcript};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
     MessageRole, MoaError, ModelCapabilities, ModelId, Result as MoaResult, StopReason,
     TokenPricing, TokenUsage, ToolCallFormat,
 };
 
-use super::transcript::{ProviderEvent, Transcript};
 const COMPACTION_MAX_OUTPUT_TOKENS: usize = 700;
 const RECORDED_COMPACTION_SUMMARY: &str =
     "Recorded checkpoint summary for deterministic long-conversation replay.";

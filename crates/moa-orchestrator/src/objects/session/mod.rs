@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use moa_core::wire::{
     CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
     SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
-    TurnOutcomeKind as ExecutionTurnOutcomeKind,
+    TurnOutcomeKind as ExecutionTurnOutcomeKind, UpdateStatusRequest,
 };
 use moa_core::{
     ActiveSegment, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput,
@@ -19,7 +19,7 @@ use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::objects::sub_agent::SubAgentClient;
-use crate::services::session_store::{RestateSessionStoreClient, UpdateStatusRequest};
+use crate::services::session_store::RestateSessionStoreClient;
 use crate::turn::approval::serialize_awakeable_decision;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_vec};
 use crate::workflows::turn_execution::TurnExecutionClient;

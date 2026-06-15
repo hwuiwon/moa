@@ -5,10 +5,9 @@
 use std::path::PathBuf;
 
 use blake3::Hash;
-use moa_lineage_audit::chain::{
-    canonical_json_bytes, canonical_payload_hash, genesis_hash, next_chain_hash,
+use moa_lineage_core::chain::{
+    HashChain, Result, canonical_json_bytes, canonical_payload_hash, genesis_hash, next_chain_hash,
 };
-use moa_lineage_audit::{HashChain, Result};
 use serde_json::Value;
 
 /// One test audit record with the stored hashes needed by hash-chain tests.

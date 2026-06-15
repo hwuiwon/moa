@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use moa_core::events::tool_approval::{
+    StoredApprovalDecision, find_resolved_pending_tool_approval,
+};
 use moa_core::{
     Event, EventRecord, PolicyAction, Result, RuntimeEvent, SessionId, SessionMeta, SessionStore,
     ToolCardStatus, ToolInvocation, ToolUpdate, UserId,
@@ -9,8 +12,6 @@ use moa_core::{
 use moa_hands::ToolRouter;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-
-use crate::turn::{StoredApprovalDecision, find_resolved_pending_tool_approval};
 
 use super::super::context_build::append_event;
 use super::super::tool_dispatch::{execute_pending_tool, resumed_tool_invocation_id};

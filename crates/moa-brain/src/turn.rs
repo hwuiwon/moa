@@ -11,11 +11,6 @@ use moa_core::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub use moa_core::events::tool_approval::{
-    PendingToolApproval, StoredApprovalDecision, find_pending_tool_approval,
-    find_resolved_pending_tool_approval,
-};
-
 /// Result of draining one streamed completion request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamedCompletion {
@@ -245,6 +240,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
+    use moa_core::events::tool_approval::find_resolved_pending_tool_approval;
     use moa_core::{
         ApprovalDecision, CompletionResponse, SessionId, StopReason, TokenUsage, ToolCallId,
     };

@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use moa_core::wire::InitSessionVoRequest;
+use moa_core::wire::{
+    AppendEventRequest, GetEventsRequest, SearchEventsRequest, UpdateStatusRequest,
+};
 use moa_core::{
     Event, EventFilter, EventRange, ModelId, SessionId, SessionMeta, SessionStatus, UserMessage,
 };
-use moa_orchestrator::services::session_store::InitSessionVoRequest;
-use moa_orchestrator::services::session_store::{
-    AppendEventRequest, GetEventsRequest, RestateSessionStore, SearchEventsRequest,
-    SessionStoreImpl, UpdateStatusRequest,
-};
+use moa_orchestrator::services::session_store::{RestateSessionStore, SessionStoreImpl};
 use moa_session::{PostgresSessionStore, testing};
 use restate_sdk::prelude::*;
 use tokio::task::JoinHandle;

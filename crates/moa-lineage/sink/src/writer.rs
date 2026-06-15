@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use blake3::{Hash, Hasher};
 use chrono::{DateTime, Utc};
+use moa_lineage_core::chain::{HashChain, canonical_payload_hash, hash_from_slice};
 use moa_lineage_core::{LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 use serde::{Deserialize, Serialize};
-use serde_canonical_json::CanonicalFormatter;
 use sqlx::Row;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -588,7 +587,7 @@ async fn apply_compliance_hashes(
         .fetch_one(&mut **tx)
         .await?;
         let prev = prev_hash.as_deref().map(hash_from_slice).transpose()?;
-        let (integrity_hash, prev) = compliance_link(prev, &row.payload)?;
+        let (integrity_hash, prev) = HashChain::link(prev, &row.payload)?;
         row.integrity_hash = integrity_hash.as_bytes().to_vec();
         row.prev_hash = prev.map(|hash| hash.as_bytes().to_vec());
 
@@ -881,8 +880,7 @@ struct LineageRow {
 
 impl LineageRow {
     fn from_event(evt: LineageEvent) -> Result<Self> {
-        let mut payload = serde_json::to_value(&evt)?;
-        sort_json_value(&mut payload);
+        let payload = serde_json::to_value(&evt)?;
         let integrity_hash = canonical_payload_hash(&payload)?.as_bytes().to_vec();
         let record_kind = evt.record_kind().as_i16();
         let fallback_ts = Utc::now();
@@ -1024,69 +1022,6 @@ fn score_source_to_db(source: ScoreSource) -> &'static str {
     }
 }
 
-fn sort_json_value(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                sort_json_value(item);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            let mut entries = map
-                .iter()
-                .map(|(key, value)| {
-                    let mut value = value.clone();
-                    sort_json_value(&mut value);
-                    (key.clone(), value)
-                })
-                .collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            map.clear();
-            for (key, value) in entries {
-                map.insert(key, value);
-            }
-        }
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
-    }
-}
-
-fn canonical_json_bytes(payload: &serde_json::Value) -> Result<Vec<u8>> {
-    let mut serializer =
-        serde_json::Serializer::with_formatter(Vec::new(), CanonicalFormatter::new());
-    payload.serialize(&mut serializer)?;
-    Ok(serializer.into_inner())
-}
-
-fn canonical_payload_hash(payload: &serde_json::Value) -> Result<Hash> {
-    Ok(blake3::hash(&canonical_json_bytes(payload)?))
-}
-
-fn compliance_link(
-    prev: Option<Hash>,
-    payload: &serde_json::Value,
-) -> Result<(Hash, Option<Hash>)> {
-    let payload_hash = canonical_payload_hash(payload)?;
-    let prev = prev.unwrap_or_else(compliance_genesis_hash);
-    let mut hasher = Hasher::new();
-    hasher.update(prev.as_bytes());
-    hasher.update(payload_hash.as_bytes());
-    Ok((hasher.finalize(), Some(prev)))
-}
-
-fn hash_from_slice(bytes: &[u8]) -> Result<Hash> {
-    let array: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| Error::Invalid("expected 32-byte compliance hash".to_string()))?;
-    Ok(Hash::from(array))
-}
-
-fn compliance_genesis_hash() -> Hash {
-    blake3::hash(b"\0\0\0\0moa-audit-genesis-v1\0\0\0\0")
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -1095,19 +1030,6 @@ mod tests {
         LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
     };
     use uuid::Uuid;
-
-    #[test]
-    fn canonical_sort_orders_nested_object_keys() {
-        let mut value = serde_json::json!({
-            "b": 1,
-            "a": {
-                "d": 2,
-                "c": 3
-            }
-        });
-        super::sort_json_value(&mut value);
-        assert_eq!(value.to_string(), r#"{"a":{"c":3,"d":2},"b":1}"#);
-    }
 
     #[test]
     fn pending_row_routes_eval_events_to_scores() {

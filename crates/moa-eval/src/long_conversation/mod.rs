@@ -6,7 +6,6 @@ pub mod memory_metrics;
 pub mod provider_recorded;
 pub mod score_card;
 pub mod scripted_user;
-pub mod transcript;
 pub mod transcript_runner;
 
 pub use budgets::{BudgetResult, BudgetViolation, Budgets};
@@ -27,5 +26,4 @@ pub use scripted_user::{
     ScriptedApprovalDecision, ScriptedUserError, ScriptedUserScript, ScriptedUserTurn,
     ScriptedUserUtterance,
 };
-pub use transcript::{ProviderEvent, Transcript, TranscriptError, Turn, UserUtterance};
 pub use transcript_runner::{LongRunReport, run_scenario_with_provider};
