@@ -52,6 +52,17 @@ pub struct PercentileSummary {
     pub max: f64,
 }
 
+/// Aggregate latency summary for one turn step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepLatencyReport {
+    /// Stable low-cardinality step label.
+    pub step: String,
+    /// Number of samples observed for this step.
+    pub sample_count: u64,
+    /// Approximate step latency summary in milliseconds.
+    pub latency_ms: PercentileSummary,
+}
+
 /// Aggregate load-test report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadTestReport {
@@ -79,6 +90,8 @@ pub struct LoadTestReport {
     pub latency_ms: PercentileSummary,
     /// Aggregate TTFT summary.
     pub ttft_ms: PercentileSummary,
+    /// Aggregate per-step latency summaries from runtime metrics.
+    pub step_latency_ms: Vec<StepLatencyReport>,
     /// Aggregate cache-hit summary across sessions.
     pub cache_hit_rate: PercentileSummary,
     /// Total spend in cents.
@@ -120,6 +133,20 @@ pub fn render_human_report(report: &LoadTestReport) -> String {
         format_millis(report.ttft_ms.p95),
         format_millis(report.ttft_ms.p99)
     );
+    if !report.step_latency_ms.is_empty() {
+        let _ = writeln!(&mut output, "Step Latency:");
+        for step in &report.step_latency_ms {
+            let _ = writeln!(
+                &mut output,
+                "  {} (n={}): p50 {}  p95 {}  p99 {}",
+                step.step,
+                step.sample_count,
+                format_millis(step.latency_ms.p50),
+                format_millis(step.latency_ms.p95),
+                format_millis(step.latency_ms.p99)
+            );
+        }
+    }
     let _ = writeln!(
         &mut output,
         "Cache Hit Rate:\n  mean: {:.1}%  min: {:.1}%  max: {:.1}%",

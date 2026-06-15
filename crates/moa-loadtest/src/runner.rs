@@ -16,13 +16,24 @@ pub(crate) async fn run_sessions(
     started: Instant,
 ) -> Result<LoadTestReport> {
     let (results_tx, mut results_rx) = mpsc::channel(plans.len());
+    let rate_limiter = options.target_qps.map(start_turn_rate_limiter);
     for plan in plans {
         let backend = backend.clone();
         let results_tx = results_tx.clone();
         let inter_message_delay = options.inter_message_delay;
+        let turn_rate_limiter = rate_limiter
+            .as_ref()
+            .map(|limiter| limiter.semaphore.clone());
         let turn_timeout = options.turn_timeout;
         tokio::spawn(async move {
-            let report = simulate_session(backend, plan, inter_message_delay, turn_timeout).await;
+            let report = simulate_session(
+                backend,
+                plan,
+                inter_message_delay,
+                turn_rate_limiter,
+                turn_timeout,
+            )
+            .await;
             let _ = results_tx.send(report).await;
         });
     }
@@ -31,6 +42,9 @@ pub(crate) async fn run_sessions(
     let mut sessions = Vec::new();
     while let Some(report) = results_rx.recv().await {
         sessions.push(report);
+    }
+    if let Some(limiter) = rate_limiter {
+        limiter.task.abort();
     }
 
     sessions.sort_by_key(|session| session.session_id.to_string());
@@ -75,6 +89,7 @@ pub(crate) async fn run_sessions(
         duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
         latency_ms: summarize_percentiles(&latency_samples),
         ttft_ms: summarize_percentiles(&ttft_samples),
+        step_latency_ms: Vec::new(),
         cache_hit_rate: summarize_percentiles(&cache_samples),
         total_cost_cents,
         sessions,
@@ -85,6 +100,7 @@ pub(crate) async fn simulate_session(
     backend: Arc<dyn SessionTarget>,
     plan: SessionPlan,
     inter_message_delay: Duration,
+    turn_rate_limiter: Option<Arc<Semaphore>>,
     turn_timeout: Duration,
 ) -> SessionReport {
     let started = Instant::now();
@@ -120,6 +136,13 @@ pub(crate) async fn simulate_session(
     let mut failure_reason = None;
 
     for (turn_index, turn) in plan.turns.iter().enumerate() {
+        if let Err(error) = await_turn_start_permit(turn_rate_limiter.as_ref()).await {
+            failure_reason = Some(format!(
+                "turn {} could not be paced: {error}",
+                turn_index + 1
+            ));
+            break;
+        }
         match backend
             .run_turn(session_id, &turn.prompt, turn_timeout)
             .await
@@ -233,6 +256,41 @@ pub(crate) async fn simulate_session(
             ),
         },
     }
+}
+
+struct TurnRateLimiter {
+    semaphore: Arc<Semaphore>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+fn start_turn_rate_limiter(target_qps: u32) -> TurnRateLimiter {
+    let semaphore = Arc::new(Semaphore::new(0));
+    let permits = semaphore.clone();
+    let period = Duration::from_secs_f64(1.0 / f64::from(target_qps));
+    let task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tokio::time::sleep(period).await;
+        loop {
+            interval.tick().await;
+            if permits.available_permits() == 0 {
+                permits.add_permits(1);
+            }
+        }
+    });
+    TurnRateLimiter { semaphore, task }
+}
+
+async fn await_turn_start_permit(limiter: Option<&Arc<Semaphore>>) -> Result<()> {
+    let Some(limiter) = limiter else {
+        return Ok(());
+    };
+    let permit = limiter
+        .acquire()
+        .await
+        .map_err(|error| MoaError::ProviderError(format!("turn rate limiter closed: {error}")))?;
+    permit.forget();
+    Ok(())
 }
 
 fn session_status_failure_reason(

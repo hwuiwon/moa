@@ -1,5 +1,7 @@
 //! Perf-gate reporting, Prometheus rendering, and histogram helpers.
 
+use crate::{cumulative_histogram_percentile, prometheus_label_value};
+
 use super::*;
 
 pub(super) fn enforce_gates(
@@ -180,13 +182,14 @@ pub(super) fn prometheus_histogram_percentile(
             if !line.starts_with(&bucket_prefix) {
                 return None;
             }
-            if !labels
-                .iter()
-                .all(|(key, value)| line.contains(&format!("{key}=\"{value}\"")))
-            {
+            if !labels.iter().all(|(key, value)| {
+                prometheus_label_value(line, key)
+                    .map(|actual| actual == *value)
+                    .unwrap_or(false)
+            }) {
                 return None;
             }
-            let le = label_value(line, "le")?;
+            let le = prometheus_label_value(line, "le")?;
             if le == "+Inf" {
                 return None;
             }
@@ -197,21 +200,7 @@ pub(super) fn prometheus_histogram_percentile(
         .collect::<Vec<_>>();
     buckets.sort_by(|left, right| left.0.total_cmp(&right.0));
     let total = buckets.last().map(|(_, count)| *count).unwrap_or(0.0);
-    if total <= 0.0 {
-        return 0.0;
-    }
-    let target = total * quantile;
-    buckets
-        .into_iter()
-        .find_map(|(upper, cumulative)| (cumulative >= target).then_some(upper))
-        .unwrap_or(0.0)
-}
-
-pub(super) fn label_value<'a>(line: &'a str, label: &str) -> Option<&'a str> {
-    let start = line.find(&format!("{label}=\""))? + label.len() + 2;
-    let rest = &line[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+    cumulative_histogram_percentile(&buckets, total, quantile)
 }
 
 /// Returns the percentile bucket upper bound for non-cumulative histogram buckets.

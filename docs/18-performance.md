@@ -38,3 +38,18 @@ First green run on CI hardware floor:
 
 Update the baseline only for intentional architectural shifts. Do not update it
 to absorb regressions.
+
+## Turn-Step Loadtest
+
+`moa-loadtest` can collect p50, p95, and p99 latency for the documented turn
+steps when the orchestrator metrics endpoint is available:
+
+```bash
+cargo run --release -p moa-loadtest --bin perf_gate -- \
+  --profile mock-short \
+  --metrics-endpoint http://localhost:9090/metrics
+```
+
+Use the step report to choose the next optimization target. Do not tune
+`pipeline_compile`, `llm_call`, `tool_dispatch`, or `event_persist` until one of
+them dominates the measured run.

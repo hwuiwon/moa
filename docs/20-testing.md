@@ -84,6 +84,15 @@ MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 \
 MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-eval
 ```
 
+Remote loadtest checks are also ignored by default. The step-latency check
+requires a running orchestrator with Prometheus metrics enabled:
+
+```bash
+MOA_RUN_LOADTEST_REMOTE_SMOKE=1 \
+MOA_LOADTEST_METRICS_ENDPOINT=http://localhost:9090/metrics \
+cargo test -p moa-loadtest --test mock_smoke mock_short_profile_reports_runtime_step_latency -- --ignored
+```
+
 The runner may start `postgres`, `openfga`, and `moa-pii-service` if compose is
 not already running. If it starts compose itself, it stops compose at the end
 with volumes preserved.

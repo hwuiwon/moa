@@ -26,13 +26,14 @@ use moa_core::{
     SessionMeta, SessionStatus, UserId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
 pub use harness::run_loadtest;
 pub use options::{LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind};
 pub use report::{
-    LoadTestReport, PercentileSummary, SessionReport, render_human_report, render_json_report,
+    LoadTestReport, PercentileSummary, SessionReport, StepLatencyReport, render_human_report,
+    render_json_report,
 };
 
 pub(crate) use backend::*;

@@ -42,7 +42,8 @@ pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 pub use events::Event;
 pub use runtime_metrics::{
-    init_metrics, metrics_endpoint_url, record_api_key_validation_duration, record_approval_wait,
+    TURN_LATENCY_REPORT_STEPS, TURN_STEP_DURATION_METRIC, TurnLatencyStep, init_metrics,
+    metrics_endpoint_url, record_api_key_validation_duration, record_approval_wait,
     record_broadcast_lag, record_cache_hit_rate, record_compaction_tier_applied,
     record_context_pipeline_construction, record_llm_cost_cents, record_llm_failure,
     record_llm_request, record_llm_request_duration, record_llm_streaming_duration,
@@ -54,7 +55,8 @@ pub use runtime_metrics::{
     record_sessions_active, record_tokens_input_cached, record_tokens_input_uncached,
     record_tokens_output, record_tool_call, record_tool_failure, record_tool_idempotency_scan,
     record_tool_output_truncated_metric, record_tool_reprovision, record_tool_retry,
-    record_turn_completed, record_turn_latency, record_turn_workflow_outcome,
+    record_turn_completed, record_turn_latency, record_turn_step_duration,
+    record_turn_workflow_outcome,
 };
 pub use session_replay::{
     TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,

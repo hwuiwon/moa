@@ -16,9 +16,11 @@ fn test_options() -> LoadTestOptions {
         sessions: 4,
         profile: SessionProfileKind::Short,
         inter_message_delay: Duration::from_millis(1),
+        target_qps: None,
         turn_timeout: Duration::from_secs(15),
         output: OutputFormat::Json,
         model: None,
+        metrics_endpoint: None,
     }
 }
 
@@ -43,6 +45,22 @@ fn load_options_reject_empty_endpoint() {
     assert_eq!(
         error.to_string(),
         "validation error: endpoint must be non-empty"
+    );
+}
+
+#[test]
+fn load_options_reject_zero_target_qps() {
+    // Pins: target-QPS pacing rejects a zero rate instead of hanging every turn.
+    let mut options = test_options();
+    options.target_qps = Some(0);
+
+    let error = options
+        .validate()
+        .expect_err("zero target qps should be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "validation error: target_qps must be greater than zero when set"
     );
 }
 
@@ -97,6 +115,11 @@ fn human_report_renders_remote_endpoint() {
         duration_ms: 10.0,
         latency_ms: summarize_percentiles(&[10.0]),
         ttft_ms: summarize_percentiles(&[]),
+        step_latency_ms: vec![StepLatencyReport {
+            step: "pipeline_compile".to_string(),
+            sample_count: 1,
+            latency_ms: summarize_percentiles(&[4.0]),
+        }],
         cache_hit_rate: summarize_percentiles(&[0.0]),
         total_cost_cents: 0,
         sessions: Vec::new(),
@@ -105,5 +128,6 @@ fn human_report_renders_remote_endpoint() {
     let rendered = render_human_report(&report);
 
     assert!(rendered.contains("Endpoint: http://localhost:10010"));
+    assert!(rendered.contains("pipeline_compile (n=1): p50 4ms  p95 4ms  p99 4ms"));
     assert!(!rendered.contains("Target:"));
 }

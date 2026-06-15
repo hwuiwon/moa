@@ -15,6 +15,12 @@ const DEFAULT_MAX_ERROR_RATE: f64 = 0.01;
 const DEFAULT_TTFT: Duration = Duration::from_millis(50);
 const DEFAULT_TURN_DURATION: Duration = Duration::from_millis(200);
 const DEFAULT_ENDPOINT: &str = "http://localhost:10010";
+const STEP_LATENCY_PROM_METRICS: &[&str] = &[
+    "perf_gate_step_latency_p50_ms",
+    "perf_gate_step_latency_p95_ms",
+    "perf_gate_step_latency_p99_ms",
+    "perf_gate_step_latency_samples",
+];
 
 /// Mock smoke performance gate configuration.
 #[derive(Debug, Clone)]
@@ -35,6 +41,8 @@ pub struct MockSmokeConfig {
     pub turn_duration: Duration,
     /// Restate ingress endpoint fronting `moa-orchestrator`.
     pub endpoint: String,
+    /// Optional Prometheus metrics endpoint for per-step latency collection.
+    pub metrics_endpoint: Option<String>,
 }
 
 impl Default for MockSmokeConfig {
@@ -48,6 +56,7 @@ impl Default for MockSmokeConfig {
             ttft: DEFAULT_TTFT,
             turn_duration: DEFAULT_TURN_DURATION,
             endpoint: DEFAULT_ENDPOINT.to_string(),
+            metrics_endpoint: None,
         }
     }
 }
@@ -62,9 +71,11 @@ pub async fn run_mock_smoke_gate(cfg: MockSmokeConfig) -> Result<()> {
         sessions: cfg.virtual_users,
         profile: SessionProfileKind::Short,
         inter_message_delay: Duration::ZERO,
+        target_qps: None,
         turn_timeout: cfg.duration.max(Duration::from_secs(1)),
         output: OutputFormat::Json,
         model: None,
+        metrics_endpoint: cfg.metrics_endpoint.clone(),
     })
     .await
     {
@@ -171,6 +182,13 @@ fn print_summary_table(cfg: &MockSmokeConfig, report: &LoadTestReport, error_rat
     let _ = writeln!(out, "| Sessions failed | {} |", report.sessions_failed);
     let _ = writeln!(out, "| Turn P95 | {:.1} ms |", report.latency_ms.p95);
     let _ = writeln!(out, "| TTFT P95 | {:.1} ms |", report.ttft_ms.p95);
+    for step in &report.step_latency_ms {
+        let _ = writeln!(
+            out,
+            "| Step `{}` P95 | {:.1} ms |",
+            step.step, step.latency_ms.p95
+        );
+    }
     let _ = writeln!(out, "| Error rate | {:.4} |", error_rate);
     out
 }
@@ -200,7 +218,27 @@ fn render_prometheus(report: &LoadTestReport, error_rate: f64) -> String {
         "perf_gate_mock_sessions_failed {}",
         report.sessions_failed
     );
+    if !report.step_latency_ms.is_empty() {
+        for metric in STEP_LATENCY_PROM_METRICS {
+            let _ = writeln!(snapshot, "# TYPE {metric} gauge");
+        }
+        for step in &report.step_latency_ms {
+            let label = escape_prom_label(&step.step);
+            for (metric, value) in [
+                ("perf_gate_step_latency_p50_ms", step.latency_ms.p50),
+                ("perf_gate_step_latency_p95_ms", step.latency_ms.p95),
+                ("perf_gate_step_latency_p99_ms", step.latency_ms.p99),
+                ("perf_gate_step_latency_samples", step.sample_count as f64),
+            ] {
+                write_step_latency_gauge(&mut snapshot, metric, &label, value);
+            }
+        }
+    }
     snapshot
+}
+
+fn write_step_latency_gauge(snapshot: &mut String, metric: &str, label: &str, value: f64) {
+    let _ = writeln!(snapshot, "{metric}{{step=\"{label}\"}} {value}");
 }
 
 async fn write_snapshot(path: &PathBuf, body: &str) -> Result<()> {
@@ -235,4 +273,8 @@ fn write_stderr(message: &str) -> Result<()> {
 
 fn sanitize_prom_comment(value: &str) -> String {
     value.replace('\n', " ")
+}
+
+fn escape_prom_label(value: &str) -> String {
+    value.replace('\\', r"\\").replace('"', r#"\""#)
 }

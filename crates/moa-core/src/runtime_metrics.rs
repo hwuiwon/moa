@@ -20,6 +20,54 @@ const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
 #[cfg(tokio_unstable)]
 const TOKIO_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Prometheus metric name for aggregate turn-step duration samples.
+pub const TURN_STEP_DURATION_METRIC: &str = "moa_turn_step_duration_seconds";
+
+/// Turn steps reported by the loadtest step-latency view.
+pub const TURN_LATENCY_REPORT_STEPS: [TurnLatencyStep; 6] = [
+    TurnLatencyStep::SnapshotLoad,
+    TurnLatencyStep::SnapshotWrite,
+    TurnLatencyStep::PipelineCompile,
+    TurnLatencyStep::LlmCall,
+    TurnLatencyStep::ToolDispatch,
+    TurnLatencyStep::EventPersist,
+];
+
+/// Low-cardinality turn-latency step labels shared by metrics producers and loadtest consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnLatencyStep {
+    /// Time spent loading a cached turn snapshot.
+    SnapshotLoad,
+    /// Time spent writing a refreshed turn snapshot.
+    SnapshotWrite,
+    /// Time spent compiling the context pipeline.
+    PipelineCompile,
+    /// Time spent in the main LLM call.
+    LlmCall,
+    /// Time spent dispatching tools.
+    ToolDispatch,
+    /// Time spent persisting turn events.
+    EventPersist,
+    /// Time to first streamed LLM token.
+    LlmTtft,
+}
+
+impl TurnLatencyStep {
+    /// Returns the stable Prometheus label for this turn step.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SnapshotLoad => "snapshot_load",
+            Self::SnapshotWrite => "snapshot_write",
+            Self::PipelineCompile => "pipeline_compile",
+            Self::LlmCall => "llm_call",
+            Self::ToolDispatch => "tool_dispatch",
+            Self::EventPersist => "event_persist",
+            Self::LlmTtft => "llm_ttft",
+        }
+    }
+}
+
 static PROMETHEUS_ENDPOINT: OnceLock<SocketAddr> = OnceLock::new();
 #[cfg(tokio_unstable)]
 static TOKIO_RUNTIME_MONITOR_STARTED: OnceLock<()> = OnceLock::new();
@@ -289,6 +337,15 @@ pub fn record_compaction_tier_applied(tier: u8) {
 /// Records one end-to-end turn latency sample.
 pub fn record_turn_latency(duration: Duration) {
     histogram!("moa_turn_latency_seconds").record(duration.as_secs_f64());
+}
+
+/// Records one aggregate turn-step duration sample.
+pub fn record_turn_step_duration(step: TurnLatencyStep, duration: Duration) {
+    histogram!(
+        TURN_STEP_DURATION_METRIC,
+        "step" => step.as_str()
+    )
+    .record(duration.as_secs_f64());
 }
 
 /// Records one terminal turn-workflow outcome and its total workflow latency.
@@ -641,6 +698,10 @@ fn register_metric_descriptions() {
         "moa_turn_latency_seconds",
         "End-to-end turn latency in seconds."
     );
+    describe_histogram!(
+        TURN_STEP_DURATION_METRIC,
+        "Aggregate per-turn step duration in seconds, labeled by documented turn step."
+    );
     describe_counter!(
         "moa_turn_outcomes_total",
         "Terminal turn workflow outcomes, labeled by scope, result, and model tier."
@@ -791,6 +852,7 @@ mod tests {
         record_tokens_output("mock", "gpt-5.4", 4);
         record_cache_hit_rate("mock", "gpt-5.4", 0.5);
         record_turn_latency(Duration::from_millis(25));
+        record_turn_step_duration(TurnLatencyStep::PipelineCompile, Duration::from_millis(10));
         record_scoped_transaction_begin_duration(Duration::from_millis(1));
         record_scoped_guc_application_duration(Duration::from_millis(2));
         record_session_event_append("ToolCall");
@@ -825,6 +887,7 @@ mod tests {
         assert!(scrape.contains("moa_tokens_output_total"));
         assert!(scrape.contains("moa_cache_hit_rate"));
         assert!(scrape.contains("moa_turn_latency_seconds"));
+        assert!(scrape.contains("moa_turn_step_duration_seconds"));
         assert!(scrape.contains("moa_scoped_transaction_begin_seconds"));
         assert!(scrape.contains("moa_scoped_guc_application_seconds"));
         assert!(scrape.contains("moa_session_events_appended_total"));

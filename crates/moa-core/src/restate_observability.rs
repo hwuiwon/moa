@@ -4,8 +4,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::{
-    SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnReplaySnapshot,
-    current_turn_root_span,
+    SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnLatencyStep, TurnReplaySnapshot,
+    current_turn_root_span, record_turn_step_duration,
 };
 use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -184,6 +184,31 @@ pub fn emit_turn_latency_summary(
     turn_number: i64,
     snapshot: &TurnLatencySnapshot,
 ) {
+    record_turn_step_duration(
+        TurnLatencyStep::SnapshotLoad,
+        snapshot.snapshot_load_duration,
+    );
+    record_turn_step_duration(
+        TurnLatencyStep::SnapshotWrite,
+        snapshot.snapshot_write_duration,
+    );
+    record_turn_step_duration(
+        TurnLatencyStep::PipelineCompile,
+        snapshot.pipeline_compile_duration,
+    );
+    record_turn_step_duration(TurnLatencyStep::LlmCall, snapshot.llm_call_duration);
+    record_turn_step_duration(
+        TurnLatencyStep::ToolDispatch,
+        snapshot.tool_dispatch_duration,
+    );
+    record_turn_step_duration(
+        TurnLatencyStep::EventPersist,
+        snapshot.event_persist_duration,
+    );
+    if let Some(ttft) = snapshot.llm_ttft {
+        record_turn_step_duration(TurnLatencyStep::LlmTtft, ttft);
+    }
+
     turn_root_span.record(
         "moa.turn.snapshot_load_ms",
         snapshot.snapshot_load_ms() as i64,

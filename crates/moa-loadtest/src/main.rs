@@ -33,6 +33,10 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     inter_message_delay_ms: u64,
 
+    /// Optional global target rate for starting turns.
+    #[arg(long)]
+    target_qps: Option<u32>,
+
     /// Per-turn timeout in seconds.
     #[arg(long, default_value_t = 60)]
     turn_timeout_seconds: u64,
@@ -44,6 +48,10 @@ struct Args {
     /// Optional model override for turn requests.
     #[arg(long)]
     model: Option<String>,
+
+    /// Optional Prometheus metrics endpoint for per-step latency collection.
+    #[arg(long)]
+    metrics_endpoint: Option<String>,
 }
 
 #[tokio::main]
@@ -59,9 +67,11 @@ async fn main() -> Result<()> {
         sessions,
         profile: args.profile,
         inter_message_delay: Duration::from_millis(args.inter_message_delay_ms),
+        target_qps: args.target_qps,
         turn_timeout: Duration::from_secs(args.turn_timeout_seconds),
         output: args.output,
         model: args.model,
+        metrics_endpoint: args.metrics_endpoint,
     };
 
     let report = run_loadtest(options.clone()).await?;
