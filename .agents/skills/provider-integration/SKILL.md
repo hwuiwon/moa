@@ -12,7 +12,6 @@ description: >
   up an MCP server", "support a new sandbox runtime". Do NOT use for general
   Rust mechanics (use `rust`), release-time validation (use `certify`), or
   memory-pack steps that touch embeddings (use `memory-pack`).
-compatibility: Rust 2024 MOA workspace with `moa-core` traits, `moa-providers`, `moa-hands`, `moa-gateway`, and `moa-security`
 allowed-tools:
   - Read
   - Grep
@@ -74,6 +73,7 @@ Every provider implementation touches at least these surfaces:
 4. **Routing wiring** — the gateway, brain, or hand router needs to know the new provider exists. This is usually a one-line addition to a registration table.
 5. **Observability** — emit `tracing` spans at the same boundaries as existing providers. See `crates/moa-providers/src/adapters/anthropic/` for the canonical span layout.
 6. **Tests** — at minimum a deterministic offline test (wiremock-based for HTTP providers) and a live test gated by an env flag. Hand off to `test-authoring` for the assertion patterns.
+7. **Production surface** — scripted, fake, recorded, or test-only providers must not be registered on default production paths or pulled into default production features.
 
 LLM providers also need: a model catalog entry and a pricing entry. Embedding providers also need: a halfvec dimension declaration. Hand providers also need: a sandbox-kind tag for the tool router. Platform adapters also need: a renderer for approval prompts.
 
@@ -104,6 +104,7 @@ LLM providers also need: a model catalog entry and a pricing entry. Embedding pr
 - A new embedding provider's vector dimension must match the database column type. If the column is `halfvec(1536)`, the provider must produce 1536-dim vectors at the appropriate precision.
 - A new hand provider that supports `BuiltInTool` must list every supported tool explicitly. Wildcard support is not allowed; the security model depends on knowing the supported set.
 - A platform adapter must implement the approval-render API; a platform that cannot render approvals is not a complete adapter.
+- Scripted, fake, recorded, or deterministic test providers belong in tests, eval fixtures, or explicitly gated internal tooling. They must not be reachable through default production provider registration, model routing, hand routing, or platform adapter lists.
 
 ## Output Format
 
@@ -115,5 +116,6 @@ When reporting on a new provider integration, include:
 - `Credentials added`: list of vault keys
 - `Routing wired`: where in the registration table
 - `Tests`: offline test names, live test names, env flags
+- `Production surface`: how test-only providers are kept out of default production paths
 - `Model catalog / pricing` (LLM only): model IDs and prices added
 - `Verification`: deterministic test result and live test result if run

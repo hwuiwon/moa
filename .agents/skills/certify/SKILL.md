@@ -7,10 +7,11 @@ description: >
   the right deterministic and live test matrix, enforces shared orchestrator contract
   coverage, and helps localize regressions before shipping. Triggers include: "validate
   this change", "is this ready to merge", "run the right tests for X", "release-gate
-  these changes". Do NOT use for memory-pack step implementation (use `memory-pack`),
+  these changes", "verify this task", "refresh memory retrieval baseline", "compare
+  retrieval quality/cost/latency", "validate query rewrite gating", and "live auth
+  e2e". Do NOT use for memory-pack step implementation (use `memory-pack`),
   diagnosing a failing test (use `runtime-forensics`), authoring new tests (use
   `test-authoring`), or general Rust review (use `rust`).
-compatibility: Rust 2024 MOA workspace with cargo; Restate admin API optional for cloud testing; live provider env vars optional
 allowed-tools:
   - Bash(cargo:*)
   - Bash(rg:*)
@@ -41,6 +42,7 @@ Use this skill when a change touches any of the following:
 - provider request/response parsing, model catalogs, pricing, caching, tool calls, or web search
 - session store, event schema, analytics, migrations, or generated aggregates
 - memory or context pipeline behavior
+- memory-retrieval baselines, query-rewrite gating, retrieval quality/cost/latency comparisons, or live memory-eval lanes
 - skills distillation, eval wiring, or skill regression suites
 - anything being prepared for merge or release that needs a regression gate
 
@@ -58,6 +60,7 @@ It does not own:
 ## Modes
 
 - `quick`: changed crate plus the nearest deterministic suite
+- `task-validation`: validate a specific task or plan step, separating task acceptance from unrelated dirty-worktree or broader suite failures
 - `certify`: deterministic matrix for the affected surface
 - `release`: `certify` plus live and provider checks when prerequisites exist
 - `triage`: failure localization and artifact collection before handoff to `runtime-forensics`
@@ -71,11 +74,13 @@ Read only the matching docs before choosing commands:
 - `docs/05-session-event-log.md` for events, replay, persistence, analytics, or compaction
 - `docs/07-context-pipeline.md` for prompt layout, cache planning, or memory injection
 - `docs/09-skills-and-learning.md` for skill distillation, improvement, or eval
+- `docs/16-evaluation.md` for eval runners, score targets, memory-retrieval reports, and budget gates
 
 Then load only the relevant reference file:
 
 - `references/test-matrix.md` for what to run
 - `references/failure-triage.md` for how to localize a failure before handoff
+- `references/memory-eval-validation.md` for memory-retrieval baselines, paired compares, query-rewrite gating validation, and live-lane artifacts
 
 ## Workflow
 
@@ -87,10 +92,24 @@ Then load only the relevant reference file:
 6. If anything fails, switch to `triage` mode, classify the failure by layer, and hand off to `runtime-forensics` for deep diagnosis if it cannot be localized in two passes.
 7. End with a short certification summary:
    - scope
+   - validation status
    - commands run
    - pass/fail by layer
    - gaps not covered
    - ship / do-not-ship recommendation
+
+## Task Validation Statuses
+
+When validating one plan task or worker output, report one of these statuses instead of a generic pass/fail:
+
+- `task-pass`: task acceptance criteria and focused checks passed.
+- `task-pass-but-suite-dirty`: task acceptance passed, but broader checks failed for a pre-existing, unrelated, or dirty-worktree reason.
+- `acceptance-failure`: the requested behavior, artifact, or task-local check is missing or wrong.
+- `focused-test-failure`: the nearest deterministic test for the changed surface failed.
+- `release-gate-failure`: focused task checks passed, but a broader required matrix failed.
+- `external-prereq-missing`: required Docker, Postgres, Restate, credentials, network, or live service prerequisite is absent.
+
+Do not mark a task failed solely because an unrelated workspace gate is red. Preserve the distinction and recommend the next smallest check.
 
 ## Live and Billed Test Discipline
 

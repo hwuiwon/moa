@@ -7,10 +7,10 @@ description: >
   selecting types for IDs/timestamps/JSON payloads, or running `cargo fmt`/`cargo clippy`.
   It applies the repo's conventions for traits, errors, async, observability, feature
   flags, and verification. Do NOT use for `sequence/memory-pack` step implementation
-  (use `memory-pack`), release-time test selection (use `certify`), runtime regression
+  (use `memory-pack`), repo-wide architecture audits, memory-eval baseline or
+  scorecard work, release-time test selection (use `certify`), runtime regression
   diagnosis (use `runtime-forensics`), provider integration (use `provider-integration`),
   or test authoring (use `test-authoring`).
-compatibility: Rust 2024 workspace with tokio, tracing, thiserror, cargo, and MOA's docs-driven architecture
 allowed-tools:
   - Read
   - Grep
@@ -40,6 +40,8 @@ Do not use this skill for:
 - diagnosing a runtime regression or adapter drift; use `runtime-forensics`
 - adding a new LLM, embedding, hand, MCP, or platform provider; use `provider-integration`
 - authoring or extending tests; use `test-authoring`
+- repo-wide architecture or lean-down audits; use a dedicated architecture-audit workflow when available
+- memory-retrieval baselines, ranking scorecards, query-rewrite gating validation, or live memory-eval lanes; use `certify` for validation until a dedicated memory-eval workflow exists
 
 ## Load Order
 
@@ -50,6 +52,7 @@ Do not use this skill for:
 ## Default Stance
 
 - Preserve documented traits and crate boundaries. Do not invent new interfaces when `docs/01-architecture-overview.md` already defines one.
+- Import directly from the owning crate or module. Do not add compatibility shim modules, wrapper functions, or `pub use` re-exports just to preserve old paths; update call sites to the source of truth.
 - Prefer borrowing over cloning. Use owned inputs only when ownership transfer is part of the API.
 - Use `Result`-based APIs for fallible work. In library crates, model errors with `thiserror`. Use `anyhow` only in binary entrypoints such as `moa-orchestrator-bin`, `moa-edge`, `xtask`, or `moa-desktop`.
 - Keep all I/O async on `tokio`. Avoid blocking filesystem or network work in async paths.
@@ -70,6 +73,15 @@ When reviewing or writing code, check these in order:
 5. Docs and comments: do module and public API docs exist, and do inline comments explain why instead of narrating the code?
 6. Feature boundaries: are optional integrations isolated behind feature gates and not pulled into default builds?
 7. Verification: were `cargo fmt --all` and `cargo clippy --all-targets --all-features --locked -- -D warnings` run?
+
+## Cross-Crate API Preflight
+
+Before changing public structs, trait methods, constructors, config types, or wire payloads:
+
+1. Build a call-site map with `rg` for the type, constructor, trait method, and obvious builders.
+2. Check tests and fixtures as well as production crates; MOA often has eval, orchestrator, and memory callers for the same type.
+3. Update all direct call sites rather than adding compatibility wrappers.
+4. For hot surfaces such as `GraphStore`, retrieval requests, config structs, and provider traits, run a compile-guided pass with focused package checks before broader workspace gates.
 
 ## Architecture First
 

@@ -7,10 +7,11 @@ description: >
   migration workflow and the rules around RLS, ScopedConn, Cypher safety, and
   hard-break migrations. Triggers include: "implement M07", "graph-memory step",
   "ingest the new schema", "fix the RLS policy", "AGE Cypher pattern", "pgvector
-  migration". Do NOT use for general Rust refactors outside memory-pack scope (use
-  `rust`), release certification (use `certify`), runtime incident diagnosis (use
-  `runtime-forensics`), or test authoring (use `test-authoring`).
-compatibility: Rust 2024 MOA workspace with Postgres + AGE + pgvector
+  migration". Do NOT use for eval baseline refreshes, query-rewrite policy or
+  gating research, retrieval ranking scorecards, live memory-eval lanes, general
+  Rust refactors outside memory-pack scope (use `rust`), release certification
+  (use `certify`), runtime incident diagnosis (use `runtime-forensics`), or test
+  authoring (use `test-authoring`).
 allowed-tools:
   - Read
   - Grep
@@ -36,11 +37,13 @@ Use this skill for:
 - `M01`-style `MemoryScope` and graph-memory type changes
 - Postgres / RLS / AGE / pgvector / changelog migrations under `crates/moa-memory/`
 - `moa-memory/graph`, `moa-memory/vector`, `moa-memory/pii`, and `moa-memory/ingest` sequence work
-- hybrid retrieval, query planning, read-time cache, and memory-pack cleanup
+- hybrid retrieval, query planning, read-time cache, and cleanup only when the task is a memory-pack implementation step or direct graph-memory internals change
 - translating memory-pack prompt paths and acceptance criteria into this repo
 
 Do not use this skill for:
 
+- memory-retrieval eval baseline refreshes, memory-eval reports, budget gates, or live-lane accounting; use `certify` for validation until a dedicated memory-eval skill exists
+- query-rewrite policy research, gating decisions, prompt-cache ordering, or retrieval scorecard tuning unless the implementation task explicitly changes memory-pack internals
 - generic Rust refactors outside memory-pack scope; use `rust`
 - release certification or live-test matrix selection; use `certify`
 - runtime incident diagnosis; use `runtime-forensics`

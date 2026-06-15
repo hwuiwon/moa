@@ -2,19 +2,15 @@
 name: test-authoring
 description: >
   Use this skill when writing or extending Rust tests in the MOA workspace. It
-  covers deciding whether a behavior needs a test at all, choosing the test tier
-  (unit, integration, snapshot, live, or eval scenario), brainstorming realistic
-  cases for new code, authoring strong assertions, mutation-verifying that the
-  test catches regressions, and self-reviewing against `AGENTS.md` testing
-  standards. Triggers include: "add a test for X", "how should I test this",
-  "write a test that catches Y", writing `#[cfg(test)] mod tests`, creating files
-  under `crates/<name>/tests/`, adding a snapshot via `insta`, or gating a
-  live-provider test. Do NOT use for selecting which tests to RUN at release time
-  (use `certify`), authoring long-conversation eval scenarios under
-  `crates/moa-eval/scenarios/` (use the eval scenario authoring guide if it
-  exists, otherwise this skill plus `docs/evals/`), or debugging a failing test
-  (use `runtime-forensics`).
-compatibility: Rust 2024 MOA workspace with cargo, Postgres-backed test fixtures, and `moa-test-support` shared utilities
+  covers test necessity, tier choice (unit, integration, snapshot, live, or eval),
+  strong assertions, mutation verification, and self-review against `AGENTS.md`.
+  Triggers include: "add a test for X", "how should I test this", "write a test
+  that catches Y", writing `#[cfg(test)] mod tests`, creating integration tests
+  under crate `tests/` directories, adding snapshots, or gating live-provider tests. Do NOT
+  use for release test selection (use `certify`), memory-retrieval scorecards or
+  eval baselines (use `certify` until a dedicated memory-eval workflow exists),
+  long-conversation eval authoring, or failing-test diagnosis (use
+  `runtime-forensics`).
 allowed-tools:
   - Read
   - Grep
@@ -51,6 +47,7 @@ Do not use this skill for:
 - general Rust quality review; use `rust`
 - memory-pack step implementation; use `memory-pack` (which itself produces tests as a side effect)
 - adding a new provider; use `provider-integration` (which prescribes the live-test pattern for providers)
+- refreshing memory-retrieval eval baselines, scorecards, or live-lane reports; use `certify` for validation until a dedicated memory-eval workflow exists
 
 ## The Six-Step Workflow
 
@@ -62,6 +59,7 @@ Not every behavior needs a test. The decision rubric:
 
 - Behavior covered by an existing test: **do not add another**. Strengthen the existing one if it is too weak.
 - Behavior already covered by an eval scenario in `crates/moa-eval/scenarios/`: **probably do not add a unit test** unless it pins a specific algorithmic invariant the eval cannot easily express, or runs in milliseconds where the eval takes 30+ seconds.
+- Behavior better measured by memory-retrieval scorecards or budget reports: **do not replace the scorecard with a unit test**. Add a unit test only for a local invariant the report cannot isolate.
 - Behavior trivially derivable from a passing type-check: **do not test**. Don't write a test that asserts `Default::default()` produces specific field values, or that `serde::from_str` round-trips for a `#[derive(Serialize, Deserialize)]` struct.
 - Behavior at a real seam where bugs have happened or could plausibly happen: **add a test**.
 
@@ -76,6 +74,18 @@ Load [references/test-tiers.md](references/test-tiers.md) for the full decision 
 - **Snapshot test with `insta`** for outputs that are large, structured, and meant to be byte-stable (compiled prompts, rendered messages, JSON shapes).
 - **Live test gated by `#[ignore]` and an env flag** for behaviors that depend on a paid external API or running infrastructure.
 - **Eval scenario under `crates/moa-eval/scenarios/`** for end-to-end multi-turn conversation behaviors. These are slow, expensive, and authoritative for end-to-end behavior.
+- **Memory-retrieval scorecard or budget report** for retrieval quality, query-rewrite gating, ranking weights, graph-leg contribution, temporal retrieval accuracy, latency, and cost.
+
+### Memory-Eval Test Guidance
+
+Use memory-eval reports instead of unit tests when the behavior is about aggregate retrieval quality, ranking tradeoffs, graph/vector/lexical leg contribution, query-rewrite gating, latency, or live-provider cost.
+
+When memory-eval behavior changes:
+
+- Require a paired baseline compare for quality or ranking changes.
+- Require a negative control, such as inverted quality priors, when validating a ranking signal.
+- Keep parser failures separate from retrieval failures with explicit diagnostics where possible.
+- Add unit tests only for local invariants, such as parser output, score formula behavior, budget-gate classification, or report serialization.
 
 ### 3. Brainstorm cases at the chosen tier
 
