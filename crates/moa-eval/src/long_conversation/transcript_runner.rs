@@ -7,8 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::{StreamedTurnResult, run_streamed_turn_with_signals};
 use moa_core::{
-    BufferedUserMessage, Event, EventRange, EventRecord, LLMProvider, MoaConfig, RuntimeEvent,
-    SessionId, SessionMeta, SessionSignal,
+    Event, EventRange, EventRecord, LLMProvider, MoaConfig, RuntimeEvent, SessionId, SessionMeta,
+    SessionSignal,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -467,7 +467,6 @@ async fn drive_one_turn(
             None,
             &mut signal_state.signal_rx,
             &mut signal_state.turn_requested,
-            &mut signal_state.queued_messages,
             &mut signal_state.soft_cancel_requested,
             Some(cancel_token.clone()),
             Some(hard_cancel_token.clone()),
@@ -688,7 +687,6 @@ async fn collect_events_for_sessions(
 struct TurnSignalState {
     signal_rx: mpsc::Receiver<SessionSignal>,
     turn_requested: bool,
-    queued_messages: Vec<BufferedUserMessage>,
     soft_cancel_requested: bool,
 }
 
@@ -697,7 +695,6 @@ impl TurnSignalState {
         Self {
             signal_rx,
             turn_requested: false,
-            queued_messages: Vec::new(),
             soft_cancel_requested: false,
         }
     }

@@ -124,23 +124,6 @@ pub(crate) fn event_type_from_db(value: &str) -> Result<EventType> {
     }
 }
 
-/// Converts a pending signal type to its stored representation.
-pub(crate) fn pending_signal_type_to_db(signal_type: PendingSignalType) -> &'static str {
-    match signal_type {
-        PendingSignalType::QueueMessage => "queue_message",
-    }
-}
-
-/// Parses a pending signal type from its stored representation.
-pub(crate) fn pending_signal_type_from_db(value: &str) -> Result<PendingSignalType> {
-    match value {
-        "queue_message" => Ok(PendingSignalType::QueueMessage),
-        other => Err(MoaError::StorageError(format!(
-            "unknown pending signal type `{other}`"
-        ))),
-    }
-}
-
 /// Converts a policy action to its stored representation.
 pub(crate) fn policy_action_to_db(action: &PolicyAction) -> &'static str {
     match action {

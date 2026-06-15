@@ -8,9 +8,8 @@ Localize the regression before patching it.
 
 Do not jump from "a test failed" to "the orchestrator is broken." In MOA, the failure could belong to:
 
-- shared lifecycle logic in the orchestrator contract
-- local orchestrator (`moa-orchestrator-local`)
-- Restate orchestrator (`moa-orchestrator`)
+- Restate orchestrator (`moa-orchestrator`) workflows, virtual objects, or services
+- brain pipeline or streamed-turn harness (`moa-brain`)
 - provider request or parsing logic
 - session store or replay (`moa-session`)
 - tool routing or approval rendering (`moa-hands` / `moa-gateway`)
@@ -20,10 +19,10 @@ Do not jump from "a test failed" to "the orchestrator is broken." In MOA, the fa
 
 - If `moa-providers --lib` fails, start in the provider layer.
 - If provider live tests fail but direct API requests succeed, start in provider request/response translation.
-- If both orchestrators fail the same shared contract assertion, start in shared lifecycle code or brain harness logic.
-- If local passes and Restate fails the shared contract suite, start in the Restate adapter (virtual objects, services, signal handling) before suspecting shared code.
+- If the brain harness suites (`moa-brain --tests`) fail alongside orchestrator suites, start in shared brain/pipeline logic before suspecting Restate adapters.
+- If only orchestrator suites fail while brain suites pass, start in the Restate adapter (virtual objects, services, signal handling).
 - If only Restate worker-recovery or workflow-resume fails, start in durability or workflow recovery, not shared lifecycle.
-- If both live matrices fail the same provider while deterministic suites are green, start in live provider request shape or approval/tool-call formatting.
+- If live tests fail the same provider while deterministic suites are green, start in live provider request shape or approval/tool-call formatting.
 - If a session reaches `Failed` with a provider HTTP 4xx or 5xx in the event log, start in request construction or provider assumptions.
 - If a session stays `Running` with no later events, suspect a hung provider call, deadlock, or signal path stall.
 - If `ApprovalRequested` exists but resume never happens after `ApprovalDecided`, start in approval replay or signal processing.
@@ -38,27 +37,16 @@ Prefer artifacts already emitted by MOA's tests before inventing new instrumenta
 - `--nocapture` output for the failing test
 - persisted session events printed by the test harness
 - provider-specific live matrix result for the same model
-- local vs Restate pass/fail difference
 - any explicit provider HTTP status or body in `Event::Error`
-
-When observability changed or the fault domain is unclear, run:
-
-```bash
-cargo test -p moa-orchestrator-local --test live_observability -- --ignored --nocapture
-```
-
-That gives you trace and event evidence instead of guessing.
 
 ## Debugging Order
 
 1. Re-run the exact failing test with `--exact --nocapture` when possible.
 2. Move one layer lower:
-   - orchestrator failure -> provider matrix or store tests
+   - orchestrator failure -> brain harness, provider matrix, or store tests
    - live failure -> provider-only live smoke
-   - Restate failure -> local-orchestrator equivalent
-3. Confirm whether the same behavior reproduces on both orchestrators.
-4. Patch only after the fault domain is clear.
-5. Re-run the original failing command, not just a smaller surrogate.
+3. Patch only after the fault domain is clear.
+4. Re-run the original failing command, not just a smaller surrogate.
 
 ## When to Hand Off
 

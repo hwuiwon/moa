@@ -7,7 +7,7 @@ This file is the command map for `certify`. Run the smallest section that still 
 - On macOS dev machines, prefer `PROTOC=/opt/homebrew/bin/protoc` when running `cargo` commands that need protobuf tooling.
 - Restate cloud or self-hosted runtime is required only for Restate live tests; deterministic Restate tests typically run in-process.
 - Live provider checks require the relevant API keys in the environment.
-- Set `MOA_RUN_LIVE_PROVIDER_TESTS=1` for the live local-orchestrator matrix.
+- Set `MOA_RUN_LIVE_PROVIDER_TESTS=1` for live provider round-trip tests.
 - Set `MOA_RUN_LIVE_COHERE_TESTS=1` for live Cohere embed/rerank tests.
 
 ## Baseline Hygiene
@@ -27,18 +27,11 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 ## Orchestrator, Approval, Lifecycle, Replay
 
-Two orchestrator backends share a contract harness in `crates/moa-orchestrator-local/tests/support/`. Verify the local orchestrator first; the Restate workflows live in `crates/moa-orchestrator/`.
+The Restate orchestrator (`crates/moa-orchestrator/`) is the only orchestrator backend; the former `moa-orchestrator-local` crate was removed (PRs #186/#196).
 
-Local orchestrator deterministic suite:
-
-```bash
-cargo test -p moa-orchestrator-local --test local_orchestrator -- --test-threads=1
-```
-
-Restate orchestrator deterministic suites (consolidate workflow, session VO, ingestion, tool executor, llm gateway):
+Restate orchestrator deterministic suites (session VO, session store, tool executor, llm gateway, ingestion, workspace, replay):
 
 ```bash
-cargo test -p moa-orchestrator --test consolidate -- --test-threads=1
 cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
 cargo test -p moa-orchestrator --test session_store -- --test-threads=1
 cargo test -p moa-orchestrator --test tool_executor -- --test-threads=1
@@ -46,25 +39,11 @@ cargo test -p moa-orchestrator --test llm_gateway -- --test-threads=1
 cargo test -p moa-orchestrator --test ingestion_e2e -- --test-threads=1
 cargo test -p moa-orchestrator --test workspace -- --test-threads=1
 cargo test -p moa-orchestrator --test integration -- --test-threads=1
+cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
+cargo test -p moa-orchestrator --test sub_agent_delegation -- --test-threads=1
 ```
 
-Live orchestrator approval roundtrip (local):
-
-```bash
-MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-orchestrator-local --test live_provider_roundtrip -- --ignored --nocapture
-```
-
-Observability audit when traces, cache metrics, or session timing changed:
-
-```bash
-cargo test -p moa-orchestrator-local --test live_observability -- --ignored --nocapture
-```
-
-Prometheus-metrics surface:
-
-```bash
-cargo test -p moa-orchestrator-local --test prometheus_metrics
-```
+If a target does not exist, list `crates/moa-orchestrator/tests/` and use the actual name.
 
 ## Providers, Models, Pricing, Tool Parsing, Web Search
 
@@ -174,7 +153,5 @@ Use this when the change spans orchestrators, providers, or persistence:
 2. workspace `clippy`
 3. `moa-providers --lib`
 4. `moa-session --tests`
-5. `moa-orchestrator-local --test local_orchestrator`
-6. `moa-orchestrator` deterministic suites that match the change
-7. live provider matrix if provider/envs are available
-8. live local orchestrator approval roundtrip if approval/tool flow changed
+5. `moa-orchestrator` deterministic suites that match the change
+6. live provider matrix if provider/envs are available

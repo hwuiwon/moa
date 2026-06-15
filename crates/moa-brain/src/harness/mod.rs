@@ -9,8 +9,8 @@ mod tool_dispatch;
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalRequest, BufferedUserMessage, EventRecord, LLMProvider, MoaError, NullLineageHandle,
-    Result, RuntimeEvent, SessionId, SessionSignal, SessionStore,
+    ApprovalRequest, EventRecord, LLMProvider, MoaError, NullLineageHandle, Result, RuntimeEvent,
+    SessionId, SessionSignal, SessionStore,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -42,32 +42,40 @@ pub enum StreamedTurnResult {
     Cancelled,
 }
 
-/// Runs one buffered turn of the brain harness.
-pub async fn run_brain_turn(
-    session_id: SessionId,
-    session_store: Arc<dyn SessionStore>,
-    llm_provider: Arc<dyn LLMProvider>,
-    pipeline: &ContextPipeline,
-) -> Result<TurnResult> {
-    run_brain_turn_with_tools_mode(session_id, session_store, llm_provider, pipeline, None).await
-}
-
 /// Runs one buffered turn of the brain harness with optional tool execution support.
-pub async fn run_brain_turn_with_tools(
+pub async fn run_brain_turn(
     session_id: SessionId,
     session_store: Arc<dyn SessionStore>,
     llm_provider: Arc<dyn LLMProvider>,
     pipeline: &ContextPipeline,
     tool_router: Option<Arc<ToolRouter>>,
 ) -> Result<TurnResult> {
-    run_brain_turn_with_tools_mode(
+    let (runtime_tx, _) = broadcast::channel(256);
+    let streamed = streaming::run_streamed_turn_with_tools_mode(
         session_id,
         session_store,
         llm_provider,
         pipeline,
         tool_router,
+        &runtime_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Arc::new(NullLineageHandle),
     )
-    .await
+    .await?;
+
+    match streamed {
+        StreamedTurnResult::Complete => Ok(TurnResult::Complete),
+        StreamedTurnResult::Continue => Ok(TurnResult::Continue),
+        StreamedTurnResult::NeedsApproval(request) => Ok(TurnResult::NeedsApproval(request)),
+        StreamedTurnResult::Cancelled => Err(MoaError::ProviderError(
+            "buffered brain turn was cancelled unexpectedly".to_string(),
+        )),
+    }
 }
 
 /// Runs the shared streamed turn engine without live session signals.
@@ -96,7 +104,6 @@ pub async fn run_streamed_turn(
         None,
         None,
         None,
-        None,
         Arc::new(NullLineageHandle),
     )
     .await
@@ -114,7 +121,6 @@ pub async fn run_streamed_turn_with_signals(
     event_tx: Option<&broadcast::Sender<EventRecord>>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
     cancel_token: Option<CancellationToken>,
     hard_cancel_token: Option<CancellationToken>,
@@ -131,45 +137,8 @@ pub async fn run_streamed_turn_with_signals(
         hard_cancel_token,
         Some(signal_rx),
         Some(turn_requested),
-        Some(queued_messages),
         Some(soft_cancel_requested),
         Arc::new(NullLineageHandle),
     )
     .await
-}
-
-async fn run_brain_turn_with_tools_mode(
-    session_id: SessionId,
-    session_store: Arc<dyn SessionStore>,
-    llm_provider: Arc<dyn LLMProvider>,
-    pipeline: &ContextPipeline,
-    tool_router: Option<Arc<ToolRouter>>,
-) -> Result<TurnResult> {
-    let (runtime_tx, _) = broadcast::channel(256);
-    let streamed = streaming::run_streamed_turn_with_tools_mode(
-        session_id,
-        session_store,
-        llm_provider,
-        pipeline,
-        tool_router,
-        &runtime_tx,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Arc::new(NullLineageHandle),
-    )
-    .await?;
-
-    match streamed {
-        StreamedTurnResult::Complete => Ok(TurnResult::Complete),
-        StreamedTurnResult::Continue => Ok(TurnResult::Continue),
-        StreamedTurnResult::NeedsApproval(request) => Ok(TurnResult::NeedsApproval(request)),
-        StreamedTurnResult::Cancelled => Err(MoaError::ProviderError(
-            "buffered brain turn was cancelled unexpectedly".to_string(),
-        )),
-    }
 }

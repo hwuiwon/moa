@@ -1,11 +1,11 @@
 # Evidence Checklist
 
-Start here before changing code. The goal is to preserve enough evidence to answer whether the failure lives in shared lifecycle logic, an orchestrator adapter, provider translation, persistence, or analytics.
+Start here before changing code. The goal is to preserve enough evidence to answer whether the failure lives in brain/pipeline logic, the Restate orchestrator, provider translation, persistence, or analytics.
 
 ## Always Capture
 
 - exact failing command, including `--ignored`, `--exact`, and feature flags
-- orchestrator type: `local` (`moa-orchestrator-local`) or `Restate` (`moa-orchestrator`)
+- which layer the repro exercises: brain harness (`moa-brain`) or Restate orchestrator (`moa-orchestrator`)
 - provider and model
 - whether the failure is deterministic, live-only, or restart/recovery-specific
 - the session id when one exists
@@ -16,25 +16,19 @@ Start here before changing code. The goal is to preserve enough evidence to answ
 Use the smallest exact test target that still reproduces:
 
 ```bash
-# local orchestrator
-cargo test -p moa-orchestrator-local --test local_orchestrator -- --test-threads=1
+# brain harness (drives the pipeline directly)
+cargo test -p moa-brain --test brain_turn -- --test-threads=1
 
 # Restate orchestrator (pick the suite that matches the change)
-cargo test -p moa-orchestrator --test consolidate -- --test-threads=1
 cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
 cargo test -p moa-orchestrator --test tool_executor -- --test-threads=1
+cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
 ```
 
 For live or provider lifecycle failures:
 
 ```bash
-MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-orchestrator-local --test live_provider_roundtrip -- --ignored --nocapture
-```
-
-For trace and latency evidence:
-
-```bash
-cargo test -p moa-orchestrator-local --test live_observability -- --ignored --nocapture
+MOA_RUN_LIVE_PROVIDER_TESTS=1 cargo test -p moa-brain --test live_harness -- --ignored --nocapture
 ```
 
 If a target name is not present in the current `tests/` directory, list the directory and pick the closest current name.
@@ -85,5 +79,5 @@ If you need the raw event log, query the store or use the test harness path alre
 
 ## Escalate To Another Reference
 
-- use `local-vs-restate.md` when the two orchestrators disagree
+- use `local-vs-restate.md` when the brain harness and Restate disagree
 - use `analytics-and-traces.md` when the disagreement is between SQL rollups, session events, and spans

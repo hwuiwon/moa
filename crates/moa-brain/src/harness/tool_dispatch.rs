@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ApprovalRequest, BufferedUserMessage, Event, EventRecord, MoaError, PolicyAction, Result,
-    RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate,
+    ApprovalRequest, Event, EventRecord, MoaError, PolicyAction, Result, RuntimeEvent, SessionId,
+    SessionMeta, SessionSignal, SessionStatus, SessionStore, ToolCallContent, ToolCallId,
+    ToolCardStatus, ToolInvocation, ToolUpdate,
 };
 use moa_hands::ToolRouter;
 use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
@@ -40,7 +40,6 @@ pub(super) async fn handle_tool_call(
     tool_dispatch_span: Option<&tracing::Span>,
     signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let invocation = &call.invocation;
@@ -255,7 +254,6 @@ pub(super) async fn handle_tool_call(
                     tool_dispatch_span,
                     receiver,
                     turn_requested,
-                    queued_messages,
                     soft_cancel_requested,
                 )
                 .await

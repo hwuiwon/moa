@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use moa_brain::{
     GraphMemoryPipelineOptions,
-    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    run_brain_turn_with_tools,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
     Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, UserId,
@@ -123,7 +122,7 @@ async fn run_prompt(
         )
         .await?;
 
-    run_brain_turn_with_tools(
+    run_brain_turn(
         session_id,
         store.clone(),
         provider,

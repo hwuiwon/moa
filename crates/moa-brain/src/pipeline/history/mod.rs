@@ -135,7 +135,13 @@ impl HistoryCompiler {
         }
 
         if let Some(checkpoint) = checkpoint {
-            let checkpoint_message = ContextMessage::system(format!(
+            // The checkpoint summary is compaction-derived conversation context, not
+            // part of the byte-stable cache prefix (identity/instructions/tools). It is
+            // injected as a `user` message — the same role used for the runtime reminder
+            // — so it does not extend the leading System block. Rendering it as a System
+            // message would push it into the cacheable prefix and invalidate prompt-cache
+            // reuse every time compaction produces a new checkpoint.
+            let checkpoint_message = ContextMessage::user(format!(
                 "<session_checkpoint summarized_events=\"{}\">\n{}\n</session_checkpoint>",
                 checkpoint.events_summarized, checkpoint.summary
             ));

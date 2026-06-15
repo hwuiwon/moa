@@ -46,7 +46,7 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage() -> mo
             )
             .await?;
         assert_eq!(
-            run_brain_turn(session_id, store.clone(), provider.clone(), &pipeline).await?,
+            run_brain_turn(session_id, store.clone(), provider.clone(), &pipeline, None).await?,
             TurnResult::Complete
         );
     }

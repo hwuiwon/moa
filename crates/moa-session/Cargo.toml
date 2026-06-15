@@ -14,7 +14,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "migrate", "macros", "json", "uuid", "chrono"] }
-futures-util = { workspace = true }
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true

@@ -3,9 +3,8 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, BufferedUserMessage, Event, EventRecord, MoaError, PolicyAction, Result,
-    RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStore, ToolCardStatus,
-    ToolInvocation, ToolUpdate,
+    ApprovalDecision, Event, EventRecord, MoaError, PolicyAction, Result, RuntimeEvent, SessionId,
+    SessionMeta, SessionSignal, SessionStore, ToolCardStatus, ToolInvocation, ToolUpdate,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -14,7 +13,7 @@ use tracing::Instrument;
 
 use crate::turn::PendingToolApproval;
 
-use super::super::context_build::{append_event, approval_decision_label, buffer_queued_message};
+use super::super::context_build::{append_event, approval_decision_label};
 use super::super::tool_dispatch::{ToolCallOutcome, execute_tool, resumed_tool_invocation_id};
 
 #[allow(clippy::too_many_arguments)]
@@ -31,7 +30,6 @@ pub(in crate::harness) async fn wait_for_approval(
     tool_dispatch_span: Option<&tracing::Span>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let invocation = ToolInvocation {
@@ -170,8 +168,7 @@ pub(in crate::harness) async fn wait_for_approval(
                         }
                     };
                 }
-                Some(SessionSignal::QueueMessage(message)) => {
-                    buffer_queued_message(queued_messages, message);
+                Some(SessionSignal::QueueMessage(_)) => {
                     *turn_requested = true;
                     let _ = runtime_tx.send(RuntimeEvent::Notice(
                         "Message queued. Will process after the approval decision.".to_string(),

@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ContextMessage, Event, EventFilter, EventRange, EventRecord, ModelCapabilities, ModelId,
-    PendingSignal, PendingSignalId, Platform, Result, SequenceNum, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId,
-    WorkingContext, WorkspaceId,
+    Platform, Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId, WorkingContext,
+    WorkspaceId,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -354,22 +354,6 @@ impl SessionStore for MockSessionStore {
 
     async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
         self.session.lock().await.status = status;
-        Ok(())
-    }
-
-    async fn store_pending_signal(
-        &self,
-        _session_id: SessionId,
-        signal: PendingSignal,
-    ) -> Result<PendingSignalId> {
-        Ok(signal.id)
-    }
-
-    async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
         Ok(())
     }
 

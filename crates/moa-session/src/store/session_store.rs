@@ -130,23 +130,6 @@ impl SessionStore for PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)?;
 
-        let session_channel = session_channel_name(&session_id);
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(&session_channel)
-            .bind(format!(r#"{{"seq":{sequence_num}}}"#))
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(GLOBAL_EVENTS_CHANNEL)
-            .bind(format!(
-                r#"{{"session_id":"{}","seq":{sequence_num}}}"#,
-                session_id
-            ))
-            .execute(&mut *transaction)
-            .await
-            .map_err(map_sqlx_error)?;
-
         transaction.commit().await.map_err(map_sqlx_error)?;
         if let Event::BrainResponse {
             model, model_tier, ..
@@ -207,6 +190,7 @@ impl SessionStore for PostgresSessionStore {
         if matches!(range.event_types, Some(ref types) if types.is_empty()) {
             return Ok(Vec::new());
         }
+        let started_at = std::time::Instant::now();
         let events = self.table_name("events");
 
         let use_recent_order =
@@ -268,6 +252,7 @@ impl SessionStore for PostgresSessionStore {
         }
         record_session_event_load(events.len() as u64);
         record_session_event_decoded_bytes(decoded_bytes);
+        record_session_event_replay(events.len(), decoded_bytes, started_at.elapsed());
         Ok(events)
     }
 
@@ -391,84 +376,6 @@ impl SessionStore for PostgresSessionStore {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
-
-        Ok(())
-    }
-
-    /// Stores an unresolved pending signal for later turn-boundary processing.
-    async fn store_pending_signal(
-        &self,
-        session_id: moa_core::SessionId,
-        signal: PendingSignal,
-    ) -> Result<PendingSignalId> {
-        if signal.session_id != session_id {
-            return Err(MoaError::StorageError(
-                "pending signal session_id does not match store_pending_signal target".to_string(),
-            ));
-        }
-
-        let pending_signals = self.table_name("pending_signals");
-        let sessions = self.table_name("sessions");
-        let affected = sqlx::query(&format!(
-            "INSERT INTO {pending_signals} \
-             (id, session_id, workspace_id, user_id, signal_type, payload, created_at, resolved_at) \
-             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, NULL \
-             FROM {sessions} s WHERE s.id = $2"
-        ))
-        .bind(signal.id.0)
-        .bind(session_id.0)
-        .bind(pending_signal_type_to_db(signal.signal_type))
-        .bind(Json(signal.payload))
-        .bind(signal.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
-
-        if affected == 0 {
-            return Err(MoaError::SessionNotFound(session_id));
-        }
-        Ok(signal.id)
-    }
-
-    /// Returns unresolved pending signals for a session in creation order.
-    async fn get_pending_signals(
-        &self,
-        session_id: moa_core::SessionId,
-    ) -> Result<Vec<PendingSignal>> {
-        let pending_signals = self.table_name("pending_signals");
-        let rows = sqlx::query(&format!(
-            "SELECT id, session_id, signal_type, payload, created_at \
-             FROM {pending_signals} \
-             WHERE session_id = $1 AND resolved_at IS NULL \
-             ORDER BY created_at ASC, id ASC"
-        ))
-        .bind(session_id.0)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.iter().map(pending_signal_from_row).collect()
-    }
-
-    /// Marks a stored pending signal as resolved.
-    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()> {
-        let pending_signals = self.table_name("pending_signals");
-        let affected = sqlx::query(&format!(
-            "UPDATE {pending_signals} SET resolved_at = $1 WHERE id = $2 AND resolved_at IS NULL"
-        ))
-        .bind(Utc::now())
-        .bind(signal_id.0)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
-
-        if affected == 0 {
-            return Err(MoaError::StorageError(format!(
-                "pending signal `{signal_id}` was not found or already resolved"
-            )));
-        }
 
         Ok(())
     }

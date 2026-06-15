@@ -18,7 +18,6 @@ mod provider;
 mod query_rewrite;
 mod resolution;
 mod runtime_events;
-mod scheduling;
 mod segments;
 mod session;
 mod snapshot;
@@ -37,17 +36,12 @@ pub use context::{
     ContextMessage, ExcludedItem, MessageRole, ProcessorOutput, WorkingContext,
     estimate_text_tokens,
 };
-pub use events_stream::{
-    BroadcastChannel, ClaimCheck, EventFilter, EventRange, EventRecord, EventStream, EventType,
-    LagPolicy, LiveEvent, MaybeBlob, SequenceNum,
-};
+pub use events_stream::{ClaimCheck, EventFilter, EventRange, EventRecord, EventType, SequenceNum};
 pub use hands::{
     HandHandle, HandResources, HandSpec, HandStatus, SandboxFile, SandboxTier,
     validate_sandbox_file_path,
 };
-pub use identifiers::{
-    BrainId, ModelId, PendingSignalId, SegmentId, SessionId, ToolCallId, UserId, WorkspaceId,
-};
+pub use identifiers::{BrainId, ModelId, SegmentId, SessionId, ToolCallId, UserId, WorkspaceId};
 pub use learning::{LearningEntry, TenantId};
 pub use memory::{MemoryScope, ScopeContext, ScopeTier, SkillMetadata};
 pub use model::{Credential, ModelCapabilities, ProviderNativeTool, TokenPricing, ToolCallFormat};
@@ -66,12 +60,10 @@ pub use resolution::{
     ResolutionLabel, ResolutionScore, ScoringPhase, SegmentBaseline, SkillResolutionRate,
 };
 pub use runtime_events::{RuntimeEvent, ToolCardStatus, ToolUpdate};
-pub use scheduling::{CronHandle, CronSpec};
 pub use segments::{ActiveSegment, SegmentCompletion, TaskSegment, deterministic_segment_id};
 pub use session::{
-    BufferedUserMessage, CancelMode, CheckpointHandle, CheckpointInfo, ObserveLevel, PendingSignal,
-    PendingSignalType, SessionFilter, SessionHandle, SessionMeta, SessionSignal, SessionStatus,
-    SessionSummary, StartSessionRequest, TurnOutcome, UserMessage, WakeContext,
+    CancelMode, CheckpointHandle, CheckpointInfo, SessionFilter, SessionMeta, SessionSignal,
+    SessionStatus, SessionSummary, TurnOutcome, UserMessage,
 };
 pub use snapshot::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextSnapshot, FileReadDedupState, SnapshotFileReadState,

@@ -35,7 +35,7 @@ Use when the test must:
 
 Examples already in the repo:
 
-- `crates/moa-orchestrator-local/tests/local_orchestrator.rs` for orchestrator lifecycle.
+- `crates/moa-brain/tests/brain_turn.rs` for turn lifecycle and approvals.
 - `crates/moa-orchestrator/tests/session_vo.rs` for Restate virtual-object behavior.
 - `crates/moa-session/tests/postgres_store.rs` for session store behavior.
 - `crates/moa-providers/tests/anthropic_offline.rs` for wiremock-backed provider behavior.

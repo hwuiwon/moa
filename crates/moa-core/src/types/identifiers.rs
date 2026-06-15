@@ -5,10 +5,6 @@ uuid_id!(
     pub struct SessionId
 );
 uuid_id!(
-    /// Identifier for a persisted pending session signal.
-    pub struct PendingSignalId
-);
-uuid_id!(
     /// Identifier for one task segment within a session.
     pub struct SegmentId
 );

@@ -36,7 +36,7 @@ pub struct ToolUpdate {
     pub detail: Option<String>,
 }
 
-/// Live runtime update emitted by the local orchestrator for UI and API event rendering.
+/// Live runtime update emitted during turn execution for UI and API event rendering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeEvent {

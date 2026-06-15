@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use moa_brain::{
     GraphMemoryPipelineOptions, TurnResult,
-    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    run_brain_turn_with_tools,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
     CompletionRequest, Event, MessageRole, ModelCapabilities, Result, SessionMeta, SessionStore,
@@ -76,7 +75,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        run_brain_turn_with_tools(
+        run_brain_turn(
             first_session_id,
             session_store.clone(),
             provider.clone(),
@@ -105,7 +104,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        run_brain_turn_with_tools(
+        run_brain_turn(
             second_session_id,
             session_store,
             provider.clone(),

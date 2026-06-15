@@ -6,54 +6,23 @@ pub mod embedding;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
     CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
-    ContextSnapshot, Credential as StoredCredential, CronHandle, CronSpec, EventFilter, EventRange,
-    EventRecord, EventStream, HandHandle, HandSpec, HandStatus, InboundMessage, MessageId,
-    ModelCapabilities, ObserveLevel, OutboundMessage, PendingSignal, PendingSignalId, Platform,
-    PlatformCapabilities, ProcessorOutput, ResolutionScore, RuntimeEvent, SandboxFile,
-    SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionHandle,
-    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionSummary, SkillResolutionRate,
-    StartSessionRequest, TaskSegment, ToolOutput, WorkingContext, WorkspaceId,
+    ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange, EventRecord,
+    HandHandle, HandSpec, HandStatus, InboundMessage, MessageId, ModelCapabilities,
+    OutboundMessage, Platform, PlatformCapabilities, ProcessorOutput, ResolutionScore, SandboxFile,
+    SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionId,
+    SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment, ToolOutput,
+    WorkingContext, WorkspaceId,
 };
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;
-
-/// Orchestrates session lifecycle and observation.
-#[async_trait]
-pub trait BrainOrchestrator: Send + Sync {
-    /// Starts a new session.
-    async fn start_session(&self, req: StartSessionRequest) -> Result<SessionHandle>;
-
-    /// Resumes an existing session.
-    async fn resume_session(&self, session_id: SessionId) -> Result<SessionHandle>;
-
-    /// Sends a signal to a running session.
-    async fn signal(&self, session_id: SessionId, signal: SessionSignal) -> Result<()>;
-
-    /// Lists sessions matching the provided filter.
-    async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
-
-    /// Observes a running or completed session.
-    async fn observe(&self, session_id: SessionId, level: ObserveLevel) -> Result<EventStream>;
-
-    /// Subscribes to live runtime events for a session.
-    ///
-    /// Returns `Ok(None)` when the orchestrator does not support live runtime observation.
-    async fn observe_runtime(
-        &self,
-        session_id: SessionId,
-    ) -> Result<Option<broadcast::Receiver<RuntimeEvent>>>;
-
-    /// Registers a cron job for background work.
-    async fn schedule_cron(&self, spec: CronSpec) -> Result<CronHandle>;
-}
 
 /// Durable append-only session store.
 #[async_trait]
@@ -161,19 +130,6 @@ pub trait SessionStore: Send + Sync {
     async fn delete_snapshot(&self, _session_id: SessionId) -> Result<()> {
         Ok(())
     }
-
-    /// Stores a durable pending signal that should be resolved later.
-    async fn store_pending_signal(
-        &self,
-        session_id: SessionId,
-        signal: PendingSignal,
-    ) -> Result<PendingSignalId>;
-
-    /// Returns unresolved pending signals for the session in creation order.
-    async fn get_pending_signals(&self, session_id: SessionId) -> Result<Vec<PendingSignal>>;
-
-    /// Marks a previously stored pending signal as resolved.
-    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()>;
 
     /// Searches events across sessions.
     async fn search_events(&self, query: &str, filter: EventFilter) -> Result<Vec<EventRecord>>;

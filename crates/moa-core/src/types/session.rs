@@ -2,15 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
-use crate::error::Result;
-
-use super::{
-    Attachment, EventRecord, ModelId, PendingSignalId, Platform, SequenceNum, SessionId, UserId,
-    WorkspaceId,
-};
+use super::{Attachment, ModelId, Platform, SequenceNum, SessionId, UserId, WorkspaceId};
 
 /// Session lifecycle status.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,18 +24,6 @@ pub enum SessionStatus {
     Cancelled,
     /// Session failed.
     Failed,
-}
-
-/// Observation verbosity for a live session stream.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObserveLevel {
-    /// Summary-only observation.
-    Summary,
-    /// Standard observation.
-    Normal,
-    /// Most detailed observation.
-    Verbose,
 }
 
 /// Canonical user-authored message payload.
@@ -96,68 +78,6 @@ pub enum SessionSignal {
     },
 }
 
-/// In-memory buffered user message awaiting turn-boundary processing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BufferedUserMessage {
-    /// The user-visible message payload.
-    pub message: UserMessage,
-    /// Optional durable pending-signal identifier associated with the message.
-    pub pending_signal_id: Option<PendingSignalId>,
-}
-
-impl BufferedUserMessage {
-    /// Creates a buffered message without a durable pending-signal identifier.
-    pub fn direct(message: UserMessage) -> Self {
-        Self {
-            message,
-            pending_signal_id: None,
-        }
-    }
-}
-
-/// Supported pending signal kinds stored durably outside the append-only event log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PendingSignalType {
-    /// A user message queued for later turn-boundary flush.
-    QueueMessage,
-}
-
-/// Durable but unresolved session signal awaiting turn-boundary processing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PendingSignal {
-    /// Stable identifier for this stored signal.
-    pub id: PendingSignalId,
-    /// Session that owns the pending signal.
-    pub session_id: SessionId,
-    /// Kind of pending signal.
-    pub signal_type: PendingSignalType,
-    /// JSON-serialized payload for the signal.
-    pub payload: Value,
-    /// Creation timestamp.
-    pub created_at: DateTime<Utc>,
-}
-
-impl PendingSignal {
-    /// Creates a pending queued-message signal from a user message.
-    pub fn queue_message(session_id: SessionId, message: UserMessage) -> Result<Self> {
-        Ok(Self {
-            id: PendingSignalId::new(),
-            session_id,
-            signal_type: PendingSignalType::QueueMessage,
-            payload: serde_json::to_value(message)?,
-            created_at: Utc::now(),
-        })
-    }
-
-    /// Decodes the queued user message payload.
-    pub fn user_message(&self) -> Result<UserMessage> {
-        match self.signal_type {
-            PendingSignalType::QueueMessage => Ok(serde_json::from_value(self.payload.clone())?),
-        }
-    }
-}
-
 /// Handle returned for a database checkpoint branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointHandle {
@@ -182,32 +102,6 @@ pub struct CheckpointInfo {
     pub size_bytes: Option<u64>,
     /// Parent branch identifier for this checkpoint.
     pub parent_branch: String,
-}
-
-/// Request for starting a new session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StartSessionRequest {
-    /// Workspace the session belongs to.
-    pub workspace_id: WorkspaceId,
-    /// User initiating the session.
-    pub user_id: UserId,
-    /// Source platform.
-    pub platform: Platform,
-    /// Model identifier to use.
-    pub model: ModelId,
-    /// Optional first message.
-    pub initial_message: Option<UserMessage>,
-    /// Optional title override.
-    pub title: Option<String>,
-    /// Optional parent session for child-brain flows.
-    pub parent_session_id: Option<SessionId>,
-}
-
-/// Handle returned when a session starts or resumes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionHandle {
-    /// Running session identifier.
-    pub session_id: SessionId,
 }
 
 /// Persistent session metadata.
@@ -331,46 +225,4 @@ pub struct SessionFilter {
     pub platform: Option<Platform>,
     /// Maximum number of results.
     pub limit: Option<usize>,
-}
-
-/// Recovered session state returned when a brain wakes from the event log.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WakeContext {
-    /// Current persisted session metadata.
-    pub session: SessionMeta,
-    /// Most recent checkpoint summary, if one exists.
-    pub checkpoint_summary: Option<String>,
-    /// Events that occurred after the checkpoint, or all events when no checkpoint exists.
-    pub recent_events: Vec<EventRecord>,
-    /// Unresolved queued signals that must be re-buffered on resume.
-    #[serde(default)]
-    pub pending_signals: Vec<PendingSignal>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PendingSignal, PendingSignalType, SessionId, UserMessage};
-
-    #[test]
-    fn pending_signal_queue_message_round_trip() {
-        let session_id = SessionId::new();
-        let signal = PendingSignal::queue_message(
-            session_id,
-            UserMessage {
-                text: "queued".to_string(),
-                attachments: vec![],
-            },
-        )
-        .expect("create pending signal");
-
-        assert_eq!(signal.session_id, session_id);
-        assert_eq!(signal.signal_type, PendingSignalType::QueueMessage);
-        assert_eq!(
-            signal
-                .user_message()
-                .expect("decode queued user message")
-                .text,
-            "queued"
-        );
-    }
 }

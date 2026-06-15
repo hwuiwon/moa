@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use moa_brain::{
     GraphMemoryPipelineOptions, TurnResult,
-    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    run_brain_turn_with_tools,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
     Event, EventRange, MemoryScope, ModelCapabilities, Result, SessionMeta, SessionStore,
@@ -87,7 +86,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         )
         .await?;
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session_id,
         session_store.clone(),
         provider.clone(),

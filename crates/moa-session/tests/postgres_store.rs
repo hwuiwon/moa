@@ -5,10 +5,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    ContextSnapshot, Event, FileReadDedupState, LearningEntry, MoaError, ModelId, PendingSignal,
-    ResolutionLabel, ResolutionScore, ScoringPhase, SegmentCompletion, SessionId, SessionMeta,
-    SessionStore, TaskSegment, ToolCallId, ToolOutput, UserId, UserMessage, WorkspaceId,
-    deterministic_segment_id,
+    ContextSnapshot, Event, FileReadDedupState, LearningEntry, MoaError, ModelId, ResolutionLabel,
+    ResolutionScore, ScoringPhase, SegmentCompletion, SessionId, SessionMeta, SessionStore,
+    TaskSegment, ToolCallId, ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use sqlx::PgPool;
@@ -104,10 +103,6 @@ async fn postgres_shared_session_store_contract() {
     .await;
     with_test_store(|store| async move {
         shared::test_emit_and_get_events(&store).await;
-    })
-    .await;
-    with_test_store(|store| async move {
-        shared::test_pending_signals(&store).await;
     })
     .await;
     with_test_store(|store| async move {
@@ -335,23 +330,6 @@ async fn postgres_session_owned_writes_fail_when_session_is_missing() {
     assert!(
         matches!(snapshot_error, MoaError::SessionNotFound(id) if id == missing_session),
         "unexpected snapshot error: {snapshot_error:?}"
-    );
-
-    let pending_signal = PendingSignal::queue_message(
-        missing_session,
-        UserMessage {
-            text: "queued message".to_string(),
-            attachments: Vec::new(),
-        },
-    )
-    .expect("build pending signal");
-    let signal_error = store
-        .store_pending_signal(missing_session, pending_signal)
-        .await
-        .expect_err("pending signal write must reject a missing session");
-    assert!(
-        matches!(signal_error, MoaError::SessionNotFound(id) if id == missing_session),
-        "unexpected pending signal error: {signal_error:?}"
     );
 
     let segment_error = store

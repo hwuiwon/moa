@@ -36,7 +36,7 @@ The default stance is:
 
 Use this skill when a change touches any of the following:
 
-- local orchestrator (`moa-orchestrator-local`) or Restate orchestrator (`moa-orchestrator`) behavior
+- Restate orchestrator (`moa-orchestrator`) behavior
 - session lifecycle, approvals, queued messages, cancellation, replay, or recovery
 - provider request/response parsing, model catalogs, pricing, caching, tool calls, or web search
 - session store, event schema, analytics, migrations, or generated aggregates
@@ -114,8 +114,7 @@ Compile ignored live tests without opt-in when changing their code. Run the expl
 
 ## Rules
 
-- Do not treat `moa-orchestrator-local` green as Restate green.
-- Do not duplicate lifecycle coverage across adapters when the shared contract harness can express it.
+- Do not treat brain-harness green as Restate green; durable workflow behavior needs orchestrator suites.
 - Prefer exact test targets over broad ignored-test sweeps.
 - If live provider credentials are available, do not ship provider request-shape changes without at least one live check.
 - Do not run billed live tests merely because `--ignored` was requested; require the matching opt-in flag too.

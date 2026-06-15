@@ -508,8 +508,8 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use moa_core::{
-        ClaimCheck, EventFilter, PendingSignal, PendingSignalId, SessionFilter, SessionId,
-        SessionMeta, SessionStatus, SessionSummary, UserId, WorkspaceId,
+        ClaimCheck, EventFilter, SessionFilter, SessionId, SessionMeta, SessionStatus,
+        SessionSummary, UserId, WorkspaceId,
     };
 
     use super::*;
@@ -571,22 +571,6 @@ mod tests {
             _session_id: SessionId,
             _status: SessionStatus,
         ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn store_pending_signal(
-            &self,
-            _session_id: SessionId,
-            _signal: PendingSignal,
-        ) -> Result<PendingSignalId> {
-            unreachable!("not used in test")
-        }
-
-        async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-            Ok(Vec::new())
-        }
-
-        async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
             Ok(())
         }
 

@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    BufferedUserMessage, CompletionContent, Event, EventRange, EventRecord, LLMProvider,
-    LineageHandle, MoaError, ModelTask, Result, RuntimeEvent, SessionId, SessionMeta,
-    SessionSignal, SessionStatus, SessionStore, StopReason, TraceContext, WorkingContext,
-    record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
+    ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus,
+    SessionStore, StopReason, TraceContext, WorkingContext, record_turn_llm_call_duration,
+    record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -51,7 +51,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     hard_cancel_token: Option<CancellationToken>,
     mut signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     turn_requested: Option<&mut bool>,
-    queued_messages: Option<&mut Vec<BufferedUserMessage>>,
     soft_cancel_requested: Option<&mut bool>,
     lineage: Arc<dyn LineageHandle>,
 ) -> Result<StreamedTurnResult> {
@@ -71,8 +70,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
 
     let mut local_turn_requested = false;
     let turn_requested = turn_requested.unwrap_or(&mut local_turn_requested);
-    let mut local_queued_messages = Vec::new();
-    let queued_messages = queued_messages.unwrap_or(&mut local_queued_messages);
     let mut local_soft_cancel_requested = false;
     let soft_cancel_requested = soft_cancel_requested.unwrap_or(&mut local_soft_cancel_requested);
 
@@ -156,7 +153,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             Some(&waiting_dispatch_span),
                             receiver,
                             turn_requested,
-                            queued_messages,
                             soft_cancel_requested,
                         )
                         .instrument(waiting_dispatch_span.clone())
@@ -165,7 +161,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             Some(receiver),
                             runtime_tx,
                             turn_requested,
-                            queued_messages,
                             soft_cancel_requested,
                         )?;
                         record_turn_tool_dispatch_duration(waiting_dispatch_started.elapsed(), 1);
@@ -299,7 +294,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             signal,
                             runtime_tx,
                             turn_requested,
-                            queued_messages,
                             soft_cancel_requested,
                         )
                     },
@@ -434,7 +428,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                                 Some(&tool_dispatch_span),
                                 signal_rx.as_deref_mut(),
                                 turn_requested,
-                                queued_messages,
                                 soft_cancel_requested,
                             )
                             .await?;
@@ -469,7 +462,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                                     signal_rx.as_deref_mut(),
                                     runtime_tx,
                                     turn_requested,
-                                    queued_messages,
                                     soft_cancel_requested,
                                 )?;
                             }

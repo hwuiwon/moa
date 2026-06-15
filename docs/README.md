@@ -36,7 +36,6 @@ Supporting notes:
 | [Auth Architecture](auth/README.md) | Identity, authorization, delegation, tuple consistency, and auth crate map |
 | [Implementation Caveats](implementation-caveats.md) | Known implementation tradeoffs and follow-up seams |
 | [Prompt Caching Architecture](prompt-caching-architecture.md) | Cache-region rules and verification |
-| [Event Fanout](event-fanout.md) | Event broadcast and observation behavior |
 
 For a current end-to-end map, start with the root [`architecture.md`](../architecture.md)
 before diving into the numbered specs.

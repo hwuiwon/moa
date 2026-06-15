@@ -2,33 +2,6 @@
 
 use super::*;
 
-pub(super) fn checkpoint_view(events: &[EventRecord]) -> (Option<String>, Vec<EventRecord>) {
-    let latest_checkpoint = events.iter().rev().find_map(|record| match &record.event {
-        Event::Checkpoint {
-            summary,
-            events_summarized,
-            ..
-        } => Some((summary.clone(), (*events_summarized) as usize)),
-        _ => None,
-    });
-    let summary = latest_checkpoint
-        .as_ref()
-        .map(|(summary, _)| summary.clone());
-    let summarized = latest_checkpoint.map(|(_, count)| count).unwrap_or(0);
-    let non_checkpoint = events
-        .iter()
-        .filter(|record| !matches!(record.event, Event::Checkpoint { .. }))
-        .cloned()
-        .collect::<Vec<_>>();
-    let non_checkpoint_len = non_checkpoint.len();
-    let recent_events = non_checkpoint
-        .into_iter()
-        .skip(summarized.min(non_checkpoint_len))
-        .collect::<Vec<_>>();
-
-    (summary, recent_events)
-}
-
 pub(super) fn redact_password(url: &str) -> String {
     if let Ok(mut parsed) = url::Url::parse(url) {
         if parsed.password().is_some() {

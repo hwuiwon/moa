@@ -1,6 +1,5 @@
 //! Restate-side bridge for compiling one durable session turn request.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use moa_brain::{
@@ -9,8 +8,8 @@ use moa_brain::{
     pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    CompletionRequest, ContextSnapshot, CountedSessionStore, EventRange, QueryRewriteResult,
-    Result, SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
+    CompletionRequest, ContextSnapshot, EventRange, QueryRewriteResult, Result, SessionId,
+    SessionStore, WorkingContext, record_pipeline_compile_duration,
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     session_engine::session_requires_processing,
 };
@@ -61,8 +60,6 @@ pub(crate) async fn prepare_turn_request(
 ) -> Result<PreparedTurnRequestOutput> {
     let ctx = OrchestratorCtx::current();
     let session_store = ctx.session_store.clone();
-    let counted_session_store: Arc<dyn SessionStore> =
-        Arc::new(CountedSessionStore::new(session_store.clone()));
     let session = session_store.get_session(session_id).await?;
     let recent_events = session_store
         .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
@@ -93,7 +90,7 @@ pub(crate) async fn prepare_turn_request(
     };
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         ctx.config.as_ref(),
-        counted_session_store,
+        session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool: ctx.graph_pool.clone(),
             shared_graph_memory_retriever: Some(ctx.graph_memory_retriever.clone()),

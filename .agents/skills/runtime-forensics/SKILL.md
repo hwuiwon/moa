@@ -1,15 +1,15 @@
 ---
 name: runtime-forensics
 description: >
-  Use this skill when diagnosing MOA runtime regressions, drift between the local
-  orchestrator and Restate, approval deadlocks, replay or recovery issues, event-log
-  inconsistencies, or analytics/trace mismatches. It correlates persisted session
-  events, runtime behavior, traces, and SQL analytics so the failure is localized
-  before patching. Triggers include: "session stuck in Running", "approval did not
-  resume", "Restate disagrees with local", "the cache hit numbers are wrong", "trace
-  shows X but the session shows Y", "this only fails after a worker restart". Do
-  NOT use for selecting which tests to run (use `certify`), implementing the fix
-  (use `rust` or `memory-pack`), or authoring new tests (use `test-authoring`).
+  Use this skill when diagnosing MOA runtime regressions, approval deadlocks,
+  replay or recovery issues, event-log inconsistencies, or analytics/trace
+  mismatches. It correlates persisted session events, runtime behavior, traces,
+  and SQL analytics so the failure is localized before patching. Triggers
+  include: "session stuck in Running", "approval did not resume", "the cache hit
+  numbers are wrong", "trace shows X but the session shows Y", "this only fails
+  after a worker restart". Do NOT use for selecting which tests to run (use
+  `certify`), implementing the fix (use `rust` or `memory-pack`), or authoring
+  new tests (use `test-authoring`).
 compatibility: Rust 2024 MOA workspace with cargo; Postgres-backed session store; Restate runtime optional; live provider env vars optional
 allowed-tools:
   - Bash(cargo:*)
@@ -37,7 +37,7 @@ The default stance is:
 
 Use this skill when the problem looks like any of the following:
 
-- the local orchestrator (`moa-orchestrator-local`) and Restate orchestrator (`moa-orchestrator`) disagree on session behavior
+- the brain harness (`moa-brain`) and the Restate orchestrator (`moa-orchestrator`) disagree on session behavior
 - approvals stall, resume incorrectly, or skip queued work
 - replay, recovery, or restart behavior differs from a fresh run
 - session events, runtime events, traces, and final status disagree
@@ -61,7 +61,7 @@ This skill also does not own pre-merge test selection. If you arrived here witho
 ## Modes
 
 - `session`: reconstruct one session end-to-end from persisted events and current status
-- `adapter-diff`: compare the same scenario across local and Restate
+- `adapter-diff`: compare the same scenario across the brain harness and Restate
 - `trace`: inspect latency spans, runtime events, and provider/tool timing
 - `analytics`: cross-check triggers, generated columns, views, and materialized views against raw events
 - `recovery`: focus on replay, worker restart, or approval resume behavior
@@ -70,7 +70,7 @@ This skill also does not own pre-merge test selection. If you arrived here witho
 
 Read only the matching docs before choosing commands:
 
-- `docs/02-brain-orchestration.md` for lifecycle, approvals, local or Restate
+- `docs/02-brain-orchestration.md` for lifecycle, approvals, and Restate orchestration
 - `docs/12-restate-architecture.md` for Restate virtual objects, services, signal flow, and worker behavior
 - `docs/05-session-event-log.md` for persisted events, replay, and recovery
 - `docs/11-event-replay-runbook.md` for replay-cost and event-fetch instrumentation
@@ -81,7 +81,7 @@ Read only the matching docs before choosing commands:
 Then load only the relevant reference file:
 
 - `references/evidence-checklist.md` for what to capture first
-- `references/local-vs-restate.md` for adapter drift and approval/restart issues
+- `references/local-vs-restate.md` for brain-harness-vs-Restate drift and approval/restart issues
 - `references/analytics-and-traces.md` for event-log versus trace versus SQL checks
 
 ## Workflow
@@ -107,7 +107,7 @@ Then load only the relevant reference file:
 - Runtime events are transient; use them to explain UX behavior, not to override the event log.
 - Traces explain timing and span boundaries; they do not prove persistence correctness on their own.
 - If analytics disagree with the event log, trust the event log first and then inspect the trigger, generated columns, or refresh path.
-- If local passes and Restate fails, do not assume provider behavior is the cause until the shared contract and persisted events say so.
+- If the brain harness passes and Restate fails, do not assume provider behavior is the cause until persisted events say so.
 - Refresh materialized views before treating them as evidence.
 - On macOS dev machines, prefer `PROTOC=/opt/homebrew/bin/protoc` when builds touch protobuf.
 

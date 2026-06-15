@@ -3,16 +3,16 @@
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalDecision, BufferedUserMessage, Event, EventRecord, MoaError, PolicyAction, Result,
-    RiskLevel, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore,
-    ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate,
+    ApprovalDecision, Event, EventRecord, MoaError, PolicyAction, Result, RiskLevel, RuntimeEvent,
+    SessionId, SessionMeta, SessionSignal, SessionStatus, SessionStore, ToolCallId, ToolCardStatus,
+    ToolInvocation, ToolUpdate,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::super::context_build::{append_event, approval_decision_label, buffer_queued_message};
+use super::super::context_build::{append_event, approval_decision_label};
 use super::super::tool_dispatch::{ToolCallOutcome, execute_tool};
 
 #[allow(clippy::too_many_arguments)]
@@ -34,7 +34,6 @@ pub(in crate::harness) async fn wait_for_signal_approval(
     tool_dispatch_span: Option<&tracing::Span>,
     signal_rx: &mut mpsc::Receiver<SessionSignal>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let approval_span = tracing::info_span!(
@@ -168,8 +167,7 @@ pub(in crate::harness) async fn wait_for_signal_approval(
                         }
                     };
                 }
-                Some(SessionSignal::QueueMessage(message)) => {
-                    buffer_queued_message(queued_messages, message);
+                Some(SessionSignal::QueueMessage(_)) => {
                     *turn_requested = true;
                     let _ = runtime_tx.send(RuntimeEvent::Notice(
                         "Message queued. Will process after the approval decision.".to_string(),

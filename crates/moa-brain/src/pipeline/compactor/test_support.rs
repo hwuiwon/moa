@@ -8,9 +8,8 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     BrainId, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ContextSnapshot, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelCapabilities,
-    ModelId, PendingSignal, PendingSignalId, Platform, Result, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage,
-    ToolCallFormat, WorkspaceId,
+    ModelId, Platform, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -98,22 +97,6 @@ impl SessionStore for MockSessionStore {
     }
 
     async fn delete_snapshot(&self, _session_id: SessionId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn store_pending_signal(
-        &self,
-        _session_id: SessionId,
-        _signal: PendingSignal,
-    ) -> Result<PendingSignalId> {
-        unimplemented!("not needed for compactor tests")
-    }
-
-    async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
         Ok(())
     }
 

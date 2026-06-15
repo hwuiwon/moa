@@ -1,4 +1,4 @@
-//! Shared streamed-turn helpers used by the buffered harness and local orchestrator.
+//! Shared streamed-turn helpers used by the buffered harness and the Restate orchestrator.
 
 use std::collections::HashSet;
 use std::sync::Arc;

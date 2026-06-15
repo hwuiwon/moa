@@ -11,7 +11,7 @@ pub mod tool_stats;
 pub mod turn;
 
 pub use harness::{
-    StreamedTurnResult, TurnResult, run_brain_turn, run_brain_turn_with_tools, run_streamed_turn,
+    StreamedTurnResult, TurnResult, run_brain_turn, run_streamed_turn,
     run_streamed_turn_with_signals,
 };
 pub use loop_detector::LoopDetector;

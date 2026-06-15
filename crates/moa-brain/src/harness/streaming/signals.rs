@@ -1,22 +1,18 @@
 //! Live session-signal handling for streamed turns.
 
-use moa_core::{BufferedUserMessage, MoaError, Result, RuntimeEvent, SessionSignal};
+use moa_core::{MoaError, Result, RuntimeEvent, SessionSignal};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::turn::StreamSignalDisposition;
-
-use super::super::context_build::buffer_queued_message;
 
 pub(super) fn handle_stream_signal(
     signal: SessionSignal,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> StreamSignalDisposition {
     match signal {
-        SessionSignal::QueueMessage(message) => {
-            buffer_queued_message(queued_messages, message);
+        SessionSignal::QueueMessage(_) => {
             *turn_requested = true;
             let _ = runtime_tx.send(RuntimeEvent::Notice(
                 "Message queued. Will process after current turn.".to_string(),
@@ -39,7 +35,6 @@ pub(super) fn drain_signal_queue(
     signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     turn_requested: &mut bool,
-    queued_messages: &mut Vec<BufferedUserMessage>,
     soft_cancel_requested: &mut bool,
 ) -> Result<()> {
     let Some(signal_rx) = signal_rx else {
@@ -48,8 +43,7 @@ pub(super) fn drain_signal_queue(
 
     loop {
         match signal_rx.try_recv() {
-            Ok(SessionSignal::QueueMessage(message)) => {
-                buffer_queued_message(queued_messages, message);
+            Ok(SessionSignal::QueueMessage(_)) => {
                 *turn_requested = true;
                 let _ = runtime_tx.send(RuntimeEvent::Notice(
                     "Message queued. Will process after current turn.".to_string(),

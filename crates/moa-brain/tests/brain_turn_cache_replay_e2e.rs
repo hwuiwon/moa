@@ -6,13 +6,12 @@ use std::sync::Mutex;
 
 use moa_brain::{
     GraphMemoryPipelineOptions, TurnResult,
-    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    run_brain_turn_with_tools,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    CompletionRequest, CountedSessionStore, Event, EventRange, EventRecord, ModelCapabilities,
-    Result, SessionMeta, SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
-    TurnReplayCounters, TurnReplaySnapshot, UserId, WorkspaceId, scope_turn_replay_counters,
+    CompletionRequest, Event, EventRange, EventRecord, ModelCapabilities, Result, SessionMeta,
+    SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, TurnReplayCounters,
+    TurnReplaySnapshot, UserId, WorkspaceId, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
@@ -73,8 +72,7 @@ async fn brain_turn_cache_replay_e2e() -> Result<()> {
         testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
     let session_store = Arc::new(session_store);
-    let counted_session_store: Arc<dyn SessionStore> =
-        Arc::new(CountedSessionStore::new(session_store.clone()));
+    let dyn_session_store: Arc<dyn SessionStore> = session_store.clone();
     let workspace_id = WorkspaceId::new("brain-turn-cache-replay");
     let session = SessionMeta {
         workspace_id: workspace_id.clone(),
@@ -97,7 +95,7 @@ async fn brain_turn_cache_replay_e2e() -> Result<()> {
     let provider = Arc::new(build_scripted_provider());
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
-        counted_session_store.clone(),
+        dyn_session_store.clone(),
         GraphMemoryPipelineOptions {
             graph_pool,
             shared_graph_memory_retriever: None,
@@ -132,9 +130,9 @@ async fn brain_turn_cache_replay_e2e() -> Result<()> {
         let turn_counters = Arc::new(TurnReplayCounters::default());
         let result = scope_turn_replay_counters(
             turn_counters.clone(),
-            run_brain_turn_with_tools(
+            run_brain_turn(
                 session_id,
-                counted_session_store.clone(),
+                dyn_session_store.clone(),
                 provider.clone(),
                 &pipeline,
                 Some(router.clone()),

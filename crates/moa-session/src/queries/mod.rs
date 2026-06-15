@@ -1,9 +1,9 @@
 //! Query helpers for mapping `PostgreSQL` rows into MOA core types.
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, EventType, LearningEntry, MoaError, ModelId, PendingSignal, PendingSignalId,
-    PendingSignalType, Platform, PolicyAction, PolicyScope, ResolutionScore, Result, SegmentId,
-    SessionId, SessionMeta, SessionStatus, SessionSummary, TaskSegment, WorkspaceId,
+    ApprovalRule, EventType, LearningEntry, MoaError, ModelId, Platform, PolicyAction, PolicyScope,
+    ResolutionScore, Result, SegmentId, SessionId, SessionMeta, SessionStatus, SessionSummary,
+    TaskSegment, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;

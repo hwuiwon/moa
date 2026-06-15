@@ -255,19 +255,6 @@ pub fn record_tool_output_truncated_metric(tool_name: &str) {
     .increment(1);
 }
 
-/// Records one live broadcast lag event count.
-pub fn record_broadcast_lag(channel: &str, dropped: u64) {
-    if dropped == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_broadcast_lag_events_dropped_total",
-        "channel" => channel.to_string()
-    )
-    .increment(dropped);
-}
-
 /// Records one applied compaction tier.
 pub fn record_compaction_tier_applied(tier: u8) {
     counter!(

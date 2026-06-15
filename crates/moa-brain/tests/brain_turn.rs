@@ -4,16 +4,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::{
     TurnResult, build_default_pipeline, build_default_pipeline_with_tools,
-    pipeline::history::HistoryCompiler, run_brain_turn, run_brain_turn_with_tools,
-    run_streamed_turn,
+    pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
 };
 use moa_core::{
     ApprovalDecision, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     Event, EventFilter, EventRange, EventRecord, EventType, LLMProvider, MoaConfig,
-    ModelCapabilities, PendingSignal, PendingSignalId, Result, RuntimeEvent, SequenceNum,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason,
-    TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolCallId, ToolInvocation,
-    ToolOutput, UserId, WorkspaceId,
+    ModelCapabilities, Result, RuntimeEvent, SequenceNum, SessionFilter, SessionId, SessionMeta,
+    SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage,
+    ToolCallContent, ToolCallFormat, ToolCallId, ToolInvocation, ToolOutput, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_security::ToolPolicies;
@@ -123,22 +121,6 @@ impl SessionStore for MockSessionStore {
 
     async fn update_status(&self, _session_id: SessionId, status: SessionStatus) -> Result<()> {
         self.session.lock().await.status = status;
-        Ok(())
-    }
-
-    async fn store_pending_signal(
-        &self,
-        _session_id: SessionId,
-        signal: PendingSignal,
-    ) -> Result<PendingSignalId> {
-        Ok(signal.id)
-    }
-
-    async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
         Ok(())
     }
 
@@ -1259,7 +1241,7 @@ async fn run_brain_turn_emits_brain_response_event() {
     let pipeline = build_default_pipeline(&MoaConfig::default(), store.clone());
     let llm = Arc::new(MockLlmProvider);
 
-    let result = run_brain_turn(session.id, store.clone(), llm, &pipeline)
+    let result = run_brain_turn(session.id, store.clone(), llm, &pipeline, None)
         .await
         .unwrap();
 
@@ -1313,7 +1295,7 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
     let pipeline = build_default_pipeline(&MoaConfig::default(), store.clone());
     let llm = Arc::new(MockLlmProvider);
 
-    run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline)
+    run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
         .await
         .unwrap();
     store
@@ -1326,7 +1308,7 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
         )
         .await
         .unwrap();
-    run_brain_turn(session.id, store.clone(), llm, &pipeline)
+    run_brain_turn(session.id, store.clone(), llm, &pipeline, None)
         .await
         .unwrap();
 
@@ -1383,7 +1365,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
     let pipeline = build_default_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
 
-    let error = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline)
+    let error = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
         .await
         .expect_err("budget should stop the turn");
     match error {
@@ -1450,7 +1432,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     let pipeline = build_default_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
 
-    let result = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline)
+    let result = run_brain_turn(session.id, store.clone(), llm.clone(), &pipeline, None)
         .await
         .expect("unlimited budget should allow the turn");
 
@@ -1485,7 +1467,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     );
     let llm = Arc::new(ToolLoopLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -1514,7 +1496,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
+    let resumed = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -1570,7 +1552,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
     );
     let llm = Arc::new(OpenAiApprovalLoopLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -1599,7 +1581,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
+    let resumed = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -1653,7 +1635,7 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
     );
     let llm = Arc::new(LargeToolOutputLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -1681,10 +1663,9 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
         .await
         .unwrap();
 
-    let resumed =
-        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
-            .await
-            .unwrap();
+    let resumed = run_brain_turn(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+        .await
+        .unwrap();
 
     assert_eq!(resumed, TurnResult::Complete);
 
@@ -1742,7 +1723,7 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
         build_default_pipeline_with_tools(&config, store.clone(), tool_router.tool_schemas());
     let llm = Arc::new(ArtifactRetrievalLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -1836,7 +1817,7 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         build_default_pipeline_with_tools(&config, store.clone(), tool_router.tool_schemas());
     let llm = Arc::new(ArtifactStderrLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -2040,7 +2021,7 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
     );
     let llm = Arc::new(SessionSearchArtifactLlmProvider::new(old_tool_id));
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session.id,
         store.clone(),
         llm.clone(),
@@ -2123,10 +2104,9 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
     );
     let llm = Arc::new(OpenAiFailedReadLoopLlmProvider::default());
 
-    let result =
-        run_brain_turn_with_tools(session.id, store.clone(), llm, &pipeline, Some(tool_router))
-            .await
-            .unwrap();
+    let result = run_brain_turn(session.id, store.clone(), llm, &pipeline, Some(tool_router))
+        .await
+        .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
 
@@ -2285,7 +2265,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
     );
     let llm = Arc::new(RepeatingToolLlmProvider::default());
 
-    let first = run_brain_turn_with_tools(
+    let first = run_brain_turn(
         session_id,
         store.clone(),
         llm.clone(),
@@ -2315,7 +2295,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
         .await
         .unwrap();
 
-    let resumed = run_brain_turn_with_tools(
+    let resumed = run_brain_turn(
         session_id,
         store.clone(),
         llm.clone(),
@@ -2345,7 +2325,7 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
         .await
         .unwrap();
 
-    let final_result = run_brain_turn_with_tools(
+    let final_result = run_brain_turn(
         session_id,
         store.clone(),
         llm.clone(),
@@ -2394,10 +2374,9 @@ async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     );
     let llm = Arc::new(CanaryLeakLlmProvider::default());
 
-    let result =
-        run_brain_turn_with_tools(session_id, store.clone(), llm, &pipeline, Some(tool_router))
-            .await
-            .unwrap();
+    let result = run_brain_turn(session_id, store.clone(), llm, &pipeline, Some(tool_router))
+        .await
+        .unwrap();
 
     assert_eq!(result, TurnResult::Complete);
     let events = store
@@ -2461,7 +2440,7 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
     );
     let llm = Arc::new(MaliciousToolOutputLlmProvider::default());
 
-    let result = run_brain_turn_with_tools(
+    let result = run_brain_turn(
         session_id,
         store.clone(),
         llm.clone(),
@@ -2576,7 +2555,7 @@ async fn streamed_turn_runtime_matches_buffered_response() {
     let buffered_pipeline = build_default_pipeline(&MoaConfig::default(), buffered_store.clone());
     let buffered_provider = Arc::new(CapturingTextLlmProvider::new("Hello streamed world"));
 
-    let buffered_result = run_brain_turn_with_tools(
+    let buffered_result = run_brain_turn(
         session_id,
         buffered_store.clone(),
         buffered_provider,

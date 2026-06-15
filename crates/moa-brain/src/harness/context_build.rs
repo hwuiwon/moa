@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    ApprovalDecision, BufferedUserMessage, CacheReport, CompletionRequest, CompletionResponse,
-    ContextSnapshot, Event, EventRecord, LLMProvider, Result, SessionId, SessionMeta, SessionStore,
-    TokenPricing, TraceContext, UserMessage, WorkingContext, current_turn_root_span,
-    record_pipeline_compile_duration, record_turn_compaction, record_turn_event_persist_duration,
+    ApprovalDecision, CacheReport, CompletionRequest, CompletionResponse, ContextSnapshot, Event,
+    EventRecord, LLMProvider, Result, SessionId, SessionMeta, SessionStore, TokenPricing,
+    TraceContext, WorkingContext, current_turn_root_span, record_pipeline_compile_duration,
+    record_turn_compaction, record_turn_event_persist_duration,
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     stable_prefix_fingerprint,
 };
@@ -215,13 +215,6 @@ async fn persist_context_snapshot(
     }
 
     record_turn_snapshot_write_duration(started_at.elapsed());
-}
-
-pub(super) fn buffer_queued_message(
-    queued_messages: &mut Vec<BufferedUserMessage>,
-    message: UserMessage,
-) {
-    queued_messages.push(BufferedUserMessage::direct(message));
 }
 
 pub(super) fn turn_number_for_events(events: &[EventRecord]) -> i64 {

@@ -76,7 +76,7 @@ When reviewing or writing code, check these in order:
 
 Before editing a subsystem, read the matching design doc:
 
-- `docs/02-brain-orchestration.md` for Restate orchestration, the local orchestrator, or the brain loop
+- `docs/02-brain-orchestration.md` for Restate orchestration or the brain loop
 - `docs/03-communication-layer.md` for gateway, approvals, observation, or hosted API message flow
 - `docs/04-memory-architecture.md` and `docs/05-session-event-log.md` for memory or session persistence
 - `docs/06-hands-and-mcp.md` for hands, MCP, and tool routing

@@ -1,22 +1,9 @@
 //! Per-turn session event replay instrumentation utilities.
 
 use std::future::Future;
-use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-
-use crate::{
-    ApprovalDecision, ApprovalPrompt, ClaimCheck, ContextSnapshot, Event, EventFilter, EventRange,
-    EventRecord, PendingSignal, PendingSignalId, ResolutionScore, Result, SegmentBaseline,
-    SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    SessionStore, SessionSummary, SkillResolutionRate, TaskSegment, ToolContent, ToolOutput,
-    WorkspaceId,
-};
+use std::time::Duration;
 
 tokio::task_local! {
     static TURN_REPLAY_COUNTERS: Arc<TurnReplayCounters>;
@@ -105,216 +92,14 @@ pub fn record_pipeline_compile_duration(duration: Duration) {
     });
 }
 
-/// Wraps a session store and records per-turn `get_events` usage in task-local counters.
-#[derive(Clone)]
-pub struct CountedSessionStore {
-    inner: Arc<dyn SessionStore>,
-}
-
-impl CountedSessionStore {
-    /// Creates a counted wrapper around an existing session store.
-    pub fn new(inner: Arc<dyn SessionStore>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl SessionStore for CountedSessionStore {
-    async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
-        self.inner.create_session(meta).await
-    }
-
-    async fn emit_event(&self, session_id: SessionId, event: Event) -> Result<u64> {
-        self.inner.emit_event(session_id, event).await
-    }
-
-    async fn store_text_artifact(&self, session_id: SessionId, text: &str) -> Result<ClaimCheck> {
-        self.inner.store_text_artifact(session_id, text).await
-    }
-
-    async fn load_text_artifact(
-        &self,
-        session_id: SessionId,
-        claim_check: &ClaimCheck,
-    ) -> Result<String> {
-        self.inner.load_text_artifact(session_id, claim_check).await
-    }
-
-    async fn get_events(
-        &self,
-        session_id: SessionId,
-        range: EventRange,
-    ) -> Result<Vec<EventRecord>> {
-        let started_at = Instant::now();
-        let events = self.inner.get_events(session_id, range.clone()).await?;
-        let duration = started_at.elapsed();
-        let bytes = approx_event_bytes(&events);
-
-        let _ = TURN_REPLAY_COUNTERS.try_with(|counters| {
-            counters.record_get_events(events.len(), bytes, duration);
-        });
-
-        tracing::debug!(
-            session_id = %session_id,
-            range = ?range,
-            returned_events = events.len(),
-            approx_bytes = bytes,
-            duration_ms = duration.as_millis() as u64,
-            "loaded session events"
-        );
-
-        Ok(events)
-    }
-
-    async fn get_session(&self, session_id: SessionId) -> Result<SessionMeta> {
-        self.inner.get_session(session_id).await
-    }
-
-    async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()> {
-        self.inner.update_status(session_id, status).await
-    }
-
-    async fn transition_status(
-        &self,
-        session_id: SessionId,
-        status: SessionStatus,
-    ) -> Result<Option<EventRecord>> {
-        self.inner.transition_status(session_id, status).await
-    }
-
-    async fn put_snapshot(&self, session_id: SessionId, snapshot: ContextSnapshot) -> Result<()> {
-        self.inner.put_snapshot(session_id, snapshot).await
-    }
-
-    async fn get_snapshot(&self, session_id: SessionId) -> Result<Option<ContextSnapshot>> {
-        self.inner.get_snapshot(session_id).await
-    }
-
-    async fn delete_snapshot(&self, session_id: SessionId) -> Result<()> {
-        self.inner.delete_snapshot(session_id).await
-    }
-
-    async fn store_pending_signal(
-        &self,
-        session_id: SessionId,
-        signal: PendingSignal,
-    ) -> Result<PendingSignalId> {
-        self.inner.store_pending_signal(session_id, signal).await
-    }
-
-    async fn get_pending_signals(&self, session_id: SessionId) -> Result<Vec<PendingSignal>> {
-        self.inner.get_pending_signals(session_id).await
-    }
-
-    async fn resolve_pending_signal(&self, signal_id: PendingSignalId) -> Result<()> {
-        self.inner.resolve_pending_signal(signal_id).await
-    }
-
-    async fn search_events(&self, query: &str, filter: EventFilter) -> Result<Vec<EventRecord>> {
-        self.inner.search_events(query, filter).await
-    }
-
-    async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
-        self.inner.list_sessions(filter).await
-    }
-
-    async fn workspace_cost_since(
-        &self,
-        workspace_id: &WorkspaceId,
-        since: DateTime<Utc>,
-    ) -> Result<u32> {
-        self.inner.workspace_cost_since(workspace_id, since).await
-    }
-
-    async fn delete_empty_session(&self, session_id: SessionId) -> Result<()> {
-        self.inner.delete_empty_session(session_id).await
-    }
-
-    async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
-        self.inner.create_segment(segment).await
-    }
-
-    async fn complete_segment(
-        &self,
-        segment_id: SegmentId,
-        update: SegmentCompletion,
-    ) -> Result<()> {
-        self.inner.complete_segment(segment_id, update).await
-    }
-
-    async fn get_active_segment(&self, session_id: SessionId) -> Result<Option<TaskSegment>> {
-        self.inner.get_active_segment(session_id).await
-    }
-
-    async fn list_segments(&self, session_id: SessionId) -> Result<Vec<TaskSegment>> {
-        self.inner.list_segments(session_id).await
-    }
-
-    async fn update_segment_resolution(
-        &self,
-        segment_id: SegmentId,
-        resolution: &str,
-        confidence: f64,
-    ) -> Result<()> {
-        self.inner
-            .update_segment_resolution(segment_id, resolution, confidence)
-            .await
-    }
-
-    async fn update_segment_resolution_score(
-        &self,
-        segment_id: SegmentId,
-        score: &ResolutionScore,
-    ) -> Result<()> {
-        self.inner
-            .update_segment_resolution_score(segment_id, score)
-            .await
-    }
-
-    async fn get_segment_baseline(&self, tenant_id: &str) -> Result<Option<SegmentBaseline>> {
-        self.inner.get_segment_baseline(tenant_id).await
-    }
-
-    async fn list_skill_resolution_rates(
-        &self,
-        tenant_id: &str,
-    ) -> Result<Vec<SkillResolutionRate>> {
-        self.inner.list_skill_resolution_rates(tenant_id).await
-    }
-
-    async fn refresh_segment_materialized_views(&self) -> Result<()> {
-        self.inner.refresh_segment_materialized_views().await
-    }
-
-    async fn record_active_segment_tool_use(
-        &self,
-        session_id: SessionId,
-        tool_name: &str,
-    ) -> Result<()> {
-        self.inner
-            .record_active_segment_tool_use(session_id, tool_name)
-            .await
-    }
-
-    async fn record_active_segment_skill_activation(
-        &self,
-        session_id: SessionId,
-        skill_name: &str,
-    ) -> Result<()> {
-        self.inner
-            .record_active_segment_skill_activation(session_id, skill_name)
-            .await
-    }
-
-    async fn record_active_segment_turn_usage(
-        &self,
-        session_id: SessionId,
-        token_cost: u64,
-    ) -> Result<()> {
-        self.inner
-            .record_active_segment_turn_usage(session_id, token_cost)
-            .await
-    }
+/// Records one `get_events` load in the current turn's replay counters.
+///
+/// Session stores call this after each event load; outside an active
+/// `scope_turn_replay_counters` scope it is a no-op.
+pub fn record_session_event_replay(event_count: usize, bytes: u64, duration: Duration) {
+    let _ = TURN_REPLAY_COUNTERS.try_with(|counters| {
+        counters.record_get_events(event_count, bytes, duration);
+    });
 }
 
 fn recorded_duration_micros(duration: Duration) -> u64 {
@@ -330,337 +115,16 @@ fn display_duration_ms(duration: Duration) -> u64 {
     }
 }
 
-fn approx_event_bytes(events: &[EventRecord]) -> u64 {
-    events
-        .iter()
-        .map(|record| {
-            mem::size_of::<EventRecord>() as u64 + event_payload_size(&record.event) as u64
-        })
-        .sum()
-}
-
-fn event_payload_size(event: &Event) -> usize {
-    match event {
-        Event::SessionCreated {
-            workspace_id,
-            user_id,
-            model,
-        } => workspace_id.as_str().len() + user_id.as_str().len() + model.as_str().len(),
-        Event::SessionStatusChanged { .. } => 32,
-        Event::SessionCompleted { summary, .. } => summary.len(),
-        Event::SegmentStarted { task_summary, .. } => task_summary.as_ref().map_or(0, String::len),
-        Event::SegmentCompleted {
-            task_summary,
-            tools_used,
-            skills_activated,
-            ..
-        } => {
-            task_summary.as_ref().map_or(0, String::len)
-                + tools_used.iter().map(String::len).sum::<usize>()
-                + skills_activated.iter().map(String::len).sum::<usize>()
-        }
-        Event::UserMessage { text, attachments } => {
-            text.len() + attachments.iter().map(attachment_size).sum::<usize>()
-        }
-        Event::QueuedMessage { text, .. } => text.len(),
-        Event::BrainThinking { summary, .. } => summary.len(),
-        Event::BrainResponse {
-            text,
-            thought_signature,
-            model,
-            model_tier,
-            ..
-        } => {
-            text.len()
-                + model.as_str().len()
-                + model_tier.as_str().len()
-                + thought_signature.as_ref().map_or(0, String::len)
-        }
-        Event::ToolCall {
-            tool_name, input, ..
-        } => tool_name.len() + json_size(input),
-        Event::ToolResult { output, .. } => tool_output_size(output),
-        Event::ToolError {
-            tool_name, error, ..
-        } => tool_name.len() + error.len(),
-        Event::ApprovalRequested {
-            tool_name,
-            input_summary,
-            prompt,
-            ..
-        } => tool_name.len() + input_summary.len() + approval_prompt_size(prompt),
-        Event::ApprovalDecided {
-            decided_by,
-            decision,
-            ..
-        } => decided_by.len() + approval_decision_size(decision),
-        Event::SubAgentSpawned {
-            sub_agent_id,
-            parent_sub_agent_id,
-            path,
-            task,
-            ..
-        } => {
-            sub_agent_id.len()
-                + parent_sub_agent_id.as_ref().map_or(0, String::len)
-                + path.len()
-                + task.len()
-        }
-        Event::SubAgentMessageSent {
-            sub_agent_id,
-            parent_sub_agent_id,
-            text,
-        } => sub_agent_id.len() + parent_sub_agent_id.as_ref().map_or(0, String::len) + text.len(),
-        Event::SubAgentStatusChanged {
-            sub_agent_id,
-            summary,
-            ..
-        } => sub_agent_id.len() + summary.as_ref().map_or(0, String::len),
-        Event::SubAgentNotificationDelivered {
-            sub_agent_id,
-            summary,
-            ..
-        } => sub_agent_id.len() + summary.len(),
-        Event::MemoryRead { path, scope } => path.len() + scope.len(),
-        Event::MemoryWrite {
-            path,
-            scope,
-            summary,
-        } => path.len() + scope.len() + summary.len(),
-        Event::MemoryIngest {
-            source_name,
-            source_path,
-            affected_pages,
-            contradictions,
-        } => {
-            source_name.len()
-                + source_path.len()
-                + affected_pages.iter().map(String::len).sum::<usize>()
-                + contradictions.iter().map(String::len).sum::<usize>()
-        }
-        Event::HandProvisioned {
-            hand_id,
-            provider,
-            tier,
-        } => hand_id.len() + provider.len() + tier.len(),
-        Event::HandDestroyed { hand_id, reason } => hand_id.len() + reason.len(),
-        Event::HandError { hand_id, error } => hand_id.len() + error.len(),
-        Event::Checkpoint {
-            summary,
-            model,
-            model_tier,
-            ..
-        } => summary.len() + model.as_str().len() + model_tier.as_str().len(),
-        Event::CacheReport { report } => json_size(&serde_json::json!(report)),
-        Event::Error { message, .. } | Event::Warning { message } => message.len(),
-    }
-}
-
-fn attachment_size(attachment: &crate::Attachment) -> usize {
-    attachment.name.len()
-        + attachment.mime_type.as_ref().map_or(0, String::len)
-        + attachment
-            .path
-            .as_ref()
-            .map_or(0, |path| path.as_os_str().len())
-        + attachment.url.as_ref().map_or(0, String::len)
-}
-
-fn approval_prompt_size(prompt: &ApprovalPrompt) -> usize {
-    prompt.pattern.len()
-        + prompt.request.tool_name.len()
-        + prompt.request.input_summary.len()
-        + prompt
-            .parameters
-            .iter()
-            .map(|field| field.label.len() + field.value.len())
-            .sum::<usize>()
-        + prompt
-            .file_diffs
-            .iter()
-            .map(|diff| {
-                diff.path.len()
-                    + diff.before.len()
-                    + diff.after.len()
-                    + diff.language_hint.as_ref().map_or(0, String::len)
-            })
-            .sum::<usize>()
-}
-
-fn approval_decision_size(decision: &ApprovalDecision) -> usize {
-    match decision {
-        ApprovalDecision::AllowOnce => 16,
-        ApprovalDecision::AlwaysAllow { pattern } => pattern.len(),
-        ApprovalDecision::Deny { reason } => reason.as_ref().map_or(16, String::len),
-    }
-}
-
-fn tool_output_size(output: &ToolOutput) -> usize {
-    let content_bytes = output
-        .content
-        .iter()
-        .map(|block| match block {
-            ToolContent::Text { text } => text.len(),
-            ToolContent::Json { data } => json_size(data),
-        })
-        .sum::<usize>();
-    let structured_bytes = output.structured.as_ref().map_or(0, json_size);
-    let artifact_bytes = output.artifact.as_ref().map_or(0, |artifact| {
-        artifact.combined.blob_id.len()
-            + artifact.combined.preview.len()
-            + artifact.stdout.as_ref().map_or(0, |claim_check| {
-                claim_check.blob_id.len() + claim_check.preview.len()
-            })
-            + artifact.stderr.as_ref().map_or(0, |claim_check| {
-                claim_check.blob_id.len() + claim_check.preview.len()
-            })
-    });
-
-    content_bytes + structured_bytes + artifact_bytes
-}
-
-fn json_size(value: &Value) -> usize {
-    serde_json::to_string(value).map_or(0, |serialized| serialized.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use async_trait::async_trait;
-    use chrono::Utc;
-
-    use crate::{SessionStatus, UserId};
-
-    #[derive(Clone)]
-    struct MockSessionStore {
-        events: Vec<EventRecord>,
-    }
-
-    #[async_trait]
-    impl SessionStore for MockSessionStore {
-        async fn create_session(&self, _meta: SessionMeta) -> Result<SessionId> {
-            Ok(SessionId::new())
-        }
-
-        async fn emit_event(&self, _session_id: SessionId, _event: Event) -> Result<u64> {
-            Ok(0)
-        }
-
-        async fn store_text_artifact(
-            &self,
-            _session_id: SessionId,
-            _text: &str,
-        ) -> Result<ClaimCheck> {
-            unreachable!("not used in test")
-        }
-
-        async fn load_text_artifact(
-            &self,
-            _session_id: SessionId,
-            _claim_check: &ClaimCheck,
-        ) -> Result<String> {
-            unreachable!("not used in test")
-        }
-
-        async fn get_events(
-            &self,
-            _session_id: SessionId,
-            _range: EventRange,
-        ) -> Result<Vec<EventRecord>> {
-            Ok(self.events.clone())
-        }
-
-        async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
-            Ok(SessionMeta {
-                workspace_id: WorkspaceId::new("workspace"),
-                user_id: UserId::new("user"),
-                status: SessionStatus::Running,
-                ..SessionMeta::default()
-            })
-        }
-
-        async fn update_status(
-            &self,
-            _session_id: SessionId,
-            _status: SessionStatus,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn store_pending_signal(
-            &self,
-            _session_id: SessionId,
-            _signal: PendingSignal,
-        ) -> Result<PendingSignalId> {
-            unreachable!("not used in test")
-        }
-
-        async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-            Ok(Vec::new())
-        }
-
-        async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
-            Ok(())
-        }
-
-        async fn search_events(
-            &self,
-            _query: &str,
-            _filter: EventFilter,
-        ) -> Result<Vec<EventRecord>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
-            Ok(Vec::new())
-        }
-
-        async fn workspace_cost_since(
-            &self,
-            _workspace_id: &WorkspaceId,
-            _since: DateTime<Utc>,
-        ) -> Result<u32> {
-            Ok(0)
-        }
-
-        async fn delete_empty_session(&self, _session_id: SessionId) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn event_record(event: Event) -> EventRecord {
-        let event_type = event.event_type();
-        EventRecord {
-            id: uuid::Uuid::now_v7(),
-            session_id: SessionId::new(),
-            sequence_num: 0,
-            event_type,
-            event,
-            timestamp: Utc::now(),
-            brain_id: None,
-            hand_id: None,
-            token_count: None,
-        }
-    }
-
     #[tokio::test]
-    async fn counted_store_records_get_events_within_scope() {
-        let inner: Arc<dyn SessionStore> = Arc::new(MockSessionStore {
-            events: vec![event_record(Event::UserMessage {
-                text: "hello".to_string(),
-                attachments: Vec::new(),
-            })],
-        });
-        let store = CountedSessionStore::new(inner);
+    async fn replay_counters_record_within_scope() {
         let counters = Arc::new(TurnReplayCounters::default());
 
         scope_turn_replay_counters(counters.clone(), async {
-            let events = store
-                .get_events(SessionId::new(), EventRange::all())
-                .await
-                .expect("get_events should succeed");
-            assert_eq!(events.len(), 1);
+            record_session_event_replay(1, 64, Duration::from_micros(250));
             record_pipeline_compile_duration(Duration::from_millis(12));
         })
         .await;
@@ -668,8 +132,19 @@ mod tests {
         let snapshot = counters.snapshot();
         assert_eq!(snapshot.get_events_calls, 1);
         assert_eq!(snapshot.events_replayed, 1);
-        assert!(snapshot.events_bytes > 0);
+        assert_eq!(snapshot.events_bytes, 64);
         assert!(snapshot.get_events_total_duration > Duration::ZERO);
         assert_eq!(snapshot.pipeline_compile_ms(), 12);
+    }
+
+    #[tokio::test]
+    async fn replay_recording_is_noop_outside_scope() {
+        record_session_event_replay(3, 128, Duration::from_micros(50));
+        record_pipeline_compile_duration(Duration::from_millis(5));
+
+        let counters = Arc::new(TurnReplayCounters::default());
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot.get_events_calls, 0);
+        assert_eq!(snapshot.events_replayed, 0);
     }
 }

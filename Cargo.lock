@@ -4019,7 +4019,6 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
- "futures-util",
  "hex",
  "moa-core",
  "moa-security",

@@ -40,7 +40,7 @@ async fn live_harness_offline_brain_turn_returns_brain_response() -> moa_core::R
         )
         .await?;
 
-    let turn_result = run_brain_turn(session_id, store.clone(), provider, &pipeline).await?;
+    let turn_result = run_brain_turn(session_id, store.clone(), provider, &pipeline, None).await?;
     let events = store.get_events(session_id, EventRange::all()).await?;
     let response_text = events.into_iter().find_map(|record| match record.event {
         Event::BrainResponse { text, .. } => Some(text),

@@ -99,27 +99,6 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
     })
 }
 
-/// Maps a `pending_signals` row into a `PendingSignal`.
-pub(crate) fn pending_signal_from_row(row: &PgRow) -> Result<PendingSignal> {
-    Ok(PendingSignal {
-        id: PendingSignalId(row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?),
-        session_id: moa_core::SessionId(
-            row.try_get::<Uuid, _>("session_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        signal_type: pending_signal_type_from_db(
-            &row.try_get::<String, _>("signal_type")
-                .map_err(map_sqlx_error)?,
-        )?,
-        payload: row
-            .try_get::<serde_json::Value, _>("payload")
-            .map_err(map_sqlx_error)?,
-        created_at: row
-            .try_get::<DateTime<Utc>, _>("created_at")
-            .map_err(map_sqlx_error)?,
-    })
-}
-
 /// Maps a `task_segments` row into a `TaskSegment`.
 pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
     Ok(TaskSegment {

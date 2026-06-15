@@ -11,8 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_brain::{
     GraphMemoryPipelineOptions,
-    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    run_brain_turn_with_tools,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
@@ -683,9 +682,7 @@ async fn run_turn(
         )
         .await?;
 
-    let result =
-        run_brain_turn_with_tools(session_id, store.clone(), provider, pipeline, tool_router)
-            .await?;
+    let result = run_brain_turn(session_id, store.clone(), provider, pipeline, tool_router).await?;
 
     assert_eq!(result, moa_brain::TurnResult::Complete);
     let _events = store.get_events(session_id, EventRange::all()).await?;

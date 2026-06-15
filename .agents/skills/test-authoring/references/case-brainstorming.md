@@ -71,7 +71,7 @@ Always include:
 - approval persists, pauses, resumes
 - soft cancel stops cleanly without inventing extra turns
 
-These are the shared contract assertions; reuse the harness in `crates/moa-orchestrator-local/tests/support/orchestrator_contract.rs`.
+These are the core lifecycle assertions; the brain harness suite in `crates/moa-brain/tests/brain_turn.rs` and the Restate suite in `crates/moa-orchestrator/tests/session_turn_lifecycle.rs` exercise them.
 
 ### Provider tests
 

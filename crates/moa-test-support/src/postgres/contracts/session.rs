@@ -2,10 +2,9 @@
 
 use chrono::{Duration, Utc};
 use moa_core::{
-    Event, EventFilter, EventRange, EventType, ModelId, PendingSignal, PendingSignalType,
-    SessionFilter, SessionMeta, SessionStatus, SessionStore, UserId, UserMessage, WorkspaceId,
+    Event, EventFilter, EventRange, EventType, ModelId, SessionFilter, SessionMeta, SessionStatus,
+    SessionStore, UserId, WorkspaceId,
 };
-use serde_json::json;
 
 fn test_session_meta(workspace: &str) -> SessionMeta {
     SessionMeta {
@@ -314,51 +313,4 @@ where
         .await
         .expect("load future workspace spend");
     assert_eq!(future_total, 0);
-}
-
-/// Verifies pending signal persistence and resolution.
-pub async fn test_pending_signals<S>(store: &S)
-where
-    S: SessionStore + ?Sized,
-{
-    let session_id = store
-        .create_session(test_session_meta("ws1"))
-        .await
-        .expect("create session");
-
-    let signal = PendingSignal::queue_message(
-        session_id,
-        UserMessage {
-            text: "queued follow-up".into(),
-            attachments: vec![],
-        },
-    )
-    .expect("build pending signal");
-
-    let signal_id = store
-        .store_pending_signal(session_id, signal.clone())
-        .await
-        .expect("store pending signal");
-    assert_eq!(signal_id, signal.id);
-
-    let pending = store
-        .get_pending_signals(session_id)
-        .await
-        .expect("get pending");
-    assert_eq!(pending, vec![signal.clone()]);
-    assert_eq!(pending[0].signal_type, PendingSignalType::QueueMessage);
-    assert_eq!(
-        pending[0].payload,
-        json!({"text":"queued follow-up","attachments":[]})
-    );
-
-    store
-        .resolve_pending_signal(signal_id)
-        .await
-        .expect("resolve pending");
-    let pending = store
-        .get_pending_signals(session_id)
-        .await
-        .expect("get pending after resolution");
-    assert!(pending.is_empty());
 }

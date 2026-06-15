@@ -9,9 +9,9 @@ use moa_core::{
     BrainId, CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, CompletionContent,
     CompletionRequest, CompletionResponse, CompletionStream, ContextSnapshot,
     ContextSnapshotConfig, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelId,
-    PendingSignal, PendingSignalId, Platform, Result, SequenceNum, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage,
-    ToolCallFormat, ToolCallId, ToolOutput, ToolOutputConfig, UserId, WorkspaceId,
+    Platform, Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId,
+    ToolOutput, ToolOutputConfig, UserId, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -117,22 +117,6 @@ impl SessionStore for MockSessionStore {
 
     async fn delete_snapshot(&self, _session_id: SessionId) -> Result<()> {
         *self.snapshot.lock().await = None;
-        Ok(())
-    }
-
-    async fn store_pending_signal(
-        &self,
-        _session_id: SessionId,
-        signal: PendingSignal,
-    ) -> Result<PendingSignalId> {
-        Ok(signal.id)
-    }
-
-    async fn get_pending_signals(&self, _session_id: SessionId) -> Result<Vec<PendingSignal>> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve_pending_signal(&self, _signal_id: PendingSignalId) -> Result<()> {
         Ok(())
     }
 

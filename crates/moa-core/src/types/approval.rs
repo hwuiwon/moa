@@ -68,7 +68,7 @@ pub struct ApprovalFileDiff {
     pub language_hint: Option<String>,
 }
 
-/// Approval prompt emitted by the local orchestrator runtime.
+/// Approval prompt emitted by the turn runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPrompt {
     /// Approval request displayed to the user.

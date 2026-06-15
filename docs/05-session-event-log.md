@@ -150,7 +150,7 @@ Replay is history-first:
 3. Reconstruct visible messages, tool state, approvals, and checkpoints.
 4. Attach to live runtime streams when available.
 
-The local orchestrator can publish live runtime events. Cloud runtime state is queryable through Restate and recoverable from the durable event log.
+The orchestrator publishes live runtime events during turn execution. Cloud runtime state is queryable through Restate and recoverable from the durable event log.
 
 ## Compaction
 

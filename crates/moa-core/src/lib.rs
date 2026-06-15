@@ -1,7 +1,6 @@
 //! Shared MOA types, traits, configuration, and error definitions.
 
 pub mod analytics;
-pub mod broadcast_recv;
 pub mod config;
 pub mod db;
 pub mod diff;
@@ -25,7 +24,6 @@ pub use analytics::{
     WorkspaceAnalyticsSummary, get_session_summary, get_workspace_stats, list_cache_daily_metrics,
     list_session_turn_metrics, list_tool_call_summaries,
 };
-pub use broadcast_recv::{RecvResult, recv_with_lag_handling};
 pub use config::{
     AuthzConfig, AuthzEngine, CloudConfig, CloudFlyioConfig, CloudHandsConfig,
     CohereEmbedderConfig, CompactionConfig, ContextSnapshotConfig, DatabaseConfig,
@@ -44,27 +42,26 @@ pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 pub use events::Event;
 pub use runtime_metrics::{
     init_metrics, metrics_endpoint_url, record_api_key_validation_duration, record_approval_wait,
-    record_broadcast_lag, record_cache_hit_rate, record_compaction_tier_applied,
-    record_context_pipeline_construction, record_llm_cost_cents, record_llm_request,
-    record_llm_streaming_duration, record_llm_ttft, record_pipeline_compile_duration_metric,
-    record_retrieval_embedder_construction, record_sandbox_provision_duration,
-    record_scoped_guc_application_duration, record_scoped_transaction_begin_duration,
-    record_session_created, record_session_error, record_session_event_append,
-    record_session_event_decoded_bytes, record_session_event_load, record_sessions_active,
-    record_tokens_input_cached, record_tokens_input_uncached, record_tokens_output,
-    record_tool_call, record_tool_failure, record_tool_idempotency_scan,
+    record_cache_hit_rate, record_compaction_tier_applied, record_context_pipeline_construction,
+    record_llm_cost_cents, record_llm_request, record_llm_streaming_duration, record_llm_ttft,
+    record_pipeline_compile_duration_metric, record_retrieval_embedder_construction,
+    record_sandbox_provision_duration, record_scoped_guc_application_duration,
+    record_scoped_transaction_begin_duration, record_session_created, record_session_error,
+    record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
+    record_sessions_active, record_tokens_input_cached, record_tokens_input_uncached,
+    record_tokens_output, record_tool_call, record_tool_failure, record_tool_idempotency_scan,
     record_tool_output_truncated_metric, record_tool_reprovision, record_tool_retry,
     record_turn_completed, record_turn_latency,
 };
 pub use session_replay::{
-    CountedSessionStore, TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,
-    scope_turn_replay_counters,
+    TurnReplayCounters, TurnReplaySnapshot, record_pipeline_compile_duration,
+    record_session_event_replay, scope_turn_replay_counters,
 };
 pub use telemetry::{TelemetryConfig, TelemetryGuard, default_log_path, init_observability};
 pub use traits::{
-    BlobStore, BrainOrchestrator, BranchManager, BuiltInTool, ContextProcessor, CredentialVault,
-    EmbeddingProvider, HandProvider, LLMProvider, LineageHandle, MemoryToolExecutor,
-    NULL_LINEAGE_HANDLE, NullLineageHandle, PlatformAdapter, SessionStore, ToolContext,
+    BlobStore, BranchManager, BuiltInTool, ContextProcessor, CredentialVault, EmbeddingProvider,
+    HandProvider, LLMProvider, LineageHandle, MemoryToolExecutor, NULL_LINEAGE_HANDLE,
+    NullLineageHandle, PlatformAdapter, SessionStore, ToolContext,
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
 pub use turn_latency::{
