@@ -73,10 +73,15 @@ Resolution-rate data comes from the `skill_resolution_rates` materialized view o
 
 ## Distillation And Improvement
 
-Skill distillation runs after successful multi-step work. The current learning
-flow creates or improves workspace-scoped skills; deployment-wide global skills
-are operator imported, and user-scoped skills are imported explicitly. Current
-flow:
+Skill package import, export, rendering, and turn-time injection are production
+surfaces. Automatic skill distillation and improvement are internal learning
+surfaces compiled only with the `moa-skills/skill-learning` feature, and eval
+backed regression execution additionally requires `internal-eval-runner`.
+
+When enabled, skill distillation runs after successful multi-step work. The
+current learning flow creates or improves workspace-scoped skills;
+deployment-wide global skills are operator imported, and user-scoped skills are
+imported explicitly. Current flow:
 
 1. Count tool calls; short/simple sessions are skipped.
 2. Extract a task summary from recent user input.

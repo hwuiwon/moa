@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+test-util = []
+
 [dependencies]
 async-trait.workspace = true
 blake3.workspace = true
@@ -33,3 +37,13 @@ moa-session = { workspace = true }
 moa-test-support.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
+
+[[test]]
+name = "extract"
+path = "tests/extract.rs"
+required-features = ["test-util"]
+
+[[test]]
+name = "slow_path_orchestration"
+path = "tests/slow_path_orchestration.rs"
+required-features = ["test-util"]

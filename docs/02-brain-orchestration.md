@@ -82,14 +82,16 @@ The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer t
 ### Provider Overrides For Test Runs
 
 `MOA_PROVIDERS_OVERRIDE` is a dev/CI-only startup switch for replacing normal
-LLM providers inside `moa-orchestrator`:
+LLM providers inside `moa-orchestrator`. It is available only in binaries built
+with the `moa-orchestrator/provider-overrides` feature:
 
 - unset: use providers configured from normal API keys.
 - `scripted:<path>`: use a JSON fixture with deterministic responses.
 - `mock:<seed>`: use the built-in deterministic mock response.
 
 The orchestrator refuses to start with an override when the environment is
-`prod` or `production`. The checked-in load-test fixture lives at
+`prod` or `production`, and a default build also refuses overrides because the
+scripted provider is not compiled in. The checked-in load-test fixture lives at
 `crates/moa-loadtest/scripts/perf-gate.json`; see `docs/20-testing.md` for the
 script format.
 

@@ -2,21 +2,22 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, path::Path};
 
 use chrono::{DateTime, Utc};
 use moa_core::wire::AppendEventRequest;
+#[cfg(feature = "provider-overrides")]
+use moa_core::{CompletionContent, StopReason, ToolCallContent, ToolCallFormat, ToolInvocation};
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig,
-    MoaError, ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, StopReason,
-    TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolInvocation, UserId, WorkspaceId,
-    record_llm_cost_cents,
+    CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig, MoaError,
+    ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage,
+    UserId, WorkspaceId, record_llm_cost_cents,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
-use moa_providers::{
-    AnthropicProvider, GeminiProvider, OpenAIProvider, ScriptedProvider, ScriptedResponse,
-};
+use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+#[cfg(feature = "provider-overrides")]
+use moa_providers::{ScriptedProvider, ScriptedResponse};
 use restate_sdk::prelude::*;
+#[cfg(feature = "provider-overrides")]
 use serde::Deserialize;
 use serde_json::Value;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -39,47 +40,6 @@ pub trait LLMGateway {
     async fn complete(
         request: Json<CompletionRequest>,
     ) -> Result<Json<CompletionResponse>, HandlerError>;
-
-    /// Starts a streamed completion and returns a polling handle.
-    async fn stream_complete(
-        request: Json<CompletionRequest>,
-    ) -> Result<Json<CompletionStreamHandle>, HandlerError>;
-
-    /// Polls an existing streamed completion handle for the next chunk.
-    async fn poll_stream(
-        handle: Json<CompletionStreamHandle>,
-    ) -> Result<Json<StreamPoll>, HandlerError>;
-}
-
-/// Opaque handle for a streamed completion session.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CompletionStreamHandle {
-    /// Stable stream identifier.
-    pub id: Uuid,
-    /// Expiration timestamp for the stream handle.
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Polled streaming state returned by `poll_stream`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum StreamPoll {
-    /// One streamed text chunk.
-    Chunk {
-        /// Newly available text.
-        text: String,
-        /// Tokens emitted so far.
-        partial_tokens: usize,
-    },
-    /// Final buffered response.
-    Done {
-        /// Completed buffered response.
-        full_response: CompletionResponse,
-    },
-    /// Terminal stream failure.
-    Error {
-        /// Human-readable failure message.
-        message: String,
-    },
 }
 
 /// Provider family selected for one request.
@@ -218,34 +178,57 @@ impl ProviderRegistry {
     }
 
     /// Builds a deterministic scripted registry from a JSON fixture file.
-    pub fn scripted(path: impl AsRef<Path>) -> moa_core::Result<Self> {
-        let path = path.as_ref();
-        let body = fs::read_to_string(path).map_err(|error| {
-            MoaError::ConfigError(format!(
-                "failed to read scripted provider fixture {}: {error}",
-                path.display()
+    pub fn scripted(path: impl AsRef<std::path::Path>) -> moa_core::Result<Self> {
+        #[cfg(not(feature = "provider-overrides"))]
+        {
+            let _ = path;
+            Err(MoaError::ConfigError(
+                "MOA_PROVIDERS_OVERRIDE=scripted requires the provider-overrides feature"
+                    .to_string(),
             ))
-        })?;
-        let file: ScriptedProviderFile = serde_json::from_str(&body).map_err(|error| {
-            MoaError::ConfigError(format!(
-                "failed to parse scripted provider fixture {}: {error}",
-                path.display()
-            ))
-        })?;
-        scripted_registry_from_file(file)
+        }
+
+        #[cfg(feature = "provider-overrides")]
+        {
+            let path = path.as_ref();
+            let body = std::fs::read_to_string(path).map_err(|error| {
+                MoaError::ConfigError(format!(
+                    "failed to read scripted provider fixture {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let file: ScriptedProviderFile = serde_json::from_str(&body).map_err(|error| {
+                MoaError::ConfigError(format!(
+                    "failed to parse scripted provider fixture {}: {error}",
+                    path.display()
+                ))
+            })?;
+            scripted_registry_from_file(file)
+        }
     }
 
     /// Builds a deterministic mock registry with an unbounded fallback response.
-    #[must_use]
-    pub fn mock(seed: u64) -> Self {
-        let response = ScriptedResponse::text(format!("OK mock response seed={seed}"));
-        let provider = Arc::new(
-            ScriptedProvider::new(scripted_capabilities("scripted-mock"))
-                .with_fallback_response(response),
-        );
-        Self::all_kinds_from_static(provider)
+    pub fn mock(seed: u64) -> moa_core::Result<Self> {
+        #[cfg(not(feature = "provider-overrides"))]
+        {
+            let _ = seed;
+            Err(MoaError::ConfigError(
+                "MOA_PROVIDERS_OVERRIDE=mock requires the provider-overrides feature".to_string(),
+            ))
+        }
+
+        #[cfg(feature = "provider-overrides")]
+        {
+            let response = ScriptedResponse::text(format!("OK mock response seed={seed}"));
+            let provider = Arc::new(
+                ScriptedProvider::new(scripted_capabilities("scripted-mock"))
+                    .with_fallback_response(response),
+            );
+            Ok(Self::all_kinds_from_static(provider))
+        }
     }
 
+    #[cfg(feature = "provider-overrides")]
     fn all_kinds_from_static(provider: Arc<dyn LLMProvider>) -> Self {
         Self::with_static_providers(
             Some(provider.clone()),
@@ -410,6 +393,7 @@ impl ProviderRegistry {
     }
 }
 
+#[cfg(feature = "provider-overrides")]
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct ScriptedProviderFile {
@@ -417,6 +401,7 @@ struct ScriptedProviderFile {
     responses: Vec<ScriptedEntry>,
 }
 
+#[cfg(feature = "provider-overrides")]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum ScriptedEntry {
@@ -424,6 +409,7 @@ enum ScriptedEntry {
     Direct(ScriptedCompletion),
 }
 
+#[cfg(feature = "provider-overrides")]
 impl ScriptedEntry {
     fn into_completion(self) -> ScriptedCompletion {
         match self {
@@ -433,6 +419,7 @@ impl ScriptedEntry {
     }
 }
 
+#[cfg(feature = "provider-overrides")]
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct ScriptedCompletion {
@@ -445,6 +432,7 @@ struct ScriptedCompletion {
     stop_reason: Option<String>,
 }
 
+#[cfg(feature = "provider-overrides")]
 impl Default for ScriptedCompletion {
     fn default() -> Self {
         Self {
@@ -459,6 +447,7 @@ impl Default for ScriptedCompletion {
     }
 }
 
+#[cfg(feature = "provider-overrides")]
 #[derive(Debug, Deserialize)]
 struct ScriptedToolCall {
     name: String,
@@ -468,6 +457,7 @@ struct ScriptedToolCall {
     id: Option<String>,
 }
 
+#[cfg(feature = "provider-overrides")]
 fn scripted_registry_from_file(file: ScriptedProviderFile) -> moa_core::Result<ProviderRegistry> {
     let mut provider = ScriptedProvider::new(scripted_capabilities("scripted-loadtest"));
     if let Some(default) = file.default {
@@ -479,6 +469,7 @@ fn scripted_registry_from_file(file: ScriptedProviderFile) -> moa_core::Result<P
     Ok(ProviderRegistry::all_kinds_from_static(Arc::new(provider)))
 }
 
+#[cfg(feature = "provider-overrides")]
 fn scripted_response(entry: ScriptedEntry) -> moa_core::Result<ScriptedResponse> {
     let completion = entry.into_completion();
     let mut blocks = Vec::new();
@@ -527,6 +518,7 @@ fn scripted_response(entry: ScriptedEntry) -> moa_core::Result<ScriptedResponse>
     Ok(response)
 }
 
+#[cfg(feature = "provider-overrides")]
 fn parse_scripted_stop_reason(raw: &str) -> moa_core::Result<StopReason> {
     match raw {
         "end_turn" => Ok(StopReason::EndTurn),
@@ -540,6 +532,7 @@ fn parse_scripted_stop_reason(raw: &str) -> moa_core::Result<StopReason> {
     }
 }
 
+#[cfg(feature = "provider-overrides")]
 fn scripted_capabilities(model_id: &str) -> ModelCapabilities {
     ModelCapabilities {
         model_id: ModelId::new(model_id),
@@ -681,26 +674,6 @@ impl LLMGateway for LLMGatewayImpl {
         }
 
         Ok(Json::from(response))
-    }
-
-    #[tracing::instrument(skip(self, _ctx, _request))]
-    async fn stream_complete(
-        &self,
-        _ctx: Context<'_>,
-        _request: Json<CompletionRequest>,
-    ) -> Result<Json<CompletionStreamHandle>, HandlerError> {
-        annotate_restate_handler_span("LLMGateway", "stream_complete");
-        Err(TerminalError::new("stream_complete not yet implemented").into())
-    }
-
-    #[tracing::instrument(skip(self, _ctx, _handle))]
-    async fn poll_stream(
-        &self,
-        _ctx: Context<'_>,
-        _handle: Json<CompletionStreamHandle>,
-    ) -> Result<Json<StreamPoll>, HandlerError> {
-        annotate_restate_handler_span("LLMGateway", "poll_stream");
-        Err(TerminalError::new("poll_stream not yet implemented").into())
     }
 }
 

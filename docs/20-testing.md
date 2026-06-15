@@ -5,7 +5,9 @@ _Provider overrides and snapshot testing conventions._
 ## Provider Overrides
 
 `MOA_PROVIDERS_OVERRIDE` lets a dev or CI orchestrator replace normal LLM
-providers at process startup.
+providers at process startup. Build the orchestrator with
+`--features provider-overrides` before setting this variable; default production
+builds do not compile the scripted provider.
 
 Supported values:
 

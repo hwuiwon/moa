@@ -11,7 +11,7 @@ pub use adapters::gemini::GeminiProvider;
 pub use adapters::gemini::debug_build_gemini_request_body;
 pub use adapters::openai_chat::OpenAIProvider;
 pub use adapters::openai_chat::debug_build_openai_request_body;
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(any(test, feature = "scripted-provider"))]
 pub use adapters::scripted::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
 pub use core::factory::{
     ProviderSelection, build_provider_from_config, build_provider_from_selection,
@@ -22,4 +22,6 @@ pub use core::models::{
     find_for_provider_model, find_model, pricing_for_model,
 };
 pub use core::router::ModelRouter;
-pub use embedding::{MockEmbedding, OpenAIEmbedding, build_embedding_provider_from_config};
+#[cfg(any(test, feature = "mock-embedding"))]
+pub use embedding::MockEmbedding;
+pub use embedding::{OpenAIEmbedding, build_embedding_provider_from_config};

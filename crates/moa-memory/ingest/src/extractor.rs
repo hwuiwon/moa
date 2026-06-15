@@ -1,8 +1,8 @@
 //! Fact extractor seam for graph-memory ingestion.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
+#[cfg(any(test, feature = "test-util"))]
+use std::sync::Arc;
 
 use crate::{ExtractedFact, Result, TurnChunk, extract_facts};
 
@@ -25,11 +25,13 @@ impl FactExtractor for HeuristicFactExtractor {
 }
 
 /// Deterministic extractor that returns a configured fact script.
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Clone)]
 pub struct ScriptedFactExtractor {
     facts: Arc<[ExtractedFact]>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 impl ScriptedFactExtractor {
     /// Creates a scripted extractor from exact fact DTOs.
     #[must_use]
@@ -60,6 +62,7 @@ impl ScriptedFactExtractor {
 }
 
 #[async_trait]
+#[cfg(any(test, feature = "test-util"))]
 impl FactExtractor for ScriptedFactExtractor {
     async fn extract(&self, _chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
         Ok(self.facts.to_vec())

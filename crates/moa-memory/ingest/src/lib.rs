@@ -32,7 +32,9 @@ pub use extract::{
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
-pub use extractor::{FactExtractor, HeuristicFactExtractor, ScriptedFactExtractor};
+#[cfg(any(test, feature = "test-util"))]
+pub use extractor::ScriptedFactExtractor;
+pub use extractor::{FactExtractor, HeuristicFactExtractor};
 pub use fast_path::{
     FastError, FastMemoryToolExecutor, FastPathCtx, FastRememberRequest, ForgetPattern,
     execute_memory_tool, fast_forget, fast_remember, fast_supersede, is_fast_memory_tool,

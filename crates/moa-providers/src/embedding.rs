@@ -1,7 +1,9 @@
 //! Embedding providers used by graph memory retrieval.
 
+#[cfg(any(test, feature = "mock-embedding"))]
 use std::collections::hash_map::DefaultHasher;
 use std::env;
+#[cfg(any(test, feature = "mock-embedding"))]
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -110,12 +112,14 @@ impl EmbeddingProvider for OpenAIEmbedding {
 }
 
 /// Deterministic embedding provider used by tests.
+#[cfg(any(test, feature = "mock-embedding"))]
 #[derive(Clone, Debug)]
 pub struct MockEmbedding {
     dimensions: usize,
     model: String,
 }
 
+#[cfg(any(test, feature = "mock-embedding"))]
 impl MockEmbedding {
     /// Creates a deterministic mock embedding provider.
     pub fn new(dimensions: usize) -> Self {
@@ -151,6 +155,7 @@ impl MockEmbedding {
 }
 
 #[async_trait]
+#[cfg(any(test, feature = "mock-embedding"))]
 impl EmbeddingProvider for MockEmbedding {
     fn model_id(&self) -> &str {
         &self.model
@@ -206,6 +211,7 @@ struct OpenAIEmbeddingData {
     embedding: Vec<f32>,
 }
 
+#[cfg(any(test, feature = "mock-embedding"))]
 fn tokenize(input: &str) -> Vec<String> {
     input
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -214,6 +220,7 @@ fn tokenize(input: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(any(test, feature = "mock-embedding"))]
 fn char_trigrams(token: &str) -> Vec<String> {
     let chars: Vec<char> = token.chars().collect();
     if chars.len() <= 3 {
@@ -226,6 +233,7 @@ fn char_trigrams(token: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(any(test, feature = "mock-embedding"))]
 fn token_aliases(token: &str) -> &'static [&'static str] {
     match token {
         "auth" | "authenticate" | "authentication" => &["oauth", "token", "identity"],
@@ -241,6 +249,7 @@ fn token_aliases(token: &str) -> &'static [&'static str] {
     }
 }
 
+#[cfg(any(test, feature = "mock-embedding"))]
 fn add_feature(vector: &mut [f32], feature: &str, weight: f32) {
     let mut hasher = DefaultHasher::new();
     feature.hash(&mut hasher);
@@ -248,6 +257,7 @@ fn add_feature(vector: &mut [f32], feature: &str, weight: f32) {
     vector[idx] += weight;
 }
 
+#[cfg(any(test, feature = "mock-embedding"))]
 fn normalize(vector: &mut [f32]) {
     let norm = vector
         .iter()

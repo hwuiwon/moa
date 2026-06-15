@@ -6,8 +6,9 @@ license.workspace = true
 
 [features]
 default = []
+mock-embedding = []
 scripted-provider = []
-test-util = ["scripted-provider"]
+test-util = ["mock-embedding", "scripted-provider"]
 
 [dependencies]
 async-openai.workspace = true

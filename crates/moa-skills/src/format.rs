@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+#[cfg(feature = "skill-learning")]
+use chrono::SecondsFormat;
+use chrono::{DateTime, Utc};
 use moa_core::{MoaError, Result, SkillMetadata};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::warn;
@@ -16,7 +18,9 @@ const META_TAGS: &str = "moa-tags";
 const META_CREATED: &str = "moa-created";
 const META_UPDATED: &str = "moa-updated";
 const META_AUTO_GENERATED: &str = "moa-auto-generated";
+#[cfg(feature = "skill-learning")]
 const META_SOURCE_SESSION: &str = "moa-source-session";
+#[cfg(feature = "skill-learning")]
 const META_DERIVED_FROM_SESSION: &str = "derived-from-session";
 const META_USE_COUNT: &str = "moa-use-count";
 const META_LAST_USED: &str = "moa-last-used";
@@ -102,6 +106,7 @@ impl SkillFrontmatter {
             .unwrap_or_else(|| self.created())
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_updated(&mut self, value: DateTime<Utc>) {
         self.insert_metadata(META_UPDATED, format_timestamp(value));
     }
@@ -111,14 +116,17 @@ impl SkillFrontmatter {
         self.metadata_bool(META_AUTO_GENERATED).unwrap_or(false)
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_auto_generated(&mut self, value: bool) {
         self.insert_metadata(META_AUTO_GENERATED, value.to_string());
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_source_session(&mut self, value: Option<String>) {
         self.set_optional_metadata(META_SOURCE_SESSION, value);
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_derived_from_session(&mut self, value: Option<String>) {
         self.set_optional_metadata(META_DERIVED_FROM_SESSION, value);
     }
@@ -128,6 +136,7 @@ impl SkillFrontmatter {
         self.metadata_u32(META_USE_COUNT).unwrap_or(0)
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_use_count(&mut self, value: u32) {
         self.insert_metadata(META_USE_COUNT, value.to_string());
     }
@@ -137,6 +146,7 @@ impl SkillFrontmatter {
         self.metadata_timestamp(META_LAST_USED)
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_last_used(&mut self, value: Option<DateTime<Utc>>) {
         self.set_optional_metadata(META_LAST_USED, value.map(format_timestamp));
     }
@@ -147,6 +157,7 @@ impl SkillFrontmatter {
             .unwrap_or(DEFAULT_SUCCESS_RATE)
     }
 
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_success_rate(&mut self, value: f32) {
         self.insert_metadata(META_SUCCESS_RATE, value.to_string());
     }
@@ -216,10 +227,12 @@ impl SkillFrontmatter {
             .and_then(|value| value.parse::<f32>().ok())
     }
 
+    #[cfg(feature = "skill-learning")]
     fn insert_metadata(&mut self, key: &str, value: String) {
         self.metadata.insert(key.to_string(), value);
     }
 
+    #[cfg(feature = "skill-learning")]
     fn set_optional_metadata(&mut self, key: &str, value: Option<String>) {
         if let Some(value) = value {
             self.insert_metadata(key, value);
@@ -363,6 +376,7 @@ fn estimate_skill_tokens(body: &str) -> usize {
     body.split_whitespace().count().max(1)
 }
 
+#[cfg(feature = "skill-learning")]
 fn format_timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }

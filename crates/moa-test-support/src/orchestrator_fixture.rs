@@ -909,10 +909,6 @@ async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
         "moa-orchestrator-bin{}",
         std::env::consts::EXE_SUFFIX
     ));
-    if candidate.exists() {
-        return Ok(candidate);
-    }
-
     let status = tokio::process::Command::new(
         std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()),
     )
@@ -923,12 +919,16 @@ async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
         "moa-orchestrator",
         "--bin",
         "moa-orchestrator-bin",
+        "--features",
+        "provider-overrides",
     ])
     .status()
     .await
     .context("build moa-orchestrator-bin for test fixture")?;
     if !status.success() {
-        bail!("cargo build -p moa-orchestrator --bin moa-orchestrator-bin failed");
+        bail!(
+            "cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides failed"
+        );
     }
     if candidate.exists() {
         Ok(candidate)

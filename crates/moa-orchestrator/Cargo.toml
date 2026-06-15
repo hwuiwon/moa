@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 integration = []
 auth0 = ["moa-auth-providers/auth0"]
+provider-overrides = ["moa-providers/scripted-provider"]
 internal-eval-runner = [
     "dep:moa-eval",
     "moa-brain/eval-harness",
@@ -49,7 +50,7 @@ moa-memory-vector = { workspace = true }
 moa-ocsf.workspace = true
 moa-security = { workspace = true }
 moa-memory-ingest = { workspace = true }
-moa-providers = { workspace = true, features = ["test-util"] }
+moa-providers = { workspace = true }
 moa-session = { workspace = true }
 moa-skills = { workspace = true }
 restate-sdk.workspace = true

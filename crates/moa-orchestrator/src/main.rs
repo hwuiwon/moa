@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         }
         ProvidersOverride::Mock { seed } => {
             tracing::warn!(seed, "using mock provider override (test mode)");
-            ProviderRegistry::mock(seed)
+            ProviderRegistry::mock(seed)?
         }
     });
     let embedding_provider = build_embedding_provider_from_config(moa_config.as_ref())?;
