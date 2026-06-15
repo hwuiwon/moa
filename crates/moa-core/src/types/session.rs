@@ -45,7 +45,7 @@ pub enum CancelMode {
     Hard,
 }
 
-/// Outcome returned by one `Session::run_turn` invocation in the Restate VO loop.
+/// Outcome returned by one brain-loop iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOutcome {

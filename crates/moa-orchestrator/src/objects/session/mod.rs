@@ -13,7 +13,7 @@ use moa_core::{
     ActiveSegment, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput,
     ConsumeSubAgentChildResultOutput, Event, EventRange, MarkSubAgentChildTerminalInput, MoaError,
     Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
-    SubAgentTerminalResult, TurnOutcome, UserMessage, record_turn_event_persist_duration,
+    SubAgentTerminalResult, UserMessage, record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
@@ -61,9 +61,6 @@ pub trait Session {
     /// Returns the current durable lifecycle status without entering the single-writer queue.
     #[shared]
     async fn status() -> Result<Json<SessionStatus>, HandlerError>;
-
-    /// Legacy internal turn runner entrypoint; retained only for wire compatibility.
-    async fn run_turn() -> Result<Json<TurnOutcome>, HandlerError>;
 
     /// Starts a new turn through the additive `TurnExecution` workflow path.
     async fn start_turn(

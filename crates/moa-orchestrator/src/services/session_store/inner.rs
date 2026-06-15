@@ -190,22 +190,12 @@ impl SessionStoreImpl {
             .map_err(HandlerError::from)
     }
 
-    pub(super) async fn update_segment_resolution_inner(
+    pub(super) async fn update_segment_assessment_inner(
         &self,
-        request: UpdateSegmentResolutionRequest,
+        request: UpdateSegmentAssessmentRequest,
     ) -> Result<(), HandlerError> {
         self.store
-            .update_segment_resolution(request.segment_id, &request.resolution, request.confidence)
-            .await
-            .map_err(HandlerError::from)
-    }
-
-    pub(super) async fn update_segment_resolution_score_inner(
-        &self,
-        request: UpdateSegmentResolutionScoreRequest,
-    ) -> Result<(), HandlerError> {
-        self.store
-            .update_segment_resolution_score(request.segment_id, &request.score)
+            .update_segment_assessment(request.segment_id, &request.assessment)
             .await
             .map_err(HandlerError::from)
     }

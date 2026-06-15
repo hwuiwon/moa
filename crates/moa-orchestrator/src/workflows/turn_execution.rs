@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use moa_brain::pipeline::segments::SegmentTracker;
-use moa_brain::resolution::{
-    ResolutionOverride, ResolutionScorer, continuation_signal, self_assessment_signal,
+use moa_brain::segment_assessment::{
+    AssessmentOverride, SegmentAssessor, continuation_signal, self_assessment_signal,
     structural_signal, tool_signal, verification_signal,
 };
 use moa_core::restate_observability::{
@@ -25,13 +25,12 @@ use moa_core::restate_observability::{
 use moa_core::wire::{
     AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
     RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
-    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentResolutionScoreRequest,
-    UpdateStatusRequest,
+    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use moa_core::{
-    ActiveSegment, ApprovalDecision, ApprovalPrompt, CompletionRequest, CompletionResponse, Event,
-    EventRange, EventRecord, EventType, LearningEntry, MoaError, ModelTier, PolicyAction,
-    QueryRewriteResult, ScoringPhase, SegmentId, SessionId, SessionMeta, SessionStatus,
+    ActiveSegment, ApprovalDecision, ApprovalPrompt, AssessmentPhase, CompletionRequest,
+    CompletionResponse, Event, EventRange, EventRecord, EventType, LearningEntry, MoaError,
+    ModelTier, PolicyAction, QueryRewriteResult, SegmentId, SessionId, SessionMeta, SessionStatus,
     SessionStore as _, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
     TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
     is_delegation_tool_name, record_approval_wait, record_session_error,
@@ -129,7 +128,7 @@ impl TurnExecution for TurnExecutionImpl {
 
         let session_id = parse_session_id(&request.session_id)?;
         let workflow_started = Instant::now();
-        let outcome = match run_turn_inside_workflow(&ctx, &request, session_id).await {
+        let outcome = match execute_turn_inside_workflow(&ctx, &request, session_id).await {
             Ok(body) => {
                 let phase = match body.kind {
                     TurnOutcomeKind::Completed => TurnPhase::Completed,
@@ -211,7 +210,7 @@ impl TurnExecution for TurnExecutionImpl {
     }
 }
 
-async fn run_turn_inside_workflow(
+async fn execute_turn_inside_workflow(
     ctx: &WorkflowContext<'_>,
     request: &RunTurnRequest,
     session_id: SessionId,
@@ -280,11 +279,11 @@ async fn run_turn_inside_workflow(
         match turn_outcome {
             CoreTurnOutcome::Continue => continue,
             CoreTurnOutcome::Cancelled => {
-                score_current_active_segment(
+                assess_current_active_segment(
                     ctx,
                     session_id,
-                    ScoringPhase::Final,
-                    &[ResolutionOverride::Cancelled],
+                    AssessmentPhase::Final,
+                    &[AssessmentOverride::Cancelled],
                 )
                 .await?;
                 return Ok(BodyOutcome {
@@ -301,7 +300,7 @@ async fn run_turn_inside_workflow(
                 });
             }
             CoreTurnOutcome::Idle => {
-                score_current_active_segment(ctx, session_id, ScoringPhase::Final, &[]).await?;
+                assess_current_active_segment(ctx, session_id, AssessmentPhase::Final, &[]).await?;
                 return Ok(BodyOutcome {
                     kind: TurnOutcomeKind::Completed,
                     message: last_summary.unwrap_or_else(|| "idle".to_string()),
@@ -310,11 +309,11 @@ async fn run_turn_inside_workflow(
         }
     }
 
-    score_current_active_segment(
+    assess_current_active_segment(
         ctx,
         session_id,
-        ScoringPhase::Final,
-        &[ResolutionOverride::TurnBudgetExceeded],
+        AssessmentPhase::Final,
+        &[AssessmentOverride::TurnBudgetExceeded],
     )
     .await?;
     emit_turn_budget_exceeded(ctx, session_id, max_turns).await?;
@@ -664,7 +663,7 @@ async fn handle_approval_gate(
     )
     .await?;
 
-    score_current_active_segment(ctx, session_id, ScoringPhase::Immediate, &[]).await?;
+    assess_current_active_segment(ctx, session_id, AssessmentPhase::Immediate, &[]).await?;
     update_session_status(ctx, session_id, SessionStatus::WaitingApproval).await?;
     let approval_timeout = approval_wait::configured_timeout();
     let timed_out_reason = approval_wait::timeout_reason(approval_timeout);
@@ -803,7 +802,7 @@ async fn ensure_current_segment(
                     event: completed.clone().into_event(),
                 }))
                 .send();
-            score_completed_segment_at_transition(
+            assess_completed_segment_at_transition(
                 ctx,
                 session_id,
                 meta.workspace_id.as_str(),
@@ -831,7 +830,7 @@ async fn ensure_current_segment(
     Ok(active_segment)
 }
 
-async fn score_completed_segment_at_transition(
+async fn assess_completed_segment_at_transition(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     tenant_id: &str,
@@ -850,7 +849,7 @@ async fn score_completed_segment_at_transition(
             .await?
             .map(|(text, sequence_num)| (Some(text), Some(sequence_num)))
             .unwrap_or((None, None));
-        let events = load_segment_scoring_events(
+        let events = load_segment_assessment_events(
             ctx,
             session_id,
             completed.segment_id,
@@ -860,31 +859,31 @@ async fn score_completed_segment_at_transition(
         )
         .await?;
         (
-            segment_events_for_scoring(&events, completed.segment_id, next_user.1),
+            segment_events_for_assessment(&events, completed.segment_id, next_user.1),
             next_user.0,
         )
     } else {
         tracing::warn!(
             session_id = %session_id,
             segment_id = %completed.segment_id,
-            "segment start event missing; falling back to full event log for completed segment scoring"
+            "segment start event missing; falling back to full event log for completed segment assessment"
         );
         let events = load_session_events_fallback(ctx, session_id).await?;
         let (next_user_message, next_user_seq) = latest_user_message(&events)
             .map(|(text, sequence_num)| (Some(text.to_string()), Some(sequence_num)))
             .unwrap_or((None, None));
         let segment_events =
-            segment_events_for_scoring(&events, completed.segment_id, next_user_seq);
+            segment_events_for_assessment(&events, completed.segment_id, next_user_seq);
         (segment_events, next_user_message)
     };
     let rewrite = query_rewrite_from_metadata(metadata);
     let baseline = load_segment_baseline(ctx, tenant_id).await?;
     let phase = if next_user_message.is_some() {
-        ScoringPhase::Deferred
+        AssessmentPhase::Deferred
     } else {
-        ScoringPhase::Immediate
+        AssessmentPhase::Immediate
     };
-    let score = score_segment_events(
+    let assessment = assess_segment_events(
         &segment_events,
         completed.turn_count,
         completed.token_cost,
@@ -896,21 +895,21 @@ async fn score_completed_segment_at_transition(
         &[],
     );
 
-    record_resolution_learning(ctx, tenant_id, completed.segment_id, &score).await?;
+    record_segment_assessment_learning(ctx, tenant_id, completed.segment_id, &assessment).await?;
     ctx.service_client::<RestateSessionStoreClient>()
-        .update_segment_resolution_score(Json(UpdateSegmentResolutionScoreRequest {
+        .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
             segment_id: completed.segment_id,
-            score,
+            assessment,
         }))
         .send();
     Ok(())
 }
 
-async fn score_current_active_segment(
+async fn assess_current_active_segment(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    phase: ScoringPhase,
-    overrides: &[ResolutionOverride],
+    phase: AssessmentPhase,
+    overrides: &[AssessmentOverride],
 ) -> Result<(), HandlerError> {
     let runtime = OrchestratorCtx::current();
     if !runtime.config.resolution.enabled {
@@ -933,16 +932,17 @@ async fn score_current_active_segment(
     let segment_events = if let Some(boundary) = segment_boundary_sequences(&boundaries, segment.id)
     {
         let events =
-            load_segment_scoring_events(ctx, session_id, segment.id, boundary, None, true).await?;
-        segment_events_for_scoring(&events, segment.id, None)
+            load_segment_assessment_events(ctx, session_id, segment.id, boundary, None, true)
+                .await?;
+        segment_events_for_assessment(&events, segment.id, None)
     } else {
         tracing::warn!(
             session_id = %session_id,
             segment_id = %segment.id,
-            "segment start event missing; falling back to full event log for active segment scoring"
+            "segment start event missing; falling back to full event log for active segment assessment"
         );
         let events = load_session_events_fallback(ctx, session_id).await?;
-        segment_events_for_scoring(&events, segment.id, None)
+        segment_events_for_assessment(&events, segment.id, None)
     };
     let baseline = load_segment_baseline(ctx, meta.workspace_id.as_str()).await?;
     let duration_ms = durable_utc_now(ctx)
@@ -950,7 +950,7 @@ async fn score_current_active_segment(
         .signed_duration_since(segment.started_at)
         .num_milliseconds()
         .max(0) as u64;
-    let score = score_segment_events(
+    let assessment = assess_segment_events(
         &segment_events,
         segment.turn_count,
         segment.token_cost,
@@ -962,39 +962,40 @@ async fn score_current_active_segment(
         overrides,
     );
 
-    record_resolution_learning(ctx, meta.workspace_id.as_str(), segment.id, &score).await?;
+    record_segment_assessment_learning(ctx, meta.workspace_id.as_str(), segment.id, &assessment)
+        .await?;
     ctx.service_client::<RestateSessionStoreClient>()
-        .update_segment_resolution_score(Json(UpdateSegmentResolutionScoreRequest {
+        .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
             segment_id: segment.id,
-            score,
+            assessment,
         }))
         .send();
     Ok(())
 }
 
-async fn record_resolution_learning(
+async fn record_segment_assessment_learning(
     ctx: &WorkflowContext<'_>,
     tenant_id: &str,
     segment_id: SegmentId,
-    score: &moa_core::ResolutionScore,
+    assessment: &moa_core::SegmentAssessment,
 ) -> Result<(), HandlerError> {
     let session_store = OrchestratorCtx::current().session_store.clone();
     let tenant_id = tenant_id.to_string();
-    let score = score.clone();
+    let assessment = assessment.clone();
     ctx.run(|| async move {
         session_store
             .append_learning(&LearningEntry {
                 id: uuid::Uuid::now_v7(),
                 tenant_id,
-                learning_type: "resolution_scored".to_string(),
+                learning_type: "segment_assessed".to_string(),
                 target_id: segment_id.to_string(),
-                target_label: Some(score.label.as_str().to_string()),
-                payload: serde_json::to_value(&score).map_err(|error| {
+                target_label: Some(assessment.outcome.as_str().to_string()),
+                payload: serde_json::to_value(&assessment).map_err(|error| {
                     HandlerError::from(MoaError::StorageError(format!(
-                        "serialize resolution score learning payload: {error}"
+                        "serialize segment assessment learning payload: {error}"
                     )))
                 })?,
-                confidence: Some(score.confidence),
+                confidence: Some(assessment.confidence),
                 source_refs: vec![segment_id.0],
                 actor: "system".to_string(),
                 valid_from: Utc::now(),
@@ -1005,7 +1006,7 @@ async fn record_resolution_learning(
             .await
             .map_err(HandlerError::from)
     })
-    .name("record_resolution_learning")
+    .name("record_segment_assessment_learning")
     .await?;
     Ok(())
 }
@@ -1050,7 +1051,7 @@ async fn load_segment_boundary_events(
     .await
 }
 
-async fn load_segment_scoring_events(
+async fn load_segment_assessment_events(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     segment_id: SegmentId,
@@ -1058,13 +1059,13 @@ async fn load_segment_scoring_events(
     cutoff_before_seq: Option<u64>,
     stop_at_completion: bool,
 ) -> Result<Vec<EventRecord>, HandlerError> {
-    let to_seq = segment_scoring_to_seq(boundary, cutoff_before_seq, stop_at_completion);
+    let to_seq = segment_assessment_to_seq(boundary, cutoff_before_seq, stop_at_completion);
     tracing::debug!(
         session_id = %session_id,
         segment_id = %segment_id,
         from_seq = boundary.start_seq,
         to_seq = ?to_seq,
-        "loading bounded events for segment scoring"
+        "loading bounded events for segment assessment"
     );
     load_events_in_range(
         ctx,
@@ -1074,7 +1075,7 @@ async fn load_segment_scoring_events(
             to_seq,
             ..EventRange::default()
         },
-        "turn_execution_load_segment_scoring_events",
+        "turn_execution_load_segment_assessment_events",
     )
     .await
 }
@@ -1108,7 +1109,7 @@ async fn load_next_user_message_cutoff(
         tracing::warn!(
             session_id = %session_id,
             sequence_num,
-            "current user message sequence was not found during completed segment scoring"
+            "current user message sequence was not found during completed segment assessment"
         );
     }
 
@@ -1177,7 +1178,7 @@ fn segment_boundary_sequences(
     })
 }
 
-fn segment_scoring_to_seq(
+fn segment_assessment_to_seq(
     boundary: SegmentBoundarySequences,
     cutoff_before_seq: Option<u64>,
     stop_at_completion: bool,
@@ -1206,7 +1207,7 @@ async fn load_segment_baseline(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn score_segment_events(
+fn assess_segment_events(
     segment_events: &[EventRecord],
     turn_count: u32,
     token_cost: u64,
@@ -1214,9 +1215,9 @@ fn score_segment_events(
     baseline: Option<&moa_core::SegmentBaseline>,
     next_user_message: Option<&str>,
     is_new_task: bool,
-    phase: ScoringPhase,
-    extra_overrides: &[ResolutionOverride],
-) -> moa_core::ResolutionScore {
+    phase: AssessmentPhase,
+    extra_overrides: &[AssessmentOverride],
+) -> moa_core::SegmentAssessment {
     let config = OrchestratorCtx::current().config.resolution.clone();
     let tool = tool_signal::score(segment_events);
     let verification = verification_signal::score(segment_events);
@@ -1243,10 +1244,10 @@ fn score_segment_events(
         overrides.push(override_value);
     }
     if tool_signal::all_tools_failed(segment_events) {
-        overrides.push(ResolutionOverride::AllToolsFailed);
+        overrides.push(AssessmentOverride::AllToolsFailed);
     }
 
-    ResolutionScorer::new(config.weights).score(
+    SegmentAssessor::new(config.weights).assess(
         tool,
         verification,
         continuation,
@@ -1257,7 +1258,7 @@ fn score_segment_events(
     )
 }
 
-fn segment_events_for_scoring(
+fn segment_events_for_assessment(
     events: &[EventRecord],
     segment_id: SegmentId,
     cutoff_before_seq: Option<u64>,
@@ -1553,8 +1554,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        SegmentBoundarySequences, segment_boundary_sequences, segment_events_for_scoring,
-        segment_scoring_to_seq,
+        SegmentBoundarySequences, segment_assessment_to_seq, segment_boundary_sequences,
+        segment_events_for_assessment,
     };
 
     fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
@@ -1658,21 +1659,24 @@ mod tests {
     }
 
     #[test]
-    fn segment_scoring_to_seq_prefers_next_user_cutoff() {
-        // Pins: completed segment scoring ends before the next user message when known.
+    fn segment_assessment_to_seq_prefers_next_user_cutoff() {
+        // Pins: completed segment assessment ends before the next user message when known.
         let boundary = SegmentBoundarySequences {
             start_seq: 10,
             completed_seq: Some(40),
         };
 
-        assert_eq!(segment_scoring_to_seq(boundary, Some(35), true), Some(34));
-        assert_eq!(segment_scoring_to_seq(boundary, None, true), Some(40));
-        assert_eq!(segment_scoring_to_seq(boundary, None, false), None);
+        assert_eq!(
+            segment_assessment_to_seq(boundary, Some(35), true),
+            Some(34)
+        );
+        assert_eq!(segment_assessment_to_seq(boundary, None, true), Some(40));
+        assert_eq!(segment_assessment_to_seq(boundary, None, false), None);
     }
 
     #[test]
-    fn segment_events_for_scoring_starts_at_segment_and_stops_before_cutoff() {
-        // Pins: segment scoring excludes prior events and the next task's user message.
+    fn segment_events_for_assessment_starts_at_segment_and_stops_before_cutoff() {
+        // Pins: segment assessment excludes prior events and the next task's user message.
         let session_id = SessionId::new();
         let target_segment = SegmentId::new();
         let events = vec![
@@ -1685,7 +1689,7 @@ mod tests {
             warning(session_id, 7, "after target segment"),
         ];
 
-        let filtered = segment_events_for_scoring(&events, target_segment, Some(5));
+        let filtered = segment_events_for_assessment(&events, target_segment, Some(5));
         let sequences = filtered
             .iter()
             .map(|record| record.sequence_num)

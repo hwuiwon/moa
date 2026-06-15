@@ -10,7 +10,7 @@ impl PostgresSessionStore {
         let affected = sqlx::query(&format!(
             "INSERT INTO {task_segments} \
              (id, session_id, workspace_id, user_id, tenant_id, segment_index, task_summary, \
-              started_at, ended_at, resolution, resolution_signal, resolution_confidence, \
+              started_at, ended_at, outcome, assessment, outcome_confidence, \
               tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
              SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
              FROM {sessions} s WHERE s.id = $2 \
@@ -20,9 +20,9 @@ impl PostgresSessionStore {
                  tenant_id = EXCLUDED.tenant_id, \
                  task_summary = EXCLUDED.task_summary, \
                  ended_at = EXCLUDED.ended_at, \
-                 resolution = EXCLUDED.resolution, \
-                 resolution_signal = EXCLUDED.resolution_signal, \
-                 resolution_confidence = EXCLUDED.resolution_confidence, \
+                 outcome = EXCLUDED.outcome, \
+                 assessment = EXCLUDED.assessment, \
+                 outcome_confidence = EXCLUDED.outcome_confidence, \
                  tools_used = EXCLUDED.tools_used, \
                  skills_activated = EXCLUDED.skills_activated, \
                  turn_count = EXCLUDED.turn_count, \
@@ -36,11 +36,11 @@ impl PostgresSessionStore {
         .bind(segment.task_summary.as_deref())
         .bind(segment.started_at)
         .bind(segment.ended_at)
-        .bind(segment.resolution.as_deref())
-        .bind(serialize_resolution_signal(
-            segment.resolution_signal.as_ref(),
+        .bind(segment.outcome.as_deref())
+        .bind(serialize_segment_assessment(
+            segment.assessment.as_ref(),
         )?)
-        .bind(segment.resolution_confidence)
+        .bind(segment.outcome_confidence)
         .bind(&segment.tools_used)
         .bind(&segment.skills_activated)
         .bind(segment.turn_count as i32)
@@ -128,53 +128,23 @@ impl PostgresSessionStore {
         rows.iter().map(task_segment_from_row).collect()
     }
 
-    /// Updates a task segment resolution outcome.
-    pub async fn update_segment_resolution(
+    /// Updates a task segment outcome and assessment evidence.
+    pub async fn update_segment_assessment(
         &self,
         segment_id: SegmentId,
-        resolution: &str,
-        confidence: f64,
+        assessment: &SegmentAssessment,
     ) -> Result<()> {
         let task_segments = self.table_name("task_segments");
         let affected = sqlx::query(&format!(
             "UPDATE {task_segments} SET \
-                 resolution = $1, \
-                 resolution_confidence = $2 \
-             WHERE id = $3"
-        ))
-        .bind(resolution)
-        .bind(confidence)
-        .bind(segment_id.0)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
-
-        if affected == 0 {
-            return Err(MoaError::StorageError(format!(
-                "task segment `{segment_id}` was not found"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Updates a task segment resolution outcome and signal breakdown.
-    pub async fn update_segment_resolution_score(
-        &self,
-        segment_id: SegmentId,
-        score: &ResolutionScore,
-    ) -> Result<()> {
-        let task_segments = self.table_name("task_segments");
-        let affected = sqlx::query(&format!(
-            "UPDATE {task_segments} SET \
-                 resolution = $1, \
-                 resolution_signal = $2, \
-                 resolution_confidence = $3 \
+                 outcome = $1, \
+                 assessment = $2, \
+                 outcome_confidence = $3 \
              WHERE id = $4"
         ))
-        .bind(score.label.as_str())
-        .bind(serialize_resolution_signal(Some(score))?)
-        .bind(score.confidence)
+        .bind(assessment.outcome.as_str())
+        .bind(serialize_segment_assessment(Some(assessment))?)
+        .bind(assessment.confidence)
         .bind(segment_id.0)
         .execute(&self.pool)
         .await
@@ -228,7 +198,7 @@ impl PostgresSessionStore {
         .transpose()
     }
 
-    /// Lists skill resolution-rate aggregates for ranking.
+    /// Lists skill outcome-rate aggregates for ranking.
     pub async fn list_skill_resolution_rates(
         &self,
         tenant_id: &str,

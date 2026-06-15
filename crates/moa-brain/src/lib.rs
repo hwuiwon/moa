@@ -6,8 +6,8 @@ pub mod harness;
 pub mod loop_detector;
 pub mod pipeline;
 pub mod planning;
-pub mod resolution;
 pub mod retrieval;
+pub mod segment_assessment;
 pub mod tool_stats;
 pub mod turn;
 

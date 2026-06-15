@@ -1,6 +1,6 @@
 # 09 — Skills & Learning
 
-_Agent Skills, resolution-weighted ranking, and the unified learning log._
+_Agent Skills, outcome-weighted ranking, and the unified learning log._
 
 ## Skill Format
 
@@ -100,9 +100,9 @@ files from the previous revision, and appends `skill_improved`.
 ```text
 Conversations
   -> task_segments
-  -> resolution scores
+  -> segment assessments
   -> learning_log
-       -> resolution-weighted skill ranking
+       -> outcome-weighted skill ranking
        -> memory consolidation
 ```
 
@@ -133,7 +133,7 @@ Current learning types include:
 - `skill_created`
 - `skill_improved`
 - `memory_updated`
-- `resolution_scored`
+- `segment_assessed`
 
 ## Memory Learning
 

@@ -1,10 +1,10 @@
-//! Tool-outcome signal for task-resolution scoring.
+//! Tool-outcome signal for task-segment assessment.
 
 use std::collections::HashMap;
 
 use moa_core::{Event, EventRecord, ToolCallId};
 
-/// Scores tool outcomes for one segment.
+/// Converts tool outcomes for one segment into a normalized signal.
 #[must_use]
 pub fn score(events: &[EventRecord]) -> Option<f64> {
     let outcomes = tool_outcomes(events);

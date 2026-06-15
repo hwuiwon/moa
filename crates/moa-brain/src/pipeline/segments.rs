@@ -54,9 +54,9 @@ impl SegmentTracker {
             skills_activated: Vec::new(),
             token_cost: 0,
             previous_segment_id,
-            resolution: None,
-            resolution_signal: None,
-            resolution_confidence: None,
+            outcome: None,
+            assessment: None,
+            outcome_confidence: None,
         };
         let started = SegmentStarted {
             segment_id,

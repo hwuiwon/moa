@@ -5,13 +5,13 @@ SELECT
     t.tenant_id,
     unnest(t.skills_activated) AS skill_name,
     COUNT(*)::BIGINT AS uses,
-    AVG(CASE WHEN t.resolution = 'resolved' THEN 1.0
-             WHEN t.resolution = 'partial' THEN 0.5
+    AVG(CASE WHEN t.outcome = 'resolved' THEN 1.0
+             WHEN t.outcome = 'partial' THEN 0.5
              ELSE 0.0 END)::DOUBLE PRECISION AS resolution_rate,
     AVG(t.token_cost)::DOUBLE PRECISION AS avg_token_cost,
     AVG(t.turn_count)::DOUBLE PRECISION AS avg_turn_count
 FROM task_segments t
-WHERE t.resolution IS NOT NULL
+WHERE t.outcome IS NOT NULL
   AND array_length(t.skills_activated, 1) IS NOT NULL
 GROUP BY t.tenant_id, skill_name;
 

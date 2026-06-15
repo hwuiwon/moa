@@ -1,6 +1,6 @@
 # 13 — Task Segmentation
 
-_Segment lifecycle, resolution scoring, and segment analytics._
+_Segment lifecycle, outcome assessment, and segment analytics._
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Segments answer:
 - What task was being attempted?
 - Which tools and skills were used?
 - How many turns and tokens did it cost?
-- Did it resolve?
+- What outcome was assessed?
 - What learning should be recorded from the outcome?
 
 ## Data Model
@@ -27,9 +27,9 @@ Important fields:
 - `task_summary`
 - `started_at`
 - `ended_at`
-- `resolution`
-- `resolution_signal`
-- `resolution_confidence`
+- `outcome`
+- `assessment`
+- `outcome_confidence`
 - `tools_used`
 - `skills_activated`
 - `turn_count`
@@ -69,9 +69,15 @@ During a turn, the orchestrator records:
 
 The active VO state and `task_segments` row stay in sync through session store calls.
 
-## Resolution Scoring
+## Segment Assessment
 
-Resolution scoring combines five signal classes:
+Segment assessment runs after boundaries such as segment completion, idle
+turns, cancellation, timeout, or deferred continuation evidence. It does not
+decide whether the live agent loop continues; deterministic turn state,
+approvals, cancellation, queued messages, and tool events own that control
+path.
+
+Assessment combines five signal classes:
 
 | Signal | Meaning |
 |---|---|
@@ -81,7 +87,7 @@ Resolution scoring combines five signal classes:
 | Self-assessment | Whether the agent response claims completion or uncertainty |
 | Structural | Whether turns, cost, and duration are anomalous for the tenant baseline |
 
-The scorer outputs:
+The assessor outputs:
 
 - `resolved`
 - `partial`
@@ -89,13 +95,13 @@ The scorer outputs:
 - `failed`
 - `abandoned`
 
-Scoring phases:
+Assessment phases:
 
 - `immediate`: when a segment appears idle or completed
 - `deferred`: after a later user message gives continuation evidence
 - `final`: when cancellation or timeout closes the segment
 
-Each score updates the segment row and appends `resolution_scored` to `learning_log`.
+Each assessment updates the segment row and appends `segment_assessed` to `learning_log`.
 
 ## Materialized Views
 
@@ -104,7 +110,7 @@ Segment rows drive learning views:
 | View | Use |
 |---|---|
 | `skill_resolution_rates` | Ranks skills by tenant-level resolution outcomes |
-| `segment_baselines` | Provides structural baselines for resolution scoring |
+| `segment_baselines` | Provides structural baselines for segment assessment |
 
 Refresh is handled through the session store's materialized-view refresh path.
 
@@ -119,7 +125,7 @@ User messages
   -> query rewrite
   -> segment start/continue/complete
   -> tool and skill counters
-  -> resolution score
+  -> segment assessment
   -> learning_log
   -> skill ranking and memory learning
 ```

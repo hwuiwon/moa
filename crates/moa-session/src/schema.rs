@@ -145,6 +145,10 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "033_quality_score_and_lineage.sql",
         sql: include_str!("../migrations/postgres/033_quality_score_and_lineage.sql"),
     },
+    SessionMigration {
+        name: "034_segment_assessment_columns.sql",
+        sql: include_str!("../migrations/postgres/034_segment_assessment_columns.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
@@ -163,13 +167,13 @@ pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
             migrator.run(pool).await.map_err(|error| {
                 MoaError::StorageError(format!("postgres migration failed: {error}"))
             })?;
-            ensure_public_resolution_views(pool).await?;
+            ensure_public_segment_views(pool).await?;
             Ok(())
         }
     }
 }
 
-async fn ensure_public_resolution_views(pool: &PgPool) -> Result<()> {
+async fn ensure_public_segment_views(pool: &PgPool) -> Result<()> {
     let missing_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) \
          FROM (VALUES ('skill_resolution_rates'), ('segment_baselines')) AS expected(name) \
@@ -198,7 +202,7 @@ async fn ensure_public_resolution_views(pool: &PgPool) -> Result<()> {
     .await
     .map_err(|error| {
         MoaError::StorageError(format!(
-            "postgres resolution view repair migration failed: {error}"
+            "postgres segment view repair migration failed: {error}"
         ))
     })?;
     tx.commit().await.map_err(map_sqlx_error)?;

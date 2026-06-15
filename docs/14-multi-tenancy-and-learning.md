@@ -23,7 +23,7 @@ Workspace memory and skill files remain workspace-scoped. Learning entries and r
 MOA does not require a durable session intent taxonomy. The agent loop selects tools and skills dynamically from the compiled context, while the learning layer records measured outcomes:
 
 - task segments capture tool and skill usage
-- resolution scoring records whether the task worked
+- segment assessment records whether the task worked
 - skill distillation and improvement create reusable Agent Skills
 - memory consolidation updates graph memory
 - the learning log records provenance and rollback metadata
@@ -53,7 +53,7 @@ Current learning types include:
 - `skill_created`
 - `skill_improved`
 - `memory_updated`
-- `resolution_scored`
+- `segment_assessed`
 
 ## Resolution-Weighted Skills
 

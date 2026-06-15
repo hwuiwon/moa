@@ -140,7 +140,7 @@ Columns include:
 
 ### `segment_baselines`
 
-Cached structural baselines for resolution scoring.
+Cached structural baselines for segment assessment.
 
 Columns include:
 

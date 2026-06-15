@@ -1,10 +1,10 @@
-//! Verification-command signal for task-resolution scoring.
+//! Verification-command signal for task-segment assessment.
 
 use std::collections::HashMap;
 
 use moa_core::{Event, EventRecord, ToolCallId};
 
-use super::scorer::ResolutionOverride;
+use super::scorer::AssessmentOverride;
 
 /// Extensible command fragments treated as verification attempts.
 pub const VERIFICATION_PATTERNS: &[&str] = &[
@@ -47,17 +47,17 @@ pub fn score(events: &[EventRecord]) -> Option<f64> {
     Some(0.85)
 }
 
-/// Returns a scorer override implied by verification results, when present.
+/// Returns an assessment override implied by verification results, when present.
 #[must_use]
-pub fn override_for_events(events: &[EventRecord]) -> Option<ResolutionOverride> {
+pub fn override_for_events(events: &[EventRecord]) -> Option<AssessmentOverride> {
     let attempts = verification_attempts(events);
     if attempts.is_empty() {
         return None;
     }
     if attempts.iter().any(|attempt| !attempt.success) {
-        Some(ResolutionOverride::VerificationFailed)
+        Some(AssessmentOverride::VerificationFailed)
     } else {
-        Some(ResolutionOverride::VerificationPassed)
+        Some(AssessmentOverride::VerificationPassed)
     }
 }
 

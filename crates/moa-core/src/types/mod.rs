@@ -16,8 +16,8 @@ mod observability;
 mod platform;
 mod provider;
 mod query_rewrite;
-mod resolution;
 mod runtime_events;
+mod segment_assessment;
 mod segments;
 mod session;
 mod snapshot;
@@ -56,10 +56,11 @@ pub use platform::{
 };
 pub use provider::{ModelTask, ModelTier};
 pub use query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};
-pub use resolution::{
-    ResolutionLabel, ResolutionScore, ScoringPhase, SegmentBaseline, SkillResolutionRate,
-};
 pub use runtime_events::{RuntimeEvent, ToolCardStatus, ToolUpdate};
+pub use segment_assessment::{
+    AssessmentPhase, SegmentAssessment, SegmentBaseline, SegmentEvidence, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentOutcome, SkillResolutionRate,
+};
 pub use segments::{ActiveSegment, SegmentCompletion, TaskSegment, deterministic_segment_id};
 pub use session::{
     CancelMode, CheckpointHandle, CheckpointInfo, SessionFilter, SessionMeta, SessionSignal,

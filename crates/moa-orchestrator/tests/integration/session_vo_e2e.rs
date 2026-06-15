@@ -138,7 +138,7 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
         assert_eq!(
             status,
             SessionStatus::Paused,
-            "idle Session::run_turn eventually maps to Paused in the existing MOA status model"
+            "post_message through TurnExecution eventually maps idle sessions to Paused"
         );
 
         let events = wait_for_brain_response(&client, ingress, &identity, session_id).await?;

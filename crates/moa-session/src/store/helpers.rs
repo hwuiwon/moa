@@ -94,14 +94,14 @@ pub(super) fn normalize_event_search_query(query: &str) -> String {
         .join(" ")
 }
 
-pub(super) fn serialize_resolution_signal(
-    score: Option<&ResolutionScore>,
+pub(super) fn serialize_segment_assessment(
+    assessment: Option<&SegmentAssessment>,
 ) -> Result<Option<String>> {
-    score
+    assessment
         .map(serde_json::to_string)
         .transpose()
         .map_err(|error| {
-            MoaError::StorageError(format!("failed to serialize resolution score: {error}"))
+            MoaError::StorageError(format!("failed to serialize segment assessment: {error}"))
         })
 }
 

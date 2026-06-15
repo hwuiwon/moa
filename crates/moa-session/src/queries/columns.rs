@@ -26,8 +26,8 @@ pub(crate) const SESSION_SUMMARY_COLUMNS: &str =
 
 /// Canonical column list for selecting task segment rows.
 pub(crate) const TASK_SEGMENT_COLUMNS: &str = concat!(
-    "id, session_id, tenant_id, segment_index, task_summary, started_at, ended_at, resolution, resolution_signal, ",
-    "resolution_confidence::DOUBLE PRECISION AS resolution_confidence, ",
+    "id, session_id, tenant_id, segment_index, task_summary, started_at, ended_at, outcome, assessment, ",
+    "outcome_confidence::DOUBLE PRECISION AS outcome_confidence, ",
     "tools_used, skills_activated, turn_count, token_cost, previous_segment_id"
 );
 

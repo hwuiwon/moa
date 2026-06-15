@@ -122,15 +122,15 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
         ended_at: row
             .try_get::<Option<DateTime<Utc>>, _>("ended_at")
             .map_err(map_sqlx_error)?,
-        resolution: row
-            .try_get::<Option<String>, _>("resolution")
+        outcome: row
+            .try_get::<Option<String>, _>("outcome")
             .map_err(map_sqlx_error)?,
-        resolution_signal: parse_resolution_signal(
-            row.try_get::<Option<String>, _>("resolution_signal")
+        assessment: parse_segment_assessment(
+            row.try_get::<Option<String>, _>("assessment")
                 .map_err(map_sqlx_error)?,
         )?,
-        resolution_confidence: row
-            .try_get::<Option<f64>, _>("resolution_confidence")
+        outcome_confidence: row
+            .try_get::<Option<f64>, _>("outcome_confidence")
             .map_err(map_sqlx_error)?,
         tools_used: row
             .try_get::<Vec<String>, _>("tools_used")
@@ -190,11 +190,11 @@ pub(crate) fn learning_entry_from_row(row: &PgRow) -> Result<LearningEntry> {
     })
 }
 
-fn parse_resolution_signal(value: Option<String>) -> Result<Option<ResolutionScore>> {
+fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAssessment>> {
     value
         .map(|value| {
-            serde_json::from_str::<ResolutionScore>(&value).map_err(|error| {
-                MoaError::StorageError(format!("invalid resolution signal payload: {error}"))
+            serde_json::from_str::<SegmentAssessment>(&value).map_err(|error| {
+                MoaError::StorageError(format!("invalid segment assessment payload: {error}"))
             })
         })
         .transpose()

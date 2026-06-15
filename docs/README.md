@@ -19,7 +19,7 @@ These docs describe the current MOA architecture as implemented in the Rust work
 | 10 | [Technology Stack](10-technology-stack.md) | Crates, services, build targets, deployment dependencies |
 | 11 | [Event Replay Runbook](11-event-replay-runbook.md) | Operational replay and recovery procedures |
 | 12 | [Restate Architecture](12-restate-architecture.md) | Restate primitives, handler mapping, deployment strategy |
-| 13 | [Task Segmentation](13-task-segmentation.md) | Segment lifecycle, resolution scoring, analytics views |
+| 13 | [Task Segmentation](13-task-segmentation.md) | Segment lifecycle, outcome assessment, analytics views |
 | 14 | [Multi-Tenancy & Learning](14-multi-tenancy-and-learning.md) | Tenant model, skills-first learning, audit and rollback |
 | 15 | [Architecture Policy](15-architecture-policy.md) | Type placement and accepted architecture decisions |
 | 16 | [Evaluation](16-evaluation.md) | Long-conversation harness, score cards, budgets, triage |

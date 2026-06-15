@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
-    EventRange, EventRecord, LearningEntry, MoaConfig, MoaError, ResolutionScore, Result,
+    EventRange, EventRecord, LearningEntry, MoaConfig, MoaError, Result, SegmentAssessment,
     SegmentBaseline, SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter,
     SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
     SkillResolutionRate, TaskSegment, ToolCallSummary, WorkspaceAnalyticsSummary, WorkspaceId,

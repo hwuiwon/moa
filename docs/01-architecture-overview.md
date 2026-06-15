@@ -29,7 +29,7 @@ Product data in Postgres / Neon
         |
         v
 Learning loop
-  segments -> resolution scores -> learning log
+  segments -> segment assessments -> learning log
   learning log -> skill ranking, memory consolidation
 ```
 
@@ -93,7 +93,7 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
   `WorkspaceStore`, `Whoami`
 - Workflows: `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution`
 
-`Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, scores resolution, and writes learning entries. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
+`Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
 ### Hosted API Clients
 
@@ -126,8 +126,8 @@ User message
   -> Tool calls route through ToolExecutor and ToolRouter
   -> BrainResponse and tool events are persisted
   -> Segment counters are updated
-  -> ResolutionScorer scores completed or idle segments
-  -> LearningEntry rows record resolution, skill, or memory learning
+  -> SegmentAssessor assesses completed or idle segments
+  -> LearningEntry rows record segment, skill, or memory learning
 ```
 
 If query rewriting is disabled, stage 5 is omitted and the remaining processors still report their configured stage numbers.
@@ -248,7 +248,7 @@ and replay resistance on the verify path.
 | Crate | Role |
 |---|---|
 | `moa-core` | Shared types, traits, config, events, analytics helpers |
-| `moa-brain` | Context pipeline, query rewrite, segment helpers, resolution scoring |
+| `moa-brain` | Context pipeline, query rewrite, segment helpers, segment assessment |
 | `moa-session` | Postgres session store, event log, task segments, learning log |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |

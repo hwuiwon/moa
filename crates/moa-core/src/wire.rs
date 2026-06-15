@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, IdempotencyClass, MemoryScope,
-    ResolutionScore, SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta,
+    SegmentAssessment, SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta,
     SessionStatus, TaskSegment, ToolDefinition, UserId, WorkspaceId,
 };
 
@@ -238,24 +238,13 @@ pub struct CompleteSegmentRequest {
     pub update: SegmentCompletion,
 }
 
-/// Request payload for `SessionStore/update_segment_resolution`.
+/// Request payload for `SessionStore/update_segment_assessment`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UpdateSegmentResolutionRequest {
+pub struct UpdateSegmentAssessmentRequest {
     /// Segment identifier to update.
     pub segment_id: SegmentId,
-    /// Resolution label.
-    pub resolution: String,
-    /// Resolution confidence.
-    pub confidence: f64,
-}
-
-/// Request payload for `SessionStore/update_segment_resolution_score`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UpdateSegmentResolutionScoreRequest {
-    /// Segment identifier to update.
-    pub segment_id: SegmentId,
-    /// Full resolution score and signal breakdown.
-    pub score: ResolutionScore,
+    /// Full assessment outcome and evidence.
+    pub assessment: SegmentAssessment,
 }
 
 /// Request payload for `SessionStore/get_segment_baseline`.

@@ -1,4 +1,4 @@
-//! Budgeting, context, compaction, and task-resolution configuration.
+//! Budgeting, context, compaction, and task-segment assessment configuration.
 
 use serde::{Deserialize, Serialize};
 
@@ -191,13 +191,13 @@ impl Default for QueryRewriteConfig {
     }
 }
 
-/// Automated task-segment resolution scoring controls.
+/// Automated task-segment assessment controls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResolutionConfig {
-    /// Whether automated resolution scoring is enabled.
+    /// Whether automated segment assessment is enabled.
     pub enabled: bool,
-    /// Signal weights used by the composite scorer.
+    /// Signal weights used by the composite assessor.
     pub weights: ResolutionWeights,
     /// Whether ambiguous agent self-assessment should use an LLM fallback.
     pub use_llm_self_assessment: bool,
@@ -207,7 +207,7 @@ pub struct ResolutionConfig {
     pub rephrase_similarity_threshold: f64,
     /// Minimum historical sample count before structural baselines are used.
     pub structural_min_samples: usize,
-    /// Idle timeout used for final continuation scoring.
+    /// Idle timeout used for final continuation assessment.
     pub idle_timeout_minutes: u64,
 }
 
@@ -225,7 +225,7 @@ impl Default for ResolutionConfig {
     }
 }
 
-/// Composite scorer weights for individual resolution signals.
+/// Composite assessor weights for individual segment signals.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResolutionWeights {

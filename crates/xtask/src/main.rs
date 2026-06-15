@@ -140,10 +140,42 @@ fn cmd_audit_paths() -> Result<()> {
         &[],
     )?;
 
+    audit_removed_segment_score_names()?;
     audit_moa_test_support_dev_dependency_only()?;
 
     println!("path audit clean");
     Ok(())
+}
+
+fn audit_removed_segment_score_names() -> Result<()> {
+    let paths = existing_paths(&[
+        "crates/moa-core",
+        "crates/moa-brain",
+        "crates/moa-session",
+        "crates/moa-orchestrator",
+        "docs",
+    ]);
+    let removed_segment_pattern = [
+        "ResolutionScore|",
+        "ResolutionScorer|",
+        "ScoringPhase|",
+        "UpdateSegmentResolutionRequest|",
+        "UpdateSegmentResolutionScoreRequest|",
+        "update_segment_resolution_score|",
+        "update_segment_resolution|",
+        "Session::run_turn|",
+        "resolution_scored",
+    ]
+    .concat();
+    rg_forbid(
+        "removed segment-score compatibility names",
+        &removed_segment_pattern,
+        &paths,
+        &[
+            "--glob",
+            "!docs/engineering-discipline/plans/2026-06-15-segment-assessment-architecture.md",
+        ],
+    )
 }
 
 fn audit_moa_test_support_dev_dependency_only() -> Result<()> {

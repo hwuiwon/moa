@@ -1,4 +1,4 @@
-//! Automated task-segment resolution scoring.
+//! Automated task-segment assessment.
 
 pub mod continuation_signal;
 pub mod scorer;
@@ -7,4 +7,4 @@ pub mod structural_signal;
 pub mod tool_signal;
 pub mod verification_signal;
 
-pub use scorer::{ResolutionOverride, ResolutionScorer};
+pub use scorer::{AssessmentOverride, SegmentAssessor};

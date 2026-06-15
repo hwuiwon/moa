@@ -11,8 +11,7 @@ use moa_core::wire::{
     GetSegmentBaselineRequest, InitSessionVoRequest, ListSessionsRequest,
     ListSkillResolutionRatesRequest, RecordSegmentSkillActivationRequest,
     RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, SearchEventsRequest,
-    UpdateSegmentResolutionRequest, UpdateSegmentResolutionScoreRequest, UpdateStatusRequest,
-    WorkspaceCostSinceRequest,
+    UpdateSegmentAssessmentRequest, UpdateStatusRequest, WorkspaceCostSinceRequest,
 };
 use moa_core::{
     Event, EventRecord, SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore,
@@ -84,14 +83,9 @@ pub trait RestateSessionStore {
         session_id: Json<SessionId>,
     ) -> Result<Json<Vec<TaskSegment>>, HandlerError>;
 
-    /// Updates a task segment resolution.
-    async fn update_segment_resolution(
-        request: Json<UpdateSegmentResolutionRequest>,
-    ) -> Result<(), HandlerError>;
-
-    /// Updates a task segment resolution and signal breakdown.
-    async fn update_segment_resolution_score(
-        request: Json<UpdateSegmentResolutionScoreRequest>,
+    /// Updates a task segment assessment artifact.
+    async fn update_segment_assessment(
+        request: Json<UpdateSegmentAssessmentRequest>,
     ) -> Result<(), HandlerError>;
 
     /// Loads a task-segment structural baseline.

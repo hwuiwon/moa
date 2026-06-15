@@ -255,36 +255,19 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn update_segment_resolution(
+    async fn update_segment_assessment(
         &self,
         ctx: Context<'_>,
-        request: Json<UpdateSegmentResolutionRequest>,
+        request: Json<UpdateSegmentAssessmentRequest>,
     ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("SessionStore", "update_segment_resolution");
+        annotate_restate_handler_span("SessionStore", "update_segment_assessment");
         let store = self.store.clone();
         let request = request.into_inner();
         let service = Self { store };
 
         Ok(ctx
-            .run(|| async move { service.update_segment_resolution_inner(request).await })
-            .name("update_segment_resolution")
-            .await?)
-    }
-
-    #[tracing::instrument(skip(self, ctx, request))]
-    async fn update_segment_resolution_score(
-        &self,
-        ctx: Context<'_>,
-        request: Json<UpdateSegmentResolutionScoreRequest>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("SessionStore", "update_segment_resolution_score");
-        let store = self.store.clone();
-        let request = request.into_inner();
-        let service = Self { store };
-
-        Ok(ctx
-            .run(|| async move { service.update_segment_resolution_score_inner(request).await })
-            .name("update_segment_resolution_score")
+            .run(|| async move { service.update_segment_assessment_inner(request).await })
+            .name("update_segment_assessment")
             .await?)
     }
 

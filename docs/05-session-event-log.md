@@ -77,9 +77,9 @@ CREATE TABLE task_segments (
     task_summary TEXT,
     started_at TIMESTAMPTZ NOT NULL,
     ended_at TIMESTAMPTZ,
-    resolution TEXT,
-    resolution_signal TEXT,
-    resolution_confidence NUMERIC(4,3),
+    outcome TEXT,
+    assessment TEXT,
+    outcome_confidence NUMERIC(4,3),
     tools_used TEXT[] NOT NULL DEFAULT '{}',
     skills_activated TEXT[] NOT NULL DEFAULT '{}',
     turn_count INT NOT NULL DEFAULT 0,
@@ -118,7 +118,7 @@ The event table uses a generated `tsvector` column and a GIN index for cross-ses
 - segment index and previous segment edge
 - task summary
 - start/end timestamps
-- resolution label, confidence, and serialized signal breakdown
+- assessed outcome, confidence, and serialized evidence
 - tools and skills used
 - turn and token counters
 
@@ -127,7 +127,7 @@ Materialized views derived from `task_segments` include:
 - `skill_resolution_rates`
 - `segment_baselines`
 
-These feed skill ranking and structural resolution scoring.
+These feed skill ranking and structural segment assessment.
 
 ## Learning Tables
 

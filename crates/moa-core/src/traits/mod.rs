@@ -15,10 +15,10 @@ use crate::types::{
     CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
     ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange, EventRecord,
     HandHandle, HandSpec, HandStatus, InboundMessage, MessageId, ModelCapabilities,
-    OutboundMessage, Platform, PlatformCapabilities, ProcessorOutput, ResolutionScore, SandboxFile,
-    SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment, ToolOutput,
-    WorkingContext, WorkspaceId,
+    OutboundMessage, Platform, PlatformCapabilities, ProcessorOutput, SandboxFile,
+    SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter,
+    SessionId, SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment,
+    ToolOutput, WorkingContext, WorkspaceId,
 };
 
 pub use auth::*;
@@ -179,26 +179,15 @@ pub trait SessionStore: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Updates the resolution outcome for a task segment.
-    async fn update_segment_resolution(
+    /// Updates the assessed outcome and evidence for a task segment.
+    async fn update_segment_assessment(
         &self,
         _segment_id: SegmentId,
-        _resolution: &str,
-        _confidence: f64,
+        _assessment: &SegmentAssessment,
     ) -> Result<()> {
         Err(MoaError::Unsupported(
             "task segments are not supported by this session store".to_string(),
         ))
-    }
-
-    /// Updates the resolution outcome and serialized signal breakdown for a task segment.
-    async fn update_segment_resolution_score(
-        &self,
-        segment_id: SegmentId,
-        score: &ResolutionScore,
-    ) -> Result<()> {
-        self.update_segment_resolution(segment_id, score.label.as_str(), score.confidence)
-            .await
     }
 
     /// Loads the structural baseline for one tenant.

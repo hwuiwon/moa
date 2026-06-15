@@ -1,6 +1,6 @@
-//! Agent self-assessment signal for task-resolution scoring.
+//! Agent self-assessment signal for task-segment assessment.
 
-/// Scores the agent's final response in a segment using deterministic language patterns.
+/// Converts the agent's final response into a normalized self-assessment signal.
 #[must_use]
 pub fn score(last_response: Option<&str>) -> Option<f64> {
     let response = last_response?.trim();

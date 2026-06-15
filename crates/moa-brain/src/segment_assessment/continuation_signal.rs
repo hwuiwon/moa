@@ -1,8 +1,8 @@
-//! User-continuation signal for deferred task-resolution scoring.
+//! User-continuation signal for deferred task-segment assessment.
 
 use std::collections::{HashMap, HashSet};
 
-/// Inputs used to score how a user continued after a segment ended.
+/// Inputs used to assess how a user continued after a segment ended.
 #[derive(Debug, Clone, Copy)]
 pub struct ContinuationInput<'a> {
     /// Next user message, if one exists.
@@ -13,7 +13,7 @@ pub struct ContinuationInput<'a> {
     pub is_new_task: bool,
 }
 
-/// Scores the next user message as implicit continuation feedback.
+/// Converts the next user message into implicit continuation feedback.
 #[must_use]
 pub fn score(input: ContinuationInput<'_>, rephrase_similarity_threshold: f64) -> Option<f64> {
     let message = input.next_user_message?.trim();

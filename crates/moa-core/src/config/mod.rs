@@ -109,7 +109,7 @@ pub struct MoaConfig {
     pub skill_budget: SkillBudgetConfig,
     /// Query-rewriting controls for pre-memory retrieval prompt normalization.
     pub query_rewrite: QueryRewriteConfig,
-    /// Automated task-segment resolution scoring controls.
+    /// Automated task-segment assessment controls.
     pub resolution: ResolutionConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,

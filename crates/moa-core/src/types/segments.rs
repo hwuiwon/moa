@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ResolutionScore, SegmentId, SessionId};
+use super::{SegmentAssessment, SegmentId, SessionId};
 
 /// Derives a stable segment identifier from a session identifier and segment index.
 #[must_use]
@@ -44,12 +44,12 @@ pub struct TaskSegment {
     pub token_cost: u64,
     /// Previous segment in the same session, when present.
     pub previous_segment_id: Option<SegmentId>,
-    /// Resolution outcome populated by later resolution tracking.
-    pub resolution: Option<String>,
-    /// Serialized signal breakdown that produced the latest resolution.
-    pub resolution_signal: Option<ResolutionScore>,
-    /// Confidence for the resolution outcome.
-    pub resolution_confidence: Option<f64>,
+    /// Outcome populated by later segment assessment.
+    pub outcome: Option<String>,
+    /// Structured assessment that produced the latest outcome.
+    pub assessment: Option<SegmentAssessment>,
+    /// Confidence for the assessed outcome.
+    pub outcome_confidence: Option<f64>,
 }
 
 impl TaskSegment {

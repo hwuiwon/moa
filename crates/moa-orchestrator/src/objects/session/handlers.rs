@@ -97,15 +97,6 @@ impl Session for SessionImpl {
         ))
     }
 
-    #[tracing::instrument(skip(self, _ctx))]
-    async fn run_turn(&self, _ctx: ObjectContext<'_>) -> Result<Json<TurnOutcome>, HandlerError> {
-        annotate_restate_handler_span("Session", "run_turn");
-        Err(TerminalError::new(
-            "Session::run_turn has moved to the TurnExecution workflow; use post_message or start_turn",
-        )
-        .into())
-    }
-
     #[tracing::instrument(skip(self, ctx, request))]
     async fn start_turn(
         &self,

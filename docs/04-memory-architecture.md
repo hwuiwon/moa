@@ -124,7 +124,7 @@ Memory is one output of the broader learning loop:
 
 ```text
 Task segments
-  -> resolution scores
+  -> segment assessments
   -> learning_log
   -> skill ranking and graph memory consolidation
 ```

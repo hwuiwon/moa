@@ -9,9 +9,9 @@ CREATE TABLE IF NOT EXISTS task_segments (
     task_summary TEXT,
     started_at TIMESTAMPTZ NOT NULL,
     ended_at TIMESTAMPTZ,
-    resolution TEXT,
-    resolution_signal TEXT,
-    resolution_confidence NUMERIC(4,3),
+    outcome TEXT,
+    assessment TEXT,
+    outcome_confidence NUMERIC(4,3),
     tools_used TEXT[] NOT NULL DEFAULT '{}',
     skills_activated TEXT[] NOT NULL DEFAULT '{}',
     turn_count INT NOT NULL DEFAULT 0,
@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS task_segments (
     UNIQUE(session_id, segment_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_resolution
-    ON task_segments (tenant_id, resolution);
+CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_outcome
+    ON task_segments (tenant_id, outcome);
 CREATE INDEX IF NOT EXISTS idx_task_segments_session
     ON task_segments (session_id, segment_index);
 CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_time

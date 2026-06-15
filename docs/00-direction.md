@@ -20,15 +20,15 @@ Platform
        -> Workspace memory and skills
 ```
 
-MOA is not a personal assistant or chat wrapper. It is an execution platform with durable orchestration, an auditable event log, graph memory, automated task resolution scoring, and a tenant-scoped learning pipeline.
+MOA is not a personal assistant or chat wrapper. It is an execution platform with durable orchestration, an auditable event log, graph memory, evidence-backed task segment assessment, and a tenant-scoped learning pipeline.
 
 ## What MOA Provides
 
 - **Durable work:** sessions and sub-agents survive process restarts because Restate owns orchestration and Postgres owns product data.
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
-- **Resolution detection:** MOA scores whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
+- **Outcome assessment:** MOA records whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
 - **Per-tenant learning:** task outcomes, skill changes, and memory updates are recorded at tenant scope without requiring a fixed session intent taxonomy.
-- **Learning log:** every learned pattern, resolution score, memory update, and skill change can be audited and invalidated by version or batch.
+- **Learning log:** every learned pattern, segment assessment, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
 - **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.

@@ -603,22 +603,12 @@ impl SessionStore for PostgresSessionStore {
         PostgresSessionStore::list_segments(self, session_id).await
     }
 
-    async fn update_segment_resolution(
+    async fn update_segment_assessment(
         &self,
         segment_id: SegmentId,
-        resolution: &str,
-        confidence: f64,
+        assessment: &SegmentAssessment,
     ) -> Result<()> {
-        PostgresSessionStore::update_segment_resolution(self, segment_id, resolution, confidence)
-            .await
-    }
-
-    async fn update_segment_resolution_score(
-        &self,
-        segment_id: SegmentId,
-        score: &ResolutionScore,
-    ) -> Result<()> {
-        PostgresSessionStore::update_segment_resolution_score(self, segment_id, score).await
+        PostgresSessionStore::update_segment_assessment(self, segment_id, assessment).await
     }
 
     async fn get_segment_baseline(&self, tenant_id: &str) -> Result<Option<SegmentBaseline>> {

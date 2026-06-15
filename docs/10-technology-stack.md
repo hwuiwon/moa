@@ -9,7 +9,7 @@ The root workspace currently contains:
 | Crate | Purpose |
 |---|---|
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
-| `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, resolution scoring |
+| `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
 | `moa-session` | Postgres session store, event log, task segments, learning log, analytics |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
@@ -111,7 +111,7 @@ and deployment setup. Key groups:
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
-| `MOA_RESOLUTION_*` | automated resolution scoring weights and thresholds |
+| `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
 | `MOA_CLOUD_*` | cloud mode and hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
@@ -128,7 +128,7 @@ Implemented architectural pillars:
 - Restate orchestrator for local development and cloud execution.
 - Postgres session store with event log, analytics, task segments, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
-- Query rewriting, segment creation, automated resolution scoring, and skill resolution-rate ranking.
+- Query rewriting, segment creation, automated segment assessment, and skill resolution-rate ranking.
 - Skill distillation/improvement with learning-log emission.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
 - Hosted API automation surfaces.

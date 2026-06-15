@@ -54,8 +54,8 @@ serialized by Restate's single-writer-per-key semantics, but they stay fast:
 the VO mutates K/V state and sends a durable workflow invocation. The
 long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
 `queue_message`, and `request_cancel` calls do not wait behind a running turn.
-`Session::run_turn` is retained only as a legacy wire-compatible handler and no
-longer drives turn execution.
+There is no legacy session-local turn runner; `TurnExecution` owns the durable
+turn loop.
 
 `TurnExecution` owns the turn mechanics:
 
@@ -66,7 +66,7 @@ longer drives turn execution.
 5. Route tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.
 7. Apply turn outcome and update session status.
-8. Score idle, cancelled, or completed segments and append `learning_log` entries.
+8. Assess idle, cancelled, or completed segments and append `learning_log` entries.
 
 The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for human approvals and sub-agent result waits, not for turn cancellation.
 
@@ -189,7 +189,7 @@ The orchestrator is responsible for connecting task work to learning:
 
 - `SegmentStarted` and `SegmentCompleted` events are persisted in the event log.
 - `task_segments` stores the current segment state and counters.
-- Resolution scoring writes `resolution_scored`.
+- Segment assessment writes `segment_assessed`.
 - Memory consolidation writes `memory_updated`.
 - Skill distillation and improvement write `skill_created` and `skill_improved`.
 

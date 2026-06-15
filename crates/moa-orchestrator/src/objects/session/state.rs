@@ -1,6 +1,7 @@
 //! Durable Session VO state projection.
 
 use super::*;
+use moa_core::TurnOutcome;
 
 pub(super) const K_META: &str = "meta";
 pub(super) const K_STATUS: &str = "status";
@@ -18,7 +19,7 @@ pub struct SessionVoState {
     pub meta: Option<SessionMeta>,
     /// Current lifecycle status held in Restate state.
     pub status: Option<SessionStatus>,
-    /// Buffered user messages waiting to be consumed by `run_turn`.
+    /// Buffered user messages waiting for the next `TurnExecution` workflow.
     pub pending: Vec<UserMessage>,
     /// Placeholder for approval state introduced in R07.
     pub pending_approval: Option<String>,

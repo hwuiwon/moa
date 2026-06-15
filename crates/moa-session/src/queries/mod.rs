@@ -2,7 +2,7 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, EventType, LearningEntry, MoaError, ModelId, Platform, PolicyAction, PolicyScope,
-    ResolutionScore, Result, SegmentId, SessionId, SessionMeta, SessionStatus, SessionSummary,
+    Result, SegmentAssessment, SegmentId, SessionId, SessionMeta, SessionStatus, SessionSummary,
     TaskSegment, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};

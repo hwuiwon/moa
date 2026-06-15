@@ -1,4 +1,4 @@
-//! Structural anomaly signal for task-resolution scoring.
+//! Structural anomaly signal for task-segment assessment.
 
 use moa_core::SegmentBaseline;
 
@@ -13,7 +13,7 @@ pub struct SegmentMetrics {
     pub duration_secs: f64,
 }
 
-/// Scores segment metrics against historical baselines.
+/// Converts segment metrics and historical baselines into a normalized signal.
 #[must_use]
 pub fn score(
     metrics: SegmentMetrics,
