@@ -29,7 +29,10 @@ pub(super) fn build_rewriter_prompt(input: &RewriteInput, ctx: &WorkingContext) 
          - Do not classify intent, choose tools, request clarification, or add prompt advice\n\
          - Respond ONLY with valid JSON matching the schema below. No preamble.\n\n\
          Schema: {{\"retrieval_query\": string, \"is_new_task\": bool,\n\
-         \"task_summary\": string|null}}\n\n\
+         \"task_summary\": string|null, \"task_facets\": object|null}}\n\
+         task_facets is optional learning metadata with string-or-null fields: domain, action,\n\
+         artifact_kind, language_or_framework, verification_style, risk_class, plus arrays\n\
+         tool_pattern and skill_pattern. Use null when unsure.\n\n\
          Available tools: {tools}\n\n\
          Available skills:\n{skills}\n\n\
          Conversation history (last 5 turns):\n{history}\n\n\

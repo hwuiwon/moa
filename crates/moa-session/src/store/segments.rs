@@ -238,7 +238,11 @@ impl PostgresSessionStore {
 
     /// Refreshes task-segment derived materialized views.
     pub async fn refresh_segment_materialized_views(&self) -> Result<()> {
-        for view_name in ["skill_resolution_rates", "segment_baselines"] {
+        for view_name in [
+            "skill_resolution_rates",
+            "segment_baselines",
+            "task_strategy_success_rates",
+        ] {
             let qualified = self.table_name(view_name);
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"

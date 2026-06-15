@@ -3,6 +3,8 @@
 #![recursion_limit = "256"]
 
 #[cfg(feature = "skill-learning")]
+pub mod candidates;
+#[cfg(feature = "skill-learning")]
 pub mod distiller;
 pub mod format;
 #[cfg(feature = "skill-learning")]
@@ -15,8 +17,13 @@ pub mod regression;
 pub mod render;
 
 #[cfg(feature = "skill-learning")]
+pub use candidates::{
+    candidate_status_update, skill_creation_candidate, skill_improvement_candidate,
+};
+#[cfg(feature = "skill-learning")]
 pub use distiller::{
-    DistillationOutcome, DistillationSkipReason, maybe_distill_skill,
+    DistillationOutcome, DistillationSkipReason, ExperienceDistillationInput,
+    distill_skill_from_experience_with_learning, maybe_distill_skill,
     maybe_distill_skill_with_learning,
 };
 pub use format::{

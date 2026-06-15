@@ -13,6 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use moa_brain::learning::{
+    attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
+    experience::experience_from_assessment,
+};
 use moa_brain::pipeline::segments::SegmentTracker;
 use moa_brain::segment_assessment::{
     AssessmentOverride, SegmentAssessor, continuation_signal, self_assessment_signal,
@@ -23,16 +27,18 @@ use moa_core::restate_observability::{
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
 use moa_core::wire::{
-    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
-    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
-    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
+    AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
+    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest,
+    GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
+    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+    UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, AssessmentPhase, CompletionRequest,
     CompletionResponse, Event, EventRange, EventRecord, EventType, LearningEntry, MoaError,
     ModelTier, PolicyAction, QueryRewriteResult, SegmentId, SessionId, SessionMeta, SessionStatus,
-    SessionStore as _, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
-    TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
+    SessionStore as _, TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
+    ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
     is_delegation_tool_name, record_approval_wait, record_session_error,
     record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
@@ -805,7 +811,7 @@ async fn ensure_current_segment(
             assess_completed_segment_at_transition(
                 ctx,
                 session_id,
-                meta.workspace_id.as_str(),
+                meta,
                 &completed,
                 &request.metadata,
             )
@@ -833,7 +839,7 @@ async fn ensure_current_segment(
 async fn assess_completed_segment_at_transition(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    tenant_id: &str,
+    meta: &SessionMeta,
     completed: &moa_brain::pipeline::segments::SegmentCompleted,
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), HandlerError> {
@@ -877,7 +883,7 @@ async fn assess_completed_segment_at_transition(
         (segment_events, next_user_message)
     };
     let rewrite = query_rewrite_from_metadata(metadata);
-    let baseline = load_segment_baseline(ctx, tenant_id).await?;
+    let baseline = load_segment_baseline(ctx, meta.workspace_id.as_str()).await?;
     let phase = if next_user_message.is_some() {
         AssessmentPhase::Deferred
     } else {
@@ -895,13 +901,31 @@ async fn assess_completed_segment_at_transition(
         &[],
     );
 
-    record_segment_assessment_learning(ctx, tenant_id, completed.segment_id, &assessment).await?;
+    record_segment_assessment_learning(
+        ctx,
+        meta.workspace_id.as_str(),
+        completed.segment_id,
+        &assessment,
+    )
+    .await?;
     ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
             segment_id: completed.segment_id,
-            assessment,
+            assessment: assessment.clone(),
         }))
-        .send();
+        .call()
+        .await?;
+    let segment = task_segment_from_completed(meta, completed, &segment_events, &assessment);
+    emit_experience_for_assessment(
+        ctx,
+        meta,
+        &segment,
+        &assessment,
+        &segment_events,
+        rewrite.as_ref(),
+        Some(completed.duration_ms),
+    )
+    .await?;
     Ok(())
 }
 
@@ -967,9 +991,153 @@ async fn assess_current_active_segment(
     ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
             segment_id: segment.id,
-            assessment,
+            assessment: assessment.clone(),
         }))
-        .send();
+        .call()
+        .await?;
+    let task_segment = task_segment_from_active(&meta, &segment, &assessment, None);
+    emit_experience_for_assessment(
+        ctx,
+        &meta,
+        &task_segment,
+        &assessment,
+        &segment_events,
+        None,
+        Some(duration_ms),
+    )
+    .await?;
+    Ok(())
+}
+
+fn task_segment_from_completed(
+    meta: &SessionMeta,
+    completed: &moa_brain::pipeline::segments::SegmentCompleted,
+    events: &[EventRecord],
+    assessment: &moa_core::SegmentAssessment,
+) -> TaskSegment {
+    let (started_at, previous_segment_id) = events
+        .iter()
+        .find_map(|record| match &record.event {
+            Event::SegmentStarted {
+                segment_id,
+                previous_segment_id,
+                ..
+            } if *segment_id == completed.segment_id => {
+                Some((record.timestamp, *previous_segment_id))
+            }
+            _ => None,
+        })
+        .unwrap_or((assessment.assessed_at, None));
+    TaskSegment {
+        id: completed.segment_id,
+        session_id: meta.id,
+        tenant_id: meta.workspace_id.to_string(),
+        segment_index: completed.segment_index,
+        task_summary: completed.task_summary.clone(),
+        started_at,
+        ended_at: Some(assessment.assessed_at),
+        turn_count: completed.turn_count,
+        tools_used: completed.tools_used.clone(),
+        skills_activated: completed.skills_activated.clone(),
+        token_cost: completed.token_cost,
+        previous_segment_id,
+        outcome: Some(assessment.outcome.as_str().to_string()),
+        assessment: Some(assessment.clone()),
+        outcome_confidence: Some(assessment.confidence),
+    }
+}
+
+fn task_segment_from_active(
+    meta: &SessionMeta,
+    segment: &ActiveSegment,
+    assessment: &moa_core::SegmentAssessment,
+    ended_at: Option<DateTime<Utc>>,
+) -> TaskSegment {
+    TaskSegment {
+        id: segment.id,
+        session_id: meta.id,
+        tenant_id: meta.workspace_id.to_string(),
+        segment_index: segment.segment_index,
+        task_summary: segment.task_summary.clone(),
+        started_at: segment.started_at,
+        ended_at,
+        turn_count: segment.turn_count,
+        tools_used: segment.tools_used.clone(),
+        skills_activated: segment.skills_activated.clone(),
+        token_cost: segment.token_cost,
+        previous_segment_id: None,
+        outcome: Some(assessment.outcome.as_str().to_string()),
+        assessment: Some(assessment.clone()),
+        outcome_confidence: Some(assessment.confidence),
+    }
+}
+
+async fn emit_experience_for_assessment(
+    ctx: &WorkflowContext<'_>,
+    meta: &SessionMeta,
+    segment: &TaskSegment,
+    assessment: &moa_core::SegmentAssessment,
+    segment_events: &[EventRecord],
+    rewrite: Option<&QueryRewriteResult>,
+    duration_ms: Option<u64>,
+) -> Result<(), HandlerError> {
+    let now = durable_utc_now(ctx).await?;
+    let experience = experience_from_assessment(
+        meta,
+        segment,
+        assessment,
+        segment_events,
+        rewrite,
+        duration_ms,
+        now,
+    );
+    let attributions = attributions_for_experience(&experience, segment_events, now);
+    let candidates = propose_candidates_for_experience(&experience, &attributions, now);
+    let result = async {
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_experience_record(Json(AppendExperienceRecordRequest {
+                experience: experience.clone(),
+            }))
+            .call()
+            .await?;
+        ctx.service_client::<RestateSessionStoreClient>()
+            .append_experience_attributions(Json(AppendExperienceAttributionsRequest {
+                attributions,
+            }))
+            .call()
+            .await?;
+        for candidate in candidates {
+            ctx.service_client::<RestateSessionStoreClient>()
+                .append_learning_candidate(Json(AppendLearningCandidateRequest { candidate }))
+                .call()
+                .await?;
+        }
+        ctx.service_client::<RestateSessionStoreClient>()
+            .refresh_segment_materialized_views(Json(serde_json::json!({})))
+            .send();
+        Ok::<(), HandlerError>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        tracing::warn!(
+            session_id = %meta.id,
+            segment_id = %segment.id,
+            ?error,
+            "experience learning emission failed"
+        );
+        append_session_event(
+            ctx,
+            meta.id,
+            Event::Warning {
+                message: format!(
+                    "experience learning emission failed for segment {}: {error:?}",
+                    segment.id
+                ),
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 

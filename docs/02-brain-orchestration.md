@@ -67,6 +67,7 @@ turn loop.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.
 7. Apply turn outcome and update session status.
 8. Assess idle, cancelled, or completed segments and append `learning_log` entries.
+9. Derive experience records, attributions, and proposed learning candidates after assessment persistence.
 
 The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for human approvals and sub-agent result waits, not for turn cancellation.
 
@@ -190,6 +191,9 @@ The orchestrator is responsible for connecting task work to learning:
 - `SegmentStarted` and `SegmentCompleted` events are persisted in the event log.
 - `task_segments` stores the current segment state and counters.
 - Segment assessment writes `segment_assessed`.
+- Experience extraction writes immutable `experience_records` from assessed segments.
+- Attribution writes `experience_attributions` for skills, tools, memory, policy, and verification evidence.
+- Candidate generation writes proposed `learning_candidates`; automatic promotion is gated by explicit status transitions.
 - Memory consolidation writes `memory_updated`.
 - Skill distillation and improvement write `skill_created` and `skill_improved`.
 

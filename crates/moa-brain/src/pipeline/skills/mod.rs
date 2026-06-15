@@ -25,6 +25,7 @@ use self::tier1_metadata::{
 const RECENT_EVENT_LIMIT: usize = 32;
 const EXCLUDED_ITEMS_METADATA_KEY: &str = "excluded_items";
 const QUERY_KEYWORDS_METADATA_KEY: &str = "query_keywords";
+const TASK_STRATEGY_RATES_METADATA_KEY: &str = "task_strategy_rates";
 const MANIFEST_BUDGET_METADATA_KEY: &str = "manifest_budget_chars";
 const MANIFEST_CHARS_USED_METADATA_KEY: &str = "manifest_chars_used";
 /// Context metadata key containing selected skill names.
@@ -119,8 +120,15 @@ impl ContextProcessor for SkillInjector {
 
         let query_keywords = self.query_keywords(ctx).await?;
         let resolution_rates = self.skill_resolution_rates(ctx).await?;
+        let task_strategy_rates = self.task_strategy_success_rates(ctx).await?;
         let budget = self.compute_budget(ctx.model_capabilities.context_window);
-        let ranked = rank_skills(&skills, &query_keywords, &budget, &resolution_rates);
+        let ranked = rank_skills(
+            &skills,
+            &query_keywords,
+            &budget,
+            &resolution_rates,
+            &task_strategy_rates,
+        );
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
         let manifest = format_skill_manifest(&selection.selected);
         let selected_metadata = selection
@@ -168,6 +176,10 @@ impl ContextProcessor for SkillInjector {
             (
                 MANIFEST_BUDGET_METADATA_KEY.to_string(),
                 json!(budget.max_manifest_chars),
+            ),
+            (
+                TASK_STRATEGY_RATES_METADATA_KEY.to_string(),
+                json!(task_strategy_rates.keys().collect::<Vec<_>>()),
             ),
             (
                 MANIFEST_CHARS_USED_METADATA_KEY.to_string(),

@@ -15,6 +15,7 @@ Platform
        -> Workspaces
        -> Admin controls
        -> Task segments
+       -> Experience records and learning candidates
        -> Learning log
        -> Lineage and audit evidence
        -> Workspace memory and skills
@@ -27,7 +28,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Durable work:** sessions and sub-agents survive process restarts because Restate owns orchestration and Postgres owns product data.
 - **Task segmentation:** conversations are split into discrete task segments so one long session can contain many independently tracked outcomes.
 - **Outcome assessment:** MOA records whether each task segment resolved, partially resolved, failed, was abandoned, or remains unknown without requiring explicit user feedback.
-- **Per-tenant learning:** task outcomes, skill changes, and memory updates are recorded at tenant scope without requiring a fixed session intent taxonomy.
+- **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
 - **Learning log:** every learned pattern, segment assessment, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
 - **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
@@ -51,9 +52,9 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 MOA's differentiators are architectural, not cosmetic:
 
 - **Restate-native agents:** sessions and sub-agents map to virtual objects with single-writer semantics and durable waits.
-- **Segment-level analytics:** learning is based on task outcomes, not whole-session guesses.
+- **Experience-level analytics:** learning is derived from assessed task segments, not whole-session guesses.
 - **Resolution-weighted improvement:** skills and future retrieval decisions can use measured success rates.
-- **Skills-first adaptation:** reusable skills and memory updates are promoted from measured outcomes, not from static routing labels.
+- **Candidate-gated adaptation:** reusable skills, memory proposals, policy proposals, and eval proposals start as learning candidates before promotion.
 - **Auditable learning:** the learning log gives provenance, confidence, versions, and rollback hooks.
 - **Operational evidence:** lineage, scores, analytics, and compliance audit tiers let operators explain what happened without scraping logs.
 - **Graph memory plus database retrieval:** learned knowledge keeps provenance and bitemporal history while retrieval gets production-grade indexes and embeddings.

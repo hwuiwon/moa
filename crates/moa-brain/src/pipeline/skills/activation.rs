@@ -2,8 +2,12 @@
 
 use std::collections::HashMap;
 
-use moa_core::{Event, EventRange, Result, SkillResolutionRate, WorkingContext};
+use moa_core::{
+    AttributionSubjectType, Event, EventRange, Result, SkillResolutionRate,
+    TaskStrategySuccessRate, WorkingContext,
+};
 
+use crate::learning::experience::task_fingerprint_for_context;
 use crate::pipeline::memory::extract_search_keywords;
 
 use super::{RECENT_EVENT_LIMIT, SkillInjector};
@@ -38,6 +42,22 @@ impl SkillInjector {
             .await?;
         Ok(skill_resolution_rate_map(&rates))
     }
+
+    pub(super) async fn task_strategy_success_rates(
+        &self,
+        ctx: &WorkingContext,
+    ) -> Result<HashMap<String, TaskStrategySuccessRate>> {
+        let Some(session_store) = &self.session_store else {
+            return Ok(HashMap::new());
+        };
+        let Some(fingerprint) = task_fingerprint_for_context(ctx) else {
+            return Ok(HashMap::new());
+        };
+        let rates = session_store
+            .list_task_strategy_success_rates(ctx.workspace_id.as_str(), &fingerprint.hash)
+            .await?;
+        Ok(task_strategy_success_rate_map(&rates))
+    }
 }
 
 fn skill_resolution_rate_map(rates: &[SkillResolutionRate]) -> HashMap<String, f64> {
@@ -49,6 +69,16 @@ fn skill_resolution_rate_map(rates: &[SkillResolutionRate]) -> HashMap<String, f
                 rate.resolution_rate.clamp(0.0, 1.0),
             )
         })
+        .collect()
+}
+
+fn task_strategy_success_rate_map(
+    rates: &[TaskStrategySuccessRate],
+) -> HashMap<String, TaskStrategySuccessRate> {
+    rates
+        .iter()
+        .filter(|rate| rate.subject_type == AttributionSubjectType::Skill)
+        .map(|rate| (rate.subject_id.clone(), rate.clone()))
         .collect()
 }
 

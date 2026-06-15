@@ -6,13 +6,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
-    EventRange, EventRecord, LearningEntry, MoaConfig, MoaError, Result, SegmentAssessment,
-    SegmentBaseline, SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
-    SkillResolutionRate, TaskSegment, ToolCallSummary, WorkspaceAnalyticsSummary, WorkspaceId,
-    record_session_created, record_session_event_append, record_session_event_decoded_bytes,
-    record_session_event_load, record_session_event_replay, record_sessions_active,
-    record_turn_completed,
+    EventRange, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
+    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError,
+    Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
+    SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
+    ToolCallSummary, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
+    record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
+    record_session_event_replay, record_sessions_active, record_turn_completed,
 };
 use moa_security::ApprovalRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -23,15 +24,19 @@ use crate::blob::{
     FileBlobStore, decode_event_from_storage, encode_event_for_storage, preview_text,
 };
 use crate::queries::{
-    EVENT_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS, SESSION_SELECT_COLUMNS,
-    SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS, approval_rule_from_row, event_type_from_db,
-    event_type_to_db, learning_entry_from_row, map_sqlx_error, platform_to_db, policy_action_to_db,
-    policy_scope_to_db, session_meta_from_row, session_status_to_db, session_summary_from_row,
-    task_segment_from_row,
+    EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
+    LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS,
+    SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS,
+    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, approval_rule_from_row, event_type_from_db,
+    event_type_to_db, experience_attribution_from_row, experience_record_from_row,
+    learning_candidate_from_row, learning_entry_from_row, map_sqlx_error, platform_to_db,
+    policy_action_to_db, policy_scope_to_db, session_meta_from_row, session_status_to_db,
+    session_summary_from_row, task_segment_from_row, task_strategy_success_rate_from_row,
 };
 use crate::schema;
 
 mod approval;
+mod experience;
 mod helpers;
 mod learning;
 mod segments;

@@ -65,11 +65,16 @@ The skill manifest is budgeted and sorted deterministically for cache stability.
 `SkillInjector` ranks all visible skills using:
 
 - keyword overlap with the current task
+- task-conditioned strategy success for the current task fingerprint
 - tenant-level resolution rate for the skill
 - normalized use count
 - recency
 
 Resolution-rate data comes from the `skill_resolution_rates` materialized view over `task_segments`. This means a skill that often leads to resolved tasks for a tenant can outrank a merely popular skill.
+Task-conditioned data comes from `task_strategy_success_rates`, which groups
+experience attributions by tenant, task fingerprint, subject type, and subject
+ID. It is smoothed by sample count and confidence, then falls back to the
+tenant-level rate when no similar task evidence exists.
 
 ## Distillation And Improvement
 
@@ -95,14 +100,25 @@ imported explicitly. Current flow:
 Skill improvement writes an updated `SKILL.md`, preserves supporting package
 files from the previous revision, and appends `skill_improved`.
 
+The experience-native path uses `ExperienceRecord` as the learning unit. It
+requires a resolved outcome, or a high-confidence partial outcome with helpful
+verification attribution. It creates a `learning_candidates` row before mutating
+a skill package, moves the candidate through `proposed -> evaluating ->
+promoted` or `rejected`, and records the candidate ID plus source experience IDs
+in the learning log when promotion succeeds.
+
 ## Unified Learning Pipeline
 
 ```text
 Conversations
   -> task_segments
   -> segment assessments
+  -> experience_records
+  -> experience_attributions
+  -> learning_candidates
+  -> promotion gates
   -> learning_log
-       -> outcome-weighted skill ranking
+       -> task-conditioned skill ranking
        -> memory consolidation
 ```
 
@@ -134,6 +150,10 @@ Current learning types include:
 - `skill_improved`
 - `memory_updated`
 - `segment_assessed`
+
+`learning_candidates` is not a replacement for `learning_log`. Candidates are
+mutable proposal state with evaluation payloads and explicit status transitions.
+`learning_log` remains the append-only audit stream for promoted learning.
 
 ## Memory Learning
 

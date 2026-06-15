@@ -7,6 +7,7 @@ mod approval;
 mod completion;
 mod context;
 mod events_stream;
+mod experience;
 mod hands;
 mod identifiers;
 mod learning;
@@ -37,6 +38,12 @@ pub use context::{
     estimate_text_tokens,
 };
 pub use events_stream::{ClaimCheck, EventFilter, EventRange, EventRecord, EventType, SequenceNum};
+pub use experience::{
+    AttributionEffect, AttributionSubjectType, ExperienceAttribution, ExperienceRecord,
+    ExperienceResource, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    LearningCandidateType, LearningRiskClass, TaskFacetSet, TaskFingerprint,
+    TaskStrategySuccessRate,
+};
 pub use hands::{
     HandHandle, HandResources, HandSpec, HandStatus, SandboxFile, SandboxTier,
     validate_sandbox_file_path,

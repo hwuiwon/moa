@@ -149,6 +149,10 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "034_segment_assessment_columns.sql",
         sql: include_str!("../migrations/postgres/034_segment_assessment_columns.sql"),
     },
+    SessionMigration {
+        name: "035_experience_learning.sql",
+        sql: include_str!("../migrations/postgres/035_experience_learning.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
@@ -176,7 +180,7 @@ pub async fn migrate(pool: &PgPool, schema_name: Option<&str>) -> Result<()> {
 async fn ensure_public_segment_views(pool: &PgPool) -> Result<()> {
     let missing_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) \
-         FROM (VALUES ('skill_resolution_rates'), ('segment_baselines')) AS expected(name) \
+         FROM (VALUES ('skill_resolution_rates'), ('segment_baselines'), ('task_strategy_success_rates')) AS expected(name) \
          LEFT JOIN pg_matviews views \
            ON views.schemaname = 'public' \
           AND views.matviewname = expected.name \

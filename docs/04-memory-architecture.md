@@ -125,8 +125,15 @@ Memory is one output of the broader learning loop:
 ```text
 Task segments
   -> segment assessments
-  -> learning_log
+  -> experience_records
+  -> experience_attributions
+  -> learning_candidates
+  -> learning_log after promotion
   -> skill ranking and graph memory consolidation
 ```
 
 Graph memory describes current knowledge; `learning_log` explains how and when a learned update entered the system.
+Memory candidates can be proposed from high-confidence resolved experiences,
+but the first implementation does not auto-promote them into graph writes.
+Promotion remains a consolidation or human-reviewed action so a single noisy
+segment cannot mutate durable memory.

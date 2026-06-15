@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use moa_core::{ExcludedItem, SkillMetadata};
+use moa_core::{ExcludedItem, SkillMetadata, TaskStrategySuccessRate};
 
 use crate::pipeline::memory::extract_search_keywords;
 
@@ -49,6 +49,7 @@ pub(super) fn rank_skills(
     query_keywords: &[String],
     budget: &ResolvedSkillBudget,
     resolution_rates: &HashMap<String, f64>,
+    task_strategy_rates: &HashMap<String, TaskStrategySuccessRate>,
 ) -> Vec<RankedSkill> {
     let max_use_count = skills
         .iter()
@@ -70,17 +71,38 @@ pub(super) fn rank_skills(
             };
             let recency_score = normalized_recency_score(metadata.last_used, oldest, newest);
             let manifest_entry = format_manifest_entry(&metadata, budget);
-            let score = resolution_rates
+            let global_rate = resolution_rates
                 .get(&metadata.name)
-                .map(|resolution_rate| {
-                    (0.3 * keyword_overlap)
-                        + (0.4 * resolution_rate)
-                        + (0.2 * normalized_use_count)
-                        + (0.1 * recency_score)
-                })
-                .unwrap_or_else(|| {
-                    (0.3 * keyword_overlap) + (0.5 * normalized_use_count) + (0.2 * recency_score)
-                });
+                .copied()
+                .unwrap_or(0.5)
+                .clamp(0.0, 1.0);
+            let task_rate = task_strategy_rates
+                .get(&metadata.name)
+                .map(smoothed_task_rate)
+                .unwrap_or(0.0);
+            let task_weight = task_strategy_rates
+                .get(&metadata.name)
+                .map(task_rate_weight)
+                .unwrap_or(0.0);
+            let score = if task_weight > 0.0 {
+                (0.35 * keyword_overlap)
+                    + (0.30 * task_rate * task_weight)
+                    + (0.15 * global_rate)
+                    + (0.12 * normalized_use_count)
+                    + (0.08 * recency_score)
+            } else if !task_strategy_rates.is_empty() {
+                (0.30 * keyword_overlap)
+                    + (0.25 * global_rate)
+                    + (0.20 * normalized_use_count)
+                    + (0.10 * recency_score)
+            } else if resolution_rates.contains_key(&metadata.name) {
+                (0.3 * keyword_overlap)
+                    + (0.4 * global_rate)
+                    + (0.2 * normalized_use_count)
+                    + (0.1 * recency_score)
+            } else {
+                (0.3 * keyword_overlap) + (0.5 * normalized_use_count) + (0.2 * recency_score)
+            };
 
             RankedSkill {
                 metadata,
@@ -92,6 +114,16 @@ pub(super) fn rank_skills(
 
     ranked.sort_by(compare_ranked_skills);
     ranked
+}
+
+fn smoothed_task_rate(rate: &TaskStrategySuccessRate) -> f64 {
+    let successes = rate.success_rate.clamp(0.0, 1.0) * rate.uses as f64;
+    ((1.0 + successes) / (2.0 + rate.uses as f64)).clamp(0.0, 1.0)
+}
+
+fn task_rate_weight(rate: &TaskStrategySuccessRate) -> f64 {
+    let sample_weight = (rate.uses as f64 / 5.0).clamp(0.0, 1.0);
+    sample_weight * rate.avg_confidence.clamp(0.0, 1.0)
 }
 
 pub(super) fn select_skills_within_budget(
@@ -252,6 +284,8 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
 mod tests {
     use std::collections::HashMap;
 
+    use moa_core::{AttributionSubjectType, TaskStrategySuccessRate};
+
     use super::{
         DEFAULT_MIN_MANIFEST_CHARS, MANIFEST_FOOTER, MANIFEST_PREAMBLE, ResolvedSkillBudget,
         format_manifest_entry, format_skill_manifest, rank_skills, select_skills_within_budget,
@@ -271,7 +305,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new());
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
         let exact_budget = MANIFEST_PREAMBLE.chars().count()
             + MANIFEST_FOOTER.chars().count()
             + ranked
@@ -323,7 +357,7 @@ mod tests {
         let budget = resolved_budget(
             MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60,
         );
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new());
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
         let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
 
         assert_eq!(selection.selected.len(), 1);
@@ -344,7 +378,13 @@ mod tests {
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
 
-        let ranked = rank_skills(&skills, &["auth".to_string()], &budget, &HashMap::new());
+        let ranked = rank_skills(
+            &skills,
+            &["auth".to_string()],
+            &budget,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
 
         assert_eq!(ranked[0].metadata.name, "alpha-auth");
         assert_eq!(ranked[1].metadata.name, "beta-db");
@@ -362,9 +402,48 @@ mod tests {
             ("high-resolution".to_string(), 1.0),
         ]);
 
-        let ranked = rank_skills(&skills, &[], &budget, &resolution_rates);
+        let ranked = rank_skills(&skills, &[], &budget, &resolution_rates, &HashMap::new());
 
         assert_eq!(ranked[0].metadata.name, "high-resolution");
+    }
+
+    #[test]
+    fn task_conditioned_skill_ranking_can_beat_higher_global_rate_with_enough_evidence() {
+        // Pins: task-specific skill success can outrank a globally better skill when evidence is strong.
+        let skills = vec![
+            test_skill("global-winner", "Rust auth workflow", 10, 0),
+            test_skill("task-winner", "Rust auth workflow", 10, 0),
+        ];
+        let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
+        let resolution_rates = HashMap::from([
+            ("global-winner".to_string(), 0.95),
+            ("task-winner".to_string(), 0.40),
+        ]);
+        let task_rates = HashMap::from([(
+            "task-winner".to_string(),
+            TaskStrategySuccessRate {
+                tenant_id: "tenant".to_string(),
+                task_fingerprint: "task-hash".to_string(),
+                subject_type: AttributionSubjectType::Skill,
+                subject_id: "task-winner".to_string(),
+                uses: 8,
+                success_rate: 1.0,
+                avg_confidence: 0.95,
+                avg_token_cost: 100.0,
+                avg_turn_count: 2.0,
+            },
+        )]);
+
+        let ranked = rank_skills(
+            &skills,
+            &["rust".to_string(), "auth".to_string()],
+            &budget,
+            &resolution_rates,
+            &task_rates,
+        );
+
+        assert_eq!(ranked[0].metadata.name, "task-winner");
+        assert_eq!(ranked[1].metadata.name, "global-winner");
     }
 
     #[test]
@@ -374,7 +453,7 @@ mod tests {
             test_skill("alpha", "Alpha workflow", 1, 5),
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new());
+        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
         assert_eq!(ranked[0].metadata.name, "zeta");
         assert_eq!(ranked[1].metadata.name, "alpha");
 
