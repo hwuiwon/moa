@@ -22,7 +22,7 @@ pub struct EvalPlan {
 }
 
 /// Builds a dry-run execution plan for one suite and a set of agent configs.
-pub(crate) fn build_eval_plan(
+pub fn build_eval_plan(
     base_config: &MoaConfig,
     suite: &TestSuite,
     configs: &[AgentConfig],

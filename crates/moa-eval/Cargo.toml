@@ -6,14 +6,15 @@ license.workspace = true
 
 [features]
 default = []
-langfuse = ["dep:reqwest"]
+langfuse = ["dep:reqwest", "moa-eval-core/langfuse"]
 
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-moa-brain = { workspace = true }
+moa-brain = { workspace = true, features = ["eval-harness"] }
 moa-core = { workspace = true }
+moa-eval-core = { workspace = true }
 moa-hands = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-memory-graph = { workspace = true }

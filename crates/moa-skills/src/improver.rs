@@ -1,22 +1,27 @@
 //! Existing-skill self-improvement logic.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "internal-eval-runner")]
+use std::sync::OnceLock;
 
 use chrono::Utc;
-use moa_core::{
-    CompletionRequest, Event, EventRecord, MemoryScope, MoaConfig, ModelTask, Result, SessionMeta,
-    SkillMetadata,
-};
+#[cfg(feature = "internal-eval-runner")]
+use moa_core::{CompletionRequest, MemoryScope, ModelTask};
+use moa_core::{Event, EventRecord, MoaConfig, Result, SessionMeta, SkillMetadata};
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
 
-use crate::format::{
-    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
-};
+use crate::format::SkillDocument;
+#[cfg(feature = "internal-eval-runner")]
+use crate::format::{parse_skill_markdown, render_skill_markdown, skill_metadata_from_document};
+#[cfg(feature = "internal-eval-runner")]
 use crate::package::{SKILL_MD_PATH, SkillPackage, SkillPackageFile, ValidatedSkillPackageFile};
+#[cfg(feature = "internal-eval-runner")]
 use crate::registry::{NewSkill, SkillRegistry};
+#[cfg(feature = "internal-eval-runner")]
 use crate::regression::{append_skill_regression_log, run_skill_regression};
 
+#[cfg(feature = "internal-eval-runner")]
 static IMPROVEMENT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 /// Outcome of one attempted existing-skill improvement.
@@ -93,6 +98,42 @@ pub async fn maybe_improve_skill_with_learning(
 
 /// Compares a run against an existing skill and returns a typed outcome for tests and callers.
 pub async fn improve_skill_with_learning(
+    config: &MoaConfig,
+    session: &SessionMeta,
+    existing: &SkillMetadata,
+    events: &[EventRecord],
+    model_router: Arc<ModelRouter>,
+    learning_store: Option<Arc<PostgresSessionStore>>,
+) -> Result<ImprovementResult> {
+    #[cfg(not(feature = "internal-eval-runner"))]
+    {
+        let _ = (
+            config,
+            session,
+            existing,
+            events,
+            model_router,
+            learning_store,
+        );
+        Ok(ImprovementResult::Skipped)
+    }
+
+    #[cfg(feature = "internal-eval-runner")]
+    {
+        improve_skill_with_learning_inner(
+            config,
+            session,
+            existing,
+            events,
+            model_router,
+            learning_store,
+        )
+        .await
+    }
+}
+
+#[cfg(feature = "internal-eval-runner")]
+async fn improve_skill_with_learning_inner(
     config: &MoaConfig,
     session: &SessionMeta,
     existing: &SkillMetadata,
@@ -222,6 +263,7 @@ pub async fn improve_skill_with_learning(
     })
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn package_with_replaced_skill_md(
     files: &[ValidatedSkillPackageFile],
     skill_md: String,
@@ -269,6 +311,7 @@ pub(crate) fn record_successful_use(skill: &mut SkillDocument, now: chrono::Date
     skill.frontmatter.set_updated(now);
 }
 
+#[cfg(feature = "internal-eval-runner")]
 pub(crate) fn record_successful_use_with_baseline(
     next_skill: &mut SkillDocument,
     previous_skill: &SkillDocument,
@@ -288,6 +331,7 @@ pub(crate) fn record_successful_use_with_baseline(
     next_skill.frontmatter.set_updated(now);
 }
 
+#[cfg(feature = "internal-eval-runner")]
 pub(crate) fn bump_version(version: &str) -> String {
     let mut parts = Vec::new();
     for segment in version.split('.') {
@@ -311,6 +355,7 @@ pub(crate) fn bump_version(version: &str) -> String {
         .join(".")
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn bump_version_for_change(version: &str, breaking_change: bool) -> String {
     if breaking_change {
         return bump_major_version(version);
@@ -318,6 +363,7 @@ fn bump_version_for_change(version: &str, breaking_change: bool) -> String {
     bump_version(version)
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn bump_major_version(version: &str) -> String {
     let Some(major) = version.split('.').next() else {
         return "2.0".to_string();
@@ -328,6 +374,7 @@ fn bump_major_version(version: &str) -> String {
     }
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn skill_signature_changed(previous: &SkillDocument, candidate: &SkillDocument) -> bool {
     previous.frontmatter.allowed_tools != candidate.frontmatter.allowed_tools
         || previous.frontmatter.compatibility != candidate.frontmatter.compatibility
@@ -340,6 +387,7 @@ fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_use
     ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn summarize_diff(previous: &str, candidate: &str) -> String {
     if previous == candidate {
         return "unchanged".to_string();
@@ -351,6 +399,7 @@ fn summarize_diff(previous: &str, candidate: &str) -> String {
     format!("body changed; line_delta={line_delta}")
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn build_improvement_prompt(current_skill: &str, events: &[EventRecord]) -> String {
     format!(
         "You are improving an existing MOA Agent Skill.\n\

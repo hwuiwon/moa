@@ -16,7 +16,7 @@ use moa_core::{
     ModelTier, Platform, SessionId, SessionMeta, SessionStatus, StopReason, TokenPricing,
     TokenUsage, ToolCallFormat, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
-use moa_eval::{ExpectedOutput, TestCase, TestSuite};
+use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 use moa_skills::{

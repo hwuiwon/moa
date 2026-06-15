@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+eval-harness = []
+
 [dependencies]
 async-trait.workspace = true
 blake3.workspace = true
@@ -43,3 +47,48 @@ proptest.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true
 wiremock.workspace = true
+
+[[example]]
+name = "chat_harness"
+path = "examples/chat_harness.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "brain_turn"
+path = "tests/brain_turn.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "brain_turn_cache_replay_e2e"
+path = "tests/brain_turn_cache_replay_e2e.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "cache_audit_offline"
+path = "tests/cache_audit_offline.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "live_cache_audit"
+path = "tests/live_cache_audit.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "live_harness"
+path = "tests/live_harness.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "live_harness_offline"
+path = "tests/live_harness_offline.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "skill_package_materialization"
+path = "tests/skill_package_materialization.rs"
+required-features = ["eval-harness"]
+
+[[test]]
+name = "stable_prefix"
+path = "tests/stable_prefix.rs"
+required-features = ["eval-harness"]

@@ -26,9 +26,10 @@ pub use package::{
     SkillPackageManifestFile, ValidatedSkillPackage, ValidatedSkillPackageFile,
 };
 pub use registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
+#[cfg(feature = "internal-eval-runner")]
+pub use regression::{SkillEvalRun, run_skill_regression, run_skill_suite};
 pub use regression::{
-    SkillEvalRun, SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary,
-    append_skill_regression_log, compare_scores, generate_skill_test_suite, run_skill_regression,
-    run_skill_suite,
+    SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary,
+    append_skill_regression_log, compare_scores, generate_skill_test_suite,
 };
 pub use render::{SkillRenderContext, render};

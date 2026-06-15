@@ -27,6 +27,7 @@ members = [
     "crates/moa-gateway",
     "crates/moa-security",
     "crates/moa-skills",
+    "crates/moa-eval/core",
     "crates/moa-eval",
     "crates/moa-loadtest",
     "crates/moa-test-support",
@@ -60,6 +61,7 @@ default-members = [
     "crates/moa-gateway",
     "crates/moa-security",
     "crates/moa-skills",
+    "crates/moa-eval/core",
     "crates/moa-eval",
     "crates/moa-loadtest",
 ]
@@ -77,6 +79,7 @@ moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-brain = { path = "crates/moa-brain" }
 moa-core = { path = "crates/moa-core" }
 moa-edge = { path = "crates/moa-edge" }
+moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }
 moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
 moa-gateway = { path = "crates/moa-gateway" }

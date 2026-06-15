@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-/// Result alias used throughout `moa-eval`.
+/// Result alias used throughout `moa-eval-core`.
 pub type Result<T> = std::result::Result<T, EvalError>;
 
-/// Errors returned by the `moa-eval` crate.
+/// Errors returned by the `moa-eval-core` crate.
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
     /// Reading a file or directory failed.
@@ -45,9 +45,6 @@ pub enum EvalError {
     /// A config or fixture path was invalid for eval execution.
     #[error("invalid eval configuration: {0}")]
     InvalidConfig(String),
-    /// A live eval exceeded its configured cost budget.
-    #[error(transparent)]
-    Cost(#[from] crate::kernel::CostError),
     /// A run could not complete because it was waiting on a human approval decision.
     #[error("eval run blocked on approval for tool {tool}")]
     ApprovalRequired {

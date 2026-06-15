@@ -1,8 +1,11 @@
 //! Restate service for hosted eval planning, execution, datasets, replay, and scores.
 
+#[cfg(feature = "internal-eval-runner")]
 use std::sync::Arc;
+#[cfg(feature = "internal-eval-runner")]
 use std::{future::Future, pin::Pin, result::Result as StdResult};
 
+#[cfg(any(feature = "internal-eval-runner", test))]
 use chrono::Utc;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
@@ -16,14 +19,21 @@ use moa_core::wire::{
     EvalSuiteListResponse, EvalSuiteSummary,
 };
 use moa_core::{MoaConfig, WorkspaceId};
+#[cfg(feature = "internal-eval-runner")]
 use moa_eval::{
-    AgentConfig, EngineOptions, EvalEngine, EvalResult, EvalStatus, EvaluatorOptions,
-    ExpectedOutput, ReplayConfig, ReporterOptions, TestCase, TestSuite, build_evaluators,
-    build_reporters, evaluate_run, token_f1,
+    EngineOptions, EvalEngine, EvaluatorOptions, ReporterOptions, build_evaluators,
+    build_reporters, evaluate_run,
 };
-use moa_lineage_core::{
-    LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue,
-};
+use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite, build_eval_plan};
+#[cfg(any(feature = "internal-eval-runner", test))]
+use moa_eval_core::{EvalResult, ReplayConfig, token_f1};
+#[cfg(feature = "internal-eval-runner")]
+use moa_eval_core::{EvalStatus, ExpectedOutput, TestCase};
+#[cfg(feature = "internal-eval-runner")]
+use moa_lineage_core::{LineageEvent, LineageSink};
+#[cfg(any(feature = "internal-eval-runner", test))]
+use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
+#[cfg(feature = "internal-eval-runner")]
 use moa_lineage_sink::{MpscSink, MpscSinkConfig};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
@@ -34,8 +44,11 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
-use crate::workflows::eval_run::{EvalRunClient, EvalRunWorkflowRequest};
+use crate::workflows::eval_run::EvalRunClient;
+#[cfg(feature = "internal-eval-runner")]
+use crate::workflows::eval_run::EvalRunWorkflowRequest;
 
+#[cfg(feature = "internal-eval-runner")]
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Workspace-scoped score summary SQL used by `Eval/scores`.
@@ -175,33 +188,46 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "run");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let acceptance_request = request.clone();
-        let response = ctx
-            .run(|| async move {
-                let suite = parse_suite_document(
-                    acceptance_request
-                        .suite_source
-                        .as_deref()
-                        .unwrap_or("<inline-suite>"),
-                    &acceptance_request.suite_document,
-                )
-                .map_err(eval_error_to_handler_error)?;
-                Ok::<_, HandlerError>(Json(accepted_eval_run_response(
-                    acceptance_request.workspace_id,
-                    Uuid::now_v7(),
-                    suite.name,
-                )))
-            })
-            .name("eval_run_accept")
-            .await?
-            .into_inner();
-        ctx.workflow_client::<EvalRunClient>(response.run_id.to_string())
-            .run(Json(EvalRunWorkflowRequest {
-                run_id: response.run_id,
-                request,
-            }))
-            .send();
-        Ok(Json(response))
+
+        #[cfg(not(feature = "internal-eval-runner"))]
+        {
+            return Err(TerminalError::new_with_code(
+                501,
+                "hosted eval execution requires the internal-eval-runner feature",
+            )
+            .into());
+        }
+
+        #[cfg(feature = "internal-eval-runner")]
+        {
+            let acceptance_request = request.clone();
+            let response = ctx
+                .run(|| async move {
+                    let suite = parse_suite_document(
+                        acceptance_request
+                            .suite_source
+                            .as_deref()
+                            .unwrap_or("<inline-suite>"),
+                        &acceptance_request.suite_document,
+                    )
+                    .map_err(eval_error_to_handler_error)?;
+                    Ok::<_, HandlerError>(Json(accepted_eval_run_response(
+                        acceptance_request.workspace_id,
+                        Uuid::now_v7(),
+                        suite.name,
+                    )))
+                })
+                .name("eval_run_accept")
+                .await?
+                .into_inner();
+            ctx.workflow_client::<EvalRunClient>(response.run_id.to_string())
+                .run(Json(EvalRunWorkflowRequest {
+                    run_id: response.run_id,
+                    request,
+                }))
+                .send();
+            Ok(Json(response))
+        }
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -278,14 +304,27 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "replay");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let runtime = OrchestratorCtx::current();
-        let config = runtime.config.as_ref().clone();
-        let pool = runtime.graph_pool.clone();
 
-        run_replay_request_isolated(config, pool, request)
-            .await
-            .map(Json::from)
-            .map_err(eval_error_to_handler_error)
+        #[cfg(not(feature = "internal-eval-runner"))]
+        {
+            return Err(TerminalError::new_with_code(
+                501,
+                "hosted eval replay requires the internal-eval-runner feature",
+            )
+            .into());
+        }
+
+        #[cfg(feature = "internal-eval-runner")]
+        {
+            let runtime = OrchestratorCtx::current();
+            let config = runtime.config.as_ref().clone();
+            let pool = runtime.graph_pool.clone();
+
+            run_replay_request_isolated(config, pool, request)
+                .await
+                .map(Json::from)
+                .map_err(eval_error_to_handler_error)
+        }
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -355,7 +394,7 @@ pub enum EvalServiceError {
     Json(#[from] serde_json::Error),
     /// The eval engine failed.
     #[error(transparent)]
-    Eval(Box<moa_eval::EvalError>),
+    Eval(Box<moa_eval_core::EvalError>),
     /// Database access failed.
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
@@ -398,8 +437,8 @@ pub enum EvalServiceError {
     },
 }
 
-impl From<moa_eval::EvalError> for EvalServiceError {
-    fn from(error: moa_eval::EvalError) -> Self {
+impl From<moa_eval_core::EvalError> for EvalServiceError {
+    fn from(error: moa_eval_core::EvalError) -> Self {
         Self::Eval(Box::new(error))
     }
 }
@@ -557,10 +596,22 @@ pub fn failed_eval_run_response(
 
 /// Runs an already-authorized eval request inside a hosted workflow.
 pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> EvalRunResponse {
-    let workspace_id = request.workspace_id.clone();
-    match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
-        Ok(response) => response,
-        Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
+    #[cfg(not(feature = "internal-eval-runner"))]
+    {
+        failed_eval_run_response(
+            request.workspace_id,
+            run_id,
+            "hosted eval execution requires the internal-eval-runner feature",
+        )
+    }
+
+    #[cfg(feature = "internal-eval-runner")]
+    {
+        let workspace_id = request.workspace_id.clone();
+        match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
+            Ok(response) => response,
+            Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
+        }
     }
 }
 
@@ -569,15 +620,27 @@ pub async fn execute_eval_run_request_isolated(
     run_id: Uuid,
     request: EvalRunRequest,
 ) -> EvalRunResponse {
-    let workspace_id = request.workspace_id.clone();
-    let join = tokio::task::spawn_blocking(move || {
-        block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
-    })
-    .await;
-    match join {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => failed_eval_run_response(workspace_id, run_id, error),
-        Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
+    #[cfg(not(feature = "internal-eval-runner"))]
+    {
+        failed_eval_run_response(
+            request.workspace_id,
+            run_id,
+            "hosted eval execution requires the internal-eval-runner feature",
+        )
+    }
+
+    #[cfg(feature = "internal-eval-runner")]
+    {
+        let workspace_id = request.workspace_id.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
+        })
+        .await;
+        match join {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => failed_eval_run_response(workspace_id, run_id, error),
+            Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
+        }
     }
 }
 
@@ -590,8 +653,7 @@ fn plan_eval_suite(
         &request.suite_document,
     )?;
     let configs = parse_agent_config_documents(&request.config_sources, &request.config_documents)?;
-    let engine = EvalEngine::new(config, EngineOptions::default())?;
-    let plan = engine.plan(&suite, &configs);
+    let plan = build_eval_plan(&config, &suite, &configs);
     Ok(EvalPlanResponse {
         suite_name: plan.suite_name,
         configs: plan.configs,
@@ -639,6 +701,7 @@ fn suite_list_response(
     })
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn execute_eval_run_request_inner(
     run_id: Uuid,
     request: EvalRunRequest,
@@ -696,7 +759,7 @@ async fn execute_eval_run_request_inner(
 pub async fn hosted_eval_report_artifacts(
     suite: &TestSuite,
     configs: &[AgentConfig],
-    run: &moa_eval::EvalRun,
+    run: &CoreEvalRun,
     specs: &[String],
     verbose: bool,
 ) -> Result<Option<Value>, EvalServiceError> {
@@ -719,19 +782,29 @@ pub async fn hosted_eval_report_artifacts(
                 }
             }));
         } else if spec == "langfuse" {
-            let reporters = build_reporters(
-                std::slice::from_ref(spec),
-                &ReporterOptions {
-                    verbose,
-                    color: false,
-                    json_pretty: true,
-                },
-            )?;
-            for reporter in reporters {
-                reporter.report(suite, configs, run).await?;
+            #[cfg(not(feature = "internal-eval-runner"))]
+            {
+                return Err(EvalServiceError::Runtime {
+                    message: "langfuse reports require the internal-eval-runner feature"
+                        .to_string(),
+                });
+            }
+            #[cfg(feature = "internal-eval-runner")]
+            {
+                let reporters = build_reporters(
+                    std::slice::from_ref(spec),
+                    &ReporterOptions {
+                        verbose,
+                        color: false,
+                        json_pretty: true,
+                    },
+                )?;
+                for reporter in reporters {
+                    reporter.report(suite, configs, run).await?;
+                }
             }
         } else {
-            return Err(moa_eval::EvalError::InvalidConfig(format!(
+            return Err(moa_eval_core::EvalError::InvalidConfig(format!(
                 "unknown report target '{spec}'"
             ))
             .into());
@@ -747,7 +820,7 @@ pub async fn hosted_eval_report_artifacts(
 fn render_hosted_terminal_report(
     suite: &TestSuite,
     configs: &[AgentConfig],
-    run: &moa_eval::EvalRun,
+    run: &CoreEvalRun,
     verbose: bool,
 ) -> String {
     let mut output = format!(
@@ -775,6 +848,7 @@ fn render_hosted_terminal_report(
     output
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn attach_summary_field(summary: &mut Value, field: &str, value: Value) {
     if let Some(object) = summary.as_object_mut() {
         object.insert(field.to_string(), value);
@@ -897,6 +971,7 @@ async fn list_datasets_for_workspace(
     })
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn replay_dataset_for_workspace(
     config: MoaConfig,
     pool: PgPool,
@@ -949,6 +1024,7 @@ async fn replay_dataset_for_workspace(
     })
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn run_replay_request_isolated(
     config: MoaConfig,
     pool: PgPool,
@@ -1025,15 +1101,18 @@ async fn compare_runs_for_workspace(
     })
 }
 
+#[cfg(any(feature = "internal-eval-runner", test))]
 #[derive(Clone, Debug)]
 struct ScopedDatasetItem {
     item_id: Uuid,
     workspace_id: WorkspaceId,
+    #[cfg(feature = "internal-eval-runner")]
     query: String,
     expected_answer: Option<String>,
     expected_chunk_ids: Vec<Uuid>,
 }
 
+#[cfg(feature = "internal-eval-runner")]
 #[derive(Clone, Debug)]
 struct ScopedReplayReport {
     run_id: Uuid,
@@ -1042,6 +1121,7 @@ struct ScopedReplayReport {
     scores: usize,
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn load_dataset_items_for_workspace(
     pool: &PgPool,
     workspace_id: &WorkspaceId,
@@ -1079,6 +1159,7 @@ async fn load_dataset_items_for_workspace(
         .collect()
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn replay_items_live(
     config: MoaConfig,
     sink: Arc<dyn LineageSink>,
@@ -1136,6 +1217,7 @@ async fn replay_items_live(
     Ok(report)
 }
 
+#[cfg(any(feature = "internal-eval-runner", test))]
 fn replay_score_records_for_item(
     item: &ScopedDatasetItem,
     result: &EvalResult,
@@ -1184,6 +1266,7 @@ fn replay_score_records_for_item(
     records
 }
 
+#[cfg(any(feature = "internal-eval-runner", test))]
 fn dataset_run_item_score_record(
     item: &ScopedDatasetItem,
     replay_config: &ReplayConfig,
@@ -1254,6 +1337,7 @@ fn parse_agent_config_documents(
         .collect()
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn option_u64_to_usize(
     value: Option<u64>,
     field: &'static str,
@@ -1265,6 +1349,7 @@ fn option_u64_to_usize(
         .transpose()
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn eval_ci_exit_code(ci: bool, results: &[EvalResult]) -> i32 {
     if !ci {
         return 0;
@@ -1284,6 +1369,7 @@ fn eval_ci_exit_code(ci: bool, results: &[EvalResult]) -> i32 {
     0
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn replay_evaluator_name(cfg: &ReplayConfig) -> String {
     match (&cfg.model_override, &cfg.embedder_override) {
         (Some(model), Some(embedder)) => format!("replay-f1:{model}:{embedder}"),
@@ -1330,6 +1416,7 @@ fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
     }
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn block_on_current_thread<T>(future: BoxFuture<T>) -> StdResult<T, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1353,6 +1440,7 @@ mod tests {
         let item = ScopedDatasetItem {
             item_id,
             workspace_id: WorkspaceId::new("workspace-a"),
+            #[cfg(feature = "internal-eval-runner")]
             query: "alpha?".to_string(),
             expected_answer: Some("alpha beta".to_string()),
             expected_chunk_ids: vec![
@@ -1407,6 +1495,7 @@ mod tests {
         let item = ScopedDatasetItem {
             item_id,
             workspace_id: WorkspaceId::new("workspace-a"),
+            #[cfg(feature = "internal-eval-runner")]
             query: "alpha?".to_string(),
             expected_answer: Some("alpha beta".to_string()),
             expected_chunk_ids: Vec::new(),

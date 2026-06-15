@@ -1,44 +1,32 @@
-//! Core evaluation types, loaders, and extension traits for MOA agent evals.
+//! Offline evaluation harnesses and internal-improvement runners for MOA.
 
 pub mod collector;
 pub mod engine;
-pub mod error;
-pub mod evaluator;
-pub mod evaluators;
 pub mod golden;
 pub mod kernel;
-pub mod loader;
 pub mod long_conversation;
 pub mod memory_eval;
 pub mod pentest;
-pub mod plan;
-pub mod replay;
 pub mod reporter;
 pub mod reporters;
-pub mod results;
 pub mod setup;
-pub mod types;
 
 pub use collector::TrajectoryCollector;
-pub use engine::{EngineOptions, EvalEngine, EvalRun, RunSummary};
-pub use error::{EvalError, Result};
-pub use evaluator::Evaluator;
-pub use evaluators::{
-    EvaluatorOptions, OutputMatchEvaluator, ThresholdEvaluator, ToolSuccessEvaluator,
-    TrajectoryMatchEvaluator, build_evaluators, evaluate_run, score_is_failure,
+pub use engine::EvalEngine;
+pub use moa_eval_core::{
+    AgentConfig, EngineOptions, EvalError, EvalMetrics, EvalPlan, EvalResult, EvalRun, EvalScore,
+    EvalStatus, Evaluator, EvaluatorOptions, ExpectedOutput, InstructionOverride,
+    LongConversationMode, LongSessionInterleaving, LongTestCase, MemoryOverride,
+    OutputMatchEvaluator, PermissionOverride, ReplayConfig, Result, RunSummary, ScoreValue,
+    SecondaryLongSession, SkillOverride, TestCase, TestCaseKind, TestSuite, ThresholdEvaluator,
+    ToolOverride, ToolSuccessEvaluator, TrajectoryMatchEvaluator, TrajectoryStep, build_eval_plan,
+    build_evaluators, discover_configs, discover_suites, evaluate_run, load_agent_config,
+    load_suite, score_is_failure, token_f1,
 };
-pub use loader::{discover_configs, discover_suites, load_agent_config, load_suite};
-pub use plan::EvalPlan;
-pub use replay::{ReplayConfig, token_f1};
+pub use moa_eval_core::{error, evaluator, evaluators, loader, plan, replay, results, types};
 pub use reporter::Reporter;
 pub use reporters::JsonReporter;
 #[cfg(feature = "langfuse")]
 pub use reporters::LangfuseReporter;
 pub use reporters::{ReporterOptions, TerminalReporter, build_reporters};
-pub use results::{EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TrajectoryStep};
 pub use setup::{AgentEnvironment, build_agent_environment};
-pub use types::{
-    AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode,
-    LongSessionInterleaving, LongTestCase, MemoryOverride, PermissionOverride,
-    SecondaryLongSession, SkillOverride, TestCase, TestCaseKind, TestSuite, ToolOverride,
-};

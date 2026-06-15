@@ -137,6 +137,12 @@ pub enum CostError {
     },
 }
 
+impl From<CostError> for crate::EvalError {
+    fn from(error: CostError) -> Self {
+        Self::InvalidConfig(error.to_string())
+    }
+}
+
 /// Estimates token count using the documented fallback of four UTF-8 chars per token.
 #[must_use]
 pub fn estimate_tokens_from_chars(text: &str) -> u64 {

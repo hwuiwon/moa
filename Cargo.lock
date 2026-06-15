@@ -3554,6 +3554,7 @@ dependencies = [
  "futures-util",
  "moa-brain",
  "moa-core",
+ "moa-eval-core",
  "moa-hands",
  "moa-lineage-core",
  "moa-memory-graph",
@@ -3580,6 +3581,26 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-opentelemetry",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-eval-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "moa-core",
+ "moa-providers",
+ "regex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
  "uuid",
  "workspace-hack",
 ]
@@ -3937,6 +3958,7 @@ dependencies = [
  "moa-brain",
  "moa-core",
  "moa-eval",
+ "moa-eval-core",
  "moa-hands",
  "moa-lineage-audit",
  "moa-lineage-core",
@@ -4046,6 +4068,7 @@ dependencies = [
  "chrono",
  "moa-core",
  "moa-eval",
+ "moa-eval-core",
  "moa-memory-graph",
  "moa-providers",
  "moa-session",

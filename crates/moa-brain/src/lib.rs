@@ -1,6 +1,7 @@
-//! Brain harness and context compilation pipeline for MOA.
+//! Context compilation, retrieval, and turn helpers for MOA.
 
 pub mod compaction;
+#[cfg(feature = "eval-harness")]
 pub mod harness;
 pub mod loop_detector;
 pub mod pipeline;
@@ -10,6 +11,7 @@ pub mod retrieval;
 pub mod tool_stats;
 pub mod turn;
 
+#[cfg(feature = "eval-harness")]
 pub use harness::{
     StreamedTurnResult, TurnResult, run_brain_turn, run_streamed_turn,
     run_streamed_turn_with_signals,

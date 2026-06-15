@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+internal-eval-runner = ["dep:moa-eval"]
+
 [dependencies]
 chrono.workspace = true
 moa-core = { workspace = true }
-moa-eval = { workspace = true }
+moa-eval-core = { workspace = true }
+moa-eval = { workspace = true, optional = true }
 moa-memory-graph = { workspace = true }
 moa-providers = { workspace = true }
 moa-session = { workspace = true }
@@ -27,3 +32,18 @@ workspace-hack = { workspace = true }
 async-trait.workspace = true
 moa-test-support = { workspace = true }
 tempfile.workspace = true
+
+[[test]]
+name = "distillation"
+path = "tests/distillation.rs"
+required-features = ["internal-eval-runner"]
+
+[[test]]
+name = "improver"
+path = "tests/improver.rs"
+required-features = ["internal-eval-runner"]
+
+[[test]]
+name = "regression"
+path = "tests/regression.rs"
+required-features = ["internal-eval-runner"]

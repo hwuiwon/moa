@@ -8,7 +8,12 @@ license.workspace = true
 default = []
 integration = []
 auth0 = ["moa-auth-providers/auth0"]
-langfuse = ["moa-eval/langfuse"]
+internal-eval-runner = [
+    "dep:moa-eval",
+    "moa-brain/eval-harness",
+    "moa-skills/internal-eval-runner",
+]
+langfuse = ["internal-eval-runner", "moa-eval/langfuse"]
 
 [[bin]]
 name = "moa-orchestrator-bin"
@@ -32,7 +37,8 @@ moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
 moa-brain = { workspace = true }
 moa-core = { workspace = true }
-moa-eval = { workspace = true }
+moa-eval-core = { workspace = true }
+moa-eval = { workspace = true, optional = true }
 moa-hands = { workspace = true }
 moa-lineage-audit = { workspace = true }
 moa-lineage-core = { workspace = true }

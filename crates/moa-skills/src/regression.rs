@@ -1,32 +1,45 @@
 //! Skill regression testing, suite generation, and improvement comparison.
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "internal-eval-runner")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "internal-eval-runner")]
 use std::sync::Arc;
 
-use moa_core::{
-    Event, EventRecord, LLMProvider, MoaConfig, MoaError, Result, SessionMeta, SkillMetadata,
-    WorkspaceId,
+use moa_core::{Event, EventRecord, MoaConfig, MoaError, Result, SessionMeta, WorkspaceId};
+#[cfg(feature = "internal-eval-runner")]
+use moa_core::{LLMProvider, SkillMetadata};
+#[cfg(feature = "internal-eval-runner")]
+use moa_eval::{EngineOptions, EvalEngine};
+#[cfg(feature = "internal-eval-runner")]
+use moa_eval_core::{
+    AgentConfig, EvalRun, EvalStatus, Evaluator, EvaluatorOptions, PermissionOverride,
+    SkillOverride, build_evaluators, evaluate_run, load_suite,
 };
-use moa_eval::{
-    AgentConfig, EngineOptions, EvalEngine, EvalRun, EvalStatus, Evaluator, EvaluatorOptions,
-    PermissionOverride, SkillOverride, TestCase, TestSuite, build_evaluators, evaluate_run,
-    load_suite,
-};
+use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
+#[cfg(feature = "internal-eval-runner")]
 use moa_memory_graph::GraphStore;
+#[cfg(not(feature = "internal-eval-runner"))]
+use moa_session::PostgresSessionStore;
+#[cfg(feature = "internal-eval-runner")]
 use moa_session::{PostgresSessionStore, create_session_store};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::format::{
-    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
-};
+use crate::format::SkillDocument;
+#[cfg(feature = "internal-eval-runner")]
+use crate::format::{parse_skill_markdown, render_skill_markdown, skill_metadata_from_document};
+#[cfg(feature = "internal-eval-runner")]
 use crate::registry::SkillRegistry;
 
 const DEFAULT_SUITE_TIMEOUT_SECONDS: u64 = 120;
+#[cfg(feature = "internal-eval-runner")]
 const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
+#[cfg(feature = "internal-eval-runner")]
 const DEFAULT_SKILL_EVALUATORS: &[&str] = &["trajectory", "output", "tool_success"];
 
 /// Completed execution of one skill suite.
+#[cfg(feature = "internal-eval-runner")]
 #[derive(Debug, Clone)]
 pub struct SkillEvalRun {
     /// Loaded suite definition.
@@ -93,6 +106,7 @@ impl SkillRegressionReport {
 }
 
 /// Runs the persisted suite for one workspace skill using the configured provider selection.
+#[cfg(feature = "internal-eval-runner")]
 pub async fn run_skill_suite(
     config: &MoaConfig,
     _graph_store: Arc<dyn GraphStore>,
@@ -126,6 +140,7 @@ pub async fn run_skill_suite(
 }
 
 /// Runs regression tests for an updated skill candidate against the previous version.
+#[cfg(feature = "internal-eval-runner")]
 pub async fn run_skill_regression(
     config: &MoaConfig,
     session: &SessionMeta,
@@ -234,6 +249,7 @@ pub async fn run_skill_regression(
     })
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn run_has_execution_failure(run: &EvalRun) -> bool {
     run.results
         .iter()
@@ -319,9 +335,9 @@ fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestS
                 case_name
             },
             input: extract_task_input(events),
-            expected_output: Some(moa_eval::ExpectedOutput {
+            expected_output: Some(ExpectedOutput {
                 contains: extract_response_keywords(events),
-                ..moa_eval::ExpectedOutput::default()
+                ..ExpectedOutput::default()
             }),
             expected_trajectory: Some(extract_tool_trajectory(events)),
             timeout_seconds: Some(DEFAULT_SUITE_TIMEOUT_SECONDS),
@@ -334,6 +350,7 @@ fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestS
     }
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn execute_skill_suite(
     config: &MoaConfig,
     suite: &TestSuite,
@@ -375,6 +392,7 @@ async fn execute_skill_suite(
     })
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn resolve_workspace_skill(
     registry: &SkillRegistry,
     workspace_id: &WorkspaceId,
@@ -401,6 +419,7 @@ async fn resolve_workspace_skill(
     )))
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn summarize_regression_run(run: &EvalRun) -> SkillRegressionSummary {
     let total_runs = run.results.len();
     let failed_runs = run
@@ -422,7 +441,8 @@ fn summarize_regression_run(run: &EvalRun) -> SkillRegressionSummary {
     }
 }
 
-fn result_score(result: &moa_eval::EvalResult) -> f64 {
+#[cfg(feature = "internal-eval-runner")]
+fn result_score(result: &moa_eval_core::EvalResult) -> f64 {
     if result.scores.is_empty() {
         return match result.status {
             EvalStatus::Passed | EvalStatus::Skipped => 1.0,
@@ -434,15 +454,15 @@ fn result_score(result: &moa_eval::EvalResult) -> f64 {
     let mut count = 0usize;
     for score in &result.scores {
         match &score.value {
-            moa_eval::ScoreValue::Numeric(value) => {
+            moa_eval_core::ScoreValue::Numeric(value) => {
                 total += *value;
                 count += 1;
             }
-            moa_eval::ScoreValue::Boolean(value) => {
+            moa_eval_core::ScoreValue::Boolean(value) => {
                 total += if *value { 1.0 } else { 0.0 };
                 count += 1;
             }
-            moa_eval::ScoreValue::Categorical(_) => {}
+            moa_eval_core::ScoreValue::Categorical(_) => {}
         }
     }
 
@@ -453,6 +473,7 @@ fn result_score(result: &moa_eval::EvalResult) -> f64 {
     }
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn estimate_suite_cost(suite: &TestSuite, llm: &dyn LLMProvider) -> f64 {
     let pricing = llm.capabilities().pricing;
     suite
@@ -468,6 +489,7 @@ fn estimate_suite_cost(suite: &TestSuite, llm: &dyn LLMProvider) -> f64 {
         .sum()
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn default_skill_evaluators() -> Result<Vec<Box<dyn Evaluator>>> {
     let names = DEFAULT_SKILL_EVALUATORS
         .iter()
@@ -476,6 +498,7 @@ fn default_skill_evaluators() -> Result<Vec<Box<dyn Evaluator>>> {
     build_evaluators(&names, &EvaluatorOptions::default()).map_err(map_eval_error)
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn skill_agent_config(skill_name: &str, skill_dir: &Path) -> AgentConfig {
     AgentConfig {
         name: format!("skill-{skill_name}"),
@@ -493,6 +516,7 @@ fn skill_agent_config(skill_name: &str, skill_dir: &Path) -> AgentConfig {
     }
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn materialize_skill_dir(root: &Path, skill_name: &str, markdown: &str) -> Result<PathBuf> {
     let slug = slugify_case_name(skill_name);
     let skill_dir = root.join(slug);
@@ -501,6 +525,7 @@ async fn materialize_skill_dir(root: &Path, skill_name: &str, markdown: &str) ->
     Ok(skill_dir)
 }
 
+#[cfg(feature = "internal-eval-runner")]
 async fn remove_dir_if_exists(path: &Path) -> Result<()> {
     if fs::try_exists(path).await? {
         fs::remove_dir_all(path).await?;
@@ -596,6 +621,7 @@ fn slugify_case_name(value: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn estimate_tokens(text: &str) -> usize {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -605,14 +631,17 @@ fn estimate_tokens(text: &str) -> usize {
     }
 }
 
+#[cfg(feature = "internal-eval-runner")]
 fn skill_selector_matches(selector: &str, name: &str) -> bool {
     selector == name || name.contains(selector)
 }
 
-fn map_eval_error(error: moa_eval::EvalError) -> MoaError {
+#[cfg(feature = "internal-eval-runner")]
+fn map_eval_error(error: moa_eval_core::EvalError) -> MoaError {
     MoaError::StorageError(error.to_string())
 }
 
+#[cfg(feature = "internal-eval-runner")]
 struct ResolvedWorkspaceSkill {
     metadata: SkillMetadata,
     document: SkillDocument,

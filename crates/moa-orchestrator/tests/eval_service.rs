@@ -4,7 +4,9 @@ use moa_core::WorkspaceId;
 use moa_core::wire::{
     EvalRunResponse, EvalRunStatus, EvalRunStatusResponse, EvalSuiteListDocument,
 };
-use moa_eval::{AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite};
+use moa_eval_core::{
+    AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite,
+};
 use moa_orchestrator::services::eval::{
     EVAL_COMPARE_SQL, EVAL_SCORES_SQL, EvalServiceError, accepted_eval_run_response,
     hosted_eval_report_artifacts, parse_dataset_items_for_workspace,
