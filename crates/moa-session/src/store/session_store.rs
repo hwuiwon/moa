@@ -24,8 +24,8 @@ impl PostgresSessionStore {
         .bind(meta.workspace_id.to_string())
         .bind(meta.user_id.to_string())
         .bind(meta.title)
-        .bind(session_status_to_db(&meta.status))
-        .bind(platform_to_db(&meta.platform))
+        .bind(meta.status.as_str())
+        .bind(meta.platform.as_str())
         .bind(meta.platform_channel)
         .bind(meta.model.to_string())
         .bind(meta.created_at)
@@ -213,7 +213,7 @@ impl SessionStore for PostgresSessionStore {
             query.push(" AND event_type IN (");
             let mut separated = query.separated(", ");
             for event_type in event_types {
-                separated.push_bind(event_type_to_db(&event_type));
+                separated.push_bind(event_type.as_str());
             }
             separated.push_unseparated(")");
         }
@@ -290,7 +290,7 @@ impl SessionStore for PostgresSessionStore {
         let affected = sqlx::query(&format!(
             "UPDATE {sessions} SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4"
         ))
-        .bind(session_status_to_db(&status))
+        .bind(status.as_str())
         .bind(now)
         .bind(completed_at)
         .bind(session_id.0)
@@ -435,7 +435,7 @@ impl SessionStore for PostgresSessionStore {
             query.push(" AND e.event_type IN (");
             let mut separated = query.separated(", ");
             for event_type in event_types {
-                separated.push_bind(event_type_to_db(&event_type));
+                separated.push_bind(event_type.as_str());
             }
             separated.push_unseparated(")");
         }
@@ -475,11 +475,11 @@ impl SessionStore for PostgresSessionStore {
         }
         if let Some(status) = filter.status {
             query.push(" AND status = ");
-            query.push_bind(session_status_to_db(&status));
+            query.push_bind(status.as_str());
         }
         if let Some(platform) = filter.platform {
             query.push(" AND platform = ");
-            query.push_bind(platform_to_db(&platform));
+            query.push_bind(platform.as_str());
         }
 
         query.push(" ORDER BY updated_at DESC");

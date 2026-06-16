@@ -23,8 +23,8 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         title: row
             .try_get::<Option<String>, _>("title")
             .map_err(map_sqlx_error)?,
-        status: session_status_from_db(&status_text)?,
-        platform: platform_from_db(&platform_text)?,
+        status: from_db("session status", &status_text)?,
+        platform: from_db("platform", &platform_text)?,
         platform_channel: row
             .try_get::<Option<String>, _>("platform_channel")
             .map_err(map_sqlx_error)?,
@@ -85,10 +85,12 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
         title: row
             .try_get::<Option<String>, _>("title")
             .map_err(map_sqlx_error)?,
-        status: session_status_from_db(
+        status: from_db(
+            "session status",
             &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
         )?,
-        platform: platform_from_db(
+        platform: from_db(
+            "platform",
             &row.try_get::<String, _>("platform")
                 .map_err(map_sqlx_error)?,
         )?,
@@ -223,7 +225,8 @@ pub(crate) fn experience_record_from_row(row: &PgRow) -> Result<ExperienceRecord
             .try_get::<Vec<String>, _>("actions")
             .map_err(map_sqlx_error)?,
         resources: json_column(row, "resources")?,
-        outcome: segment_outcome_from_db(
+        outcome: from_db(
+            "segment outcome",
             &row.try_get::<String, _>("outcome")
                 .map_err(map_sqlx_error)?,
         )?,
@@ -277,14 +280,16 @@ pub(crate) fn experience_attribution_from_row(row: &PgRow) -> Result<ExperienceA
             .try_get::<Option<String>, _>("user_id")
             .map_err(map_sqlx_error)?
             .map(UserId),
-        subject_type: attribution_subject_type_from_db(
+        subject_type: from_db(
+            "attribution subject type",
             &row.try_get::<String, _>("subject_type")
                 .map_err(map_sqlx_error)?,
         )?,
         subject_id: row
             .try_get::<String, _>("subject_id")
             .map_err(map_sqlx_error)?,
-        effect: attribution_effect_from_db(
+        effect: from_db(
+            "attribution effect",
             &row.try_get::<String, _>("effect").map_err(map_sqlx_error)?,
         )?,
         confidence: row
@@ -312,11 +317,13 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
             .try_get::<Option<String>, _>("user_id")
             .map_err(map_sqlx_error)?
             .map(UserId),
-        candidate_type: learning_candidate_type_from_db(
+        candidate_type: from_db(
+            "learning candidate type",
             &row.try_get::<String, _>("candidate_type")
                 .map_err(map_sqlx_error)?,
         )?,
-        status: learning_candidate_status_from_db(
+        status: from_db(
+            "learning candidate status",
             &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
         )?,
         target_id: row
@@ -355,7 +362,8 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
         confidence: row
             .try_get::<Option<f64>, _>("confidence")
             .map_err(map_sqlx_error)?,
-        risk_class: learning_risk_class_from_db(
+        risk_class: from_db(
+            "learning risk class",
             &row.try_get::<String, _>("risk_class")
                 .map_err(map_sqlx_error)?,
         )?,
@@ -386,7 +394,8 @@ pub(crate) fn task_strategy_success_rate_from_row(row: &PgRow) -> Result<TaskStr
         task_fingerprint: row
             .try_get::<String, _>("task_fingerprint")
             .map_err(map_sqlx_error)?,
-        subject_type: attribution_subject_type_from_db(
+        subject_type: from_db(
+            "attribution subject type",
             &row.try_get::<String, _>("subject_type")
                 .map_err(map_sqlx_error)?,
         )?,
@@ -420,81 +429,6 @@ where
         .map_err(|error| MoaError::StorageError(format!("invalid {column} payload: {error}")))
 }
 
-fn segment_outcome_from_db(value: &str) -> Result<SegmentOutcome> {
-    match value {
-        "resolved" => Ok(SegmentOutcome::Resolved),
-        "partial" => Ok(SegmentOutcome::Partial),
-        "unknown" => Ok(SegmentOutcome::Unknown),
-        "failed" => Ok(SegmentOutcome::Failed),
-        "abandoned" => Ok(SegmentOutcome::Abandoned),
-        other => Err(MoaError::StorageError(format!(
-            "invalid segment outcome `{other}`"
-        ))),
-    }
-}
-
-fn attribution_subject_type_from_db(value: &str) -> Result<AttributionSubjectType> {
-    match value {
-        "skill" => Ok(AttributionSubjectType::Skill),
-        "tool" => Ok(AttributionSubjectType::Tool),
-        "memory" => Ok(AttributionSubjectType::Memory),
-        "policy" => Ok(AttributionSubjectType::Policy),
-        "verification" => Ok(AttributionSubjectType::Verification),
-        other => Err(MoaError::StorageError(format!(
-            "invalid attribution subject type `{other}`"
-        ))),
-    }
-}
-
-fn attribution_effect_from_db(value: &str) -> Result<AttributionEffect> {
-    match value {
-        "helpful" => Ok(AttributionEffect::Helpful),
-        "neutral" => Ok(AttributionEffect::Neutral),
-        "harmful" => Ok(AttributionEffect::Harmful),
-        "mixed" => Ok(AttributionEffect::Mixed),
-        other => Err(MoaError::StorageError(format!(
-            "invalid attribution effect `{other}`"
-        ))),
-    }
-}
-
-fn learning_candidate_type_from_db(value: &str) -> Result<LearningCandidateType> {
-    match value {
-        "skill" => Ok(LearningCandidateType::Skill),
-        "memory" => Ok(LearningCandidateType::Memory),
-        "policy" => Ok(LearningCandidateType::Policy),
-        "eval" => Ok(LearningCandidateType::Eval),
-        "prompt" => Ok(LearningCandidateType::Prompt),
-        other => Err(MoaError::StorageError(format!(
-            "invalid learning candidate type `{other}`"
-        ))),
-    }
-}
-
-fn learning_candidate_status_from_db(value: &str) -> Result<LearningCandidateStatus> {
-    match value {
-        "proposed" => Ok(LearningCandidateStatus::Proposed),
-        "evaluating" => Ok(LearningCandidateStatus::Evaluating),
-        "promoted" => Ok(LearningCandidateStatus::Promoted),
-        "rejected" => Ok(LearningCandidateStatus::Rejected),
-        "rolled_back" => Ok(LearningCandidateStatus::RolledBack),
-        other => Err(MoaError::StorageError(format!(
-            "invalid learning candidate status `{other}`"
-        ))),
-    }
-}
-
-fn learning_risk_class_from_db(value: &str) -> Result<LearningRiskClass> {
-    match value {
-        "low" => Ok(LearningRiskClass::Low),
-        "medium" => Ok(LearningRiskClass::Medium),
-        "high" => Ok(LearningRiskClass::High),
-        other => Err(MoaError::StorageError(format!(
-            "invalid learning risk class `{other}`"
-        ))),
-    }
-}
-
 fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAssessment>> {
     value
         .map(|value| {
@@ -517,10 +451,14 @@ pub(crate) fn approval_rule_from_row(row: &PgRow) -> Result<ApprovalRule> {
         pattern: row
             .try_get::<String, _>("pattern")
             .map_err(map_sqlx_error)?,
-        action: policy_action_from_db(
+        action: from_db(
+            "approval rule action",
             &row.try_get::<String, _>("action").map_err(map_sqlx_error)?,
         )?,
-        scope: policy_scope_from_db(&row.try_get::<String, _>("scope").map_err(map_sqlx_error)?)?,
+        scope: from_db(
+            "approval rule scope",
+            &row.try_get::<String, _>("scope").map_err(map_sqlx_error)?,
+        )?,
         created_by: moa_core::UserId(
             row.try_get::<String, _>("created_by")
                 .map_err(map_sqlx_error)?,

@@ -35,7 +35,8 @@ pub enum PlanError {
 }
 
 /// Retrieval strategy selected from a query's wording.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum Strategy {
     /// Graph traversal should have the strongest influence.
     GraphFirst,
@@ -43,6 +44,14 @@ pub enum Strategy {
     VectorFirst,
     /// All retrieval legs should run with default weights.
     Both,
+}
+
+impl Strategy {
+    /// Returns the stable cache-key representation of this strategy.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
 }
 
 /// Planned query produced before retrieval.
@@ -510,6 +519,15 @@ mod tests {
     #[test]
     fn planner_classify_defaults_to_both() {
         assert_eq!(classify_strategy("tell me about deploys"), Strategy::Both);
+    }
+
+    #[test]
+    fn strategy_labels_are_pinned() {
+        // Pins: these strings are embedded in retrieval cache keys; keep them
+        // byte-identical so cached entries stay addressable across deploys.
+        assert_eq!(Strategy::GraphFirst.as_str(), "graph_first");
+        assert_eq!(Strategy::VectorFirst.as_str(), "vector_first");
+        assert_eq!(Strategy::Both.as_str(), "both");
     }
 
     #[test]

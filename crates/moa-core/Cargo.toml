@@ -20,6 +20,7 @@ secrecy.workspace = true
 shell-words.workspace = true
 similar.workspace = true
 sqlx = { workspace = true, features = ["chrono", "uuid"] }
+strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-metrics.workspace = true

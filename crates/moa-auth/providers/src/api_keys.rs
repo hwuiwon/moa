@@ -2,7 +2,6 @@
 //!
 //! Wire format: `moa_<env>_<random>_<crc32>`.
 
-use std::fmt;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -36,8 +35,11 @@ static VALIDATION_CACHE: OnceLock<Cache<ValidationCacheKey, ResolvedKey>> = Once
 static VALIDATION_KEY_IDS: OnceLock<Cache<Uuid, ValidationCacheKey>> = OnceLock::new();
 
 /// Environment segment embedded in a MOA API key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum Env {
     /// Live environment.
     Live,
@@ -53,12 +55,7 @@ impl Env {
     /// Return the key-format string for this environment.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Env::Live => "live",
-            Env::Prod => "prod",
-            Env::Stg => "stg",
-            Env::Dev => "dev",
-        }
+        self.into()
     }
 
     /// Parse an environment segment.
@@ -71,12 +68,6 @@ impl Env {
             "dev" => Some(Env::Dev),
             _ => None,
         }
-    }
-}
-
-impl fmt::Display for Env {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
     }
 }
 
@@ -479,6 +470,32 @@ async fn invalidate_validation_cache_for_key_id(key_id: Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_strings_are_pinned_and_round_trip() {
+        // Pins: the environment segment crosses the API-key wire format and is
+        // persisted to the `api_keys.env` column, so every label must stay
+        // byte-identical in both directions.
+        let cases = [
+            (Env::Live, "live"),
+            (Env::Prod, "prod"),
+            (Env::Stg, "stg"),
+            (Env::Dev, "dev"),
+        ];
+        for (value, label) in cases {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(value.to_string(), label);
+            assert_eq!(Env::parse(label), Some(value));
+            assert_eq!(label.parse::<Env>().unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn env_rejects_unknown_strings() {
+        // Pins: unknown segments fail both parse entry points.
+        assert_eq!(Env::parse("prd"), None);
+        assert!("prd".parse::<Env>().is_err());
+    }
 
     #[test]
     fn generated_key_has_correct_shape() {

@@ -9,7 +9,7 @@ use moa_core::{MemoryScope, ScopeContext, ScopeTier, ScopedConn};
 use moka::future::Cache;
 use sqlx::PgPool;
 
-use crate::planning::{PlannedQuery, Strategy};
+use crate::planning::PlannedQuery;
 use crate::retrieval::hybrid::{HybridRetriever, Result};
 use crate::retrieval::{RetrievalHit, RetrievalRequest};
 
@@ -298,7 +298,7 @@ fn canonicalize(
     }
     out.push('|');
     out.push_str("strategy=");
-    out.push_str(strategy_str(planned.strategy));
+    out.push_str(planned.strategy.as_str());
     out.push_str("|scope=");
     push_scope(&mut out, &req.scope);
     out.push_str("|layers=");
@@ -377,14 +377,6 @@ fn push_scope(out: &mut String, scope: &MemoryScope) {
     }
 }
 
-fn strategy_str(strategy: Strategy) -> &'static str {
-    match strategy {
-        Strategy::GraphFirst => "graph_first",
-        Strategy::VectorFirst => "vector_first",
-        Strategy::Both => "both",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -395,6 +387,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::planning::Strategy;
     use crate::retrieval::LegSources;
     use crate::retrieval::ranking::{
         RANKING_PIPELINE_VERSION, RankingConfig, RankingMode, ranking_fingerprint,

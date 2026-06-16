@@ -23,8 +23,11 @@ pub struct AuthConfig {
 }
 
 /// Trusted identity header handling mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AuthHeaderTrustKind {
     /// Reject requests that do not include the required identity header set.
     #[default]
@@ -37,16 +40,16 @@ impl AuthHeaderTrustKind {
     /// Return the serialized configuration value.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-            Self::Lenient => "lenient",
-        }
+        self.into()
     }
 }
 
 /// Supported authentication provider kinds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AuthProviderKind {
     /// Local API-key authentication.
     #[default]
@@ -64,12 +67,7 @@ impl AuthProviderKind {
     /// Return the serialized configuration value.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Disabled => "disabled",
-            Self::Auth0 => "auth0",
-            Self::Oidc => "oidc",
-        }
+        self.into()
     }
 }
 

@@ -12,7 +12,21 @@ use super::{BrainId, SessionId, UserId, WorkspaceId};
 pub type SequenceNum = u64;
 
 /// Event type discriminator used for filtering and indexing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// The strum `IntoStaticStr`/`EnumString` derives intentionally use the verbatim
+/// PascalCase variant names — that is the persisted database representation
+/// (see `event_type_to_db`), which differs from the snake_case serde/JSON form.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     /// `SessionCreated`.
@@ -71,6 +85,17 @@ pub enum EventType {
     Error,
     /// `Warning`.
     Warning,
+}
+
+impl EventType {
+    /// Returns the stable database representation.
+    ///
+    /// This is the verbatim PascalCase variant name (the persisted form), which
+    /// is intentionally distinct from the snake_case serde/JSON representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        self.into()
+    }
 }
 
 /// Event listing range.

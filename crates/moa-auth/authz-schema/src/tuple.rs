@@ -1,15 +1,15 @@
 //! Typed OpenFGA tuple keys for MOA authorization.
 
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use uuid::Uuid;
 
 /// The full enumeration of object types in schema v1.
 ///
 /// OpenFGA receives these as strings at the wire boundary, while Rust call
 /// sites use this enum to avoid ad hoc object-type literals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ObjectType {
     /// A tenant/team boundary.
     Tenant,
@@ -27,24 +27,10 @@ pub enum ObjectType {
     Agent,
 }
 
-impl fmt::Display for ObjectType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Tenant => "tenant",
-            Self::Workspace => "workspace",
-            Self::Session => "session",
-            Self::KnowledgeBase => "knowledge_base",
-            Self::Document => "document",
-            Self::ApiKey => "api_key",
-            Self::Agent => "agent",
-        };
-        f.write_str(value)
-    }
-}
-
 /// Subject types on the user side of an OpenFGA tuple.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum UserType {
     /// A human user.
     User,
@@ -54,25 +40,15 @@ pub enum UserType {
     ApiKey,
 }
 
-impl fmt::Display for UserType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::User => "user",
-            Self::Agent => "agent",
-            Self::ApiKey => "api_key",
-        };
-        f.write_str(value)
-    }
-}
-
 /// Relations defined in schema v1.
 ///
 /// The caller is responsible for choosing a relation that exists on the target
 /// object type. `moa-authz` enforces that at runtime; a fully type-safe
 /// per-object relation enum is deferred until relation drift becomes a real
 /// maintenance problem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Relation {
     /// Tenant membership.
     Member,
@@ -104,29 +80,6 @@ pub enum Relation {
     KnowledgeBase,
     /// API-key principal alias relationship.
     Principal,
-}
-
-impl fmt::Display for Relation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            Self::Member => "member",
-            Self::Admin => "admin",
-            Self::BillingAdmin => "billing_admin",
-            Self::ScimAdmin => "scim_admin",
-            Self::Editor => "editor",
-            Self::Owner => "owner",
-            Self::Participant => "participant",
-            Self::Reader => "reader",
-            Self::Writer => "writer",
-            Self::Operator => "operator",
-            Self::CanActAs => "can_act_as",
-            Self::Tenant => "tenant",
-            Self::Workspace => "workspace",
-            Self::KnowledgeBase => "knowledge_base",
-            Self::Principal => "principal",
-        };
-        f.write_str(value)
-    }
 }
 
 /// A fully qualified OpenFGA tuple key.
@@ -214,7 +167,8 @@ pub struct TupleKeyWire {
 }
 
 /// Tuple mutation operation for idempotency-key construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum TupleOp {
     /// Write a tuple.
     Write,
@@ -222,19 +176,64 @@ pub enum TupleOp {
     Delete,
 }
 
-impl fmt::Display for TupleOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Write => "write",
-            Self::Delete => "delete",
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::SCHEMA_V1_JSON;
+
+    #[test]
+    fn display_strings_are_pinned() {
+        // Pins: strum-derived `Display` output must stay byte-identical to the
+        // previous hand-written tables, since these strings cross the OpenFGA
+        // wire boundary and are baked into outbox idempotency keys.
+        let object_types = [
+            (ObjectType::Tenant, "tenant"),
+            (ObjectType::Workspace, "workspace"),
+            (ObjectType::Session, "session"),
+            (ObjectType::KnowledgeBase, "knowledge_base"),
+            (ObjectType::Document, "document"),
+            (ObjectType::ApiKey, "api_key"),
+            (ObjectType::Agent, "agent"),
+        ];
+        for (value, label) in object_types {
+            assert_eq!(value.to_string(), label);
+        }
+
+        let user_types = [
+            (UserType::User, "user"),
+            (UserType::Agent, "agent"),
+            (UserType::ApiKey, "api_key"),
+        ];
+        for (value, label) in user_types {
+            assert_eq!(value.to_string(), label);
+        }
+
+        let relations = [
+            (Relation::Member, "member"),
+            (Relation::Admin, "admin"),
+            (Relation::BillingAdmin, "billing_admin"),
+            (Relation::ScimAdmin, "scim_admin"),
+            (Relation::Editor, "editor"),
+            (Relation::Owner, "owner"),
+            (Relation::Participant, "participant"),
+            (Relation::Reader, "reader"),
+            (Relation::Writer, "writer"),
+            (Relation::Operator, "operator"),
+            (Relation::CanActAs, "can_act_as"),
+            (Relation::Tenant, "tenant"),
+            (Relation::Workspace, "workspace"),
+            (Relation::KnowledgeBase, "knowledge_base"),
+            (Relation::Principal, "principal"),
+        ];
+        for (value, label) in relations {
+            assert_eq!(value.to_string(), label);
+        }
+
+        let tuple_ops = [(TupleOp::Write, "write"), (TupleOp::Delete, "delete")];
+        for (value, label) in tuple_ops {
+            assert_eq!(value.to_string(), label);
+        }
+    }
 
     #[test]
     fn tuple_wire_format_user_to_workspace() {

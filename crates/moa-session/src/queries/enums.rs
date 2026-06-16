@@ -1,165 +1,185 @@
 //! Database enum conversion helpers for session queries.
+//!
+//! Each enum's persisted label is produced by `strum`-derived `as_str()` (write)
+//! and `FromStr` (read) on the `moa_core` definitions, so the `to_db` direction
+//! is simply `value.as_str()` at the call site. `from_db` is the single adapter
+//! that turns a parse failure into a `StorageError` naming the column and value.
+
+use std::str::FromStr;
 
 use super::*;
 
-pub(crate) fn session_status_to_db(status: &SessionStatus) -> &'static str {
-    match status {
-        SessionStatus::Created => "created",
-        SessionStatus::Running => "running",
-        SessionStatus::Paused => "paused",
-        SessionStatus::WaitingApproval => "waiting_approval",
-        SessionStatus::Completed => "completed",
-        SessionStatus::Cancelled => "cancelled",
-        SessionStatus::Failed => "failed",
-    }
+/// Parses a stored database label into its enum.
+///
+/// `kind` names the column for diagnostics; an unrecognized label becomes a
+/// [`MoaError::StorageError`] that quotes both the column kind and the value.
+pub(crate) fn from_db<E: FromStr>(kind: &str, value: &str) -> Result<E> {
+    E::from_str(value)
+        .map_err(|_| MoaError::StorageError(format!("unknown {kind} value `{value}`")))
 }
 
-/// Parses a session status from its stored database representation.
-pub(crate) fn session_status_from_db(value: &str) -> Result<SessionStatus> {
-    match value {
-        "created" => Ok(SessionStatus::Created),
-        "running" => Ok(SessionStatus::Running),
-        "paused" => Ok(SessionStatus::Paused),
-        "waiting_approval" => Ok(SessionStatus::WaitingApproval),
-        "completed" => Ok(SessionStatus::Completed),
-        "cancelled" => Ok(SessionStatus::Cancelled),
-        "failed" => Ok(SessionStatus::Failed),
-        _ => Err(MoaError::StorageError(format!(
-            "unknown session status value `{value}`"
-        ))),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moa_core::{
+        AttributionEffect, AttributionSubjectType, EventType, LearningCandidateStatus,
+        LearningCandidateType, LearningRiskClass, Platform, PolicyAction, PolicyScope,
+        SegmentOutcome, SessionStatus,
+    };
 
-/// Converts a platform enum to its stored database representation.
-pub(crate) fn platform_to_db(platform: &Platform) -> &'static str {
-    match platform {
-        Platform::Telegram => "telegram",
-        Platform::Slack => "slack",
-        Platform::Discord => "discord",
-        Platform::Api => "api",
-    }
-}
+    #[test]
+    fn db_labels_are_pinned_and_round_trip() {
+        // Pins: the persisted strings strum derives must stay byte-identical to the
+        // previous hand-written tables, and every label round-trips via `from_db`.
+        let session_statuses = [
+            (SessionStatus::Created, "created"),
+            (SessionStatus::Running, "running"),
+            (SessionStatus::Paused, "paused"),
+            (SessionStatus::WaitingApproval, "waiting_approval"),
+            (SessionStatus::Completed, "completed"),
+            (SessionStatus::Cancelled, "cancelled"),
+            (SessionStatus::Failed, "failed"),
+        ];
+        for (value, label) in session_statuses {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<SessionStatus>("session status", label).unwrap(),
+                value
+            );
+        }
 
-/// Parses a platform enum from its stored database representation.
-pub(crate) fn platform_from_db(value: &str) -> Result<Platform> {
-    match value {
-        "telegram" => Ok(Platform::Telegram),
-        "slack" => Ok(Platform::Slack),
-        "discord" => Ok(Platform::Discord),
-        "api" => Ok(Platform::Api),
-        _ => Err(MoaError::StorageError(format!(
-            "unknown platform value `{value}`"
-        ))),
-    }
-}
+        let platforms = [
+            (Platform::Telegram, "telegram"),
+            (Platform::Slack, "slack"),
+            (Platform::Discord, "discord"),
+            (Platform::Api, "api"),
+        ];
+        for (value, label) in platforms {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(from_db::<Platform>("platform", label).unwrap(), value);
+        }
 
-/// Converts an event type enum to its stored database representation.
-pub(crate) fn event_type_to_db(event_type: &EventType) -> &'static str {
-    match event_type {
-        EventType::SessionCreated => "SessionCreated",
-        EventType::SessionStatusChanged => "SessionStatusChanged",
-        EventType::SessionCompleted => "SessionCompleted",
-        EventType::SegmentStarted => "SegmentStarted",
-        EventType::SegmentCompleted => "SegmentCompleted",
-        EventType::UserMessage => "UserMessage",
-        EventType::QueuedMessage => "QueuedMessage",
-        EventType::BrainThinking => "BrainThinking",
-        EventType::BrainResponse => "BrainResponse",
-        EventType::ToolCall => "ToolCall",
-        EventType::ToolResult => "ToolResult",
-        EventType::ToolError => "ToolError",
-        EventType::ApprovalRequested => "ApprovalRequested",
-        EventType::ApprovalDecided => "ApprovalDecided",
-        EventType::SubAgentSpawned => "SubAgentSpawned",
-        EventType::SubAgentMessageSent => "SubAgentMessageSent",
-        EventType::SubAgentStatusChanged => "SubAgentStatusChanged",
-        EventType::SubAgentNotificationDelivered => "SubAgentNotificationDelivered",
-        EventType::MemoryRead => "MemoryRead",
-        EventType::MemoryWrite => "MemoryWrite",
-        EventType::MemoryIngest => "MemoryIngest",
-        EventType::HandProvisioned => "HandProvisioned",
-        EventType::HandDestroyed => "HandDestroyed",
-        EventType::HandError => "HandError",
-        EventType::Checkpoint => "Checkpoint",
-        EventType::CacheReport => "CacheReport",
-        EventType::Error => "Error",
-        EventType::Warning => "Warning",
-    }
-}
+        // Event types persist as verbatim PascalCase (distinct from the snake_case
+        // serde/JSON form), so spot-check single- and multi-word variants.
+        let event_types = [
+            (EventType::SessionCreated, "SessionCreated"),
+            (EventType::ToolError, "ToolError"),
+            (
+                EventType::SubAgentNotificationDelivered,
+                "SubAgentNotificationDelivered",
+            ),
+            (EventType::Warning, "Warning"),
+        ];
+        for (value, label) in event_types {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(from_db::<EventType>("event type", label).unwrap(), value);
+        }
 
-/// Parses an event type enum from its stored database representation.
-pub(crate) fn event_type_from_db(value: &str) -> Result<EventType> {
-    match value {
-        "SessionCreated" => Ok(EventType::SessionCreated),
-        "SessionStatusChanged" => Ok(EventType::SessionStatusChanged),
-        "SessionCompleted" => Ok(EventType::SessionCompleted),
-        "SegmentStarted" => Ok(EventType::SegmentStarted),
-        "SegmentCompleted" => Ok(EventType::SegmentCompleted),
-        "UserMessage" => Ok(EventType::UserMessage),
-        "QueuedMessage" => Ok(EventType::QueuedMessage),
-        "BrainThinking" => Ok(EventType::BrainThinking),
-        "BrainResponse" => Ok(EventType::BrainResponse),
-        "ToolCall" => Ok(EventType::ToolCall),
-        "ToolResult" => Ok(EventType::ToolResult),
-        "ToolError" => Ok(EventType::ToolError),
-        "ApprovalRequested" => Ok(EventType::ApprovalRequested),
-        "ApprovalDecided" => Ok(EventType::ApprovalDecided),
-        "SubAgentSpawned" => Ok(EventType::SubAgentSpawned),
-        "SubAgentMessageSent" => Ok(EventType::SubAgentMessageSent),
-        "SubAgentStatusChanged" => Ok(EventType::SubAgentStatusChanged),
-        "SubAgentNotificationDelivered" => Ok(EventType::SubAgentNotificationDelivered),
-        "MemoryRead" => Ok(EventType::MemoryRead),
-        "MemoryWrite" => Ok(EventType::MemoryWrite),
-        "MemoryIngest" => Ok(EventType::MemoryIngest),
-        "HandProvisioned" => Ok(EventType::HandProvisioned),
-        "HandDestroyed" => Ok(EventType::HandDestroyed),
-        "HandError" => Ok(EventType::HandError),
-        "Checkpoint" => Ok(EventType::Checkpoint),
-        "CacheReport" => Ok(EventType::CacheReport),
-        "Error" => Ok(EventType::Error),
-        "Warning" => Ok(EventType::Warning),
-        _ => Err(MoaError::StorageError(format!(
-            "unknown event type value `{value}`"
-        ))),
-    }
-}
+        assert_eq!(PolicyAction::RequireApproval.as_str(), "require_approval");
+        assert_eq!(
+            from_db::<PolicyAction>("approval rule action", "deny").unwrap(),
+            PolicyAction::Deny
+        );
+        assert_eq!(PolicyScope::Global.as_str(), "global");
+        assert_eq!(
+            from_db::<PolicyScope>("approval rule scope", "workspace").unwrap(),
+            PolicyScope::Workspace
+        );
 
-/// Converts a policy action to its stored representation.
-pub(crate) fn policy_action_to_db(action: &PolicyAction) -> &'static str {
-    match action {
-        PolicyAction::Allow => "allow",
-        PolicyAction::Deny => "deny",
-        PolicyAction::RequireApproval => "require_approval",
-    }
-}
+        // Experience / segment enums (formerly hand-rolled in rows.rs).
+        let segment_outcomes = [
+            (SegmentOutcome::Resolved, "resolved"),
+            (SegmentOutcome::Partial, "partial"),
+            (SegmentOutcome::Unknown, "unknown"),
+            (SegmentOutcome::Failed, "failed"),
+            (SegmentOutcome::Abandoned, "abandoned"),
+        ];
+        for (value, label) in segment_outcomes {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<SegmentOutcome>("segment outcome", label).unwrap(),
+                value
+            );
+        }
 
-/// Parses a policy action from its stored representation.
-pub(crate) fn policy_action_from_db(value: &str) -> Result<PolicyAction> {
-    match value {
-        "allow" => Ok(PolicyAction::Allow),
-        "deny" => Ok(PolicyAction::Deny),
-        "require_approval" => Ok(PolicyAction::RequireApproval),
-        other => Err(MoaError::StorageError(format!(
-            "unknown approval rule action `{other}`"
-        ))),
-    }
-}
+        let subject_types = [
+            (AttributionSubjectType::Skill, "skill"),
+            (AttributionSubjectType::Tool, "tool"),
+            (AttributionSubjectType::Memory, "memory"),
+            (AttributionSubjectType::Policy, "policy"),
+            (AttributionSubjectType::Verification, "verification"),
+        ];
+        for (value, label) in subject_types {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<AttributionSubjectType>("attribution subject type", label).unwrap(),
+                value
+            );
+        }
 
-/// Converts a policy scope to its stored representation.
-pub(crate) fn policy_scope_to_db(scope: &PolicyScope) -> &'static str {
-    match scope {
-        PolicyScope::Workspace => "workspace",
-        PolicyScope::Global => "global",
-    }
-}
+        let effects = [
+            (AttributionEffect::Helpful, "helpful"),
+            (AttributionEffect::Neutral, "neutral"),
+            (AttributionEffect::Harmful, "harmful"),
+            (AttributionEffect::Mixed, "mixed"),
+        ];
+        for (value, label) in effects {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<AttributionEffect>("attribution effect", label).unwrap(),
+                value
+            );
+        }
 
-/// Parses a policy scope from its stored representation.
-pub(crate) fn policy_scope_from_db(value: &str) -> Result<PolicyScope> {
-    match value {
-        "workspace" => Ok(PolicyScope::Workspace),
-        "global" => Ok(PolicyScope::Global),
-        other => Err(MoaError::StorageError(format!(
-            "unknown approval rule scope `{other}`"
-        ))),
+        let candidate_types = [
+            (LearningCandidateType::Skill, "skill"),
+            (LearningCandidateType::Memory, "memory"),
+            (LearningCandidateType::Policy, "policy"),
+            (LearningCandidateType::Eval, "eval"),
+            (LearningCandidateType::Prompt, "prompt"),
+        ];
+        for (value, label) in candidate_types {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<LearningCandidateType>("learning candidate type", label).unwrap(),
+                value
+            );
+        }
+
+        let candidate_statuses = [
+            (LearningCandidateStatus::Proposed, "proposed"),
+            (LearningCandidateStatus::Evaluating, "evaluating"),
+            (LearningCandidateStatus::Promoted, "promoted"),
+            (LearningCandidateStatus::Rejected, "rejected"),
+            (LearningCandidateStatus::RolledBack, "rolled_back"),
+        ];
+        for (value, label) in candidate_statuses {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<LearningCandidateStatus>("learning candidate status", label).unwrap(),
+                value
+            );
+        }
+
+        let risk_classes = [
+            (LearningRiskClass::Low, "low"),
+            (LearningRiskClass::Medium, "medium"),
+            (LearningRiskClass::High, "high"),
+        ];
+        for (value, label) in risk_classes {
+            assert_eq!(value.as_str(), label);
+            assert_eq!(
+                from_db::<LearningRiskClass>("learning risk class", label).unwrap(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_labels_error_with_the_offending_value() {
+        let error = from_db::<SessionStatus>("session status", "bogus").unwrap_err();
+        assert!(error.to_string().contains("bogus"));
+        // PascalCase event types must not accept the snake_case serde form.
+        assert!(from_db::<EventType>("event type", "session_created").is_err());
     }
 }

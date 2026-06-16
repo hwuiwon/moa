@@ -16,7 +16,8 @@ pub enum RewriteDecision {
 }
 
 /// Reason the query-rewrite gate skipped the LLM call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum SkipReason {
     /// Query rewriting is disabled by config.
     Disabled,
@@ -40,17 +41,7 @@ pub enum SkipReason {
 
 impl SkipReason {
     pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::CircuitOpen => "circuit_open",
-            Self::NoMemoryRetrieval => "no_memory_retrieval",
-            Self::NoVectorRetrieval => "no_vector_retrieval",
-            Self::EmptyQuery => "empty_query",
-            Self::ToolLikeVerb => "tool_like_verb",
-            Self::ExactAnchors => "exact_anchors",
-            Self::FirstTurnExplicit => "first_turn_explicit",
-            Self::NoRewriteSignal => "no_rewrite_signal",
-        }
+        self.into()
     }
 }
 
@@ -247,6 +238,26 @@ mod tests {
     use moa_core::{ContextMessage, QueryRewriteConfig, RewriteReason};
 
     use super::{RewriteDecision, RewriteGateInput, SkipReason, decide};
+
+    #[test]
+    fn skip_reason_labels_are_pinned() {
+        // Pins: these strings are emitted as metric labels; keep them byte-identical
+        // so dashboards keyed on the snake_case reason continue to aggregate.
+        let labels = [
+            (SkipReason::Disabled, "disabled"),
+            (SkipReason::CircuitOpen, "circuit_open"),
+            (SkipReason::NoMemoryRetrieval, "no_memory_retrieval"),
+            (SkipReason::NoVectorRetrieval, "no_vector_retrieval"),
+            (SkipReason::EmptyQuery, "empty_query"),
+            (SkipReason::ToolLikeVerb, "tool_like_verb"),
+            (SkipReason::ExactAnchors, "exact_anchors"),
+            (SkipReason::FirstTurnExplicit, "first_turn_explicit"),
+            (SkipReason::NoRewriteSignal, "no_rewrite_signal"),
+        ];
+        for (reason, label) in labels {
+            assert_eq!(reason.as_str(), label);
+        }
+    }
 
     fn gate(query: &str, history: Vec<ContextMessage>) -> RewriteDecision {
         decide(RewriteGateInput {

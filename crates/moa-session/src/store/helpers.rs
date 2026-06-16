@@ -20,8 +20,8 @@ impl PostgresSessionStore {
         let active = sqlx::query_scalar::<_, i64>(&format!(
             "SELECT COUNT(*)::BIGINT FROM {sessions} WHERE status IN ($1, $2)"
         ))
-        .bind(session_status_to_db(&SessionStatus::Running))
-        .bind(session_status_to_db(&SessionStatus::WaitingApproval))
+        .bind(SessionStatus::Running.as_str())
+        .bind(SessionStatus::WaitingApproval.as_str())
         .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -55,7 +55,7 @@ impl PostgresSessionStore {
             sequence_num: row
                 .try_get::<i64, _>("sequence_num")
                 .map_err(map_sqlx_error)? as u64,
-            event_type: event_type_from_db(&event_type_text)?,
+            event_type: from_db("event type", &event_type_text)?,
             event,
             timestamp: row
                 .try_get::<chrono::DateTime<Utc>, _>("timestamp")

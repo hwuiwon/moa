@@ -7,8 +7,19 @@ use uuid::Uuid;
 use super::{Attachment, ModelId, Platform, SequenceNum, SessionId, UserId, WorkspaceId};
 
 /// Session lifecycle status.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SessionStatus {
     /// Session exists but has not started execution.
     Created,
@@ -24,6 +35,14 @@ pub enum SessionStatus {
     Cancelled,
     /// Session failed.
     Failed,
+}
+
+impl SessionStatus {
+    /// Returns the stable database representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        self.into()
+    }
 }
 
 /// Canonical user-authored message payload.

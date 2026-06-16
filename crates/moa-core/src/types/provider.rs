@@ -19,8 +19,9 @@ pub enum ModelTask {
 }
 
 /// Stable high-level pricing tier used for analytics and event attribution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ModelTier {
     /// Frontier/user-facing work.
     Main,
@@ -46,9 +47,6 @@ impl ModelTier {
     /// Returns the stable string form used in JSON payloads and analytics.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Main => "main",
-            Self::Auxiliary => "auxiliary",
-        }
+        self.into()
     }
 }

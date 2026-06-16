@@ -23,8 +23,11 @@ impl Default for AsyncAuthzConfig {
 }
 
 /// Supported async authorization provider kinds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AsyncAuthzKind {
     /// Builtin Postgres + Restate awakeable approvals.
     #[default]
@@ -37,10 +40,7 @@ impl AsyncAuthzKind {
     /// Return the serialized configuration value.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Builtin => "builtin",
-            Self::Auth0 => "auth0",
-        }
+        self.into()
     }
 }
 

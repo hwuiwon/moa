@@ -3,8 +3,11 @@
 use crate::*;
 
 /// Execution mode for the load harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum LoadMode {
     /// Use the scripted mock provider and exercise only MOA infrastructure.
     Mock,
@@ -13,8 +16,11 @@ pub enum LoadMode {
 }
 
 /// Session profile family for the generated workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SessionProfileKind {
     /// Five simple interactive turns.
     Short,
@@ -101,19 +107,37 @@ impl LoadTestOptions {
 
 impl LoadMode {
     pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Mock => "mock",
-            Self::Live => "live",
-        }
+        self.into()
     }
 }
 
 impl SessionProfileKind {
     pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Short => "short",
-            Self::Long => "long",
-            Self::Mixed => "mixed",
+        self.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_labels_are_pinned() {
+        // Pins: the strum-derived `as_str()` output must stay byte-identical to
+        // the previous hand-written tables. These strings appear in load-test
+        // reports and CLI value names, so they must not drift.
+        let load_modes = [(LoadMode::Mock, "mock"), (LoadMode::Live, "live")];
+        for (value, label) in load_modes {
+            assert_eq!(value.as_str(), label);
+        }
+
+        let profiles = [
+            (SessionProfileKind::Short, "short"),
+            (SessionProfileKind::Long, "long"),
+            (SessionProfileKind::Mixed, "mixed"),
+        ];
+        for (value, label) in profiles {
+            assert_eq!(value.as_str(), label);
         }
     }
 }

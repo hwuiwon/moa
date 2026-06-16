@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use super::lineage::LineageConfig;
 
 /// Observability configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum OtlpProtocol {
     /// Export OTLP spans over gRPC.
     #[default]
@@ -20,10 +23,7 @@ pub enum OtlpProtocol {
 impl OtlpProtocol {
     /// Returns the serialized config string for this protocol.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Grpc => "grpc",
-            Self::Http => "http",
-        }
+        self.into()
     }
 }
 

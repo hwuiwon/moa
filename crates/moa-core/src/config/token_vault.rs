@@ -11,8 +11,11 @@ pub struct TokenVaultConfig {
 }
 
 /// Supported token vault provider kinds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum TokenVaultKind {
     /// No token vault configured.
     #[default]
@@ -25,9 +28,6 @@ impl TokenVaultKind {
     /// Return the serialized configuration value.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Auth0 => "auth0",
-        }
+        self.into()
     }
 }

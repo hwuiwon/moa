@@ -28,8 +28,11 @@ impl Default for AuthzConfig {
 }
 
 /// Supported authorization engines.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AuthzEngine {
     /// Self-hosted OpenFGA, Postgres-backed.
     #[default]
@@ -42,10 +45,7 @@ impl AuthzEngine {
     /// Return the serialized configuration value for this engine.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Openfga => "openfga",
-            Self::Auth0Fga => "auth0_fga",
-        }
+        self.into()
     }
 }
 

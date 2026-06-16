@@ -82,8 +82,11 @@ pub struct ApprovalPrompt {
 }
 
 /// Persistent approval rule action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum PolicyAction {
     /// Automatically allow matching tool calls.
     Allow,
@@ -93,14 +96,33 @@ pub enum PolicyAction {
     RequireApproval,
 }
 
+impl PolicyAction {
+    /// Returns the stable database representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        self.into()
+    }
+}
+
 /// Scope a persistent approval rule applies to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum PolicyScope {
     /// Rule applies within a single workspace.
     Workspace,
     /// Rule applies globally across workspaces.
     Global,
+}
+
+impl PolicyScope {
+    /// Returns the stable database representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        self.into()
+    }
 }
 
 /// Persistent approval rule stored for tool execution policies.

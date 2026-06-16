@@ -28,11 +28,10 @@ use crate::queries::{
     EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
     LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS,
     SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS,
-    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, approval_rule_from_row, event_type_from_db,
-    event_type_to_db, experience_attribution_from_row, experience_record_from_row,
-    learning_candidate_from_row, learning_entry_from_row, map_sqlx_error, platform_to_db,
-    policy_action_to_db, policy_scope_to_db, session_meta_from_row, session_status_to_db,
-    session_summary_from_row, task_segment_from_row, task_strategy_success_rate_from_row,
+    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, approval_rule_from_row, experience_attribution_from_row,
+    experience_record_from_row, from_db, learning_candidate_from_row, learning_entry_from_row,
+    map_sqlx_error, session_meta_from_row, session_summary_from_row, task_segment_from_row,
+    task_strategy_success_rate_from_row,
 };
 use crate::schema;
 
@@ -237,9 +236,15 @@ impl PostgresSessionStore {
         blob_store: Arc<dyn BlobStore>,
         blob_threshold_bytes: usize,
     ) -> Result<Self> {
-        let pool =
-            Self::connect_with_retry(database_url, pool_min, pool_max, connect_timeout_secs, 3)
-                .await?;
+        let pool = Self::connect_with_retry(
+            database_url,
+            pool_min,
+            pool_max,
+            connect_timeout_secs,
+            3,
+            schema_name,
+        )
+        .await?;
         schema::migrate(&pool, schema_name).await?;
         let store = Self {
             url: database_url.to_string(),
@@ -258,16 +263,31 @@ impl PostgresSessionStore {
         pool_max: u32,
         connect_timeout_secs: u64,
         max_retries: u32,
+        schema_name: Option<&str>,
     ) -> Result<PgPool> {
         let backoff = ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(500))
             .with_max_times(max_retries.saturating_sub(1) as usize);
+        let search_path = schema_name
+            .map(|schema_name| format!("{}, public", quote_identifier(schema_name)))
+            .unwrap_or_else(|| "public".to_string());
 
         (|| async {
+            let search_path = search_path.clone();
             PgPoolOptions::new()
                 .min_connections(pool_min)
                 .max_connections(pool_max)
                 .acquire_timeout(Duration::from_secs(connect_timeout_secs))
+                .after_connect(move |conn, _meta| {
+                    let search_path = search_path.clone();
+                    Box::pin(async move {
+                        sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                            .bind(search_path)
+                            .execute(conn)
+                            .await?;
+                        Ok(())
+                    })
+                })
                 .connect(database_url)
                 .await
         })

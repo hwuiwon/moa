@@ -1,7 +1,6 @@
 //! Memory subsystem and embedding configuration.
 
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 /// Memory bootstrap and maintenance configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,36 +121,15 @@ impl Default for MemoryRankingConfig {
 }
 
 /// Ranking mode for graph-memory retrieval.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum MemoryRankingMode {
     /// Preserve the legacy RRF plus layer-bias ranking path.
     Legacy,
     /// Apply deterministic feature scoring after candidate hydration.
     #[default]
     FeatureV1,
-}
-
-impl FromStr for MemoryRankingMode {
-    type Err = MemoryRankingModeParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "legacy" => Ok(Self::Legacy),
-            "feature_v1" => Ok(Self::FeatureV1),
-            _ => Err(MemoryRankingModeParseError),
-        }
-    }
-}
-
-/// Parse error for memory ranking mode strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoryRankingModeParseError;
-
-impl std::fmt::Display for MemoryRankingModeParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("expected one of legacy, feature_v1")
-    }
 }
 
 /// Weights used by deterministic graph-memory ranking.
@@ -201,8 +179,9 @@ impl Default for MemoryRankingWeights {
 }
 
 /// Reranker enablement mode for graph-memory retrieval.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum MemoryRerankerMode {
     /// Do not apply reranking.
     #[default]
@@ -211,29 +190,6 @@ pub enum MemoryRerankerMode {
     EvalOnly,
     /// Apply reranking in the normal runtime retrieval pipeline.
     On,
-}
-
-impl FromStr for MemoryRerankerMode {
-    type Err = MemoryRerankerModeParseError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "off" => Ok(Self::Off),
-            "eval_only" => Ok(Self::EvalOnly),
-            "on" => Ok(Self::On),
-            _ => Err(MemoryRerankerModeParseError),
-        }
-    }
-}
-
-/// Parse error for memory reranker mode strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoryRerankerModeParseError;
-
-impl std::fmt::Display for MemoryRerankerModeParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("expected one of off, eval_only, on")
-    }
 }
 
 /// Graph-memory vector configuration.

@@ -153,6 +153,10 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "035_experience_learning.sql",
         sql: include_str!("../migrations/postgres/035_experience_learning.sql"),
     },
+    SessionMigration {
+        name: "036_public_experience_learning.sql",
+        sql: include_str!("../migrations/postgres/036_public_experience_learning.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;
@@ -246,7 +250,7 @@ async fn migrate_in_schema_locked(conn: &mut PgConnection, schema_name: &str) ->
     .map_err(map_sqlx_error)?;
 
     raw_sql(
-        "CREATE EXTENSION IF NOT EXISTS age; LOAD 'age'; CREATE EXTENSION IF NOT EXISTS vector;",
+        "CREATE EXTENSION IF NOT EXISTS age; LOAD 'age'; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;",
     )
     .execute(&mut *conn)
     .await

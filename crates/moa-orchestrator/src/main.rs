@@ -146,8 +146,27 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let providers_override = ProvidersOverride::from_env();
     providers_override.ensure_allowed(moa_config.as_ref())?;
+    let database_search_path = moa_config
+        .database
+        .schema
+        .as_deref()
+        .map(|schema_name| format!("{}, public", quote_identifier(schema_name)))
+        .unwrap_or_else(|| "public".to_string());
     let pool = PgPoolOptions::new()
         .max_connections(25)
+        .after_connect({
+            let database_search_path = database_search_path.clone();
+            move |conn, _meta| {
+                let database_search_path = database_search_path.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                        .bind(database_search_path)
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            }
+        })
         .connect(&moa_config.database.url)
         .await?;
     apply_database_migrations(&pool).await?;
@@ -366,6 +385,10 @@ fn header_trust_mode_from_config(config: &MoaConfig) -> HeaderTrustMode {
         AuthHeaderTrustKind::Strict => HeaderTrustMode::Strict,
         AuthHeaderTrustKind::Lenient => HeaderTrustMode::Lenient,
     }
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {

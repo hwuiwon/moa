@@ -21,8 +21,20 @@ pub struct SegmentAssessment {
 }
 
 /// Task segment outcome labels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::Display,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 pub enum SegmentOutcome {
     /// The task appears to have been completed successfully.
@@ -41,19 +53,7 @@ impl SegmentOutcome {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Resolved => "resolved",
-            Self::Partial => "partial",
-            Self::Unknown => "unknown",
-            Self::Failed => "failed",
-            Self::Abandoned => "abandoned",
-        }
-    }
-}
-
-impl std::fmt::Display for SegmentOutcome {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
+        self.into()
     }
 }
 

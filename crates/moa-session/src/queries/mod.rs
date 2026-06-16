@@ -1,10 +1,8 @@
 //! Query helpers for mapping `PostgreSQL` rows into MOA core types.
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, AttributionEffect, AttributionSubjectType, EventType, ExperienceAttribution,
-    ExperienceRecord, LearningCandidate, LearningCandidateStatus, LearningCandidateType,
-    LearningEntry, LearningRiskClass, MoaError, ModelId, Platform, PolicyAction, PolicyScope,
-    Result, SegmentAssessment, SegmentId, SegmentOutcome, SessionId, SessionMeta, SessionStatus,
+    ApprovalRule, ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningEntry,
+    MoaError, ModelId, Result, SegmentAssessment, SegmentId, SessionId, SessionMeta,
     SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, UserId, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};

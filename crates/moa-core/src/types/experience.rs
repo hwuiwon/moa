@@ -115,8 +115,19 @@ pub struct ExperienceRecord {
 }
 
 /// Subject type assigned to an attribution or strategy-rate row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AttributionSubjectType {
     /// A skill package was part of the segment.
     Skill,
@@ -134,19 +145,24 @@ impl AttributionSubjectType {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Skill => "skill",
-            Self::Tool => "tool",
-            Self::Memory => "memory",
-            Self::Policy => "policy",
-            Self::Verification => "verification",
-        }
+        self.into()
     }
 }
 
 /// Directional effect assigned during experience attribution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AttributionEffect {
     /// The subject appears to have helped the outcome.
     Helpful,
@@ -162,12 +178,7 @@ impl AttributionEffect {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Helpful => "helpful",
-            Self::Neutral => "neutral",
-            Self::Harmful => "harmful",
-            Self::Mixed => "mixed",
-        }
+        self.into()
     }
 }
 
@@ -200,8 +211,19 @@ pub struct ExperienceAttribution {
 }
 
 /// Learning-candidate target type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum LearningCandidateType {
     /// Candidate proposes creating or changing a skill package.
     Skill,
@@ -219,19 +241,24 @@ impl LearningCandidateType {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Skill => "skill",
-            Self::Memory => "memory",
-            Self::Policy => "policy",
-            Self::Eval => "eval",
-            Self::Prompt => "prompt",
-        }
+        self.into()
     }
 }
 
 /// Durable status for a proposed learning mutation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum LearningCandidateStatus {
     /// Candidate was proposed but not evaluated.
     Proposed,
@@ -249,19 +276,24 @@ impl LearningCandidateStatus {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Proposed => "proposed",
-            Self::Evaluating => "evaluating",
-            Self::Promoted => "promoted",
-            Self::Rejected => "rejected",
-            Self::RolledBack => "rolled_back",
-        }
+        self.into()
     }
 }
 
 /// Risk assigned to a candidate promotion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum LearningRiskClass {
     /// Low blast-radius candidate.
     Low,
@@ -275,11 +307,7 @@ impl LearningRiskClass {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
+        self.into()
     }
 }
 

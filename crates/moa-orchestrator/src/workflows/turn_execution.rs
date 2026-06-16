@@ -27,11 +27,9 @@ use moa_core::restate_observability::{
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
 use moa_core::wire::{
-    AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
-    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest,
-    GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
-    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
-    UpdateSegmentAssessmentRequest, UpdateStatusRequest,
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
+    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, AssessmentPhase, CompletionRequest,
@@ -1093,37 +1091,36 @@ async fn emit_experience_for_assessment(
     );
     let attributions = attributions_for_experience(&experience, segment_events, now);
     let candidates = propose_candidates_for_experience(&experience, &attributions, now);
-    let result = async {
-        ctx.service_client::<RestateSessionStoreClient>()
-            .append_experience_record(Json(AppendExperienceRecordRequest {
-                experience: experience.clone(),
-            }))
-            .call()
-            .await?;
-        ctx.service_client::<RestateSessionStoreClient>()
-            .append_experience_attributions(Json(AppendExperienceAttributionsRequest {
-                attributions,
-            }))
-            .call()
-            .await?;
-        for candidate in candidates {
-            ctx.service_client::<RestateSessionStoreClient>()
-                .append_learning_candidate(Json(AppendLearningCandidateRequest { candidate }))
-                .call()
-                .await?;
-        }
-        ctx.service_client::<RestateSessionStoreClient>()
-            .refresh_segment_materialized_views(Json(serde_json::json!({})))
-            .send();
-        Ok::<(), HandlerError>(())
-    }
-    .await;
+    let store = OrchestratorCtx::current().session_store.clone();
+    let learning_error = ctx
+        .run(move || {
+            let store = store.clone();
+            let experience = experience.clone();
+            let attributions = attributions.clone();
+            let candidates = candidates.clone();
+            async move {
+                let result = async {
+                    store.append_experience_record(&experience).await?;
+                    store.append_experience_attributions(&attributions).await?;
+                    for candidate in &candidates {
+                        store.append_learning_candidate(candidate).await?;
+                    }
+                    store.refresh_segment_materialized_views().await?;
+                    Ok::<(), MoaError>(())
+                }
+                .await;
+                Ok::<_, HandlerError>(Json::from(result.err().map(|error| error.to_string())))
+            }
+        })
+        .name("emit_experience_learning")
+        .await?
+        .into_inner();
 
-    if let Err(error) = result {
+    if let Some(error) = learning_error {
         tracing::warn!(
             session_id = %meta.id,
             segment_id = %segment.id,
-            ?error,
+            error,
             "experience learning emission failed"
         );
         append_session_event(
@@ -1131,7 +1128,7 @@ async fn emit_experience_for_assessment(
             meta.id,
             Event::Warning {
                 message: format!(
-                    "experience learning emission failed for segment {}: {error:?}",
+                    "experience learning emission failed for segment {}: {error}",
                     segment.id
                 ),
             },

@@ -25,6 +25,7 @@ secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
+strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

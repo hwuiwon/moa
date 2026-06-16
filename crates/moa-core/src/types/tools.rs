@@ -12,8 +12,9 @@ fn default_tool_max_output_tokens() -> u32 {
 }
 
 /// Addressable stream within a persisted tool-result artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ToolArtifactStream {
     /// Combined rendered tool output.
     Combined,
@@ -26,11 +27,7 @@ pub enum ToolArtifactStream {
 impl ToolArtifactStream {
     /// Returns the stable string form used in prompts and structured payloads.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Combined => "combined",
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        }
+        self.into()
     }
 }
 
