@@ -4,9 +4,9 @@ mod support;
 
 use moa_core::{MoaError, Result, WorkspaceId};
 use moa_memory_graph::GraphStore;
-use moa_skills::{
-    LessonContext, NewSkill, SkillRegistry, SkillRenderContext, learn_lesson, render,
-};
+use moa_skills::lessons::{LessonContext, learn_lesson};
+use moa_skills::registry::{NewSkill, SkillRegistry};
+use moa_skills::render::{SkillRenderContext, render};
 use uuid::Uuid;
 
 use support::skill_graph::{

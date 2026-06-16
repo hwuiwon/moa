@@ -34,10 +34,10 @@ use moa_core::wire::{
 use moa_core::{
     ActiveSegment, ApprovalDecision, ApprovalPrompt, AssessmentPhase, CompletionRequest,
     CompletionResponse, Event, EventRange, EventRecord, EventType, LearningEntry, MoaError,
-    ModelTier, PolicyAction, QueryRewriteResult, SegmentId, SessionId, SessionMeta, SessionStatus,
-    SessionStore as _, TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
-    ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
-    is_delegation_tool_name, record_approval_wait, record_session_error,
+    ModelTier, PolicyAction, QueryRewriteResult, SandboxFile, SegmentId, SessionId, SessionMeta,
+    SessionStatus, SessionStore as _, TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest,
+    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
+    TurnReplayCounters, is_delegation_tool_name, record_approval_wait, record_session_error,
     record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
     scope_turn_replay_counters,
@@ -92,6 +92,7 @@ struct SegmentBoundarySequences {
 struct BuiltTurnRequest {
     request: CompletionRequest,
     active_canary: Option<String>,
+    trusted_sandbox_files: Vec<SandboxFile>,
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -344,6 +345,7 @@ async fn run_once_inside_workflow(
     let BuiltTurnRequest {
         mut request,
         active_canary,
+        trusted_sandbox_files,
     } = built_request;
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
@@ -351,6 +353,10 @@ async fn run_once_inside_workflow(
     }
 
     let meta = load_session_meta(ctx, session_id).await?;
+    OrchestratorCtx::current()
+        .tool_router
+        .set_trusted_sandbox_files(&meta, trusted_sandbox_files)
+        .await;
     let active_segment = ensure_current_segment(ctx, session_id, &meta, &mut request).await?;
     if let Some(segment) = active_segment.as_ref() {
         request.metadata.insert(
@@ -442,6 +448,7 @@ async fn build_request_inside_workflow(
         PreparedTurnRequest::Request(request) => Some(BuiltTurnRequest {
             request: *request,
             active_canary: prepared.active_canary,
+            trusted_sandbox_files: prepared.trusted_sandbox_files,
         }),
     })
 }

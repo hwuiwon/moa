@@ -143,6 +143,7 @@ fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> 
         description,
         tags,
         allowed_tools: manifest_string_vec(&manifest, "allowed_tools"),
+        actions: manifest_action_ids(&manifest),
         estimated_tokens: manifest_usize(&manifest, "skill_md_estimated_tokens").max(1),
         use_count: manifest_u32(&manifest, "use_count"),
         last_used: manifest_datetime(&manifest, "last_used"),
@@ -179,6 +180,20 @@ fn manifest_string_vec(manifest: &Value, key: &str) -> Vec<String> {
             entries
                 .iter()
                 .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn manifest_action_ids(manifest: &Value) -> Vec<String> {
+    manifest
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(|action| action.get("id").and_then(Value::as_str))
                 .map(ToOwned::to_owned)
                 .collect()
         })

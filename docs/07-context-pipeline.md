@@ -71,6 +71,9 @@ tenant or person specialize behavior without mutating the shared package.
 It emits only a compact dynamic manifest. Full skill bodies and supporting package files
 are materialized in the active hand under `.moa/skills/<skill>/...` when a hand
 tool is first invoked. The manifest is budget-aware through `SkillBudgetConfig`.
+Artifact-backed skills can expose named actions. When present, action names are
+included in the compact manifest so the model can choose a linked capability
+without loading the full package body.
 
 The selected manifest is not part of the stable prefix because query keywords,
 tenant-level learning, and recency can legitimately change which skills are

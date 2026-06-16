@@ -171,6 +171,9 @@ pub struct SkillMetadata {
     pub tags: Vec<String>,
     /// Tools referenced by the skill.
     pub allowed_tools: Vec<String>,
+    /// Callable action names exposed by the skill artifact, if any.
+    #[serde(default)]
+    pub actions: Vec<String>,
     /// Estimated token cost for the full skill body.
     pub estimated_tokens: usize,
     /// Historical usage count.

@@ -3,7 +3,8 @@
 mod support;
 
 use moa_core::{Result, WorkspaceId};
-use moa_skills::{NewSkill, SkillPackage, SkillPackageFile, SkillRegistry};
+use moa_skills::package::{SkillPackage, SkillPackageFile};
+use moa_skills::registry::{NewSkill, SkillRegistry};
 use uuid::Uuid;
 
 use support::skill_graph::{

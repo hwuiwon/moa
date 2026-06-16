@@ -3366,6 +3366,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-artifacts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "moa-core",
+ "moa-session",
+ "serde",
+ "serde_canonical_json",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-auth-providers"
 version = "0.1.0"
 dependencies = [
@@ -3960,6 +3980,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "moa-artifacts",
  "moa-auth-providers",
  "moa-authz",
  "moa-authz-schema",
@@ -3981,6 +4002,7 @@ dependencies = [
  "moa-session",
  "moa-skills",
  "moa-test-support",
+ "moa-workflows",
  "reqwest 0.13.2",
  "restate-sdk",
  "secrecy 0.10.3",
@@ -4076,6 +4098,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hex",
+ "moa-artifacts",
  "moa-core",
  "moa-eval",
  "moa-eval-core",
@@ -4119,6 +4142,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-workflows"
+version = "0.1.0"
+dependencies = [
+ "moa-artifacts",
+ "moa-core",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "uuid",
  "workspace-hack",
 ]

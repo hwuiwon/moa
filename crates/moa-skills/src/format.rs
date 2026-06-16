@@ -274,6 +274,7 @@ pub fn skill_metadata_from_document(path: String, skill: &SkillDocument) -> Skil
         description: skill.frontmatter.description.clone(),
         tags: skill.frontmatter.tags(),
         allowed_tools: skill.frontmatter.allowed_tools.clone(),
+        actions: Vec::new(),
         estimated_tokens: skill.frontmatter.estimated_tokens(&skill.body),
         use_count: skill.frontmatter.use_count(),
         last_used: skill.frontmatter.last_used(),

@@ -1065,6 +1065,275 @@ pub struct SkillBootstrapGlobalResponse {
     pub imported: u64,
 }
 
+/// One source/package file supplied with an artifact import or export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactFileDocument {
+    /// POSIX relative path inside the artifact package.
+    pub path: String,
+    /// Base64-encoded file content.
+    pub content_base64: String,
+    /// Optional media type hint.
+    pub content_type: Option<String>,
+    /// Whether the file should be executable in a sandbox.
+    #[serde(default)]
+    pub executable: bool,
+}
+
+/// Request payload for importing a draft artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactImportRequest {
+    /// Workspace used for authorization and workspace/user scoped imports.
+    pub workspace_id: WorkspaceId,
+    /// Scope where the draft artifact should be written.
+    pub scope: MemoryScope,
+    /// Source format, currently `json` or `yaml`.
+    pub source_format: String,
+    /// Raw JSON or YAML artifact document.
+    pub source_text: String,
+    /// Optional package files stored with the artifact revision.
+    #[serde(default)]
+    pub files: Vec<ArtifactFileDocument>,
+}
+
+/// Response payload returned after importing a draft artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactImportResponse {
+    /// Artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Draft revision row identifier.
+    pub revision_uid: Uuid,
+    /// Stored artifact status.
+    pub status: String,
+    /// Structured validation report for the draft.
+    pub validation_report: Value,
+}
+
+/// Request payload for exporting a visible artifact revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactExportRequest {
+    /// Workspace used for authorization.
+    pub workspace_id: WorkspaceId,
+    /// Optional scope to read from, defaulting to the workspace tier.
+    #[serde(default)]
+    pub scope: Option<MemoryScope>,
+    /// Artifact kind such as `skill`, `connector`, or `workflow`.
+    pub kind: String,
+    /// Artifact name.
+    pub name: String,
+    /// Optional source format preference, currently advisory.
+    #[serde(default)]
+    pub source_format: Option<String>,
+}
+
+/// Response payload containing an exported artifact revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactExportResponse {
+    /// Artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Revision row identifier.
+    pub revision_uid: Uuid,
+    /// Artifact source format.
+    pub source_format: String,
+    /// Raw source text for this revision.
+    pub source_text: String,
+    /// Parsed artifact document as JSON.
+    pub document: Value,
+    /// Files stored with this artifact revision.
+    #[serde(default)]
+    pub files: Vec<ArtifactFileDocument>,
+}
+
+/// Request payload for listing visible artifacts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactListRequest {
+    /// Workspace used for authorization.
+    pub workspace_id: WorkspaceId,
+    /// Optional scope to list from, defaulting to the workspace tier.
+    #[serde(default)]
+    pub scope: Option<MemoryScope>,
+    /// Optional artifact kind filter.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Optional status filter.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Response payload containing visible artifact summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactListResponse {
+    /// Listed artifact summaries.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactSummary>,
+}
+
+/// Summary of one visible artifact revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactSummary {
+    /// Artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Revision row identifier.
+    pub revision_uid: Uuid,
+    /// Generated scope tier label.
+    pub scope: String,
+    /// Artifact kind.
+    pub kind: String,
+    /// Artifact name.
+    pub name: String,
+    /// Artifact description.
+    pub description: String,
+    /// Artifact tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Revision status.
+    pub status: String,
+    /// Revision version.
+    pub version: i32,
+    /// Timestamp when this revision was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request payload for validating an artifact document without writing it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactValidateRequest {
+    /// Workspace used for authorization.
+    pub workspace_id: WorkspaceId,
+    /// Source format, currently `json` or `yaml`.
+    pub source_format: String,
+    /// Raw JSON or YAML artifact document.
+    pub source_text: String,
+    /// Desired lifecycle status for validation.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Response payload for artifact validation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactValidateResponse {
+    /// Whether validation produced no errors.
+    pub valid: bool,
+    /// Structured validation report.
+    pub validation_report: Value,
+}
+
+/// Request payload for publishing a draft artifact revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactPublishRequest {
+    /// Workspace used for authorization.
+    pub workspace_id: WorkspaceId,
+    /// Scope that owns the revision.
+    pub scope: MemoryScope,
+    /// Draft revision to publish.
+    pub revision_uid: Uuid,
+}
+
+/// Response payload returned after publishing an artifact revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactPublishResponse {
+    /// Artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Published revision row identifier.
+    pub revision_uid: Uuid,
+    /// Stored artifact status.
+    pub status: String,
+    /// Structured validation report used for publish.
+    pub validation_report: Value,
+}
+
+/// Request payload for starting an artifact-backed workflow run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRunRequest {
+    /// Workspace used for authorization and execution.
+    pub workspace_id: WorkspaceId,
+    /// Workflow artifact reference, for example `workflow://damaged-food-order`.
+    pub workflow_ref: String,
+    /// Initial workflow input.
+    #[serde(default)]
+    pub input: Value,
+    /// Optional session that should receive agent-loop work.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+    /// Optional idempotency key for run creation.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// Response payload returned when a workflow run is started.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRunResponse {
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Initial run status.
+    pub status: String,
+}
+
+/// Request payload for loading workflow run status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowStatusRequest {
+    /// Workspace used for authorization.
+    pub workspace_id: WorkspaceId,
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+}
+
+/// Response payload for workflow run status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowRunStatus {
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Session associated with this workflow run, when present.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+    /// Current node ID, if execution has started.
+    pub current_node_id: Option<String>,
+    /// Current run status.
+    pub status: String,
+    /// Per-node run summaries.
+    #[serde(default)]
+    pub node_runs: Vec<WorkflowNodeRunSummary>,
+    /// Terminal output payload.
+    #[serde(default)]
+    pub output: Option<Value>,
+    /// Terminal error text.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Summary of one workflow node execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowNodeRunSummary {
+    /// Workflow node ID.
+    pub node_id: String,
+    /// Node run status.
+    pub status: String,
+    /// Node start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Node completion timestamp.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Request payload for cancelling a workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowCancelRequest {
+    /// Workspace used for authorization.
+    pub workspace_id: WorkspaceId,
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Optional cancellation reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Response payload returned after requesting workflow cancellation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowCancelResponse {
+    /// Whether cancellation was accepted.
+    pub cancelled: bool,
+    /// Human-readable status message.
+    pub reason: String,
+}
+
 /// Request payload for planning an eval suite run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalPlanRequest {

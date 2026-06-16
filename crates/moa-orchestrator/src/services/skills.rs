@@ -12,9 +12,8 @@ use moa_core::wire::{
     SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile, SkillSummary,
 };
 use moa_core::{MemoryScope, MoaError, UserId, WorkspaceId};
-use moa_skills::{
-    NewSkill, Skill, SkillPackage, SkillPackageFile, SkillRegistry, StoredSkillPackage,
-};
+use moa_skills::package::{SkillPackage, SkillPackageFile};
+use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;

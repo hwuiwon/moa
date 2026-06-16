@@ -1,6 +1,6 @@
 //! Tests for skill package validation invariants.
 
-use moa_skills::{MAX_SKILL_PACKAGE_FILES, SkillPackage, SkillPackageFile};
+use moa_skills::package::{MAX_SKILL_PACKAGE_FILES, SkillPackage, SkillPackageFile};
 
 const VALID_SKILL: &str = r#"---
 name: package-skill

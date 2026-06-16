@@ -19,10 +19,11 @@ use moa_core::{
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
-use moa_skills::{
-    NewSkill, SkillRegistry, build_skill_path, parse_skill_markdown, render_skill_markdown,
-    skill_metadata_from_document, slugify_skill_name,
+use moa_skills::format::{
+    build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
+    slugify_skill_name,
 };
+use moa_skills::registry::{NewSkill, Skill, SkillRegistry};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde::Deserialize;
 use serde_json::Value;
@@ -233,11 +234,7 @@ pub async fn seed_skill(
 }
 
 /// Loads the active skill row by name.
-pub async fn load_active_skill(
-    test_db: &TestDb,
-    scope: &MemoryScope,
-    skill_name: &str,
-) -> moa_skills::Skill {
+pub async fn load_active_skill(test_db: &TestDb, scope: &MemoryScope, skill_name: &str) -> Skill {
     SkillRegistry::new(test_db.store().pool().clone())
         .load_by_name(scope, skill_name)
         .await

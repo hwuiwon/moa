@@ -1,0 +1,23 @@
+[package]
+name = "moa-artifacts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+moa-core.workspace = true
+serde.workspace = true
+serde_canonical_json.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["chrono", "json", "uuid"] }
+thiserror.workspace = true
+uuid.workspace = true
+workspace-hack.workspace = true
+
+[dev-dependencies]
+moa-session.workspace = true
+tokio.workspace = true

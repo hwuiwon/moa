@@ -685,6 +685,62 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
+            "/v1/artifacts/import" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Artifacts/import".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/artifacts/export" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Artifacts/export".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/artifacts/list" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Artifacts/list".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/artifacts/validate" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Artifacts/validate".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/artifacts/publish" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Artifacts/publish".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/workflows/run" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Workflows/run".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/workflows/status" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Workflows/status".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/workflows/cancel" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Workflows/cancel".to_string(),
+                    body: body.to_vec(),
+                };
+            }
             _ => {}
         }
     }
@@ -1315,6 +1371,86 @@ mod tests {
                     assert_eq!(
                         forwarded_body,
                         json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted artifact edge routes forward to the internal Artifacts service paths.
+        let cases = [
+            ("/v1/artifacts/import", "/Artifacts/import"),
+            ("/v1/artifacts/export", "/Artifacts/export"),
+            ("/v1/artifacts/list", "/Artifacts/list"),
+            ("/v1/artifacts/validate", "/Artifacts/validate"),
+            ("/v1/artifacts/publish", "/Artifacts/publish"),
+        ];
+
+        for (public_path, internal_path) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        body.as_ref(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted workflow edge routes forward to the internal Workflows service paths.
+        let cases = [
+            ("/v1/workflows/run", "/Workflows/run"),
+            ("/v1/workflows/status", "/Workflows/status"),
+            ("/v1/workflows/cancel", "/Workflows/cancel"),
+        ];
+
+        for (public_path, internal_path) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        body.as_ref(),
                         "{public_path} body should pass through unchanged"
                     );
                 }

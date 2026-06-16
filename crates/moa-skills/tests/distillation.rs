@@ -8,7 +8,7 @@ use moa_core::MoaConfig;
 use moa_skills::distiller::{
     DistillationOutcome, DistillationSkipReason, distill_skill_with_learning,
 };
-use moa_skills::parse_skill_markdown;
+use moa_skills::format::parse_skill_markdown;
 use support::{
     SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_5_TOOL_CALLS, configured_test_db, failed_session,
     learning_store, load_active_skill_markdown, load_session_fixture, scripted_router, seed_skill,

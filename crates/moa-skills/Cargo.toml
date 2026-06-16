@@ -12,6 +12,7 @@ internal-eval-runner = ["skill-learning", "dep:moa-eval"]
 [dependencies]
 chrono.workspace = true
 hex.workspace = true
+moa-artifacts.workspace = true
 moa-core = { workspace = true }
 moa-eval-core = { workspace = true, optional = true }
 moa-eval = { workspace = true, optional = true }
@@ -21,7 +22,7 @@ moa-session = { workspace = true, optional = true }
 moka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+serde_yaml.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "json", "uuid"] }
 tokio.workspace = true

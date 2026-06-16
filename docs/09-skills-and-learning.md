@@ -21,6 +21,11 @@ MOA uses Agent Skills-style packages:
 are part of the same package revision and may include scripts, references,
 templates, or other resources.
 
+Packages may also include `skill.moa.yaml`. That file declares the canonical
+skill artifact metadata: input and output schemas, connector references, named
+actions, allowed tools, and UI metadata. When it is absent, MOA converts the
+package to a minimal skill artifact that points at `SKILL.md`.
+
 ## Storage
 
 Postgres is the only durable skill package store:
@@ -29,6 +34,9 @@ Postgres is the only durable skill package store:
   total size, tags, and a JSONB manifest derived from `SKILL.md`.
 - `moa.skill_file` stores each package file as `BYTEA`, keyed by skill revision
   and normalized package path.
+- `moa.artifact` and `moa.artifact_revision` store the canonical skill artifact
+  document. `moa.skill` remains the materialized skill lookup for turn
+  context injection.
 
 Skill packages are scoped with the same `MemoryScope` tiers used by memory:
 
@@ -54,7 +62,7 @@ hand under `.moa/skills/<skill>/...` before the first hand tool executes.
 
 | Tier | Loaded into context | When |
 |---|---|---|
-| Metadata | name, description, tags, allowed tools, estimates | stage 4 skill manifest |
+| Metadata | name, description, tags, allowed tools, action names, estimates | stage 4 skill manifest |
 | `SKILL.md` | full instructions | read from `.moa/skills/<skill>/SKILL.md` when the agent activates the skill |
 | Resources | scripts, references, assets | only when needed for execution |
 

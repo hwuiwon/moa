@@ -9,7 +9,9 @@ The root workspace currently contains:
 | Crate | Purpose |
 |---|---|
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
+| `moa-artifacts` | Canonical skill, connector, action, and workflow artifact documents, validation, references, and Postgres registry |
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
+| `moa-workflows` | Artifact-backed workflow run lifecycle and future workflow node interpreter/improvement logic |
 | `moa-session` | Postgres session store, event log, task segments, learning log, analytics |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |

@@ -37,6 +37,7 @@ use moa_orchestrator::{
         api_keys::{ApiKeys, ApiKeysImpl},
         approvals::{Approvals, ApprovalsImpl},
         approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
+        artifacts::{Artifacts, ArtifactsImpl},
         audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
         eval::{Eval, EvalImpl},
@@ -53,6 +54,7 @@ use moa_orchestrator::{
         tenants::{Tenants, TenantsImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         whoami::{Whoami, WhoamiImpl},
+        workflows::{Workflows, WorkflowsImpl},
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
     },
     workflows::{
@@ -84,6 +86,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Agents",
     "AdminMaintenance",
     "Analytics",
+    "Artifacts",
     "Approvals",
     "ApiKeys",
     "Audit",
@@ -111,6 +114,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Workspace",
     "WorkspaceStore",
     "Whoami",
+    "Workflows",
 ];
 
 /// Process arguments for the orchestrator process.
@@ -254,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(AgentsImpl.serve())
         .bind(AdminMaintenanceImpl.serve())
         .bind(AnalyticsImpl.serve())
+        .bind(ArtifactsImpl.serve())
         .bind(ApprovalsImpl.serve())
         .bind(ApiKeysImpl.serve())
         .bind(AuditImpl.serve())
@@ -274,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(TenantsImpl.serve())
         .bind(WorkspaceImpl.serve())
         .bind(WhoamiImpl.serve())
+        .bind(WorkflowsImpl.serve())
         .bind(ConsolidateImpl.serve())
         .bind(EvalRunImpl.serve())
         .bind(SubAgentTurnExecutionImpl.serve())

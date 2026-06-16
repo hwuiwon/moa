@@ -4,7 +4,8 @@ mod support;
 
 use moa_core::{MoaError, Result, ScopeContext, ScopedConn};
 use moa_memory_graph::GraphStore;
-use moa_skills::{LessonContext, NewSkill, SkillRegistry, learn_lesson};
+use moa_skills::lessons::{LessonContext, learn_lesson};
+use moa_skills::registry::{NewSkill, SkillRegistry};
 use sqlx::Row;
 use uuid::Uuid;
 

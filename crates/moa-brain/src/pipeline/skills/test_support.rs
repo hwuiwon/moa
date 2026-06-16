@@ -70,6 +70,7 @@ pub(super) fn test_skill(
         description: description.to_string(),
         tags: vec!["ops".to_string(), "debug".to_string()],
         allowed_tools: vec!["bash".to_string()],
+        actions: Vec::new(),
         estimated_tokens: 1_200,
         use_count,
         last_used: Some(older_time(last_used_days_ago)),

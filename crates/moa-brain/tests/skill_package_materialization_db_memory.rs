@@ -14,7 +14,8 @@ use moa_hands::ToolRouter;
 use moa_providers::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
 use moa_security::ToolPolicies;
 use moa_session::testing;
-use moa_skills::{NewSkill, SkillPackage, SkillPackageFile, SkillRegistry};
+use moa_skills::package::{SkillPackage, SkillPackageFile};
+use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde_json::json;
 use tempfile::TempDir;
 

@@ -135,6 +135,21 @@ pub async fn grant_workspace_member(
     .context("grant test workspace membership")
 }
 
+/// Grant the test identity workspace editor privileges directly in live OpenFGA.
+pub async fn grant_workspace_editor(
+    identity: &Identity,
+    workspace_id: impl std::fmt::Display,
+) -> Result<()> {
+    apply_raw_tuple(
+        TupleOp::Write,
+        &format!("user:{}", identity.id),
+        "editor",
+        &format!("workspace:{workspace_id}"),
+    )
+    .await
+    .context("grant test workspace editor")
+}
+
 /// Grant the test identity direct participation in one session.
 pub async fn grant_session_participant(identity: &Identity, session_id: SessionId) -> Result<()> {
     apply_raw_tuple(

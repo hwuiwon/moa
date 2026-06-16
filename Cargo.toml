@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/moa-core",
+    "crates/moa-artifacts",
     "crates/moa-brain",
+    "crates/moa-workflows",
     "crates/moa-session",
     "crates/moa-memory/graph",
     "crates/moa-memory/ingest",
@@ -36,7 +38,9 @@ members = [
 ]
 default-members = [
     "crates/moa-core",
+    "crates/moa-artifacts",
     "crates/moa-brain",
+    "crates/moa-workflows",
     "crates/moa-session",
     "crates/moa-memory/graph",
     "crates/moa-memory/ingest",
@@ -76,6 +80,7 @@ moa-auth-providers = { path = "crates/moa-auth/providers" }
 moa-auth-providers-auth0 = { path = "crates/moa-auth/auth0" }
 moa-authz = { path = "crates/moa-auth/authz" }
 moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
+moa-artifacts = { path = "crates/moa-artifacts" }
 moa-brain = { path = "crates/moa-brain" }
 moa-core = { path = "crates/moa-core" }
 moa-edge = { path = "crates/moa-edge" }
@@ -102,6 +107,7 @@ moa-security = { path = "crates/moa-security" }
 moa-session = { path = "crates/moa-session" }
 moa-skills = { path = "crates/moa-skills" }
 moa-test-support = { path = "crates/moa-test-support" }
+moa-workflows = { path = "crates/moa-workflows" }
 workspace-hack = { path = "crates/workspace-hack" }
 xtask = { path = "crates/xtask" }
 anyhow = "1"
@@ -156,6 +162,7 @@ secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_canonical_json = "1"
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 shell-words = "1.1"
 similar = "2"

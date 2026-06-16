@@ -1,5 +1,7 @@
 //! Manually-run integration coverage for external Restate round-trips.
 
+#[path = "integration/agent_artifacts_e2e.rs"]
+mod agent_artifacts_e2e;
 #[path = "integration/approval_flow_e2e.rs"]
 mod approval_flow_e2e;
 #[path = "integration/consolidate_e2e.rs"]

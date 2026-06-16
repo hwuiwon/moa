@@ -6,7 +6,8 @@ use moa_core::{MemoryScope, UserId, WorkspaceId};
 use moa_orchestrator::services::skills::{
     SkillScopeError, checked_import_scope, effective_user_id, skill_summary_from_skill,
 };
-use moa_skills::{Skill, SkillPackageManifest};
+use moa_skills::package::SkillPackageManifest;
+use moa_skills::registry::Skill;
 use uuid::Uuid;
 
 fn user_identity(user_id: Uuid) -> Identity {
@@ -185,6 +186,13 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
             last_used: None,
             success_rate: 1.0,
             auto_generated: false,
+            artifact_schema_version: "moa.artifact/v1".to_string(),
+            artifact_kind: "skill".to_string(),
+            inputs_schema: serde_json::json!({}),
+            outputs_schema: serde_json::json!({}),
+            actions: Vec::new(),
+            connectors: Vec::new(),
+            ui: serde_json::json!({}),
             files: Vec::new(),
         },
         version: 2,

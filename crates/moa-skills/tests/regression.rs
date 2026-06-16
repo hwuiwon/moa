@@ -5,7 +5,7 @@
 mod support;
 
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
-use moa_skills::{SkillRegressionDecision, SkillRegressionSummary, compare_scores};
+use moa_skills::regression::{SkillRegressionDecision, SkillRegressionSummary, compare_scores};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, SESSION_WITH_5_TOOL_CALLS,
     active_semantic_version, configured_test_db, learning_store, load_session_fixture,

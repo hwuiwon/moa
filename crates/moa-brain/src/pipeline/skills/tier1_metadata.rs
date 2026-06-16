@@ -191,6 +191,10 @@ fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget)
     };
 
     let mut entry = format!("- {name}: {description} [tags: {tags}]");
+    let actions = normalized_action_names(&metadata.actions);
+    if !actions.is_empty() {
+        entry.push_str(&format!(" [actions: {}]", actions.join(", ")));
+    }
     if budget.show_token_estimates {
         entry.push_str(&format!(" (est. {} tok)", metadata.estimated_tokens));
     }
@@ -199,14 +203,22 @@ fn format_manifest_entry(metadata: &SkillMetadata, budget: &ResolvedSkillBudget)
 }
 
 fn normalized_tags(tags: &[String]) -> Vec<String> {
-    let mut tags = tags
+    normalized_inline_values(tags)
+}
+
+fn normalized_action_names(actions: &[String]) -> Vec<String> {
+    normalized_inline_values(actions)
+}
+
+fn normalized_inline_values(values: &[String]) -> Vec<String> {
+    let mut normalized = values
         .iter()
-        .map(|tag| normalize_inline_text(tag))
-        .filter(|tag| !tag.is_empty())
+        .map(|value| normalize_inline_text(value))
+        .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
-    tags.sort_by(|left, right| alphabetical_name_cmp(left, right));
-    tags.dedup();
-    tags
+    normalized.sort_by(|left, right| alphabetical_name_cmp(left, right));
+    normalized.dedup();
+    normalized
 }
 
 fn keyword_overlap_score(query_keywords: &[String], metadata: &SkillMetadata) -> f64 {
@@ -215,10 +227,11 @@ fn keyword_overlap_score(query_keywords: &[String], metadata: &SkillMetadata) ->
     }
 
     let haystack = format!(
-        "{} {} {}",
+        "{} {} {} {}",
         metadata.name,
         metadata.description,
-        metadata.tags.join(" ")
+        metadata.tags.join(" "),
+        metadata.actions.join(" ")
     );
     let skill_keywords = extract_search_keywords(&haystack)
         .into_iter()
@@ -345,6 +358,24 @@ mod tests {
 
         assert_eq!(entry.chars().count(), 120);
         assert!(entry.ends_with("..."));
+    }
+
+    #[test]
+    fn manifest_entry_includes_actions_only_when_present() {
+        // Pins: artifact-backed skill actions are visible in the compact skill manifest.
+        let mut skill = test_skill("refund-helper", "Refund workflow", 1, 0);
+        let budget = ResolvedSkillBudget {
+            max_manifest_chars: DEFAULT_MIN_MANIFEST_CHARS,
+            max_per_skill_chars: 512,
+            show_token_estimates: false,
+        };
+
+        let without_actions = format_manifest_entry(&skill, &budget);
+        skill.actions = vec!["issue_refund".to_string(), "lookup_order".to_string()];
+        let with_actions = format_manifest_entry(&skill, &budget);
+
+        assert!(!without_actions.contains("[actions:"));
+        assert!(with_actions.contains("[actions: issue_refund, lookup_order]"));
     }
 
     #[test]

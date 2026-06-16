@@ -8,8 +8,8 @@ use moa_brain::{
     pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
-    CompletionRequest, ContextSnapshot, EventRange, QueryRewriteResult, Result, SessionId,
-    SessionStore, WorkingContext, record_pipeline_compile_duration,
+    CompletionRequest, ContextSnapshot, EventRange, QueryRewriteResult, Result, SandboxFile,
+    SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     session_engine::session_requires_processing,
 };
@@ -48,6 +48,9 @@ pub(crate) struct PreparedTurnRequestOutput {
     /// Active canary injected into this prepared request, when tools were available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_canary: Option<String>,
+    /// Trusted files selected by the context pipeline for sandbox materialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_sandbox_files: Vec<SandboxFile>,
     /// Query rewrite cache entry observed during compilation.
     pub query_rewrite_cache: Option<QueryRewriteCacheEntry>,
 }
@@ -68,6 +71,7 @@ pub(crate) async fn prepare_turn_request(
         return Ok(PreparedTurnRequestOutput {
             prepared: PreparedTurnRequest::Idle,
             active_canary: None,
+            trusted_sandbox_files: Vec::new(),
             query_rewrite_cache: None,
         });
     }
@@ -142,9 +146,11 @@ pub(crate) async fn prepare_turn_request(
     context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
 
     let query_rewrite_cache = query_rewrite_cache_from_context(active_user_sequence_num, &context);
+    let trusted_sandbox_files = context.take_trusted_sandbox_files();
     Ok(PreparedTurnRequestOutput {
         prepared: PreparedTurnRequest::Request(Box::new(context.into_request())),
         active_canary,
+        trusted_sandbox_files,
         query_rewrite_cache,
     })
 }

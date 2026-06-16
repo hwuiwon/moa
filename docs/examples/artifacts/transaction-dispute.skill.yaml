@@ -1,0 +1,54 @@
+api_version: moa.artifact/v1
+kind: skill
+metadata:
+  name: transaction-dispute
+  description: Card transaction dispute handling skill with linkable actions.
+  tags:
+    - banking
+    - disputes
+status: draft
+definition:
+  type: skill
+  spec:
+    instructions:
+      path: SKILL.md
+    inputs:
+      type: object
+      required:
+        - transaction_id
+      properties:
+        transaction_id:
+          type: string
+        reported_details:
+          type: string
+    outputs:
+      type: object
+      properties:
+        dispute_opened:
+          type: boolean
+    connectors:
+      - connector://credit_card
+      - connector://transactions
+    allowed_tools:
+      - get_transaction_info
+    actions:
+      - id: freeze_card
+        description: Freeze the customer card after dispute eligibility is confirmed.
+        kind: connector_action
+        ref: action://credit_card.freeze
+      - id: file_transaction_dispute
+        description: File a dispute for the unrecognized transaction.
+        kind: connector_action
+        ref: action://transactions.file_dispute
+ui:
+  label: Transaction dispute
+  icon: credit-card
+  layout:
+    columns: 2
+reference_resolutions:
+  - path: definition.spec.actions[0].ref
+    ref: action://credit_card.freeze
+    state: unresolved
+  - path: definition.spec.actions[1].ref
+    ref: action://transactions.file_dispute
+    state: unresolved

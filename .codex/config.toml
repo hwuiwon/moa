@@ -5,3 +5,4 @@ args = ["-y", "@upstash/context7-mcp"]
 [features]
 multi_agent = true
 shell_snapshot = true
+hooks = true

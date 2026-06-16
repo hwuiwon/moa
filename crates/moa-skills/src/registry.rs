@@ -4,6 +4,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
+use moa_artifacts::registry::{
+    ArtifactScopeParts, NewArtifactFile, NewPublishedArtifactRevision, insert_published_revision,
+};
 use moa_core::{
     MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SkillMetadata, UserId, WorkspaceId,
 };
@@ -11,6 +15,7 @@ use moka::future::Cache;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use crate::artifact::{SKILL_ARTIFACT_PATH, skill_artifact_document_from_package};
 use crate::format::build_skill_path;
 use crate::package::{
     SKILL_MD_PATH, SkillPackage, SkillPackageManifest, ValidatedSkillPackage,
@@ -68,6 +73,12 @@ impl Skill {
             description: self.description.clone(),
             tags: self.tags.clone(),
             allowed_tools: self.manifest.allowed_tools.clone(),
+            actions: self
+                .manifest
+                .actions
+                .iter()
+                .map(|action| action.id.clone())
+                .collect(),
             estimated_tokens: self.manifest.skill_md_estimated_tokens.max(1),
             use_count: self.manifest.use_count,
             last_used: self.manifest.last_used,
@@ -565,7 +576,64 @@ async fn insert_skill(
         .map_err(map_sqlx_error)?;
     }
 
+    insert_skill_artifact(conn, skill, version).await?;
+
     Ok(skill_uid)
+}
+
+async fn insert_skill_artifact(
+    conn: &mut PgConnection,
+    skill: &ValidatedNewSkill,
+    version: i32,
+) -> Result<()> {
+    let document = skill_artifact_document_from_package(&skill.package, ArtifactStatus::Published)?;
+    let source_text = skill_artifact_source_text(&skill.package, &document)?;
+    let artifact_files = skill
+        .package
+        .files
+        .iter()
+        .map(artifact_file_from_skill_file)
+        .collect::<Vec<_>>();
+
+    insert_published_revision(
+        conn,
+        &ArtifactScopeParts::from_scope(&skill.scope),
+        NewPublishedArtifactRevision {
+            document: &document,
+            source_format: "yaml",
+            source_text: &source_text,
+            files: &artifact_files,
+            version: Some(version),
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+fn artifact_file_from_skill_file(file: &ValidatedSkillPackageFile) -> NewArtifactFile {
+    NewArtifactFile {
+        path: file.path.clone(),
+        content: file.content.clone(),
+        content_type: file.content_type.clone(),
+        executable: file.executable,
+    }
+}
+
+fn skill_artifact_source_text(
+    package: &ValidatedSkillPackage,
+    document: &ArtifactDocument,
+) -> Result<Vec<u8>> {
+    if let Some(file) = package
+        .files
+        .iter()
+        .find(|file| file.path == SKILL_ARTIFACT_PATH)
+    {
+        return Ok(file.content.clone());
+    }
+    document
+        .to_yaml()
+        .map(String::into_bytes)
+        .map_err(|error| MoaError::SerializationError(error.to_string()))
 }
 
 fn scope_parts(scope: &MemoryScope) -> (Option<String>, Option<String>) {

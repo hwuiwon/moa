@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moa.dev/schemas/moa-skill-v1.schema.json",
+  "title": "MOA Skill Definition v1",
+  "type": "object",
+  "properties": {
+    "instructions": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "default": "SKILL.md" }
+      }
+    },
+    "inputs": { "type": "object" },
+    "outputs": { "type": "object" },
+    "connectors": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^connector://.+" }
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "kind": { "enum": ["connector_action", "tool", "code"] },
+          "ref": { "type": "string" },
+          "runtime": { "type": "string" },
+          "entrypoint": { "type": "string" },
+          "input_schema": { "type": "object" },
+          "output_schema": { "type": "object" },
+          "ui": { "type": "object" }
+        }
+      }
+    },
+    "ui": { "type": "object" }
+  }
+}

@@ -38,6 +38,19 @@ Learning loop
 
 Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes.
 
+## Agent Building Blocks
+
+MOA supports two user-facing execution shapes:
+
+- Agent loop: the existing `Session` and `TurnExecution` path gives an agent tools, skills, memory, approvals, and sub-agents so it can handle an open-ended task autonomously.
+- Agent workflow: an artifact-backed `WorkflowDefinition` stores a typed node/edge graph for cases that need explicit conditions, approval gates, connector actions, checkpoints, and run history.
+
+Skills, connectors, actions, and workflows are canonical artifacts. `moa-artifacts` owns the persisted document model, validation, stable references, and Postgres registry; `moa-skills` owns skill parsing, ranking, distillation, and the live `SkillInjector` path; `moa-workflows` owns durable workflow run lifecycle and the future node interpreter/improvement loop. JSON is the canonical persisted shape in Postgres, while YAML is a human authoring/import/export format. A future visual builder should round-trip through the same artifact structs instead of owning a separate canvas-only model.
+
+At runtime today, agent-loop choice is skill-driven: the context pipeline ranks visible skills and materializes selected skill files for the tool router. Artifact-backed workflows are explicit product operations through the `Workflows` API; a run may be associated with a session for UI/history, but the open-ended agent loop does not yet select or interpret workflow nodes automatically.
+
+Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. Existing `moa.skill` and `moa.skill_file` rows remain the materialized skill lookup used by `SkillInjector`.
+
 MOA's enterprise boundary is the tenant. Runtime operators can run local mode for
 development and incident response, but the product model assumes organizations
 need governed execution, audit trails, tenant-owned learning, and clear rollback
@@ -90,10 +103,10 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
-- Services: `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `Eval`,
+- Services: `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `Eval`,
   `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
   `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-  `WorkspaceStore`, `Whoami`
+  `Workflows`, `WorkspaceStore`, `Whoami`
 - Workflows: `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution`
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.

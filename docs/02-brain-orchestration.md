@@ -31,10 +31,14 @@ Bound surfaces:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Service | `Agents`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
+| Service | `Agents`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
 | Workflow | `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
+
+`Artifacts` owns import, export, listing, validation, and publish for canonical skills, connectors, and workflows. `Workflows` exposes artifact-backed workflow run lifecycle over Restate, while `moa-workflows` owns the reusable lifecycle logic and future node interpreter. The open-ended agent loop still lives in `Session` and `TurnExecution`.
+
+Workflow runs can carry an optional `session_id` so the product can show a procedure/workflow attached to the same support conversation. This is an association boundary, not autonomous routing: skill selection still happens inside the context pipeline, and workflow node execution remains explicit workflow runtime behavior.
 
 ## Session Flow
 
@@ -129,7 +133,7 @@ Dispatch is bounded by depth, active fan-out, repeated active task detection, an
 
 ## Workflows
 
-Only one-shot background jobs use workflows:
+MOA has two workflow-shaped execution surfaces. Restate workflows run internal durable jobs:
 
 - `Consolidate`: one workspace/date memory consolidation pass.
 - `EvalRun`: one eval replay run.
@@ -137,6 +141,8 @@ Only one-shot background jobs use workflows:
 - `SubAgentTurnExecution`: one admitted sub-agent turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `SubAgent` with turn-scoped mutations.
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
+
+Artifact-backed workflows are user-authored `WorkflowDefinition` documents for explicit node graphs, branch conditions, connector actions, approval gates, checkpoints, and product-visible run history. `moa-artifacts` stores and validates the workflow document shape; `moa-workflows` creates and mutates durable workflow runs; the `Workflows` Restate service handles authorization and service binding. Workflow improvement should operate on artifact revisions and proposed patches, not by rewriting the live run state directly.
 
 Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
 key stores its cron expression, timezone, target service handler, and a version
