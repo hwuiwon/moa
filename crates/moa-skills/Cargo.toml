@@ -11,6 +11,7 @@ internal-eval-runner = ["skill-learning", "dep:moa-eval"]
 
 [dependencies]
 chrono.workspace = true
+hex.workspace = true
 moa-core = { workspace = true }
 moa-eval-core = { workspace = true, optional = true }
 moa-eval = { workspace = true, optional = true }

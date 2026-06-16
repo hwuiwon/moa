@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use eventsource_stream::Eventsource;
+use futures_util::{StreamExt, pin_mut};
 use moa_core::{
     McpServerConfig, McpTransportConfig, MoaError, Result, ToolContent, ToolFailureClass,
     ToolOutput, classify_tool_error,
@@ -519,44 +521,20 @@ async fn read_framed_message(stdout: &mut BufReader<ChildStdout>) -> Result<Valu
 }
 
 async fn read_sse_response(response: reqwest::Response) -> Result<Value> {
-    let body = response
-        .text()
-        .await
-        .map_err(|error| MoaError::StreamError(format!("failed reading MCP SSE body: {error}")))?;
-
-    let mut current_event = String::new();
-    let mut current_data = Vec::new();
-    for line in body.lines() {
-        if line.is_empty() {
-            if !current_data.is_empty() && (current_event.is_empty() || current_event == "message")
-            {
-                return serde_json::from_str(&current_data.join("\n")).map_err(|error| {
-                    MoaError::StreamError(format!("invalid MCP SSE payload: {error}"))
-                });
-            }
-            current_event.clear();
-            current_data.clear();
-            continue;
+    // `eventsource-stream` defaults an absent `event:` field to "message", so a
+    // bare `data:`-only event matches the same JSON-RPC response the manual
+    // parser accepted.
+    let events = response.bytes_stream().eventsource();
+    pin_mut!(events);
+    while let Some(event) = events.next().await {
+        let event = event.map_err(|error| {
+            MoaError::StreamError(format!("failed reading MCP SSE body: {error}"))
+        })?;
+        if event.event == "message" && !event.data.is_empty() {
+            return serde_json::from_str(&event.data).map_err(|error| {
+                MoaError::StreamError(format!("invalid MCP SSE payload: {error}"))
+            });
         }
-
-        if let Some(comment) = line.strip_prefix(':') {
-            let _ = comment;
-            continue;
-        }
-
-        if let Some(event) = line.strip_prefix("event:") {
-            current_event = event.trim().to_string();
-            continue;
-        }
-
-        if let Some(data) = line.strip_prefix("data:") {
-            current_data.push(data.trim_start().to_string());
-        }
-    }
-
-    if !current_data.is_empty() && (current_event.is_empty() || current_event == "message") {
-        return serde_json::from_str(&current_data.join("\n"))
-            .map_err(|error| MoaError::StreamError(format!("invalid MCP SSE payload: {error}")));
     }
 
     Err(MoaError::StreamError(

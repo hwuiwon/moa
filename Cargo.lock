@@ -3404,6 +3404,7 @@ dependencies = [
  "moa-authz",
  "moa-authz-schema",
  "moa-core",
+ "moka",
  "reqwest 0.13.2",
  "rsa",
  "secrecy 0.10.3",
@@ -3652,6 +3653,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "eventsource-stream",
  "futures-util",
  "globset",
  "ignore",
@@ -4068,6 +4070,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "hex",
  "moa-core",
  "moa-eval",
  "moa-eval-core",

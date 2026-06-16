@@ -96,3 +96,53 @@ async fn http_client_sends_headers_and_parses_jsonrpc() {
         .unwrap();
     assert_eq!(output.to_text(), "pong");
 }
+
+#[tokio::test]
+async fn http_client_parses_sse_tool_response() {
+    // Pins: a `text/event-stream` JSON-RPC response is parsed via eventsource-stream.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        for request_index in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 4096];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            let (content_type, body) = if request_index == 0 {
+                (
+                    "application/json",
+                    r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#
+                        .to_string(),
+                )
+            } else if request_index == 1 {
+                ("application/json", "{}".to_string())
+            } else {
+                (
+                    "text/event-stream",
+                    "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}\n\n"
+                        .to_string(),
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+
+    let client = MCPClient::connect(&McpServerConfig {
+        name: "remote".to_string(),
+        transport: McpTransportConfig::Http,
+        url: Some(format!("http://{addr}")),
+        ..McpServerConfig::default()
+    })
+    .await
+    .unwrap();
+
+    let output = client
+        .call_tool("ping", json!({}), HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(output.to_text(), "pong");
+}

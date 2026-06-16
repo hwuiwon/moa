@@ -254,7 +254,7 @@ impl SkillPackageManifest {
                 .map(|file| SkillPackageManifestFile {
                     path: file.path.clone(),
                     size_bytes: file.file_size_bytes,
-                    sha256: encode_hex(&file.content_sha256),
+                    sha256: hex::encode(&file.content_sha256),
                     content_type: file.content_type.clone(),
                     executable: file.executable,
                 })
@@ -276,17 +276,6 @@ pub struct SkillPackageManifestFile {
     pub content_type: Option<String>,
     /// Whether the file should be executable in sandboxes.
     pub executable: bool,
-}
-
-/// Returns a lowercase hex string for bytes.
-pub fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn normalize_package_path(path: &str) -> Result<String> {
