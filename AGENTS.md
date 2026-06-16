@@ -165,3 +165,13 @@ Do not weaken or rewrite tests that fail criterion A or D — delete them. Tests
 ### What "test infrastructure" gets a free pass
 
 Test helpers, fixtures, and contract harnesses in `tests/support/`, `moa-test-support`, and shared modules are not graded against criteria A–D directly — they are graded by whether the tests *that use them* meet the criteria. A helper that exists but is unused should be deleted.
+
+## Graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
