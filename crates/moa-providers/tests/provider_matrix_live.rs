@@ -1,3 +1,5 @@
+//! Ignored live matrix tests for real chat provider behavior.
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -38,7 +40,15 @@ fn looks_like_four_answer(text: &str) -> bool {
     normalized.contains('4') || normalized.contains("four")
 }
 
+fn live_provider_tests_enabled() -> bool {
+    std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+}
+
 fn available_live_providers() -> Vec<LiveProvider> {
+    if !live_provider_tests_enabled() {
+        return Vec::new();
+    }
+
     let mut providers = Vec::new();
     if let Ok(provider) = OpenAIProvider::from_env("gpt-5.4") {
         providers.push(LiveProvider::OpenAi(Box::new(provider)));
@@ -49,6 +59,10 @@ fn available_live_providers() -> Vec<LiveProvider> {
     if let Ok(provider) = GeminiProvider::from_env(google_live_model()) {
         providers.push(LiveProvider::Google(Box::new(provider)));
     }
+    assert!(
+        !providers.is_empty(),
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires at least one provider credential: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY"
+    );
     providers
 }
 
@@ -115,7 +129,7 @@ async fn complete_until(
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_answer_simple_prompt_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -147,7 +161,7 @@ async fn live_providers_answer_simple_prompt_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_emit_tool_calls_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -206,7 +220,7 @@ async fn live_providers_emit_tool_calls_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_can_use_native_web_search_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -249,7 +263,7 @@ async fn live_providers_can_use_native_web_search_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_obey_system_prompt_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -291,7 +305,7 @@ async fn live_providers_obey_system_prompt_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_stream_incrementally_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -337,7 +351,7 @@ async fn live_providers_stream_incrementally_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_report_token_usage_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -372,7 +386,7 @@ async fn live_providers_report_token_usage_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_truncate_at_max_output_tokens_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {
@@ -410,7 +424,7 @@ async fn live_providers_truncate_at_max_output_tokens_across_available_keys() {
 }
 
 #[tokio::test]
-#[ignore = "manual live provider matrix test"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
 async fn live_providers_preserve_unicode_across_available_keys() {
     let providers = available_live_providers();
     if providers.is_empty() {

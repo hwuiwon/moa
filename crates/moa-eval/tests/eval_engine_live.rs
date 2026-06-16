@@ -22,12 +22,20 @@ fn live_model() -> Option<&'static str> {
     None
 }
 
+fn live_provider_tests_enabled() -> bool {
+    std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+}
+
 #[tokio::test]
-#[ignore = "requires provider API key env"]
-async fn live_run_single_produces_eval_result() {
-    let Some(model) = live_model() else {
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
+async fn live_eval_engine_runs_single_case() {
+    if !live_provider_tests_enabled() {
         return;
-    };
+    }
+    let model = live_model().expect(
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY",
+    );
+
     let temp = tempdir().unwrap();
     let mut config = MoaConfig::default();
     config.database.url = test_database_url();

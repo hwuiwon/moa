@@ -92,7 +92,9 @@ Docker is used by the dev stack and optionally by local hand providers.
 
 ```bash
 cargo build
-cargo test --workspace --no-run
+cargo nextest run --locked
+cargo test --locked --doc
+cargo test --workspace --no-run --locked --timings
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 MOA_DATABASE_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021

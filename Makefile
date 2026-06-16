@@ -1,4 +1,4 @@
-.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status e2e-clean e2e-clean-live loadtest-mock loadtest-live graphify
+.PHONY: dev fga-bootstrap dev-down dev-wipe dev-logs dev-restate-ui dev-status test-fast test-ci test-db-session test-db-memory test-authz-pentest test-service-e2e test-provider-e2e build-timings e2e-clean e2e-clean-live loadtest-mock loadtest-live graphify
 
 # Install the repo-pinned graphify CLI (version from
 # .agents/skills/graphify/.graphify_version) via uv, so every contributor runs
@@ -49,6 +49,38 @@ dev-logs:
 
 dev-restate-ui:
 	@echo "open http://localhost:10011"
+
+test-fast:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	cargo nextest run --locked --profile fast-pr
+	cargo test --locked --doc
+
+test-ci:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	cargo nextest run --locked --profile ci
+	cargo test --locked --doc
+
+test-db-session:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	cargo nextest run --locked --profile db-session
+
+test-db-memory:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	cargo nextest run --locked --profile db-memory
+
+test-authz-pentest:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest is required; install with: cargo install cargo-nextest --locked"; exit 127; }
+	cargo nextest run --locked --profile authz-pentest
+
+test-service-e2e: e2e-clean-live
+
+test-provider-e2e:
+	@: $${MOA_RUN_LIVE_E2E:?set MOA_RUN_LIVE_E2E=1 to run live/billed E2E checks}
+	@: $${MOA_RUN_LIVE_PROVIDER_TESTS:?set MOA_RUN_LIVE_PROVIDER_TESTS=1 to run provider E2E checks}
+	./scripts/run-clean-e2e.sh --live --providers
+
+build-timings:
+	cargo test --workspace --no-run --locked --timings
 
 e2e-clean:
 	./scripts/run-clean-e2e.sh

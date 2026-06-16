@@ -20,5 +20,5 @@ The ignored E2E check for this report shape is:
 ```bash
 MOA_RUN_LOADTEST_REMOTE_SMOKE=1 \
 MOA_LOADTEST_METRICS_ENDPOINT=http://localhost:9090/metrics \
-cargo test -p moa-loadtest --test mock_smoke mock_short_profile_reports_runtime_step_latency -- --ignored
+cargo test -p moa-loadtest --test mock_loadtest_service_e2e mock_short_profile_reports_runtime_step_latency -- --ignored
 ```

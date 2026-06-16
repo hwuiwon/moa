@@ -55,13 +55,13 @@ path = "examples/chat_harness.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "brain_turn"
-path = "tests/brain_turn.rs"
+name = "brain_turn_db"
+path = "tests/brain_turn_db.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "brain_turn_cache_replay_e2e"
-path = "tests/brain_turn_cache_replay_e2e.rs"
+name = "brain_turn_cache_replay_db_memory"
+path = "tests/brain_turn_cache_replay_db_memory.rs"
 required-features = ["eval-harness"]
 
 [[test]]
@@ -70,26 +70,26 @@ path = "tests/cache_audit_offline.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "live_cache_audit"
-path = "tests/live_cache_audit.rs"
+name = "cache_audit_live"
+path = "tests/cache_audit_live.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "live_harness"
-path = "tests/live_harness.rs"
+name = "brain_turn_live"
+path = "tests/brain_turn_live.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "live_harness_offline"
-path = "tests/live_harness_offline.rs"
+name = "brain_turn_offline"
+path = "tests/brain_turn_offline.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "skill_package_materialization"
-path = "tests/skill_package_materialization.rs"
+name = "skill_package_materialization_db_memory"
+path = "tests/skill_package_materialization_db_memory.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "stable_prefix"
-path = "tests/stable_prefix.rs"
+name = "stable_prefix_db_memory"
+path = "tests/stable_prefix_db_memory.rs"
 required-features = ["eval-harness"]

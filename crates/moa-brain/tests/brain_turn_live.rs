@@ -1,6 +1,6 @@
-// Live counterpart: see live_harness_offline.rs for the wiremock version that runs in PR CI.
+// Live counterpart: see brain_turn_offline.rs for the wiremock version that runs in PR CI.
 
-//! Live integration coverage for the Step 04 brain harness.
+//! Live integration coverage for a brain turn through the real provider path.
 
 use std::sync::Arc;
 
@@ -16,8 +16,12 @@ use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::testing;
 
 #[tokio::test]
-#[ignore = "requires provider API key env"]
-async fn live_brain_turn_returns_brain_response() -> Result<()> {
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1 and provider API key env"]
+async fn live_brain_turn_completes() -> Result<()> {
+    if std::env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() != Ok("1") {
+        return Ok(());
+    }
+
     let mut config = MoaConfig::default();
     let selection = resolve_provider_selection(&config, None)?;
     config.general.default_provider = selection.provider_name;
@@ -27,7 +31,7 @@ async fn live_brain_turn_returns_brain_response() -> Result<()> {
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;
     let session_id = store
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("live-harness"),
+            workspace_id: WorkspaceId::new("live-brain-turn"),
             user_id: UserId::new("integration-test"),
             model: config.models.main.clone().into(),
             ..SessionMeta::default()

@@ -1,4 +1,4 @@
-//! Wiremock offline counterpart for the Step 04 brain harness live smoke.
+//! Wiremock offline coverage for a brain turn through the OpenAI provider path.
 
 mod support;
 
@@ -12,7 +12,7 @@ use wiremock::MockServer;
 use support::{MockSessionStore, captured_json_bodies, mount_openai_text, session_meta};
 
 #[tokio::test]
-async fn live_harness_offline_brain_turn_returns_brain_response() -> moa_core::Result<()> {
+async fn offline_brain_turn_returns_response() -> moa_core::Result<()> {
     let server = MockServer::start().await;
     mount_openai_text(&server, "4", 0).await;
 
@@ -25,7 +25,7 @@ async fn live_harness_offline_brain_turn_returns_brain_response() -> moa_core::R
         OpenAIProvider::new("test-key", "gpt-5.4")?
             .with_api_base(format!("{}/v1", server.uri()))?,
     );
-    let session = session_meta("offline-harness", "gpt-5.4");
+    let session = session_meta("offline-brain-turn", "gpt-5.4");
     let session_id = session.id;
     let store = Arc::new(MockSessionStore::new(session, Vec::new()));
     let pipeline = build_default_pipeline(&config, store.clone());

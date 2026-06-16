@@ -145,14 +145,14 @@ export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
 Run one scenario first:
 
 ```bash
-cargo test -p moa-eval --test long_conversation_smoke --locked -- \
+cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- \
   <scenario_test_name> --ignored --nocapture
 ```
 
 Then run the full ignored suite:
 
 ```bash
-cargo test -p moa-eval --test long_conversation_smoke --locked -- --ignored --nocapture
+cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored --nocapture
 ```
 
 Run the budget gate:
@@ -201,7 +201,7 @@ Only update a scenario after confirming:
 When re-recording:
 
 ```bash
-MOA_RECORD_TRANSCRIPT=1 cargo test -p moa-eval --test long_conversation_smoke -- --ignored
+MOA_RECORD_TRANSCRIPT=1 cargo test -p moa-eval --test long_conversation_smoke_eval -- --ignored
 ```
 
 Validate with the ignored long-conversation test and the budget gate before

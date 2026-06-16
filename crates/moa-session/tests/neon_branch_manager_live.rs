@@ -79,6 +79,29 @@ fn neon_live_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+fn live_neon_tests_enabled() -> bool {
+    std::env::var("MOA_RUN_LIVE_NEON_TESTS").as_deref() == Ok("1")
+}
+
+fn require_neon_live_env() -> bool {
+    if !live_neon_tests_enabled() {
+        return false;
+    }
+
+    for name in ["NEON_API_KEY", "NEON_PROJECT_ID"] {
+        assert!(
+            std::env::var(name).is_ok_and(|value| !value.trim().is_empty()),
+            "MOA_RUN_LIVE_NEON_TESTS=1 requires {name}"
+        );
+    }
+    assert!(
+        std::env::var("TEST_DATABASE_URL").is_ok_and(|value| !value.trim().is_empty())
+            || std::env::var("NEON_DB_URL").is_ok_and(|value| !value.trim().is_empty()),
+        "MOA_RUN_LIVE_NEON_TESTS=1 requires TEST_DATABASE_URL or NEON_DB_URL"
+    );
+    true
+}
+
 async fn wait_for_workspace_session_count(
     store: &PostgresSessionStore,
     workspace_id: &WorkspaceId,
@@ -135,13 +158,16 @@ async fn live_session_store(database_url: &str) -> PostgresSessionStore {
 }
 
 #[tokio::test]
-#[ignore = "requires NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
+#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_branch_manager_create_list_get_rollback_and_discard_checkpoint() {
-    let _guard = neon_live_lock().lock().await;
-    let Some(config) = live_neon_config().await else {
-        eprintln!("skipping live Neon test; missing env");
+    if !require_neon_live_env() {
         return;
-    };
+    }
+
+    let _guard = neon_live_lock().lock().await;
+    let config = live_neon_config()
+        .await
+        .expect("MOA_RUN_LIVE_NEON_TESTS=1 requires NEON_PARENT_BRANCH_ID or permission to list Neon branches");
     let manager = NeonBranchManager::from_config(&config).expect("manager");
 
     let checkpoint = manager
@@ -173,13 +199,16 @@ async fn neon_branch_manager_create_list_get_rollback_and_discard_checkpoint() {
 }
 
 #[tokio::test]
-#[ignore = "requires NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
+#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_checkpoint_branch_connection_is_copy_on_write() {
-    let _guard = neon_live_lock().lock().await;
-    let Some(config) = live_neon_config().await else {
-        eprintln!("skipping live Neon test; missing env");
+    if !require_neon_live_env() {
         return;
-    };
+    }
+
+    let _guard = neon_live_lock().lock().await;
+    let config = live_neon_config()
+        .await
+        .expect("MOA_RUN_LIVE_NEON_TESTS=1 requires NEON_PARENT_BRANCH_ID or permission to list Neon branches");
     let manager = NeonBranchManager::from_config(&config).expect("manager");
     let main_store = live_session_store(&config.database.url).await;
     let workspace_id = WorkspaceId::new(format!("neon-live-{}", Uuid::now_v7().simple()));
@@ -253,23 +282,25 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
 }
 
 #[tokio::test]
-#[ignore = "requires NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
+#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_checkpoint_capacity_limit_rejects_extra_branch() {
-    let _guard = neon_live_lock().lock().await;
-    let Some(base_config) = live_neon_config().await else {
-        eprintln!("skipping live Neon test; missing env");
+    if !require_neon_live_env() {
         return;
-    };
+    }
+
+    let _guard = neon_live_lock().lock().await;
+    let base_config = live_neon_config()
+        .await
+        .expect("MOA_RUN_LIVE_NEON_TESTS=1 requires NEON_PARENT_BRANCH_ID or permission to list Neon branches");
     let base_manager = NeonBranchManager::from_config(&base_config).expect("manager");
     let existing = base_manager
         .list_checkpoints()
         .await
         .expect("list checkpoints")
         .len();
-    let Some(config) = live_neon_config_with_limit(existing + 1).await else {
-        eprintln!("skipping live Neon test; missing env");
-        return;
-    };
+    let config = live_neon_config_with_limit(existing + 1)
+        .await
+        .expect("MOA_RUN_LIVE_NEON_TESTS=1 requires Neon checkpoint config");
     let manager = NeonBranchManager::from_config(&config).expect("manager with limit");
 
     let first = manager

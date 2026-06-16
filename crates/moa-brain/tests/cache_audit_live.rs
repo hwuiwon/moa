@@ -210,7 +210,7 @@ struct AuditedProvider {
 }
 
 #[tokio::test]
-#[ignore = "requires provider API key env and performs live cache audits"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, provider API key env, and performs live cache audits"]
 async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
     let repo_root = repo_root()?;
 
@@ -388,8 +388,13 @@ fn is_query_rewrite_request(request: &CompletionRequest) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires provider API key env and performs live cache audits"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, ANTHROPIC_API_KEY, and performs live cache audits"]
 async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -> Result<()> {
+    if !live_provider_tests_enabled() {
+        return Ok(());
+    }
+    require_live_env("ANTHROPIC_API_KEY", "Anthropic cache audit");
+
     let repo_root = repo_root()?;
 
     let workspace_id = WorkspaceId::new("cache-audit");
@@ -725,25 +730,44 @@ fn role_label(role: MessageRole) -> String {
 }
 
 fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaConfig)> {
+    if !live_provider_tests_enabled() {
+        return Vec::new();
+    }
+
     let mut configs = Vec::new();
 
-    if env::var("ANTHROPIC_API_KEY").is_ok() {
+    if env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         let mut config = live_cache_config("anthropic", "claude-sonnet-4-6", repo_root);
         config.providers.anthropic.api_key_env = "ANTHROPIC_API_KEY".to_string();
         configs.push(("anthropic".to_string(), config));
     }
-    if env::var("OPENAI_API_KEY").is_ok() {
+    if env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         let mut config = live_cache_config("openai", "gpt-5.4", repo_root);
         config.providers.openai.api_key_env = "OPENAI_API_KEY".to_string();
         configs.push(("openai".to_string(), config));
     }
-    if env::var("GOOGLE_API_KEY").is_ok() {
+    if env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         let mut config = live_cache_config("google", "gemini-3-flash-preview", repo_root);
         config.providers.google.api_key_env = "GOOGLE_API_KEY".to_string();
         configs.push(("google".to_string(), config));
     }
+    assert!(
+        !configs.is_empty(),
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires at least one provider credential for cache audits: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY"
+    );
 
     configs
+}
+
+fn live_provider_tests_enabled() -> bool {
+    env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+}
+
+fn require_live_env(name: &str, test_name: &str) {
+    assert!(
+        env::var(name).is_ok_and(|value| !value.trim().is_empty()),
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires {name} for {test_name}"
+    );
 }
 
 fn live_cache_config(provider: &str, model: &str, repo_root: &Path) -> MoaConfig {

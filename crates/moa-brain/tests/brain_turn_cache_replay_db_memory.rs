@@ -33,7 +33,7 @@ const OLD_SNIPPET: &str = "    let refresh_token = issue_refresh_token(user_id);
 const NEW_SNIPPET: &str = "    let issued_refresh_token = issue_refresh_token(user_id);\n    format!(\"refresh:{issued_refresh_token}\")";
 
 #[tokio::test]
-async fn brain_turn_cache_replay_e2e() -> Result<()> {
+async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let span_recorder = SpanRecorder::default();
     let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);

@@ -44,6 +44,6 @@ path = "tests/extract.rs"
 required-features = ["test-util"]
 
 [[test]]
-name = "slow_path_orchestration"
-path = "tests/slow_path_orchestration.rs"
+name = "slow_path_orchestration_db_memory"
+path = "tests/slow_path_orchestration_db_memory.rs"
 required-features = ["test-util"]

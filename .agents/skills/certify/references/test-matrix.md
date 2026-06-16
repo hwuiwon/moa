@@ -33,12 +33,12 @@ Restate orchestrator deterministic suites (session VO, session store, tool execu
 
 ```bash
 cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
-cargo test -p moa-orchestrator --test session_store -- --test-threads=1
+cargo test -p moa-orchestrator --test session_store_db -- --test-threads=1
 cargo test -p moa-orchestrator --test tool_executor -- --test-threads=1
 cargo test -p moa-orchestrator --test llm_gateway -- --test-threads=1
-cargo test -p moa-orchestrator --test ingestion_e2e -- --test-threads=1
+cargo test -p moa-orchestrator --test ingestion_service_e2e -- --test-threads=1
 cargo test -p moa-orchestrator --test workspace -- --test-threads=1
-cargo test -p moa-orchestrator --test integration -- --test-threads=1
+cargo test -p moa-orchestrator --test integration_service_e2e -- --test-threads=1
 cargo test -p moa-orchestrator --test replay_determinism -- --test-threads=1
 cargo test -p moa-orchestrator --test sub_agent_delegation -- --test-threads=1
 ```
@@ -56,7 +56,7 @@ cargo test -p moa-providers --lib
 Live provider matrix (requires keys):
 
 ```bash
-cargo test -p moa-providers --test live_provider_matrix -- --ignored --nocapture
+cargo test -p moa-providers --test provider_matrix_live -- --ignored --nocapture
 ```
 
 Per-provider live smoke when narrowing a failure:
@@ -85,16 +85,16 @@ If the change affects session-derived analytics or event accounting, also rerun 
 Deterministic:
 
 ```bash
-cargo test -p moa-brain --test brain_turn -- --test-threads=1
-cargo test -p moa-brain --test stable_prefix -- --test-threads=1
+cargo test -p moa-brain --test brain_turn_db -- --test-threads=1
+cargo test -p moa-brain --test stable_prefix_db_memory -- --test-threads=1
 cargo test -p moa-memory --tests
 ```
 
 Live cache or live harness verification when prompt layout or cache planning changed:
 
 ```bash
-cargo test -p moa-brain --test live_harness -- --ignored --nocapture
-cargo test -p moa-brain --test live_cache_audit -- --ignored --nocapture
+cargo test -p moa-brain --test harness_live -- --ignored --nocapture
+cargo test -p moa-brain --test cache_audit_live -- --ignored --nocapture
 ```
 
 If those targets do not exist, list `crates/moa-brain/tests/` and use the names that do.

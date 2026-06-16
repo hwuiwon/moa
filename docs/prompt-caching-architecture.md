@@ -103,7 +103,7 @@ When adding prompt content:
 Use the stable-prefix test before merging prompt changes:
 
 ```bash
-cargo test -p moa-brain --test stable_prefix
+cargo test -p moa-brain --test stable_prefix_db_memory
 ```
 
 That test compiles the same pipeline twice and asserts the cached prefix bytes
@@ -112,7 +112,7 @@ match exactly.
 For a live cache validation against Anthropic, run:
 
 ```bash
-cargo test -p moa-brain --test live_cache_audit -- --ignored --nocapture
+cargo test -p moa-brain --test cache_audit_live -- --ignored --nocapture
 ```
 
 Expected behavior:

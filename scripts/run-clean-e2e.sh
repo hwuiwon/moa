@@ -70,6 +70,17 @@ run() {
   "$@"
 }
 
+run_without_provider_keys() {
+  echo
+  echo ">> env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY -u COHERE_API_KEY $*"
+  env \
+    -u ANTHROPIC_API_KEY \
+    -u OPENAI_API_KEY \
+    -u GOOGLE_API_KEY \
+    -u COHERE_API_KEY \
+    "$@"
+}
+
 wait_for_http() {
   local url="$1"
   local label="$2"
@@ -140,6 +151,9 @@ require_cmd cargo
 require_cmd curl
 require_cmd docker
 require_cmd restate-server
+if [[ "${LIVE}" -eq 1 ]]; then
+  require_cmd cargo-nextest
+fi
 
 cd "${REPO_ROOT}"
 
@@ -235,15 +249,13 @@ export MOA_RESTATE_DEPLOYMENT_HOST="127.0.0.1"
 export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
 
 run cargo test -p moa-orchestrator --tests --locked -- --test-threads=1
-run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_e2e --locked
-run cargo test -p moa-eval --test golden_e2e --locked
+run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
+run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
-  run cargo test -p moa-orchestrator --test ingestion_e2e --locked -- --ignored --test-threads=1 --nocapture
-  run cargo test -p moa-orchestrator --features provider-overrides --test integration --locked -- --ignored --test-threads=1 --nocapture
-  run cargo test -p moa-orchestrator --test llm_gateway_e2e --locked -- --ignored --test-threads=1 --nocapture
+  run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --profile restate-service-e2e --run-ignored ignored-only
 
-  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --locked
+  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides --locked
 
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"
@@ -253,7 +265,11 @@ if [[ "${LIVE}" -eq 1 ]]; then
   echo
   echo ">> starting shared orchestrator for lifecycle smoke tests"
   env -u COHERE_API_KEY \
+    -u ANTHROPIC_API_KEY \
+    -u OPENAI_API_KEY \
+    -u GOOGLE_API_KEY \
     RUST_LOG="${RUST_LOG:-warn}" \
+    MOA_PROVIDERS_OVERRIDE="mock:${RUN_SAFE_ID}" \
     MOA_LOCAL_MEMORY_DIR="${TMP_ROOT}/memory" \
     MOA_LOCAL_SANDBOX_DIR="${TMP_ROOT}/sandbox" \
     MOA_LOCAL_DOCKER_ENABLED=false \
@@ -270,20 +286,20 @@ if [[ "${LIVE}" -eq 1 ]]; then
     -H "content-type: application/json" \
     --data "{\"uri\":\"http://127.0.0.1:${ORCH_PORT}\"}"
 
-  run cargo test -p moa-orchestrator --features integration --test session_turn_lifecycle --locked -- --ignored --test-threads=1 --nocapture
-  run cargo test -p moa-orchestrator --features integration --test turn_execution_smoke --locked -- --ignored --test-threads=1 --nocapture
+  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --profile orchestrator-service-e2e --run-ignored ignored-only
 
   if [[ "${RUN_PROVIDERS}" -eq 1 ]]; then
     if ! truthy "${MOA_RUN_LIVE_PROVIDER_TESTS:-}"; then
       echo "refusing provider live checks without MOA_RUN_LIVE_PROVIDER_TESTS=1" >&2
       exit 2
     fi
-    run cargo test -p moa-providers --test live_provider_matrix --locked -- --ignored --test-threads=1 --nocapture
-    run cargo test -p moa-brain --test query_rewrite_live --locked -- --ignored --test-threads=1 --nocapture
+    run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --profile provider-e2e --run-ignored ignored-only
+    run cargo nextest run -p moa-providers --locked --profile provider-e2e --run-ignored ignored-only
+    run cargo nextest run -p moa-brain --locked --profile provider-e2e --run-ignored ignored-only
   fi
 
   if [[ "${RUN_LONG_EVAL}" -eq 1 ]]; then
-    run cargo test -p moa-eval --test long_conversation_smoke --locked -- --ignored --test-threads=1 --nocapture
+    run cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored --test-threads=1 --nocapture
   fi
 fi
 

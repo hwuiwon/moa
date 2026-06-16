@@ -1,0 +1,138 @@
+[profile.default]
+failure-output = "immediate-final"
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+junit.path = "target/nextest/ci/junit.xml"
+# The cross-tenant pentest has its own explicit CI step because it writes a
+# security report and intentionally mutates shared graph/vector state.
+default-filter = '''
+all()
+  - binary(/^cross_tenant_pentest_db_memory$/)
+'''
+
+[profile.fast-pr]
+inherits = "default"
+# The default developer/PR smoke lane: no Postgres, Docker, Restate, OpenFGA,
+# PII sidecar, cloud auth, recorded eval, or live/billed providers.
+default-filter = '''
+all()
+  - binary(/(_db|_db_memory|_service_e2e|_provider_e2e|_live|_docker)$/)
+  - binary(/^(golden_eval|long_conversation_foundation_eval|long_conversation_smoke_eval|scripted_user_mode_eval)$/)
+  - (package(moa-eval) & test(/::tests::.*_db_/))
+  - (package(moa-orchestrator) & test(/::tests::.*_db_/))
+'''
+
+[profile.db-session]
+inherits = "default"
+test-threads = 8
+default-filter = '''
+binary(/_db$/)
+  | (package(moa-eval) & test(/::tests::.*_db_/))
+  | (package(moa-orchestrator) & test(/::tests::.*_db_/))
+'''
+
+[profile.db-memory]
+inherits = "default"
+test-threads = 4
+default-filter = '''
+binary(/_db_memory$/)
+  - binary(/^cross_tenant_pentest_db_memory$/)
+'''
+
+[profile.authz-pentest]
+inherits = "default"
+test-threads = 1
+default-filter = 'binary(/^cross_tenant_pentest_db_memory$/)'
+
+[profile.restate-service-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = '''
+binary(/^ingestion_service_e2e$/)
+  | (binary(/^integration_service_e2e$/) & test(/^(approval_flow_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/))
+'''
+
+[profile.orchestrator-service-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = 'binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)'
+
+[profile.service-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = '''
+binary(/^ingestion_service_e2e$/)
+  | (binary(/^integration_service_e2e$/) & test(/^(approval_flow_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/))
+  | binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)
+'''
+
+[profile.fixture-service-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = 'binary(/^orchestrator_fixture_service_e2e$/)'
+
+[profile.loadtest-service-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = '''
+binary(/^mock_loadtest_service_e2e$/)
+'''
+
+[profile.provider-e2e]
+inherits = "default"
+test-threads = 1
+default-filter = '''
+binary(/^llm_gateway_provider_e2e$/)
+  | (binary(/^integration_service_e2e$/) & test(/^(session_brain_e2e|session_vo_e2e)::/))
+  | binary(/^(provider_matrix_live|query_rewrite_live)$/)
+'''
+
+[profile.eval-recorded]
+inherits = "default"
+test-threads = 2
+default-filter = 'binary(/^(golden_eval|long_conversation_foundation_eval|long_conversation_smoke_eval|scripted_user_mode_eval)$/)'
+
+[test-groups]
+db-session = { max-threads = 4 }
+db-memory = { max-threads = 1 }
+eval-recorded = { max-threads = 1 }
+service-e2e = { max-threads = 1 }
+live-external = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(/_db$/)'
+test-group = "db-session"
+threads-required = 1
+
+[[profile.default.overrides]]
+filter = 'binary(/_db_memory$/)'
+test-group = "db-memory"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'binary(/^(golden_eval|long_conversation_foundation_eval|long_conversation_smoke_eval|scripted_user_mode_eval)$/)'
+test-group = "eval-recorded"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'binary(/^ingestion_service_e2e$/) | (binary(/^integration_service_e2e$/) & test(/^(approval_flow_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/)) | binary(/^(orchestrator_fixture_service_e2e|session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e|mock_loadtest_service_e2e)$/)'
+test-group = "service-e2e"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'binary(/^llm_gateway_provider_e2e$/) | (binary(/^integration_service_e2e$/) & test(/^(session_brain_e2e|session_vo_e2e)::/)) | binary(/(_live|_docker)$/)'
+test-group = "live-external"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'package(moa-orchestrator) & test(/::tests::.*_db_/)'
+test-group = "db-session"
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'package(moa-eval) & test(/::tests::.*_db_/)'
+test-group = "db-session"
+threads-required = "num-test-threads"

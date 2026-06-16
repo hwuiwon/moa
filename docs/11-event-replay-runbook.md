@@ -29,7 +29,7 @@ If replay work grows materially across turns, step 86-style snapshots become hig
    test using `OrchestratorTestFixture`:
 
    ```bash
-   cargo test -p moa-orchestrator --test integration -- --ignored --nocapture --test-threads=1
+   cargo test -p moa-orchestrator --test integration_service_e2e -- --ignored --nocapture --test-threads=1
    ```
 
 4. Capture the per-turn replay summary log lines:

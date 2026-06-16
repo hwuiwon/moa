@@ -9,6 +9,9 @@ jobs:
   retrieval-gate:
     runs-on: ubuntu-latest-8-core
     timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     services:
       postgres:
         image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
@@ -24,6 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Run perf gate
         run: cargo run -p moa-loadtest --release --bin perf_gate -- --duration 5m
         env:
@@ -38,6 +45,9 @@ jobs:
   loadtest-mock-smoke:
     runs-on: ubuntu-latest-8-core
     timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     services:
       postgres:
         image: ghcr.io/hwuiwon/moa-postgres-age:17.6-age1.7.0
@@ -66,6 +76,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Build orchestrator
         run: cargo build -p moa-orchestrator --bin moa-orchestrator-bin
       - name: Start orchestrator with scripted providers

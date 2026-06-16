@@ -14,6 +14,6 @@ To re-record a scenario:
 3. Run the scenario with `MOA_RECORD_TRANSCRIPT=1` through the hosted Eval API or a dedicated ignored integration test.
 4. Capture the provider stream with the recording wrapper and save it as `<scenario>/transcript.jsonl`.
 5. Validate it with `moa_core::transcript::Transcript::read_jsonl`.
-6. Run `cargo test -p moa-eval --test long_conversation_smoke --locked -- --ignored`.
+6. Run `cargo test -p moa-eval --test long_conversation_smoke_eval --locked -- --ignored`.
 
 Recorded fixtures should preserve tool-call argument JSON and usage counters exactly. Redact request IDs, timestamps inside response bodies, UUIDs generated during a live run, and any credentials before committing.

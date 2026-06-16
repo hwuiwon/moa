@@ -16,6 +16,8 @@ jobs:
       MOA_TEST_EXTERNAL_INGRESS_URL: http://localhost:18080
       MOA_TEST_EXTERNAL_ADMIN_URL: http://localhost:9070
       MOA_TEST_EXTERNAL_POSTGRES_URL: postgres://moa_owner:dev@localhost:25432/moa
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -23,8 +25,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Start Restate-backed orchestrator stack
         run: docker compose up -d --build postgres restate moa-orchestrator restate-register
@@ -41,7 +48,7 @@ jobs:
           exit 1
 
       - name: Run fixture smoke
-        run: cargo test -p moa-test-support --features integration --test orchestrator_fixture_smoke -- --nocapture
+        run: cargo test -p moa-test-support --features integration --test orchestrator_fixture_service_e2e -- --nocapture
 
       - name: Dump compose logs
         if: failure()

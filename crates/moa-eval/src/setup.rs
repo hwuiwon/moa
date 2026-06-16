@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_respects_tool_allowlist() {
+    async fn setup_db_respects_tool_allowlist() {
         let temp = tempdir().unwrap();
         let moa_config = test_moa_config();
         let config = AgentConfig {

@@ -248,7 +248,7 @@ async fn set_workspace_vector_backend(pool: &PgPool, workspace_id: &str, backend
 }
 
 #[tokio::test]
-async fn hybrid_retrieval_e2e_returns_fused_annotated_results() {
+async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await

@@ -42,7 +42,7 @@ fn into_anyhow(error: HandlerError) -> anyhow::Error {
 }
 
 #[tokio::test]
-async fn append_event_increments_sequence() -> Result<()> {
+async fn append_event_db_increments_sequence() -> Result<()> {
     let (service, database_url, schema_name) = test_service().await?;
     let session_id = service
         .create_session_inner(test_session_meta("append-seq"))
@@ -86,7 +86,7 @@ async fn append_event_increments_sequence() -> Result<()> {
 }
 
 #[tokio::test]
-async fn get_events_respects_range() -> Result<()> {
+async fn get_events_db_respects_range() -> Result<()> {
     let (service, database_url, schema_name) = test_service().await?;
     let session_id = service
         .create_session_inner(test_session_meta("range"))
@@ -127,7 +127,7 @@ async fn get_events_respects_range() -> Result<()> {
 }
 
 #[tokio::test]
-async fn update_status_affects_get_session() -> Result<()> {
+async fn update_status_db_affects_get_session() -> Result<()> {
     let (service, database_url, schema_name) = test_service().await?;
     let session_id = service
         .create_session_inner(test_session_meta("status"))
@@ -153,7 +153,7 @@ async fn update_status_affects_get_session() -> Result<()> {
 }
 
 #[tokio::test]
-async fn search_events_finds_by_payload() -> Result<()> {
+async fn search_events_db_finds_by_payload() -> Result<()> {
     let (service, database_url, schema_name) = test_service().await?;
     let session_id = service
         .create_session_inner(test_session_meta("search"))

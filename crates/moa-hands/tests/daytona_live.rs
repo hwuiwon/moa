@@ -38,6 +38,17 @@ fn live_provider() -> DaytonaHandProvider {
         .expect("failed to build Daytona provider")
 }
 
+fn live_daytona_tests_enabled() -> bool {
+    std::env::var("MOA_RUN_LIVE_DAYTONA_TESTS").as_deref() == Ok("1")
+}
+
+fn require_daytona_credentials() {
+    assert!(
+        std::env::var("DAYTONA_API_KEY").is_ok_and(|value| !value.trim().is_empty()),
+        "MOA_RUN_LIVE_DAYTONA_TESTS=1 requires DAYTONA_API_KEY"
+    );
+}
+
 fn live_config() -> MoaConfig {
     let mut config = MoaConfig::default();
     config.cloud.enabled = true;
@@ -99,8 +110,13 @@ async fn destroy_and_wait(provider: &DaytonaHandProvider, handle: &HandHandle) -
 }
 
 #[tokio::test]
-#[ignore = "manual live Daytona test"]
-async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
+#[ignore = "requires MOA_RUN_LIVE_DAYTONA_TESTS=1 and DAYTONA_API_KEY"]
+async fn daytona_provider_round_trip() {
+    if !live_daytona_tests_enabled() {
+        return;
+    }
+    require_daytona_credentials();
+
     let provider = live_provider();
 
     let unsupported = provider
@@ -257,8 +273,13 @@ async fn daytona_live_provider_handles_roundtrip_and_lifecycle() {
 }
 
 #[tokio::test]
-#[ignore = "manual live Daytona test"]
-async fn daytona_live_router_lazy_provisions_reuses_and_isolates_sessions() {
+#[ignore = "requires MOA_RUN_LIVE_DAYTONA_TESTS=1 and DAYTONA_API_KEY"]
+async fn daytona_router_reuses_and_isolates() {
+    if !live_daytona_tests_enabled() {
+        return;
+    }
+    require_daytona_credentials();
+
     let mut config = live_config();
     let temp = tempdir().expect("tempdir");
     config.local.sandbox_dir = temp.path().join("sandbox").display().to_string();

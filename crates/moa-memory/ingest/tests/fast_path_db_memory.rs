@@ -291,7 +291,7 @@ async fn workspace_version(pool: &PgPool, workspace_id: Uuid) -> i64 {
 }
 
 #[tokio::test]
-async fn fast_remember_e2e() {
+async fn fast_remember_db_memory() {
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await

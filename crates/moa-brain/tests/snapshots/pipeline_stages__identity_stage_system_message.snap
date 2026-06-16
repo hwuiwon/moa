@@ -1,5 +1,5 @@
 ---
-source: crates/moa-brain/tests/pipeline_stages.rs
+source: crates/moa-brain/tests/pipeline_stages_db_memory.rs
 assertion_line: 69
 expression: "fixture.ctx.messages[0].content"
 ---

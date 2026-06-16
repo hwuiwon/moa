@@ -48,7 +48,7 @@ Turn-latency and replay guidance lives in:
 
 - `docs/observability/turn-latency.md`
 - `docs/11-event-replay-runbook.md`
-- `crates/moa-brain/tests/brain_turn_cache_replay_e2e.rs` (span structure + replay accounting)
+- `crates/moa-brain/tests/brain_turn_cache_replay_db_memory.rs` (span structure + replay accounting)
 
 The important span structure is:
 
@@ -86,7 +86,7 @@ Examples:
 
 ```bash
 cargo test -p moa-session --tests
-cargo test -p moa-brain --test brain_turn_cache_replay_e2e -- --nocapture
+cargo test -p moa-brain --test brain_turn_cache_replay_db_memory -- --nocapture
 ```
 
 Operational reads:

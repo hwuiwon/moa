@@ -17,7 +17,7 @@ Use the smallest exact test target that still reproduces:
 
 ```bash
 # brain harness (drives the pipeline directly)
-cargo test -p moa-brain --test brain_turn -- --test-threads=1
+cargo test -p moa-brain --test brain_turn_db -- --test-threads=1
 
 # Restate orchestrator (pick the suite that matches the change)
 cargo test -p moa-orchestrator --test session_vo -- --test-threads=1

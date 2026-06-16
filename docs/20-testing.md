@@ -53,6 +53,63 @@ for every later request. `tool_calls` entries have `name`, `input`, and optional
 The load-test smoke fixture is checked in at
 `crates/moa-loadtest/scripts/perf-gate.json`.
 
+## Fast Local Test Runs
+
+Use `cargo-nextest` for the default local suite. It schedules individual tests
+across test binaries. The default developer target uses the `fast-pr` nextest
+profile, which excludes tests that need Postgres, Docker, Restate, OpenFGA, the
+PII sidecar, cloud auth, or live/billed providers.
+
+```bash
+cargo install cargo-nextest --locked
+make test-fast
+```
+
+`cargo-nextest` does not run doctests, so `make test-fast` runs
+`cargo test --locked --doc` after the nextest pass. The CI-equivalent local
+target keeps running after failures and writes nextest's JUnit report under
+`target/nextest/ci/`:
+
+```bash
+make test-ci
+```
+
+### Test Lanes
+
+The suite is split by runtime requirements rather than by crate. Keep the fast
+lane free of hidden service dependencies; move mixed test files into clearer
+suffixes as they are touched.
+
+| Lane | Command | Runtime requirements |
+| --- | --- | --- |
+| Fast PR | `make test-fast` | none beyond local mock servers and tempdirs |
+| DB session | `make test-db-session` | Postgres only; schema isolation |
+| DB memory | `make test-db-memory` | Postgres with AGE/pgvector; currently serial until physical DB isolation lands |
+| Authz pentest | `make test-authz-pentest` | Postgres with graph/vector state; writes the pentest report |
+| Service E2E | `make test-service-e2e` | clean Postgres/OpenFGA/Restate/PII harness with deterministic providers |
+| Provider E2E | `make test-provider-e2e` | service E2E harness plus live/billed provider credentials |
+
+The nextest profiles in `.config/nextest.toml` are mostly suffix-based. Keep
+new out-of-line test targets on one of these suffixes so the filters stay short:
+`*_unit.rs`, `*_offline.rs`, `*_component.rs`, `*_db.rs`, `*_db_memory.rs`,
+`*_service_e2e.rs`, `*_provider_e2e.rs`, `*_eval.rs`, `*_live.rs`, and
+`*_docker.rs`. Mixed E2E binaries can use exact module selectors when one file
+contains service and provider lanes.
+
+If a crate-private inline unit test needs a slow resource and cannot move to an
+integration test without exposing internals, put the lane marker in the test
+function name, for example `*_db_*`. Keep these exceptions rare; file suffixes
+are the preferred boundary.
+
+Before changing build profiles, linker settings, or crate structure for compile
+speed, capture a Cargo timings report:
+
+```bash
+make build-timings
+```
+
+The report is written under `target/cargo-timings/`.
+
 ## Clean E2E Runner
 
 Use the clean runner for certification instead of the persistent compose
@@ -70,16 +127,17 @@ Ignored/live Restate E2E requires an explicit opt-in:
 MOA_RUN_LIVE_E2E=1 make e2e-clean-live
 ```
 
-The live Restate lane uses `moa-orchestrator/provider-overrides` for approval
-flow tests that need deterministic tool calls. Billed provider coverage remains
-in the separate provider lane below.
+The live Restate lane keeps provider-backed cases out of the default `--live`
+path. It uses `moa-orchestrator/provider-overrides` and
+`MOA_PROVIDERS_OVERRIDE=mock:<run-id>` for deterministic lifecycle smoke tests,
+and it unsets provider API-key environment variables around those tests. Billed
+provider coverage remains in the separate provider lane below.
 
 Optional provider and long-eval lanes remain explicit because they can be
 billed or slow:
 
 ```bash
-MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 \
-  ./scripts/run-clean-e2e.sh --live --providers
+MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 make test-provider-e2e
 
 MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-eval
 ```
@@ -90,7 +148,7 @@ requires a running orchestrator with Prometheus metrics enabled:
 ```bash
 MOA_RUN_LOADTEST_REMOTE_SMOKE=1 \
 MOA_LOADTEST_METRICS_ENDPOINT=http://localhost:9090/metrics \
-cargo test -p moa-loadtest --test mock_smoke mock_short_profile_reports_runtime_step_latency -- --ignored
+cargo test -p moa-loadtest --test mock_loadtest_service_e2e mock_short_profile_reports_runtime_step_latency -- --ignored
 ```
 
 The runner may start `postgres`, `openfga`, and `moa-pii-service` if compose is

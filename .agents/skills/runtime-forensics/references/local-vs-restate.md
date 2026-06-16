@@ -10,12 +10,12 @@ Do not start by diffing the Restate workflow line-by-line. Start by proving whet
 
 The brain harness suites live in:
 
-- `crates/moa-brain/tests/brain_turn.rs` (buffered turn lifecycle, approvals, cancellation)
-- `crates/moa-brain/tests/brain_turn_cache_replay_e2e.rs` (cache + replay accounting)
+- `crates/moa-brain/tests/brain_turn_db.rs` (buffered turn lifecycle, approvals, cancellation)
+- `crates/moa-brain/tests/brain_turn_cache_replay_db_memory.rs` (cache + replay accounting)
 
 The Restate suites live in:
 
-- `crates/moa-orchestrator/tests/` (multiple files: `session_vo.rs`, `session_store.rs`, `tool_executor.rs`, `llm_gateway.rs`, `ingestion_e2e.rs`, `workspace.rs`, `integration.rs`, `replay_determinism.rs`, `sub_agent_delegation.rs`, `session_turn_lifecycle.rs`)
+- `crates/moa-orchestrator/tests/` (multiple files: `session_vo.rs`, `session_store_db.rs`, `tool_executor.rs`, `llm_gateway.rs`, `ingestion_service_e2e.rs`, `workspace.rs`, `integration_service_e2e.rs`, `replay_determinism.rs`, `sub_agent_delegation.rs`, `session_turn_lifecycle_service_e2e.rs`)
 
 ## Classification Flow
 
@@ -49,7 +49,7 @@ The Restate suites live in:
 
 ```bash
 # brain harness (drives the pipeline directly)
-cargo test -p moa-brain --test brain_turn -- --test-threads=1
+cargo test -p moa-brain --test brain_turn_db -- --test-threads=1
 
 # Restate, scoped to the surface that changed
 cargo test -p moa-orchestrator --test session_vo -- --test-threads=1
