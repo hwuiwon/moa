@@ -18,6 +18,10 @@ use moa_core::config::{AsyncAuthzKind, AuthHeaderTrustKind};
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
+#[cfg(feature = "internal-eval-runner")]
+use moa_orchestrator::services::eval::{Eval, EvalImpl};
+#[cfg(feature = "internal-eval-runner")]
+use moa_orchestrator::workflows::eval_run::{EvalRun, EvalRunImpl};
 use moa_orchestrator::{
     OrchestratorCtx,
     config::{
@@ -40,7 +44,7 @@ use moa_orchestrator::{
         artifacts::{Artifacts, ArtifactsImpl},
         audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
-        eval::{Eval, EvalImpl},
+        experiments::{Experiments, ExperimentsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         lineage_admin::{LineageAdmin, LineageAdminImpl},
@@ -59,7 +63,8 @@ use moa_orchestrator::{
     },
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
-        eval_run::{EvalRun, EvalRunImpl},
+        experiment_run::{ExperimentRun, ExperimentRunImpl},
+        experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl},
         sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
     },
@@ -82,7 +87,7 @@ const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
 const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
-const EXPECTED_SERVICE_NAMES: &[&str] = &[
+const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Agents",
     "AdminMaintenance",
     "Analytics",
@@ -93,8 +98,9 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Authz",
     "Consolidate",
     "CronJob",
-    "Eval",
-    "EvalRun",
+    "Experiments",
+    "ExperimentRun",
+    "ExperimentTrialRun",
     "GraphMemoryMaint",
     "Health",
     "IngestionVO",
@@ -116,6 +122,7 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Whoami",
     "Workflows",
 ];
+const INTERNAL_EVAL_SERVICE_NAMES: &[&str] = &["Eval", "EvalRun"];
 
 /// Process arguments for the orchestrator process.
 #[derive(Debug, Parser)]
@@ -262,8 +269,11 @@ async fn main() -> anyhow::Result<()> {
         .bind(ApprovalsImpl.serve())
         .bind(ApiKeysImpl.serve())
         .bind(AuditImpl.serve())
-        .bind(AuthzImpl.serve())
-        .bind(EvalImpl.serve())
+        .bind(AuthzImpl.serve());
+    #[cfg(feature = "internal-eval-runner")]
+    let endpoint = endpoint.bind(EvalImpl.serve());
+    let endpoint = endpoint
+        .bind(ExperimentsImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -280,8 +290,12 @@ async fn main() -> anyhow::Result<()> {
         .bind(WorkspaceImpl.serve())
         .bind(WhoamiImpl.serve())
         .bind(WorkflowsImpl.serve())
-        .bind(ConsolidateImpl.serve())
-        .bind(EvalRunImpl.serve())
+        .bind(ConsolidateImpl.serve());
+    #[cfg(feature = "internal-eval-runner")]
+    let endpoint = endpoint.bind(EvalRunImpl.serve());
+    let endpoint = endpoint
+        .bind(ExperimentRunImpl.serve())
+        .bind(ExperimentTrialRunImpl.serve())
         .bind(SubAgentTurnExecutionImpl.serve())
         .bind(TurnExecutionImpl.serve())
         .build();
@@ -850,9 +864,29 @@ fn env_flag_from_reader(
         .unwrap_or(default)
 }
 
+fn expected_service_names() -> Vec<&'static str> {
+    expected_service_names_for_internal_eval(cfg!(feature = "internal-eval-runner"))
+}
+
+fn expected_service_names_for_internal_eval(internal_eval_enabled: bool) -> Vec<&'static str> {
+    let mut names = DEFAULT_EXPECTED_SERVICE_NAMES.to_vec();
+    if internal_eval_enabled {
+        names.extend_from_slice(INTERNAL_EVAL_SERVICE_NAMES);
+    }
+    names
+}
+
 fn services_registered(deployments: &[RegisteredDeployment]) -> bool {
+    let expected_services = expected_service_names();
+    services_registered_with_expected(deployments, &expected_services)
+}
+
+fn services_registered_with_expected(
+    deployments: &[RegisteredDeployment],
+    expected_services: &[&str],
+) -> bool {
     deployments.iter().any(|deployment| {
-        EXPECTED_SERVICE_NAMES.iter().all(|expected| {
+        expected_services.iter().all(|expected| {
             deployment
                 .services
                 .iter()
@@ -864,8 +898,9 @@ fn services_registered(deployments: &[RegisteredDeployment]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXPECTED_SERVICE_NAMES, RegisteredDeployment, RegisteredService, env_flag_from_reader,
-        services_registered,
+        RegisteredDeployment, RegisteredService, env_flag_from_reader,
+        expected_service_names_for_internal_eval, services_registered,
+        services_registered_with_expected,
     };
 
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
@@ -882,8 +917,64 @@ mod tests {
     }
 
     #[test]
+    fn default_expected_services_hide_hosted_eval() {
+        let names = expected_service_names_for_internal_eval(false);
+
+        assert!(
+            !names.contains(&"Eval"),
+            "default product readiness must not expect hosted Eval service"
+        );
+        assert!(
+            !names.contains(&"EvalRun"),
+            "default product readiness must not expect hosted EvalRun workflow"
+        );
+        assert!(
+            names.contains(&"Experiments"),
+            "default product readiness should include Experiments"
+        );
+        assert!(
+            names.contains(&"ExperimentRun"),
+            "default product readiness should include ExperimentRun"
+        );
+        assert!(
+            names.contains(&"ExperimentTrialRun"),
+            "default product readiness should include ExperimentTrialRun"
+        );
+    }
+
+    #[test]
+    fn internal_eval_gate_adds_hosted_eval_services() {
+        let names = expected_service_names_for_internal_eval(true);
+
+        assert_eq!(
+            names.iter().filter(|name| **name == "Eval").count(),
+            1,
+            "internal eval gate should add Eval exactly once"
+        );
+        assert_eq!(
+            names.iter().filter(|name| **name == "EvalRun").count(),
+            1,
+            "internal eval gate should add EvalRun exactly once"
+        );
+        assert!(
+            names.contains(&"Experiments"),
+            "internal eval mode should keep Experiments registered"
+        );
+        assert!(
+            names.contains(&"ExperimentRun"),
+            "internal eval mode should keep ExperimentRun registered"
+        );
+        assert!(
+            names.contains(&"ExperimentTrialRun"),
+            "internal eval mode should keep ExperimentTrialRun registered"
+        );
+    }
+
+    #[test]
     fn registration_check_requires_all_expected_services() {
-        let deployments = vec![deployment_with_services(EXPECTED_SERVICE_NAMES)];
+        let names =
+            expected_service_names_for_internal_eval(cfg!(feature = "internal-eval-runner"));
+        let deployments = vec![deployment_with_services(&names)];
 
         assert!(services_registered(&deployments));
     }
@@ -893,6 +984,23 @@ mod tests {
         let deployments = vec![deployment_with_services(&["Health", "SessionStore"])];
 
         assert!(!services_registered(&deployments));
+    }
+
+    #[test]
+    fn internal_eval_registration_requires_eval_and_eval_run_when_enabled() {
+        let default_names = expected_service_names_for_internal_eval(false);
+        let internal_names = expected_service_names_for_internal_eval(true);
+        let default_deployment = vec![deployment_with_services(&default_names)];
+        let internal_deployment = vec![deployment_with_services(&internal_names)];
+
+        assert!(
+            !services_registered_with_expected(&default_deployment, &internal_names),
+            "internal eval readiness must reject a deployment missing Eval and EvalRun"
+        );
+        assert!(
+            services_registered_with_expected(&internal_deployment, &internal_names),
+            "internal eval readiness should accept Eval and EvalRun when explicitly enabled"
+        );
     }
 
     #[test]

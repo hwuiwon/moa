@@ -4,7 +4,7 @@ use moa_core::{MemoryScope, Result};
 
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind};
-use crate::reference::{ArtifactRef, ArtifactRefKind, ReferenceResolution};
+use crate::reference::{ArtifactRef, ReferenceResolution};
 use crate::registry::ArtifactRegistry;
 
 /// Resolves artifact references against visible published revisions.
@@ -38,24 +38,14 @@ impl ArtifactResolver {
     }
 
     async fn resolve_one(&self, scope: &MemoryScope, artifact_ref: &ArtifactRef) -> Result<bool> {
-        match artifact_ref.kind {
-            ArtifactRefKind::Tool => Ok(true),
-            ArtifactRefKind::Skill => self
+        match artifact_ref {
+            ArtifactRef::Tool { .. } => Ok(true),
+            ArtifactRef::Artifact { kind, name } => self
                 .registry
-                .load_visible_published(scope, ArtifactKind::Skill, &artifact_ref.target)
+                .load_visible_published(scope, kind.clone(), name)
                 .await
                 .map(|artifact| artifact.is_some()),
-            ArtifactRefKind::Workflow => self
-                .registry
-                .load_visible_published(scope, ArtifactKind::Workflow, &artifact_ref.target)
-                .await
-                .map(|artifact| artifact.is_some()),
-            ArtifactRefKind::Connector => self
-                .registry
-                .load_visible_published(scope, ArtifactKind::Connector, &artifact_ref.target)
-                .await
-                .map(|artifact| artifact.is_some()),
-            ArtifactRefKind::Action => self.resolve_action(scope, artifact_ref).await,
+            ArtifactRef::Action { .. } => self.resolve_action(scope, artifact_ref).await,
         }
     }
 
@@ -64,12 +54,12 @@ impl ArtifactResolver {
         scope: &MemoryScope,
         artifact_ref: &ArtifactRef,
     ) -> Result<bool> {
-        let Some(action_name) = artifact_ref.action.as_deref() else {
+        let ArtifactRef::Action { connector, action } = artifact_ref else {
             return Ok(false);
         };
         let Some(connector) = self
             .registry
-            .load_visible_published(scope, ArtifactKind::Connector, &artifact_ref.target)
+            .load_visible_published(scope, ArtifactKind::Connector, connector)
             .await?
         else {
             return Ok(false);
@@ -79,6 +69,6 @@ impl ArtifactResolver {
         else {
             return Ok(false);
         };
-        Ok(actions.iter().any(|action| action.id == action_name))
+        Ok(actions.iter().any(|candidate| candidate.id == *action))
     }
 }

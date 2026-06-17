@@ -1,0 +1,451 @@
+//! Restate workflow that executes one behavior-lab simulator trial.
+
+use std::time::Duration;
+
+use chrono::Utc;
+use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
+use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus};
+use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_core::traits::{Identity, IdentityType};
+use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
+use moa_core::{
+    CompletionRequest, ContextMessage, Event, EventRange, EventRecord, EventType, MemoryScope,
+    MoaError, ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore, UserId,
+    WorkspaceId, current_trace_id, record_experiment_approval_wait, record_experiment_trial,
+    record_experiment_trial_duration, record_simulation_cost_cents, record_simulation_tokens,
+    record_simulation_turn,
+};
+use moa_experiments::model::{
+    ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
+    ExperimentTrialStopReason, ExperimentVariant, NewExperimentTrial,
+};
+use moa_experiments::plan::{PlanExpansionError, PlanSimulationSelection, select_simulation};
+use moa_experiments::store::ExperimentStore;
+use moa_workflows::error::WorkflowError;
+use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
+use restate_sdk::context::Request;
+use restate_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use uuid::Uuid;
+
+use crate::OrchestratorCtx;
+use crate::objects::session::SessionClient;
+use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
+use crate::services::session_store::inner::create_session_for_identity;
+
+mod status;
+mod target_execution;
+mod trial_simulator;
+
+use status::{
+    attach_current_trial_trace, insert_or_load_trial, persist_trial_status,
+    persist_trial_status_by_key, status_response_from_record, trial_status_allows_child_start,
+    trial_status_response,
+};
+use target_execution::{run_agent_loop_trial, run_workflow_trial};
+use trial_simulator::load_simulator_context;
+
+const K_WORKSPACE_ID: &str = "workspace_id";
+const K_RUN_UID: &str = "run_uid";
+const K_TRIAL_UID: &str = "trial_uid";
+const K_TRIAL_KEY: &str = "trial_key";
+const K_STATUS: &str = "status";
+const K_SESSION_ID: &str = "session_id";
+const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
+const TARGET_WAIT_ATTEMPTS: u32 = 90;
+const TARGET_WAIT_INTERVAL: Duration = Duration::from_secs(1);
+const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
+
+/// Workflow input for one behavior-lab simulator trial.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentTrialRunWorkflowRequest {
+    /// Workspace already authorized by the experiment planner or service.
+    pub workspace_id: WorkspaceId,
+    /// Trial fields used for idempotent insert-or-load by `(run_uid, trial_key)`.
+    pub trial: NewExperimentTrial,
+    /// Serialized experiment target payload selected for this trial.
+    pub target: Value,
+    /// Serialized experiment variant payload selected for this trial.
+    pub variant: Value,
+    /// Identity snapshot used for normal downstream authz checks.
+    pub identity: Identity,
+}
+
+/// Request payload for reading one trial workflow status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentTrialRunStatusRequest {
+    /// Workspace scope used for trial-result filtering.
+    pub workspace_id: WorkspaceId,
+    /// Stable trial identifier.
+    pub trial_uid: Uuid,
+}
+
+/// Response payload for one trial workflow status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentTrialRunStatusResponse {
+    /// Workspace scope that owns the trial.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run that owns the trial.
+    pub run_uid: Uuid,
+    /// Stable trial identifier.
+    pub trial_uid: Uuid,
+    /// Deterministic key unique inside the owning run.
+    pub trial_key: String,
+    /// Current trial lifecycle status.
+    pub status: String,
+    /// Execution shape targeted by this trial.
+    pub target_kind: String,
+    /// Durable stop reason when the trial has stopped.
+    pub stop_reason: Option<String>,
+    /// Number of simulator user turns submitted to the target.
+    pub turn_count: i32,
+    /// Linked target session.
+    pub session_id: Option<SessionId>,
+    /// Linked artifact workflow run.
+    pub workflow_run_uid: Option<Uuid>,
+    /// Score run identifier used for trial-level scores.
+    pub score_run_id: Uuid,
+    /// Terminal error for failed trials.
+    pub error: Option<String>,
+    /// Full trial record payload for service versions that can expose it.
+    #[serde(default)]
+    pub trial: Value,
+}
+
+/// Restate workflow surface for one behavior-lab simulator trial.
+#[restate_sdk::workflow]
+pub trait ExperimentTrialRun {
+    /// Executes one simulator-target trial through the configured production path.
+    async fn run(
+        request: Json<ExperimentTrialRunWorkflowRequest>,
+    ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError>;
+
+    /// Reads the current persisted trial status.
+    #[shared]
+    async fn status(
+        request: Json<ExperimentTrialRunStatusRequest>,
+    ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError>;
+}
+
+/// Concrete behavior-lab trial workflow implementation.
+pub struct ExperimentTrialRunImpl;
+
+impl ExperimentTrialRun for ExperimentTrialRunImpl {
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: dispatched only from authorized experiment execution paths.
+    async fn run(
+        &self,
+        ctx: WorkflowContext<'_>,
+        request: Json<ExperimentTrialRunWorkflowRequest>,
+    ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError> {
+        annotate_restate_handler_span("ExperimentTrialRun", "run");
+        let request = request.into_inner();
+        let expected_key = trial_workflow_key(request.trial.run_uid, &request.trial.trial_key);
+        if expected_key != ctx.key() {
+            return Err(TerminalError::new_with_code(404, "experiment trial key mismatch").into());
+        }
+
+        ctx.set(K_WORKSPACE_ID, Json(request.workspace_id.clone()));
+        ctx.set(K_RUN_UID, Json(request.trial.run_uid));
+        ctx.set(K_TRIAL_KEY, Json(request.trial.trial_key.clone()));
+        annotate_trial_span(&request.trial, None);
+
+        match run_trial(&ctx, request.clone()).await {
+            Ok(response) => Ok(Json(response)),
+            Err(error) => {
+                let message = handler_error_message(&error);
+                ctx.set(K_STATUS, Json(ExperimentTrialStatus::Failed));
+                if let Err(update_error) = persist_trial_status_by_key(
+                    &ctx,
+                    request.workspace_id,
+                    request.trial.run_uid,
+                    request.trial.trial_key.clone(),
+                    ExperimentTrialStatus::Failed,
+                    Some(ExperimentTrialStopReason::Error),
+                    Some(message),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error = ?update_error,
+                        run_uid = %request.trial.run_uid,
+                        trial_key = %request.trial.trial_key,
+                        "failed to persist experiment trial workflow failure"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: called only after experiment status authorization.
+    async fn status(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        request: Json<ExperimentTrialRunStatusRequest>,
+    ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError> {
+        annotate_restate_handler_span("ExperimentTrialRun", "status");
+        let request = request.into_inner();
+        let pool = OrchestratorCtx::current().graph_pool.clone();
+        Ok(ctx
+            .run(|| async move { trial_status_response(pool, request).await.map(Json::from) })
+            .name("experiment_trial_status")
+            .await?)
+    }
+}
+
+/// Returns the stable Restate workflow key for a trial retry.
+#[must_use]
+pub fn trial_workflow_key(run_uid: Uuid, trial_key: &str) -> String {
+    format!("{run_uid}:{trial_key}")
+}
+
+async fn run_trial(
+    ctx: &WorkflowContext<'_>,
+    request: ExperimentTrialRunWorkflowRequest,
+) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
+    let trial =
+        insert_or_load_trial(ctx, request.workspace_id.clone(), request.trial.clone()).await?;
+    ctx.set(K_TRIAL_UID, Json(trial.trial_uid));
+    ctx.set(K_STATUS, Json(trial.status));
+    annotate_trial_record_span(&trial);
+    attach_current_trial_trace(ctx, request.workspace_id.clone(), trial.trial_uid).await?;
+    if !trial_status_allows_child_start(trial.status) {
+        return status_response_from_record(request.workspace_id, trial);
+    }
+
+    let trial = persist_trial_status(
+        ctx,
+        request.workspace_id.clone(),
+        trial.trial_uid,
+        ExperimentTrialStatus::Running,
+        None,
+        None,
+    )
+    .await?;
+    ctx.set(K_STATUS, Json(trial.status));
+
+    let simulator_context =
+        load_simulator_context(ctx, request.workspace_id.clone(), trial.clone()).await?;
+    match trial.target_kind {
+        ExperimentTargetKind::AgentLoop => {
+            run_agent_loop_trial(ctx, request, trial, simulator_context).await
+        }
+        ExperimentTargetKind::Workflow => run_workflow_trial(ctx, request, trial).await,
+    }
+}
+
+fn new_session_meta(
+    workspace_id: WorkspaceId,
+    model: ModelId,
+    identity: &Identity,
+) -> Result<SessionMeta, HandlerError> {
+    let now = Utc::now();
+    Ok(SessionMeta {
+        id: SessionId::new(),
+        workspace_id,
+        user_id: session_user_id(identity)?,
+        title: Some("Experiment trial agent-loop run".to_string()),
+        status: SessionStatus::Created,
+        platform: Platform::Api,
+        model,
+        created_at: now,
+        updated_at: now,
+        ..SessionMeta::default()
+    })
+}
+
+fn session_user_id(identity: &Identity) -> Result<UserId, HandlerError> {
+    match identity.identity_type {
+        IdentityType::User => Ok(UserId::new(identity.id.to_string())),
+        IdentityType::Agent => Ok(UserId::new(
+            identity
+                .acting_on_behalf_of
+                .unwrap_or(identity.id)
+                .to_string(),
+        )),
+        IdentityType::Service => Err(TerminalError::new_with_code(
+            403,
+            "service identities cannot create agent-loop experiment trial sessions",
+        )
+        .into()),
+    }
+}
+
+fn with_identity_headers<'a, Req, Res>(
+    request: Request<'a, Req, Res>,
+    identity: &Identity,
+) -> Request<'a, Req, Res> {
+    let request = request
+        .header(
+            "x-moa-identity-type".to_string(),
+            identity_type_header(identity.identity_type).to_string(),
+        )
+        .header("x-moa-identity-id".to_string(), identity.id.to_string())
+        .header(
+            "x-moa-tenant-id".to_string(),
+            identity.tenant_id.to_string(),
+        );
+    let request = if let Some(api_key_id) = identity.api_key_id {
+        request.header("x-moa-api-key-id".to_string(), api_key_id.to_string())
+    } else {
+        request
+    };
+    if let Some(user_id) = identity.acting_on_behalf_of {
+        request.header("x-moa-acting-on-behalf-of".to_string(), user_id.to_string())
+    } else {
+        request
+    }
+}
+
+fn identity_type_header(identity_type: IdentityType) -> &'static str {
+    match identity_type {
+        IdentityType::User => "user",
+        IdentityType::Agent => "agent",
+        IdentityType::Service => "service",
+    }
+}
+
+fn workflow_runtime(pool: sqlx::PgPool) -> WorkflowRuntime {
+    WorkflowRuntime::new(ArtifactRegistry::new(pool))
+}
+
+fn annotate_trial_span(trial: &NewExperimentTrial, trial_uid: Option<Uuid>) {
+    let span = tracing::Span::current();
+    span.set_attribute("moa.experiment.run_uid", trial.run_uid.to_string());
+    span.set_attribute("moa.experiment.trial_key", trial.trial_key.clone());
+    span.set_attribute("moa.experiment.target_kind", trial.target_kind.as_str());
+    span.set_attribute(
+        "moa.experiment.score_run_id",
+        trial.score_run_id.to_string(),
+    );
+    if let Some(trial_uid) = trial_uid {
+        span.set_attribute("moa.experiment.trial_uid", trial_uid.to_string());
+    }
+}
+
+fn annotate_trial_record_span(trial: &ExperimentTrialRecord) {
+    let span = tracing::Span::current();
+    span.set_attribute("moa.experiment.run_uid", trial.run_uid.to_string());
+    span.set_attribute("moa.experiment.trial_uid", trial.trial_uid.to_string());
+    span.set_attribute("moa.experiment.trial_key", trial.trial_key.clone());
+    span.set_attribute("moa.experiment.target_kind", trial.target_kind.as_str());
+    span.set_attribute(
+        "moa.experiment.score_run_id",
+        trial.score_run_id.to_string(),
+    );
+}
+
+fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
+    MemoryScope::Workspace { workspace_id }
+}
+
+fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(value).map_err(|error| {
+        TerminalError::new_with_code(400, format!("invalid experiment trial {field}: {error}"))
+            .into()
+    })
+}
+
+fn artifact_revision_not_found(revision_uid: Uuid) -> HandlerError {
+    TerminalError::new_with_code(404, format!("artifact revision {revision_uid} not found")).into()
+}
+
+fn trial_not_found(trial_uid: Uuid) -> HandlerError {
+    TerminalError::new_with_code(404, format!("experiment trial {trial_uid} not found")).into()
+}
+
+fn bad_request(message: impl Into<String>) -> HandlerError {
+    TerminalError::new_with_code(400, message.into()).into()
+}
+
+fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
+    if error.is_fatal() {
+        return TerminalError::new(error.to_string()).into();
+    }
+
+    HandlerError::from(error)
+}
+
+fn plan_expansion_error_to_handler_error(error: PlanExpansionError) -> HandlerError {
+    bad_request(error.to_string())
+}
+
+fn non_retryable_handler_error(error: HandlerError) -> HandlerError {
+    TerminalError::new(handler_error_message(&error)).into()
+}
+
+fn handler_error_message(error: &HandlerError) -> String {
+    let error_ref = <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(error);
+    error_ref.to_string()
+}
+
+fn workflow_handler_error(error: WorkflowError) -> HandlerError {
+    match error {
+        WorkflowError::InvalidReference { .. } | WorkflowError::WrongReferenceKind => {
+            TerminalError::new_with_code(400, error.to_string()).into()
+        }
+        WorkflowError::WorkflowNotFound { .. } => {
+            TerminalError::new_with_code(404, error.to_string()).into()
+        }
+        WorkflowError::Artifact(source) => {
+            if source.is_fatal() {
+                TerminalError::new(source.to_string()).into()
+            } else {
+                HandlerError::from(source)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulator_done_accepts_empty_and_done_markers() {
+        // Pins: an empty or explicit simulator stop does not enter the target transcript.
+        assert!(trial_simulator::simulator_done(""));
+        assert!(trial_simulator::simulator_done(" DONE "));
+        assert!(trial_simulator::simulator_done("[done]"));
+        assert!(!trial_simulator::simulator_done(
+            "I still need help with this order."
+        ));
+    }
+
+    #[test]
+    fn effective_max_turns_uses_scenario_cap_when_lower() {
+        // Pins: scenario max_turns bounds the simulator loop without allowing zero-turn trials.
+        assert_eq!(trial_simulator::effective_max_turns(5, 2), 2);
+        assert_eq!(trial_simulator::effective_max_turns(0, 2), 1);
+        assert_eq!(trial_simulator::effective_max_turns(3, 0), 3);
+    }
+
+    #[test]
+    fn approval_status_maps_to_waiting_approval_stop_reason() {
+        // Pins: trial execution stops on approvals and never resolves them synthetically.
+        assert_eq!(
+            target_execution::stop_for_session_status(&SessionStatus::WaitingApproval),
+            Some((
+                ExperimentTrialStatus::WaitingApproval,
+                ExperimentTrialStopReason::ApprovalWait
+            ))
+        );
+    }
+
+    #[test]
+    fn trial_workflow_key_is_stable_for_retries() {
+        // Pins: Restate workflow retry identity is based on the run UID and deterministic trial key.
+        let run_uid = Uuid::nil();
+        assert_eq!(
+            trial_workflow_key(run_uid, "persona-a/scenario-b/variant-c/0"),
+            "00000000-0000-0000-0000-000000000000:persona-a/scenario-b/variant-c/0"
+        );
+    }
+}

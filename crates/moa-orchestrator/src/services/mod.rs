@@ -10,6 +10,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod authz_admin;
 pub mod eval;
+pub mod experiments;
 pub mod graph_memory_maint;
 pub mod health;
 pub mod lineage_admin;

@@ -25,7 +25,8 @@ Product data in Postgres / Neon
   learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
   learning_log
-  analytics.turn_lineage, analytics.scores, compliance audit tables
+  analytics.turn_lineage, analytics.score_run, analytics.scores,
+  moa.experiment_run, compliance audit tables
   security_events
         |
         v
@@ -45,7 +46,9 @@ MOA supports two user-facing execution shapes:
 - Agent loop: the existing `Session` and `TurnExecution` path gives an agent tools, skills, memory, approvals, and sub-agents so it can handle an open-ended task autonomously.
 - Agent workflow: an artifact-backed `WorkflowDefinition` stores a typed node/edge graph for cases that need explicit conditions, approval gates, connector actions, checkpoints, and run history.
 
-Skills, connectors, actions, and workflows are canonical artifacts. `moa-artifacts` owns the persisted document model, validation, stable references, and Postgres registry; `moa-skills` owns skill parsing, ranking, distillation, and the live `SkillInjector` path; `moa-workflows` owns durable workflow run lifecycle and the future node interpreter/improvement loop. JSON is the canonical persisted shape in Postgres, while YAML is a human authoring/import/export format. A future visual builder should round-trip through the same artifact structs instead of owning a separate canvas-only model.
+Skills, connectors, actions, workflows, and behavior-lab experiment plans are canonical artifacts. `moa-artifacts` owns the persisted document model, validation, stable references, and Postgres registry; `moa-skills` owns skill parsing, ranking, distillation, and the live `SkillInjector` path; `moa-workflows` owns durable workflow run lifecycle and the future node interpreter/improvement loop. JSON is the canonical persisted shape in Postgres, while YAML is a human authoring/import/export format. Visual builders must round-trip through the same artifact structs instead of owning a separate canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
+
+Behavior Lab uses a single `experiment_plan` artifact. Personas, profiles, data bundles, and scenarios are typed embedded blocks under `definition.spec.simulation`, each with stable IDs for UI round trips, trial fanout, scoring, and analytics. Their product boundary, UI expectations, and verification lanes are documented in [`docs/product/behavior-lab.md`](product/behavior-lab.md).
 
 At runtime today, agent-loop choice is skill-driven: the context pipeline ranks visible skills and materializes selected skill files for the tool router. Artifact-backed workflows are explicit product operations through the `Workflows` API; a run may be associated with a session for UI/history, but the open-ended agent loop does not yet select or interpret workflow nodes automatically.
 
@@ -103,11 +106,16 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
-- Services: `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `Eval`,
-  `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
-  `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-  `Workflows`, `WorkspaceStore`, `Whoami`
-- Workflows: `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution`
+- Services: `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
+  `Experiments`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`,
+  `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`,
+  `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami`
+- Workflows: `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
+  `TurnExecution`, `SubAgentTurnExecution`
+
+When built with `internal-eval-runner`, the orchestrator also binds internal
+`Eval` and `EvalRun` handlers. They are not part of the default cloud
+registration.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -157,6 +165,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Session metadata and events | Postgres | `sessions`, `events`, `pending_signals`, `context_snapshots` |
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, task-conditioned strategy rates |
+| Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
 | Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes for global, workspace, and user scopes; selected packages are materialized into hands on demand |
@@ -215,18 +224,70 @@ those events to S3 with per-tenant bucket routing and Object Lock compliance
 mode. Operational setup is documented in
 [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
-## Eval And Dashboards
+## Eval, Experiments, And Insights
 
 Lineage records are captured through the hot-path `LineageHandle` bridge and
 written asynchronously to `analytics.turn_lineage`. Eval, online-judge, and
 human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)` and
 land in `analytics.scores`, keyed by turn, session, or dataset replay item.
 
-The hosted eval API stores replay datasets through
-`POST /v1/evals/datasets/register` in `analytics.eval_datasets` and
-`analytics.eval_dataset_items`. `POST /v1/evals/replay` emits score records with
-a shared `run_id`, while `POST /v1/evals/scores` and
-`POST /v1/evals/compare` read directly from `analytics.scores`.
+Regression evals, live behavior experiments, and analytics insights are
+separate surfaces:
+
+- Regression eval: `moa-eval` owns deterministic datasets, replay plans,
+  CI/nightly regression runs, and score comparisons. In default cloud builds
+  these remain local and CI tooling; the public edge does not translate
+  `/v1/evals/*`. The `Eval` service and `EvalRun` workflow are available
+  only when the orchestrator is compiled with `internal-eval-runner`; if
+  exposed internally, their handlers still enforce workspace authorization
+  before replay, dataset, score, or compare reads.
+- Live behavior experiments: `moa-experiments` owns the typed domain model and
+  storage repository; the `Experiments` service accepts and tracks runs against
+  production execution paths. Agent-loop targets create or reuse `Session`
+  state and queue messages through the normal `Session` and `TurnExecution`
+  path. Workflow targets start existing artifact-backed runs through
+  `WorkflowRuntime` and link `moa.artifact_run.run_uid`; workflow node
+  interpretation remains a future `moa-workflows` capability. The
+  `moa.experiment_run` row is the experiment ledger and links to the session,
+  workflow run, pinned artifact revisions, and `analytics.score_run`.
+  `ExperimentTrialRun` owns per-trial simulator execution. The public edge
+  routes are `POST /v1/experiments/generate-plan`,
+  `/v1/experiments/run-plan`, `/v1/experiments/status`,
+  `/v1/experiments/list`, `/v1/experiments/trials`,
+  `/v1/experiments/trial-status`, `/v1/experiments/cancel`,
+  `/v1/experiments/propose-improvements`, `/v1/experiments/scores`, and
+  `/v1/experiments/compare`; stale aliases such as `/v1/experiments/run` are
+  not product routes. `Experiments/generate_plan`, `run`, `cancel`, and
+  `propose_improvements` require `Workspace:Editor`; `status`, `list`,
+  `trials`, `trial_status`, `scores`, and `compare` require
+  `Workspace:Member`.
+- Analytics and insights: `Analytics` exposes curated read APIs for session,
+  workspace, tool, cache, experiment, learning-candidate, and session-search
+  use cases. `LineageAdmin` exposes protected lineage explain, query, export,
+  verify, and erase operations. Future analytics agents must call these typed
+  services, not raw SQL or unscoped `SessionStore` methods. `Analytics`
+  session stats require `Session:Participant`; workspace, cache, experiment,
+  and session-search reads require `Workspace:Member`; workspace learning
+  candidate reads require `Workspace:Editor`; tenant-wide learning candidates
+  and deployment-wide tool stats require tenant-admin authorization, with
+  deployment-wide tool stats limited to service identities. `LineageAdmin`
+  explain, query, and verify require `Workspace:Member`, while export and erase
+  require `Workspace:Admin`.
+
+Live behavior experiment-derived improvements have one review boundary: they
+must become `learning_candidates` before any skill or workflow change is
+accepted. Experiment runs do not auto-create those proposals, and no experiment
+path may auto-promote skills or workflows. The explicit
+`Experiments/propose_improvements` operation attaches experiment run IDs, score
+run IDs, and artifact revision references to the candidate payload so reviewers
+can reproduce the evidence.
+
+Future MCP support is a transport adapter over product/default services such as
+`Experiments`, `Analytics`, `LineageAdmin`, `Workflows`, and other typed
+surfaces. If internal eval is exposed through MCP, it must remain qualified as
+`internal-eval-runner` gated. MCP must not publish public `/v1/evals/*`
+semantics, own experiment, eval, analytics, learning, workflow, or lineage
+domain models, or bypass service-level authorization.
 
 Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live
 in `ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource
@@ -292,6 +353,7 @@ and replay resistance on the verify path.
 | `moa-security` | Vault, policies, MCP credential proxy, injection controls |
 | `moa-skills` | Skill parsing, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
+| `moa-experiments` | Live behavior experiment domain model and scoped Postgres run ledger |
 | `moa-loadtest` | Direct HTTP load-test tooling for hosted APIs |
 | `workspace-hack` | Generated `cargo-hakari` dependency feature unification crate |
 | `xtask` | Repo-local audit and maintenance commands |
@@ -302,5 +364,6 @@ and replay resistance on the verify path.
 - Memory details: `docs/04-memory-architecture.md`
 - Shared type placement: `docs/15-architecture-policy.md`
 - Event and segment schema: `docs/05-session-event-log.md`
+- Live behavior experiments: `docs/eval/live-behavior-experiments.md`
 - Context pipeline: `docs/07-context-pipeline.md`
 - Multi-tenant learning: `docs/14-multi-tenancy-and-learning.md`

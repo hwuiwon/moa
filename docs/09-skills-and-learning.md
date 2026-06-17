@@ -115,6 +115,14 @@ a skill package, moves the candidate through `proposed -> evaluating ->
 promoted` or `rejected`, and records the candidate ID plus source experience IDs
 in the learning log when promotion succeeds.
 
+Live behavior experiments use the same review boundary for any derived
+skill or workflow improvement. An experiment run may provide evidence through
+its linked session, workflow run, artifact revisions, and `analytics.score_run`,
+but the experiment path itself does not auto-create or auto-promote skills or
+workflows. Any future experiment-derived improvement writer must first append a
+`learning_candidates` proposal with the experiment evidence attached, then rely
+on explicit evaluation and human or operator review before promotion.
+
 ## Unified Learning Pipeline
 
 ```text
@@ -161,7 +169,10 @@ Current learning types include:
 
 `learning_candidates` is not a replacement for `learning_log`. Candidates are
 mutable proposal state with evaluation payloads and explicit status transitions.
-`learning_log` remains the append-only audit stream for promoted learning.
+They are also the required boundary for experiment-derived skill or workflow
+improvements; experiment outcomes must not mutate skill packages or workflow
+artifacts directly. `learning_log` remains the append-only audit stream for
+promoted learning.
 
 ## Memory Learning
 

@@ -209,6 +209,90 @@ async fn scripted_user_runner_drives_turn_approval_and_checks_final_answer() -> 
     Ok(())
 }
 
+#[tokio::test]
+async fn offline_scripted_user_replays_distilled_dispute_failure_without_live_simulation()
+-> TestResult {
+    if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
+        return Ok(());
+    }
+
+    let temp = tempdir()?;
+    let goal_card_path = temp.path().join("goal_card.md");
+    let script_path = temp.path().join("script.jsonl");
+    let expectations_path = temp.path().join("expectations.toml");
+    tokio::fs::write(
+        &goal_card_path,
+        b"# Distilled transaction-dispute failure\nReplay the ambiguous merchant case offline and require clarification before dispute drafting.\n",
+    )
+    .await?;
+    tokio::fs::write(
+        &script_path,
+        r#"{"version":1,"scenario":"distilled-ambiguous-dispute","expected_final_answer_fragments":["merchant's legal name","before I draft a dispute"],"probe_ids":["distilled-dispute-regression"]}
+{"user":{"text":"I need to dispute a charge labeled SQ * CITY MARKET, but I do not know the exact merchant."},"probe_ids":["ambiguous-merchant"]}
+"#,
+    )
+    .await?;
+    tokio::fs::write(&expectations_path, b"# placeholder expectations\n").await?;
+
+    let case = TestCase {
+        kind: TestCaseKind::Long,
+        name: "distilled-ambiguous-dispute".to_string(),
+        long: Some(LongTestCase {
+            goal_card: Some(goal_card_path),
+            scripted_user: Some(script_path),
+            expectations: expectations_path,
+            mode: LongConversationMode::ScriptedUser,
+            ..LongTestCase::default()
+        }),
+        ..TestCase::default()
+    };
+    let agent_config = AgentConfig {
+        name: "offline-distilled-dispute-agent".to_string(),
+        ..AgentConfig::default()
+    };
+    let mut base_config = MoaConfig::default();
+    base_config.database.url = moa_test_support::postgres::test_database_url();
+    base_config.query_rewrite.enabled = false;
+
+    let provider = Arc::new(ClarifyingDisputeProvider::default());
+    let llm_provider: Arc<dyn LLMProvider> = provider.clone();
+    let report = run_scenario_with_provider(
+        &base_config,
+        &agent_config,
+        &EngineOptions {
+            temp_dir: temp.path().join("runs"),
+            ..EngineOptions::default()
+        },
+        &case,
+        llm_provider,
+    )
+    .await?;
+
+    assert_eq!(report.result.status, EvalStatus::Passed);
+    assert_eq!(
+        report.result.response.as_deref(),
+        Some(
+            "Please confirm the merchant's legal name, date, amount, and whether your card was present before I draft a dispute."
+        )
+    );
+    assert_eq!(report.score_card.functional.turn_count, 1);
+    assert_eq!(
+        provider.seen_user_messages(),
+        vec![
+            "I need to dispute a charge labeled SQ * CITY MARKET, but I do not know the exact merchant."
+                .to_string()
+        ]
+    );
+    assert!(
+        !report.events.iter().any(|event| matches!(
+            event,
+            Event::ApprovalRequested { .. } | Event::ToolCall { .. }
+        )),
+        "offline replay should not need live simulation, connector calls, or approvals"
+    );
+    Ok(())
+}
+
 #[derive(Default)]
 struct ApprovalThenFinalProvider {
     seen_user_messages: Mutex<Vec<String>>,
@@ -298,6 +382,67 @@ impl LLMProvider for ApprovalThenFinalProvider {
             }
         };
         Ok(CompletionStream::from_response(response))
+    }
+}
+
+#[derive(Default)]
+struct ClarifyingDisputeProvider {
+    seen_user_messages: Mutex<Vec<String>>,
+}
+
+impl ClarifyingDisputeProvider {
+    fn seen_user_messages(&self) -> Vec<String> {
+        self.seen_user_messages
+            .lock()
+            .expect("seen user messages lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ClarifyingDisputeProvider {
+    fn name(&self) -> &str {
+        "offline-distilled-dispute"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: ModelId::new("offline-distilled-dispute-model"),
+            context_window: 32_000,
+            max_output: 1_024,
+            supports_tools: true,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: Some(0.0),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+        let latest_user = latest_user_message(&request).unwrap_or_default();
+        self.seen_user_messages
+            .lock()
+            .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?
+            .push(latest_user);
+
+        let text = "Please confirm the merchant's legal name, date, amount, and whether your card was present before I draft a dispute.";
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: text.to_string(),
+            content: vec![CompletionContent::Text(text.to_string())],
+            stop_reason: StopReason::EndTurn,
+            model: self.capabilities().model_id,
+            usage: token_usage(16, 12),
+            duration_ms: 1,
+            thought_signature: None,
+        }))
     }
 }
 

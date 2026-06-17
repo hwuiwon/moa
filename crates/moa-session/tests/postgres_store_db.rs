@@ -633,6 +633,14 @@ async fn experience_records_and_candidates_round_trip() {
         })
         .await
         .expect("candidate status update");
+    let mut duplicate_candidate = candidate.clone();
+    duplicate_candidate.payload = serde_json::json!({"skill_markdown": "# moa-rust\nupdated"});
+    duplicate_candidate.status = LearningCandidateStatus::Proposed;
+    duplicate_candidate.updated_at = Utc::now();
+    store
+        .append_learning_candidate(&duplicate_candidate)
+        .await
+        .expect("idempotent candidate append should not reset status");
 
     let experiences = store
         .list_experience_records(session_id)

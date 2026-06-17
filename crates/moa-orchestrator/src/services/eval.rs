@@ -18,6 +18,8 @@ use moa_core::wire::{
     EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
     EvalSuiteListResponse, EvalSuiteSummary,
 };
+#[cfg(feature = "internal-eval-runner")]
+use moa_core::{MemoryScope, ScopeContext, ScopedConn};
 use moa_core::{MoaConfig, WorkspaceId};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::{
@@ -35,6 +37,12 @@ use moa_lineage_core::{LineageEvent, LineageSink};
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 #[cfg(feature = "internal-eval-runner")]
 use moa_lineage_sink::{MpscSink, MpscSinkConfig};
+#[cfg(feature = "internal-eval-runner")]
+use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
+use moa_scoring::{
+    ScoreCompare, ScoreCompareRef, ScoreRunRef, ScoreSummary, ScoringError,
+    compare_score_runs_for_workspace, score_summaries_for_workspace,
+};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
@@ -50,42 +58,6 @@ use crate::workflows::eval_run::EvalRunWorkflowRequest;
 
 #[cfg(feature = "internal-eval-runner")]
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
-
-/// Workspace-scoped score summary SQL used by `Eval/scores`.
-pub const EVAL_SCORES_SQL: &str = r#"
-SELECT name,
-       value_type,
-       COUNT(*)::BIGINT AS n,
-       AVG(value_numeric) AS numeric_mean,
-       AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
-FROM analytics.scores
-WHERE run_id = $1 AND workspace_id = $2
-GROUP BY name, value_type
-ORDER BY name, value_type
-"#;
-
-/// Workspace-scoped score comparison SQL used by `Eval/compare`.
-pub const EVAL_COMPARE_SQL: &str = r#"
-WITH base AS (
-    SELECT name, AVG(value_numeric) AS mean
-    FROM analytics.scores
-    WHERE run_id = $1 AND workspace_id = $3 AND value_type = 'numeric'
-    GROUP BY name
-),
-new AS (
-    SELECT name, AVG(value_numeric) AS mean
-    FROM analytics.scores
-    WHERE run_id = $2 AND workspace_id = $3 AND value_type = 'numeric'
-    GROUP BY name
-)
-SELECT COALESCE(base.name, new.name) AS name,
-       base.mean AS base_mean,
-       new.mean AS new_mean,
-       COALESCE(new.mean, 0.0) - COALESCE(base.mean, 0.0) AS delta
-FROM base
-FULL OUTER JOIN new USING (name)
-ORDER BY name
-"#;
 
 /// Restate service surface for hosted eval operations.
 #[restate_sdk::service]
@@ -340,10 +312,18 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                score_summaries_for_workspace(&pool, request)
-                    .await
-                    .map(Json::from)
-                    .map_err(eval_error_to_handler_error)
+                score_summaries_for_workspace(
+                    &pool,
+                    ScoreRunRef {
+                        workspace_id: request.workspace_id,
+                        run_id: request.run_id,
+                    },
+                )
+                .await
+                .map(eval_scores_response_from_summary)
+                .map_err(scoring_error_to_eval_error)
+                .map(Json::from)
+                .map_err(eval_error_to_handler_error)
             })
             .name("eval_scores")
             .await?)
@@ -362,10 +342,19 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                compare_runs_for_workspace(&pool, request)
-                    .await
-                    .map(Json::from)
-                    .map_err(eval_error_to_handler_error)
+                compare_score_runs_for_workspace(
+                    &pool,
+                    ScoreCompareRef {
+                        workspace_id: request.workspace_id,
+                        base_run: request.base_run,
+                        new_run: request.new_run,
+                    },
+                )
+                .await
+                .map(eval_compare_response_from_scores)
+                .map_err(scoring_error_to_eval_error)
+                .map(Json::from)
+                .map_err(eval_error_to_handler_error)
             })
             .name("eval_compare")
             .await?)
@@ -999,6 +988,7 @@ async fn replay_dataset_for_workspace(
             workspace_id: request.workspace_id,
         });
     }
+    ensure_eval_replay_score_run_parent(&pool, &request.workspace_id, run_id).await?;
 
     let (sink, writer) = MpscSink::spawn(
         MpscSinkConfig::from(&config.observability.lineage),
@@ -1025,6 +1015,31 @@ async fn replay_dataset_for_workspace(
 }
 
 #[cfg(feature = "internal-eval-runner")]
+async fn ensure_eval_replay_score_run_parent(
+    pool: &PgPool,
+    workspace_id: &WorkspaceId,
+    run_id: Uuid,
+) -> Result<(), EvalServiceError> {
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone()))
+        .await
+        .map_err(|error| EvalServiceError::Runtime {
+            message: error.to_string(),
+        })?;
+    ensure_score_run_parent(conn.as_mut(), &scope, run_id, SCORE_RUN_SOURCE_EVAL_REPLAY)
+        .await
+        .map_err(scoring_error_to_eval_error)?;
+    conn.commit()
+        .await
+        .map_err(|error| EvalServiceError::Runtime {
+            message: error.to_string(),
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "internal-eval-runner")]
 async fn run_replay_request_isolated(
     config: MoaConfig,
     pool: PgPool,
@@ -1040,65 +1055,6 @@ async fn run_replay_request_isolated(
         message: error.to_string(),
     })?
     .map_err(|message| EvalServiceError::Runtime { message })?
-}
-
-async fn score_summaries_for_workspace(
-    pool: &PgPool,
-    request: EvalScoresRequest,
-) -> Result<EvalScoresResponse, EvalServiceError> {
-    let rows = sqlx::query(EVAL_SCORES_SQL)
-        .bind(request.run_id)
-        .bind(request.workspace_id.as_str())
-        .fetch_all(pool)
-        .await?;
-
-    let mut summaries = Vec::with_capacity(rows.len());
-    for row in rows {
-        let n: i64 = row.try_get("n")?;
-        let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
-        let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
-        summaries.push(EvalScoreSummaryRow {
-            name: row.try_get("name")?,
-            value_type: row.try_get("value_type")?,
-            n: u64::try_from(n).map_err(|_| EvalServiceError::IntegerTooLarge { field: "n" })?,
-            mean_or_rate: numeric_mean.or(boolean_rate).unwrap_or(0.0),
-        });
-    }
-
-    Ok(EvalScoresResponse {
-        workspace_id: request.workspace_id,
-        run_id: request.run_id,
-        rows: summaries,
-    })
-}
-
-async fn compare_runs_for_workspace(
-    pool: &PgPool,
-    request: EvalCompareRequest,
-) -> Result<EvalCompareResponse, EvalServiceError> {
-    let rows = sqlx::query(EVAL_COMPARE_SQL)
-        .bind(request.base_run)
-        .bind(request.new_run)
-        .bind(request.workspace_id.as_str())
-        .fetch_all(pool)
-        .await?;
-
-    let mut comparisons = Vec::with_capacity(rows.len());
-    for row in rows {
-        comparisons.push(EvalCompareRow {
-            name: row.try_get("name")?,
-            base_mean: row.try_get("base_mean")?,
-            new_mean: row.try_get("new_mean")?,
-            delta: row.try_get("delta")?,
-        });
-    }
-
-    Ok(EvalCompareResponse {
-        workspace_id: request.workspace_id,
-        base_run: request.base_run,
-        new_run: request.new_run,
-        rows: comparisons,
-    })
 }
 
 #[cfg(any(feature = "internal-eval-runner", test))]
@@ -1413,6 +1369,51 @@ fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
         | EvalServiceError::Sql(_)
         | EvalServiceError::Lineage(_)
         | EvalServiceError::Runtime { .. } => TerminalError::new(error.to_string()).into(),
+    }
+}
+
+fn eval_scores_response_from_summary(summary: ScoreSummary) -> EvalScoresResponse {
+    EvalScoresResponse {
+        workspace_id: summary.workspace_id,
+        run_id: summary.run_id,
+        rows: summary
+            .rows
+            .into_iter()
+            .map(|row| EvalScoreSummaryRow {
+                name: row.name,
+                value_type: row.value_type,
+                n: row.n,
+                mean_or_rate: row.mean_or_rate,
+            })
+            .collect(),
+    }
+}
+
+fn eval_compare_response_from_scores(compare: ScoreCompare) -> EvalCompareResponse {
+    EvalCompareResponse {
+        workspace_id: compare.workspace_id,
+        base_run: compare.base_run,
+        new_run: compare.new_run,
+        rows: compare
+            .rows
+            .into_iter()
+            .map(|row| EvalCompareRow {
+                name: row.name,
+                base_mean: row.base_mean,
+                new_mean: row.new_mean,
+                delta: row.delta,
+            })
+            .collect(),
+    }
+}
+
+fn scoring_error_to_eval_error(error: ScoringError) -> EvalServiceError {
+    match error {
+        ScoringError::IntegerTooLarge { field } => EvalServiceError::IntegerTooLarge { field },
+        ScoringError::Sql(error) => EvalServiceError::Sql(error),
+        ScoringError::ScoreRunMismatch { .. } => EvalServiceError::Runtime {
+            message: error.to_string(),
+        },
     }
 }
 

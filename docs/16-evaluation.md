@@ -19,7 +19,7 @@ report identifies the bottleneck before new memory architecture ships.
 | Mode | Use |
 |---|---|
 | `recorded` | PR-CI mode. A JSONL transcript provides user turns and recorded provider events. |
-| `scripted_user` | Reserved for future simulation from a goal card and rubric. |
+| `scripted_user` | Offline replay guard. A goal card and scripted-user JSONL drive the normal long-conversation runner without live simulation or billed providers. |
 | `live` | Reserved for nightly or manual provider runs. Never run by default. |
 
 Recorded mode uses `RecordedScriptedProvider`. Strict matching is the default:
@@ -43,8 +43,9 @@ Expected files:
 
 | File | Required | Purpose |
 |---|---|---|
-| `goal_card.md` | no | Future scripted-user mode |
-| `transcript.jsonl` | yes | User turns and provider events |
+| `goal_card.md` | no | Required by `scripted_user`; describes the user goal and guardrail context |
+| `scripted_user.jsonl` | no | Required by `scripted_user`; scripted user turns, approvals, fragments, and probes |
+| `transcript.jsonl` | recorded mode | User turns and provider events |
 | `expectations.toml` | yes | Budgets, planted facts, canaries, tool expectations |
 
 Suite TOML uses `kind = "long"` for these cases. Existing single-turn cases
@@ -75,8 +76,11 @@ transcript turn it appends the user event to the session log, then executes the
 brain through the normal turn path. The context pipeline, tool router, session
 store, and memory retrieval stages still run.
 
-Recorded mode is the foundation implementation. Scripted-user and live modes
-are explicit schema values so scenarios do not need a schema break later.
+Recorded mode is the default CI implementation. `scripted_user` mode is also
+implemented for offline scripted-user replay guards: the runner reads the goal
+card and scripted user turns, then drives the same brain/session path. `live`
+remains an explicit schema value for future nightly or manual provider runs and
+is not implemented in the default local lane.
 
 ## ScoreCard
 

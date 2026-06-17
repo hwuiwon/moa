@@ -1,4 +1,4 @@
-//! Canonical artifact definitions for MOA skills, connectors, and workflows.
+//! Canonical artifact definitions for MOA skills, connectors, workflows, and experiment plans.
 //!
 //! The crate owns the code-addressable document model used by API imports,
 //! Postgres storage, and future visual builders. Runtime crates should depend
@@ -16,6 +16,8 @@ pub mod reference;
 pub mod registry;
 /// Reference resolution against published artifact revisions.
 pub mod resolver;
+/// Behavior-lab experiment plan and embedded simulation definitions.
+pub mod simulation;
 /// Skill artifact definitions.
 pub mod skill;
 /// Semantic validation for artifact documents.

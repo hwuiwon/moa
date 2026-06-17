@@ -148,7 +148,6 @@ impl PostgresSessionStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
                      $18, $19, $20, $21) \
              ON CONFLICT (id) DO UPDATE SET \
-                 status = EXCLUDED.status, \
                  target_id = EXCLUDED.target_id, \
                  target_label = EXCLUDED.target_label, \
                  payload = EXCLUDED.payload, \

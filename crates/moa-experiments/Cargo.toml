@@ -1,0 +1,22 @@
+[package]
+name = "moa-experiments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3.workspace = true
+chrono.workspace = true
+moa-artifacts.workspace = true
+moa-core.workspace = true
+moa-scoring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["chrono", "json", "uuid"] }
+thiserror.workspace = true
+uuid.workspace = true
+workspace-hack.workspace = true
+
+[dev-dependencies]
+moa-test-support.workspace = true
+tokio.workspace = true

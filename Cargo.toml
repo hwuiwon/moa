@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/moa-core",
+    "crates/moa-scoring",
     "crates/moa-artifacts",
     "crates/moa-brain",
     "crates/moa-workflows",
@@ -31,6 +32,7 @@ members = [
     "crates/moa-skills",
     "crates/moa-eval/core",
     "crates/moa-eval",
+    "crates/moa-experiments",
     "crates/moa-loadtest",
     "crates/moa-test-support",
     "crates/workspace-hack",
@@ -38,6 +40,7 @@ members = [
 ]
 default-members = [
     "crates/moa-core",
+    "crates/moa-scoring",
     "crates/moa-artifacts",
     "crates/moa-brain",
     "crates/moa-workflows",
@@ -67,6 +70,7 @@ default-members = [
     "crates/moa-skills",
     "crates/moa-eval/core",
     "crates/moa-eval",
+    "crates/moa-experiments",
     "crates/moa-loadtest",
 ]
 
@@ -83,9 +87,11 @@ moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-artifacts = { path = "crates/moa-artifacts" }
 moa-brain = { path = "crates/moa-brain" }
 moa-core = { path = "crates/moa-core" }
+moa-scoring = { path = "crates/moa-scoring" }
 moa-edge = { path = "crates/moa-edge" }
 moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }
+moa-experiments = { path = "crates/moa-experiments" }
 moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
 moa-gateway = { path = "crates/moa-gateway" }
 moa-hands = { path = "crates/moa-hands" }

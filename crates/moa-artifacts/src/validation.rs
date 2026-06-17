@@ -3,10 +3,18 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
-use crate::reference::{ReferenceResolution, ReferenceState};
+use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
+use crate::simulation::{
+    ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition,
+    ExperimentTargetKind, MAX_PLAN_PARALLELISM, MAX_PLAN_TOTAL_COST_CENTS, MAX_PLAN_TOTAL_TOKENS,
+    MAX_PLAN_TRIAL_COST_CENTS, MAX_PLAN_TRIAL_TOKENS, MAX_PLAN_TRIALS_PER_COMBINATION,
+    MAX_SCENARIO_TURNS, SimulationDataBundleDefinition, SimulationDataSourceKind,
+    SimulationPersonaDefinition, SimulationProfileDefinition, SimulationScenarioDefinition,
+};
 use crate::skill::SkillDefinition;
 use crate::workflow::{WorkflowDefinition, WorkflowNodeKind};
 
@@ -62,6 +70,9 @@ pub fn validate_for_status(
         ArtifactDefinition::Skill(definition) => validate_skill(definition, &mut report),
         ArtifactDefinition::Connector(definition) => validate_connector(definition, &mut report),
         ArtifactDefinition::Workflow(definition) => validate_workflow(definition, &mut report),
+        ArtifactDefinition::ExperimentPlan(definition) => {
+            validate_experiment_plan(definition, &mut report);
+        }
     }
 
     if requested_status == ArtifactStatus::Published {
@@ -79,6 +90,13 @@ pub fn validate_for_status(
 }
 
 fn validate_envelope(document: &ArtifactDocument, report: &mut ValidationReport) {
+    if document.api_version != "moa.artifact/v1" {
+        report.push_error(
+            "api_version",
+            "artifact api_version must be moa.artifact/v1",
+        );
+    }
+
     if document.metadata.name.trim().is_empty() {
         report.push_error("metadata.name", "artifact name must not be empty");
     }
@@ -99,6 +117,361 @@ fn validate_envelope(document: &ArtifactDocument, report: &mut ValidationReport)
             "kind",
             "standalone action documents are reserved for a later schema version",
         );
+    }
+}
+
+fn validate_simulation_persona(
+    path: &str,
+    definition: &SimulationPersonaDefinition,
+    report: &mut ValidationReport,
+) {
+    require_non_empty(format!("{path}.id"), &definition.id, "persona id", report);
+    require_non_empty(
+        format!("{path}.voice"),
+        &definition.voice,
+        "persona voice",
+        report,
+    );
+    require_non_empty_vec(
+        &format!("{path}.goals"),
+        &definition.goals,
+        "simulation persona must include at least one goal",
+        "persona goal must not be empty",
+        report,
+    );
+    require_non_empty(
+        format!("{path}.stop_behavior"),
+        &definition.stop_behavior,
+        "persona stop behavior",
+        report,
+    );
+}
+
+fn validate_simulation_profile(
+    path: &str,
+    definition: &SimulationProfileDefinition,
+    report: &mut ValidationReport,
+) {
+    require_non_empty(format!("{path}.id"), &definition.id, "profile id", report);
+    if !is_non_empty_object(&definition.facts) {
+        report.push_error(
+            format!("{path}.facts"),
+            "simulation profile facts must be a non-empty object",
+        );
+    }
+}
+
+fn validate_simulation_data_bundle(
+    path: &str,
+    definition: &SimulationDataBundleDefinition,
+    report: &mut ValidationReport,
+) {
+    require_non_empty(
+        format!("{path}.id"),
+        &definition.id,
+        "data bundle id",
+        report,
+    );
+    if definition.sources.is_empty() {
+        report.push_error(
+            format!("{path}.sources"),
+            "simulation data bundle must include at least one source",
+        );
+    }
+
+    let mut source_ids = HashSet::new();
+    for (index, source) in definition.sources.iter().enumerate() {
+        let source_path = format!("{path}.sources[{index}]");
+        let id_path = format!("{source_path}.id");
+        if source.id.trim().is_empty() {
+            report.push_error(id_path.clone(), "data source id must not be empty");
+        } else if !source_ids.insert(source.id.as_str()) {
+            report.push_error(id_path, "duplicate data source id");
+        }
+
+        if let Some(connector_ref) = &source.connector_ref {
+            validate_ref_kind(
+                &format!("{source_path}.connector_ref"),
+                connector_ref,
+                ArtifactKind::Connector,
+                report,
+            );
+        }
+
+        match source.kind {
+            SimulationDataSourceKind::ConnectorFixture => {
+                if source.connector_ref.is_none() {
+                    report.push_error(
+                        format!("{source_path}.connector_ref"),
+                        "connector fixture source must reference a connector artifact",
+                    );
+                }
+            }
+            SimulationDataSourceKind::MockData => {
+                if is_empty_value(&source.fixture) {
+                    report.push_error(
+                        format!("{source_path}.fixture"),
+                        "mock data source fixture must not be empty",
+                    );
+                }
+            }
+            SimulationDataSourceKind::LiveDataScope => {
+                let scope = source.scope.as_deref().unwrap_or_default();
+                if scope.trim().is_empty() {
+                    report.push_error(
+                        format!("{source_path}.scope"),
+                        "live data source scope must not be empty",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn validate_simulation_scenario(
+    path: &str,
+    definition: &SimulationScenarioDefinition,
+    data_bundle_ids: &HashSet<&str>,
+    report: &mut ValidationReport,
+) {
+    require_non_empty(format!("{path}.id"), &definition.id, "scenario id", report);
+    require_non_empty(
+        format!("{path}.initial_situation"),
+        &definition.initial_situation,
+        "scenario initial situation",
+        report,
+    );
+    require_non_empty_vec(
+        &format!("{path}.goals"),
+        &definition.goals,
+        "simulation scenario must include at least one goal",
+        "scenario goal must not be empty",
+        report,
+    );
+    require_non_empty_vec(
+        &format!("{path}.success_criteria"),
+        &definition.success_criteria,
+        "simulation scenario must include at least one success criterion",
+        "scenario success criterion must not be empty",
+        report,
+    );
+    validate_u32_range(
+        &format!("{path}.max_turns"),
+        definition.max_turns,
+        1,
+        MAX_SCENARIO_TURNS,
+        "scenario max_turns",
+        report,
+    );
+
+    for (index, data_bundle_id) in definition.data_bundle_ids.iter().enumerate() {
+        let id_path = format!("{path}.data_bundle_ids[{index}]");
+        if data_bundle_id.trim().is_empty() {
+            report.push_error(id_path, "scenario data bundle id must not be empty");
+        } else if !data_bundle_ids.contains(data_bundle_id.as_str()) {
+            report.push_error(
+                id_path,
+                "scenario data bundle id must exist in simulation.data_bundles",
+            );
+        }
+    }
+}
+
+fn validate_experiment_plan(definition: &ExperimentPlanDefinition, report: &mut ValidationReport) {
+    validate_experiment_simulation(&definition.simulation, report);
+    validate_target_variants(definition, report);
+    require_non_empty(
+        "definition.spec.simulator_model",
+        &definition.simulator_model,
+        "experiment plan simulator_model",
+        report,
+    );
+    if let Some(target_model) = &definition.target_model {
+        require_non_empty(
+            "definition.spec.target_model",
+            target_model,
+            "experiment plan target_model",
+            report,
+        );
+    }
+    validate_u32_range(
+        "definition.spec.parallelism",
+        definition.parallelism,
+        1,
+        MAX_PLAN_PARALLELISM,
+        "experiment plan parallelism",
+        report,
+    );
+    validate_u32_range(
+        "definition.spec.trials_per_combination",
+        definition.trials_per_combination,
+        1,
+        MAX_PLAN_TRIALS_PER_COMBINATION,
+        "experiment plan trials_per_combination",
+        report,
+    );
+    validate_budget(&definition.budget, report);
+}
+
+fn validate_experiment_simulation(
+    definition: &ExperimentSimulationDefinition,
+    report: &mut ValidationReport,
+) {
+    let root = "definition.spec.simulation";
+    validate_non_empty_ids(
+        &format!("{root}.scenarios"),
+        definition
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str()),
+        "experiment plan must include at least one scenario",
+        "duplicate scenario id",
+        report,
+    );
+    validate_non_empty_ids(
+        &format!("{root}.personas"),
+        definition
+            .personas
+            .iter()
+            .map(|persona| persona.id.as_str()),
+        "experiment plan must include at least one persona",
+        "duplicate persona id",
+        report,
+    );
+    validate_non_empty_ids(
+        &format!("{root}.profiles"),
+        definition
+            .profiles
+            .iter()
+            .map(|profile| profile.id.as_str()),
+        "experiment plan must include at least one profile",
+        "duplicate profile id",
+        report,
+    );
+    let data_bundle_ids = collect_ids(
+        &format!("{root}.data_bundles"),
+        definition
+            .data_bundles
+            .iter()
+            .map(|data_bundle| data_bundle.id.as_str()),
+        "duplicate data bundle id",
+        report,
+    );
+
+    for (index, scenario) in definition.scenarios.iter().enumerate() {
+        validate_simulation_scenario(
+            &format!("{root}.scenarios[{index}]"),
+            scenario,
+            &data_bundle_ids,
+            report,
+        );
+    }
+    for (index, persona) in definition.personas.iter().enumerate() {
+        validate_simulation_persona(&format!("{root}.personas[{index}]"), persona, report);
+    }
+    for (index, profile) in definition.profiles.iter().enumerate() {
+        validate_simulation_profile(&format!("{root}.profiles[{index}]"), profile, report);
+    }
+    for (index, data_bundle) in definition.data_bundles.iter().enumerate() {
+        validate_simulation_data_bundle(
+            &format!("{root}.data_bundles[{index}]"),
+            data_bundle,
+            report,
+        );
+    }
+}
+
+fn validate_target_variants(definition: &ExperimentPlanDefinition, report: &mut ValidationReport) {
+    if definition.target_variants.is_empty() {
+        report.push_error(
+            "definition.spec.target_variants",
+            "experiment plan must include at least one target variant",
+        );
+    }
+
+    let mut variant_keys = HashSet::new();
+    for (index, variant) in definition.target_variants.iter().enumerate() {
+        let key_path = format!("definition.spec.target_variants[{index}].key");
+        if variant.key.trim().is_empty() {
+            report.push_error(key_path.clone(), "target variant key must not be empty");
+        } else if !variant_keys.insert(variant.key.as_str()) {
+            report.push_error(key_path, "duplicate target variant key");
+        }
+
+        match variant.kind {
+            ExperimentTargetKind::AgentLoop => {}
+            ExperimentTargetKind::Workflow => {
+                if let Some(workflow_ref) = &variant.workflow_ref {
+                    validate_ref_kind(
+                        &format!("definition.spec.target_variants[{index}].workflow_ref"),
+                        workflow_ref,
+                        ArtifactKind::Workflow,
+                        report,
+                    );
+                } else {
+                    report.push_error(
+                        format!("definition.spec.target_variants[{index}].workflow_ref"),
+                        "workflow target variant must reference a workflow artifact",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn validate_budget(budget: &ExperimentBudget, report: &mut ValidationReport) {
+    validate_u32_range(
+        "definition.spec.budget.max_total_cents",
+        budget.max_total_cents,
+        1,
+        MAX_PLAN_TOTAL_COST_CENTS,
+        "experiment plan max_total_cents",
+        report,
+    );
+    if let Some(max_trial_cents) = budget.max_trial_cents {
+        validate_u32_range(
+            "definition.spec.budget.max_trial_cents",
+            max_trial_cents,
+            1,
+            MAX_PLAN_TRIAL_COST_CENTS,
+            "experiment plan max_trial_cents",
+            report,
+        );
+        if budget.max_total_cents > 0 && max_trial_cents > budget.max_total_cents {
+            report.push_error(
+                "definition.spec.budget.max_trial_cents",
+                "experiment plan max_trial_cents must not exceed max_total_cents",
+            );
+        }
+    }
+    if let Some(max_total_tokens) = budget.max_total_tokens {
+        validate_u32_range(
+            "definition.spec.budget.max_total_tokens",
+            max_total_tokens,
+            1,
+            MAX_PLAN_TOTAL_TOKENS,
+            "experiment plan max_total_tokens",
+            report,
+        );
+    }
+    if let Some(max_trial_tokens) = budget.max_trial_tokens {
+        validate_u32_range(
+            "definition.spec.budget.max_trial_tokens",
+            max_trial_tokens,
+            1,
+            MAX_PLAN_TRIAL_TOKENS,
+            "experiment plan max_trial_tokens",
+            report,
+        );
+        if budget
+            .max_total_tokens
+            .is_some_and(|max_total_tokens| max_trial_tokens > max_total_tokens)
+        {
+            report.push_error(
+                "definition.spec.budget.max_trial_tokens",
+                "experiment plan max_trial_tokens must not exceed max_total_tokens",
+            );
+        }
     }
 }
 
@@ -166,5 +539,105 @@ fn validate_workflow(definition: &WorkflowDefinition, report: &mut ValidationRep
                 "edge destination node does not exist",
             );
         }
+    }
+}
+
+fn require_non_empty(
+    path: impl Into<String>,
+    value: &str,
+    label: &str,
+    report: &mut ValidationReport,
+) {
+    if value.trim().is_empty() {
+        report.push_error(path, format!("{label} must not be empty"));
+    }
+}
+
+fn require_non_empty_vec(
+    path: &str,
+    values: &[String],
+    empty_message: &str,
+    item_message: &str,
+    report: &mut ValidationReport,
+) {
+    if values.is_empty() {
+        report.push_error(path, empty_message);
+        return;
+    }
+    for (index, value) in values.iter().enumerate() {
+        if value.trim().is_empty() {
+            report.push_error(format!("{path}[{index}]"), item_message);
+        }
+    }
+}
+
+fn validate_ref_kind(
+    path: &str,
+    artifact_ref: &ArtifactRef,
+    expected: ArtifactKind,
+    report: &mut ValidationReport,
+) {
+    if artifact_ref.artifact_kind() != Some(&expected) {
+        report.push_error(path, format!("reference must use {}://", expected.as_str()));
+    }
+}
+
+fn validate_non_empty_ids<'a>(
+    path: &str,
+    values: impl Iterator<Item = &'a str>,
+    empty_message: &str,
+    duplicate_message: &str,
+    report: &mut ValidationReport,
+) {
+    let ids = values.collect::<Vec<_>>();
+    if ids.is_empty() {
+        report.push_error(path, empty_message);
+        return;
+    }
+    collect_ids(path, ids.into_iter(), duplicate_message, report);
+}
+
+fn collect_ids<'a>(
+    path: &str,
+    values: impl Iterator<Item = &'a str>,
+    duplicate_message: &str,
+    report: &mut ValidationReport,
+) -> HashSet<&'a str> {
+    let mut ids = HashSet::new();
+    for (index, value) in values.enumerate() {
+        let id_path = format!("{path}[{index}].id");
+        if value.trim().is_empty() {
+            report.push_error(id_path, "id must not be empty");
+        } else if !ids.insert(value) {
+            report.push_error(id_path, duplicate_message);
+        }
+    }
+    ids
+}
+
+fn validate_u32_range(
+    path: &str,
+    value: u32,
+    min: u32,
+    max: u32,
+    label: &str,
+    report: &mut ValidationReport,
+) {
+    if value < min || value > max {
+        report.push_error(path, format!("{label} must be between {min} and {max}"));
+    }
+}
+
+fn is_non_empty_object(value: &Value) -> bool {
+    matches!(value, Value::Object(map) if !map.is_empty())
+}
+
+fn is_empty_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(values) => values.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        Value::String(value) => value.trim().is_empty(),
+        Value::Bool(_) | Value::Number(_) => false,
     }
 }

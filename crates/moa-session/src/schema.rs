@@ -161,6 +161,26 @@ const SESSION_MIGRATIONS: &[SessionMigration] = &[
         name: "037_agent_artifacts.sql",
         sql: include_str!("../migrations/postgres/037_agent_artifacts.sql"),
     },
+    SessionMigration {
+        name: "038_behavior_experiments.sql",
+        sql: include_str!("../migrations/postgres/038_behavior_experiments.sql"),
+    },
+    SessionMigration {
+        name: "039_behavior_lab_artifact_kinds.sql",
+        sql: include_str!("../migrations/postgres/039_behavior_lab_artifact_kinds.sql"),
+    },
+    SessionMigration {
+        name: "040_behavior_lab_trials.sql",
+        sql: include_str!("../migrations/postgres/040_behavior_lab_trials.sql"),
+    },
+    SessionMigration {
+        name: "041_behavior_lab_dispatched_trials.sql",
+        sql: include_str!("../migrations/postgres/041_behavior_lab_dispatched_trials.sql"),
+    },
+    SessionMigration {
+        name: "042_behavior_lab_trial_plan_revision.sql",
+        sql: include_str!("../migrations/postgres/042_behavior_lab_trial_plan_revision.sql"),
+    },
 ];
 
 pub(crate) const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x4d4f_415f_5343_4845;

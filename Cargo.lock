@@ -3631,6 +3631,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-experiments"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "moa-artifacts",
+ "moa-core",
+ "moa-scoring",
+ "moa-test-support",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-fga-bootstrap"
 version = "0.1.0"
 dependencies = [
@@ -3988,6 +4007,7 @@ dependencies = [
  "moa-core",
  "moa-eval",
  "moa-eval-core",
+ "moa-experiments",
  "moa-hands",
  "moa-lineage-audit",
  "moa-lineage-core",
@@ -3998,11 +4018,13 @@ dependencies = [
  "moa-memory-vector",
  "moa-ocsf",
  "moa-providers",
+ "moa-scoring",
  "moa-security",
  "moa-session",
  "moa-skills",
  "moa-test-support",
  "moa-workflows",
+ "regex",
  "reqwest 0.13.2",
  "restate-sdk",
  "secrecy 0.10.3",
@@ -4043,6 +4065,19 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-scoring"
+version = "0.1.0"
+dependencies = [
+ "moa-core",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
  "workspace-hack",
 ]
 

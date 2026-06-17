@@ -1,8 +1,7 @@
 //! Durable runtime lifecycle for artifact-backed workflow runs.
 
-use moa_artifacts::document::ArtifactKind;
-use moa_artifacts::reference::{ArtifactRef, ArtifactRefKind};
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactRun, ArtifactRunStatus, NewArtifactRun};
+use moa_artifacts::{document::ArtifactKind, reference::ArtifactRef};
 use moa_core::{MemoryScope, SessionId};
 use serde_json::Value;
 use uuid::Uuid;
@@ -43,7 +42,7 @@ impl WorkflowRuntime {
         let artifact_ref = parse_workflow_ref(&request.workflow_ref)?;
         let workflow = self
             .registry
-            .load_visible_published(scope, ArtifactKind::Workflow, &artifact_ref.target)
+            .load_visible_published(scope, ArtifactKind::Workflow, artifact_ref.target_name())
             .await?
             .ok_or_else(|| WorkflowError::WorkflowNotFound {
                 workflow_ref: request.workflow_ref.clone(),
@@ -94,7 +93,7 @@ fn parse_workflow_ref(value: &str) -> Result<ArtifactRef> {
                 reference: value.to_string(),
                 message: error.to_string(),
             })?;
-    if artifact_ref.kind != ArtifactRefKind::Workflow {
+    if artifact_ref.artifact_kind() != Some(&ArtifactKind::Workflow) {
         return Err(WorkflowError::WrongReferenceKind);
     }
     Ok(artifact_ref)
@@ -110,7 +109,7 @@ mod tests {
         // Pins: the runtime never creates workflow runs from skill or action references.
         let workflow_ref =
             parse_workflow_ref("workflow://damaged-food-order").expect("workflow ref parses");
-        assert_eq!(workflow_ref.target, "damaged-food-order");
+        assert_eq!(workflow_ref.target_name(), "damaged-food-order");
 
         let error = parse_workflow_ref("skill://damaged-food-order")
             .expect_err("skill references must not start workflow runs");
