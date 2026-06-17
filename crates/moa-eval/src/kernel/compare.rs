@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_reports_mcnemar_uses_discordant_pairs_only() {
+    fn compare_reports_mcnemar_uses_mismatched_pairs_only() {
         // Pins: McNemar counts only probes where the paired binary outcome differs.
         let probes = ["probe-a", "probe-b", "probe-c", "probe-d"];
         let baseline = report_json("corpus-a", &[1], &probes, |index| {

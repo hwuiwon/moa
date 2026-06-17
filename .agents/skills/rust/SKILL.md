@@ -59,7 +59,7 @@ Do not use this skill for:
 - Use `tracing` for observability. Never add `println!` or `eprintln!` to library code.
 - Every public function needs a doc comment. Every module needs a module-level doc comment.
 - Avoid `unwrap()` in library code. In tests, `expect()` with a specific failure message is acceptable.
-- Optional integrations stay behind workspace feature flags: `telegram`, `slack`, `discord`, `cloud`.
+- Optional integrations stay behind workspace feature flags: `slack`, `cloud`, or a narrowly named provider flag.
 - Prefer focused tests close to the changed behavior. Use inline unit tests for local logic and `tests/` directories for integration coverage.
 
 ## Review Checklist

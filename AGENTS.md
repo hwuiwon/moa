@@ -31,7 +31,7 @@ crate, translate it to `crates/<name>/...`.
 |---|---|
 | Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-edge` public HTTP edge |
 | Memory and learning | `moa-memory-*` graph/ingest/lifecycle/PII/vector, `moa-skills` registry/distillation/improvement |
-| Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding providers, `moa-gateway` Slack/Discord/Telegram adapters, `moa-security` vault/policy/MCP proxy |
+| Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding providers, `moa-gateway` Slack adapter, `moa-security` vault/policy/MCP proxy |
 | Auth, audit, lineage | `moa-auth/*` identity/authz/OpenFGA bootstrap, `moa-ocsf` security events, `moa-lineage/*` citation, sinks, OTel, audit chain |
 | Eval and dev tooling | `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`, `xtask`, `workspace-hack` |
 
@@ -42,8 +42,8 @@ crate, translate it to `crates/<name>/...`.
 3. Use `tracing` for logging; never `println!`/`eprintln!` in library code.
 4. Use `tokio`; all I/O must be async.
 5. No `unwrap()` in library code. Use `?` or explicit handling.
-6. Optional dependencies are controlled by feature flags such as `telegram`,
-   `slack`, `discord`, and `cloud`.
+6. Optional dependencies are controlled by feature flags such as `slack` and
+   `cloud`.
 7. Prefer direct imports from the owning crate/module. Do not add compatibility
    shims, wrapper functions, or `pub use` re-exports just to preserve old paths.
 

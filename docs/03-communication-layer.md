@@ -9,7 +9,7 @@ MOA has several front doors over the same session model:
 | Surface | Primary crate | Use |
 |---|---|---|
 | REST/API | `moa-edge`, `moa-orchestrator` | Cloud, automation, diagnostics, and integration entrypoints |
-| Messaging adapters | `moa-gateway` | Telegram, Slack, Discord conversations and approvals |
+| Messaging adapters | `moa-gateway` | Slack conversations and approvals |
 
 The interfaces differ in rendering and transport. They all eventually create or address a `SessionId`, append user messages, observe session events, and resolve approvals.
 
@@ -32,9 +32,7 @@ Outbound rendering is platform-specific, but the payload model is shared: text, 
 | Surface | Session mapping |
 |---|---|
 | REST/API | HTTP request maps to a durable session and calls the cloud orchestrator |
-| Telegram | Reply chains or threads map to sessions |
 | Slack | Slack threads map to sessions |
-| Discord | Direct messages or guild threads map to sessions |
 
 The durable state is not stored in the client. Clients can reconnect by replaying Postgres events and, in cloud mode, querying Restate status.
 
@@ -88,6 +86,6 @@ surface.
 
 ## Messaging Gateway
 
-`moa-gateway` owns platform adapters and renderers for Telegram, Slack, and Discord. Adapters convert platform callbacks into the shared command/event model and render approvals with platform-native controls when available.
+`moa-gateway` owns the Slack platform adapter and renderer. The adapter converts Slack callbacks into the shared command/event model and renders approvals with platform-native controls when available.
 
 Current implementation caveats are documented in `implementation-caveats.md`, especially around callback normalization and outbound routing anchors.

@@ -90,28 +90,23 @@ pub fn prepare_outbound_message(
 }
 
 /// Builds the standard approval buttons for one request and platform.
-pub fn approval_buttons(platform: Platform, request_id: Uuid) -> Vec<ActionButton> {
-    let (allow_label, always_label, deny_label) = match platform {
-        Platform::Slack => ("Allow", "Always", "Deny"),
-        _ => ("✅ Allow", "🔁 Always", "❌ Deny"),
-    };
-
+pub fn approval_buttons(_platform: Platform, request_id: Uuid) -> Vec<ActionButton> {
     vec![
         ActionButton {
             id: "allow".to_string(),
-            label: allow_label.to_string(),
+            label: "Allow".to_string(),
             style: ButtonStyle::Primary,
             callback_data: ApprovalCallbackAction::AllowOnce { request_id }.encode(),
         },
         ActionButton {
             id: "always".to_string(),
-            label: always_label.to_string(),
+            label: "Always".to_string(),
             style: ButtonStyle::Secondary,
             callback_data: ApprovalCallbackAction::AlwaysAllow { request_id }.encode(),
         },
         ActionButton {
             id: "deny".to_string(),
-            label: deny_label.to_string(),
+            label: "Deny".to_string(),
             style: ButtonStyle::Danger,
             callback_data: ApprovalCallbackAction::Deny { request_id }.encode(),
         },
@@ -120,32 +115,18 @@ pub fn approval_buttons(platform: Platform, request_id: Uuid) -> Vec<ActionButto
 
 /// Builds the visual post-decision approval controls for a platform.
 ///
-/// Slack removes stale action buttons after a decision. Telegram cannot disable inline
-/// buttons, so it replaces them with a single inert status button. Discord carries the
-/// same labels into disabled component rendering via the Discord adapter helper.
+/// Slack removes stale action buttons after a decision.
 pub fn resolved_approval_buttons(
     platform: Platform,
     request_id: Uuid,
     decision: &ApprovalDecision,
     actor: &str,
 ) -> Vec<ActionButton> {
-    match platform {
-        Platform::Slack => Vec::new(),
-        Platform::Telegram => vec![ActionButton {
-            id: "resolved".to_string(),
-            label: resolved_label(decision, actor),
-            style: ButtonStyle::Secondary,
-            callback_data: format!("ap:x:{request_id}"),
-        }],
-        Platform::Discord | Platform::Api => approval_buttons(platform, request_id),
-    }
-}
-
-fn resolved_label(decision: &ApprovalDecision, actor: &str) -> String {
-    match decision {
-        ApprovalDecision::AllowOnce => format!("✓ Allowed by {actor}"),
-        ApprovalDecision::AlwaysAllow { .. } => format!("✓ Always allowed by {actor}"),
-        ApprovalDecision::Deny { .. } => format!("✕ Denied by {actor}"),
+    if matches!(platform, Platform::Slack) {
+        Vec::new()
+    } else {
+        let _ = (decision, actor);
+        approval_buttons(platform, request_id)
     }
 }
 
@@ -200,18 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn renderer_builds_platform_approval_buttons() {
+    fn renderer_builds_slack_approval_buttons() {
         let request_id = Uuid::now_v7();
-        let telegram = approval_buttons(Platform::Telegram, request_id);
         let slack = approval_buttons(Platform::Slack, request_id);
-        let discord = approval_buttons(Platform::Discord, request_id);
 
-        assert_eq!(telegram.len(), 3);
         assert_eq!(slack.len(), 3);
-        assert_eq!(discord.len(), 3);
-        assert!(telegram[0].label.contains("Allow"));
         assert_eq!(slack[0].label, "Allow");
-        assert!(discord[2].label.contains("Deny"));
+        assert_eq!(slack[1].label, "Always");
+        assert_eq!(slack[2].label, "Deny");
     }
 
     #[test]
@@ -227,9 +204,9 @@ mod tests {
         };
 
         let prepared = prepare_outbound_message(
-            Platform::Discord,
+            Platform::Slack,
             &PlatformCapabilities {
-                max_message_length: 2_000,
+                max_message_length: 40_000,
                 supports_inline_buttons: true,
                 supports_modals: true,
                 supports_ephemeral: true,

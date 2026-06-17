@@ -10,41 +10,24 @@ Caveats are grouped by root cause / architectural boundary, not by the crate whe
 
 All three messaging adapters normalize platform-specific callback payloads into text control messages instead of typed gateway events. The fix is the same everywhere: widen `PlatformAdapter` to emit structured callback events alongside `InboundMessage`.
 
-### Telegram approval callbacks are normalized into control messages
-
-- `crates/moa-gateway/src/telegram.rs` receives Telegram callback queries for approval buttons.
-- The core `PlatformAdapter` trait only emits `InboundMessage`; it does not have a direct signal callback surface for `ApprovalDecided`.
-- The adapter converts callback payloads into normalized control text such as `/approval allow <request_id>` and forwards that as an `InboundMessage`.
-- This works without widening the core gateway trait surface and keeps approval payloads compact and testable.
-- A future gateway/orchestrator seam may want a richer event type than `InboundMessage.text` for platform-originated control actions.
-
 ### Slack approval buttons are normalized back into control messages
 
 - `crates/moa-gateway/src/slack.rs` receives Block Kit button actions over Socket Mode.
 - The core `PlatformAdapter` trait still only emits `InboundMessage`.
 - The adapter converts approval button clicks into normalized commands such as `/approval deny <request_id>`.
-- Approval actions from Slack and Telegram share the same downstream parsing model.
 - If adapters need richer structured callbacks later, `InboundMessage.text` should stop carrying control commands.
 
-### The unified approval layer still targets inline-button platforms first
+### The unified approval layer still targets inline buttons first
 
 - `crates/moa-gateway/src/approval.rs` is the single source of truth for approval callback encoding and default approval buttons.
-- Telegram, Slack, and Discord all consume that same callback format and button set, with a fallback to text commands when inline buttons are unavailable.
-- Approval rendering is consistent across all current messaging adapters.
+- Slack consumes that callback format and button set, with a fallback to text commands when inline buttons are unavailable.
 - The generic gateway surface still has no first-class modal representation. `PlatformCapabilities.supports_modals` is informative today, but the unified approval flow still chooses inline buttons when available and text fallback otherwise.
 
 ---
 
 ## Gateway: outbound routing requires an inbound anchor
 
-All three adapters resolve outbound destinations from `reply_to` and cannot proactively start conversations. The shared fix is an explicit destination field on `OutboundMessage` or the adapter trait.
-
-### Telegram outbound sends require a reply anchor
-
-- `OutboundMessage` does not carry an explicit destination chat or thread.
-- The Telegram adapter resolves where to send by using `reply_to` as an anchor into either a known inbound Telegram message id or a previously sent synthetic gateway message id.
-- Reply-chain session mapping works for the intended session model, and the adapter can send, edit, and delete multi-part Telegram replies without changing the existing trait.
-- The adapter cannot originate a brand-new top-level Telegram conversation without an existing reply anchor.
+The Slack adapter resolves outbound destinations from `reply_to` and cannot proactively start conversations. The shared fix is an explicit destination field on `OutboundMessage` or the adapter trait.
 
 ### Slack outbound routing depends on an existing reply anchor
 
@@ -53,24 +36,11 @@ All three adapters resolve outbound destinations from `reply_to` and cannot proa
 - The intended session model works: one MOA session per Slack thread, with replies and edits anchored correctly.
 - The adapter cannot proactively open a brand-new channel/thread without a prior inbound anchor.
 
-### Discord thread mapping is anchored to an inbound message
-
-- `crates/moa-gateway/src/discord.rs` auto-creates a thread the first time the adapter responds to a guild message that is not already in a thread. Direct messages stay in the DM channel, and existing threads are reused.
-- The "one MOA session per Discord thread" model works for the normal inbound-driven flow.
-- Like Telegram and Slack, the Discord adapter relies on `reply_to` as its routing anchor and cannot proactively open a new conversation without an inbound message or prior synthetic gateway message id.
-
 ---
 
 ## Gateway: conservative rendering
 
-Both Telegram and Slack rendering are intentionally minimal. Upgrading either one requires a proper platform-safe formatting layer with escaping and richer markup.
-
-### Telegram rendering is intentionally conservative
-
-- `crates/moa-gateway/src/renderer.rs` renders text, tool cards, approvals, status updates, diffs, and code blocks.
-- Long messages are split at Telegram's 4096-character limit and approval buttons stay on the final chunk.
-- Rendering uses plain text plus fenced blocks instead of full Telegram Markdown/HTML parse-mode formatting. This is robust against escaping bugs and message splitting issues.
-- If the bot starts carrying heavier user-facing traffic, the next upgrade should be a proper Telegram-safe formatting layer with escaping and richer inline emphasis.
+Slack rendering is intentionally minimal. Upgrading it requires a proper platform-safe formatting layer with escaping and richer markup.
 
 ### Slack rendering is intentionally minimal Block Kit
 

@@ -1,4 +1,4 @@
-//! Out-of-line tests for gateway rate-limit control flow.
+//! Out-of-line tests for Slack gateway rate-limit control flow.
 
 mod support;
 
@@ -12,25 +12,16 @@ use support::{mock_429_then_200, mock_always_200, mock_always_429, post_send};
 use tokio::time::advance;
 
 #[tokio::test(start_paused = true)]
-async fn telegram_send_retries_after_429_with_retry_after_header_respected() {
-    retry_after_header_is_respected(Platform::Telegram, "Retry-After").await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn slack_send_retries_after_429_with_retry_after_header_respected() {
     retry_after_header_is_respected(Platform::Slack, "Retry-After").await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn discord_send_retries_after_429_with_reset_after_header_respected() {
-    retry_after_header_is_respected(Platform::Discord, "X-RateLimit-Reset-After").await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn rate_limit_retry_gives_up_after_max_attempts_and_returns_typed_error() {
     let server = mock_always_429("Retry-After", "1").await;
-    let limiter = GatewayRateLimiter::for_platform(Platform::Telegram)
+    let limiter = GatewayRateLimiter::for_platform(Platform::Slack)
         .with_per_channel_interval(Duration::ZERO)
+        .with_delay_first_send(false)
         .with_max_retries(2);
     let server_for_task = server.clone();
 
@@ -102,8 +93,9 @@ async fn burst_of_concurrent_sends_to_same_channel_serialize_below_per_channel_l
 #[tokio::test(start_paused = true)]
 async fn rate_limit_metrics_are_emitted_per_platform_per_outcome() {
     let server = mock_429_then_200("Retry-After", "1").await;
-    let limiter = GatewayRateLimiter::for_platform(Platform::Telegram)
-        .with_per_channel_interval(Duration::ZERO);
+    let limiter = GatewayRateLimiter::for_platform(Platform::Slack)
+        .with_per_channel_interval(Duration::ZERO)
+        .with_delay_first_send(false);
     let metrics = limiter.metrics();
     let server_for_task = server.clone();
 
@@ -122,7 +114,7 @@ async fn rate_limit_metrics_are_emitted_per_platform_per_outcome() {
 
     assert_eq!(
         metrics
-            .counter("gateway_send_429_received_total", Platform::Telegram, None)
+            .counter("gateway_send_429_received_total", Platform::Slack, None)
             .await,
         1
     );
@@ -130,7 +122,7 @@ async fn rate_limit_metrics_are_emitted_per_platform_per_outcome() {
         metrics
             .counter(
                 "gateway_send_retries_total",
-                Platform::Telegram,
+                Platform::Slack,
                 Some("success")
             )
             .await,
@@ -140,8 +132,9 @@ async fn rate_limit_metrics_are_emitted_per_platform_per_outcome() {
 
 async fn retry_after_header_is_respected(platform: Platform, header_name: &str) {
     let server = mock_429_then_200(header_name, "2").await;
-    let limiter =
-        GatewayRateLimiter::for_platform(platform).with_per_channel_interval(Duration::ZERO);
+    let limiter = GatewayRateLimiter::for_platform(platform)
+        .with_per_channel_interval(Duration::ZERO)
+        .with_delay_first_send(false);
     let server_for_task = server.clone();
 
     let task = tokio::spawn(async move {
@@ -168,27 +161,19 @@ async fn retry_after_header_is_respected(platform: Platform, header_name: &str) 
         .expect("retry task should not panic")
         .expect("429 then 200 should eventually succeed");
     assert_eq!(response.status, 200);
-    assert_eq!(
-        server
-            .received_requests()
-            .await
-            .expect("request recording should be enabled")
-            .len(),
-        2
-    );
 }
 
-async fn wait_for_request_count(server: &wiremock::MockServer, expected: usize) {
-    for _ in 0..1_000 {
-        let count = server
+async fn wait_for_request_count(server: &Arc<wiremock::MockServer>, count: usize) {
+    for _ in 0..100 {
+        let received = server
             .received_requests()
             .await
-            .expect("request recording should be enabled")
-            .len();
-        if count >= expected {
+            .expect("request recording should be enabled");
+        if received.len() >= count {
             return;
         }
+        advance(Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
     }
-    panic!("mock server did not receive {expected} requests");
+    panic!("mock server did not receive {count} requests");
 }

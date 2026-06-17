@@ -6,7 +6,7 @@ _System model, trait map, data flow, and workspace layout._
 
 ```text
 Clients
-  REST/gateway | API automation | Telegram/Slack/Discord
+  REST/gateway | API automation | Slack
         |
         v
 Runtime boundary
@@ -89,7 +89,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, and test/mock adapters |
-| `PlatformAdapter` | Gateway inbound/outbound normalization | Telegram, Slack, Discord |
+| `PlatformAdapter` | Gateway inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |
 | `CredentialVault` | Secret storage and retrieval | local encrypted vault; environment-backed MCP vault |

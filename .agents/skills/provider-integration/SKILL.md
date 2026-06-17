@@ -4,11 +4,11 @@ description: >
   Use this skill when adding or modifying a provider implementation in the MOA
   workspace: a new `LLMProvider` (third-party chat model), `EmbeddingProvider`,
   `HandProvider` (sandbox or runtime backend), MCP server, or `PlatformAdapter`
-  (Telegram, Slack, Discord, or future platforms). It covers the required trait
+  (Slack or future enterprise chat platforms). It covers the required trait
   surface, model catalog and pricing wiring, credential vault entries, gateway
   routing, observability hooks, feature-flag gating, and the live-test pattern
   with `MOA_RUN_LIVE_*_TESTS` flags. Triggers include: "add support for the X
-  model", "integrate Y as an embedding provider", "add a Discord adapter", "wire
+  model", "integrate Y as an embedding provider", "add a Slack adapter", "wire
   up an MCP server", "support a new sandbox runtime". Do NOT use for general
   Rust mechanics (use `rust`), release-time validation (use `certify`), or
   memory-pack steps that touch embeddings (use `memory-pack`).
@@ -38,7 +38,7 @@ Use this skill for:
 - adding a new embedding or rerank provider
 - adding a new hand provider (sandbox: Docker, Daytona, E2B, future runtimes)
 - adding a new MCP server integration
-- adding a new platform adapter (Telegram, Slack, Discord, future chat platforms)
+- adding a new platform adapter (Slack or future enterprise chat platforms)
 - modifying any of the above to support new models, sandbox kinds, or platform features
 
 Do not use this skill for:
@@ -84,7 +84,7 @@ LLM providers also need: a model catalog entry and a pricing entry. Embedding pr
    - LLM: `crates/moa-providers/src/adapters/anthropic/`
    - Embedding: existing OpenAI / Cohere implementations
    - Hand: `crates/moa-hands/src/adapters/local/` for the simplest, `e2b/` for an HTTP-backed sandbox
-   - Platform: `crates/moa-gateway/src/telegram.rs`
+   - Platform: `crates/moa-gateway/src/slack.rs`
    - MCP: `crates/moa-hands/src/adapters/mcp/`
 3. Implement the trait. Mirror the existing adapter's module layout: a `mod.rs` that exposes the public type, an `api.rs` or `client.rs` for HTTP wire shapes, a `parse.rs` for response parsing, and a `tests/` adjacent to the adapter or in `crates/<crate>/tests/<name>_offline.rs`.
 4. Wire credentials through `moa-security`. Do not read environment variables directly from inside the provider; the vault is the indirection.

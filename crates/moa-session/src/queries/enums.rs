@@ -48,12 +48,7 @@ mod tests {
             );
         }
 
-        let platforms = [
-            (Platform::Telegram, "telegram"),
-            (Platform::Slack, "slack"),
-            (Platform::Discord, "discord"),
-            (Platform::Api, "api"),
-        ];
+        let platforms = [(Platform::Slack, "slack"), (Platform::Api, "api")];
         for (value, label) in platforms {
             assert_eq!(value.as_str(), label);
             assert_eq!(from_db::<Platform>("platform", label).unwrap(), value);

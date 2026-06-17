@@ -140,9 +140,7 @@ Deterministic, with feature flags as needed:
 
 ```bash
 cargo test -p moa-gateway --tests
-cargo test -p moa-gateway --tests --features telegram
 cargo test -p moa-gateway --tests --features slack
-cargo test -p moa-gateway --tests --features discord
 ```
 
 ## Suggested Release Gate

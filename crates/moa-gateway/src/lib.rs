@@ -1,6 +1,6 @@
 //! Messaging gateway adapters and rendering helpers.
 
-#[cfg(any(feature = "discord", feature = "slack", feature = "telegram"))]
+#[cfg(feature = "slack")]
 use moa_core::{ChannelRef, InboundMessage, trace_name_from_message};
 
 pub mod approval;
@@ -10,14 +10,8 @@ pub mod edit_window;
 pub mod rate_limit;
 pub mod renderer;
 
-#[cfg(feature = "discord")]
-pub mod discord;
-
 #[cfg(feature = "slack")]
 pub mod slack;
-
-#[cfg(feature = "telegram")]
-pub mod telegram;
 
 pub use approval::{
     ApprovalCallbackAction, approval_buttons, prepare_outbound_message, resolved_approval_buttons,
@@ -31,29 +25,15 @@ pub use edit_window::{
     GatewayEditOutcome, GatewayEditResponse, edit_with_followup_fallback, is_fallback_edit_error,
 };
 pub use rate_limit::{GatewayRateLimitMetrics, GatewayRateLimiter, GatewaySendResponse};
-pub use renderer::{
-    DISCORD_MAX_MESSAGE_LENGTH, SLACK_MAX_MESSAGE_LENGTH, TELEGRAM_MAX_MESSAGE_LENGTH,
-};
-
-#[cfg(feature = "discord")]
-pub use discord::DiscordAdapter;
-
-#[cfg(feature = "discord")]
-pub use renderer::{DiscordRenderChunk, DiscordRenderer};
+pub use renderer::SLACK_MAX_MESSAGE_LENGTH;
 
 #[cfg(feature = "slack")]
 pub use renderer::{SlackRenderChunk, SlackRenderer};
 
-#[cfg(feature = "telegram")]
-pub use renderer::{TelegramRenderChunk, TelegramRenderer};
-
 #[cfg(feature = "slack")]
 pub use slack::SlackAdapter;
 
-#[cfg(feature = "telegram")]
-pub use telegram::TelegramAdapter;
-
-#[cfg(any(feature = "discord", feature = "slack", feature = "telegram"))]
+#[cfg(feature = "slack")]
 pub(crate) fn gateway_receive_span(message: &InboundMessage) -> tracing::Span {
     let trace_name = trace_name_from_message(&message.text);
     let platform = message.platform.as_str();
@@ -70,7 +50,7 @@ pub(crate) fn gateway_receive_span(message: &InboundMessage) -> tracing::Span {
     )
 }
 
-#[cfg(any(feature = "discord", feature = "slack", feature = "telegram"))]
+#[cfg(feature = "slack")]
 fn gateway_channel_label(channel: &ChannelRef) -> String {
     match channel {
         ChannelRef::DirectMessage { user_id } => format!("dm:{user_id}"),

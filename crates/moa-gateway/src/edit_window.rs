@@ -95,15 +95,9 @@ where
 pub fn is_fallback_edit_error(platform: &Platform, response: &GatewayEditResponse) -> bool {
     let body = response.body.to_ascii_lowercase();
     match platform {
-        Platform::Telegram => {
-            response.status == 400
-                && (body.contains("message can't be edited")
-                    || body.contains("message can not be edited"))
-        }
         Platform::Slack => {
             body.contains("message_not_found") || body.contains("cant_update_message")
         }
-        Platform::Discord => response.status == 404 || body.contains("unknown message"),
-        Platform::Api => false,
+        _ => false,
     }
 }

@@ -395,13 +395,13 @@ mod tests {
             id: SessionId::new(),
             user_id: UserId::new("user-456"),
             workspace_id: WorkspaceId::new("webapp"),
-            platform: Platform::Telegram,
+            platform: Platform::Slack,
             model: "claude-sonnet-4-20250514".into(),
             ..SessionMeta::default()
         };
         let ctx = TraceContext::from_session_meta(&meta, Some("Fix OAuth bug"));
         assert_eq!(ctx.trace_name.as_deref(), Some("Fix OAuth bug"));
-        assert!(ctx.tags.contains(&"telegram".to_string()));
+        assert!(ctx.tags.contains(&"slack".to_string()));
         assert_eq!(ctx.workspace_id, WorkspaceId::new("webapp"));
     }
 

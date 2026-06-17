@@ -274,17 +274,17 @@ fn percentile(sorted_samples: &[f64], percentile: f64) -> f64 {
 }
 
 fn exact_mcnemar_p_value(control_only_successes: usize, treatment_only_successes: usize) -> f64 {
-    let discordant = control_only_successes + treatment_only_successes;
-    if discordant == 0 {
+    let mismatched_pairs = control_only_successes + treatment_only_successes;
+    if mismatched_pairs == 0 {
         return 1.0;
     }
 
     let smaller_tail = control_only_successes.min(treatment_only_successes);
-    let mut probability = 2.0_f64.powf(-(discordant as f64));
+    let mut probability = 2.0_f64.powf(-(mismatched_pairs as f64));
     let mut tail = 0.0;
     for successes in 0..=smaller_tail {
         if successes > 0 {
-            probability *= (discordant - successes + 1) as f64 / successes as f64;
+            probability *= (mismatched_pairs - successes + 1) as f64 / successes as f64;
         }
         tail += probability;
     }

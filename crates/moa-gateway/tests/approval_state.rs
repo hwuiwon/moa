@@ -1,38 +1,20 @@
-//! Out-of-line tests for gateway approval button lifecycle state.
+//! Out-of-line tests for Slack gateway approval button lifecycle state.
 
 mod support;
 
 use chrono::{TimeZone, Utc};
 use moa_core::{ApprovalDecision, Platform, SessionSignal};
 use moa_gateway::{
-    ApprovalLifecycleState, ApprovalStateTracker, approval_buttons, approval_state_marker, discord,
-    resolved_approval_buttons, telegram,
+    ApprovalLifecycleState, ApprovalStateTracker, approval_buttons, approval_state_marker,
+    resolved_approval_buttons,
 };
 use support::{approval_request, fixed_request_id, outbound_text};
 
 #[test]
-fn approval_buttons_in_pending_state_render_as_clickable_per_platform() {
+fn slack_approval_buttons_in_pending_state_are_clickable() {
     let request_id = fixed_request_id();
-
-    let telegram_buttons = approval_buttons(Platform::Telegram, request_id);
-    let telegram_markup =
-        telegram::render_inline_keyboard(&telegram_buttons).expect("telegram buttons render");
-    let telegram_value =
-        serde_json::to_value(telegram_markup).expect("telegram markup should serialize");
-    for button in telegram_value["inline_keyboard"][0]
-        .as_array()
-        .expect("telegram markup should contain one button row")
-    {
-        assert!(
-            button["callback_data"]
-                .as_str()
-                .expect("telegram button callback should be set")
-                .starts_with("ap:"),
-            "telegram pending button should be clickable"
-        );
-    }
-
     let slack_buttons = approval_buttons(Platform::Slack, request_id);
+
     assert_eq!(slack_buttons.len(), 3);
     assert!(
         slack_buttons
@@ -40,75 +22,54 @@ fn approval_buttons_in_pending_state_render_as_clickable_per_platform() {
             .all(|button| !button.callback_data.is_empty()),
         "slack pending buttons should be clickable"
     );
-
-    let discord_buttons = approval_buttons(Platform::Discord, request_id);
-    let discord_rows = discord::render_action_rows(&discord_buttons, false);
-    let discord_value = serde_json::to_value(discord_rows).expect("discord rows should serialize");
-    for component in discord_value[0]["components"]
-        .as_array()
-        .expect("discord row should contain button components")
-    {
-        assert_eq!(component["disabled"], false);
-        assert!(
-            component["custom_id"]
-                .as_str()
-                .expect("discord custom_id should be set")
-                .starts_with("ap:"),
-            "discord pending button should be clickable"
-        );
-    }
 }
 
 #[tokio::test]
-async fn approval_button_click_with_valid_callback_data_emits_decision_signal() {
+async fn slack_approval_button_click_with_valid_callback_data_emits_decision_signal() {
     let request = approval_request();
     let request_id = request.request_id;
     let now = fixed_now();
+    let tracker = ApprovalStateTracker::new();
+    tracker
+        .insert_pending(
+            request.clone(),
+            now + chrono::Duration::minutes(5),
+            "@test-user",
+        )
+        .await;
+    let callback_data = approval_buttons(Platform::Slack, request_id)[0]
+        .callback_data
+        .clone();
 
-    for platform in [Platform::Telegram, Platform::Slack, Platform::Discord] {
-        let tracker = ApprovalStateTracker::new();
-        tracker
-            .insert_pending(
-                request.clone(),
-                now + chrono::Duration::minutes(5),
-                "@test-user",
-            )
-            .await;
-        let callback_data = approval_buttons(platform.clone(), request_id)[0]
-            .callback_data
-            .clone();
+    let outcome = tracker
+        .handle_callback(&callback_data, "@test-user", now)
+        .await;
 
-        let outcome = tracker
-            .handle_callback(&callback_data, "@test-user", now)
-            .await;
-
-        assert_eq!(
-            outcome.signal,
-            Some(SessionSignal::ApprovalDecided {
-                request_id,
-                decision: ApprovalDecision::AllowOnce,
-            }),
-            "{platform} callback should emit the expected approval decision"
-        );
-        assert_eq!(
-            outbound_text(&outcome.acknowledgement),
-            "Approval recorded."
-        );
-        assert_eq!(
-            outcome.state,
-            ApprovalLifecycleState::Decided {
-                decision: ApprovalDecision::AllowOnce,
-                actor: "@test-user".to_string(),
-                decided_at: now,
-            }
-        );
-    }
+    assert_eq!(
+        outcome.signal,
+        Some(SessionSignal::ApprovalDecided {
+            request_id,
+            decision: ApprovalDecision::AllowOnce,
+        })
+    );
+    assert_eq!(
+        outbound_text(&outcome.acknowledgement),
+        "Approval recorded."
+    );
+    assert_eq!(
+        outcome.state,
+        ApprovalLifecycleState::Decided {
+            decision: ApprovalDecision::AllowOnce,
+            actor: "@test-user".to_string(),
+            decided_at: now,
+        }
+    );
 }
 
 #[tokio::test]
 async fn approval_button_click_with_unknown_request_id_returns_stale_error_message() {
     let tracker = ApprovalStateTracker::new();
-    let callback_data = approval_buttons(Platform::Telegram, fixed_request_id())[0]
+    let callback_data = approval_buttons(Platform::Slack, fixed_request_id())[0]
         .callback_data
         .clone();
 
@@ -128,7 +89,7 @@ async fn approval_button_click_with_unknown_request_id_returns_stale_error_messa
 }
 
 #[test]
-fn approval_buttons_after_decision_re_render_as_disabled_with_decision_marker() {
+fn slack_approval_buttons_after_decision_are_removed() {
     let request_id = fixed_request_id();
     let state = ApprovalLifecycleState::Decided {
         decision: ApprovalDecision::AllowOnce,
@@ -141,21 +102,6 @@ fn approval_buttons_after_decision_re_render_as_disabled_with_decision_marker() 
         "✓ Allowed by @test-user at 12:34"
     );
 
-    let telegram_buttons = resolved_approval_buttons(
-        Platform::Telegram,
-        request_id,
-        &ApprovalDecision::AllowOnce,
-        "@test-user",
-    );
-    let telegram_markup =
-        telegram::render_inline_keyboard(&telegram_buttons).expect("telegram marker renders");
-    let telegram_value =
-        serde_json::to_value(telegram_markup).expect("telegram marker should serialize");
-    assert_eq!(
-        telegram_value["inline_keyboard"][0][0]["text"],
-        "✓ Allowed by @test-user"
-    );
-
     let slack_buttons = resolved_approval_buttons(
         Platform::Slack,
         request_id,
@@ -166,22 +112,6 @@ fn approval_buttons_after_decision_re_render_as_disabled_with_decision_marker() 
         slack_buttons.is_empty(),
         "Slack should remove approval action buttons after a decision"
     );
-
-    let discord_buttons = resolved_approval_buttons(
-        Platform::Discord,
-        request_id,
-        &ApprovalDecision::AllowOnce,
-        "@test-user",
-    );
-    let discord_rows = discord::render_action_rows(&discord_buttons, true);
-    let discord_value =
-        serde_json::to_value(discord_rows).expect("discord disabled rows should serialize");
-    for component in discord_value[0]["components"]
-        .as_array()
-        .expect("discord row should contain disabled buttons")
-    {
-        assert_eq!(component["disabled"], true);
-    }
 }
 
 #[tokio::test]
@@ -259,16 +189,6 @@ async fn approval_request_after_orchestrator_timeout_marks_buttons_as_expired() 
     );
     assert_eq!(approval_state_marker(&outcome.state), "Expired");
 
-    let telegram_buttons = resolved_approval_buttons(
-        Platform::Telegram,
-        request_id,
-        &ApprovalDecision::Deny {
-            reason: Some("expired".to_string()),
-        },
-        "system",
-    );
-    assert_eq!(telegram_buttons.len(), 1);
-
     let slack_buttons = resolved_approval_buttons(
         Platform::Slack,
         request_id,
@@ -278,24 +198,6 @@ async fn approval_request_after_orchestrator_timeout_marks_buttons_as_expired() 
         "system",
     );
     assert!(slack_buttons.is_empty());
-
-    let discord_buttons = resolved_approval_buttons(
-        Platform::Discord,
-        request_id,
-        &ApprovalDecision::Deny {
-            reason: Some("expired".to_string()),
-        },
-        "system",
-    );
-    let discord_rows = discord::render_action_rows(&discord_buttons, true);
-    let discord_value =
-        serde_json::to_value(discord_rows).expect("discord expired rows should serialize");
-    for component in discord_value[0]["components"]
-        .as_array()
-        .expect("discord expired row should contain disabled buttons")
-    {
-        assert_eq!(component["disabled"], true);
-    }
 }
 
 #[tokio::test]

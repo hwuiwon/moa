@@ -121,7 +121,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, mock/test embedding |
 | `HandProvider` | Provision, execute, pause, resume, destroy execution environments | local, Docker, Daytona, E2B |
 | `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
-| `PlatformAdapter` | Gateway normalization/rendering | Telegram, Slack, Discord |
+| `PlatformAdapter` | Gateway normalization/rendering | Slack |
 | `ContextProcessor` | Ordered context-pipeline stage | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
 | `CredentialVault` | Secret storage abstraction | encrypted local file vault, environment-backed MCP vault |
 | `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |

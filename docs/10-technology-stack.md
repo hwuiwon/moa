@@ -32,7 +32,7 @@ The root workspace currently contains:
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
-| `moa-gateway` | Telegram, Slack, Discord adapters and renderers |
+| `moa-gateway` | Slack adapter and renderer |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
 | `moa-skills` | Skill parser, DB-backed package registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
@@ -89,7 +89,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Neon branching | Database checkpoint/rollback support |
 | HashiCorp Vault or similar | Cloud credential storage |
 | Grafana/Tempo/Prometheus stack | Metrics and traces |
-| Messaging platforms | Telegram, Slack, Discord adapters |
+| Messaging platforms | Slack adapter |
 
 ## Build Targets
 
@@ -162,10 +162,8 @@ Optional hand and gateway settings depend on the chosen deployment:
 ```bash
 DAYTONA_API_KEY=...
 E2B_API_KEY=...
-TELEGRAM_BOT_TOKEN=...
 SLACK_BOT_TOKEN=...
 SLACK_APP_TOKEN=...
-DISCORD_BOT_TOKEN=...
 ```
 
 The orchestrator exposes the Restate handler endpoint and a health/readiness endpoint. Readiness checks Postgres and can optionally require registered Restate services.

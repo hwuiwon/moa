@@ -7,7 +7,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | Short | Component | Crate |
 |---|---|---|
 | `User` | Person sending messages | — |
-| `Platform` | Telegram / Slack / Discord / Desktop / API caller | `moa-gateway`, `moa-edge` |
+| `Platform` | Slack / API caller | `moa-gateway`, `moa-edge` |
 | `Gateway` | Normalizes inbound, renders outbound | `moa-gateway` |
 | `Orch` | `BrainOrchestrator` (`LocalOrchestrator` or Restate-backed runtime) | `moa-orchestrator` |
 | `Brain` | Stateless harness loop | `moa-brain` |
@@ -22,7 +22,7 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 
 ---
 
-## 1. Full end-to-end: "deploy to staging" via Telegram
+## 1. Full end-to-end: "deploy to staging" via Slack
 
 The canonical request flow. Every other section is a zoom-in on a slice of this.
 
@@ -30,7 +30,7 @@ The canonical request flow. Every other section is a zoom-in on a slice of this.
 sequenceDiagram
     autonumber
     actor User
-    participant Platform as Telegram
+    participant Platform as Slack
     participant Gateway
     participant Orch as Orchestrator
     participant Brain

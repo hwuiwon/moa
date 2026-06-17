@@ -191,14 +191,10 @@ pub struct MoaEnvOverlay {
     pub cloud_hands_e2b_domain: Option<String>,
     /// `MOA_CLOUD_HANDS_E2B_TEMPLATE`.
     pub cloud_hands_e2b_template: Option<String>,
-    /// `MOA_GATEWAY_TELEGRAM_TOKEN_ENV`.
-    pub gateway_telegram_token_env: Option<String>,
     /// `MOA_GATEWAY_SLACK_TOKEN_ENV`.
     pub gateway_slack_token_env: Option<String>,
     /// `MOA_GATEWAY_SLACK_APP_TOKEN_ENV`.
     pub gateway_slack_app_token_env: Option<String>,
-    /// `MOA_GATEWAY_DISCORD_TOKEN_ENV`.
-    pub gateway_discord_token_env: Option<String>,
     /// `MOA_PERMISSIONS_DEFAULT_POSTURE`.
     pub permissions_default_posture: Option<String>,
     /// `MOA_PERMISSIONS_AUTO_APPROVE`.
@@ -590,20 +586,12 @@ impl MoaEnvOverlay {
         set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
         self.apply_cloud(config);
         set_if_some(
-            &mut config.gateway.telegram_token_env,
-            &self.gateway_telegram_token_env,
-        );
-        set_if_some(
             &mut config.gateway.slack_token_env,
             &self.gateway_slack_token_env,
         );
         set_if_some(
             &mut config.gateway.slack_app_token_env,
             &self.gateway_slack_app_token_env,
-        );
-        set_if_some(
-            &mut config.gateway.discord_token_env,
-            &self.gateway_discord_token_env,
         );
         set_if_some(
             &mut config.permissions.default_posture,

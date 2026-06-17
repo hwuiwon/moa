@@ -11,7 +11,7 @@ This reference condenses the repository-specific instructions that matter when a
 - Use `tracing` for logging. Do not add `println!` or `eprintln!` to library code.
 - Use `tokio` for async work. Keep I/O async.
 - Do not use `unwrap()` in library code.
-- Optional integrations stay behind feature flags: `telegram`, `slack`, `discord`, `cloud`.
+- Optional integrations stay behind feature flags: `slack`, `cloud`, or a narrowly named provider flag.
 - Close-out for Rust work is `cargo fmt --all` and `cargo clippy ... -D warnings`.
 
 ## Workspace Facts

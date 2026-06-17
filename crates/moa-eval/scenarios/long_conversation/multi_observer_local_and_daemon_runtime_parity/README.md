@@ -2,7 +2,7 @@
 
 ## What It Tests
 
-This scenario represents the long-conversation version of runtime observation parity. It replaces the unavailable TUI plus Telegram brief with LocalRuntime and DaemonRuntime observers watching the same session stream.
+This scenario represents the long-conversation version of runtime observation parity. It replaces the unavailable TUI plus messaging brief with LocalRuntime and DaemonRuntime observers watching the same session stream.
 
 ## Key Invariants
 

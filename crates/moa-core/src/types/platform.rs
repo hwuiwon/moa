@@ -24,12 +24,8 @@ use super::{ApprovalRequest, SessionId, SessionStatus, UserId};
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Platform {
-    /// Telegram Bot API.
-    Telegram,
     /// Slack.
     Slack,
-    /// Discord.
-    Discord,
     /// Hosted API request.
     Api,
 }

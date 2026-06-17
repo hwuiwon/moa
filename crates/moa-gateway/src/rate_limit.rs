@@ -42,11 +42,8 @@ impl GatewaySendResponse {
         self.status == 429
     }
 
-    fn retry_after_for_platform(&self, platform: Platform) -> Duration {
-        let retry_after = match platform {
-            Platform::Discord => self.header("x-ratelimit-reset-after"),
-            Platform::Telegram | Platform::Slack | Platform::Api => self.header("retry-after"),
-        };
+    fn retry_after_for_platform(&self, _platform: Platform) -> Duration {
+        let retry_after = self.header("retry-after");
         retry_after
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
@@ -104,9 +101,8 @@ impl GatewayRateLimiter {
     /// Creates a rate limiter with conservative defaults for a platform.
     pub fn for_platform(platform: Platform) -> Self {
         let per_channel_interval = match platform {
-            Platform::Telegram | Platform::Slack => Duration::from_secs(1),
-            Platform::Discord => Duration::from_millis(200),
-            Platform::Api => Duration::ZERO,
+            Platform::Slack => Duration::from_secs(1),
+            _ => Duration::ZERO,
         };
         Self {
             platform,

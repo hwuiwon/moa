@@ -89,13 +89,9 @@ fn command_action(platform: Platform, text: &str) -> GatewayControlAction {
     }
 }
 
-fn acknowledgement(platform: &Platform, text: &str, ephemeral: bool) -> OutboundMessage {
+fn acknowledgement(_platform: &Platform, text: &str, ephemeral: bool) -> OutboundMessage {
     OutboundMessage {
-        content: MessageContent::Text(match platform {
-            Platform::Telegram | Platform::Discord | Platform::Slack | Platform::Api => {
-                text.to_string()
-            }
-        }),
+        content: MessageContent::Text(text.to_string()),
         buttons: Vec::new(),
         reply_to: None,
         ephemeral,
