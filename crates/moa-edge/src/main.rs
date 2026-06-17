@@ -4,14 +4,12 @@
 //! caller-supplied `X-Moa-*` headers, and forwards trusted identity headers to
 //! the internal Restate ingress.
 
-mod headers;
-mod proxy;
-mod routes;
-
 use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use moa_edge::proxy::OrchestratorProxy;
+use moa_edge::routes::{self, AppState};
 
 /// Process arguments for `moa-edge`.
 #[derive(Debug, Parser)]
@@ -54,12 +52,10 @@ async fn main() -> anyhow::Result<()> {
     let providers = moa_auth_providers::build_providers(&moa_config, pool.clone())
         .context("build providers bundle")?;
 
-    let state = routes::AppState {
+    let state = AppState {
         auth: providers.auth.clone(),
         pool: pool.clone(),
-        proxy: Arc::new(
-            proxy::OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?,
-        ),
+        proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await

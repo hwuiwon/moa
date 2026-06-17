@@ -41,6 +41,7 @@ moa-brain = { workspace = true }
 moa-core = { workspace = true }
 moa-eval-core = { workspace = true }
 moa-eval = { workspace = true, optional = true }
+moa-experiments.workspace = true
 moa-hands = { workspace = true }
 moa-lineage-audit = { workspace = true }
 moa-lineage-core = { workspace = true }

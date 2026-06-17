@@ -1,5 +1,6 @@
 //! Restate handlers for the session-store facade.
 
+use super::inner::create_session_for_identity;
 use super::*;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
@@ -16,6 +17,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "create_session");
         let store = self.store.clone();
         let meta = meta.into_inner();
+        let vo_meta = meta.clone();
         let identity = require_identity(&ctx)?;
         let fga = require_fga_client()?;
         require_authz_with_delegation(
@@ -27,17 +29,21 @@ impl RestateSessionStore for SessionStoreImpl {
         )
         .await
         .map_err(translate_authz_error)?;
-        let service = Self { store };
 
-        Ok(ctx
+        let session_id = ctx
             .run(|| async move {
-                service
-                    .create_session_authorized_inner(meta, identity)
+                create_session_for_identity(store.as_ref(), meta, identity)
                     .await
                     .map(Json::from)
             })
             .name("create_session")
-            .await?)
+            .await?
+            .into_inner();
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .set_meta(Json::from(vo_meta))
+            .call()
+            .await?;
+        Ok(Json::from(session_id))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]

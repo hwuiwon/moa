@@ -5,14 +5,25 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use moa_core::{
     Event, EventFilter, EventRange, ModelId, SessionMeta, SessionStatus, UserId, WorkspaceId,
+    traits::{Identity, IdentityType},
 };
 use moa_session::testing;
 use restate_sdk::prelude::HandlerError;
+use uuid::Uuid;
 
+use super::inner::create_session_for_identity;
 use super::{
     AppendEventRequest, GetEventsRequest, SearchEventsRequest, SessionStoreImpl,
     UpdateStatusRequest,
 };
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct AuthzOutboxTuple {
+    tuple_user: String,
+    tuple_relation: String,
+    tuple_object: String,
+    tenant_id: Option<Uuid>,
+}
 
 fn test_session_meta(workspace_id: &str) -> SessionMeta {
     SessionMeta {
@@ -39,6 +50,73 @@ async fn cleanup(database_url: &str, schema_name: &str) -> Result<()> {
 
 fn into_anyhow(error: HandlerError) -> anyhow::Error {
     anyhow!("{error:?}")
+}
+
+async fn install_authz_outbox(service: &SessionStoreImpl) -> Result<()> {
+    sqlx::raw_sql(include_str!(
+        "../../../../moa-auth/authz/migrations/20260512000000_authz_outbox.up.sql"
+    ))
+    .execute(service.store.pool())
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_session_for_identity_db_enqueues_owner_workspace_and_participant() -> Result<()> {
+    // Pins: authorized session creation enqueues every tuple the first turn needs.
+    let (service, database_url, schema_name) = test_service().await?;
+    install_authz_outbox(&service).await?;
+    let identity = Identity {
+        identity_type: IdentityType::User,
+        id: Uuid::new_v4(),
+        tenant_id: Uuid::new_v4(),
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
+    let meta = test_session_meta("authorized-helper");
+    let workspace_id = meta.workspace_id.clone();
+    let session_id = create_session_for_identity(service.store.as_ref(), meta, identity.clone())
+        .await
+        .map_err(into_anyhow)?;
+    let session_object = format!("session:{session_id}");
+
+    let tuples = sqlx::query_as::<_, AuthzOutboxTuple>(
+        r#"
+        SELECT tuple_user, tuple_relation, tuple_object, tenant_id
+        FROM authz_outbox
+        WHERE tuple_object = $1
+        ORDER BY tuple_relation, tuple_user
+        "#,
+    )
+    .bind(&session_object)
+    .fetch_all(service.store.pool())
+    .await?;
+
+    assert_eq!(
+        tuples,
+        vec![
+            AuthzOutboxTuple {
+                tuple_user: format!("user:{}", identity.id),
+                tuple_relation: "owner".to_string(),
+                tuple_object: session_object.clone(),
+                tenant_id: Some(identity.tenant_id),
+            },
+            AuthzOutboxTuple {
+                tuple_user: format!("user:{}", identity.id),
+                tuple_relation: "participant".to_string(),
+                tuple_object: session_object.clone(),
+                tenant_id: Some(identity.tenant_id),
+            },
+            AuthzOutboxTuple {
+                tuple_user: format!("workspace:{workspace_id}"),
+                tuple_relation: "workspace".to_string(),
+                tuple_object: session_object,
+                tenant_id: Some(identity.tenant_id),
+            },
+        ]
+    );
+
+    cleanup(&database_url, &schema_name).await
 }
 
 #[tokio::test]

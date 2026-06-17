@@ -3631,6 +3631,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-experiments"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "moa-core",
+ "moa-test-support",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-fga-bootstrap"
 version = "0.1.0"
 dependencies = [
@@ -3988,6 +4004,7 @@ dependencies = [
  "moa-core",
  "moa-eval",
  "moa-eval-core",
+ "moa-experiments",
  "moa-hands",
  "moa-lineage-audit",
  "moa-lineage-core",

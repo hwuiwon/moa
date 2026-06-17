@@ -28,7 +28,7 @@ use crate::objects::session::SessionClient;
 use moa_core::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
-mod inner;
+pub(crate) mod inner;
 #[cfg(test)]
 mod tests;
 

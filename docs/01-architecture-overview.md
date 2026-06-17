@@ -25,7 +25,8 @@ Product data in Postgres / Neon
   learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
   learning_log
-  analytics.turn_lineage, analytics.scores, compliance audit tables
+  analytics.turn_lineage, analytics.score_run, analytics.scores,
+  moa.experiment_run, compliance audit tables
   security_events
         |
         v
@@ -104,10 +105,11 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
 - Services: `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `Eval`,
-  `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
-  `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-  `Workflows`, `WorkspaceStore`, `Whoami`
-- Workflows: `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution`
+  `Experiments`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`,
+  `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`,
+  `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami`
+- Workflows: `Consolidate`, `EvalRun`, `ExperimentRun`, `TurnExecution`,
+  `SubAgentTurnExecution`
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -157,6 +159,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Session metadata and events | Postgres | `sessions`, `events`, `pending_signals`, `context_snapshots` |
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, task-conditioned strategy rates |
+| Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
 | Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes for global, workspace, and user scopes; selected packages are materialized into hands on demand |
@@ -215,18 +218,59 @@ those events to S3 with per-tenant bucket routing and Object Lock compliance
 mode. Operational setup is documented in
 [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
-## Eval And Dashboards
+## Eval, Experiments, And Insights
 
 Lineage records are captured through the hot-path `LineageHandle` bridge and
 written asynchronously to `analytics.turn_lineage`. Eval, online-judge, and
 human-review scores use the same sink via `LineageEvent::Eval(ScoreRecord)` and
 land in `analytics.scores`, keyed by turn, session, or dataset replay item.
 
-The hosted eval API stores replay datasets through
-`POST /v1/evals/datasets/register` in `analytics.eval_datasets` and
-`analytics.eval_dataset_items`. `POST /v1/evals/replay` emits score records with
-a shared `run_id`, while `POST /v1/evals/scores` and
-`POST /v1/evals/compare` read directly from `analytics.scores`.
+Regression evals and live behavior experiments are separate surfaces:
+
+- Regression eval: `moa-eval` and the hosted `Eval` service own deterministic
+  datasets, replay plans, CI/nightly regression runs, and score comparisons.
+  `Eval` stores replay datasets in `analytics.eval_datasets` and
+  `analytics.eval_dataset_items`. `POST /v1/evals/replay` emits score rows with
+  a shared `run_id`, while `POST /v1/evals/scores` and
+  `POST /v1/evals/compare` read workspace-scoped rows from `analytics.scores`.
+  `Eval` handlers require `Workspace:Member` before reads and replay
+  operations. Dataset registration additionally requires `Workspace:Editor`.
+- Live behavior experiments: `moa-experiments` owns the typed domain model and
+  storage repository; the `Experiments` service accepts and tracks runs against
+  production execution paths. Agent-loop targets create or reuse `Session`
+  state and queue messages through the normal `Session` and `TurnExecution`
+  path. Workflow targets start existing artifact-backed runs through
+  `WorkflowRuntime` and link `moa.artifact_run.run_uid`; workflow node
+  interpretation remains a future `moa-workflows` capability. The
+  `moa.experiment_run` row is the experiment ledger and links to the session,
+  workflow run, pinned artifact revisions, and `analytics.score_run`.
+  `Experiments/run` and `Experiments/cancel` require `Workspace:Editor`;
+  `Experiments/status`, `list`, `scores`, and `compare` require
+  `Workspace:Member`.
+- Analytics and insights: `Analytics` exposes curated read APIs for session,
+  workspace, tool, cache, experiment, learning-candidate, and session-search
+  use cases. `LineageAdmin` exposes protected lineage explain, query, export,
+  verify, and erase operations. Future analytics agents must call these typed
+  services, not raw SQL or unscoped `SessionStore` methods. `Analytics`
+  session stats require `Session:Participant`; workspace, cache, experiment,
+  and session-search reads require `Workspace:Member`; workspace learning
+  candidate reads require `Workspace:Editor`; tenant-wide learning candidates
+  and deployment-wide tool stats require tenant-admin authorization, with
+  deployment-wide tool stats limited to service identities. `LineageAdmin`
+  explain, query, and verify require `Workspace:Member`, while export and erase
+  require `Workspace:Admin`.
+
+Live behavior experiment-derived improvements have one review boundary: they
+must become `learning_candidates` before any skill or workflow change is
+accepted. Current experiment runs do not auto-create those proposals, and no
+experiment path may auto-promote skills or workflows. A later proposal writer
+must attach experiment run IDs, score run IDs, and artifact revision references
+to the candidate payload so reviewers can reproduce the evidence.
+
+Future MCP support is a transport adapter over `Eval`, `Experiments`,
+`Analytics`, `LineageAdmin`, `Workflows`, and the other typed services. MCP must
+not own experiment, eval, analytics, learning, workflow, or lineage domain
+models, and it must not bypass service-level authorization.
 
 Grafana dashboards live in `dashboards/grafana/` and Prometheus alert rules live
 in `ops/prometheus/alerts/`. Import the dashboards with a Postgres datasource
@@ -292,6 +336,7 @@ and replay resistance on the verify path.
 | `moa-security` | Vault, policies, MCP credential proxy, injection controls |
 | `moa-skills` | Skill parsing, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
+| `moa-experiments` | Live behavior experiment domain model and scoped Postgres run ledger |
 | `moa-loadtest` | Direct HTTP load-test tooling for hosted APIs |
 | `workspace-hack` | Generated `cargo-hakari` dependency feature unification crate |
 | `xtask` | Repo-local audit and maintenance commands |
@@ -302,5 +347,6 @@ and replay resistance on the verify path.
 - Memory details: `docs/04-memory-architecture.md`
 - Shared type placement: `docs/15-architecture-policy.md`
 - Event and segment schema: `docs/05-session-event-log.md`
+- Live behavior experiments: `docs/eval/live-behavior-experiments.md`
 - Context pipeline: `docs/07-context-pipeline.md`
 - Multi-tenant learning: `docs/14-multi-tenancy-and-learning.md`

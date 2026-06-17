@@ -468,6 +468,27 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
+            "/v1/analytics/experiment-stats" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/experiment_stats".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/analytics/learning-candidates" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/learning_candidates".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/analytics/session-search" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Analytics/session_search".to_string(),
+                    body: body.to_vec(),
+                };
+            }
             "/v1/evals/plan" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
@@ -528,6 +549,48 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                 return RouteTranslation::Forward {
                     method: Method::POST,
                     path: "/Eval/compare".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/run" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/run".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/status" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/status".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/list" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/list".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/cancel" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/cancel".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/scores" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/scores".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/compare" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/compare".to_string(),
                     body: body.to_vec(),
                 };
             }
@@ -1017,6 +1080,21 @@ mod tests {
                 "/Analytics/cache_stats",
                 r#"{"workspace_id":"workspace-a","days":7}"#,
             ),
+            (
+                "/v1/analytics/experiment-stats",
+                "/Analytics/experiment_stats",
+                r#"{"workspace_id":"workspace-a","from_time":null,"to_time":null,"limit":20}"#,
+            ),
+            (
+                "/v1/analytics/learning-candidates",
+                "/Analytics/learning_candidates",
+                r#"{"workspace_id":"workspace-a","status":"proposed","limit":20}"#,
+            ),
+            (
+                "/v1/analytics/session-search",
+                "/Analytics/session_search",
+                r#"{"workspace_id":"workspace-a","query":"refresh token","from_time":null,"to_time":null,"event_types":["user_message"],"limit":10}"#,
+            ),
         ];
 
         for (public_path, internal_path, json_body) in cases {
@@ -1117,6 +1195,48 @@ mod tests {
                     assert_eq!(
                         forwarded_body,
                         json_body.as_bytes(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn experiments_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted experiment edge routes forward to the internal Experiments service paths.
+        let cases = [
+            ("/v1/experiments/run", "/Experiments/run"),
+            ("/v1/experiments/status", "/Experiments/status"),
+            ("/v1/experiments/list", "/Experiments/list"),
+            ("/v1/experiments/cancel", "/Experiments/cancel"),
+            ("/v1/experiments/scores", "/Experiments/scores"),
+            ("/v1/experiments/compare", "/Experiments/compare"),
+        ];
+
+        for (public_path, internal_path) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        body.as_ref(),
                         "{public_path} body should pass through unchanged"
                     );
                 }

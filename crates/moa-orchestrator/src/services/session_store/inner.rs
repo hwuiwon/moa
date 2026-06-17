@@ -5,6 +5,81 @@ use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::traits::{Identity, IdentityType};
 
+/// Creates a session row and enqueues the authorization tuples needed by its first caller.
+pub(crate) async fn create_session_for_identity(
+    store: &PostgresSessionStore,
+    meta: SessionMeta,
+    identity: Identity,
+) -> Result<SessionId, HandlerError> {
+    let (owner_user_type, owner_id) = owner_tuple_subject(&identity)?;
+    let tenant_id = identity.tenant_id;
+    let workspace_id = meta.workspace_id.clone();
+    let mut transaction = store
+        .pool()
+        .begin()
+        .await
+        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
+
+    let session_id = store
+        .create_session_in_tx(&mut transaction, meta)
+        .await
+        .map_err(HandlerError::from)?;
+
+    let owner_tuple = TupleKey::new(
+        owner_user_type,
+        owner_id,
+        Relation::Owner,
+        ObjectType::Session,
+        session_id.0,
+    );
+    enqueue(
+        &mut *transaction,
+        TupleOp::Write,
+        &owner_tuple,
+        Some(tenant_id),
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")))?;
+
+    enqueue_raw(
+        &mut *transaction,
+        TupleOp::Write,
+        &format!("workspace:{workspace_id}"),
+        "workspace",
+        &format!("session:{session_id}"),
+        Some(tenant_id),
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("authz outbox parent tuple: {error}")))?;
+
+    let participant_tuple = TupleKey::new(
+        owner_user_type,
+        owner_id,
+        Relation::Participant,
+        ObjectType::Session,
+        session_id.0,
+    );
+    enqueue(
+        &mut *transaction,
+        TupleOp::Write,
+        &participant_tuple,
+        Some(tenant_id),
+    )
+    .await
+    .map_err(|error| TerminalError::new(format!("authz outbox participant tuple: {error}")))?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
+    store
+        .refresh_active_session_metric()
+        .await
+        .map_err(HandlerError::from)?;
+
+    Ok(session_id)
+}
+
 impl SessionStoreImpl {
     #[cfg(test)]
     pub(super) async fn create_session_inner(
@@ -15,66 +90,6 @@ impl SessionStoreImpl {
             .create_session(meta)
             .await
             .map_err(HandlerError::from)
-    }
-
-    pub(super) async fn create_session_authorized_inner(
-        &self,
-        meta: SessionMeta,
-        identity: Identity,
-    ) -> Result<SessionId, HandlerError> {
-        let (owner_user_type, owner_id) = owner_tuple_subject(&identity)?;
-        let tenant_id = identity.tenant_id;
-        let workspace_id = meta.workspace_id.clone();
-        let mut transaction = self
-            .store
-            .pool()
-            .begin()
-            .await
-            .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
-
-        let session_id = self
-            .store
-            .create_session_in_tx(&mut transaction, meta)
-            .await
-            .map_err(HandlerError::from)?;
-
-        let owner_tuple = TupleKey::new(
-            owner_user_type,
-            owner_id,
-            Relation::Owner,
-            ObjectType::Session,
-            session_id.0,
-        );
-        enqueue(
-            &mut *transaction,
-            TupleOp::Write,
-            &owner_tuple,
-            Some(tenant_id),
-        )
-        .await
-        .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")))?;
-
-        enqueue_raw(
-            &mut *transaction,
-            TupleOp::Write,
-            &format!("workspace:{workspace_id}"),
-            "workspace",
-            &format!("session:{session_id}"),
-            Some(tenant_id),
-        )
-        .await
-        .map_err(|error| TerminalError::new(format!("authz outbox parent tuple: {error}")))?;
-
-        transaction
-            .commit()
-            .await
-            .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
-        self.store
-            .refresh_active_session_metric()
-            .await
-            .map_err(HandlerError::from)?;
-
-        Ok(session_id)
     }
 
     pub(super) async fn append_event_inner(

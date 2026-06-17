@@ -8,10 +8,11 @@ use moa_eval_core::{
     AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite,
 };
 use moa_orchestrator::services::eval::{
-    EVAL_COMPARE_SQL, EVAL_SCORES_SQL, EvalServiceError, accepted_eval_run_response,
-    hosted_eval_report_artifacts, parse_dataset_items_for_workspace,
-    status_response_from_run_response, suite_summaries_from_documents, verify_run_status_workspace,
+    EvalServiceError, accepted_eval_run_response, hosted_eval_report_artifacts,
+    parse_dataset_items_for_workspace, status_response_from_run_response,
+    suite_summaries_from_documents, verify_run_status_workspace,
 };
+use moa_orchestrator::services::score_queries::{COMPARE_NUMERIC_RUNS_SQL, SCORES_BY_RUN_SQL};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -163,15 +164,15 @@ fn dataset_jsonl_items_are_constrained_to_authorized_workspace() {
 fn score_queries_scope_every_run_id_by_workspace() {
     // Pins: score and compare queries constrain every requested run id by request.workspace_id.
     assert!(
-        EVAL_SCORES_SQL.contains("WHERE run_id = $1 AND workspace_id = $2"),
+        SCORES_BY_RUN_SQL.contains("WHERE run_id = $1 AND workspace_id = $2"),
         "scores query must scope the run id by workspace"
     );
     assert!(
-        EVAL_COMPARE_SQL.contains("WHERE run_id = $1 AND workspace_id = $3"),
+        COMPARE_NUMERIC_RUNS_SQL.contains("WHERE run_id = $1 AND workspace_id = $3"),
         "compare base run must be scoped by workspace"
     );
     assert!(
-        EVAL_COMPARE_SQL.contains("WHERE run_id = $2 AND workspace_id = $3"),
+        COMPARE_NUMERIC_RUNS_SQL.contains("WHERE run_id = $2 AND workspace_id = $3"),
         "compare new run must be scoped by workspace"
     );
 }

@@ -15,6 +15,7 @@ Postgres stores:
 - context snapshots
 - task segments
 - learning log entries
+- live behavior experiment run metadata
 - graph changelog outbox rows and per-workspace changelog versions
 - analytics views and materialized views
 
@@ -134,6 +135,47 @@ These feed skill ranking and structural segment assessment.
 The session schema also owns `learning_log`.
 
 Learning log rows are append-only records with tenant ID, learning type, target, payload, confidence, source refs, actor, validity interval, optional batch ID, and version. Rollback invalidates rows by setting `valid_to`; it does not delete history.
+
+## Live Behavior Experiment Tables
+
+Live behavior experiment runs are stored in a dedicated ledger instead of being
+encoded as session events, `analytics.scores`, or artifact workflow runs.
+
+`analytics.score_run` is the FK-able parent for a scored run. It stores the
+score run UUID, three-tier scope columns, source label, and timestamps. Eval,
+experiment, and future scored run types can attach many `analytics.scores` rows
+to one parent run ID while preserving scoped reads.
+
+`moa.experiment_run` stores one live behavior experiment run:
+
+- `run_uid` is the public experiment run identifier.
+- `workspace_id`, `user_id`, generated `scope`, and three-tier RLS match the
+  artifact and learning-candidate model.
+- `target_kind` is `agent_loop` or `workflow`.
+- `status` is `accepted`, `running`, `waiting_approval`, `completed`, `failed`,
+  or `cancelled`.
+- `target`, `variant`, and `scorecard` are the accepted experiment payloads.
+- `score_run_id` references `analytics.score_run(run_id)` and is the join key
+  for `analytics.scores`.
+- `session_id` references `sessions(id)` for agent-loop runs or workflow runs
+  associated with a session.
+- `workflow_run_uid` references `moa.artifact_run(run_uid)` for
+  artifact-backed workflow experiments.
+- `artifact_revision_uids` is the fast-read list of pinned artifact revisions.
+- `idempotency_key`, `created_by_identity`, `error`, and timestamps describe
+  admission, ownership, and terminal state.
+
+`moa.experiment_run_artifact_revision` is the enforceable many-to-many link
+from an experiment run to pinned `moa.artifact_revision` rows. The denormalized
+`artifact_revision_uids` array on `moa.experiment_run` exists for API reads; it
+does not replace the FK table.
+
+`Experiments/run` and `Experiments/cancel` require `Workspace:Editor`.
+`Experiments/status`, `Experiments/list`, `Experiments/scores`, and
+`Experiments/compare` require `Workspace:Member`. `Analytics/experiment_stats`
+also requires `Workspace:Member`. These service checks sit above the RLS scope
+on `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and
+`analytics.score_run`.
 
 ## Graph Changelog
 

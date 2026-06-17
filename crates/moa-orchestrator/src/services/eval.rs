@@ -11,12 +11,11 @@ use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
-    EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
-    EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
-    EvalDatasetSummary, EvalPlanRequest, EvalPlanResponse, EvalReplayRequest, EvalReplayResponse,
-    EvalRunRequest, EvalRunResponse, EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse,
-    EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
-    EvalSuiteListResponse, EvalSuiteSummary,
+    EvalCompareRequest, EvalCompareResponse, EvalDatasetListRequest, EvalDatasetListResponse,
+    EvalDatasetRegisterRequest, EvalDatasetRegisterResponse, EvalDatasetSummary, EvalPlanRequest,
+    EvalPlanResponse, EvalReplayRequest, EvalReplayResponse, EvalRunRequest, EvalRunResponse,
+    EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse, EvalScoresRequest,
+    EvalScoresResponse, EvalSuiteListRequest, EvalSuiteListResponse, EvalSuiteSummary,
 };
 use moa_core::{MoaConfig, WorkspaceId};
 #[cfg(feature = "internal-eval-runner")]
@@ -44,48 +43,15 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::services::score_queries::{
+    compare_score_runs_for_workspace, score_summaries_for_workspace,
+};
 use crate::workflows::eval_run::EvalRunClient;
 #[cfg(feature = "internal-eval-runner")]
 use crate::workflows::eval_run::EvalRunWorkflowRequest;
 
 #[cfg(feature = "internal-eval-runner")]
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
-
-/// Workspace-scoped score summary SQL used by `Eval/scores`.
-pub const EVAL_SCORES_SQL: &str = r#"
-SELECT name,
-       value_type,
-       COUNT(*)::BIGINT AS n,
-       AVG(value_numeric) AS numeric_mean,
-       AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS boolean_rate
-FROM analytics.scores
-WHERE run_id = $1 AND workspace_id = $2
-GROUP BY name, value_type
-ORDER BY name, value_type
-"#;
-
-/// Workspace-scoped score comparison SQL used by `Eval/compare`.
-pub const EVAL_COMPARE_SQL: &str = r#"
-WITH base AS (
-    SELECT name, AVG(value_numeric) AS mean
-    FROM analytics.scores
-    WHERE run_id = $1 AND workspace_id = $3 AND value_type = 'numeric'
-    GROUP BY name
-),
-new AS (
-    SELECT name, AVG(value_numeric) AS mean
-    FROM analytics.scores
-    WHERE run_id = $2 AND workspace_id = $3 AND value_type = 'numeric'
-    GROUP BY name
-)
-SELECT COALESCE(base.name, new.name) AS name,
-       base.mean AS base_mean,
-       new.mean AS new_mean,
-       COALESCE(new.mean, 0.0) - COALESCE(base.mean, 0.0) AS delta
-FROM base
-FULL OUTER JOIN new USING (name)
-ORDER BY name
-"#;
 
 /// Restate service surface for hosted eval operations.
 #[restate_sdk::service]
@@ -362,7 +328,7 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                compare_runs_for_workspace(&pool, request)
+                compare_score_runs_for_workspace(&pool, request)
                     .await
                     .map(Json::from)
                     .map_err(eval_error_to_handler_error)
@@ -1040,65 +1006,6 @@ async fn run_replay_request_isolated(
         message: error.to_string(),
     })?
     .map_err(|message| EvalServiceError::Runtime { message })?
-}
-
-async fn score_summaries_for_workspace(
-    pool: &PgPool,
-    request: EvalScoresRequest,
-) -> Result<EvalScoresResponse, EvalServiceError> {
-    let rows = sqlx::query(EVAL_SCORES_SQL)
-        .bind(request.run_id)
-        .bind(request.workspace_id.as_str())
-        .fetch_all(pool)
-        .await?;
-
-    let mut summaries = Vec::with_capacity(rows.len());
-    for row in rows {
-        let n: i64 = row.try_get("n")?;
-        let numeric_mean: Option<f64> = row.try_get("numeric_mean")?;
-        let boolean_rate: Option<f64> = row.try_get("boolean_rate")?;
-        summaries.push(EvalScoreSummaryRow {
-            name: row.try_get("name")?,
-            value_type: row.try_get("value_type")?,
-            n: u64::try_from(n).map_err(|_| EvalServiceError::IntegerTooLarge { field: "n" })?,
-            mean_or_rate: numeric_mean.or(boolean_rate).unwrap_or(0.0),
-        });
-    }
-
-    Ok(EvalScoresResponse {
-        workspace_id: request.workspace_id,
-        run_id: request.run_id,
-        rows: summaries,
-    })
-}
-
-async fn compare_runs_for_workspace(
-    pool: &PgPool,
-    request: EvalCompareRequest,
-) -> Result<EvalCompareResponse, EvalServiceError> {
-    let rows = sqlx::query(EVAL_COMPARE_SQL)
-        .bind(request.base_run)
-        .bind(request.new_run)
-        .bind(request.workspace_id.as_str())
-        .fetch_all(pool)
-        .await?;
-
-    let mut comparisons = Vec::with_capacity(rows.len());
-    for row in rows {
-        comparisons.push(EvalCompareRow {
-            name: row.try_get("name")?,
-            base_mean: row.try_get("base_mean")?,
-            new_mean: row.try_get("new_mean")?,
-            delta: row.try_get("delta")?,
-        });
-    }
-
-    Ok(EvalCompareResponse {
-        workspace_id: request.workspace_id,
-        base_run: request.base_run,
-        new_run: request.new_run,
-        rows: comparisons,
-    })
 }
 
 #[cfg(any(feature = "internal-eval-runner", test))]

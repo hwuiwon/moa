@@ -9,9 +9,7 @@ use moa_core::traits::Identity;
 use moa_core::{ModelId, SessionId, SessionMeta};
 use serde::Deserialize;
 
-use crate::support::restate_runtime::{
-    grant_session_participant, grant_workspace_member, test_user_identity, with_identity,
-};
+use crate::support::restate_runtime::{grant_workspace_member, test_user_identity, with_identity};
 
 mod support;
 
@@ -115,19 +113,6 @@ async fn create_initialized_session(
         .json::<SessionId>()
         .await
         .context("deserialize created session id")?;
-    grant_session_participant(&identity, session_id).await?;
-
-    client
-        .post(session_store_url("init_session_vo"))
-        .json(&serde_json::json!({
-            "session_id": session_id,
-            "meta": meta,
-        }))
-        .send()
-        .await
-        .context("send SessionStore init_session_vo")?
-        .error_for_status()
-        .context("SessionStore init_session_vo should succeed")?;
 
     Ok(InitializedSession {
         id: session_id.to_string(),

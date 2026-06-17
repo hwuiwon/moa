@@ -1,6 +1,6 @@
 ---
 source: crates/moa-brain/tests/pipeline_stages_db_memory.rs
-assertion_line: 69
+assertion_line: 116
 expression: "fixture.ctx.messages[0].content"
 ---
 <identity>

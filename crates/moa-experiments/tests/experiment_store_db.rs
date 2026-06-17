@@ -1,0 +1,586 @@
+use moa_core::{
+    MemoryScope, ModelId, Result, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
+};
+use moa_experiments::{
+    model::{
+        ExperimentRunStatus, ExperimentScorecard, ExperimentTarget, ExperimentVariant,
+        NewExperimentRun as NewExperiment,
+    },
+    store::ExperimentStore,
+};
+use serde_json::json;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn workspace_scoped_run_insert_load_round_trip_db() -> Result<()> {
+    // Pins: workspace-scoped experiment metadata persists and loads through the scoped store.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = workspace_scope("experiment-round-trip");
+    let artifact_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
+    let new_run = new_experiment(
+        "round-trip",
+        Some("round-trip-key"),
+        vec![artifact_revision_uid],
+    );
+
+    let inserted = store.insert_run(&scope, new_run).await?;
+    let loaded = store
+        .load_run(&scope, inserted.run_uid)
+        .await?
+        .expect("inserted experiment should load in same workspace");
+
+    assert_eq!(loaded.scope, scope);
+    assert_eq!(loaded.status, ExperimentRunStatus::Accepted);
+    assert_eq!(loaded.name, "round-trip");
+    assert_eq!(loaded.scorecard.score_names, ["task_success"]);
+    assert_eq!(loaded.artifact_revision_uids, [artifact_revision_uid]);
+    assert_eq!(loaded.idempotency_key.as_deref(), Some("round-trip-key"));
+    assert_eq!(loaded.created_by_identity["id"], "experimenter");
+    assert_eq!(loaded.created_at, inserted.created_at);
+    assert_score_run_exists(test_db.store().pool(), &scope, loaded.score_run_id).await?;
+    assert_artifact_revision_links(
+        test_db.store().pool(),
+        &scope,
+        loaded.run_uid,
+        &[artifact_revision_uid],
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn missing_artifact_revision_rejects_experiment_insert_db() -> Result<()> {
+    // Pins: experiment artifact revision links are backed by enforced artifact_revision FKs.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = workspace_scope("experiment-missing-artifact-revision");
+    let missing_revision_uid = Uuid::now_v7();
+
+    let error = store
+        .insert_run(
+            &scope,
+            new_experiment("missing-revision", None, vec![missing_revision_uid]),
+        )
+        .await
+        .expect_err("missing artifact revision should reject experiment insert");
+
+    assert!(
+        error.to_string().contains("artifact revision"),
+        "expected link-table FK failure, got {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn workspace_a_cannot_load_workspace_b_run_db() -> Result<()> {
+    // Pins: exact scoped loads cannot cross workspace boundaries.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let workspace_a = workspace_scope("experiment-a");
+    let workspace_b = workspace_scope("experiment-b");
+
+    let inserted = store
+        .insert_run(
+            &workspace_b,
+            new_experiment("workspace-b", None, Vec::new()),
+        )
+        .await?;
+
+    let visible_to_a = store.load_run(&workspace_a, inserted.run_uid).await?;
+    let visible_to_b = store.load_run(&workspace_b, inserted.run_uid).await?;
+
+    assert_eq!(visible_to_a, None);
+    assert_eq!(
+        visible_to_b
+            .expect("workspace b should load its run")
+            .run_uid,
+        inserted.run_uid
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn idempotency_key_deduplicates_within_scope_not_across_workspaces_db() -> Result<()> {
+    // Pins: scoped idempotency returns the existing row only inside the same workspace.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let workspace_a = workspace_scope("experiment-idem-a");
+    let workspace_b = workspace_scope("experiment-idem-b");
+
+    let first = store
+        .insert_run(
+            &workspace_a,
+            new_experiment("first", Some("shared-key"), Vec::new()),
+        )
+        .await?;
+    let duplicate = store
+        .insert_run(
+            &workspace_a,
+            new_experiment("second", Some("shared-key"), Vec::new()),
+        )
+        .await?;
+    let other_workspace = store
+        .insert_run(
+            &workspace_b,
+            new_experiment("third", Some("shared-key"), Vec::new()),
+        )
+        .await?;
+
+    assert_eq!(duplicate.run_uid, first.run_uid);
+    assert_eq!(duplicate.name, "first");
+    assert_ne!(other_workspace.run_uid, first.run_uid);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn idempotency_duplicate_does_not_add_artifact_revision_links_db() -> Result<()> {
+    // Pins: scoped idempotency returns before duplicate requests mutate revision links or score runs.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = workspace_scope("experiment-idem-links");
+    let first_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
+    let duplicate_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
+    let first = store
+        .insert_run(
+            &scope,
+            new_experiment("first", Some("shared-link-key"), vec![first_revision_uid]),
+        )
+        .await?;
+    let duplicate_request = new_experiment(
+        "duplicate",
+        Some("shared-link-key"),
+        vec![duplicate_revision_uid],
+    );
+    let duplicate_score_run_id = duplicate_request.score_run_id;
+
+    let duplicate = store.insert_run(&scope, duplicate_request).await?;
+
+    assert_eq!(duplicate.run_uid, first.run_uid);
+    assert_eq!(duplicate.artifact_revision_uids, [first_revision_uid]);
+    assert_artifact_revision_links(
+        test_db.store().pool(),
+        &scope,
+        first.run_uid,
+        &[first_revision_uid],
+    )
+    .await?;
+    assert_score_run_absent(test_db.store().pool(), duplicate_score_run_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn score_run_id_from_another_workspace_rejects_insert_db() -> Result<()> {
+    // Pins: experiment runs cannot attach to an existing score-run parent from another workspace.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let workspace_a = workspace_scope("experiment-score-run-a");
+    let workspace_b = workspace_scope("experiment-score-run-b");
+    let score_run_id = Uuid::now_v7();
+    insert_score_run(test_db.store().pool(), &workspace_b, score_run_id).await?;
+    let mut new_run = new_experiment("cross-score-run", None, Vec::new());
+    new_run.score_run_id = score_run_id;
+
+    let error = store
+        .insert_run(&workspace_a, new_run)
+        .await
+        .expect_err("cross-workspace score run should reject experiment insert");
+
+    assert!(
+        error.to_string().contains("score_run"),
+        "expected score-run scope error, got {error}"
+    );
+    assert_scoped_experiment_count_for_score_run(
+        test_db.store().pool(),
+        &workspace_a,
+        score_run_id,
+        0,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn cross_workspace_artifact_revision_rejects_insert_db() -> Result<()> {
+    // Pins: experiment artifact links must target revisions visible from the requested scope.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let workspace_a = workspace_scope("experiment-artifact-a");
+    let workspace_b = workspace_scope("experiment-artifact-b");
+    let workspace_b_revision_uid =
+        insert_artifact_revision(test_db.store().pool(), &workspace_b).await?;
+    let new_run = new_experiment(
+        "cross-workspace-revision",
+        None,
+        vec![workspace_b_revision_uid],
+    );
+    let score_run_id = new_run.score_run_id;
+
+    let error = store
+        .insert_run(&workspace_a, new_run)
+        .await
+        .expect_err("cross-workspace artifact revision should reject experiment insert");
+
+    assert!(
+        error.to_string().contains("artifact revision"),
+        "expected artifact revision visibility error, got {error}"
+    );
+    assert_score_run_absent(test_db.store().pool(), score_run_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn workflow_run_and_session_links_persist_db() -> Result<()> {
+    // Pins: session and workflow artifact-run links persist on experiment records.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let experiment_store = ExperimentStore::new(test_db.store().pool().clone());
+    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
+    let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
+    let session_id =
+        insert_session_for_experiment_fk(test_db.store().pool(), &workspace_id, &user_id).await?;
+    let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
+    let inserted = experiment_store
+        .insert_run(&scope, new_experiment("links", None, Vec::new()))
+        .await?;
+
+    experiment_store
+        .attach_session(&scope, inserted.run_uid, session_id)
+        .await?
+        .expect("session link update should return the run");
+    let linked = experiment_store
+        .attach_workflow_run(&scope, inserted.run_uid, workflow_run_uid)
+        .await?
+        .expect("workflow link update should return the run");
+
+    assert_eq!(linked.session_id, Some(session_id));
+    assert_eq!(linked.workflow_run_uid, Some(workflow_run_uid));
+    assert_score_run_exists(test_db.store().pool(), &scope, linked.score_run_id).await?;
+    Ok(())
+}
+
+fn workspace_scope(label: &str) -> MemoryScope {
+    MemoryScope::Workspace {
+        workspace_id: WorkspaceId::new(format!("{label}-{}", Uuid::now_v7())),
+    }
+}
+
+fn new_experiment(
+    name: &str,
+    idempotency_key: Option<&str>,
+    artifact_revision_uids: Vec<Uuid>,
+) -> NewExperiment {
+    NewExperiment {
+        name: name.to_string(),
+        target: ExperimentTarget::AgentLoop {
+            prompt: "Measure this behavior.".to_string(),
+            session_id: None,
+            model: ModelId::new("gpt-5.1"),
+            attachments: Vec::new(),
+        },
+        variant: ExperimentVariant {
+            name: "baseline".to_string(),
+            model: Some(ModelId::new("gpt-5.1")),
+            artifact_revision_uids: artifact_revision_uids.clone(),
+            skill_refs: vec!["skill://experiment-baseline".to_string()],
+            workflow_ref: None,
+            metadata: json!({ "cohort": "db" }),
+        },
+        scorecard: ExperimentScorecard {
+            score_names: vec!["task_success".to_string()],
+            evaluator_metadata: json!({ "judge": "offline" }),
+        },
+        score_run_id: Uuid::now_v7(),
+        session_id: None,
+        workflow_run_uid: None,
+        artifact_revision_uids,
+        idempotency_key: idempotency_key.map(ToOwned::to_owned),
+        created_by_identity: json!({
+            "type": "user",
+            "id": "experimenter"
+        }),
+    }
+}
+
+async fn insert_workflow_run(
+    pool: &sqlx::PgPool,
+    scope: &MemoryScope,
+    session_id: SessionId,
+) -> Result<Uuid> {
+    let workspace_id = scope
+        .workspace_id()
+        .expect("workflow link test uses a workspace scope")
+        .to_string();
+    let run_uid = Uuid::now_v7();
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.artifact_run (
+            run_uid, workspace_id, session_id, workflow_ref, status, input, state
+        )
+        VALUES ($1, $2, $3, $4, 'queued', $5, $6)
+        "#,
+    )
+    .bind(run_uid)
+    .bind(workspace_id)
+    .bind(session_id.0)
+    .bind("workflow://experiment-link")
+    .bind(json!({ "case": "link" }))
+    .bind(json!({}))
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(run_uid)
+}
+
+async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &MemoryScope) -> Result<Uuid> {
+    let workspace_id = scope
+        .workspace_id()
+        .expect("artifact revision test uses a workspace scope")
+        .to_string();
+    let artifact_uid = Uuid::now_v7();
+    let revision_uid = Uuid::now_v7();
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.artifact (
+            artifact_uid, workspace_id, kind, name, description
+        )
+        VALUES ($1, $2, 'skill', $3, 'experiment fixture')
+        "#,
+    )
+    .bind(artifact_uid)
+    .bind(&workspace_id)
+    .bind(format!("experiment-fixture-{artifact_uid}"))
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.artifact_revision (
+            revision_uid, artifact_uid, workspace_id, definition, canonical_hash,
+            source_format, source_text, status, validation_report, version, published_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'json', $6, 'published', $7, 1, now())
+        "#,
+    )
+    .bind(revision_uid)
+    .bind(artifact_uid)
+    .bind(&workspace_id)
+    .bind(json!({ "kind": "skill", "name": "experiment fixture" }))
+    .bind(vec![1_u8; 32])
+    .bind(br#"{"kind":"skill","name":"experiment fixture"}"#.to_vec())
+    .bind(json!({}))
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(revision_uid)
+}
+
+async fn assert_score_run_exists(
+    pool: &sqlx::PgPool,
+    scope: &MemoryScope,
+    score_run_id: Uuid,
+) -> Result<()> {
+    let parts = scope_parts(scope);
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM analytics.score_run
+            WHERE run_id = $1
+              AND source = 'experiment_run'
+              AND scope = $2
+              AND workspace_id IS NOT DISTINCT FROM $3
+              AND user_id IS NOT DISTINCT FROM $4
+        )
+        "#,
+    )
+    .bind(score_run_id)
+    .bind(parts.0)
+    .bind(parts.1.as_deref())
+    .bind(parts.2.as_deref())
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    assert!(exists, "score-run parent row should exist");
+    Ok(())
+}
+
+async fn assert_score_run_absent(pool: &sqlx::PgPool, score_run_id: Uuid) -> Result<()> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM analytics.score_run
+            WHERE run_id = $1
+        )
+        "#,
+    )
+    .bind(score_run_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    assert!(!exists, "score-run parent row should not exist");
+    Ok(())
+}
+
+async fn assert_scoped_experiment_count_for_score_run(
+    pool: &sqlx::PgPool,
+    scope: &MemoryScope,
+    score_run_id: Uuid,
+    expected: i64,
+) -> Result<()> {
+    let parts = scope_parts(scope);
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.experiment_run
+        WHERE score_run_id = $1
+          AND scope = $2
+          AND workspace_id IS NOT DISTINCT FROM $3
+          AND user_id IS NOT DISTINCT FROM $4
+        "#,
+    )
+    .bind(score_run_id)
+    .bind(parts.0)
+    .bind(parts.1.as_deref())
+    .bind(parts.2.as_deref())
+    .fetch_one(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    assert_eq!(count, expected);
+    Ok(())
+}
+
+async fn insert_score_run(
+    pool: &sqlx::PgPool,
+    scope: &MemoryScope,
+    score_run_id: Uuid,
+) -> Result<()> {
+    let parts = scope_parts(scope);
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.score_run (
+            run_id, workspace_id, user_id, source
+        )
+        VALUES ($1, $2, $3, 'experiment_run')
+        "#,
+    )
+    .bind(score_run_id)
+    .bind(parts.1.as_deref())
+    .bind(parts.2.as_deref())
+    .execute(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    Ok(())
+}
+
+async fn assert_artifact_revision_links(
+    pool: &sqlx::PgPool,
+    scope: &MemoryScope,
+    run_uid: Uuid,
+    expected_revision_uids: &[Uuid],
+) -> Result<()> {
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut revision_uids = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT revision_uid
+        FROM moa.experiment_run_artifact_revision
+        WHERE run_uid = $1
+        ORDER BY revision_uid
+        "#,
+    )
+    .bind(run_uid)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    conn.commit().await?;
+    let mut expected = expected_revision_uids.to_vec();
+    revision_uids.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(revision_uids, expected);
+    Ok(())
+}
+
+async fn insert_session_for_experiment_fk(
+    pool: &sqlx::PgPool,
+    workspace_id: &WorkspaceId,
+    user_id: &UserId,
+) -> Result<SessionId> {
+    let target_table = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT confrelid::regclass::text
+        FROM pg_constraint
+        WHERE conrelid = 'moa.experiment_run'::regclass
+          AND conname = 'experiment_run_session_id_fkey'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    let session_id = SessionId::new();
+    let target_table = target_table.unwrap_or_else(|| "sessions".to_string());
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {target_table} (
+            id, workspace_id, user_id, status, platform, model
+        )
+        VALUES ($1, $2, $3, 'created', 'api', $4)
+        "#
+    ))
+    .bind(session_id.0)
+    .bind(workspace_id.to_string())
+    .bind(user_id.to_string())
+    .bind("gpt-5.1")
+    .execute(pool)
+    .await
+    .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
+    Ok(session_id)
+}
+
+fn scope_parts(scope: &MemoryScope) -> (&'static str, Option<String>, Option<String>) {
+    match scope {
+        MemoryScope::Global => ("global", None, None),
+        MemoryScope::Workspace { workspace_id } => {
+            ("workspace", Some(workspace_id.to_string()), None)
+        }
+        MemoryScope::User {
+            workspace_id,
+            user_id,
+        } => (
+            "user",
+            Some(workspace_id.to_string()),
+            Some(user_id.to_string()),
+        ),
+    }
+}

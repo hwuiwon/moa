@@ -29,6 +29,24 @@ async fn cleanup(database_url: &str, schema_name: &str) -> Result<()> {
 }
 
 #[tokio::test]
+async fn create_session_persists_requested_metadata() -> Result<()> {
+    // Pins: the core Postgres session-store create path remains a metadata-row write.
+    let (store, database_url, schema_name) = test_store().await?;
+    let meta = test_session_meta("create-metadata");
+    let session_id = store.create_session(meta.clone()).await?;
+
+    let persisted = store.get_session(session_id).await?;
+
+    assert_eq!(persisted.id, meta.id);
+    assert_eq!(persisted.workspace_id, meta.workspace_id);
+    assert_eq!(persisted.user_id, meta.user_id);
+    assert_eq!(persisted.model, meta.model);
+    assert_eq!(persisted.status, meta.status);
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
 async fn append_event_increments_sequence() -> Result<()> {
     let (store, database_url, schema_name) = test_store().await?;
     let session_id = store

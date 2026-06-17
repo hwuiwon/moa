@@ -8,11 +8,12 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, ExperienceAttribution,
-    ExperienceRecord, IdempotencyClass, LearningCandidate, LearningCandidateStatus,
-    LearningCandidateStatusUpdate, MemoryScope, SegmentAssessment, SegmentCompletion, SegmentId,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate,
-    ToolDefinition, UserId, WorkspaceId,
+    Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, EventType,
+    ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
+    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType,
+    LearningRiskClass, MemoryScope, SegmentAssessment, SegmentCompletion, SegmentId, SessionFilter,
+    SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate, ToolDefinition,
+    UserId, WorkspaceId,
 };
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -539,6 +540,160 @@ pub struct CacheDailyMetricRow {
     pub total_cost_cents: u64,
     /// Average cache-hit rate on the day.
     pub avg_cache_hit_rate: f64,
+}
+
+/// Request payload for workspace-scoped live experiment analytics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentAnalyticsRequest {
+    /// Workspace whose experiment runs should be summarized.
+    pub workspace_id: WorkspaceId,
+    /// Optional lower bound on experiment creation time.
+    pub from_time: Option<DateTime<Utc>>,
+    /// Optional upper bound on experiment creation time.
+    pub to_time: Option<DateTime<Utc>>,
+    /// Maximum number of score-run references to include.
+    pub limit: u32,
+}
+
+/// Response payload containing workspace-scoped experiment analytics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentAnalyticsResponse {
+    /// Workspace whose experiment runs were summarized.
+    pub workspace_id: WorkspaceId,
+    /// Total experiment runs in the requested window.
+    pub total_runs: u64,
+    /// Per-status run counts ordered by status.
+    #[serde(default)]
+    pub statuses: Vec<ExperimentStatusCount>,
+    /// Score-run references ordered by newest experiment run first.
+    #[serde(default)]
+    pub score_runs: Vec<ExperimentScoreRunRef>,
+}
+
+/// Count of experiment runs for one lifecycle status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentStatusCount {
+    /// Durable experiment run status.
+    pub status: String,
+    /// Number of runs with this status.
+    pub count: u64,
+}
+
+/// Reference from an experiment run to the associated score run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScoreRunRef {
+    /// Stable experiment run identifier.
+    pub run_uid: Uuid,
+    /// Human-readable experiment run name.
+    pub name: String,
+    /// Durable experiment run status.
+    pub status: String,
+    /// Score run identifier used by `analytics.scores`.
+    pub score_run_id: Uuid,
+    /// Time the experiment run was accepted.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request payload for listing curated learning-candidate summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningCandidateListRequest {
+    /// Optional workspace scope. When absent, the caller must be a tenant admin.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Optional candidate status filter.
+    pub status: Option<LearningCandidateStatus>,
+    /// Maximum number of candidates to return.
+    pub limit: u32,
+}
+
+/// Response payload containing curated learning-candidate summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearningCandidateListResponse {
+    /// Tenant scope inferred from the authenticated caller.
+    pub tenant_id: String,
+    /// Workspace filter used for this response, if any.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Candidate summaries ordered by newest update first.
+    #[serde(default)]
+    pub candidates: Vec<LearningCandidateSummary>,
+}
+
+/// Redacted read-model projection of one learning candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LearningCandidateSummary {
+    /// Stable candidate identifier.
+    pub id: Uuid,
+    /// Tenant scope for the candidate.
+    pub tenant_id: String,
+    /// Workspace scope for the candidate.
+    pub workspace_id: WorkspaceId,
+    /// Optional user scope for user-personal candidates.
+    pub user_id: Option<UserId>,
+    /// Candidate target type.
+    pub candidate_type: LearningCandidateType,
+    /// Current promotion status.
+    pub status: LearningCandidateStatus,
+    /// Optional target identifier when mutating existing learned state.
+    pub target_id: Option<String>,
+    /// Optional human-readable target label.
+    pub target_label: Option<String>,
+    /// Task fingerprint hash the candidate is expected to help.
+    pub task_fingerprint: Option<String>,
+    /// Confidence in the candidate proposal.
+    pub confidence: Option<f64>,
+    /// Promotion risk class.
+    pub risk_class: LearningRiskClass,
+    /// Short, redacted preview of the candidate payload.
+    pub payload_preview: String,
+    /// Candidate creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last candidate update time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request payload for workspace-scoped session event search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchRequest {
+    /// Workspace whose sessions should be searched.
+    pub workspace_id: WorkspaceId,
+    /// Full-text event search query.
+    pub query: String,
+    /// Optional lower timestamp bound.
+    pub from_time: Option<DateTime<Utc>>,
+    /// Optional upper timestamp bound.
+    pub to_time: Option<DateTime<Utc>>,
+    /// Optional event type filter.
+    pub event_types: Option<Vec<EventType>>,
+    /// Maximum number of snippets to return.
+    pub limit: u32,
+}
+
+/// Response payload containing redacted session event snippets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchResponse {
+    /// Workspace whose sessions were searched.
+    pub workspace_id: WorkspaceId,
+    /// Query text that produced the results.
+    pub query: String,
+    /// Redacted event snippets ordered by search rank.
+    #[serde(default)]
+    pub results: Vec<SessionSearchResult>,
+}
+
+/// One redacted event-search hit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchResult {
+    /// Session that owns the matching event.
+    pub session_id: SessionId,
+    /// Stable event identifier.
+    pub event_id: Uuid,
+    /// Event sequence number within the session.
+    pub sequence_num: u64,
+    /// Event type discriminator.
+    pub event_type: EventType,
+    /// Time the event was emitted.
+    pub timestamp: DateTime<Utc>,
+    /// Short redacted snippet for analytics review.
+    pub snippet: String,
 }
 
 /// Request payload for graph-memory search.
@@ -1684,6 +1839,176 @@ pub struct EvalCompareResponse {
     /// Comparison rows ordered for API display.
     #[serde(default)]
     pub rows: Vec<EvalCompareRow>,
+}
+
+/// Request payload for accepting a live behavior experiment run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentRunRequest {
+    /// Workspace scope used for authorization and run ownership.
+    pub workspace_id: WorkspaceId,
+    /// Human-readable experiment run name.
+    pub name: String,
+    /// Target payload for the live behavior run.
+    pub target: Value,
+    /// Variant payload under experiment.
+    pub variant: Value,
+    /// Scorecard payload requested for the experiment.
+    #[serde(default)]
+    pub scorecard: Value,
+    /// Optional score run identifier used to join against analytics scores.
+    pub score_run_id: Option<Uuid>,
+    /// Optional idempotency key for scoped run admission.
+    pub idempotency_key: Option<String>,
+}
+
+/// Response payload returned after accepting a live behavior experiment run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentRunResponse {
+    /// Workspace scope that owns the experiment run.
+    pub workspace_id: WorkspaceId,
+    /// Stable experiment run identifier.
+    pub run_uid: Uuid,
+    /// Current run lifecycle status.
+    pub status: String,
+    /// Score run identifier used to join against analytics scores.
+    pub score_run_id: Uuid,
+    /// Linked session identifier, when the target has one.
+    pub session_id: Option<SessionId>,
+    /// Linked workflow run identifier, when the target has one.
+    pub workflow_run_uid: Option<Uuid>,
+}
+
+/// Request payload for reading an experiment run status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentRunStatusRequest {
+    /// Workspace scope used for authorization and run-result filtering.
+    pub workspace_id: WorkspaceId,
+    /// Stable experiment run identifier.
+    pub run_uid: Uuid,
+}
+
+/// Response payload for reading an experiment run status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentRunStatusResponse {
+    /// Workspace scope that owns the experiment run.
+    pub workspace_id: WorkspaceId,
+    /// Stable experiment run identifier.
+    pub run_uid: Uuid,
+    /// Current run lifecycle status.
+    pub status: String,
+    /// Fast target-kind discriminator, when available.
+    pub target_kind: Option<String>,
+    /// Score run identifier used to join against analytics scores.
+    pub score_run_id: Option<Uuid>,
+    /// Linked session identifier, when the target has one.
+    pub session_id: Option<SessionId>,
+    /// Linked workflow run identifier, when the target has one.
+    pub workflow_run_uid: Option<Uuid>,
+    /// Terminal error for failed runs.
+    pub error: Option<String>,
+    /// Full run record payload for service versions that can expose it.
+    #[serde(default)]
+    pub run: Value,
+}
+
+/// Request payload for listing experiment runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentListRequest {
+    /// Workspace scope used for authorization and run filtering.
+    pub workspace_id: WorkspaceId,
+    /// Optional lifecycle status filter.
+    pub status: Option<String>,
+    /// Optional maximum number of runs to return.
+    pub limit: Option<u64>,
+}
+
+/// Response payload containing experiment run summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentListResponse {
+    /// Workspace scope used for run filtering.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run summaries ordered for API display.
+    #[serde(default)]
+    pub runs: Vec<Value>,
+}
+
+/// Request payload for cancelling an experiment run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentCancelRequest {
+    /// Workspace scope used for authorization and run filtering.
+    pub workspace_id: WorkspaceId,
+    /// Stable experiment run identifier.
+    pub run_uid: Uuid,
+    /// Optional cancellation reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Response payload returned after requesting experiment cancellation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentCancelResponse {
+    /// Workspace scope that owns the experiment run.
+    pub workspace_id: WorkspaceId,
+    /// Stable experiment run identifier.
+    pub run_uid: Uuid,
+    /// Whether cancellation was accepted.
+    pub cancelled: bool,
+    /// Current run lifecycle status.
+    pub status: String,
+    /// Human-readable cancellation result.
+    pub reason: String,
+}
+
+/// Request payload for reading experiment score summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentScoresRequest {
+    /// Workspace scope used for authorization and score filtering.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run identifier whose resolved score run should be summarized.
+    pub run_uid: Uuid,
+}
+
+/// Response payload containing experiment score summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScoresResponse {
+    /// Workspace scope used for score filtering.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run identifier summarized by the response.
+    pub run_uid: Uuid,
+    /// Resolved score run identifier summarized by the response.
+    pub score_run_id: Uuid,
+    /// Score summary rows ordered for API display.
+    #[serde(default)]
+    pub rows: Vec<Value>,
+}
+
+/// Request payload for comparing two experiment score runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentCompareRequest {
+    /// Workspace scope used for authorization and score filtering.
+    pub workspace_id: WorkspaceId,
+    /// Baseline experiment run identifier.
+    pub base_run_uid: Uuid,
+    /// New experiment run identifier.
+    pub new_run_uid: Uuid,
+}
+
+/// Response payload containing experiment score comparison rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentCompareResponse {
+    /// Workspace scope used for score filtering.
+    pub workspace_id: WorkspaceId,
+    /// Baseline experiment run identifier.
+    pub base_run_uid: Uuid,
+    /// New experiment run identifier.
+    pub new_run_uid: Uuid,
+    /// Resolved baseline score run identifier.
+    pub base_score_run_id: Uuid,
+    /// Resolved new score run identifier.
+    pub new_score_run_id: Uuid,
+    /// Comparison rows ordered for API display.
+    #[serde(default)]
+    pub rows: Vec<Value>,
 }
 
 /// Request payload for promoting a workspace vector backend.

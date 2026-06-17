@@ -31,6 +31,7 @@ members = [
     "crates/moa-skills",
     "crates/moa-eval/core",
     "crates/moa-eval",
+    "crates/moa-experiments",
     "crates/moa-loadtest",
     "crates/moa-test-support",
     "crates/workspace-hack",
@@ -67,6 +68,7 @@ default-members = [
     "crates/moa-skills",
     "crates/moa-eval/core",
     "crates/moa-eval",
+    "crates/moa-experiments",
     "crates/moa-loadtest",
 ]
 
@@ -86,6 +88,7 @@ moa-core = { path = "crates/moa-core" }
 moa-edge = { path = "crates/moa-edge" }
 moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }
+moa-experiments = { path = "crates/moa-experiments" }
 moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
 moa-gateway = { path = "crates/moa-gateway" }
 moa-hands = { path = "crates/moa-hands" }

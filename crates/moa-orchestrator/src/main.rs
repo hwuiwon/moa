@@ -41,6 +41,7 @@ use moa_orchestrator::{
         audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
         eval::{Eval, EvalImpl},
+        experiments::{Experiments, ExperimentsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         lineage_admin::{LineageAdmin, LineageAdminImpl},
@@ -60,6 +61,7 @@ use moa_orchestrator::{
     workflows::{
         consolidate::{Consolidate, ConsolidateImpl},
         eval_run::{EvalRun, EvalRunImpl},
+        experiment_run::{ExperimentRun, ExperimentRunImpl},
         sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
     },
@@ -95,6 +97,8 @@ const EXPECTED_SERVICE_NAMES: &[&str] = &[
     "CronJob",
     "Eval",
     "EvalRun",
+    "Experiments",
+    "ExperimentRun",
     "GraphMemoryMaint",
     "Health",
     "IngestionVO",
@@ -264,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(AuditImpl.serve())
         .bind(AuthzImpl.serve())
         .bind(EvalImpl.serve())
+        .bind(ExperimentsImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -282,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(WorkflowsImpl.serve())
         .bind(ConsolidateImpl.serve())
         .bind(EvalRunImpl.serve())
+        .bind(ExperimentRunImpl.serve())
         .bind(SubAgentTurnExecutionImpl.serve())
         .bind(TurnExecutionImpl.serve())
         .build();
