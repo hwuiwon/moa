@@ -189,7 +189,8 @@ async fn run_workflow_experiment(
     let request = ExperimentRunRequest {
         workspace_id: workspace_id.clone(),
         name: "damaged-food-workflow-experiment".to_string(),
-        target: json!({
+        plan_revision_uid: None,
+        target: Some(json!({
             "kind": "workflow",
             "workflow_ref": "workflow://damaged-food-replacement",
             "input": {
@@ -199,15 +200,15 @@ async fn run_workflow_experiment(
             },
             "session_id": null,
             "idempotency_key": format!("workflow-target-{}", Uuid::now_v7())
-        }),
-        variant: json!({
+        })),
+        variant: Some(json!({
             "name": "damaged-food-workflow",
             "model": null,
             "artifact_revision_uids": [published.revision_uid],
             "skill_refs": [],
             "workflow_ref": "workflow://damaged-food-replacement",
             "metadata": { "lane": "workflow-experiment-e2e" }
-        }),
+        })),
         scorecard: json!({
             "score_names": ["workflow_started"],
             "evaluator_metadata": { "mode": "manual-or-later" }

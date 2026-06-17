@@ -3635,7 +3635,9 @@ name = "moa-experiments"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "moa-artifacts",
  "moa-core",
+ "moa-scoring",
  "moa-test-support",
  "serde",
  "serde_json",
@@ -4015,6 +4017,7 @@ dependencies = [
  "moa-memory-vector",
  "moa-ocsf",
  "moa-providers",
+ "moa-scoring",
  "moa-security",
  "moa-session",
  "moa-skills",
@@ -4060,6 +4063,18 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-scoring"
+version = "0.1.0"
+dependencies = [
+ "moa-core",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.18",
+ "uuid",
  "workspace-hack",
 ]
 

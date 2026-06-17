@@ -5,9 +5,12 @@ _Boundary between regression evals, production-path experiments, and analytics._
 ## Choose The Surface
 
 Use a regression eval when the question is "did this behavior regress under a
-controlled scenario?" Regression evals live in `moa-eval` and the hosted
-`Eval` service. They use datasets, transcripts, scripted providers, replay, and
-budget gates so CI and nightly jobs can compare runs deterministically.
+controlled scenario?" Regression evals live in `moa-eval`. They use datasets,
+transcripts, scripted providers, replay, and budget gates so CI and nightly
+jobs can compare runs deterministically. The `Eval` service and `EvalRun`
+workflow are internal-only surfaces compiled behind
+`internal-eval-runner`; default public edge builds do not translate
+`/v1/evals/*`.
 
 Use a live behavior experiment when the question is "what happens when this
 variant uses real MOA execution paths?" Live experiments live in
@@ -19,6 +22,8 @@ artifact-backed workflow runs.
 Do not use live experiments as a shortcut for regression coverage. If a live
 experiment reveals a repeatable failure, turn the finding into a regression
 eval or a `learning_candidates` proposal with enough evidence to reproduce it.
+The product-facing Behavior Lab artifact model is documented in
+[`docs/product/behavior-lab.md`](../product/behavior-lab.md).
 
 ## Target Kinds
 
@@ -56,7 +61,28 @@ Public experiment score APIs are experiment-run centric:
   `score_run_id`, then reads `analytics.scores`.
 - `Experiments/compare` accepts `base_run_uid` and `new_run_uid`, resolves both
   score run IDs, then reuses the same workspace-scoped score comparison helper
-  as hosted evals.
+  as internal eval and scoring surfaces.
+
+## Public Product Routes
+
+The public edge exposes product-shaped experiment routes and forwards them to
+the `Experiments` Restate service:
+
+| Public route | Service handler |
+|---|---|
+| `POST /v1/experiments/generate-plan` | `Experiments/generate_plan` |
+| `POST /v1/experiments/run-plan` | `Experiments/run` |
+| `POST /v1/experiments/status` | `Experiments/status` |
+| `POST /v1/experiments/list` | `Experiments/list` |
+| `POST /v1/experiments/trials` | `Experiments/trials` |
+| `POST /v1/experiments/trial-status` | `Experiments/trial_status` |
+| `POST /v1/experiments/cancel` | `Experiments/cancel` |
+| `POST /v1/experiments/propose-improvements` | `Experiments/propose_improvements` |
+| `POST /v1/experiments/scores` | `Experiments/scores` |
+| `POST /v1/experiments/compare` | `Experiments/compare` |
+
+Do not document `/v1/experiments/run` as public; the public admission route is
+`/v1/experiments/run-plan`.
 
 ## Approvals
 
@@ -68,53 +94,70 @@ mirrors the linked artifact workflow run when a workflow run has been attached.
 ## Learning Boundary
 
 Experiment-derived improvements must go through `learning_candidates`; they
-must never auto-promote skills or workflows. Current experiment execution only
-records run metadata and links to sessions, workflow runs, artifact revisions,
-and score runs. A future proposal writer may create a candidate from experiment
-evidence, but review, evaluation, and promotion remain separate explicit steps.
+must never auto-promote skills or workflows. Experiment execution records run
+metadata and links to sessions, workflow runs, artifact revisions, and score
+runs. The explicit `Experiments/propose_improvements` operation may create a
+candidate from completed experiment evidence, but review, evaluation, and
+promotion remain separate explicit steps.
 
-## Deterministic Providers
+## Local Deterministic Commands
 
-Use deterministic provider overrides for service E2E and regression-style
-checks that exercise live experiment plumbing:
+Use nextest for deterministic behavior-lab checks:
 
 ```bash
-cargo test -p moa-orchestrator --test experiment_agent_loop_e2e \
-  --features integration,provider-overrides -- --ignored
+cargo nextest run -p moa-artifacts --all-targets --locked
+cargo nextest run -p moa-scoring --all-targets --locked
+cargo nextest run -p moa-experiments --all-targets --locked
+cargo nextest run -p moa-orchestrator --test experiment_service --test behavior_lab_simulation_e2e --locked
+cargo nextest run -p moa-edge --lib --locked
 ```
 
-The test harness sets `MOA_PROVIDERS_OVERRIDE=scripted:<fixture>` or
-`MOA_PROVIDERS_OVERRIDE=mock:<seed>` around the orchestrator process. Production
-builds do not compile provider overrides, and the override is blocked in
-production environments.
+The `behavior_lab_simulation_e2e` target compiles in the default lane; its
+local Restate E2E tests are ignored. To run those ignored tests, start the local
+Postgres/OpenFGA/Restate dependencies first and compile the orchestrator with
+provider overrides:
+
+```bash
+cargo nextest run -p moa-orchestrator \
+  --test behavior_lab_simulation_e2e \
+  --features integration,provider-overrides \
+  --locked \
+  --run-ignored ignored-only
+```
+
+The ignored local Restate E2Es need Postgres, OpenFGA, and Restate. They do not
+use billed providers by default: the harness starts the orchestrator with
+`MOA_PROVIDERS_OVERRIDE=scripted:<fixture>` and removes live provider keys from
+the child process. Production builds do not compile provider overrides, and the
+override is blocked in production environments.
 
 ## Live And Billed Gates
 
-Live Restate experiment tests are ignored by default because they need
-Postgres, OpenFGA, Restate, and sometimes provider credentials. Run the clean
-live lane only with an explicit opt-in:
+Live simulation provider tests are ignored by default and double-gated. Run
+them only with an explicit opt-in and provider credentials:
 
 ```bash
-MOA_RUN_LIVE_E2E=1 make e2e-clean-live
+MOA_RUN_LIVE_SIMULATION_TESTS=1 cargo nextest run -p moa-orchestrator \
+  --test behavior_lab_simulation_e2e \
+  --features integration,provider-overrides \
+  --locked \
+  --run-ignored ignored-only \
+  live_behavior_lab_simulation_gate_requires_flag_and_provider_credentials
 ```
 
-Provider-backed or long-running billed checks remain separate:
-
-```bash
-MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 make test-provider-e2e
-MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-eval
-```
-
-Do not put live or billed experiment checks in the default test lane.
+If `MOA_RUN_LIVE_SIMULATION_TESTS=1` is set but no `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or `GOOGLE_API_KEY` is present, the test fails before any
+provider call. Do not put live or billed experiment checks in the default test
+lane.
 
 ## Authorization
 
 | Surface | Required authorization |
 |---|---|
-| `Eval` suites, plan, run, status, datasets list, replay, scores, compare | `Workspace:Member` |
-| `Eval` dataset registration | `Workspace:Editor` |
-| `Experiments/run` and `Experiments/cancel` | `Workspace:Editor` |
-| `Experiments/status`, `list`, `scores`, `compare` | `Workspace:Member` |
+| Internal-gated `Eval` suites, plan, run, status, datasets list, replay, scores, compare | `Workspace:Member` |
+| Internal-gated `Eval` dataset registration | `Workspace:Editor` |
+| `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Workspace:Editor` |
+| `Experiments/status`, `list`, `trials`, `trial_status`, `scores`, `compare` | `Workspace:Member` |
 | `Analytics/session_stats` | `Session:Participant` |
 | `Analytics/workspace_stats`, `cache_stats`, `experiment_stats`, `session_search` | `Workspace:Member` |
 | `Analytics/tool_stats` with `workspace_id` | `Workspace:Member` |
@@ -124,6 +167,9 @@ Do not put live or billed experiment checks in the default test lane.
 | `LineageAdmin/explain`, `query`, `verify` | `Workspace:Member` |
 | `LineageAdmin/export`, `erase` | `Workspace:Admin` |
 
-Future MCP support is a transport adapter over these typed services. It must
-forward through the same DTOs and authorization boundaries instead of owning
-eval, experiment, analytics, lineage, learning, or workflow domain logic.
+Future MCP support is a thin adapter over product/default typed services such
+as `Experiments`, `Analytics`, `LineageAdmin`, and `Workflows`. If it exposes
+internal eval at all, that surface must remain qualified as
+`internal-eval-runner` gated. MCP must forward through the same DTOs and
+authorization boundaries instead of owning eval, experiment, analytics,
+lineage, learning, or workflow domain logic.

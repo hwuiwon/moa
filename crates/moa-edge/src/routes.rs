@@ -489,70 +489,14 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
-            "/v1/evals/plan" => {
+            "/v1/experiments/generate-plan" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
-                    path: "/Eval/plan".to_string(),
+                    path: "/Experiments/generate_plan".to_string(),
                     body: body.to_vec(),
                 };
             }
-            "/v1/evals/suites/list" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/suites_list".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/run" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/run".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/run-status" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/run_status".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/datasets/register" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/datasets_register".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/datasets/list" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/datasets_list".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/replay" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/replay".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/scores" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/scores".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/evals/compare" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Eval/compare".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/experiments/run" => {
+            "/v1/experiments/run-plan" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
                     path: "/Experiments/run".to_string(),
@@ -573,10 +517,31 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
+            "/v1/experiments/trials" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/trials".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/trial-status" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/trial_status".to_string(),
+                    body: body.to_vec(),
+                };
+            }
             "/v1/experiments/cancel" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
                     path: "/Experiments/cancel".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/propose-improvements" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/propose_improvements".to_string(),
                     body: body.to_vec(),
                 };
             }
@@ -1128,81 +1093,37 @@ mod tests {
     }
 
     #[test]
-    fn eval_public_routes_translate_to_restate_handlers() {
-        // Pins: hosted eval edge routes forward to the internal Eval service paths.
-        let cases = [
-            (
-                "/v1/evals/plan",
-                "/Eval/plan",
-                r#"{"workspace_id":"workspace-a","suite_document":"[suite]\nname=\"s\"","config_documents":[]}"#,
-            ),
-            (
-                "/v1/evals/suites/list",
-                "/Eval/suites_list",
-                r#"{"workspace_id":"workspace-a","documents":[{"source":"suite.toml","body":"[suite]\nname=\"s\""}]}"#,
-            ),
-            (
-                "/v1/evals/run",
-                "/Eval/run",
-                r#"{"workspace_id":"workspace-a","suite_document":"[suite]\nname=\"s\"","config_documents":[]}"#,
-            ),
-            (
-                "/v1/evals/run-status",
-                "/Eval/run_status",
-                r#"{"workspace_id":"workspace-a","run_id":"11111111-1111-1111-1111-111111111111"}"#,
-            ),
-            (
-                "/v1/evals/datasets/register",
-                "/Eval/datasets_register",
-                r#"{"workspace_id":"workspace-a","name":"golden","jsonl":"{}"}"#,
-            ),
-            (
-                "/v1/evals/datasets/list",
-                "/Eval/datasets_list",
-                r#"{"workspace_id":"workspace-a"}"#,
-            ),
-            (
-                "/v1/evals/replay",
-                "/Eval/replay",
-                r#"{"workspace_id":"workspace-a","dataset_id":"22222222-2222-2222-2222-222222222222"}"#,
-            ),
-            (
-                "/v1/evals/scores",
-                "/Eval/scores",
-                r#"{"workspace_id":"workspace-a","run_id":"33333333-3333-3333-3333-333333333333"}"#,
-            ),
-            (
-                "/v1/evals/compare",
-                "/Eval/compare",
-                r#"{"workspace_id":"workspace-a","base_run":"33333333-3333-3333-3333-333333333333","new_run":"44444444-4444-4444-4444-444444444444"}"#,
-            ),
+    fn eval_public_routes_do_not_translate_to_product_handlers() {
+        // Pins: hosted eval is not part of the default public product edge surface.
+        let paths = [
+            "/v1/evals/plan",
+            "/v1/evals/suites/list",
+            "/v1/evals/run",
+            "/v1/evals/run-status",
+            "/v1/evals/datasets/register",
+            "/v1/evals/datasets/list",
+            "/v1/evals/replay",
+            "/v1/evals/scores",
+            "/v1/evals/compare",
         ];
 
-        for (public_path, internal_path, json_body) in cases {
+        for public_path in paths {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from(json_body.as_bytes().to_vec());
+            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
 
             let translation = translate_public_route(&Method::POST, &uri, &body);
 
             match translation {
+                RouteTranslation::NoChange => {}
                 RouteTranslation::Forward {
                     method,
                     path,
-                    body: forwarded_body,
+                    body: _,
                 } => {
-                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
-                    assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        json_body.as_bytes(),
-                        "{public_path} body should pass through unchanged"
-                    );
-                }
-                RouteTranslation::NoChange => {
-                    panic!("{public_path} should translate to {internal_path}")
+                    panic!("{public_path} must not translate, got {method} {path}")
                 }
                 RouteTranslation::BadRequest(message) => {
-                    panic!("{public_path} should not fail translation: {message}")
+                    panic!("{public_path} should fall through unchanged, got: {message}")
                 }
             }
         }
@@ -1212,10 +1133,20 @@ mod tests {
     fn experiments_public_routes_translate_to_restate_handlers() {
         // Pins: hosted experiment edge routes forward to the internal Experiments service paths.
         let cases = [
-            ("/v1/experiments/run", "/Experiments/run"),
+            (
+                "/v1/experiments/generate-plan",
+                "/Experiments/generate_plan",
+            ),
+            ("/v1/experiments/run-plan", "/Experiments/run"),
             ("/v1/experiments/status", "/Experiments/status"),
             ("/v1/experiments/list", "/Experiments/list"),
+            ("/v1/experiments/trials", "/Experiments/trials"),
+            ("/v1/experiments/trial-status", "/Experiments/trial_status"),
             ("/v1/experiments/cancel", "/Experiments/cancel"),
+            (
+                "/v1/experiments/propose-improvements",
+                "/Experiments/propose_improvements",
+            ),
             ("/v1/experiments/scores", "/Experiments/scores"),
             ("/v1/experiments/compare", "/Experiments/compare"),
         ];
@@ -1245,6 +1176,31 @@ mod tests {
                 }
                 RouteTranslation::BadRequest(message) => {
                     panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stale_experiment_alias_routes_do_not_translate() {
+        // Pins: removed experiment aliases cannot bypass the product-shaped public API.
+        let stale_paths = [
+            "/v1/experiments/run",
+            "/v1/experiments/generate_plan",
+            "/v1/experiments/trial_status",
+        ];
+
+        for public_path in stale_paths {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+
+            match translate_public_route(&Method::POST, &uri, &body) {
+                RouteTranslation::NoChange => {}
+                RouteTranslation::Forward { method, path, .. } => {
+                    panic!("{public_path} must not translate, got {method} {path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should fall through unchanged, got: {message}")
                 }
             }
         }

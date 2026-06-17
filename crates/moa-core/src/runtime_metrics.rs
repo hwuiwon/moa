@@ -521,6 +521,107 @@ pub fn record_api_key_validation_duration(result: &str, duration: Duration) {
     .record(duration.as_secs_f64());
 }
 
+/// Records one experiment run lifecycle observation.
+pub fn record_experiment_run(status: &str, target_kind: &str) {
+    counter!(
+        "moa_experiment_runs_total",
+        "status" => status.to_string(),
+        "target_kind" => target_kind.to_string()
+    )
+    .increment(1);
+}
+
+/// Records one experiment trial lifecycle observation.
+pub fn record_experiment_trial(status: &str, stop_reason: Option<&str>, target_kind: &str) {
+    counter!(
+        "moa_experiment_trials_total",
+        "status" => status.to_string(),
+        "stop_reason" => stop_reason.unwrap_or("none").to_string(),
+        "target_kind" => target_kind.to_string()
+    )
+    .increment(1);
+}
+
+/// Records one terminal experiment trial duration.
+pub fn record_experiment_trial_duration(target_kind: &str, status: &str, duration: Duration) {
+    histogram!(
+        "moa_experiment_trial_duration_seconds",
+        "target_kind" => target_kind.to_string(),
+        "status" => status.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records one simulator turn submitted to a target.
+pub fn record_simulation_turn(target_kind: &str) {
+    counter!(
+        "moa_simulation_turns_total",
+        "target_kind" => target_kind.to_string()
+    )
+    .increment(1);
+}
+
+/// Records simulation token usage for a bounded participant role.
+pub fn record_simulation_tokens(role: &str, tokens: u64) {
+    if tokens == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_simulation_tokens_total",
+        "role" => role.to_string()
+    )
+    .increment(tokens);
+}
+
+/// Records simulation model cost for a bounded participant role.
+pub fn record_simulation_cost_cents(role: &str, cost_cents: u64) {
+    if cost_cents == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_simulation_cost_cents_total",
+        "role" => role.to_string()
+    )
+    .increment(cost_cents);
+}
+
+/// Records score rows read from an experiment scoring surface.
+pub fn record_experiment_score_rows(source: &str, rows: u64) {
+    if rows == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_experiment_score_rows_total",
+        "source" => source.to_string()
+    )
+    .increment(rows);
+}
+
+/// Records learning candidates proposed from experiment evidence.
+pub fn record_experiment_learning_candidates(status: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_experiment_learning_candidates_total",
+        "status" => status.to_string()
+    )
+    .increment(count);
+}
+
+/// Records a trial that stopped because its target entered an approval wait.
+pub fn record_experiment_approval_wait(target_kind: &str) {
+    counter!(
+        "moa_experiment_approval_waits_total",
+        "target_kind" => target_kind.to_string()
+    )
+    .increment(1);
+}
+
 #[cfg(tokio_unstable)]
 fn spawn_tokio_runtime_metrics_publisher() {
     if TOKIO_RUNTIME_MONITOR_STARTED.get().is_some() {
@@ -802,6 +903,42 @@ fn register_metric_descriptions() {
         "moa_memory_operation_results",
         "Memory service result counts, labeled by operation and status."
     );
+    describe_counter!(
+        "moa_experiment_runs_total",
+        "Experiment run lifecycle observations, labeled by terminal status and bounded target kind."
+    );
+    describe_counter!(
+        "moa_experiment_trials_total",
+        "Experiment trial lifecycle observations, labeled by status, bounded stop reason, and bounded target kind."
+    );
+    describe_histogram!(
+        "moa_experiment_trial_duration_seconds",
+        "Terminal experiment trial duration in seconds, labeled by bounded status and target kind."
+    );
+    describe_counter!(
+        "moa_simulation_turns_total",
+        "Simulator turns submitted to experiment targets, labeled by bounded target kind."
+    );
+    describe_counter!(
+        "moa_simulation_tokens_total",
+        "Simulation token usage, labeled by bounded participant role."
+    );
+    describe_counter!(
+        "moa_simulation_cost_cents_total",
+        "Simulation model cost in cents, labeled by bounded participant role."
+    );
+    describe_counter!(
+        "moa_experiment_score_rows_total",
+        "Experiment score rows read by service surfaces, labeled by bounded source."
+    );
+    describe_counter!(
+        "moa_experiment_learning_candidates_total",
+        "Experiment learning candidates proposed, labeled by candidate status."
+    );
+    describe_counter!(
+        "moa_experiment_approval_waits_total",
+        "Experiment trials that stopped on approval waits, labeled by bounded target kind."
+    );
 }
 
 fn session_status_label(status: &SessionStatus) -> &'static str {
@@ -862,6 +999,15 @@ mod tests {
         record_retrieval_embedder_construction("success", Duration::from_millis(4));
         record_tool_idempotency_scan("ToolResult", 5, Duration::from_millis(5));
         record_api_key_validation_duration("failure", Duration::from_millis(6));
+        record_experiment_run("accepted", "agent_loop");
+        record_experiment_trial("completed", Some("max_turns"), "agent_loop");
+        record_experiment_trial_duration("agent_loop", "completed", Duration::from_millis(7));
+        record_simulation_turn("agent_loop");
+        record_simulation_tokens("simulator", 16);
+        record_simulation_cost_cents("simulator", 1);
+        record_experiment_score_rows("scores", 3);
+        record_experiment_learning_candidates("proposed", 1);
+        record_experiment_approval_wait("agent_loop");
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -899,6 +1045,15 @@ mod tests {
         assert!(scrape.contains("moa_tool_idempotency_scan_seconds"));
         assert!(scrape.contains("moa_tool_idempotency_scan_events"));
         assert!(scrape.contains("moa_api_key_validation_seconds"));
+        assert!(scrape.contains("moa_experiment_runs_total"));
+        assert!(scrape.contains("moa_experiment_trials_total"));
+        assert!(scrape.contains("moa_experiment_trial_duration_seconds"));
+        assert!(scrape.contains("moa_simulation_turns_total"));
+        assert!(scrape.contains("moa_simulation_tokens_total"));
+        assert!(scrape.contains("moa_simulation_cost_cents_total"));
+        assert!(scrape.contains("moa_experiment_score_rows_total"));
+        assert!(scrape.contains("moa_experiment_learning_candidates_total"));
+        assert!(scrape.contains("moa_experiment_approval_waits_total"));
 
         #[cfg(tokio_unstable)]
         {
@@ -921,6 +1076,59 @@ mod tests {
             assert!(tokio_scrape.contains("tokio_workers_count"));
             assert!(tokio_scrape.contains("tokio_global_queue_depth"));
             assert!(tokio_scrape.contains("tokio_worker_mean_poll_time_us"));
+        }
+    }
+
+    #[test]
+    fn experiment_metric_descriptions_exist_and_labels_stay_bounded() {
+        // Pins: experiment metrics remain an aggregate dashboard surface, not a drilldown ID index.
+        let source = include_str!("runtime_metrics.rs");
+        for metric in [
+            "moa_experiment_runs_total",
+            "moa_experiment_trials_total",
+            "moa_experiment_trial_duration_seconds",
+            "moa_simulation_turns_total",
+            "moa_simulation_tokens_total",
+            "moa_simulation_cost_cents_total",
+            "moa_experiment_score_rows_total",
+            "moa_experiment_learning_candidates_total",
+            "moa_experiment_approval_waits_total",
+        ] {
+            let described = source.contains(&format!("describe_counter!(\n        \"{metric}\""))
+                || source.contains(&format!("describe_histogram!(\n        \"{metric}\""));
+            assert!(
+                described,
+                "runtime metric {metric} should have a description"
+            );
+        }
+
+        let experiment_metrics_source = source
+            .split("pub fn record_experiment_run")
+            .nth(1)
+            .expect("experiment metric helpers should exist")
+            .split("#[cfg(tokio_unstable)]")
+            .next()
+            .expect("experiment metric helper section should end before runtime publisher");
+        for forbidden in [
+            "run_uid",
+            "trial_uid",
+            "session_id",
+            "workflow_run_uid",
+            "score_run_id",
+            "trial_key",
+            "artifact_revision",
+            "prompt",
+            "profile",
+            "persona",
+            "scenario",
+            "transcript",
+            "connector",
+            "model_output",
+        ] {
+            assert!(
+                !experiment_metrics_source.contains(forbidden),
+                "experiment metric helpers must not use high-cardinality label `{forbidden}`"
+            );
         }
     }
 }

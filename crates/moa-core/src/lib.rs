@@ -41,19 +41,24 @@ pub use db::ScopedConn;
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 pub use events::Event;
+pub use restate_observability::{current_trace_id, trace_id_for_span};
 pub use runtime_metrics::{
     TURN_LATENCY_REPORT_STEPS, TURN_STEP_DURATION_METRIC, TurnLatencyStep, init_metrics,
     metrics_endpoint_url, record_api_key_validation_duration, record_approval_wait,
     record_broadcast_lag, record_cache_hit_rate, record_compaction_tier_applied,
-    record_context_pipeline_construction, record_llm_cost_cents, record_llm_failure,
-    record_llm_request, record_llm_request_duration, record_llm_streaming_duration,
-    record_llm_ttft, record_memory_operation, record_pipeline_compile_duration_metric,
-    record_query_rewrite_decision, record_retrieval_embedder_construction,
-    record_sandbox_provision_duration, record_scoped_guc_application_duration,
-    record_scoped_transaction_begin_duration, record_session_created, record_session_error,
-    record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
-    record_sessions_active, record_tokens_input_cached, record_tokens_input_uncached,
-    record_tokens_output, record_tool_call, record_tool_failure, record_tool_idempotency_scan,
+    record_context_pipeline_construction, record_experiment_approval_wait,
+    record_experiment_learning_candidates, record_experiment_run, record_experiment_score_rows,
+    record_experiment_trial, record_experiment_trial_duration, record_llm_cost_cents,
+    record_llm_failure, record_llm_request, record_llm_request_duration,
+    record_llm_streaming_duration, record_llm_ttft, record_memory_operation,
+    record_pipeline_compile_duration_metric, record_query_rewrite_decision,
+    record_retrieval_embedder_construction, record_sandbox_provision_duration,
+    record_scoped_guc_application_duration, record_scoped_transaction_begin_duration,
+    record_session_created, record_session_error, record_session_event_append,
+    record_session_event_decoded_bytes, record_session_event_load, record_sessions_active,
+    record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
+    record_tokens_input_cached, record_tokens_input_uncached, record_tokens_output,
+    record_tool_call, record_tool_failure, record_tool_idempotency_scan,
     record_tool_output_truncated_metric, record_tool_reprovision, record_tool_retry,
     record_turn_completed, record_turn_latency, record_turn_step_duration,
     record_turn_workflow_outcome,

@@ -169,21 +169,22 @@ async fn run_agent_loop_experiment(
     let request = ExperimentRunRequest {
         workspace_id: workspace_id.clone(),
         name: "spilled-order-support-agent-loop".to_string(),
-        target: json!({
+        plan_revision_uid: None,
+        target: Some(json!({
             "kind": "agent_loop",
             "prompt": "A customer says soup spilled across the delivery bag. They have a clear photo and ask whether we can replace the order.",
             "session_id": null,
             "model": "scripted-loadtest",
             "attachments": []
-        }),
-        variant: json!({
+        })),
+        variant: Some(json!({
             "name": "delivery-support-skill",
             "model": "scripted-loadtest",
             "artifact_revision_uids": [],
             "skill_refs": ["skill://delivery-support"],
             "workflow_ref": null,
             "metadata": { "lane": "deterministic-e2e" }
-        }),
+        })),
         scorecard: json!({
             "score_names": ["support_resolution"],
             "evaluator_metadata": { "mode": "manual-or-later" }

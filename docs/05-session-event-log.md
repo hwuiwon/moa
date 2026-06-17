@@ -152,8 +152,8 @@ to one parent run ID while preserving scoped reads.
 - `workspace_id`, `user_id`, generated `scope`, and three-tier RLS match the
   artifact and learning-candidate model.
 - `target_kind` is `agent_loop` or `workflow`.
-- `status` is `accepted`, `running`, `waiting_approval`, `completed`, `failed`,
-  or `cancelled`.
+- `status` is `accepted`, `dispatched`, `running`, `waiting_approval`,
+  `completed`, `failed`, or `cancelled`.
 - `target`, `variant`, and `scorecard` are the accepted experiment payloads.
 - `score_run_id` references `analytics.score_run(run_id)` and is the join key
   for `analytics.scores`.
@@ -170,12 +170,21 @@ from an experiment run to pinned `moa.artifact_revision` rows. The denormalized
 `artifact_revision_uids` array on `moa.experiment_run` exists for API reads; it
 does not replace the FK table.
 
-`Experiments/run` and `Experiments/cancel` require `Workspace:Editor`.
-`Experiments/status`, `Experiments/list`, `Experiments/scores`, and
-`Experiments/compare` require `Workspace:Member`. `Analytics/experiment_stats`
-also requires `Workspace:Member`. These service checks sit above the RLS scope
-on `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and
-`analytics.score_run`.
+`moa.experiment_trial` stores per-trial behavior-lab execution. It belongs to a
+run, carries the workspace/user scope, trial key, status, target kind, variant
+key, pinned plan revision, selected persona/profile/scenario/data-bundle IDs,
+simulator settings, session or workflow run link, score run ID, turn count,
+stop reason, error, trace ID, and timestamps. `ExperimentTrialRun` updates this
+row as simulator turns dispatch target sessions or workflow runs.
+
+The `Experiments` service exposes `generate_plan`, `run`, `status`, `list`,
+`trials`, `trial_status`, `cancel`, `propose_improvements`, `scores`, and
+`compare`. `generate_plan`, `run`, `cancel`, and `propose_improvements` require
+`Workspace:Editor`. `status`, `list`, `trials`, `trial_status`, `scores`, and
+`compare` require `Workspace:Member`. `Analytics/experiment_stats` also
+requires `Workspace:Member`. These service checks sit above the RLS scope on
+`moa.experiment_run`, `moa.experiment_trial`,
+`moa.experiment_run_artifact_revision`, and `analytics.score_run`.
 
 ## Graph Changelog
 

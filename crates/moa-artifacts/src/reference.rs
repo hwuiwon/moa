@@ -1,111 +1,130 @@
-//! Stable references between skills, connectors, tools, and workflows.
+//! Stable references between artifacts, connector actions, and tools.
 
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{Error, Result};
-
-/// Artifact family addressed by an [`ArtifactRef`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ArtifactRefKind {
-    /// A reusable skill package.
-    Skill,
-    /// A callable connector action, written as `action://connector.action`.
-    Action,
-    /// A reusable workflow definition.
-    Workflow,
-    /// A connector definition.
-    Connector,
-    /// A built-in tool or MCP tool name.
-    Tool,
-}
-
-impl ArtifactRefKind {
-    /// Returns the URI scheme used for this reference kind.
-    #[must_use]
-    pub fn scheme(&self) -> &'static str {
-        match self {
-            Self::Skill => "skill",
-            Self::Action => "action",
-            Self::Workflow => "workflow",
-            Self::Connector => "connector",
-            Self::Tool => "tool",
-        }
-    }
-}
+use crate::{Error, Result, document::ArtifactKind};
 
 /// A stable, code-addressable reference to another building block.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ArtifactRef {
-    /// Kind of referenced artifact.
-    pub kind: ArtifactRefKind,
-    /// Name of the referenced artifact, connector, or tool.
-    pub target: String,
-    /// Optional action name for `action://connector.action` references.
-    pub action: Option<String>,
+pub enum ArtifactRef {
+    /// A published artifact revision selected by kind and name.
+    Artifact {
+        /// Artifact family stored in the registry.
+        kind: ArtifactKind,
+        /// Stable artifact name in the visible scope set.
+        name: String,
+    },
+    /// A callable connector action, written as `action://connector.action`.
+    Action {
+        /// Connector artifact name.
+        connector: String,
+        /// Action identifier declared by the connector.
+        action: String,
+    },
+    /// A built-in tool or MCP tool name.
+    Tool {
+        /// Tool identifier.
+        name: String,
+    },
 }
 
 impl ArtifactRef {
+    /// Builds an artifact reference for a specific registry kind.
+    #[must_use]
+    pub fn artifact(kind: ArtifactKind, name: impl Into<String>) -> Self {
+        Self::Artifact {
+            kind,
+            name: name.into(),
+        }
+    }
+
     /// Builds a skill reference.
     #[must_use]
     pub fn skill(name: impl Into<String>) -> Self {
-        Self {
-            kind: ArtifactRefKind::Skill,
-            target: name.into(),
-            action: None,
-        }
+        Self::artifact(ArtifactKind::Skill, name)
     }
 
     /// Builds a connector-action reference.
     #[must_use]
     pub fn action(connector: impl Into<String>, action: impl Into<String>) -> Self {
-        Self {
-            kind: ArtifactRefKind::Action,
-            target: connector.into(),
-            action: Some(action.into()),
+        Self::Action {
+            connector: connector.into(),
+            action: action.into(),
         }
     }
 
     /// Builds a workflow reference.
     #[must_use]
     pub fn workflow(name: impl Into<String>) -> Self {
-        Self {
-            kind: ArtifactRefKind::Workflow,
-            target: name.into(),
-            action: None,
-        }
+        Self::artifact(ArtifactKind::Workflow, name)
     }
 
     /// Builds a connector reference.
     #[must_use]
     pub fn connector(name: impl Into<String>) -> Self {
-        Self {
-            kind: ArtifactRefKind::Connector,
-            target: name.into(),
-            action: None,
-        }
+        Self::artifact(ArtifactKind::Connector, name)
+    }
+
+    /// Builds an experiment plan reference.
+    #[must_use]
+    pub fn experiment_plan(name: impl Into<String>) -> Self {
+        Self::artifact(ArtifactKind::ExperimentPlan, name)
     }
 
     /// Builds a tool reference.
     #[must_use]
     pub fn tool(name: impl Into<String>) -> Self {
-        Self {
-            kind: ArtifactRefKind::Tool,
-            target: name.into(),
-            action: None,
+        Self::Tool { name: name.into() }
+    }
+
+    /// Returns the artifact kind when this reference points at the registry.
+    #[must_use]
+    pub const fn artifact_kind(&self) -> Option<&ArtifactKind> {
+        match self {
+            Self::Artifact { kind, .. } => Some(kind),
+            Self::Action { .. } | Self::Tool { .. } => None,
+        }
+    }
+
+    /// Returns the primary target name for diagnostics and lookup.
+    #[must_use]
+    pub fn target_name(&self) -> &str {
+        match self {
+            Self::Artifact { name, .. } | Self::Tool { name } => name,
+            Self::Action { connector, .. } => connector,
+        }
+    }
+
+    /// Returns the connector action name when this is an action reference.
+    #[must_use]
+    pub fn action_name(&self) -> Option<&str> {
+        match self {
+            Self::Action { action, .. } => Some(action),
+            Self::Artifact { .. } | Self::Tool { .. } => None,
+        }
+    }
+
+    /// Returns the URI scheme used when this reference is displayed.
+    #[must_use]
+    pub fn scheme(&self) -> &'static str {
+        match self {
+            Self::Artifact { kind, .. } => kind.as_str(),
+            Self::Action { .. } => "action",
+            Self::Tool { .. } => "tool",
         }
     }
 }
 
 impl fmt::Display for ArtifactRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.kind {
-            ArtifactRefKind::Action => {
-                let action = self.action.as_deref().unwrap_or_default();
-                write!(formatter, "action://{}.{}", self.target, action)
+        match self {
+            Self::Artifact { kind, name } => write!(formatter, "{kind}://{name}"),
+            Self::Action { connector, action } => {
+                write!(formatter, "action://{connector}.{action}")
             }
-            _ => write!(formatter, "{}://{}", self.kind.scheme(), self.target),
+            Self::Tool { name } => write!(formatter, "tool://{name}"),
         }
     }
 }
@@ -122,10 +141,6 @@ impl FromStr for ArtifactRef {
         }
 
         match scheme {
-            "skill" => Ok(Self::skill(rest)),
-            "workflow" => Ok(Self::workflow(rest)),
-            "connector" => Ok(Self::connector(rest)),
-            "tool" => Ok(Self::tool(rest)),
             "action" => {
                 let (connector, action) = rest.split_once('.').ok_or_else(|| {
                     invalid_ref(value, "action references must be connector.action")
@@ -138,7 +153,8 @@ impl FromStr for ArtifactRef {
                 }
                 Ok(Self::action(connector, action))
             }
-            _ => Err(invalid_ref(value, "unsupported URI scheme")),
+            "tool" => Ok(Self::tool(rest)),
+            _ => ArtifactKind::from_str(scheme).map(|kind| Self::artifact(kind, rest)),
         }
     }
 }
@@ -188,7 +204,7 @@ pub struct ReferenceResolution {
 }
 
 impl ReferenceResolution {
-    /// Creates an unresolved reference resolution entry.
+    /// Builds an unresolved reference entry.
     #[must_use]
     pub fn unresolved(path: impl Into<String>, artifact_ref: ArtifactRef) -> Self {
         Self {
@@ -199,7 +215,7 @@ impl ReferenceResolution {
         }
     }
 
-    /// Creates a resolved reference resolution entry.
+    /// Builds a resolved reference entry.
     #[must_use]
     pub fn resolved(path: impl Into<String>, artifact_ref: ArtifactRef) -> Self {
         Self {
@@ -211,9 +227,9 @@ impl ReferenceResolution {
     }
 }
 
-fn invalid_ref(reference: &str, message: impl Into<String>) -> Error {
+fn invalid_ref(reference: &str, message: &str) -> Error {
     Error::InvalidReference {
         reference: reference.to_string(),
-        message: message.into(),
+        message: message.to_string(),
     }
 }

@@ -6,10 +6,11 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{IdentityType, SessionStore as _};
 use moa_core::wire::{
     CacheDailyMetricRow, CacheStatsRequest, CacheStatsResponse, ExperimentAnalyticsRequest,
-    ExperimentAnalyticsResponse, ExperimentScoreRunRef, ExperimentStatusCount,
-    LearningCandidateListRequest, LearningCandidateListResponse, LearningCandidateSummary,
-    SessionSearchRequest, SessionSearchResponse, SessionSearchResult, SessionStatsRequest,
-    SessionStatsResponse, ToolStatsRequest, ToolStatsResponse, ToolStatsRow, WorkspaceStatsRequest,
+    ExperimentAnalyticsResponse, ExperimentRunTrendPoint, ExperimentScoreRunRef,
+    ExperimentStatusCount, ExperimentTrialTrendPoint, LearningCandidateListRequest,
+    LearningCandidateListResponse, LearningCandidateSummary, SessionSearchRequest,
+    SessionSearchResponse, SessionSearchResult, SessionStatsRequest, SessionStatsResponse,
+    ToolStatsRequest, ToolStatsResponse, ToolStatsRow, WorkspaceStatsRequest,
     WorkspaceStatsResponse,
 };
 use moa_core::{
@@ -471,6 +472,53 @@ async fn experiment_stats_inner(
     .fetch_all(conn.as_mut())
     .await
     .map_err(sqlx_to_handler_error)?;
+    let run_trend_rows = sqlx::query(
+        r#"
+        SELECT date_trunc('day', created_at) AS day,
+               status,
+               COUNT(*)::BIGINT AS count
+        FROM moa.experiment_run
+        WHERE scope = 'workspace'
+          AND workspace_id = $1
+          AND user_id IS NULL
+          AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
+          AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
+        GROUP BY day, status
+        ORDER BY day ASC, status
+        "#,
+    )
+    .bind(request.workspace_id.as_str())
+    .bind(request.from_time)
+    .bind(request.to_time)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(sqlx_to_handler_error)?;
+    let trial_trend_rows = sqlx::query(
+        r#"
+        SELECT date_trunc('day', created_at) AS day,
+               status,
+               variant_key,
+               scenario_id,
+               COUNT(*)::BIGINT AS count
+        FROM moa.experiment_trial
+        WHERE scope = 'workspace'
+          AND workspace_id = $1
+          AND user_id IS NULL
+          AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
+          AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
+        GROUP BY day, status, variant_key, scenario_id
+        ORDER BY day ASC,
+                 status,
+                 variant_key,
+                 scenario_id ASC NULLS FIRST
+        "#,
+    )
+    .bind(request.workspace_id.as_str())
+    .bind(request.from_time)
+    .bind(request.to_time)
+    .fetch_all(conn.as_mut())
+    .await
+    .map_err(sqlx_to_handler_error)?;
     conn.commit().await.map_err(to_handler_error)?;
 
     let statuses = status_rows
@@ -481,11 +529,21 @@ async fn experiment_stats_inner(
         .iter()
         .map(experiment_score_run_ref_from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    let run_trends = run_trend_rows
+        .iter()
+        .map(experiment_run_trend_point_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let trial_trends = trial_trend_rows
+        .iter()
+        .map(experiment_trial_trend_point_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(experiment_stats_response_from_parts(
         request.workspace_id,
         statuses,
         score_runs,
+        run_trends,
+        trial_trends,
     ))
 }
 
@@ -537,6 +595,8 @@ pub fn experiment_stats_response_from_parts(
     workspace_id: WorkspaceId,
     statuses: Vec<ExperimentStatusCount>,
     score_runs: Vec<ExperimentScoreRunRef>,
+    run_trends: Vec<ExperimentRunTrendPoint>,
+    trial_trends: Vec<ExperimentTrialTrendPoint>,
 ) -> ExperimentAnalyticsResponse {
     let total_runs = statuses.iter().map(|row| row.count).sum();
     ExperimentAnalyticsResponse {
@@ -544,6 +604,8 @@ pub fn experiment_stats_response_from_parts(
         total_runs,
         statuses,
         score_runs,
+        run_trends,
+        trial_trends,
     }
 }
 
@@ -676,6 +738,34 @@ fn experiment_score_run_ref_from_row(row: &PgRow) -> Result<ExperimentScoreRunRe
         status: row.try_get("status").map_err(sqlx_to_handler_error)?,
         score_run_id: row.try_get("score_run_id").map_err(sqlx_to_handler_error)?,
         created_at: row.try_get("created_at").map_err(sqlx_to_handler_error)?,
+    })
+}
+
+fn experiment_run_trend_point_from_row(
+    row: &PgRow,
+) -> Result<ExperimentRunTrendPoint, HandlerError> {
+    Ok(ExperimentRunTrendPoint {
+        day: row.try_get("day").map_err(sqlx_to_handler_error)?,
+        status: row.try_get("status").map_err(sqlx_to_handler_error)?,
+        count: u64_from_i64(
+            row.try_get("count").map_err(sqlx_to_handler_error)?,
+            "count",
+        )?,
+    })
+}
+
+fn experiment_trial_trend_point_from_row(
+    row: &PgRow,
+) -> Result<ExperimentTrialTrendPoint, HandlerError> {
+    Ok(ExperimentTrialTrendPoint {
+        day: row.try_get("day").map_err(sqlx_to_handler_error)?,
+        status: row.try_get("status").map_err(sqlx_to_handler_error)?,
+        variant_key: row.try_get("variant_key").map_err(sqlx_to_handler_error)?,
+        scenario_id: row.try_get("scenario_id").map_err(sqlx_to_handler_error)?,
+        count: u64_from_i64(
+            row.try_get("count").map_err(sqlx_to_handler_error)?,
+            "count",
+        )?,
     })
 }
 

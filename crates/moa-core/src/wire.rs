@@ -568,6 +568,12 @@ pub struct ExperimentAnalyticsResponse {
     /// Score-run references ordered by newest experiment run first.
     #[serde(default)]
     pub score_runs: Vec<ExperimentScoreRunRef>,
+    /// Daily experiment run trend points.
+    #[serde(default)]
+    pub run_trends: Vec<ExperimentRunTrendPoint>,
+    /// Daily experiment trial trend points.
+    #[serde(default)]
+    pub trial_trends: Vec<ExperimentTrialTrendPoint>,
 }
 
 /// Count of experiment runs for one lifecycle status.
@@ -592,6 +598,32 @@ pub struct ExperimentScoreRunRef {
     pub score_run_id: Uuid,
     /// Time the experiment run was accepted.
     pub created_at: DateTime<Utc>,
+}
+
+/// Daily count of experiment runs for one lifecycle status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentRunTrendPoint {
+    /// UTC day bucket.
+    pub day: DateTime<Utc>,
+    /// Durable experiment run status.
+    pub status: String,
+    /// Number of runs created in the day bucket with this status.
+    pub count: u64,
+}
+
+/// Daily count of experiment trials for one lifecycle status and matrix cell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentTrialTrendPoint {
+    /// UTC day bucket.
+    pub day: DateTime<Utc>,
+    /// Durable experiment trial status.
+    pub status: String,
+    /// Stable target variant key selected for the trial.
+    pub variant_key: String,
+    /// Stable scenario ID selected for the trial.
+    pub scenario_id: Option<String>,
+    /// Number of trials created in the day bucket with this status and matrix cell.
+    pub count: u64,
 }
 
 /// Request payload for listing curated learning-candidate summaries.
@@ -1271,7 +1303,7 @@ pub struct ArtifactExportRequest {
     /// Optional scope to read from, defaulting to the workspace tier.
     #[serde(default)]
     pub scope: Option<MemoryScope>,
-    /// Artifact kind such as `skill`, `connector`, or `workflow`.
+    /// Artifact kind such as `skill`, `workflow`, or `experiment_plan`.
     pub kind: String,
     /// Artifact name.
     pub name: String,
@@ -1306,7 +1338,7 @@ pub struct ArtifactListRequest {
     /// Optional scope to list from, defaulting to the workspace tier.
     #[serde(default)]
     pub scope: Option<MemoryScope>,
-    /// Optional artifact kind filter.
+    /// Optional artifact kind filter such as `skill`, `workflow`, or `experiment_plan`.
     #[serde(default)]
     pub kind: Option<String>,
     /// Optional status filter.
@@ -1848,10 +1880,15 @@ pub struct ExperimentRunRequest {
     pub workspace_id: WorkspaceId,
     /// Human-readable experiment run name.
     pub name: String,
+    /// Published experiment_plan artifact revision to execute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_revision_uid: Option<Uuid>,
     /// Target payload for the live behavior run.
-    pub target: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Value>,
     /// Variant payload under experiment.
-    pub variant: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<Value>,
     /// Scorecard payload requested for the experiment.
     #[serde(default)]
     pub scorecard: Value,
@@ -1859,6 +1896,42 @@ pub struct ExperimentRunRequest {
     pub score_run_id: Option<Uuid>,
     /// Optional idempotency key for scoped run admission.
     pub idempotency_key: Option<String>,
+}
+
+/// Request payload for generating a draft experiment plan artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentGeneratePlanRequest {
+    /// Workspace scope used for authorization and draft ownership.
+    pub workspace_id: WorkspaceId,
+    /// Natural-language behavior-lab plan description.
+    pub description: String,
+    /// Optional model override for plan generation.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional artifact references the generated plan should use.
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+}
+
+/// Response payload returned after generating a draft experiment plan artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentGeneratePlanResponse {
+    /// Workspace scope that owns the generated draft.
+    pub workspace_id: WorkspaceId,
+    /// Stored artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Stored draft revision identifier.
+    pub revision_uid: Uuid,
+    /// Stored artifact revision status.
+    pub status: String,
+    /// Artifact source format, currently `json`.
+    pub source_format: String,
+    /// Canonical generated artifact document text.
+    pub source_text: String,
+    /// Parsed artifact document as JSON.
+    pub document: Value,
+    /// Draft validation report persisted with the revision.
+    pub validation_report: Value,
 }
 
 /// Response payload returned after accepting a live behavior experiment run.
@@ -1932,6 +2005,112 @@ pub struct ExperimentListResponse {
     pub runs: Vec<Value>,
 }
 
+/// Request payload for listing experiment trials under a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentTrialsRequest {
+    /// Workspace scope used for authorization and trial filtering.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run whose trials should be listed.
+    pub run_uid: Uuid,
+    /// Optional lifecycle status filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional maximum number of trials to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+/// Typed summary for one experiment trial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentTrialSummary {
+    /// Workspace scope that owns the trial.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run that owns the trial.
+    pub run_uid: Uuid,
+    /// Stable trial identifier.
+    pub trial_uid: Uuid,
+    /// Current trial lifecycle status.
+    pub status: String,
+    /// Execution shape targeted by this trial.
+    pub target_kind: String,
+    /// Deterministic trial key unique inside the run.
+    pub trial_key: String,
+    /// Stable target variant key selected for the trial.
+    pub variant_key: String,
+    /// Stable scenario ID selected for the trial.
+    pub scenario_id: Option<String>,
+    /// Score run identifier used by trial-level score rows.
+    pub score_run_id: Uuid,
+    /// Linked session identifier, when the trial has one.
+    pub session_id: Option<SessionId>,
+    /// Linked workflow run identifier, when the trial has one.
+    pub workflow_run_uid: Option<Uuid>,
+    /// Trace identifier for observability drill-down.
+    pub trace_id: Option<String>,
+    /// Durable reason why the trial stopped.
+    pub stop_reason: Option<String>,
+    /// Terminal error for failed trials.
+    pub error: Option<String>,
+    /// Number of simulator-target turns persisted for this trial.
+    pub turn_count: i32,
+}
+
+/// Response payload containing experiment trial summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentTrialsResponse {
+    /// Workspace scope used for trial filtering.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run whose trials were listed.
+    pub run_uid: Uuid,
+    /// Trial summaries ordered for API display.
+    #[serde(default)]
+    pub trials: Vec<ExperimentTrialSummary>,
+}
+
+/// Request payload for reading one experiment trial status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentTrialStatusRequest {
+    /// Workspace scope used for authorization and trial filtering.
+    pub workspace_id: WorkspaceId,
+    /// Stable trial identifier.
+    pub trial_uid: Uuid,
+}
+
+/// Response payload for reading one experiment trial status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentTrialStatusResponse {
+    /// Workspace scope that owns the trial.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run that owns the trial.
+    pub run_uid: Uuid,
+    /// Stable trial identifier.
+    pub trial_uid: Uuid,
+    /// Current trial lifecycle status.
+    pub status: String,
+    /// Execution shape targeted by this trial.
+    pub target_kind: String,
+    /// Deterministic trial key unique inside the run.
+    pub trial_key: String,
+    /// Stable target variant key selected for the trial.
+    pub variant_key: String,
+    /// Stable scenario ID selected for the trial.
+    pub scenario_id: Option<String>,
+    /// Score run identifier used by trial-level score rows.
+    pub score_run_id: Uuid,
+    /// Linked session identifier, when the trial has one.
+    pub session_id: Option<SessionId>,
+    /// Linked workflow run identifier, when the trial has one.
+    pub workflow_run_uid: Option<Uuid>,
+    /// Trace identifier for observability drill-down.
+    pub trace_id: Option<String>,
+    /// Durable reason why the trial stopped.
+    pub stop_reason: Option<String>,
+    /// Terminal error for failed trials.
+    pub error: Option<String>,
+    /// Number of simulator-target turns persisted for this trial.
+    pub turn_count: i32,
+}
+
 /// Request payload for cancelling an experiment run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentCancelRequest {
@@ -1959,6 +2138,33 @@ pub struct ExperimentCancelResponse {
     pub reason: String,
 }
 
+/// Request payload for proposing learning candidates from a completed experiment run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentProposeImprovementsRequest {
+    /// Workspace scope used for authorization and run filtering.
+    pub workspace_id: WorkspaceId,
+    /// Completed experiment run whose evidence should seed proposals.
+    pub run_uid: Uuid,
+    /// Optional idempotency key for stable candidate creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// Response payload returned after proposing learning candidates from an experiment run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExperimentProposeImprovementsResponse {
+    /// Workspace scope that owns the proposal candidates.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run summarized by the proposal candidates.
+    pub run_uid: Uuid,
+    /// Learning candidate identifiers appended for review.
+    #[serde(default)]
+    pub candidate_ids: Vec<Uuid>,
+    /// Draft artifact revisions created for suggested changes, when any are meaningful.
+    #[serde(default)]
+    pub draft_artifact_revision_uids: Vec<Uuid>,
+}
+
 /// Request payload for reading experiment score summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentScoresRequest {
@@ -1966,6 +2172,47 @@ pub struct ExperimentScoresRequest {
     pub workspace_id: WorkspaceId,
     /// Experiment run identifier whose resolved score run should be summarized.
     pub run_uid: Uuid,
+}
+
+/// Workspace-scoped experiment score summary row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScoreSummaryRow {
+    /// Score name.
+    pub name: String,
+    /// Score value type.
+    pub value_type: String,
+    /// Number of rows summarized.
+    pub n: u64,
+    /// Numeric mean or boolean true-rate.
+    pub mean_or_rate: f64,
+}
+
+/// Per-trial score summary for one experiment trial.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentTrialScoreSummary {
+    /// Stable trial identifier.
+    pub trial_uid: Uuid,
+    /// Deterministic trial key unique inside the experiment run.
+    pub trial_key: String,
+    /// Score run identifier used by trial-level score rows.
+    pub score_run_id: Uuid,
+    /// Stable target variant key selected for the trial.
+    pub variant_key: String,
+    /// Stable scenario ID selected for the trial.
+    pub scenario_id: Option<String>,
+    /// Score summary rows ordered for API display.
+    #[serde(default)]
+    pub rows: Vec<ExperimentScoreSummaryRow>,
+}
+
+/// Per-scenario score summary for one experiment run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScenarioScoreSummary {
+    /// Stable scenario ID summarized by this row group.
+    pub scenario_id: Option<String>,
+    /// Score summary rows ordered for API display.
+    #[serde(default)]
+    pub rows: Vec<ExperimentScoreSummaryRow>,
 }
 
 /// Response payload containing experiment score summaries.
@@ -1979,7 +2226,16 @@ pub struct ExperimentScoresResponse {
     pub score_run_id: Uuid,
     /// Score summary rows ordered for API display.
     #[serde(default)]
-    pub rows: Vec<Value>,
+    pub rows: Vec<ExperimentScoreSummaryRow>,
+    /// Aggregate score rows computed across trial-level score runs.
+    #[serde(default)]
+    pub trial_rollup_rows: Vec<ExperimentScoreSummaryRow>,
+    /// Per-trial score summaries.
+    #[serde(default)]
+    pub trials: Vec<ExperimentTrialScoreSummary>,
+    /// Per-scenario score summaries.
+    #[serde(default)]
+    pub scenarios: Vec<ExperimentScenarioScoreSummary>,
 }
 
 /// Request payload for comparing two experiment score runs.
@@ -1991,6 +2247,49 @@ pub struct ExperimentCompareRequest {
     pub base_run_uid: Uuid,
     /// New experiment run identifier.
     pub new_run_uid: Uuid,
+}
+
+/// Workspace-scoped experiment run comparison row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentCompareRow {
+    /// Score name.
+    pub name: String,
+    /// Baseline numeric mean.
+    pub base_mean: Option<f64>,
+    /// New numeric mean.
+    pub new_mean: Option<f64>,
+    /// New mean minus baseline mean, treating missing means as zero.
+    pub delta: f64,
+}
+
+/// Numeric experiment score delta for one scenario.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentScenarioScoreDeltaRow {
+    /// Stable scenario ID compared by this row.
+    pub scenario_id: Option<String>,
+    /// Score name.
+    pub name: String,
+    /// Baseline numeric mean.
+    pub base_mean: Option<f64>,
+    /// New numeric mean.
+    pub new_mean: Option<f64>,
+    /// New mean minus baseline mean, treating missing means as zero.
+    pub delta: f64,
+}
+
+/// Numeric experiment score delta for one variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentVariantScoreDeltaRow {
+    /// Stable target variant key compared by this row.
+    pub variant_key: String,
+    /// Score name.
+    pub name: String,
+    /// Baseline numeric mean.
+    pub base_mean: Option<f64>,
+    /// New numeric mean.
+    pub new_mean: Option<f64>,
+    /// New mean minus baseline mean, treating missing means as zero.
+    pub delta: f64,
 }
 
 /// Response payload containing experiment score comparison rows.
@@ -2008,7 +2307,13 @@ pub struct ExperimentCompareResponse {
     pub new_score_run_id: Uuid,
     /// Comparison rows ordered for API display.
     #[serde(default)]
-    pub rows: Vec<Value>,
+    pub rows: Vec<ExperimentCompareRow>,
+    /// Numeric scenario deltas ordered for API display.
+    #[serde(default)]
+    pub scenario_deltas: Vec<ExperimentScenarioScoreDeltaRow>,
+    /// Numeric variant deltas ordered for API display.
+    #[serde(default)]
+    pub variant_deltas: Vec<ExperimentVariantScoreDeltaRow>,
 }
 
 /// Request payload for promoting a workspace vector backend.

@@ -2,8 +2,9 @@
 
 use chrono::{TimeZone, Utc};
 use moa_core::wire::{
-    ExperimentScoreRunRef, ExperimentStatusCount, LearningCandidateListRequest,
-    SessionSearchRequest, ToolStatsRequest,
+    ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount,
+    ExperimentTrialTrendPoint, LearningCandidateListRequest, SessionSearchRequest,
+    ToolStatsRequest,
 };
 use moa_core::{
     CacheDailyMetric, Event, EventRecord, EventType, LearningCandidateStatus,
@@ -103,6 +104,18 @@ fn analytics_experiment_stats_response_sums_status_counts() {
                 .expect("score UUID fixture parses"),
             created_at,
         }],
+        vec![ExperimentRunTrendPoint {
+            day: created_at,
+            status: "completed".to_string(),
+            count: 2,
+        }],
+        vec![ExperimentTrialTrendPoint {
+            day: created_at,
+            status: "completed".to_string(),
+            variant_key: "candidate".to_string(),
+            scenario_id: Some("ambiguous-merchant-dispute".to_string()),
+            count: 4,
+        }],
     );
 
     assert_eq!(response.workspace_id, WorkspaceId::new("workspace-a"));
@@ -113,6 +126,12 @@ fn analytics_experiment_stats_response_sums_status_counts() {
         response.score_runs[0].score_run_id,
         Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("score UUID fixture parses")
     );
+    assert_eq!(response.run_trends.len(), 1);
+    assert_eq!(response.run_trends[0].day, created_at);
+    assert_eq!(response.run_trends[0].status, "completed");
+    assert_eq!(response.trial_trends.len(), 1);
+    assert_eq!(response.trial_trends[0].variant_key, "candidate");
+    assert_eq!(response.trial_trends[0].count, 4);
 }
 
 #[test]

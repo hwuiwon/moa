@@ -11,12 +11,15 @@ use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
-    EvalCompareRequest, EvalCompareResponse, EvalDatasetListRequest, EvalDatasetListResponse,
-    EvalDatasetRegisterRequest, EvalDatasetRegisterResponse, EvalDatasetSummary, EvalPlanRequest,
-    EvalPlanResponse, EvalReplayRequest, EvalReplayResponse, EvalRunRequest, EvalRunResponse,
-    EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse, EvalScoresRequest,
-    EvalScoresResponse, EvalSuiteListRequest, EvalSuiteListResponse, EvalSuiteSummary,
+    EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
+    EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
+    EvalDatasetSummary, EvalPlanRequest, EvalPlanResponse, EvalReplayRequest, EvalReplayResponse,
+    EvalRunRequest, EvalRunResponse, EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse,
+    EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
+    EvalSuiteListResponse, EvalSuiteSummary,
 };
+#[cfg(feature = "internal-eval-runner")]
+use moa_core::{MemoryScope, ScopeContext, ScopedConn};
 use moa_core::{MoaConfig, WorkspaceId};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::{
@@ -34,6 +37,12 @@ use moa_lineage_core::{LineageEvent, LineageSink};
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 #[cfg(feature = "internal-eval-runner")]
 use moa_lineage_sink::{MpscSink, MpscSinkConfig};
+#[cfg(feature = "internal-eval-runner")]
+use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
+use moa_scoring::{
+    ScoreCompare, ScoreCompareRef, ScoreRunRef, ScoreSummary, ScoringError,
+    compare_score_runs_for_workspace, score_summaries_for_workspace,
+};
 use restate_sdk::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
@@ -43,9 +52,6 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
-use crate::services::score_queries::{
-    compare_score_runs_for_workspace, score_summaries_for_workspace,
-};
 use crate::workflows::eval_run::EvalRunClient;
 #[cfg(feature = "internal-eval-runner")]
 use crate::workflows::eval_run::EvalRunWorkflowRequest;
@@ -306,10 +312,18 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                score_summaries_for_workspace(&pool, request)
-                    .await
-                    .map(Json::from)
-                    .map_err(eval_error_to_handler_error)
+                score_summaries_for_workspace(
+                    &pool,
+                    ScoreRunRef {
+                        workspace_id: request.workspace_id,
+                        run_id: request.run_id,
+                    },
+                )
+                .await
+                .map(eval_scores_response_from_summary)
+                .map_err(scoring_error_to_eval_error)
+                .map(Json::from)
+                .map_err(eval_error_to_handler_error)
             })
             .name("eval_scores")
             .await?)
@@ -328,10 +342,19 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                compare_score_runs_for_workspace(&pool, request)
-                    .await
-                    .map(Json::from)
-                    .map_err(eval_error_to_handler_error)
+                compare_score_runs_for_workspace(
+                    &pool,
+                    ScoreCompareRef {
+                        workspace_id: request.workspace_id,
+                        base_run: request.base_run,
+                        new_run: request.new_run,
+                    },
+                )
+                .await
+                .map(eval_compare_response_from_scores)
+                .map_err(scoring_error_to_eval_error)
+                .map(Json::from)
+                .map_err(eval_error_to_handler_error)
             })
             .name("eval_compare")
             .await?)
@@ -965,6 +988,7 @@ async fn replay_dataset_for_workspace(
             workspace_id: request.workspace_id,
         });
     }
+    ensure_eval_replay_score_run_parent(&pool, &request.workspace_id, run_id).await?;
 
     let (sink, writer) = MpscSink::spawn(
         MpscSinkConfig::from(&config.observability.lineage),
@@ -988,6 +1012,31 @@ async fn replay_dataset_for_workspace(
         scores: u64::try_from(report.scores)
             .map_err(|_| EvalServiceError::IntegerTooLarge { field: "scores" })?,
     })
+}
+
+#[cfg(feature = "internal-eval-runner")]
+async fn ensure_eval_replay_score_run_parent(
+    pool: &PgPool,
+    workspace_id: &WorkspaceId,
+    run_id: Uuid,
+) -> Result<(), EvalServiceError> {
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone()))
+        .await
+        .map_err(|error| EvalServiceError::Runtime {
+            message: error.to_string(),
+        })?;
+    ensure_score_run_parent(conn.as_mut(), &scope, run_id, SCORE_RUN_SOURCE_EVAL_REPLAY)
+        .await
+        .map_err(scoring_error_to_eval_error)?;
+    conn.commit()
+        .await
+        .map_err(|error| EvalServiceError::Runtime {
+            message: error.to_string(),
+        })?;
+    Ok(())
 }
 
 #[cfg(feature = "internal-eval-runner")]
@@ -1320,6 +1369,51 @@ fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
         | EvalServiceError::Sql(_)
         | EvalServiceError::Lineage(_)
         | EvalServiceError::Runtime { .. } => TerminalError::new(error.to_string()).into(),
+    }
+}
+
+fn eval_scores_response_from_summary(summary: ScoreSummary) -> EvalScoresResponse {
+    EvalScoresResponse {
+        workspace_id: summary.workspace_id,
+        run_id: summary.run_id,
+        rows: summary
+            .rows
+            .into_iter()
+            .map(|row| EvalScoreSummaryRow {
+                name: row.name,
+                value_type: row.value_type,
+                n: row.n,
+                mean_or_rate: row.mean_or_rate,
+            })
+            .collect(),
+    }
+}
+
+fn eval_compare_response_from_scores(compare: ScoreCompare) -> EvalCompareResponse {
+    EvalCompareResponse {
+        workspace_id: compare.workspace_id,
+        base_run: compare.base_run,
+        new_run: compare.new_run,
+        rows: compare
+            .rows
+            .into_iter()
+            .map(|row| EvalCompareRow {
+                name: row.name,
+                base_mean: row.base_mean,
+                new_mean: row.new_mean,
+                delta: row.delta,
+            })
+            .collect(),
+    }
+}
+
+fn scoring_error_to_eval_error(error: ScoringError) -> EvalServiceError {
+    match error {
+        ScoringError::IntegerTooLarge { field } => EvalServiceError::IntegerTooLarge { field },
+        ScoringError::Sql(error) => EvalServiceError::Sql(error),
+        ScoringError::ScoreRunMismatch { .. } => EvalServiceError::Runtime {
+            message: error.to_string(),
+        },
     }
 }
 

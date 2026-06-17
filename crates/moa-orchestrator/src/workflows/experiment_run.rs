@@ -1,9 +1,11 @@
 //! Restate workflow that admits one live behavior experiment into production paths.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::Utc;
-use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus};
+use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
+use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus, StoredArtifactRevision};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
@@ -11,12 +13,13 @@ use moa_core::wire::{
 };
 use moa_core::{
     MemoryScope, MoaError, ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore,
-    UserId, WorkspaceId,
+    UserId, WorkspaceId, record_experiment_run,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTargetKind,
-    ExperimentVariant,
+    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant, NewExperimentTrial,
 };
+use moa_experiments::plan::{ExpandedPlanTrial, PlanExpansionError, expand_plan_trials};
 use moa_experiments::store::ExperimentStore;
 use moa_workflows::error::WorkflowError;
 use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
@@ -24,11 +27,23 @@ use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::objects::session::SessionClient;
 use crate::services::session_store::inner::create_session_for_identity;
+use crate::workflows::experiment_trial_run::{
+    ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
+};
+
+mod plan_expansion;
+mod status;
+mod target_execution;
+
+use plan_expansion::run_experiment_plan;
+use status::{status_response, workflow_status_response};
+use target_execution::{run_agent_loop_target, run_workflow_target};
 
 const K_WORKSPACE_ID: &str = "workspace_id";
 const K_RUN_UID: &str = "run_uid";
@@ -36,6 +51,7 @@ const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
 const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
+const PLAN_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Workflow input for one live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +64,9 @@ pub struct ExperimentRunWorkflowRequest {
     pub target: Value,
     /// Serialized experiment variant payload.
     pub variant: Value,
+    /// Pinned published experiment_plan revision when this run fans out trials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_revision_uid: Option<Uuid>,
     /// Identity snapshot used for audit and normal downstream authz checks.
     pub identity: Identity,
     /// Score run identifier associated with this experiment.
@@ -90,6 +109,7 @@ impl ExperimentRun for ExperimentRunImpl {
         ctx.set(K_RUN_UID, Json(request.run_uid));
         ctx.set(K_SCORE_RUN_ID, Json(request.score_run_id));
         ctx.set(K_STATUS, Json(ExperimentRunStatus::Running));
+        annotate_run_span(&request, None);
 
         match run_experiment_target(&ctx, request.clone()).await {
             Ok(response) => Ok(Json(response)),
@@ -138,28 +158,31 @@ impl ExperimentRun for ExperimentRunImpl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StartedWorkflowRun {
-    run_uid: Uuid,
-}
-
 async fn run_experiment_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
+    if let Some(plan_revision_uid) = request.plan_revision_uid {
+        return run_experiment_plan(ctx, request, plan_revision_uid).await;
+    }
+
     match parse_payload::<ExperimentTarget>("target", request.target.clone())? {
         ExperimentTarget::AgentLoop {
             prompt,
             session_id,
             model,
             attachments,
-        } => run_agent_loop_target(ctx, request, prompt, session_id, model, attachments).await,
+        } => {
+            annotate_run_span(&request, Some(ExperimentTargetKind::AgentLoop));
+            run_agent_loop_target(ctx, request, prompt, session_id, model, attachments).await
+        }
         ExperimentTarget::Workflow {
             workflow_ref,
             input,
             session_id,
             idempotency_key,
         } => {
+            annotate_run_span(&request, Some(ExperimentTargetKind::Workflow));
             run_workflow_target(
                 ctx,
                 request,
@@ -171,291 +194,6 @@ async fn run_experiment_target(
             .await
         }
     }
-}
-
-async fn run_agent_loop_target(
-    ctx: &WorkflowContext<'_>,
-    request: ExperimentRunWorkflowRequest,
-    prompt: String,
-    session_id: Option<SessionId>,
-    model: ModelId,
-    attachments: Vec<moa_core::Attachment>,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
-    let scope = workspace_scope(request.workspace_id.clone());
-    persist_run_status(
-        ctx,
-        request.workspace_id.clone(),
-        request.run_uid,
-        ExperimentRunStatus::Running,
-        None,
-        None,
-    )
-    .await?;
-
-    let model = variant.model.unwrap_or(model);
-    let session_id = match session_id {
-        Some(session_id) => session_id,
-        None => {
-            let (session_id, meta) =
-                create_new_session(ctx, request.workspace_id.clone(), model.clone(), &request)
-                    .await?;
-            with_identity_headers(
-                ctx.object_client::<SessionClient>(session_id.to_string())
-                    .set_meta(Json::from(meta)),
-                &request.identity,
-            )
-            .call()
-            .await?;
-            // The session authz tuples are applied through the normal outbox poller.
-            ctx.sleep(Duration::from_millis(750)).await?;
-            session_id
-        }
-    };
-
-    ctx.set(K_SESSION_ID, Json(session_id));
-    persist_attached_session(ctx, scope.clone(), request.run_uid, session_id).await?;
-
-    with_identity_headers(
-        ctx.object_client::<SessionClient>(session_id.to_string())
-            .queue_message(Json::from(QueueMessageRequest {
-                user_message: prompt,
-                attachments,
-                model: Some(model.to_string()),
-            })),
-        &request.identity,
-    )
-    .call()
-    .await?;
-
-    workflow_status_response(
-        ctx,
-        ExperimentRunStatusRequest {
-            workspace_id: request.workspace_id,
-            run_uid: request.run_uid,
-        },
-    )
-    .await
-}
-
-async fn run_workflow_target(
-    ctx: &WorkflowContext<'_>,
-    request: ExperimentRunWorkflowRequest,
-    workflow_ref: String,
-    input: Value,
-    session_id: Option<SessionId>,
-    idempotency_key: Option<String>,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
-    persist_run_status(
-        ctx,
-        request.workspace_id.clone(),
-        request.run_uid,
-        ExperimentRunStatus::Running,
-        None,
-        None,
-    )
-    .await?;
-
-    let workflow_run = start_and_attach_workflow_run(
-        ctx,
-        scope,
-        request.run_uid,
-        workflow_ref,
-        input,
-        session_id,
-        idempotency_key,
-    )
-    .await?;
-    ctx.set(K_WORKFLOW_RUN_UID, Json(workflow_run.run_uid));
-
-    workflow_status_response(
-        ctx,
-        ExperimentRunStatusRequest {
-            workspace_id: request.workspace_id,
-            run_uid: request.run_uid,
-        },
-    )
-    .await
-}
-
-async fn create_new_session(
-    ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
-    model: ModelId,
-    request: &ExperimentRunWorkflowRequest,
-) -> Result<(SessionId, SessionMeta), HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
-    let identity = request.identity.clone();
-    Ok(ctx
-        .run(|| async move {
-            let meta = new_session_meta(workspace_id, model, &identity)?;
-            let session_id = create_session_for_identity(store.as_ref(), meta.clone(), identity)
-                .await
-                .map_err(non_retryable_handler_error)?;
-            Ok::<_, HandlerError>(Json::from((session_id, meta)))
-        })
-        .name("experiment_create_session")
-        .await?
-        .into_inner())
-}
-
-async fn start_and_attach_workflow_run(
-    ctx: &WorkflowContext<'_>,
-    scope: MemoryScope,
-    experiment_run_uid: Uuid,
-    workflow_ref: String,
-    input: Value,
-    session_id: Option<SessionId>,
-    idempotency_key: Option<String>,
-) -> Result<StartedWorkflowRun, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
-    Ok(ctx
-        .run(|| async move {
-            let run = workflow_runtime(pool.clone())
-                .start(
-                    &scope,
-                    StartWorkflowRun {
-                        workflow_ref,
-                        input,
-                        session_id,
-                        idempotency_key,
-                    },
-                )
-                .await
-                .map_err(workflow_handler_error)?;
-            attach_workflow_run(pool, scope, experiment_run_uid, run.run_uid).await?;
-            Ok::<_, HandlerError>(Json::from(StartedWorkflowRun {
-                run_uid: run.run_uid,
-            }))
-        })
-        .name("experiment_start_workflow_run")
-        .await?
-        .into_inner())
-}
-
-async fn status_response(
-    pool: sqlx::PgPool,
-    request: ExperimentRunStatusRequest,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let workspace_id = request.workspace_id.clone();
-    let scope = workspace_scope(workspace_id.clone());
-    let store = ExperimentStore::new(pool.clone());
-    let mut run = store
-        .load_run(&scope, request.run_uid)
-        .await
-        .map_err(moa_error_to_handler_error)?
-        .ok_or_else(|| run_not_found(request.run_uid))?;
-
-    if run.target_kind == ExperimentTargetKind::Workflow {
-        return linked_workflow_status_response(pool, scope, workspace_id, run).await;
-    }
-
-    if let Some(status) = derived_session_status(run.status, run.session_id).await?
-        && status != run.status
-    {
-        run = store
-            .update_run_status(
-                &scope,
-                run.run_uid,
-                status,
-                None,
-                completed_at_for_status(status),
-            )
-            .await
-            .map_err(moa_error_to_handler_error)?
-            .ok_or_else(|| run_not_found(request.run_uid))?;
-    }
-
-    status_response_from_record(workspace_id, run)
-}
-
-async fn linked_workflow_status_response(
-    pool: sqlx::PgPool,
-    scope: MemoryScope,
-    workspace_id: WorkspaceId,
-    mut run: ExperimentRunRecord,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let Some(workflow_run_uid) = run.workflow_run_uid else {
-        return status_response_from_record(workspace_id, run);
-    };
-
-    let workflow_run = workflow_runtime(pool.clone())
-        .status(&scope, workflow_run_uid)
-        .await
-        .map_err(workflow_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-
-    if let Some(status) = experiment_status_from_artifact_status(&workflow_run.status)
-        && status != run.status
-    {
-        let run_uid = run.run_uid;
-        run = ExperimentStore::new(pool)
-            .update_run_status(
-                &scope,
-                run_uid,
-                status,
-                workflow_run.error.clone(),
-                workflow_run.completed_at,
-            )
-            .await
-            .map_err(moa_error_to_handler_error)?
-            .ok_or_else(|| run_not_found(run_uid))?;
-    }
-
-    let mut response = status_response_from_record_with_status(
-        workspace_id,
-        run,
-        workflow_run.status.as_str().to_string(),
-    )?;
-    response.session_id = workflow_run.session_id.or(response.session_id);
-    if workflow_run.error.is_some() {
-        response.error = workflow_run.error;
-    }
-    Ok(response)
-}
-
-async fn workflow_status_response(
-    ctx: &WorkflowContext<'_>,
-    request: ExperimentRunStatusRequest,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
-    Ok(ctx
-        .run(|| async move { status_response(pool, request).await.map(Json::from) })
-        .name("experiment_run_response")
-        .await?
-        .into_inner())
-}
-
-async fn derived_session_status(
-    row_status: ExperimentRunStatus,
-    session_id: Option<SessionId>,
-) -> Result<Option<ExperimentRunStatus>, HandlerError> {
-    if matches!(
-        row_status,
-        ExperimentRunStatus::Completed
-            | ExperimentRunStatus::Failed
-            | ExperimentRunStatus::Cancelled
-    ) {
-        return Ok(Some(row_status));
-    }
-
-    let Some(session_id) = session_id else {
-        return Ok(Some(row_status));
-    };
-    let session = OrchestratorCtx::current()
-        .session_store
-        .get_session(session_id)
-        .await
-        .map_err(moa_error_to_handler_error)?;
-    Ok(Some(match session.status {
-        SessionStatus::Created => row_status,
-        SessionStatus::Running => ExperimentRunStatus::Running,
-        SessionStatus::Paused | SessionStatus::Completed => ExperimentRunStatus::Completed,
-        SessionStatus::WaitingApproval => ExperimentRunStatus::WaitingApproval,
-        SessionStatus::Cancelled => ExperimentRunStatus::Cancelled,
-        SessionStatus::Failed => ExperimentRunStatus::Failed,
-    }))
 }
 
 async fn persist_run_status(
@@ -509,11 +247,13 @@ async fn update_run_status(
     error: Option<String>,
     completed_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<ExperimentRunRecord, HandlerError> {
-    ExperimentStore::new(pool)
+    let run = ExperimentStore::new(pool)
         .update_run_status(&scope, run_uid, status, error, completed_at)
         .await
         .map_err(moa_error_to_handler_error)?
-        .ok_or_else(|| run_not_found(run_uid))
+        .ok_or_else(|| run_not_found(run_uid))?;
+    record_experiment_run(run.status.as_str(), run.target_kind.as_str());
+    Ok(run)
 }
 
 async fn attach_session(
@@ -626,21 +366,27 @@ fn completed_at_for_status(status: ExperimentRunStatus) -> Option<chrono::DateTi
     }
 }
 
-fn experiment_status_from_artifact_status(
-    status: &ArtifactRunStatus,
-) -> Option<ExperimentRunStatus> {
-    match status {
-        ArtifactRunStatus::Queued => None,
-        ArtifactRunStatus::Running => Some(ExperimentRunStatus::Running),
-        ArtifactRunStatus::WaitingApproval => Some(ExperimentRunStatus::WaitingApproval),
-        ArtifactRunStatus::Completed => Some(ExperimentRunStatus::Completed),
-        ArtifactRunStatus::Failed => Some(ExperimentRunStatus::Failed),
-        ArtifactRunStatus::Cancelled => Some(ExperimentRunStatus::Cancelled),
-    }
-}
-
 fn workflow_runtime(pool: sqlx::PgPool) -> WorkflowRuntime {
     WorkflowRuntime::new(ArtifactRegistry::new(pool))
+}
+
+fn annotate_run_span(
+    request: &ExperimentRunWorkflowRequest,
+    target_kind: Option<ExperimentTargetKind>,
+) {
+    let span = tracing::Span::current();
+    span.set_attribute("moa.experiment.run_uid", request.run_uid.to_string());
+    span.set_attribute(
+        "moa.experiment.workspace_id",
+        request.workspace_id.to_string(),
+    );
+    span.set_attribute(
+        "moa.experiment.run_score_run_id",
+        request.score_run_id.to_string(),
+    );
+    if let Some(target_kind) = target_kind {
+        span.set_attribute("moa.experiment.target_kind", target_kind.as_str());
+    }
 }
 
 fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
@@ -656,32 +402,17 @@ where
     })
 }
 
-fn status_response_from_record(
-    workspace_id: WorkspaceId,
-    run: ExperimentRunRecord,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let status = run.status.as_str().to_string();
-    status_response_from_record_with_status(workspace_id, run, status)
+fn serialized_payload<T>(field: &'static str, value: &T) -> Result<Value, HandlerError>
+where
+    T: Serialize,
+{
+    serde_json::to_value(value).map_err(|error| {
+        TerminalError::new(format!("serialize experiment {field} failed: {error}")).into()
+    })
 }
 
-fn status_response_from_record_with_status(
-    workspace_id: WorkspaceId,
-    run: ExperimentRunRecord,
-    status: String,
-) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let run_value = serde_json::to_value(&run)
-        .map_err(|error| TerminalError::new(format!("serialize experiment run failed: {error}")))?;
-    Ok(ExperimentRunStatusResponse {
-        workspace_id,
-        run_uid: run.run_uid,
-        status,
-        target_kind: Some(run.target_kind.as_str().to_string()),
-        score_run_id: Some(run.score_run_id),
-        session_id: run.session_id,
-        workflow_run_uid: run.workflow_run_uid,
-        error: run.error,
-        run: run_value,
-    })
+fn bad_request(message: impl Into<String>) -> HandlerError {
+    TerminalError::new_with_code(400, message.into()).into()
 }
 
 fn run_not_found(run_uid: Uuid) -> HandlerError {
@@ -694,6 +425,10 @@ fn moa_error_to_handler_error(error: MoaError) -> HandlerError {
     }
 
     HandlerError::from(error)
+}
+
+fn plan_expansion_error_to_handler_error(error: PlanExpansionError) -> HandlerError {
+    bad_request(error.to_string())
 }
 
 fn non_retryable_handler_error(error: HandlerError) -> HandlerError {
@@ -720,5 +455,133 @@ fn workflow_handler_error(error: WorkflowError) -> HandlerError {
                 HandlerError::from(source)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use moa_experiments::model::ExperimentSimulatorConfig;
+    use serde_json::json;
+
+    #[test]
+    fn aggregate_status_keeps_parent_running_until_partial_failures_are_final() {
+        // Pins: failed trial rows are preserved while pending work keeps the parent run active.
+        let failed = trial_record("failed", ExperimentTrialStatus::Failed);
+        let pending = trial_record("pending", ExperimentTrialStatus::Accepted);
+        let dispatched = trial_record("dispatched", ExperimentTrialStatus::Dispatched);
+        let completed = trial_record("completed", ExperimentTrialStatus::Completed);
+
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                &[failed.clone(), pending],
+                ExperimentRunStatus::Running
+            ),
+            ExperimentRunStatus::Running
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                &[failed.clone(), dispatched],
+                ExperimentRunStatus::Running
+            ),
+            ExperimentRunStatus::Running
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                &[failed.clone(), completed],
+                ExperimentRunStatus::Running
+            ),
+            ExperimentRunStatus::Failed
+        );
+        assert_eq!(
+            plan_expansion::aggregate_error_for_trials(&[failed]).as_deref(),
+            Some("1 experiment trial(s) failed")
+        );
+    }
+
+    #[test]
+    fn dispatched_trials_occupy_parent_parallelism_slots() {
+        // Pins: a child sent by the parent but not yet running still consumes plan parallelism.
+        let dispatched = trial_record("dispatched", ExperimentTrialStatus::Dispatched);
+        let running = trial_record("running", ExperimentTrialStatus::Running);
+        let accepted = trial_record("accepted", ExperimentTrialStatus::Accepted);
+
+        assert_eq!(
+            plan_expansion::active_plan_trial_count(&[dispatched, running, accepted]),
+            2
+        );
+        assert!(plan_expansion::trial_status_occupies_dispatch_slot(
+            ExperimentTrialStatus::Dispatched
+        ));
+    }
+
+    #[test]
+    fn aggregate_status_maps_cancelled_remaining_work_clearly() {
+        // Pins: once no trial is active, cancelled remaining work makes the parent cancelled.
+        let completed = trial_record("completed", ExperimentTrialStatus::Completed);
+        let cancelled = trial_record("cancelled", ExperimentTrialStatus::Cancelled);
+
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(
+                &[completed, cancelled],
+                ExperimentRunStatus::Running
+            ),
+            ExperimentRunStatus::Cancelled
+        );
+    }
+
+    fn trial_record(trial_key: &str, status: ExperimentTrialStatus) -> ExperimentTrialRecord {
+        let now = Utc::now();
+        ExperimentTrialRecord {
+            scope: MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new("workspace-test"),
+            },
+            trial_uid: Uuid::now_v7(),
+            run_uid: fixture_uuid(100),
+            trial_key: trial_key.to_string(),
+            status,
+            target_kind: ExperimentTargetKind::AgentLoop,
+            variant_key: "baseline".to_string(),
+            plan_revision_uid: fixture_uuid(200),
+            persona_id: None,
+            profile_id: None,
+            scenario_id: None,
+            data_bundle_ids: Vec::new(),
+            artifact_revision_uids: Vec::new(),
+            simulator: ExperimentSimulatorConfig {
+                model: ModelId::new("gpt-5.1-mini"),
+                temperature: Some(0.0),
+                max_turns: 4,
+                token_budget: None,
+                metadata: json!({}),
+            },
+            target_model: Some(ModelId::new("gpt-5.1")),
+            seed: None,
+            session_id: None,
+            workflow_run_uid: None,
+            score_run_id: Uuid::now_v7(),
+            turn_count: 0,
+            stop_reason: None,
+            error: None,
+            trace_id: None,
+            started_at: Some(now),
+            completed_at: if plan_expansion::run_status_is_terminal(match status {
+                ExperimentTrialStatus::Failed => ExperimentRunStatus::Failed,
+                ExperimentTrialStatus::Cancelled => ExperimentRunStatus::Cancelled,
+                ExperimentTrialStatus::Completed => ExperimentRunStatus::Completed,
+                _ => ExperimentRunStatus::Running,
+            }) {
+                Some(now)
+            } else {
+                None
+            },
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn fixture_uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
     }
 }

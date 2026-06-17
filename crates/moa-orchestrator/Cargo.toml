@@ -51,6 +51,7 @@ moa-memory-lifecycle = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-ocsf.workspace = true
 moa-security = { workspace = true }
+moa-scoring = { workspace = true }
 moa-memory-ingest = { workspace = true }
 moa-providers = { workspace = true }
 moa-session = { workspace = true }

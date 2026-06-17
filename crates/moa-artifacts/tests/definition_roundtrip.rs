@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use moa_artifacts::canonical::canonical_hash;
-use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
-use moa_artifacts::reference::{ArtifactRef, ArtifactRefKind, ReferenceState};
+use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
+use moa_artifacts::reference::{ArtifactRef, ReferenceState};
 use moa_artifacts::validation::validate_for_status;
 
 #[test]
@@ -113,43 +113,39 @@ fn artifact_refs_parse_and_format_supported_schemes() {
     let cases = [
         (
             "skill://refund-policy",
-            ArtifactRefKind::Skill,
+            Some(ArtifactKind::Skill),
             "refund-policy",
             None,
         ),
         (
-            "action://credit_card.freeze",
-            ArtifactRefKind::Action,
-            "credit_card",
-            Some("freeze"),
-        ),
-        (
             "workflow://damaged-food-order",
-            ArtifactRefKind::Workflow,
+            Some(ArtifactKind::Workflow),
             "damaged-food-order",
             None,
         ),
         (
             "connector://orders",
-            ArtifactRefKind::Connector,
+            Some(ArtifactKind::Connector),
             "orders",
             None,
         ),
-        (
-            "tool://web_search",
-            ArtifactRefKind::Tool,
-            "web_search",
-            None,
-        ),
+        ("tool://web_search", None, "web_search", None),
     ];
 
     for (input, kind, target, action) in cases {
         let artifact_ref = ArtifactRef::from_str(input).expect("parse reference");
-        assert_eq!(artifact_ref.kind, kind);
-        assert_eq!(artifact_ref.target, target);
-        assert_eq!(artifact_ref.action.as_deref(), action);
+        assert_eq!(artifact_ref.artifact_kind(), kind.as_ref());
+        assert_eq!(artifact_ref.target_name(), target);
+        assert_eq!(artifact_ref.action_name(), action);
         assert_eq!(artifact_ref.to_string(), input);
     }
+
+    let action = ArtifactRef::from_str("action://credit_card.freeze")
+        .expect("parse connector action reference");
+    assert_eq!(action.artifact_kind(), None);
+    assert_eq!(action.target_name(), "credit_card");
+    assert_eq!(action.action_name(), Some("freeze"));
+    assert_eq!(action.to_string(), "action://credit_card.freeze");
 }
 
 #[test]

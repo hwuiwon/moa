@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::connector::ConnectorDefinition;
 use crate::reference::{ArtifactRef, ReferenceResolution};
+use crate::simulation::ExperimentPlanDefinition;
 use crate::skill::SkillDefinition;
 use crate::workflow::WorkflowDefinition;
 use crate::{Error, Result};
@@ -23,17 +24,27 @@ pub enum ArtifactKind {
     Workflow,
     /// Standalone action declaration.
     Action,
+    /// Experiment matrix and budget plan for behavior-lab runs.
+    ExperimentPlan,
 }
 
-impl fmt::Display for ArtifactKind {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
+impl ArtifactKind {
+    /// Returns the lowercase persisted label for this artifact kind.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
             Self::Skill => "skill",
             Self::Connector => "connector",
             Self::Workflow => "workflow",
             Self::Action => "action",
-        };
-        formatter.write_str(value)
+            Self::ExperimentPlan => "experiment_plan",
+        }
+    }
+}
+
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -46,6 +57,7 @@ impl FromStr for ArtifactKind {
             "connector" => Ok(Self::Connector),
             "workflow" => Ok(Self::Workflow),
             "action" => Ok(Self::Action),
+            "experiment_plan" => Ok(Self::ExperimentPlan),
             _ => Err(Error::InvalidReference {
                 reference: value.to_string(),
                 message: "unsupported artifact kind".to_string(),
@@ -151,6 +163,8 @@ pub enum ArtifactDefinition {
     Connector(ConnectorDefinition),
     /// Workflow artifact body.
     Workflow(WorkflowDefinition),
+    /// Behavior-lab experiment plan body.
+    ExperimentPlan(ExperimentPlanDefinition),
 }
 
 impl ArtifactDefinition {
@@ -161,6 +175,7 @@ impl ArtifactDefinition {
             Self::Skill(_) => ArtifactKind::Skill,
             Self::Connector(_) => ArtifactKind::Connector,
             Self::Workflow(_) => ArtifactKind::Workflow,
+            Self::ExperimentPlan(_) => ArtifactKind::ExperimentPlan,
         }
     }
 
@@ -218,6 +233,7 @@ impl ArtifactDefinition {
                 refs
             }
             Self::Connector(_) => Vec::new(),
+            Self::ExperimentPlan(definition) => definition.reference_paths(),
             Self::Workflow(definition) => {
                 let mut refs = Vec::new();
                 for (node_index, node) in definition.nodes.iter().enumerate() {

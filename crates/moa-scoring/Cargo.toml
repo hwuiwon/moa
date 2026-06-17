@@ -1,0 +1,13 @@
+[package]
+name = "moa-scoring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moa-core.workspace = true
+serde.workspace = true
+sqlx = { workspace = true, features = ["uuid"] }
+thiserror.workspace = true
+uuid.workspace = true
+workspace-hack.workspace = true

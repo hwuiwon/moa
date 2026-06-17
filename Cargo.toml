@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/moa-core",
+    "crates/moa-scoring",
     "crates/moa-artifacts",
     "crates/moa-brain",
     "crates/moa-workflows",
@@ -39,6 +40,7 @@ members = [
 ]
 default-members = [
     "crates/moa-core",
+    "crates/moa-scoring",
     "crates/moa-artifacts",
     "crates/moa-brain",
     "crates/moa-workflows",
@@ -85,6 +87,7 @@ moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-artifacts = { path = "crates/moa-artifacts" }
 moa-brain = { path = "crates/moa-brain" }
 moa-core = { path = "crates/moa-core" }
+moa-scoring = { path = "crates/moa-scoring" }
 moa-edge = { path = "crates/moa-edge" }
 moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }

@@ -3,10 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    document::empty_object,
-    reference::{ArtifactRef, ArtifactRefKind},
-};
+use crate::{document::empty_object, reference::ArtifactRef};
 
 /// Location of the instruction body used for a skill.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,12 +93,7 @@ impl SkillActionDefinition {
     /// Returns whether the action points at a connector action.
     #[must_use]
     pub fn uses_connector_action(&self) -> bool {
-        matches!(
-            self.artifact_ref
-                .as_ref()
-                .map(|artifact_ref| &artifact_ref.kind),
-            Some(ArtifactRefKind::Action)
-        )
+        matches!(self.artifact_ref, Some(ArtifactRef::Action { .. }))
     }
 }
 

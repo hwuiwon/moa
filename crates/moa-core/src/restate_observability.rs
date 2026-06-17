@@ -7,7 +7,7 @@ use crate::{
     SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnLatencyStep, TurnReplaySnapshot,
     current_turn_root_span, record_turn_step_duration,
 };
-use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Annotates the current tracing span with the Restate service and handler names.
@@ -15,6 +15,24 @@ pub fn annotate_restate_handler_span(service: &str, handler: &str) {
     let span = tracing::Span::current();
     span.set_attribute("restate.service", service.to_string());
     span.set_attribute("restate.handler", handler.to_string());
+}
+
+/// Returns the OpenTelemetry trace ID for the current tracing span when one is active.
+#[must_use]
+pub fn current_trace_id() -> Option<String> {
+    trace_id_for_span(&tracing::Span::current())
+}
+
+/// Returns the OpenTelemetry trace ID for a tracing span when it has a sampled context.
+#[must_use]
+pub fn trace_id_for_span(span: &tracing::Span) -> Option<String> {
+    let trace_id = span.context().span().span_context().trace_id();
+    let value = trace_id.to_string();
+    if value.chars().all(|character| character == '0') {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// Applies stable session/user/workspace tracing attributes to the provided span.

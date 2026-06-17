@@ -2,7 +2,8 @@ use chrono::Utc;
 use moa_core::{Attachment, MemoryScope, ModelId, SessionId, WorkspaceId};
 use moa_experiments::model::{
     ExperimentRunKind, ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard,
-    ExperimentTarget, ExperimentTargetKind, ExperimentVariant,
+    ExperimentSimulatorConfig, ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord,
+    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -111,6 +112,82 @@ fn storage_enum_conversions_reject_unknown_database_values_offline() {
         Some(ExperimentTargetKind::Workflow)
     );
     assert_eq!(ExperimentTargetKind::from_db("dataset"), None);
+    assert_eq!(ExperimentTrialStatus::Dispatched.as_str(), "dispatched");
+    assert_eq!(
+        ExperimentTrialStatus::from_db("dispatched"),
+        Some(ExperimentTrialStatus::Dispatched)
+    );
+    assert_eq!(ExperimentTrialStatus::Running.as_str(), "running");
+    assert_eq!(
+        ExperimentTrialStatus::from_db("waiting_approval"),
+        Some(ExperimentTrialStatus::WaitingApproval)
+    );
+    assert_eq!(ExperimentTrialStatus::from_db("queued"), None);
+    assert_eq!(ExperimentTrialStopReason::MaxTurns.as_str(), "max_turns");
+    assert_eq!(
+        ExperimentTrialStopReason::from_db("approval_wait"),
+        Some(ExperimentTrialStopReason::ApprovalWait)
+    );
+    assert_eq!(ExperimentTrialStopReason::from_db("timeout"), None);
+}
+
+#[test]
+fn trial_record_round_trips_through_public_model_offline() {
+    // Pins: trial records preserve simulator config, artifact pins, links, and stop reason.
+    let now = Utc::now();
+    let session_id = SessionId::new();
+    let workflow_run_uid = Uuid::now_v7();
+    let trial = ExperimentTrialRecord {
+        scope: MemoryScope::Workspace {
+            workspace_id: WorkspaceId::new("workspace-test"),
+        },
+        trial_uid: Uuid::now_v7(),
+        run_uid: Uuid::now_v7(),
+        trial_key: "scenario-a/persona-b/baseline".to_string(),
+        status: ExperimentTrialStatus::Completed,
+        target_kind: ExperimentTargetKind::AgentLoop,
+        variant_key: "baseline".to_string(),
+        plan_revision_uid: Uuid::now_v7(),
+        persona_id: Some("careful-shopper".to_string()),
+        profile_id: None,
+        scenario_id: Some("checkout-delay".to_string()),
+        data_bundle_ids: vec!["orders-fixture".to_string()],
+        artifact_revision_uids: vec![Uuid::now_v7()],
+        simulator: ExperimentSimulatorConfig {
+            model: ModelId::new("gpt-5.1-mini"),
+            temperature: Some(0.2),
+            max_turns: 8,
+            token_budget: Some(8_000),
+            metadata: json!({ "style": "terse" }),
+        },
+        target_model: Some(ModelId::new("gpt-5.1")),
+        seed: Some("seed-123".to_string()),
+        session_id: Some(session_id),
+        workflow_run_uid: Some(workflow_run_uid),
+        score_run_id: Uuid::now_v7(),
+        turn_count: 4,
+        stop_reason: Some(ExperimentTrialStopReason::Success),
+        error: None,
+        trace_id: Some("trace-abc".to_string()),
+        started_at: Some(now),
+        completed_at: Some(now),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let encoded = serde_json::to_value(&trial).expect("trial record serializes");
+    let decoded: ExperimentTrialRecord =
+        serde_json::from_value(encoded).expect("trial record deserializes");
+
+    assert_eq!(decoded.trial_key, "scenario-a/persona-b/baseline");
+    assert_eq!(decoded.simulator.model, ModelId::new("gpt-5.1-mini"));
+    assert_eq!(decoded.session_id, Some(session_id));
+    assert_eq!(decoded.workflow_run_uid, Some(workflow_run_uid));
+    assert_eq!(
+        decoded.stop_reason,
+        Some(ExperimentTrialStopReason::Success)
+    );
+    assert_eq!(decoded, trial);
 }
 
 fn record_for_target(

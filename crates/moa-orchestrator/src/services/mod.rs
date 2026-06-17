@@ -19,7 +19,6 @@ pub mod memory;
 pub mod neon_maint;
 pub mod privacy;
 pub mod scim;
-pub mod score_queries;
 pub mod session_store;
 pub mod skills;
 pub mod tenants;
