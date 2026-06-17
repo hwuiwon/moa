@@ -10,6 +10,12 @@ use super::*;
 struct TargetObservation {
     status: SessionStatus,
     latest_response: Option<String>,
+    latest_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TargetUsageObservation {
+    latest_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,10 +39,12 @@ pub(super) async fn run_agent_loop_trial(
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
 
-    let mut transcript = Vec::new();
-    let mut target_event_offset = load_session_events(ctx, session_id).await?.len();
+    let initial_events = load_session_events(ctx, session_id, EventRange::all()).await?;
+    let mut transcript = transcript_from_events(&initial_events);
+    let mut transcript_sequence = latest_sequence(&initial_events);
+    let mut target_usage_sequence = transcript_sequence;
     for turn_index in trial.turn_count.max(0) as u32..simulator_context.max_turns {
-        let observation = observe_session(ctx, session_id).await?;
+        let observation = observe_session_after(ctx, session_id, transcript_sequence).await?;
         if let Some(stop) = stop_for_session_status(&observation.status) {
             return stop_trial(
                 ctx,
@@ -53,6 +61,7 @@ pub(super) async fn run_agent_loop_trial(
                 "Target response: {response}"
             )));
         }
+        transcript_sequence = observation.latest_sequence;
 
         let simulator_message =
             simulator_next_user_message(ctx, &trial, &simulator_context, &transcript, turn_index)
@@ -81,11 +90,10 @@ pub(super) async fn run_agent_loop_trial(
         .call()
         .await?;
         increment_trial_turn(ctx, request.workspace_id.clone(), trial.trial_uid).await?;
-        record_simulation_turn(trial.target_kind.as_str());
         transcript.push(ContextMessage::user(simulator_message));
 
         let status = wait_for_target_after_turn(ctx, session_id).await?;
-        record_target_usage_since(ctx, session_id, &mut target_event_offset).await?;
+        record_target_usage_after(ctx, session_id, &mut target_usage_sequence).await?;
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
                 ctx,
@@ -230,9 +238,10 @@ async fn create_new_session(
         .into_inner())
 }
 
-async fn observe_session(
+async fn observe_session_after(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    sequence_num: u64,
 ) -> Result<TargetObservation, HandlerError> {
     let status = ctx
         .object_client::<SessionClient>(session_id.to_string())
@@ -240,22 +249,24 @@ async fn observe_session(
         .call()
         .await?
         .into_inner();
-    let events = load_session_events(ctx, session_id).await?;
+    let events = load_session_events(ctx, session_id, event_range_after(sequence_num)).await?;
     Ok(TargetObservation {
         status,
         latest_response: latest_brain_response(&events),
+        latest_sequence: latest_sequence(&events).max(sequence_num),
     })
 }
 
 async fn load_session_events(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    range: EventRange,
 ) -> Result<Vec<EventRecord>, HandlerError> {
     let store = OrchestratorCtx::current().session_store.clone();
     Ok(ctx
         .run(|| async move {
             store
-                .get_events(session_id, EventRange::all())
+                .get_events(session_id, range)
                 .await
                 .map(Json::from)
                 .map_err(moa_error_to_handler_error)
@@ -291,29 +302,73 @@ async fn wait_for_target_after_turn(
     Err(TerminalError::new("timed out waiting for target session turn").into())
 }
 
-async fn record_target_usage_since(
+async fn record_target_usage_after(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    event_offset: &mut usize,
+    sequence_num: &mut u64,
 ) -> Result<(), HandlerError> {
-    let events = load_session_events(ctx, session_id).await?;
-    let (tokens, cost_cents) = target_usage_from_events(&events, *event_offset);
-    *event_offset = events.len();
-    record_simulation_tokens("target", tokens);
-    record_simulation_cost_cents("target", cost_cents);
+    let store = OrchestratorCtx::current().session_store.clone();
+    let range = event_range_after(*sequence_num);
+    let previous_sequence = *sequence_num;
+    let observation = ctx
+        .run(|| async move {
+            let events = store
+                .get_events(session_id, range)
+                .await
+                .map_err(moa_error_to_handler_error)?;
+            let (tokens, cost_cents) = target_usage_from_events(&events);
+            record_simulation_tokens("target", tokens);
+            record_simulation_cost_cents("target", cost_cents);
+            Ok::<_, HandlerError>(Json::from(TargetUsageObservation {
+                latest_sequence: latest_sequence(&events).max(previous_sequence),
+            }))
+        })
+        .name("experiment_trial_record_target_usage")
+        .await?
+        .into_inner();
+    *sequence_num = observation.latest_sequence;
     Ok(())
 }
 
-fn target_usage_from_events(events: &[EventRecord], event_offset: usize) -> (u64, u64) {
+fn target_usage_from_events(events: &[EventRecord]) -> (u64, u64) {
     events
         .iter()
-        .skip(event_offset)
         .fold((0_u64, 0_u64), |(tokens, cost_cents), record| {
             (
                 tokens + (record.event.input_tokens() + record.event.output_tokens()) as u64,
                 cost_cents + u64::from(record.event.cost_cents()),
             )
         })
+}
+
+fn event_range_after(sequence_num: u64) -> EventRange {
+    EventRange {
+        from_seq: Some(sequence_num.saturating_add(1)),
+        event_types: Some(vec![EventType::UserMessage, EventType::BrainResponse]),
+        ..EventRange::default()
+    }
+}
+
+fn latest_sequence(events: &[EventRecord]) -> u64 {
+    events
+        .last()
+        .map(|record| record.sequence_num)
+        .unwrap_or_default()
+}
+
+fn transcript_from_events(events: &[EventRecord]) -> Vec<ContextMessage> {
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::UserMessage { text, .. } if !text.trim().is_empty() => {
+                Some(ContextMessage::user(text.clone()))
+            }
+            Event::BrainResponse { text, .. } if !text.trim().is_empty() => Some(
+                ContextMessage::assistant(format!("Target response: {text}")),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 fn target_is_waiting_or_idle(status: &SessionStatus, snapshot: &SessionSnapshot) -> bool {
@@ -416,5 +471,69 @@ fn trial_status_from_workflow_status(
             ExperimentTrialStatus::Completed,
             ExperimentTrialStopReason::TargetTerminal,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moa_core::{EventRecord, MessageRole, ModelTier};
+
+    #[test]
+    fn transcript_from_events_reconstructs_target_conversation_offline() {
+        // Pins: a resumed simulator keeps prior target context from the durable session log.
+        let session_id = SessionId::new();
+        let events = vec![
+            event_record(
+                session_id,
+                1,
+                Event::UserMessage {
+                    text: "first simulator turn".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                session_id,
+                2,
+                Event::BrainResponse {
+                    text: "first target response".to_string(),
+                    thought_signature: None,
+                    model: ModelId::new("gpt-5.1"),
+                    model_tier: ModelTier::Main,
+                    input_tokens_uncached: 10,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 5,
+                    cost_cents: 1,
+                    duration_ms: 25,
+                },
+            ),
+        ];
+
+        let transcript = transcript_from_events(&events);
+
+        assert_eq!(latest_sequence(&events), 2);
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].role, MessageRole::User);
+        assert_eq!(transcript[0].content, "first simulator turn");
+        assert_eq!(transcript[1].role, MessageRole::Assistant);
+        assert_eq!(
+            transcript[1].content,
+            "Target response: first target response"
+        );
+    }
+
+    fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::new_v4(),
+            session_id,
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
     }
 }

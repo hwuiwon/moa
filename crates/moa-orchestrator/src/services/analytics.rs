@@ -1,5 +1,7 @@
 //! Restate service for protected session, workspace, tool, and cache analytics.
 
+use std::sync::OnceLock;
+
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
@@ -18,6 +20,7 @@ use moa_core::{
     LearningCandidateType, LearningRiskClass, MemoryScope, MoaError, ScopeContext, ScopedConn,
     SessionAnalyticsSummary, ToolCallSummary, UserId, WorkspaceAnalyticsSummary, WorkspaceId,
 };
+use regex::Regex;
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
@@ -848,7 +851,13 @@ fn redact_json_value(value: &Value) -> Value {
 }
 
 fn redact_sensitive_text(text: &str) -> String {
-    text.split_whitespace()
+    let redacted = sensitive_text_patterns()
+        .iter()
+        .fold(text.to_string(), |redacted, pattern| {
+            pattern.replace_all(&redacted, "[redacted]").into_owned()
+        });
+    redacted
+        .split_whitespace()
         .map(|word| {
             let lower = word.to_ascii_lowercase();
             if lower.starts_with("sk-")
@@ -867,6 +876,24 @@ fn redact_sensitive_text(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn sensitive_text_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*",
+            r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+            r"\bAKIA[0-9A-Z]{16}\b",
+            r"\bAIza[0-9A-Za-z_-]{20,}\b",
+            r"\bsk-[A-Za-z0-9_-]{12,}\b",
+            r"\bghp_[A-Za-z0-9_]{12,}\b",
+            r"(?i)\b(password|token|api_key|apikey|secret)=([^&\s]+)",
+        ]
+        .into_iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
+        .collect()
+    })
 }
 
 fn is_sensitive_key(key: &str) -> bool {

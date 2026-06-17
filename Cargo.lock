@@ -3634,6 +3634,7 @@ dependencies = [
 name = "moa-experiments"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "moa-artifacts",
  "moa-core",
@@ -4023,6 +4024,7 @@ dependencies = [
  "moa-skills",
  "moa-test-support",
  "moa-workflows",
+ "regex",
  "reqwest 0.13.2",
  "restate-sdk",
  "secrecy 0.10.3",
@@ -4074,6 +4076,7 @@ dependencies = [
  "serde",
  "sqlx",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
  "workspace-hack",
 ]

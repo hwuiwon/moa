@@ -51,6 +51,12 @@ impl ExperimentRunStatus {
             _ => None,
         }
     }
+
+    /// Returns true when the status should no longer accept lifecycle rewrites.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
 }
 
 /// Lifecycle state for one experiment trial.
@@ -101,6 +107,12 @@ impl ExperimentTrialStatus {
             "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
+    }
+
+    /// Returns true when the status should no longer accept lifecycle rewrites.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
 }
 
@@ -192,16 +204,6 @@ impl ExperimentTargetKind {
             _ => None,
         }
     }
-}
-
-/// Product intent for an experiment run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExperimentRunKind {
-    /// Offline or replay-style regression evaluation.
-    RegressionEval,
-    /// Live behavior experiment against production execution paths.
-    LiveBehaviorExperiment,
 }
 
 /// Target payload for an experiment run.
@@ -372,8 +374,6 @@ pub struct ExperimentRunRecord {
     pub run_uid: Uuid,
     /// Human-readable run name.
     pub name: String,
-    /// Whether the run is a regression eval or live behavior experiment.
-    pub run_kind: ExperimentRunKind,
     /// Fast discriminator for the target payload.
     pub target_kind: ExperimentTargetKind,
     /// Current run lifecycle status.

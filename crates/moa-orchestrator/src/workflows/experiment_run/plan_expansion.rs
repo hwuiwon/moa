@@ -38,6 +38,7 @@ async fn dispatch_plan_trials(
         .into_iter()
         .map(|trial| (trial.trial.trial_key.clone(), trial))
         .collect::<BTreeMap<_, _>>();
+    let mut idle_polls = 0_u32;
 
     loop {
         let aggregate =
@@ -108,6 +109,7 @@ async fn dispatch_plan_trials(
             .take(available_slots)
             .map(|trial| trial.trial_key.clone())
             .collect::<Vec<_>>();
+        let had_ready_trials = !ready_trial_keys.is_empty();
         let claimed_trials = claim_plan_trial_dispatches(
             ctx,
             request.workspace_id.clone(),
@@ -132,7 +134,12 @@ async fn dispatch_plan_trials(
                 .send();
         }
 
-        ctx.sleep(PLAN_STATUS_POLL_INTERVAL).await?;
+        if available_slots == 0 || had_ready_trials {
+            idle_polls = 0;
+        } else {
+            idle_polls = idle_polls.saturating_add(1);
+        }
+        ctx.sleep(plan_status_poll_interval(idle_polls)).await?;
     }
 }
 
@@ -313,7 +320,11 @@ pub(super) fn aggregate_status_for_trials(
     fallback: ExperimentRunStatus,
 ) -> ExperimentRunStatus {
     if trials.is_empty() {
-        return fallback;
+        return if fallback.is_terminal() {
+            fallback
+        } else {
+            ExperimentRunStatus::Completed
+        };
     }
     if trials.iter().any(|trial| {
         matches!(
@@ -344,6 +355,16 @@ pub(super) fn aggregate_status_for_trials(
         return ExperimentRunStatus::Cancelled;
     }
     ExperimentRunStatus::Completed
+}
+
+pub(super) fn plan_status_poll_interval(idle_polls: u32) -> Duration {
+    let seconds = match idle_polls {
+        0 => PLAN_STATUS_POLL_INTERVAL.as_secs(),
+        1 => PLAN_STATUS_POLL_INTERVAL.as_secs().saturating_mul(2),
+        2 => PLAN_STATUS_POLL_INTERVAL.as_secs().saturating_mul(4),
+        _ => PLAN_STATUS_POLL_MAX_INTERVAL.as_secs(),
+    };
+    Duration::from_secs(seconds.min(PLAN_STATUS_POLL_MAX_INTERVAL.as_secs()))
 }
 
 pub(super) fn aggregate_error_for_trials(trials: &[ExperimentTrialRecord]) -> Option<String> {

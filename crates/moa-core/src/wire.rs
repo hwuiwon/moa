@@ -1819,8 +1819,8 @@ pub struct EvalScoreSummaryRow {
     pub value_type: String,
     /// Number of rows summarized.
     pub n: u64,
-    /// Numeric mean or boolean true-rate.
-    pub mean_or_rate: f64,
+    /// Numeric mean or boolean true-rate, or `None` when every summarized value is NULL.
+    pub mean_or_rate: Option<f64>,
 }
 
 /// Response payload containing eval score summaries.
@@ -1855,8 +1855,8 @@ pub struct EvalCompareRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Response payload containing eval run comparison rows.
@@ -2183,8 +2183,8 @@ pub struct ExperimentScoreSummaryRow {
     pub value_type: String,
     /// Number of rows summarized.
     pub n: u64,
-    /// Numeric mean or boolean true-rate.
-    pub mean_or_rate: f64,
+    /// Numeric mean or boolean true-rate, or `None` when every summarized value is NULL.
+    pub mean_or_rate: Option<f64>,
 }
 
 /// Per-trial score summary for one experiment trial.
@@ -2258,8 +2258,8 @@ pub struct ExperimentCompareRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Numeric experiment score delta for one scenario.
@@ -2273,8 +2273,8 @@ pub struct ExperimentScenarioScoreDeltaRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Numeric experiment score delta for one variant.
@@ -2288,8 +2288,8 @@ pub struct ExperimentVariantScoreDeltaRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Response payload containing experiment score comparison rows.

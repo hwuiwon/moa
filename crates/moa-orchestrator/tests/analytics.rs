@@ -256,6 +256,21 @@ fn analytics_redaction_helpers_remove_secret_values() {
         attachments: Vec::new(),
     });
     assert_eq!(snippet, "rotate [redacted] with [redacted]");
+
+    let embedded = redacted_event_snippet(&Event::UserMessage {
+        text: concat!(
+            "check https://example.test/callback?token=refresh-token-123 ",
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c ",
+            "aws AKIAIOSFODNN7EXAMPLE google AIzaSyD0f4akeKeyStringNeedsThirtyFiveChars"
+        )
+        .to_string(),
+        attachments: Vec::new(),
+    });
+    assert!(embedded.contains("[redacted]"));
+    assert!(!embedded.contains("refresh-token-123"));
+    assert!(!embedded.contains("eyJhbGciOiJIUzI1NiJ9"));
+    assert!(!embedded.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!embedded.contains("AIzaSyD0f4akeKeyStringNeedsThirtyFiveChars"));
 }
 
 #[test]

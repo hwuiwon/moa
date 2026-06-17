@@ -4,7 +4,6 @@
 //! experiment definitions and durable records without depending on Restate or
 //! `moa-orchestrator`.
 
-pub mod error;
 pub mod model;
 pub mod plan;
 pub mod store;

@@ -12,9 +12,9 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    ExperimentRunKind, ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard,
-    ExperimentSimulatorConfig, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
-    ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun, NewExperimentTrial,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
+    ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
+    ExperimentVariant, NewExperimentRun, NewExperimentTrial,
 };
 
 /// Postgres-backed repository for experiment run metadata.
@@ -101,18 +101,19 @@ impl ExperimentStore {
         .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
-        for revision_uid in &artifact_revision_uids {
+        if !artifact_revision_uids.is_empty() {
             sqlx::query(
                 r#"
                 INSERT INTO moa.experiment_run_artifact_revision (
                     run_uid, revision_uid, workspace_id, user_id
                 )
-                VALUES ($1, $2, $3, $4)
+                SELECT $1, revision_uid, $3, $4
+                FROM UNNEST($2::UUID[]) AS revisions(revision_uid)
                 ON CONFLICT (run_uid, revision_uid) DO NOTHING
                 "#,
             )
             .bind(row.get::<Uuid, _>("run_uid"))
-            .bind(revision_uid)
+            .bind(&artifact_revision_uids)
             .bind(parts.workspace_id.as_deref())
             .bind(parts.user_id.as_deref())
             .execute(conn.as_mut())
@@ -186,10 +187,16 @@ impl ExperimentStore {
             r#"
             UPDATE moa.experiment_run
             SET status = $5,
-                error = $6,
-                completed_at = $7,
+                error = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN error
+                    ELSE $6
+                END,
+                completed_at = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN completed_at
+                    ELSE $7
+                END,
                 started_at = CASE
-                    WHEN $5 IN ('dispatched', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled')
+                    WHEN $5 IN ('running', 'waiting_approval', 'completed', 'failed', 'cancelled')
                     THEN COALESCE(started_at, now())
                     ELSE started_at
                 END,
@@ -198,6 +205,7 @@ impl ExperimentStore {
               AND scope = $1
               AND workspace_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
+              AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $5)
             RETURNING run_uid, workspace_id, user_id, scope, name, target_kind, status,
                       target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                       artifact_revision_uids, idempotency_key, created_by_identity, error,
@@ -339,6 +347,19 @@ impl ExperimentStore {
         row.map(|row| trial_from_row(&row)).transpose()
     }
 
+    /// Loads one experiment trial by its run-scoped deterministic key.
+    pub async fn load_trial_by_key(
+        &self,
+        scope: &MemoryScope,
+        run_uid: Uuid,
+        trial_key: &str,
+    ) -> MoaResult<Option<ExperimentTrialRecord>> {
+        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let row = load_scoped_trial_by_key(conn.as_mut(), scope, run_uid, trial_key).await?;
+        conn.commit().await?;
+        row.map(|row| trial_from_row(&row)).transpose()
+    }
+
     /// Lists experiment trials for a scoped run, optionally filtered by status.
     pub async fn list_trials(
         &self,
@@ -414,7 +435,7 @@ impl ExperimentStore {
                         AND run.scope = $1
                         AND run.workspace_id IS NOT DISTINCT FROM $2
                         AND run.user_id IS NOT DISTINCT FROM $3
-                        AND run.status <> 'cancelled'
+                        AND run.status NOT IN ('completed', 'failed', 'cancelled')
                   )
                 ORDER BY trial.trial_key
                 LIMIT $6
@@ -462,9 +483,18 @@ impl ExperimentStore {
             r#"
             UPDATE moa.experiment_trial
             SET status = $5,
-                stop_reason = $6,
-                error = $7,
-                completed_at = $8,
+                stop_reason = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN stop_reason
+                    ELSE $6
+                END,
+                error = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN error
+                    ELSE $7
+                END,
+                completed_at = CASE
+                    WHEN status IN ('completed', 'failed', 'cancelled') THEN completed_at
+                    ELSE $8
+                END,
                 started_at = CASE
                     WHEN $5 IN ('dispatched', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled')
                     THEN COALESCE(started_at, now())
@@ -475,6 +505,7 @@ impl ExperimentStore {
               AND scope = $1
               AND workspace_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
+              AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $5)
             RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
@@ -969,7 +1000,6 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
         scope: scope_from_parts(&scope_text, workspace_id, user_id)?,
         run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
-        run_kind: ExperimentRunKind::LiveBehaviorExperiment,
         target_kind: ExperimentTargetKind::from_db(&target_kind_text).ok_or_else(|| {
             MoaError::StorageError(format!(
                 "invalid experiment target kind `{target_kind_text}`"

@@ -52,6 +52,7 @@ const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
 const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
 const PLAN_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const PLAN_STATUS_POLL_MAX_INTERVAL: Duration = Duration::from_secs(8);
 
 /// Workflow input for one live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -353,19 +354,6 @@ fn identity_type_header(identity_type: IdentityType) -> &'static str {
     }
 }
 
-fn completed_at_for_status(status: ExperimentRunStatus) -> Option<chrono::DateTime<Utc>> {
-    if matches!(
-        status,
-        ExperimentRunStatus::Completed
-            | ExperimentRunStatus::Failed
-            | ExperimentRunStatus::Cancelled
-    ) {
-        Some(Utc::now())
-    } else {
-        None
-    }
-}
-
 fn workflow_runtime(pool: sqlx::PgPool) -> WorkflowRuntime {
     WorkflowRuntime::new(ArtifactRegistry::new(pool))
 }
@@ -528,6 +516,40 @@ mod tests {
                 ExperimentRunStatus::Running
             ),
             ExperimentRunStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn aggregate_status_completes_empty_plan_expansion() {
+        // Pins: an empty runtime expansion cannot leave the parent polling forever.
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(&[], ExperimentRunStatus::Running),
+            ExperimentRunStatus::Completed
+        );
+        assert_eq!(
+            plan_expansion::aggregate_status_for_trials(&[], ExperimentRunStatus::Cancelled),
+            ExperimentRunStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn plan_status_poll_interval_backs_off_when_idle() {
+        // Pins: the parent plan loop backs off bounded idle scans.
+        assert_eq!(
+            plan_expansion::plan_status_poll_interval(0),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            plan_expansion::plan_status_poll_interval(1),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            plan_expansion::plan_status_poll_interval(2),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            plan_expansion::plan_status_poll_interval(9),
+            Duration::from_secs(8)
         );
     }
 

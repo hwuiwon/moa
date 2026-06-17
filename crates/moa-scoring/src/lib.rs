@@ -44,7 +44,7 @@ new AS (
 SELECT COALESCE(base.name, new.name) AS name,
        base.mean AS base_mean,
        new.mean AS new_mean,
-       COALESCE(new.mean, 0.0) - COALESCE(base.mean, 0.0) AS delta
+       new.mean - base.mean AS delta
 FROM base
 FULL OUTER JOIN new USING (name)
 ORDER BY name
@@ -161,7 +161,7 @@ SELECT COALESCE(base.scenario_id, new.scenario_id) AS scenario_id,
        COALESCE(base.name, new.name) AS name,
        base.mean AS base_mean,
        new.mean AS new_mean,
-       COALESCE(new.mean, 0.0) - COALESCE(base.mean, 0.0) AS delta
+       new.mean - base.mean AS delta
 FROM base
 FULL OUTER JOIN new
   ON base.name = new.name
@@ -205,7 +205,7 @@ SELECT COALESCE(base.variant_key, new.variant_key) AS variant_key,
        COALESCE(base.name, new.name) AS name,
        base.mean AS base_mean,
        new.mean AS new_mean,
-       COALESCE(new.mean, 0.0) - COALESCE(base.mean, 0.0) AS delta
+       new.mean - base.mean AS delta
 FROM base
 FULL OUTER JOIN new USING (variant_key, name)
 ORDER BY variant_key, name
@@ -284,8 +284,8 @@ pub struct ScoreSummaryRow {
     pub value_type: String,
     /// Number of rows summarized.
     pub n: u64,
-    /// Numeric mean or boolean true-rate.
-    pub mean_or_rate: f64,
+    /// Numeric mean or boolean true-rate, or `None` when every summarized value is NULL.
+    pub mean_or_rate: Option<f64>,
 }
 
 /// Score summary result for one score run.
@@ -309,8 +309,8 @@ pub struct ScoreCompareRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Score comparison result for two score runs.
@@ -384,8 +384,8 @@ pub struct ScenarioScoreDeltaRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Numeric score delta for one variant.
@@ -399,8 +399,8 @@ pub struct VariantScoreDeltaRow {
     pub base_mean: Option<f64>,
     /// New numeric mean.
     pub new_mean: Option<f64>,
-    /// New mean minus baseline mean, treating missing means as zero.
-    pub delta: f64,
+    /// New mean minus baseline mean when both sides have data.
+    pub delta: Option<f64>,
 }
 
 /// Trial-aware score comparison result for two experiment runs.
@@ -440,7 +440,7 @@ pub async fn score_summaries_for_workspace(
             name: row.try_get("name")?,
             value_type: row.try_get("value_type")?,
             n: u64::try_from(n).map_err(|_| ScoringError::IntegerTooLarge { field: "n" })?,
-            mean_or_rate: numeric_mean.or(boolean_rate).unwrap_or(0.0),
+            mean_or_rate: numeric_mean.or(boolean_rate),
         });
     }
 
@@ -457,21 +457,20 @@ pub async fn experiment_score_breakdown_for_workspace(
     request: ExperimentRunScoreRef,
 ) -> Result<ExperimentScoreBreakdown, ScoringError> {
     let workspace_id = request.workspace_id.as_str();
-    let aggregate_rows = sqlx::query(TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL)
+    let aggregate_query = sqlx::query(TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.run_uid)
         .bind(workspace_id)
-        .fetch_all(pool)
-        .await?;
-    let trial_rows = sqlx::query(TRIAL_SCORES_BY_EXPERIMENT_RUN_SQL)
+        .fetch_all(pool);
+    let trial_query = sqlx::query(TRIAL_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.run_uid)
         .bind(workspace_id)
-        .fetch_all(pool)
-        .await?;
-    let scenario_rows = sqlx::query(SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL)
+        .fetch_all(pool);
+    let scenario_query = sqlx::query(SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.run_uid)
         .bind(workspace_id)
-        .fetch_all(pool)
-        .await?;
+        .fetch_all(pool);
+    let (aggregate_rows, trial_rows, scenario_rows) =
+        tokio::try_join!(aggregate_query, trial_query, scenario_query)?;
 
     Ok(ExperimentScoreBreakdown {
         workspace_id: request.workspace_id,
@@ -517,24 +516,23 @@ pub async fn compare_experiment_score_breakdown_for_workspace(
     pool: &PgPool,
     request: ExperimentRunCompareRef,
 ) -> Result<ExperimentScoreBreakdownCompare, ScoringError> {
-    let rows = sqlx::query(COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL)
+    let scenario_query = sqlx::query(COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.base_run_uid)
         .bind(request.new_run_uid)
         .bind(request.workspace_id.as_str())
-        .fetch_all(pool)
-        .await?;
-    let scenario_deltas = rows
+        .fetch_all(pool);
+    let variant_query = sqlx::query(COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL)
+        .bind(request.base_run_uid)
+        .bind(request.new_run_uid)
+        .bind(request.workspace_id.as_str())
+        .fetch_all(pool);
+    let (scenario_rows, variant_rows) = tokio::try_join!(scenario_query, variant_query)?;
+    let scenario_deltas = scenario_rows
         .iter()
         .map(scenario_delta_from_row)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let rows = sqlx::query(COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL)
-        .bind(request.base_run_uid)
-        .bind(request.new_run_uid)
-        .bind(request.workspace_id.as_str())
-        .fetch_all(pool)
-        .await?;
-    let variant_deltas = rows
+    let variant_deltas = variant_rows
         .iter()
         .map(variant_delta_from_row)
         .collect::<Result<Vec<_>, _>>()?;
@@ -601,7 +599,7 @@ fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, ScoringErr
         name: row.try_get("name")?,
         value_type: row.try_get("value_type")?,
         n: u64::try_from(n).map_err(|_| ScoringError::IntegerTooLarge { field: "n" })?,
-        mean_or_rate: numeric_mean.or(boolean_rate).unwrap_or(0.0),
+        mean_or_rate: numeric_mean.or(boolean_rate),
     })
 }
 
@@ -844,6 +842,40 @@ mod tests {
             COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL.contains("variant_key"),
             "variant deltas must expose the stable variant key"
         );
+    }
+
+    #[test]
+    fn score_summary_rows_preserve_missing_aggregate_values() {
+        // Pins: a score row with no aggregate value is represented as missing, not sentinel 0.0.
+        let row = ScoreSummaryRow {
+            name: "quality".to_string(),
+            value_type: "numeric".to_string(),
+            n: 3,
+            mean_or_rate: None,
+        };
+
+        assert_eq!(row.mean_or_rate, None);
+    }
+
+    #[test]
+    fn score_compare_queries_do_not_coalesce_missing_means_to_zero() {
+        // Pins: one-sided score presence yields a null delta instead of a fabricated magnitude.
+        for sql in [
+            COMPARE_NUMERIC_RUNS_SQL,
+            COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL,
+            COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL,
+        ] {
+            assert!(
+                sql.contains("new.mean - base.mean AS delta"),
+                "compare SQL should let NULL means produce NULL deltas: {sql}"
+            );
+            assert!(
+                !sql.contains("COALESCE(base.mean")
+                    && !sql.contains("COALESCE(new.mean")
+                    && !sql.contains("COALESCE(mean"),
+                "compare SQL must not coalesce missing means to zero: {sql}"
+            );
+        }
     }
 
     #[test]

@@ -1,16 +1,16 @@
 use chrono::Utc;
 use moa_core::{Attachment, MemoryScope, ModelId, SessionId, WorkspaceId};
 use moa_experiments::model::{
-    ExperimentRunKind, ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard,
-    ExperimentSimulatorConfig, ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord,
-    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
+    ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
+    ExperimentTrialStopReason, ExperimentVariant,
 };
 use serde_json::json;
 use uuid::Uuid;
 
 #[test]
 fn agent_loop_target_round_trips_through_public_model_offline() {
-    // Pins: agent-loop experiments preserve prompts, model choice, attachments, and run kind.
+    // Pins: agent-loop experiments preserve prompts, model choice, and attachments.
     let session_id = SessionId::new();
     let target = ExperimentTarget::AgentLoop {
         prompt: "Check whether the answer cites the provided source.".to_string(),
@@ -25,7 +25,6 @@ fn agent_loop_target_round_trips_through_public_model_offline() {
         }],
     };
     let record = record_for_target(
-        ExperimentRunKind::RegressionEval,
         ExperimentTargetKind::AgentLoop,
         target,
         Some(session_id),
@@ -36,7 +35,6 @@ fn agent_loop_target_round_trips_through_public_model_offline() {
     let decoded: ExperimentRunRecord =
         serde_json::from_str(&encoded).expect("agent loop record deserializes");
 
-    assert_eq!(decoded.run_kind, ExperimentRunKind::RegressionEval);
     assert_eq!(decoded.target_kind, ExperimentTargetKind::AgentLoop);
     assert_eq!(decoded.target.kind(), ExperimentTargetKind::AgentLoop);
     assert_eq!(decoded.session_id, Some(session_id));
@@ -46,7 +44,7 @@ fn agent_loop_target_round_trips_through_public_model_offline() {
 
 #[test]
 fn workflow_target_round_trips_through_public_model_offline() {
-    // Pins: workflow experiments preserve workflow refs, inputs, idempotency, and live run kind.
+    // Pins: workflow experiments preserve workflow refs, inputs, and idempotency.
     let workflow_run_uid = Uuid::now_v7();
     let target = ExperimentTarget::Workflow {
         workflow_ref: "workflow://damaged-food-order".to_string(),
@@ -55,7 +53,6 @@ fn workflow_target_round_trips_through_public_model_offline() {
         idempotency_key: Some("experiment-live-workflow-123".to_string()),
     };
     let record = record_for_target(
-        ExperimentRunKind::LiveBehaviorExperiment,
         ExperimentTargetKind::Workflow,
         target,
         None,
@@ -66,7 +63,6 @@ fn workflow_target_round_trips_through_public_model_offline() {
     let decoded: ExperimentRunRecord =
         serde_json::from_value(encoded).expect("workflow record deserializes");
 
-    assert_eq!(decoded.run_kind, ExperimentRunKind::LiveBehaviorExperiment);
     assert_eq!(decoded.target_kind, ExperimentTargetKind::Workflow);
     assert_eq!(decoded.target.kind(), ExperimentTargetKind::Workflow);
     assert_eq!(decoded.session_id, None);
@@ -191,7 +187,6 @@ fn trial_record_round_trips_through_public_model_offline() {
 }
 
 fn record_for_target(
-    run_kind: ExperimentRunKind,
     target_kind: ExperimentTargetKind,
     target: ExperimentTarget,
     session_id: Option<SessionId>,
@@ -205,7 +200,6 @@ fn record_for_target(
         },
         run_uid: Uuid::now_v7(),
         name: "experiment run".to_string(),
-        run_kind,
         target_kind,
         status: ExperimentRunStatus::Accepted,
         target,

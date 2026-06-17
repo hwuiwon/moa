@@ -283,6 +283,53 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+async fn terminal_run_status_cannot_be_overwritten_db() -> Result<()> {
+    // Pins: terminal runs keep their final status, error, and completed_at across late updates.
+    let _guard = DB_TEST_LOCK.lock().await;
+    let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
+    let store = ExperimentStore::new(test_db.store().pool().clone());
+    let scope = workspace_scope("run-terminal-guard");
+    let run = store
+        .insert_run(
+            &scope,
+            new_experiment("run-terminal-guard", None, Vec::new()),
+        )
+        .await?;
+    let completed_at = chrono::Utc::now();
+    let completed = store
+        .update_run_status(
+            &scope,
+            run.run_uid,
+            ExperimentRunStatus::Completed,
+            None,
+            Some(completed_at),
+        )
+        .await?
+        .expect("terminal update should return run");
+
+    let cancelled = store
+        .update_run_status(
+            &scope,
+            run.run_uid,
+            ExperimentRunStatus::Cancelled,
+            Some("late cancel".to_string()),
+            Some(chrono::Utc::now()),
+        )
+        .await?;
+    let loaded = store
+        .load_run(&scope, run.run_uid)
+        .await?
+        .expect("run should still load");
+
+    assert_eq!(cancelled, None);
+    assert_eq!(loaded.status, ExperimentRunStatus::Completed);
+    assert_eq!(loaded.error, completed.error);
+    assert_eq!(loaded.completed_at, completed.completed_at);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
 async fn trial_insert_load_list_round_trip_db() -> Result<()> {
     // Pins: trial rows persist through scoped store paths without introducing a trial event table.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -530,6 +577,23 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
         completed.stop_reason,
         Some(ExperimentTrialStopReason::Success)
     );
+    let reopened = store
+        .update_trial_status(
+            &scope,
+            trial.trial_uid,
+            ExperimentTrialStatus::Running,
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let loaded = store
+        .load_trial(&scope, trial.trial_uid)
+        .await?
+        .expect("trial should still load");
+    assert_eq!(reopened, None);
+    assert_eq!(loaded.status, ExperimentTrialStatus::Completed);
+    assert_eq!(loaded.stop_reason, Some(ExperimentTrialStopReason::Success));
     Ok(())
 }
 

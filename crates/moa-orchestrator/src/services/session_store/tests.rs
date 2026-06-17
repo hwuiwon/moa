@@ -62,8 +62,8 @@ async fn install_authz_outbox(service: &SessionStoreImpl) -> Result<()> {
 }
 
 #[tokio::test]
-async fn create_session_for_identity_db_enqueues_owner_workspace_and_participant() -> Result<()> {
-    // Pins: authorized session creation enqueues every tuple the first turn needs.
+async fn create_session_for_identity_db_enqueues_owner_and_workspace_tuples() -> Result<()> {
+    // Pins: authorized session creation relies on session#participant being derived from owner/workspace.
     let (service, database_url, schema_name) = test_service().await?;
     install_authz_outbox(&service).await?;
     let identity = Identity {
@@ -98,12 +98,6 @@ async fn create_session_for_identity_db_enqueues_owner_workspace_and_participant
             AuthzOutboxTuple {
                 tuple_user: format!("user:{}", identity.id),
                 tuple_relation: "owner".to_string(),
-                tuple_object: session_object.clone(),
-                tenant_id: Some(identity.tenant_id),
-            },
-            AuthzOutboxTuple {
-                tuple_user: format!("user:{}", identity.id),
-                tuple_relation: "participant".to_string(),
                 tuple_object: session_object.clone(),
                 tenant_id: Some(identity.tenant_id),
             },

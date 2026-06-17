@@ -57,11 +57,9 @@ pub(super) async fn persist_trial_status_by_key(
     ctx.run(|| async move {
         let store = ExperimentStore::new(pool.clone());
         if let Some(trial) = store
-            .list_trials(&scope, run_uid, None, 10_000)
+            .load_trial_by_key(&scope, run_uid, &trial_key)
             .await
             .map_err(moa_error_to_handler_error)?
-            .into_iter()
-            .find(|trial| trial.trial_key == trial_key)
         {
             update_trial_status(pool, scope, trial.trial_uid, status, stop_reason, error).await?;
         }
@@ -106,6 +104,7 @@ pub(super) async fn increment_trial_turn(
             .await
             .map_err(moa_error_to_handler_error)?
             .ok_or_else(|| trial_not_found(trial_uid))?;
+        record_simulation_turn("agent_loop");
         Ok::<_, HandlerError>(Json::from(()))
     })
     .name("experiment_trial_increment_turn")
@@ -228,18 +227,14 @@ pub(super) fn status_response_from_record(
 pub(super) fn trial_status_allows_child_start(status: ExperimentTrialStatus) -> bool {
     matches!(
         status,
-        ExperimentTrialStatus::Accepted | ExperimentTrialStatus::Dispatched
+        ExperimentTrialStatus::Accepted
+            | ExperimentTrialStatus::Dispatched
+            | ExperimentTrialStatus::WaitingApproval
     )
 }
 
 fn completed_at_for_status(status: ExperimentTrialStatus) -> Option<chrono::DateTime<Utc>> {
-    if matches!(
-        status,
-        ExperimentTrialStatus::Completed
-            | ExperimentTrialStatus::Failed
-            | ExperimentTrialStatus::Cancelled
-            | ExperimentTrialStatus::WaitingApproval
-    ) {
+    if status.is_terminal() {
         Some(Utc::now())
     } else {
         None

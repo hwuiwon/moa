@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3.workspace = true
 chrono.workspace = true
 moa-artifacts.workspace = true
 moa-core.workspace = true

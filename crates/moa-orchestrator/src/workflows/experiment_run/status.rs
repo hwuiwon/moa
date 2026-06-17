@@ -20,17 +20,8 @@ pub(super) async fn status_response(
         let aggregate =
             aggregate_plan_status_from_store(pool.clone(), scope.clone(), run.run_uid).await?;
         if aggregate.status != run.status || aggregate.error != run.error {
-            run = store
-                .update_run_status(
-                    &scope,
-                    run.run_uid,
-                    aggregate.status,
-                    aggregate.error,
-                    completed_at_for_status(aggregate.status),
-                )
-                .await
-                .map_err(moa_error_to_handler_error)?
-                .ok_or_else(|| run_not_found(request.run_uid))?;
+            run.status = aggregate.status;
+            run.error = aggregate.error;
         }
         return status_response_from_record(workspace_id, run);
     }
@@ -42,17 +33,7 @@ pub(super) async fn status_response(
     if let Some(status) = derived_session_status(run.status, run.session_id).await?
         && status != run.status
     {
-        run = store
-            .update_run_status(
-                &scope,
-                run.run_uid,
-                status,
-                None,
-                completed_at_for_status(status),
-            )
-            .await
-            .map_err(moa_error_to_handler_error)?
-            .ok_or_else(|| run_not_found(request.run_uid))?;
+        run.status = status;
     }
 
     status_response_from_record(workspace_id, run)
@@ -77,18 +58,9 @@ async fn linked_workflow_status_response(
     if let Some(status) = experiment_status_from_artifact_status(&workflow_run.status)
         && status != run.status
     {
-        let run_uid = run.run_uid;
-        run = ExperimentStore::new(pool)
-            .update_run_status(
-                &scope,
-                run_uid,
-                status,
-                workflow_run.error.clone(),
-                workflow_run.completed_at,
-            )
-            .await
-            .map_err(moa_error_to_handler_error)?
-            .ok_or_else(|| run_not_found(run_uid))?;
+        run.status = status;
+        run.error = workflow_run.error.clone();
+        run.completed_at = workflow_run.completed_at;
     }
 
     let mut response = status_response_from_record_with_status(

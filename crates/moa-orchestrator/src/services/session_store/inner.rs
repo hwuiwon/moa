@@ -52,22 +52,6 @@ pub(crate) async fn create_session_for_identity(
     .await
     .map_err(|error| TerminalError::new(format!("authz outbox parent tuple: {error}")))?;
 
-    let participant_tuple = TupleKey::new(
-        owner_user_type,
-        owner_id,
-        Relation::Participant,
-        ObjectType::Session,
-        session_id.0,
-    );
-    enqueue(
-        &mut *transaction,
-        TupleOp::Write,
-        &participant_tuple,
-        Some(tenant_id),
-    )
-    .await
-    .map_err(|error| TerminalError::new(format!("authz outbox participant tuple: {error}")))?;
-
     transaction
         .commit()
         .await

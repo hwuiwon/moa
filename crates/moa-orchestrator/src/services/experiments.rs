@@ -255,14 +255,15 @@ impl Experiments for ExperimentsImpl {
     ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError> {
         annotate_restate_handler_span("Experiments", "propose_improvements");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        let tenant_id = identity.tenant_id.to_string();
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool.clone();
         let session_store = runtime.session_store.clone();
 
         Ok(ctx
             .run(|| async move {
-                propose_improvements_inner(pool, session_store, request)
+                propose_improvements_inner(pool, session_store, request, tenant_id)
                     .await
                     .map(Json::from)
             })
@@ -554,7 +555,13 @@ async fn trial_status_inner(
         .ok_or_else(|| trial_not_found(request.trial_uid))?;
     let summary = trial_summary_from_record(request.workspace_id, &trial);
 
-    Ok(ExperimentTrialStatusResponse {
+    Ok(trial_status_response_from_summary(summary))
+}
+
+fn trial_status_response_from_summary(
+    summary: ExperimentTrialSummary,
+) -> ExperimentTrialStatusResponse {
+    ExperimentTrialStatusResponse {
         workspace_id: summary.workspace_id,
         run_uid: summary.run_uid,
         trial_uid: summary.trial_uid,
@@ -570,7 +577,7 @@ async fn trial_status_inner(
         stop_reason: summary.stop_reason,
         error: summary.error,
         turn_count: summary.turn_count,
-    })
+    }
 }
 
 async fn cancel_inner(
@@ -583,6 +590,16 @@ async fn cancel_inner(
         .filter(|reason| !reason.trim().is_empty())
         .unwrap_or_else(|| "cancelled".to_string());
     let store = ExperimentStore::new(pool);
+    let existing = load_required_run(&store, &scope, request.run_uid).await?;
+    if existing.status.is_terminal() {
+        return Ok(ExperimentCancelResponse {
+            workspace_id: request.workspace_id,
+            run_uid: existing.run_uid,
+            cancelled: false,
+            status: existing.status.as_str().to_string(),
+            reason,
+        });
+    }
     let run = store
         .update_run_status(
             &scope,
@@ -613,6 +630,7 @@ async fn propose_improvements_inner(
     pool: sqlx::PgPool,
     session_store: Arc<PostgresSessionStore>,
     request: ExperimentProposeImprovementsRequest,
+    tenant_id: String,
 ) -> Result<ExperimentProposeImprovementsResponse, HandlerError> {
     let scope = workspace_scope(request.workspace_id.clone());
     let store = ExperimentStore::new(pool.clone());
@@ -660,6 +678,7 @@ async fn propose_improvements_inner(
 
     let draft_artifact_revision_uids = Vec::new();
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
+        tenant_id,
         workspace_id: request.workspace_id.clone(),
         run: &run,
         completed_trials: &completed_trials,
@@ -937,6 +956,8 @@ fn require_trial_score_rows(
 
 /// Evidence used to build one experiment-derived learning candidate.
 pub struct ExperimentLearningProposalEvidence<'a> {
+    /// Tenant that owns the candidate review lifecycle.
+    pub tenant_id: String,
     /// Workspace that owns the experiment run and candidate.
     pub workspace_id: WorkspaceId,
     /// Completed experiment run that produced proposal evidence.
@@ -975,7 +996,7 @@ pub fn build_experiment_learning_candidate(
 
     LearningCandidate {
         id: candidate_id,
-        tenant_id: evidence.workspace_id.to_string(),
+        tenant_id: evidence.tenant_id,
         workspace_id: evidence.workspace_id,
         user_id: None,
         candidate_type: LearningCandidateType::Prompt,
@@ -1010,6 +1031,7 @@ fn experiment_learning_candidate_payload(
     serde_json::json!({
         "kind": "experiment_learning_proposal",
         "source": "Experiments/propose_improvements",
+        "tenant_id": evidence.tenant_id,
         "workspace_id": evidence.workspace_id,
         "experiment": {
             "run_uid": run.run_uid,

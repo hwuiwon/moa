@@ -25,9 +25,18 @@ pub enum PlanExpansionError {
     /// A plan has no target variants.
     #[error("experiment plan must include at least one target variant")]
     MissingTargetVariant,
+    /// A plan has no executable trial matrix.
+    #[error("experiment plan must include at least one {dimension}")]
+    MissingPlanDimension {
+        /// Empty matrix dimension.
+        dimension: &'static str,
+    },
     /// Agent-loop variants require a target model.
     #[error("agent-loop experiment plans require target_model")]
     MissingTargetModel,
+    /// A simulator temperature value cannot be represented safely.
+    #[error("simulator_temperature must be a finite f32-compatible number")]
+    InvalidSimulatorTemperature,
     /// Workflow variants require a workflow reference.
     #[error("workflow target variants require workflow_ref")]
     MissingWorkflowRef,
@@ -126,6 +135,11 @@ pub fn expand_plan_trials(
     plan_revision_uid: Uuid,
     definition: &ExperimentPlanDefinition,
 ) -> Result<Vec<ExpandedPlanTrial>, PlanExpansionError> {
+    require_plan_dimension("scenario", !definition.simulation.scenarios.is_empty())?;
+    require_plan_dimension("persona", !definition.simulation.personas.is_empty())?;
+    require_plan_dimension("profile", !definition.simulation.profiles.is_empty())?;
+    require_plan_dimension("target variant", !definition.target_variants.is_empty())?;
+
     let mut trials = Vec::new();
     for (scenario_index, scenario) in definition.simulation.scenarios.iter().enumerate() {
         for (persona_index, persona) in definition.simulation.personas.iter().enumerate() {
@@ -166,18 +180,14 @@ pub fn expand_plan_trials(
                                 artifact_revision_uids: Vec::new(),
                                 simulator: ExperimentSimulatorConfig {
                                     model: ModelId::new(definition.simulator_model.clone()),
-                                    temperature: variant
-                                        .config
-                                        .get("simulator_temperature")
-                                        .and_then(Value::as_f64)
-                                        .map(|value| value as f32),
+                                    temperature: simulator_temperature(variant)?,
                                     max_turns: DEFAULT_PLAN_TRIAL_MAX_TURNS,
                                     token_budget: definition.budget.max_trial_tokens,
                                     metadata: json!({}),
                                 },
                                 target_model: definition.target_model.as_ref().map(ModelId::new),
                                 seed: Some(format!("{trial_key}:{plan_revision_uid}")),
-                                score_run_id: Uuid::now_v7(),
+                                score_run_id: deterministic_score_run_id(run_uid, &trial_key),
                             },
                             target: target.clone(),
                             variant: variant_payload.clone(),
@@ -188,6 +198,46 @@ pub fn expand_plan_trials(
         }
     }
     Ok(trials)
+}
+
+fn require_plan_dimension(
+    dimension: &'static str,
+    present: bool,
+) -> Result<(), PlanExpansionError> {
+    if present {
+        Ok(())
+    } else {
+        Err(PlanExpansionError::MissingPlanDimension { dimension })
+    }
+}
+
+fn simulator_temperature(
+    variant: &ExperimentTargetVariant,
+) -> Result<Option<f32>, PlanExpansionError> {
+    let Some(value) = variant.config.get("simulator_temperature") else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_f64() else {
+        return Ok(None);
+    };
+    if value.is_finite() && value <= f64::from(f32::MAX) && value >= f64::from(f32::MIN) {
+        Ok(Some(value as f32))
+    } else {
+        Err(PlanExpansionError::InvalidSimulatorTemperature)
+    }
+}
+
+fn deterministic_score_run_id(run_uid: Uuid, trial_key: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"moa:experiment-trial-score-run:v1");
+    hasher.update(run_uid.as_bytes());
+    hasher.update(trial_key.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 /// Selects embedded simulation blocks from a pinned plan for one stored trial row.
@@ -413,6 +463,46 @@ mod tests {
         }));
         assert_eq!(trials[0].trial.scenario_id.as_deref(), Some("damaged-food"));
         assert_eq!(trials[0].trial.data_bundle_ids, vec!["orders".to_string()]);
+    }
+
+    #[test]
+    fn expand_plan_trials_derives_stable_score_run_ids_offline() {
+        // Pins: plan re-expansion cannot mint different score-run IDs for the same trial key.
+        let plan_revision_uid = fixture_uuid(1);
+        let run_uid = fixture_uuid(2);
+        let definition = fixture_plan();
+
+        let first = expand_plan_trials(run_uid, plan_revision_uid, &definition)
+            .expect("valid plan matrix expands");
+        let second = expand_plan_trials(run_uid, plan_revision_uid, &definition)
+            .expect("valid plan matrix expands again");
+
+        let first_ids = first
+            .iter()
+            .map(|trial| (trial.trial.trial_key.clone(), trial.trial.score_run_id))
+            .collect::<Vec<_>>();
+        let second_ids = second
+            .iter()
+            .map(|trial| (trial.trial.trial_key.clone(), trial.trial.score_run_id))
+            .collect::<Vec<_>>();
+        assert_eq!(first_ids, second_ids);
+    }
+
+    #[test]
+    fn expand_plan_trials_rejects_empty_matrix_dimensions_offline() {
+        // Pins: empty plan dimensions fail before the workflow enters the polling loop.
+        let mut definition = fixture_plan();
+        definition.simulation.scenarios.clear();
+
+        let error = expand_plan_trials(fixture_uuid(2), fixture_uuid(1), &definition)
+            .expect_err("empty scenarios should fail expansion");
+
+        assert!(matches!(
+            error,
+            PlanExpansionError::MissingPlanDimension {
+                dimension: "scenario"
+            }
+        ));
     }
 
     #[test]

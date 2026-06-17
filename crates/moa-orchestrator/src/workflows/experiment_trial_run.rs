@@ -9,9 +9,9 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
-    CompletionRequest, ContextMessage, Event, EventRange, EventRecord, MemoryScope, MoaError,
-    ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore, UserId, WorkspaceId,
-    current_trace_id, record_experiment_approval_wait, record_experiment_trial,
+    CompletionRequest, ContextMessage, Event, EventRange, EventRecord, EventType, MemoryScope,
+    MoaError, ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore, UserId,
+    WorkspaceId, current_trace_id, record_experiment_approval_wait, record_experiment_trial,
     record_experiment_trial_duration, record_simulation_cost_cents, record_simulation_tokens,
     record_simulation_turn,
 };
@@ -213,11 +213,6 @@ async fn run_trial(
     ctx.set(K_STATUS, Json(trial.status));
     annotate_trial_record_span(&trial);
     attach_current_trial_trace(ctx, request.workspace_id.clone(), trial.trial_uid).await?;
-    record_experiment_trial(
-        trial.status.as_str(),
-        trial.stop_reason.map(ExperimentTrialStopReason::as_str),
-        trial.target_kind.as_str(),
-    );
     if !trial_status_allows_child_start(trial.status) {
         return status_response_from_record(request.workspace_id, trial);
     }

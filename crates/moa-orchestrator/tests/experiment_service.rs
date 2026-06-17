@@ -17,9 +17,9 @@ use moa_core::wire::{
 };
 use moa_core::{MemoryScope, ModelId, SessionId, WorkspaceId};
 use moa_experiments::model::{
-    ExperimentRunKind, ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard,
-    ExperimentSimulatorConfig, ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord,
-    ExperimentTrialStatus, ExperimentVariant,
+    ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
+    ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
+    ExperimentVariant,
 };
 use moa_orchestrator::services::experiments::{
     ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
@@ -220,21 +220,21 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
             name: "quality".to_string(),
             base_mean: Some(0.7),
             new_mean: Some(0.8),
-            delta: 0.1,
+            delta: Some(0.1),
         }],
         scenario_deltas: vec![ExperimentScenarioScoreDeltaRow {
             scenario_id: Some(fixture_uuid(7).to_string()),
             name: "quality".to_string(),
             base_mean: Some(0.7),
             new_mean: Some(0.8),
-            delta: 0.1,
+            delta: Some(0.1),
         }],
         variant_deltas: vec![ExperimentVariantScoreDeltaRow {
             variant_key: "candidate".to_string(),
             name: "quality".to_string(),
             base_mean: Some(0.7),
             new_mean: Some(0.8),
-            delta: 0.1,
+            delta: Some(0.1),
         }],
     });
 }
@@ -383,21 +383,21 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
             name: "quality".to_string(),
             base_mean: Some(0.7),
             new_mean: Some(0.9),
-            delta: 0.2,
+            delta: Some(0.2),
         }],
         scenario_deltas: vec![ExperimentScenarioScoreDeltaRow {
             scenario_id: Some(scenario_id.to_string()),
             name: "quality".to_string(),
             base_mean: Some(0.7),
             new_mean: Some(0.9),
-            delta: 0.2,
+            delta: Some(0.2),
         }],
         variant_deltas: vec![ExperimentVariantScoreDeltaRow {
             variant_key: "candidate".to_string(),
             name: "quality".to_string(),
             base_mean: Some(0.7),
             new_mean: Some(0.9),
-            delta: 0.2,
+            delta: Some(0.2),
         }],
     };
 
@@ -483,7 +483,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
             name: "quality".to_string(),
             value_type: "numeric".to_string(),
             n: 1,
-            mean_or_rate: 0.92,
+            mean_or_rate: Some(0.92),
         }],
     };
     let trial_score_summary = moa_scoring::TrialScoreSummary {
@@ -500,6 +500,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     };
 
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
+        tenant_id: "tenant-a".to_string(),
         workspace_id,
         run: &run,
         completed_trials: &trials,
@@ -514,6 +515,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     });
 
     assert_eq!(candidate.status.as_str(), "proposed");
+    assert_eq!(candidate.tenant_id, "tenant-a");
     assert_eq!(candidate.candidate_type.as_str(), "prompt");
     assert_eq!(
         candidate.promotion_requirements,
@@ -527,6 +529,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
         candidate.payload["evidence_refs"]["experiment_run_uid"],
         run.run_uid.to_string()
     );
+    assert_eq!(candidate.payload["tenant_id"], "tenant-a");
     assert_eq!(
         candidate.payload["evidence_refs"]["run_score_run_id"],
         run.score_run_id.to_string()
@@ -1148,7 +1151,7 @@ fn score_row(
         name: name.into(),
         value_type: value_type.into(),
         n,
-        mean_or_rate,
+        mean_or_rate: Some(mean_or_rate),
     }
 }
 
@@ -1159,7 +1162,6 @@ fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
         },
         run_uid: fixture_uuid(1),
         name: "proposal fixture".to_string(),
-        run_kind: ExperimentRunKind::LiveBehaviorExperiment,
         target_kind: ExperimentTargetKind::AgentLoop,
         status: ExperimentRunStatus::Completed,
         target: ExperimentTarget::AgentLoop {
