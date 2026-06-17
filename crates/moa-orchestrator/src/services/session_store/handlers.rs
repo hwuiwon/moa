@@ -4,8 +4,14 @@ use super::inner::create_session_for_identity;
 use super::*;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
-use moa_authz::require_authz_with_delegation;
+use moa_authz::{
+    AuthzCheckError, OutboxPoller, PollerConfig, fga_subject, require_authz_with_delegation,
+};
 use moa_authz_schema::{ObjectType, Relation};
+use std::time::Duration;
+
+const SESSION_AUTHZ_VISIBILITY_ATTEMPTS: usize = 6;
+const SESSION_AUTHZ_VISIBILITY_DELAY: Duration = Duration::from_millis(25);
 
 impl RestateSessionStore for SessionStoreImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -30,15 +36,18 @@ impl RestateSessionStore for SessionStoreImpl {
         .await
         .map_err(translate_authz_error)?;
 
+        let create_identity = identity.clone();
         let session_id = ctx
             .run(|| async move {
-                create_session_for_identity(store.as_ref(), meta, identity)
+                create_session_for_identity(store.as_ref(), meta, create_identity)
                     .await
                     .map(Json::from)
             })
             .name("create_session")
             .await?
             .into_inner();
+        ensure_session_authz_visible(&ctx, self.store.pool().clone(), fga, &identity, session_id)
+            .await?;
         ctx.object_client::<SessionClient>(session_id.to_string())
             .set_meta(Json::from(vo_meta))
             .call()
@@ -565,4 +574,54 @@ async fn authorize_session_read(
     )
     .await
     .map_err(translate_authz_error)
+}
+
+async fn ensure_session_authz_visible(
+    ctx: &Context<'_>,
+    pool: sqlx::PgPool,
+    fga: moa_authz::FgaClient,
+    identity: &moa_core::traits::Identity,
+    session_id: SessionId,
+) -> Result<(), HandlerError> {
+    let subject = fga_subject(identity);
+    let object = format!("{}:{session_id}", ObjectType::Session);
+    for attempt in 0..SESSION_AUTHZ_VISIBILITY_ATTEMPTS {
+        let visible = fga
+            .check(&subject, &Relation::Participant.to_string(), &object)
+            .await
+            .map_err(|error| translate_authz_error(AuthzCheckError::Engine(error)))?;
+        if visible {
+            return Ok(());
+        }
+
+        let poller = OutboxPoller::new(
+            pool.clone(),
+            fga.clone(),
+            PollerConfig {
+                batch_size: 128,
+                ..PollerConfig::default()
+            },
+        );
+        ctx.run(move || async move {
+            poller.tick().await.map_err(|error| {
+                HandlerError::from(TerminalError::new(format!(
+                    "authz outbox visibility drain: {error}"
+                )))
+            })?;
+            Ok::<(), HandlerError>(())
+        })
+        .name(format!("create_session_authz_visibility_{attempt}"))
+        .await?;
+
+        if attempt + 1 < SESSION_AUTHZ_VISIBILITY_ATTEMPTS {
+            tokio::time::sleep(SESSION_AUTHZ_VISIBILITY_DELAY).await;
+        }
+    }
+
+    Err(translate_authz_error(AuthzCheckError::Forbidden {
+        subject,
+        object_type: ObjectType::Session,
+        object_id: session_id.to_string(),
+        relation: Relation::Participant,
+    }))
 }
