@@ -6,13 +6,16 @@ use moa_auth_providers_auth0::Auth0AuthProvider;
 use moa_core::traits::{AuthError, AuthProvider, Credential, IdentityType};
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
+mod support;
+
+#[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and an Auth0 tenant"]
-async fn auth0_authenticate_valid_token_returns_identity(pool: sqlx::PgPool) {
+async fn auth0_authenticate_valid_token_returns_identity() {
     // Pins: a real Auth0 access token with MOA namespaced claims resolves to a MOA user identity.
     let Some(env) = live_valid_env() else {
         return;
     };
+    let pool = support::migrated_auth0_pool().await;
     let provider = Auth0AuthProvider::new(&env.domain, &env.audience, Arc::new(pool));
     let identity = provider
         .authenticate(&Credential::BearerJwt(env.valid_token))
@@ -23,13 +26,14 @@ async fn auth0_authenticate_valid_token_returns_identity(pool: sqlx::PgPool) {
     assert_eq!(identity.api_key_id, None);
 }
 
-#[sqlx::test(migrations = "./migrations")]
+#[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and an expired Auth0 token"]
-async fn auth0_expired_token_returns_expired(pool: sqlx::PgPool) {
+async fn auth0_expired_token_returns_expired() {
     // Pins: a real expired Auth0 token maps to AuthError::Expired rather than generic rejection.
     let Some(env) = live_config() else {
         return;
     };
+    let pool = support::migrated_auth0_pool().await;
     let expired_token = required_env("MOA_TEST_AUTH0_EXPIRED_TOKEN");
     let provider = Auth0AuthProvider::new(&env.domain, &env.audience, Arc::new(pool));
     let error = provider
@@ -39,13 +43,14 @@ async fn auth0_expired_token_returns_expired(pool: sqlx::PgPool) {
     assert!(matches!(error, AuthError::Expired), "got {error:?}");
 }
 
-#[sqlx::test(migrations = "./migrations")]
+#[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and a wrong-audience Auth0 token"]
-async fn auth0_wrong_audience_returns_rejected(pool: sqlx::PgPool) {
+async fn auth0_wrong_audience_returns_rejected() {
     // Pins: a real Auth0 token for a different audience maps to AuthError::Rejected.
     let Some(env) = live_config() else {
         return;
     };
+    let pool = support::migrated_auth0_pool().await;
     let wrong_audience_token = required_env("MOA_TEST_AUTH0_WRONG_AUDIENCE_TOKEN");
     let provider = Auth0AuthProvider::new(&env.domain, &env.audience, Arc::new(pool));
     let error = provider

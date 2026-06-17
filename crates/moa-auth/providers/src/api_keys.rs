@@ -109,9 +109,6 @@ pub enum ApiKeyError {
     /// Database query failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
-    /// SQLx migration failed.
-    #[error("migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
     /// Key was unknown or already revoked.
     #[error("not found or revoked")]
     NotFoundOrRevoked,
@@ -382,10 +379,20 @@ async fn validate_inner(pool: &sqlx::PgPool, presented: &str) -> Result<Resolved
         return Err(ApiKeyError::NotFoundOrRevoked);
     }
 
-    if let Err(error) = sqlx::query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await
+    if let Err(error) = sqlx::query(
+        r#"
+        UPDATE api_keys
+        SET last_used_at = NOW()
+        WHERE id = $1
+          AND (
+              last_used_at IS NULL
+              OR last_used_at < NOW() - INTERVAL '5 minutes'
+          )
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await
     {
         tracing::warn!(error = %error, key_id = %id, "failed to update api key last_used_at");
     }

@@ -58,12 +58,6 @@ impl AuthProvider for LocalAuthProvider {
                     "api key store unavailable".to_string(),
                 ))
             }
-            Err(ApiKeyError::Migration(error)) => {
-                tracing::error!(error = %error, "api key migration error during authentication");
-                Err(AuthError::Unavailable(
-                    "api key store unavailable".to_string(),
-                ))
-            }
             Err(ApiKeyError::Hash(error)) => Err(AuthError::Internal(error)),
         }
     }

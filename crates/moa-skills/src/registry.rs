@@ -273,9 +273,14 @@ impl SkillRegistry {
     ) -> Result<Vec<StoredSkillPackage>> {
         let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
         let skills = load_visible_skills(conn.as_mut(), scope).await?;
+        let skill_uids = skills
+            .iter()
+            .map(|skill| skill.skill_uid)
+            .collect::<Vec<_>>();
+        let mut files_by_skill = load_skill_files_for_skills(conn.as_mut(), &skill_uids).await?;
         let mut packages = Vec::with_capacity(skills.len());
         for skill in skills {
-            let files = load_skill_files(conn.as_mut(), skill.skill_uid).await?;
+            let files = files_by_skill.remove(&skill.skill_uid).unwrap_or_default();
             packages.push(StoredSkillPackage { skill, files });
         }
         conn.commit().await?;
@@ -464,6 +469,38 @@ async fn load_skill_files(
     rows.into_iter()
         .map(|row| skill_file_from_row(&row))
         .collect()
+}
+
+async fn load_skill_files_for_skills(
+    conn: &mut PgConnection,
+    skill_uids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<ValidatedSkillPackageFile>>> {
+    if skill_uids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT skill_uid, path, content, content_sha256, content_type, executable, file_size_bytes
+        FROM moa.skill_file
+        WHERE skill_uid = ANY($1)
+        ORDER BY skill_uid ASC, path ASC
+        "#,
+    )
+    .bind(skill_uids)
+    .fetch_all(conn)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    let mut files_by_skill = HashMap::<Uuid, Vec<ValidatedSkillPackageFile>>::new();
+    for row in rows {
+        let skill_uid = row.try_get("skill_uid").map_err(map_sqlx_error)?;
+        files_by_skill
+            .entry(skill_uid)
+            .or_default()
+            .push(skill_file_from_row(&row)?);
+    }
+    Ok(files_by_skill)
 }
 
 async fn upsert_by_name(conn: &mut PgConnection, skill: &ValidatedNewSkill) -> Result<Uuid> {

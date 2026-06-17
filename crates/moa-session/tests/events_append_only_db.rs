@@ -227,10 +227,10 @@ async fn migration_applied_idempotently_does_not_break_invariant() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    moa_session::schema::migrate(test_db.store().pool(), Some(test_db.schema_name()))
+    moa_migrations::run_session_schema(test_db.store().pool(), test_db.schema_name())
         .await
         .expect("first explicit migration replay");
-    moa_session::schema::migrate(test_db.store().pool(), Some(test_db.schema_name()))
+    moa_migrations::run_session_schema(test_db.store().pool(), test_db.schema_name())
         .await
         .expect("second explicit migration replay");
 

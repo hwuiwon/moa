@@ -8,7 +8,6 @@ pub mod classes;
 pub mod emit;
 pub mod enums;
 pub mod jcs;
-pub mod schema;
 pub mod signing;
 
 pub use emit::{

@@ -1,12 +1,11 @@
 //! Postgres-backed session storage for MOA.
 //!
-//! This crate embeds the canonical Postgres migration set used for local and
-//! test session storage.
+//! Database migrations live in `moa-migrations`; this crate owns runtime
+//! session-store queries.
 
 pub mod blob;
 pub mod neon;
 pub mod queries;
-pub mod schema;
 pub mod store;
 pub mod testing;
 

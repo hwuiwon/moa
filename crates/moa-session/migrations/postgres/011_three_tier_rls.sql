@@ -1,7 +1,0 @@
-SELECT moa.apply_three_tier_rls('sessions'::REGCLASS);
-SELECT moa.apply_three_tier_rls('events'::REGCLASS);
-SELECT moa.apply_three_tier_rls('approval_rules'::REGCLASS);
-SELECT moa.apply_three_tier_rls('pending_signals'::REGCLASS);
-SELECT moa.apply_three_tier_rls('context_snapshots'::REGCLASS);
-SELECT moa.apply_three_tier_rls('task_segments'::REGCLASS);
-SELECT moa.apply_three_tier_rls('learning_log'::REGCLASS);

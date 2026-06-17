@@ -14,6 +14,8 @@ use thiserror::Error;
 use tokio::time::interval;
 use uuid::Uuid;
 
+const GROUP_SYNC_BATCH_SIZE: i64 = 1000;
+
 /// Reads group membership names for one external identity provider subject.
 #[async_trait]
 pub trait IdpGroupReader: Send + Sync {
@@ -65,50 +67,74 @@ impl OidcGroupSync {
     }
 
     async fn sync_once(&self) -> Result<(), GroupSyncError> {
-        let users: Vec<(Uuid, Uuid, String)> =
-            sqlx::query_as("SELECT user_id, tenant_id, sub FROM auth0_user_map LIMIT 1000")
-                .fetch_all(&*self.pool)
-                .await?;
+        let workspace_tenant_column = workspace_tenant_column(&self.pool).await?;
+        if workspace_tenant_column == WorkspaceTenantColumn::Missing {
+            tracing::warn!(
+                "cannot validate OIDC workspace groups because workspaces.tenant_id is absent"
+            );
+        }
 
-        for (user_id, tenant_id, sub) in users {
-            let groups = match self.reader.groups_for(&sub).await {
-                Ok(groups) => groups,
-                Err(error) => {
-                    tracing::warn!(sub = %sub, error = %error, "groups_for failed; skipping");
-                    continue;
-                }
-            };
-            let mut desired = Vec::new();
-            for group in &groups {
-                match validate_group_for_user(&self.pool, group, tenant_id).await {
-                    Ok(Some(tuple)) => desired.push(tuple),
-                    Ok(None) => {
-                        tracing::debug!(group = %group, user_id = %user_id, "discarded unmappable OIDC group");
-                    }
+        let mut cursor = None;
+        loop {
+            let users = auth0_user_batch(&self.pool, cursor.as_ref()).await?;
+            if users.is_empty() {
+                break;
+            }
+
+            for (user_id, tenant_id, sub) in &users {
+                let groups = match self.reader.groups_for(sub).await {
+                    Ok(groups) => groups,
                     Err(error) => {
-                        tracing::warn!(
-                            group = %group,
-                            user_id = %user_id,
-                            error = %error,
-                            "failed to validate OIDC group; skipping"
-                        );
+                        tracing::warn!(sub = %sub, error = %error, "groups_for failed; skipping");
+                        continue;
+                    }
+                };
+                let mut desired = Vec::new();
+                for group in &groups {
+                    match validate_group_for_user(
+                        &self.pool,
+                        group,
+                        *tenant_id,
+                        workspace_tenant_column,
+                    )
+                    .await
+                    {
+                        Ok(Some(tuple)) => desired.push(tuple),
+                        Ok(None) => {
+                            tracing::debug!(group = %group, user_id = %user_id, "discarded unmappable OIDC group");
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                group = %group,
+                                user_id = %user_id,
+                                error = %error,
+                                "failed to validate OIDC group; skipping"
+                            );
+                        }
                     }
                 }
+
+                let mut tx = self.pool.begin().await?;
+                for tuple in &desired {
+                    enqueue_raw(
+                        &mut *tx,
+                        TupleOp::Write,
+                        &format!("user:{user_id}"),
+                        &tuple.relation,
+                        &format!("{}:{}", tuple.object_type, tuple.object_id),
+                        Some(*tenant_id),
+                    )
+                    .await?;
+                }
+                tx.commit().await?;
             }
 
-            let mut tx = self.pool.begin().await?;
-            for tuple in &desired {
-                enqueue_raw(
-                    &mut *tx,
-                    TupleOp::Write,
-                    &format!("user:{user_id}"),
-                    &tuple.relation,
-                    &format!("{}:{}", tuple.object_type, tuple.object_id),
-                    Some(tenant_id),
-                )
-                .await?;
+            cursor = users
+                .last()
+                .map(|(_, tenant_id, sub)| (sub.clone(), *tenant_id));
+            if users.len() < GROUP_SYNC_BATCH_SIZE as usize {
+                break;
             }
-            tx.commit().await?;
         }
 
         Ok(())
@@ -136,6 +162,48 @@ struct DesiredTuple {
     relation: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceTenantColumn {
+    Missing,
+    Text,
+    Uuid,
+}
+
+async fn auth0_user_batch(
+    pool: &PgPool,
+    cursor: Option<&(String, Uuid)>,
+) -> Result<Vec<(Uuid, Uuid, String)>, GroupSyncError> {
+    match cursor {
+        Some((last_sub, last_tenant_id)) => sqlx::query_as(
+            r#"
+            SELECT user_id, tenant_id, sub
+            FROM auth0_user_map
+            WHERE (sub, tenant_id) > ($1, $2)
+            ORDER BY sub ASC, tenant_id ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(last_sub)
+        .bind(last_tenant_id)
+        .bind(GROUP_SYNC_BATCH_SIZE)
+        .fetch_all(pool)
+        .await
+        .map_err(GroupSyncError::from),
+        None => sqlx::query_as(
+            r#"
+            SELECT user_id, tenant_id, sub
+            FROM auth0_user_map
+            ORDER BY sub ASC, tenant_id ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(GROUP_SYNC_BATCH_SIZE)
+        .fetch_all(pool)
+        .await
+        .map_err(GroupSyncError::from),
+    }
+}
+
 fn parse_group(group: &str) -> Option<DesiredTuple> {
     let parts: Vec<&str> = group.split(':').collect();
     match parts.as_slice() {
@@ -159,12 +227,19 @@ async fn validate_group_for_user(
     pool: &PgPool,
     group: &str,
     user_tenant_id: Uuid,
+    workspace_tenant_column: WorkspaceTenantColumn,
 ) -> Result<Option<DesiredTuple>, GroupSyncError> {
     let Some(tuple) = prevalidate_group_for_user(group, user_tenant_id) else {
         return Ok(None);
     };
     if tuple.object_type == "workspace"
-        && !workspace_belongs_to_tenant(pool, tuple.object_id, tuple.tenant_id).await?
+        && !workspace_belongs_to_tenant(
+            pool,
+            tuple.object_id,
+            tuple.tenant_id,
+            workspace_tenant_column,
+        )
+        .await?
     {
         return Ok(None);
     }
@@ -191,48 +266,66 @@ fn allowed_group_relation(object_type: &str, relation: &str) -> bool {
     )
 }
 
-async fn workspace_belongs_to_tenant(
-    pool: &PgPool,
-    workspace_id: Uuid,
-    tenant_id: Uuid,
-) -> Result<bool, GroupSyncError> {
-    let has_tenant_column = sqlx::query_scalar::<_, bool>(
+async fn workspace_tenant_column(pool: &PgPool) -> Result<WorkspaceTenantColumn, GroupSyncError> {
+    let data_type = sqlx::query_scalar::<_, Option<String>>(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_name = 'workspaces'
-              AND column_name = 'tenant_id'
-        )
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'workspaces'
+          AND column_name = 'tenant_id'
+        LIMIT 1
         "#,
     )
     .fetch_one(pool)
     .await?;
 
-    if !has_tenant_column {
-        tracing::warn!(
-            workspace_id = %workspace_id,
-            tenant_id = %tenant_id,
-            "cannot validate OIDC workspace group because workspaces.tenant_id is absent"
-        );
-        return Ok(false);
-    }
+    Ok(match data_type.as_deref() {
+        Some("uuid") => WorkspaceTenantColumn::Uuid,
+        Some(_) => WorkspaceTenantColumn::Text,
+        None => WorkspaceTenantColumn::Missing,
+    })
+}
 
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM workspaces
-            WHERE id = $1
-              AND tenant_id::text = $2
+async fn workspace_belongs_to_tenant(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    tenant_id: Uuid,
+    tenant_column: WorkspaceTenantColumn,
+) -> Result<bool, GroupSyncError> {
+    match tenant_column {
+        WorkspaceTenantColumn::Missing => Ok(false),
+        WorkspaceTenantColumn::Uuid => sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM workspaces
+                WHERE id = $1
+                  AND tenant_id = $2
+            )
+            "#,
         )
-        "#,
-    )
-    .bind(workspace_id.to_string())
-    .bind(tenant_id.to_string())
-    .fetch_one(pool)
-    .await
-    .map_err(GroupSyncError::from)
+        .bind(workspace_id.to_string())
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await
+        .map_err(GroupSyncError::from),
+        WorkspaceTenantColumn::Text => sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM workspaces
+                WHERE id = $1
+                  AND tenant_id = $2
+            )
+            "#,
+        )
+        .bind(workspace_id.to_string())
+        .bind(tenant_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(GroupSyncError::from),
+    }
 }
 
 #[cfg(test)]

@@ -9,12 +9,13 @@ async-trait.workspace = true
 backon.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
+moa-migrations = { workspace = true }
 moa-security = { workspace = true }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx = { workspace = true, features = ["tls-rustls", "migrate", "macros", "json", "uuid", "chrono"] }
+sqlx = { workspace = true, features = ["tls-rustls", "macros", "json", "uuid", "chrono"] }
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true

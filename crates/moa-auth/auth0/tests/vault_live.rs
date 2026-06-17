@@ -12,13 +12,16 @@ use moa_core::traits::TokenVaultProvider;
 use secrecy::{ExposeSecret, SecretString};
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
+mod support;
+
+#[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_AUTH0_TESTS=1 and a real Auth0 linked user"]
-async fn live_auth0_token_vault_returns_third_party_token(pool: sqlx::PgPool) {
+async fn live_auth0_token_vault_returns_third_party_token() {
     // Pins: a real Auth0-linked user can exchange linked connection metadata for a provider token.
     if std::env::var("MOA_RUN_LIVE_AUTH0_TESTS").as_deref() != Ok("1") {
         return;
     }
+    let pool = support::migrated_auth0_pool().await;
     let domain = required_env("MOA_TEST_AUTH0_DOMAIN");
     let client_id = required_env("MOA_TEST_AUTH0_CLIENT_ID");
     let client_secret = required_env("MOA_TEST_AUTH0_CLIENT_SECRET");

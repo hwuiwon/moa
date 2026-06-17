@@ -1,0 +1,14 @@
+[package]
+name = "moa-migrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+refinery = { version = "0.9", features = ["tokio-postgres"] }
+sqlx = { workspace = true, features = ["postgres"] }
+tokio.workspace = true
+tokio-postgres = "0.7"
+tracing.workspace = true
+workspace-hack = { workspace = true }

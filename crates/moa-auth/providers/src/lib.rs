@@ -6,7 +6,6 @@ pub mod bundle;
 pub mod disabled;
 pub mod local;
 pub mod null_vault;
-pub mod schema;
 
 #[cfg(feature = "auth0")]
 pub use moa_auth_providers_auth0 as auth0;

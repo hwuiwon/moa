@@ -13,9 +13,12 @@ use serde_json::json;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn ciba_approved_poll_resolves_awakeable(pool: sqlx::PgPool) {
+mod support;
+
+#[tokio::test]
+async fn ciba_approved_poll_resolves_awakeable() {
     // Pins: a successful CIBA token poll resolves the waiting awakeable as approved.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     let authorize = server.mock(|when, then| {
         when.method(POST).path("/bc-authorize");
@@ -52,9 +55,10 @@ async fn ciba_approved_poll_resolves_awakeable(pool: sqlx::PgPool) {
     poll.assert_hits(1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn ciba_access_denied_resolves_denied_reason(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn ciba_access_denied_resolves_denied_reason() {
     // Pins: Auth0 access_denied resolves a denied payload with the provider reason.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(POST).path("/bc-authorize");
@@ -90,9 +94,10 @@ async fn ciba_access_denied_resolves_denied_reason(pool: sqlx::PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn ciba_expired_token_resolves_timeout(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn ciba_expired_token_resolves_timeout() {
     // Pins: Auth0 expired_token maps to MOA's timeout approval outcome.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     server.mock(|when, then| {
         when.method(POST).path("/bc-authorize");

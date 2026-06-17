@@ -13,6 +13,7 @@ The root workspace currently contains:
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
 | `moa-workflows` | Artifact-backed workflow run lifecycle and future workflow node interpreter/improvement logic |
 | `moa-session` | Postgres session store, event log, task segments, learning log, analytics |
+| `moa-migrations` | Central refinery migrations, schema-isolated test replay helpers, and database DDL guardrails |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
@@ -50,7 +51,7 @@ The root workspace currently contains:
 | Logging/observability | `tracing`, `tracing-subscriber`, `opentelemetry`, `tracing-opentelemetry` |
 | Repo binaries | `clap` for repo tools such as load tests and bootstraps |
 | HTTP | `reqwest`, `axum` |
-| Database | `sqlx` with Postgres, migrations, JSON, UUID, chrono |
+| Database | `sqlx` with Postgres for runtime queries; `refinery` for all Postgres schema migrations |
 | Orchestration | `restate-sdk` |
 | Scheduling | Restate `CronJob` virtual object |
 | Security | `age`, `secrecy`, `shell-words` |
@@ -100,6 +101,7 @@ cargo test --workspace --no-run --locked --timings
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 MOA_DATABASE_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
+MOA_DATABASE_ADMIN_URL=postgres://... cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- migrate
 ```
 
 ## Configuration

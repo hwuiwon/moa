@@ -19,7 +19,6 @@ aead = { version = "0.5", default-features = false, features = ["alloc", "getran
 aho-corasick = { version = "1" }
 arrayvec = { version = "0.7", features = ["serde"] }
 base64 = { version = "0.22" }
-bitflags = { version = "2", default-features = false, features = ["serde"] }
 byteorder = { version = "1" }
 chrono = { version = "0.4", features = ["serde"] }
 cipher = { version = "0.4", default-features = false, features = ["zeroize"] }
@@ -38,13 +37,10 @@ flate2 = { version = "1" }
 form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
-futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
-getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", features = ["raw"] }
 hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16", default-features = false, features = ["default-hasher", "inline-more", "raw-entry"] }
 hyper = { version = "1", features = ["full"] }
@@ -55,16 +51,16 @@ lalrpop-util = { version = "0.20", features = ["lexer"] }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable", "std"] }
+md-5 = { version = "0.10" }
 memchr = { version = "2" }
 mime_guess = { version = "2" }
-num-bigint = { version = "0.4", default-features = false, features = ["std"] }
-num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
-num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
+minimal-lexical = { version = "0.2", default-features = false, features = ["std"] }
+nom = { version = "7", default-features = false, features = ["std"] }
 num-traits = { version = "0.2", default-features = false, features = ["i128", "libm", "std"] }
-once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+refinery-core = { version = "0.9", features = ["tokio-postgres", "toml"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
@@ -85,7 +81,7 @@ similar = { version = "2", features = ["inline"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde"] }
 spin = { version = "0.9" }
-sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "postgres", "runtime-tokio-rustls", "tls-rustls", "uuid"] }
 sqlx-core = { version = "0.8", features = ["_rt-tokio", "_tls-rustls-ring-webpki", "any", "chrono", "json", "migrate", "offline", "uuid"] }
 sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "migrate", "offline", "uuid"] }
 subtle = { version = "2" }
@@ -109,12 +105,12 @@ zerovec = { version = "0.11", default-features = false, features = ["alloc", "de
 [build-dependencies]
 aho-corasick = { version = "1" }
 base64 = { version = "0.22" }
-bitflags = { version = "2", default-features = false, features = ["serde"] }
 byteorder = { version = "1" }
 chrono = { version = "0.4", features = ["serde"] }
 concurrent-queue = { version = "2" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
+deranged = { version = "0.5", features = ["powerfmt", "serde"] }
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
 either = { version = "1", features = ["serde", "use_std"] }
 form_urlencoded = { version = "1" }
@@ -123,19 +119,19 @@ futures-core = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", features = ["raw"] }
 i18n-embed = { version = "0.15", features = ["filesystem-assets", "fluent-system"] }
 lalrpop-util = { version = "0.20", features = ["lexer"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable", "std"] }
+md-5 = { version = "0.10" }
 memchr = { version = "2" }
 num-traits = { version = "0.2", default-features = false, features = ["i128", "libm", "std"] }
-once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 proc-macro-error2 = { version = "2" }
-proc-macro2 = { version = "1" }
-quote = { version = "1" }
+rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+refinery-core = { version = "0.9", features = ["tokio-postgres", "toml"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
@@ -150,15 +146,14 @@ sha2 = { version = "0.10" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "serde"] }
 sqlx-core = { version = "0.8", features = ["_rt-tokio", "_tls-rustls-ring-webpki", "any", "chrono", "json", "migrate", "offline", "uuid"] }
-sqlx-macros = { version = "0.8", features = ["_rt-tokio", "_tls-rustls-ring-webpki", "chrono", "derive", "json", "macros", "migrate", "postgres", "uuid"] }
-sqlx-macros-core = { version = "0.8", features = ["_rt-tokio", "_tls-rustls-ring-webpki", "chrono", "derive", "json", "macros", "migrate", "postgres", "uuid"] }
 sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "migrate", "offline", "uuid"] }
 subtle = { version = "2" }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
+time = { version = "0.3", features = ["macros", "serde-well-known"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
-tiny-keccak = { version = "2", features = ["sha3", "shake"] }
 tinystr = { version = "0.8", features = ["zerovec"] }
 tokio = { version = "1", features = ["full", "test-util", "tracing"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
@@ -172,63 +167,58 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
 linux-raw-sys = { version = "0.12", default-features = false, features = ["auxvec", "elf", "errno", "general", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "xdp"] }
+nom = { version = "7" }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.6", features = ["cors", "decompression-gzip", "follow-redirect", "request-id", "set-header", "trace"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
-ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2", features = ["extra_traits"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 
 [target.aarch64-apple-darwin.dependencies]
-ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
+nom = { version = "7" }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "time"] }
-security-framework-sys = { version = "2" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.6", features = ["cors", "decompression-gzip", "follow-redirect", "request-id", "set-header", "trace"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
-ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2", features = ["extra_traits"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 
 [target.x86_64-apple-darwin.dependencies]
-ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["tls12", "webpki-tokio"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-proxy"] }
+nom = { version = "7" }
 rustix = { version = "1", features = ["event", "fs", "net", "pipe", "process", "time"] }
-security-framework-sys = { version = "2" }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "ring", "tls12"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
-tower-http = { version = "0.6", features = ["cors", "decompression-gzip", "follow-redirect", "request-id", "set-header", "trace"] }
+tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
 
 [target.x86_64-apple-darwin.build-dependencies]
-ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2", features = ["extra_traits"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 
 ### END HAKARI SECTION

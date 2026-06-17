@@ -503,15 +503,13 @@ impl SessionStore for PostgresSessionStore {
         since: DateTime<Utc>,
     ) -> Result<u32> {
         let events = self.table_name("events");
-        let sessions = self.table_name("sessions");
         let total = sqlx::query_scalar::<_, i64>(&format!(
             "SELECT COALESCE( \
                  SUM((e.payload -> 'data' ->> 'cost_cents')::BIGINT), \
                  0 \
              )::BIGINT \
              FROM {events} e \
-             JOIN {sessions} s ON s.id = e.session_id \
-             WHERE s.workspace_id = $1 \
+             WHERE e.workspace_id = $1 \
                AND e.event_type = $2 \
                AND e.timestamp >= $3"
         ))

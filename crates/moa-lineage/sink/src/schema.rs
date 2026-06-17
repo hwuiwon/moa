@@ -1,22 +1,15 @@
 //! Schema installer for engineering-tier lineage.
 
-use sqlx::Executor;
-
 use crate::Result;
+use crate::error::Error;
 
 /// Idempotent schema DDL for the engineering-tier lineage tables.
-pub const SCHEMA_DDL: &str = concat!(
-    include_str!("../../../moa-session/migrations/postgres/024_lineage.sql"),
-    "\n",
-    include_str!("../../../moa-session/migrations/postgres/025_lineage_scores.sql"),
-    "\n",
-    include_str!("../../../moa-session/migrations/postgres/026_lineage_audit.sql"),
-    "\n",
-    include_str!("../../../moa-session/migrations/postgres/028_lineage_dead_letters.sql")
-);
+pub const SCHEMA_DDL: &str = moa_migrations::LINEAGE_SCHEMA_DDL;
 
 /// Ensures the lineage schema exists.
 pub async fn ensure_schema(pool: &sqlx::PgPool) -> Result<()> {
-    pool.execute(SCHEMA_DDL).await?;
+    moa_migrations::ensure_lineage_schema(pool)
+        .await
+        .map_err(|error| Error::Invalid(format!("lineage schema migration failed: {error}")))?;
     Ok(())
 }

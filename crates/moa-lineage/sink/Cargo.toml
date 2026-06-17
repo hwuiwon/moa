@@ -12,6 +12,7 @@ metrics.workspace = true
 moa-core = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-lineage-otel = { workspace = true }
+moa-migrations = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "json", "uuid"] }

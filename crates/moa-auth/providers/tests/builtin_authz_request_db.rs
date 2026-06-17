@@ -5,12 +5,14 @@ use std::time::Duration;
 
 use moa_auth_providers::BuiltinAsyncAuthzProvider;
 use moa_core::traits::{ApprovalRequest, AsyncAuthzProvider};
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
+#[tokio::test]
 #[ignore = "requires DATABASE_URL pointing at a local Postgres test database"]
-async fn request_approval_inserts_pending_row(pool: sqlx::PgPool) {
+async fn request_approval_inserts_pending_row() {
     // Pins: builtin provider persists exactly one pending approval for the awakeable.
+    let pool = migrated_pool().await;
     let provider = BuiltinAsyncAuthzProvider::new(Arc::new(pool.clone()));
     let session_id = Uuid::from_u128(10);
     let user_id = Uuid::from_u128(11);
@@ -57,10 +59,11 @@ async fn request_approval_inserts_pending_row(pool: sqlx::PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
+#[tokio::test]
 #[ignore = "requires DATABASE_URL pointing at a local Postgres test database"]
-async fn request_approval_requires_tenant_id_in_action_details(pool: sqlx::PgPool) {
+async fn request_approval_requires_tenant_id_in_action_details() {
     // Pins: missing internal tenant metadata is rejected before any row is inserted.
+    let pool = migrated_pool().await;
     let provider = BuiltinAsyncAuthzProvider::new(Arc::new(pool.clone()));
     let error = provider
         .request_approval(ApprovalRequest {
@@ -83,4 +86,41 @@ async fn request_approval_requires_tenant_id_in_action_details(pool: sqlx::PgPoo
         .await
         .expect("count approval rows");
     assert_eq!(count, 0);
+}
+
+async fn migrated_pool() -> sqlx::PgPool {
+    let database_url = test_database_url();
+    let schema_name = format!("moa_auth_providers_test_{}", Uuid::new_v4().simple());
+    let search_path = format!("{}, public", quote_identifier(&schema_name));
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(5))
+        .after_connect(move |conn, _meta| {
+            let search_path = search_path.clone();
+            Box::pin(async move {
+                sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                    .bind(search_path)
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await
+        .expect("test Postgres should be reachable");
+    moa_migrations::run_auth_schema(&pool, &schema_name)
+        .await
+        .expect("auth baseline should apply");
+    pool
+}
+
+fn test_database_url() -> String {
+    std::env::var("MOA_TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string())
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

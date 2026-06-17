@@ -1,8 +1,9 @@
 //! Repository maintenance commands.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -15,10 +16,14 @@ mod record_memory_extractions;
 mod record_memory_merges;
 mod run_memory_retrieval_eval;
 
+const CENTRAL_MIGRATIONS_DIR: &str = "crates/moa-migrations/migrations/postgres";
+const CENTRAL_MIGRATIONS_ROOT: &str = "crates/moa-migrations/migrations";
+
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("audit-paths") => cmd_audit_paths(),
+        Some("check-migrations") => cmd_check_migrations(),
         Some("check-eval-budgets") => check_eval_budgets::run(args),
         Some("compare-eval-reports") => compare_eval_reports::run(args),
         Some("compute-memory-quality-scores") => compute_memory_quality_scores::run(args),
@@ -42,6 +47,215 @@ fn cmd_migrate_test_db() -> Result<()> {
         "test database configured at {redacted}; MOA integration tests create migrated isolated schemas during bootstrap"
     );
     Ok(())
+}
+
+fn cmd_check_migrations() -> Result<()> {
+    check_central_migration_files()?;
+    check_no_noncentral_migration_dirs()?;
+    check_duplicate_table_ownership()?;
+    println!("migration checks clean");
+    Ok(())
+}
+
+fn check_central_migration_files() -> Result<()> {
+    let migrations_dir = Path::new(CENTRAL_MIGRATIONS_DIR);
+    let mut versions = BTreeMap::<u64, String>::new();
+    for entry in fs::read_dir(migrations_dir).context("read central migrations directory")? {
+        let entry = entry.context("read central migration entry")?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("sql") {
+            let name = file_name(&path)?;
+            let version = parse_refinery_version(name)?;
+            if let Some(existing) = versions.insert(version, name.to_string()) {
+                bail!("duplicate migration version {version}: {existing}, {name}");
+            }
+        }
+    }
+
+    if versions.is_empty() {
+        bail!("no central migrations found under {CENTRAL_MIGRATIONS_DIR}");
+    }
+
+    Ok(())
+}
+
+fn parse_refinery_version(file_name: &str) -> Result<u64> {
+    let Some(rest) = file_name.strip_prefix('V') else {
+        bail!("migration file must start with V: {file_name}");
+    };
+    let Some((version, description)) = rest.split_once("__") else {
+        bail!("migration file must use V<version>__<description>.sql: {file_name}");
+    };
+    if !description.ends_with(".sql") {
+        bail!("migration file must end with .sql: {file_name}");
+    }
+    if !version.chars().all(|character| character.is_ascii_digit()) {
+        bail!("migration version must be numeric: {file_name}");
+    }
+    version
+        .parse::<u64>()
+        .with_context(|| format!("parse migration version in {file_name}"))
+}
+
+fn check_no_noncentral_migration_dirs() -> Result<()> {
+    let mut dirs = Vec::new();
+    for root in ["crates", "services"] {
+        collect_migration_dirs(Path::new(root), &mut dirs)?;
+    }
+
+    let allowed_root = Path::new(CENTRAL_MIGRATIONS_ROOT);
+    let violations = dirs
+        .into_iter()
+        .filter(|path| path != allowed_root)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !violations.is_empty() {
+        bail!(
+            "migration directories must live under {CENTRAL_MIGRATIONS_ROOT}; found:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    Ok(())
+}
+
+fn check_duplicate_table_ownership() -> Result<()> {
+    let mut migration_files = Vec::new();
+    collect_migration_sql_files(Path::new(CENTRAL_MIGRATIONS_DIR), &mut migration_files)?;
+
+    let mut owners = BTreeMap::<String, Vec<PathBuf>>::new();
+    for path in migration_files {
+        let sql = fs::read_to_string(&path)
+            .with_context(|| format!("read migration {}", path.display()))?;
+        for table in extract_create_table_if_not_exists(&sql) {
+            owners.entry(table).or_default().push(path.clone());
+        }
+    }
+
+    let mut violations = Vec::new();
+    for (table, paths) in owners {
+        if paths.len() <= 1 {
+            continue;
+        }
+        let owner_keys = paths
+            .iter()
+            .map(|path| migration_owner_key(path))
+            .collect::<BTreeSet<_>>();
+        if owner_keys.len() == 1 {
+            continue;
+        }
+        let path_list = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        violations.push(format!("{table}: {path_list}"));
+    }
+
+    if !violations.is_empty() {
+        bail!(
+            "duplicate CREATE TABLE IF NOT EXISTS ownership detected:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    Ok(())
+}
+
+fn migration_owner_key(path: &Path) -> String {
+    file_name(path).unwrap_or("<unknown>").to_string()
+}
+
+fn collect_migration_dirs(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("read entry under {}", root.display()))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("migrations") {
+            out.push(path.clone());
+        }
+        collect_migration_dirs(&path, out)?;
+    }
+    Ok(())
+}
+
+fn collect_migration_sql_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("read entry under {}", root.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_migration_sql_files(&path, out)?;
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) == Some("sql")
+            && path
+                .components()
+                .any(|component| component.as_os_str() == "migrations")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn extract_create_table_if_not_exists(sql: &str) -> Vec<String> {
+    let mut tables = Vec::new();
+    let sql_without_line_comments = sql
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lower = sql_without_line_comments.to_ascii_lowercase();
+    let marker = "create table if not exists ";
+    let mut offset = 0;
+    while let Some(relative_index) = lower[offset..].find(marker) {
+        let name_start = offset + relative_index + marker.len();
+        let remainder = sql_without_line_comments[name_start..].trim_start();
+        let Some(token) = remainder.split_whitespace().next() else {
+            break;
+        };
+        if let Some(table) = normalize_table_name(token) {
+            tables.push(table);
+        }
+        offset = name_start + token.len();
+    }
+    tables
+}
+
+fn normalize_table_name(token: &str) -> Option<String> {
+    let trimmed = token
+        .trim_end_matches('(')
+        .trim_end_matches(';')
+        .trim_matches('"')
+        .to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains('.') {
+        Some(
+            trimmed
+                .split('.')
+                .map(|part| part.trim_matches('"'))
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    } else {
+        Some(format!("public.{trimmed}"))
+    }
+}
+
+fn file_name(path: &Path) -> Result<&str> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("path has no UTF-8 file name: {}", path.display()))
 }
 
 fn redact_password(database_url: &str) -> String {
@@ -172,10 +386,7 @@ fn audit_removed_segment_score_names() -> Result<()> {
         "removed segment-score compatibility names",
         &removed_segment_pattern,
         &paths,
-        &[
-            "--glob",
-            "!docs/engineering-discipline/plans/2026-06-15-segment-assessment-architecture.md",
-        ],
+        &[],
     )
 }
 

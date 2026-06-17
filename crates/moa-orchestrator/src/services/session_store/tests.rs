@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use moa_core::{
     Event, EventFilter, EventRange, ModelId, SessionMeta, SessionStatus, UserId, WorkspaceId,
     traits::{Identity, IdentityType},
@@ -53,11 +53,11 @@ fn into_anyhow(error: HandlerError) -> anyhow::Error {
 }
 
 async fn install_authz_outbox(service: &SessionStoreImpl) -> Result<()> {
-    sqlx::raw_sql(include_str!(
-        "../../../../moa-auth/authz/migrations/20260512000000_authz_outbox.up.sql"
-    ))
-    .execute(service.store.pool())
-    .await?;
+    let schema_name = service
+        .store
+        .schema_name()
+        .context("test service should use an isolated schema")?;
+    moa_migrations::run_auth_schema(service.store.pool(), schema_name).await?;
     Ok(())
 }
 

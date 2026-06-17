@@ -8,7 +8,6 @@ pub mod ciba;
 pub mod group_sync;
 pub mod jwks_cache;
 pub mod oidc_provider;
-pub mod schema;
 pub mod vault;
 
 pub use auth0_provider::{Auth0AuthProvider, resolve_or_provision_static};

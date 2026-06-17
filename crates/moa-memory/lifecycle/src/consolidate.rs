@@ -20,6 +20,7 @@ use crate::digest::rebuild_digests;
 
 const CONSOLIDATION_ACTOR: &str = "consolidation";
 const CONSOLIDATION_ACTOR_KIND: &str = "system";
+const ACTIVE_ROWS_PAGE_SIZE: i64 = 1000;
 const EPSILON: f64 = 1e-9;
 
 /// Result type returned by lifecycle helpers.
@@ -317,8 +318,14 @@ pub async fn backfill_entities(
         );
     }
 
+    let mut aliases_by_entity = edge_aliases_for_entities(pool, workspace_id, &entities).await?;
     for entity in &entities {
-        let promoted = promote_aliases_for_entity(pool, entity).await?;
+        let promoted = promote_aliases_for_entity(
+            pool,
+            entity,
+            aliases_by_entity.remove(&entity.uid).unwrap_or_default(),
+        )
+        .await?;
         aliases += promoted;
     }
 
@@ -458,8 +465,11 @@ fn decay_target(
     )
 }
 
-async fn promote_aliases_for_entity(pool: &PgPool, entity: &LifecycleNodeRow) -> Result<u64> {
-    let aliases = edge_aliases_for_entity(pool, entity).await?;
+async fn promote_aliases_for_entity(
+    pool: &PgPool,
+    entity: &LifecycleNodeRow,
+    aliases: BTreeSet<String>,
+) -> Result<u64> {
     if aliases.is_empty() {
         return Ok(0);
     }
@@ -497,32 +507,64 @@ async fn promote_aliases_for_entity(pool: &PgPool, entity: &LifecycleNodeRow) ->
     Ok(added as u64)
 }
 
-async fn edge_aliases_for_entity(
+async fn edge_aliases_for_entities(
     pool: &PgPool,
-    entity: &LifecycleNodeRow,
-) -> Result<BTreeSet<String>> {
+    workspace_id: &WorkspaceId,
+    entities: &[LifecycleNodeRow],
+) -> Result<BTreeMap<Uuid, BTreeSet<String>>> {
+    if entities.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let entity_uids = entities
+        .iter()
+        .map(|entity| entity.uid.to_string())
+        .collect::<Vec<_>>();
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT payload->'after'->>'alias_mention' AS alias
-        FROM moa.graph_changelog
-        WHERE workspace_id = $1
-          AND target_kind = 'edge'
-          AND op = 'create'
-          AND (payload->>'start_uid' = $2 OR payload->>'end_uid' = $2)
-          AND payload->'after' ? 'alias_mention'
+        WITH candidate_aliases AS (
+            SELECT payload->>'start_uid' AS entity_uid,
+                   payload->'after'->>'alias_mention' AS alias
+            FROM moa.graph_changelog
+            WHERE workspace_id = $1
+              AND target_kind = 'edge'
+              AND op = 'create'
+              AND payload->>'start_uid' = ANY($2)
+              AND payload->'after' ? 'alias_mention'
+            UNION
+            SELECT payload->>'end_uid' AS entity_uid,
+                   payload->'after'->>'alias_mention' AS alias
+            FROM moa.graph_changelog
+            WHERE workspace_id = $1
+              AND target_kind = 'edge'
+              AND op = 'create'
+              AND payload->>'end_uid' = ANY($2)
+              AND payload->'after' ? 'alias_mention'
+        )
+        SELECT DISTINCT entity_uid, alias
+        FROM candidate_aliases
+        WHERE entity_uid IS NOT NULL
+          AND alias IS NOT NULL
         "#,
     )
-    .bind(entity.workspace_id.as_deref())
-    .bind(entity.uid.to_string())
+    .bind(workspace_id.to_string())
+    .bind(&entity_uids)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| row.try_get::<Option<String>, _>("alias").ok().flatten())
-        .map(|alias| alias.trim().to_string())
-        .filter(|alias| !alias.is_empty())
-        .collect())
+    let mut aliases_by_entity = BTreeMap::<Uuid, BTreeSet<String>>::new();
+    for row in rows {
+        let entity_uid = row.try_get::<String, _>("entity_uid")?;
+        let entity_uid = Uuid::parse_str(&entity_uid)
+            .map_err(|error| Error::InvalidRow(format!("invalid alias entity uid: {error}")))?;
+        let alias = row.try_get::<String, _>("alias")?.trim().to_string();
+        if !alias.is_empty() {
+            aliases_by_entity
+                .entry(entity_uid)
+                .or_default()
+                .insert(alias);
+        }
+    }
+    Ok(aliases_by_entity)
 }
 
 async fn active_fact_rows(
@@ -545,38 +587,61 @@ async fn active_rows(
     label: NodeLabel,
     include_embedding_state: bool,
 ) -> Result<Vec<LifecycleNodeRow>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT node.uid,
-               node.workspace_id,
-               node.user_id,
-               node.scope,
-               node.name,
-               node.pii_class,
-               node.confidence,
-               node.valid_from,
-               node.valid_to,
-               node.properties_summary,
-               node.last_accessed_at,
-               (embedding.uid IS NOT NULL) AS has_embedding
-        FROM moa.node_index AS node
-        LEFT JOIN moa.embeddings AS embedding
-          ON embedding.uid = node.uid
-         AND embedding.valid_to IS NULL
-        WHERE node.workspace_id = $1
-          AND node.label = $2
-          AND node.valid_to IS NULL
-        ORDER BY node.scope ASC, node.user_id ASC NULLS FIRST, node.valid_from ASC, node.uid ASC
-        "#,
-    )
-    .bind(workspace_id.to_string())
-    .bind(label.as_str())
-    .fetch_all(pool)
-    .await?;
+    let mut rows = Vec::new();
+    let mut cursor_valid_from: Option<DateTime<Utc>> = None;
+    let mut cursor_uid: Option<Uuid> = None;
 
-    rows.into_iter()
+    loop {
+        let batch = sqlx::query(
+            r#"
+            SELECT node.uid,
+                   node.workspace_id,
+                   node.user_id,
+                   node.scope,
+                   node.name,
+                   node.pii_class,
+                   node.confidence,
+                   node.valid_from,
+                   node.valid_to,
+                   node.properties_summary,
+                   node.last_accessed_at,
+                   (embedding.uid IS NOT NULL) AS has_embedding
+            FROM moa.node_index AS node
+            LEFT JOIN moa.embeddings AS embedding
+              ON embedding.uid = node.uid
+             AND embedding.valid_to IS NULL
+            WHERE node.workspace_id = $1
+              AND node.label = $2
+              AND node.valid_to IS NULL
+              AND ($3::timestamptz IS NULL OR (node.valid_from, node.uid) > ($3, $4::uuid))
+            ORDER BY node.valid_from ASC, node.uid ASC
+            LIMIT $5
+            "#,
+        )
+        .bind(workspace_id.to_string())
+        .bind(label.as_str())
+        .bind(cursor_valid_from)
+        .bind(cursor_uid)
+        .bind(ACTIVE_ROWS_PAGE_SIZE)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
         .map(|row| lifecycle_row_from_sql(row, include_embedding_state))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+        let batch_len = batch.len();
+        if let Some(last) = batch.last() {
+            cursor_valid_from = Some(last.valid_from);
+            cursor_uid = Some(last.uid);
+        }
+        rows.extend(batch);
+
+        if batch_len < ACTIVE_ROWS_PAGE_SIZE as usize {
+            break;
+        }
+    }
+
+    Ok(rows)
 }
 
 fn lifecycle_row_from_sql(

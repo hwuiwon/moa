@@ -25,9 +25,9 @@ owns the opt-in compliance tier.
 Lineage explain, retrieval debug, query, and export operations are exposed
 through hosted orchestrator/edge APIs, not a local command client crate.
 
-Database schema for lineage lives in the central Postgres migration tree at
-`crates/moa-session/migrations/postgres/024_lineage.sql`; lineage crates do not
-own separate migration directories.
+Database schema for lineage lives in `crates/moa-migrations`. Production gets
+the tables through the central refinery baseline; the lineage writer uses the
+central `sql/lineage_schema.sql` fragment for standalone schema bootstrap.
 
 ## Phase status
 

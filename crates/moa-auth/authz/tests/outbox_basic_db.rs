@@ -16,9 +16,9 @@ async fn test_pool() -> PgPool {
         .connect(&database_url)
         .await
         .expect("test Postgres should be reachable");
-    moa_authz::schema::migrate(&pool)
+    moa_migrations::run(&database_url)
         .await
-        .expect("authz migrations should apply");
+        .expect("database migrations should apply");
     pool
 }
 

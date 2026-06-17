@@ -93,6 +93,9 @@ jobs:
       - name: Path audit
         run: cargo xtask audit-paths
 
+      - name: Migration audit
+        run: cargo xtask check-migrations
+
       - name: Run clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 

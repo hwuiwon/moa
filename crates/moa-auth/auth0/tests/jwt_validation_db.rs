@@ -14,6 +14,8 @@ use rsa::{RsaPrivateKey, rand_core::OsRng};
 use serde::Serialize;
 use uuid::Uuid;
 
+mod support;
+
 #[derive(Debug, Serialize)]
 struct Claims {
     sub: String,
@@ -26,9 +28,10 @@ struct Claims {
     identity_type: String,
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn jwt_validation_accepts_self_signed_auth0_token(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn jwt_validation_accepts_self_signed_auth0_token() {
     // Pins: Auth0AuthProvider validates RS256 JWTs via JWKS and reuses the same sub mapping.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     let key = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate RSA test key");
     let public = key.to_public_key();
@@ -76,9 +79,9 @@ async fn jwt_validation_accepts_self_signed_auth0_token(pool: sqlx::PgPool) {
     assert_eq!(second.id, first.id);
     assert_eq!(jwks_mock.hits(), 1);
 
-    let (mapped_id, source): (Uuid, String) = sqlx::query_as(
+    let (mapped_id, external_id): (Uuid, String) = sqlx::query_as(
         r#"
-        SELECT m.user_id, u.source
+        SELECT m.user_id, u.external_id
         FROM auth0_user_map m
         JOIN users u ON u.id = m.user_id
         WHERE m.sub = $1 AND m.tenant_id = $2
@@ -90,7 +93,7 @@ async fn jwt_validation_accepts_self_signed_auth0_token(pool: sqlx::PgPool) {
     .await
     .expect("mapping row should exist");
     assert_eq!(mapped_id, first.id);
-    assert_eq!(source, "auth0");
+    assert_eq!(external_id, "auth0:auth0|abc");
 }
 
 fn signed_token(

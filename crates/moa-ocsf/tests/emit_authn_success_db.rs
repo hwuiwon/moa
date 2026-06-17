@@ -4,9 +4,12 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_ocsf::{emit_authn_success, signing};
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn emit_authn_success_inserts_signed_security_event(pool: sqlx::PgPool) {
+mod support;
+
+#[tokio::test]
+async fn emit_authn_success_inserts_signed_security_event() {
     // Pins: authn success produces the expected OCSF row and a verifiable signature.
+    let pool = support::migrated_ocsf_pool().await;
     let tenant_id = Uuid::from_u128(0x10);
     let user_id = Uuid::from_u128(0x20);
     let identity = Identity {

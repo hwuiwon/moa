@@ -144,17 +144,17 @@ pub async fn resolve_or_provision_static(
 
     let new_id = Uuid::new_v4();
     if identity_type == IdentityType::User {
+        let external_id = format!("{source}:{sub}");
         sqlx::query(
             r#"
-            INSERT INTO users (id, tenant_id, source, external_id, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO users (id, tenant_id, email, external_id, created_at, updated_at)
+            VALUES ($1, $2, $3, $3, NOW(), NOW())
             ON CONFLICT (id) DO NOTHING
             "#,
         )
         .bind(new_id)
         .bind(tenant_id)
-        .bind(source)
-        .bind(sub)
+        .bind(external_id)
         .execute(&mut *tx)
         .await?;
     }

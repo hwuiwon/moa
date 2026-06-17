@@ -53,6 +53,7 @@ moa-ocsf.workspace = true
 moa-security = { workspace = true }
 moa-scoring = { workspace = true }
 moa-memory-ingest = { workspace = true }
+moa-migrations = { workspace = true }
 moa-providers = { workspace = true }
 moa-session = { workspace = true }
 moa-skills = { workspace = true }
@@ -64,7 +65,7 @@ serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
-sqlx = { workspace = true, features = ["tls-rustls", "migrate", "json", "uuid", "chrono"] }
+sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
 tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true

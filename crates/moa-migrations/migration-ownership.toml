@@ -1,0 +1,100 @@
+# Declarative ownership for SQL tables and table families.
+#
+# Keep this in sync with `cargo run -p xtask -- check-migrations`. A service may
+# read a table without owning its DDL. Non-owner schema changes must be requested
+# through the owner and shipped as forward migrations.
+
+[[table]]
+name = "sessions"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "events"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "task_segments"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "workspaces"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "users"
+schema = "public"
+owner = "moa-orchestrator"
+readers = ["moa-session", "moa-auth/auth0"]
+notes = "Auth0 may provision rows through the orchestrator-owned shape; it does not own users DDL."
+
+[[table]]
+name = "api_keys"
+schema = "public"
+owner = "moa-auth/providers"
+
+[[table]]
+name = "builtin_pending_approvals"
+schema = "public"
+owner = "moa-auth/providers"
+
+[[table]]
+name = "authz_outbox"
+schema = "public"
+owner = "moa-authz"
+
+[[table]]
+name = "agents"
+schema = "public"
+owner = "moa-orchestrator"
+
+[[table]]
+name = "tenant_audit_destinations"
+schema = "public"
+owner = "moa-ocsf"
+readers = ["services/audit-shipper"]
+
+[[table]]
+name = "security_events"
+schema = "public"
+owner = "moa-ocsf"
+readers = ["services/audit-shipper"]
+
+[[table]]
+name = "moa.node_index"
+schema = "moa"
+owner = "moa-session"
+readers = ["moa-memory/graph", "moa-memory/lifecycle", "moa-memory/vector"]
+
+[[table]]
+name = "moa.skill"
+schema = "moa"
+owner = "moa-session"
+readers = ["moa-skills"]
+
+[[table]]
+name = "moa.skill_file"
+schema = "moa"
+owner = "moa-session"
+readers = ["moa-skills"]
+
+[[table]]
+name = "analytics.turn_lineage"
+schema = "analytics"
+owner = "moa-session"
+readers = ["moa-lineage/*", "moa-eval"]
+
+[[table]]
+name = "analytics.scores"
+schema = "analytics"
+owner = "moa-session"
+readers = ["moa-eval", "moa-orchestrator"]
+
+[[table]]
+name = "pii_vault.subject_keys"
+schema = "pii_vault"
+owner = "moa-session"
+readers = ["moa-lineage/audit", "moa-memory/pii"]

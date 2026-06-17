@@ -13,7 +13,7 @@ moa-ocsf.workspace = true
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "uuid", "chrono", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres", "json", "uuid", "chrono"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -22,4 +22,5 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 httpmock.workspace = true
+moa-migrations.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

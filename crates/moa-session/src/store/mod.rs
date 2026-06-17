@@ -33,8 +33,6 @@ use crate::queries::{
     map_sqlx_error, session_meta_from_row, session_summary_from_row, task_segment_from_row,
     task_strategy_success_rate_from_row,
 };
-use crate::schema;
-
 mod approval;
 mod experience;
 mod helpers;
@@ -245,7 +243,7 @@ impl PostgresSessionStore {
             schema_name,
         )
         .await?;
-        schema::migrate(&pool, schema_name).await?;
+        migrate_database(database_url, &pool, schema_name).await?;
         let store = Self {
             url: database_url.to_string(),
             pool,
@@ -313,5 +311,22 @@ impl PostgresSessionStore {
             Some(schema_name) => qualified_name(schema_name, table_name),
             None => table_name.to_string(),
         }
+    }
+}
+
+async fn migrate_database(
+    database_url: &str,
+    pool: &PgPool,
+    schema_name: Option<&str>,
+) -> Result<()> {
+    match schema_name {
+        Some(schema_name) => moa_migrations::run_session_schema(pool, schema_name)
+            .await
+            .map_err(|error| {
+                MoaError::StorageError(format!("postgres migration failed: {error:#}"))
+            }),
+        None => moa_migrations::run(database_url).await.map_err(|error| {
+            MoaError::StorageError(format!("postgres migration failed: {error:#}"))
+        }),
     }
 }

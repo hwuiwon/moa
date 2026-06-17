@@ -22,10 +22,6 @@ pub enum AuthzError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    /// SQLx migration metadata or execution failed.
-    #[error("migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
-
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),

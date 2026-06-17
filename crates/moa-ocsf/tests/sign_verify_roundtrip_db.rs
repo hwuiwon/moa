@@ -4,9 +4,12 @@ use moa_ocsf::signing;
 use serde_json::json;
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn sign_verify_roundtrip_detects_tamper_and_wrong_key(pool: sqlx::PgPool) {
+mod support;
+
+#[tokio::test]
+async fn sign_verify_roundtrip_detects_tamper_and_wrong_key() {
     // Pins: HMAC verification accepts the original payload and rejects tamper/wrong-key checks.
+    let pool = support::migrated_ocsf_pool().await;
     let tenant_id = Uuid::from_u128(0x0a);
     let other_tenant_id = Uuid::from_u128(0x0b);
     signing::ensure_key(&pool, tenant_id)

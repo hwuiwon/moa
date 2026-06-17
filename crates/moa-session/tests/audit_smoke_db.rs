@@ -6,8 +6,6 @@ use moa_test_support::postgres::test_database_url;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-const M22_PGAUDIT_SQL: &str = include_str!("../migrations/postgres/019_pgaudit.sql");
-
 fn pgaudit_smoke_requested() -> bool {
     matches!(
         std::env::var("MOA_RUN_PGAUDIT_SMOKE").as_deref(),
@@ -45,7 +43,7 @@ async fn pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_vi
     .await
     .is_ok();
 
-    let migration_sql = M22_PGAUDIT_SQL
+    let migration_sql = moa_migrations::PGAUDIT_SCHEMA_DDL
         .replace("moa.", &format!("{quoted_schema}."))
         .replace("SCHEMA moa", &format!("SCHEMA {quoted_schema}"));
     sqlx::raw_sql(&migration_sql).execute(&pool).await?;
@@ -133,7 +131,7 @@ async fn audit_writes_log_line() -> Result<(), Box<dyn Error>> {
     }
 
     let pool = PgPool::connect(&test_database_url()).await?;
-    moa_session::schema::migrate(&pool, None).await?;
+    moa_migrations::run(&test_database_url()).await?;
     let uid = Uuid::now_v7();
     let phi_like_placeholder = "audit smoke placeholder 123-45-6789";
     sqlx::query(

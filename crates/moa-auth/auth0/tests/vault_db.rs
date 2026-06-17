@@ -9,9 +9,12 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "./migrations")]
-async fn vault_get_token_returns_token_on_happy_path(pool: sqlx::PgPool) {
+mod support;
+
+#[tokio::test]
+async fn vault_get_token_returns_token_on_happy_path() {
     // Pins: linked users are exchanged through Auth0 Token Vault and scopes are split exactly.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     let m2m = server.mock(|when, then| {
         when.method(POST).path("/oauth/token").json_body(json!({
@@ -59,9 +62,10 @@ async fn vault_get_token_returns_token_on_happy_path(pool: sqlx::PgPool) {
     exchange.assert_hits(1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn vault_get_token_returns_not_linked_for_unlinked_user(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn vault_get_token_returns_not_linked_for_unlinked_user() {
     // Pins: a mapped Auth0 user without the requested linked connection fails before HTTP exchange.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     let user_id = Uuid::from_u128(0x303);
     let tenant_id = Uuid::from_u128(0x404);
@@ -75,9 +79,10 @@ async fn vault_get_token_returns_not_linked_for_unlinked_user(pool: sqlx::PgPool
     assert!(matches!(error, TokenVaultError::NotLinked));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn vault_caches_m2m_token_between_exchanges(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn vault_caches_m2m_token_between_exchanges() {
     // Pins: repeated token exchanges reuse a still-fresh M2M token in-process.
+    let pool = support::migrated_auth0_pool().await;
     let server = MockServer::start();
     let m2m = server.mock(|when, then| {
         when.method(POST).path("/oauth/token").json_body(json!({

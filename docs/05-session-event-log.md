@@ -4,7 +4,7 @@ _Postgres schema, append-only events, task segments, replay, and compaction._
 
 ## Storage
 
-MOA uses Postgres for session storage in both local and cloud modes. Local development uses the repo Postgres dev stack; cloud deployments use managed Postgres/Neon. The `moa-session` crate owns migrations and the `PostgresSessionStore`.
+MOA uses Postgres for session storage in both local and cloud modes. Local development uses the repo Postgres dev stack; cloud deployments use managed Postgres/Neon. The `moa-session` crate owns the session-store runtime code; session/event DDL lives in the central `moa-migrations` refinery baseline.
 
 Postgres stores:
 
@@ -21,7 +21,7 @@ Postgres stores:
 
 ## Core Tables
 
-The current migration lives in `crates/moa-session/src/schema.rs`. The important tables are:
+The session schema baseline lives in `crates/moa-migrations/migrations/postgres/V000001__session_baseline.sql`. Production applies central refinery migrations once. Schema-isolated tests replay the session baseline through `moa_migrations::run_session_schema`. The important tables are:
 
 ```sql
 CREATE TABLE sessions (

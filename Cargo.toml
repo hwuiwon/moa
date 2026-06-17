@@ -7,6 +7,7 @@ members = [
     "crates/moa-brain",
     "crates/moa-workflows",
     "crates/moa-session",
+    "crates/moa-migrations",
     "crates/moa-memory/graph",
     "crates/moa-memory/ingest",
     "crates/moa-memory/lifecycle",
@@ -45,6 +46,7 @@ default-members = [
     "crates/moa-brain",
     "crates/moa-workflows",
     "crates/moa-session",
+    "crates/moa-migrations",
     "crates/moa-memory/graph",
     "crates/moa-memory/ingest",
     "crates/moa-memory/lifecycle",
@@ -106,6 +108,7 @@ moa-memory-ingest = { path = "crates/moa-memory/ingest" }
 moa-memory-lifecycle = { path = "crates/moa-memory/lifecycle" }
 moa-memory-pii = { path = "crates/moa-memory/pii" }
 moa-memory-vector = { path = "crates/moa-memory/vector" }
+moa-migrations = { path = "crates/moa-migrations" }
 moa-ocsf = { path = "crates/moa-ocsf" }
 moa-orchestrator = { path = "crates/moa-orchestrator" }
 moa-providers = { path = "crates/moa-providers" }

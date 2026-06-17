@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use moa_authz::AwakeableResolver;
 use moa_brain::build_default_graph_memory_retriever;
 use moa_core::config::{AsyncAuthzKind, AuthHeaderTrustKind};
@@ -127,6 +127,9 @@ const INTERNAL_EVAL_SERVICE_NAMES: &[&str] = &["Eval", "EvalRun"];
 /// Process arguments for the orchestrator process.
 #[derive(Debug, Parser)]
 struct Args {
+    /// Run database migrations and exit without starting Restate services.
+    #[command(subcommand)]
+    command: Option<Command>,
     /// HTTP port for the Restate handler endpoint.
     #[arg(long, default_value_t = DEFAULT_RESTATE_PORT)]
     port: u16,
@@ -138,13 +141,17 @@ struct Args {
     scim_port: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+enum Command {
+    /// Apply database migrations and exit.
+    Migrate,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let moa_config = load_moa_config_from_env()?;
     let header_trust_mode = header_trust_mode_from_config(&moa_config);
-    let restate_admin_url = restate_admin_url(&moa_config)?;
-    let restate_ingress_url = restate_ingress_url(&moa_config)?;
     let skip_fga = skip_fga_from_env();
     let moa_config = Arc::new(moa_config);
     let _ = ctx::HEADER_TRUST_MODE.set(header_trust_mode);
@@ -155,32 +162,38 @@ async fn main() -> anyhow::Result<()> {
             ..TelemetryConfig::default()
         },
     )?;
-    let providers_override = ProvidersOverride::from_env();
-    providers_override.ensure_allowed(moa_config.as_ref())?;
     let database_search_path = moa_config
         .database
         .schema
         .as_deref()
         .map(|schema_name| format!("{}, public", quote_identifier(schema_name)))
         .unwrap_or_else(|| "public".to_string());
-    let pool = PgPoolOptions::new()
-        .max_connections(25)
-        .after_connect({
-            let database_search_path = database_search_path.clone();
-            move |conn, _meta| {
-                let database_search_path = database_search_path.clone();
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                        .bind(database_search_path)
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            }
-        })
-        .connect(&moa_config.database.url)
-        .await?;
-    apply_database_migrations(&pool).await?;
+    let migration_pool = build_database_pool(
+        moa_config.database.admin_url(),
+        &database_search_path,
+        moa_config.database.max_connections.clamp(1, 5),
+        Duration::from_secs(moa_config.database.connect_timeout_seconds),
+    )
+    .await
+    .context("connect migration database pool")?;
+    apply_database_migrations(moa_config.as_ref(), &migration_pool).await?;
+    drop(migration_pool);
+    if args.command == Some(Command::Migrate) {
+        return Ok(());
+    }
+
+    let restate_admin_url = restate_admin_url(moa_config.as_ref())?;
+    let restate_ingress_url = restate_ingress_url(moa_config.as_ref())?;
+    let providers_override = ProvidersOverride::from_env();
+    providers_override.ensure_allowed(moa_config.as_ref())?;
+    let pool = build_database_pool(
+        moa_config.database.runtime_url(),
+        &database_search_path,
+        moa_config.database.max_connections,
+        Duration::from_secs(moa_config.database.connect_timeout_seconds),
+    )
+    .await
+    .context("connect runtime database pool")?;
     moa_authz::configure_security_audit(pool.clone(), moa_config.audit_security.emit_authz_allows);
     let fga_client = if skip_fga {
         tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
@@ -411,26 +424,37 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-async fn apply_database_migrations(pool: &PgPool) -> anyhow::Result<()> {
-    moa_session::schema::migrate(pool, None)
+async fn build_database_pool(
+    database_url: &str,
+    database_search_path: &str,
+    max_connections: u32,
+    connect_timeout: Duration,
+) -> anyhow::Result<PgPool> {
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .acquire_timeout(connect_timeout)
+        .after_connect({
+            let database_search_path = database_search_path.to_string();
+            move |conn, _meta| {
+                let database_search_path = database_search_path.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                        .bind(database_search_path)
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            }
+        })
+        .connect(database_url)
         .await
-        .context("apply moa-session migrations")?;
-    moa_authz::schema::migrate(pool)
+        .map_err(Into::into)
+}
+
+async fn apply_database_migrations(config: &MoaConfig, _pool: &PgPool) -> anyhow::Result<()> {
+    moa_migrations::run(config.database.admin_url())
         .await
-        .context("apply moa-authz migrations")?;
-    moa_auth_providers::schema::migrate(pool)
-        .await
-        .context("apply moa-auth-providers migrations")?;
-    moa_orchestrator::schema::migrate(pool)
-        .await
-        .context("apply moa-orchestrator migrations")?;
-    #[cfg(feature = "auth0")]
-    moa_auth_providers::auth0::schema::migrate(pool)
-        .await
-        .context("apply moa-auth-providers-auth0 migrations")?;
-    moa_ocsf::schema::migrate(pool)
-        .await
-        .context("apply moa-ocsf migrations")?;
+        .context("apply database migrations")?;
     Ok(())
 }
 
