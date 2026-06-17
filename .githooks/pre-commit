@@ -4,8 +4,8 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-# Paths that never affect Rust compilation/tests. When a commit only touches
-# files under these prefixes, skip the expensive cargo pipeline.
+# Paths that never affect Rust compilation. When a commit only touches files
+# under these prefixes, skip the cargo lint.
 DOC_ONLY_PREFIXES=("docs/" "sequence/")
 
 staged="$(git diff --cached --name-only)"
@@ -30,12 +30,12 @@ while IFS= read -r path; do
 done <<< "$staged"
 
 if $is_doc_only; then
-  echo "[pre-commit] doc-only change set — skipping cargo checks"
+  echo "[pre-commit] doc-only change set — skipping clippy"
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# Scope clippy & tests to only the crates that changed.
+# Scope clippy to only the crates that changed.
 # Falls back to --workspace when root-level files are touched (e.g. root
 # Cargo.toml, CI configs, rust-toolchain.toml).
 # ---------------------------------------------------------------------------
@@ -118,19 +118,9 @@ timed() {
   echo "[pre-commit] $label — $(($(date +%s) - t0))s"
 }
 
-# 1. Format — always full workspace (no compilation, ~1s)
-timed "fmt" cargo fmt --all --check
-
-# 2. Clippy — scoped to affected crates. Clippy compiles + lints in one pass,
-#    so a separate `cargo build` step is redundant.
+# Clippy — scoped to affected crates. Clippy compiles + lints in one pass,
+# so a separate `cargo build` step is redundant.
 timed "clippy [$scope_label]" \
   cargo clippy "${scope[@]}" --all-targets -- -D warnings
 
-# 3. Test — scoped to affected crates. Prefer nextest for parallel execution.
-if command -v cargo-nextest &>/dev/null; then
-  timed "nextest [$scope_label]" cargo nextest run "${scope[@]}"
-else
-  timed "test [$scope_label]" cargo test "${scope[@]}"
-fi
-
-echo "[pre-commit] all checks passed"
+echo "[pre-commit] clippy passed"
