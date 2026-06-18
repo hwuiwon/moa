@@ -35,7 +35,7 @@ auditability.
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as REST / Gateway / API automation / Adapters
+    actor Client as REST / Messaging / API automation / Adapters
     participant Edge as moa-edge
     participant Auth as moa-auth/providers
     participant Restate as Restate ingress
@@ -121,7 +121,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, mock/test embedding |
 | `HandProvider` | Provision, execute, pause, resume, destroy execution environments | local, Docker, Daytona, E2B |
 | `BuiltInTool` | In-process tools with policy and schema metadata | memory, file/search/read/write, shell helpers |
-| `PlatformAdapter` | Gateway normalization/rendering | Slack |
+| `PlatformAdapter` | Messaging normalization/rendering | Slack |
 | `ContextProcessor` | Ordered context-pipeline stage | identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, cache |
 | `CredentialVault` | Secret storage abstraction | encrypted local file vault, environment-backed MCP vault |
 | `AuthProvider` | Resolve API keys or bearer JWTs to MOA identities | local API keys, disabled local/test mode, optional Auth0/OIDC |
@@ -157,7 +157,7 @@ Stable interfaces live in [`crates/moa-core`](crates/moa-core/).
 | `moa-hands` | Tool router and execution adapters |
 | `moa-providers` | Provider core and vendor adapters |
 | `moa-orchestrator` | Restate objects, services, workflows, and `moa-orchestrator-bin` |
-| `moa-gateway` | Messaging adapters and platform renderers |
+| `moa-messaging` | Messaging adapters, platform renderers, and notification connectors |
 | `moa-security` | Vaults, MCP credential proxy, policies, prompt-injection controls |
 | `moa-skills` | Agent Skills parsing, distillation, improvement, and regression generation |
 | `moa-eval` | Evaluation harness |
@@ -216,7 +216,7 @@ The Docker image builds `moa-orchestrator-bin` and installs it as
 sequenceDiagram
     autonumber
     actor User
-    participant Client as Gateway / API caller
+    participant Client as Messaging / API caller
     participant Session as Session VO
     participant Store as moa-session / Postgres
     participant Pipeline as Context pipeline

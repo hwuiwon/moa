@@ -142,6 +142,45 @@ MOA_RUN_LIVE_E2E=1 MOA_RUN_LIVE_PROVIDER_TESTS=1 make test-provider-e2e
 MOA_RUN_LIVE_E2E=1 ./scripts/run-clean-e2e.sh --live --long-eval
 ```
 
+Postmark messaging e2e coverage is ignored by default and reads local `.env`
+values directly. Use `POSTMARK_SERVER_API_TOKEN=POSTMARK_API_TEST` for
+non-delivery validation, or provide `POSTMARK_TEST_FROM` and `POSTMARK_TEST_TO`
+with a real server token:
+
+```bash
+MOA_RUN_LIVE_POSTMARK_TESTS=1 \
+cargo test -p moa-messaging --test postmark_provider_e2e --all-features -- --ignored --nocapture
+```
+
+The Postmark offline suite covers payload shape, provider status errors,
+bounded HTTP 429 retries, exhausted rate-limit failures, and nonzero
+`ErrorCode` classification. Live Postmark coverage should remain a single
+happy-path acceptance check because reproducing account, suppression, or rate
+limit failures against the real service is brittle.
+
+Twilio SMS e2e coverage is also ignored by default and reads local `.env`
+values directly. It requires `TWILIO_ACCOUNT_SID` or `TWILIO_SID`, either
+`TWILIO_AUTH_TOKEN` or `TWILIO_API_KEY_SID` plus `TWILIO_API_KEY_SECRET`, and
+either `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID`. Set
+`TWILIO_TEST_TO` to the recipient number for a live send; the test skips when
+that value is absent:
+
+```bash
+MOA_RUN_LIVE_TWILIO_TESTS=1 \
+cargo test -p moa-messaging --test twilio_provider_e2e --all-features -- --ignored --nocapture
+```
+
+The Twilio live test polls the accepted Message SID until the message reaches
+`sent`, `delivered`, or a terminal failure state. Terminal failures include the
+Twilio status and error code in the assertion so delivery regressions do not
+look like successful provider acceptance.
+
+Slack messaging tests stay offline by default. Unit and integration tests cover
+Events API normalization, approval controls, edit fallbacks, per-channel send
+pacing, exhausted rate limits, and Slack API error classification; live Slack
+coverage should use a separate ignored provider lane once a test workspace and
+channel are configured.
+
 Remote loadtest checks are also ignored by default. The step-latency check
 requires a running orchestrator with Prometheus metrics enabled:
 

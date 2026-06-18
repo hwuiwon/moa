@@ -3567,27 +3567,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moa-gateway"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "insta",
- "moa-core",
- "moa-test-support",
- "reqwest 0.13.2",
- "serde_json",
- "slack-morphism",
- "tokio",
- "tokio-test",
- "tracing",
- "unicode-segmentation",
- "uuid",
- "wiremock",
- "workspace-hack",
-]
-
-[[package]]
 name = "moa-hands"
 version = "0.1.0"
 dependencies = [
@@ -3855,6 +3834,30 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+ "wiremock",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-messaging"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "insta",
+ "moa-core",
+ "moa-test-support",
+ "reqwest 0.13.2",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "slack-morphism",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "unicode-segmentation",
  "uuid",
  "wiremock",
  "workspace-hack",

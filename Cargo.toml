@@ -28,7 +28,7 @@ members = [
     "crates/moa-hands",
     "crates/moa-providers",
     "crates/moa-orchestrator",
-    "crates/moa-gateway",
+    "crates/moa-messaging",
     "crates/moa-security",
     "crates/moa-skills",
     "crates/moa-eval/core",
@@ -67,7 +67,7 @@ default-members = [
     "crates/moa-hands",
     "crates/moa-providers",
     "crates/moa-orchestrator",
-    "crates/moa-gateway",
+    "crates/moa-messaging",
     "crates/moa-security",
     "crates/moa-skills",
     "crates/moa-eval/core",
@@ -95,7 +95,7 @@ moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }
 moa-experiments = { path = "crates/moa-experiments" }
 moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
-moa-gateway = { path = "crates/moa-gateway" }
+moa-messaging = { path = "crates/moa-messaging" }
 moa-hands = { path = "crates/moa-hands" }
 moa-lineage-audit = { path = "crates/moa-lineage/audit" }
 moa-lineage-citation = { path = "crates/moa-lineage/citation" }

@@ -32,7 +32,7 @@ The root workspace currently contains:
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
-| `moa-gateway` | Slack adapter and renderer |
+| `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
 | `moa-skills` | Skill parser, DB-backed package registry, distillation, improvement, regression generation |
 | `moa-eval` | Evaluation harness |
@@ -122,7 +122,7 @@ and deployment setup. Key groups:
 | `MOA_CLOUD_*` | cloud mode and hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, async approvals, and OCSF security-event audit |
-| `MOA_GATEWAY_*` | messaging adapter token env names |
+| `MOA_MESSAGING_*` | messaging adapter settings |
 | `MOA_PERMISSIONS_*` | default approval posture |
 | `MOA_COMPACTION_*` | history compaction thresholds |
 
@@ -142,7 +142,7 @@ Implemented architectural pillars:
 Areas still evolving:
 
 - REST product API shape and admin UI details.
-- Richer gateway callback typing.
+- Richer messaging callback typing.
 - More complete tenant admin dashboard workflows.
 - Production deployment automation around Restate registration and hand provider configuration.
 
@@ -157,13 +157,17 @@ MOA_RESTATE_INGRESS_URL=http://...
 OPENAI_API_KEY=... # or another configured provider key
 ```
 
-Optional hand and gateway settings depend on the chosen deployment:
+Optional hand and messaging settings depend on the chosen deployment:
 
 ```bash
 DAYTONA_API_KEY=...
 E2B_API_KEY=...
 SLACK_BOT_TOKEN=...
 SLACK_APP_TOKEN=...
+POSTMARK_SERVER_API_TOKEN=...
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_FROM_NUMBER=...
 ```
 
 The orchestrator exposes the Restate handler endpoint and a health/readiness endpoint. Readiness checks Postgres and can optionally require registered Restate services.

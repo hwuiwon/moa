@@ -7,10 +7,10 @@ mod authz;
 mod context;
 mod database;
 mod env_overlay;
-mod gateway;
 mod lineage;
 mod loader;
 mod memory;
+mod messaging;
 mod orchestrator;
 mod providers;
 mod sandbox;
@@ -32,7 +32,6 @@ pub use context::{
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
 pub use env_overlay::MoaEnvOverlay;
-pub use gateway::GatewayConfig;
 pub use lineage::LineageConfig;
 pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
@@ -40,6 +39,7 @@ pub use memory::{
     MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
     VectorEmbedderConfig,
 };
+pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
 pub use sandbox::{
@@ -83,8 +83,8 @@ pub struct MoaConfig {
     pub memory: MemoryConfig,
     /// Cloud runtime settings.
     pub cloud: CloudConfig,
-    /// Messaging gateway settings.
-    pub gateway: GatewayConfig,
+    /// Messaging adapter settings.
+    pub messaging: MessagingConfig,
     /// Permission policy settings.
     pub permissions: PermissionsConfig,
     /// Session storage settings.

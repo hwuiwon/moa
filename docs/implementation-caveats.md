@@ -6,45 +6,45 @@ Caveats are grouped by root cause / architectural boundary, not by the crate whe
 
 ---
 
-## Gateway: platform callbacks are not first-class typed events
+## Messaging: platform callbacks are not first-class typed events
 
-All three messaging adapters normalize platform-specific callback payloads into text control messages instead of typed gateway events. The fix is the same everywhere: widen `PlatformAdapter` to emit structured callback events alongside `InboundMessage`.
+Messaging adapters normalize platform-specific callback payloads into text control messages instead of typed messaging events. The fix is the same everywhere: widen `PlatformAdapter` to emit structured callback events alongside `InboundMessage`.
 
 ### Slack approval buttons are normalized back into control messages
 
-- `crates/moa-gateway/src/slack.rs` receives Block Kit button actions over Socket Mode.
+- `crates/moa-messaging/src/slack.rs` receives Block Kit button actions over Socket Mode.
 - The core `PlatformAdapter` trait still only emits `InboundMessage`.
 - The adapter converts approval button clicks into normalized commands such as `/approval deny <request_id>`.
 - If adapters need richer structured callbacks later, `InboundMessage.text` should stop carrying control commands.
 
 ### The unified approval layer still targets inline buttons first
 
-- `crates/moa-gateway/src/approval.rs` is the single source of truth for approval callback encoding and default approval buttons.
+- `crates/moa-messaging/src/approval.rs` is the single source of truth for approval callback encoding and default approval buttons.
 - Slack consumes that callback format and button set, with a fallback to text commands when inline buttons are unavailable.
-- The generic gateway surface still has no first-class modal representation. `PlatformCapabilities.supports_modals` is informative today, but the unified approval flow still chooses inline buttons when available and text fallback otherwise.
+- The generic messaging surface still has no first-class modal representation. `PlatformCapabilities.supports_modals` is informative today, but the unified approval flow still chooses inline buttons when available and text fallback otherwise.
 
 ---
 
-## Gateway: outbound routing requires an inbound anchor
+## Messaging: outbound routing requires an inbound anchor
 
 The Slack adapter resolves outbound destinations from `reply_to` and cannot proactively start conversations. The shared fix is an explicit destination field on `OutboundMessage` or the adapter trait.
 
 ### Slack outbound routing depends on an existing reply anchor
 
 - `OutboundMessage` still has no explicit Slack destination.
-- `crates/moa-gateway/src/slack.rs` resolves channel/thread targets from `reply_to`, using either a known inbound Slack message timestamp or a previously sent synthetic gateway message id.
+- `crates/moa-messaging/src/slack.rs` resolves channel/thread targets from `reply_to`, using either a known inbound Slack message timestamp or a previously sent synthetic messaging message id.
 - The intended session model works: one MOA session per Slack thread, with replies and edits anchored correctly.
 - The adapter cannot proactively open a brand-new channel/thread without a prior inbound anchor.
 
 ---
 
-## Gateway: conservative rendering
+## Messaging: conservative rendering
 
 Slack rendering is intentionally minimal. Upgrading it requires a proper platform-safe formatting layer with escaping and richer markup.
 
 ### Slack rendering is intentionally minimal Block Kit
 
-- `crates/moa-gateway/src/renderer.rs` splits Slack output at the 40K text cap and renders approval buttons as Block Kit actions.
+- `crates/moa-messaging/src/renderer.rs` splits Slack output at the 40K text cap and renders approval buttons as Block Kit actions.
 - Normal text/code/diff output stays text-first, with Block Kit only added when interactive buttons are needed.
 - The adapter uses `chat.update` directly and advertises a 1-second edit interval, but does not yet coalesce bursts of intermediate status updates into a smarter buffer.
 - If Slack becomes a primary surface, the next upgrade should add richer per-event thread rendering and more deliberate edit throttling/coalescing.

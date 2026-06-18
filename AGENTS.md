@@ -13,7 +13,7 @@ truth.
 | `docs/00-direction.md` | Product identity and philosophy |
 | `docs/01-architecture-overview.md` | System model, trait map, workspace layout |
 | `docs/02-brain-orchestration.md` | Restate orchestration and brain loop |
-| `docs/03-communication-layer.md` | Gateway/API communication, approvals, observation |
+| `docs/03-communication-layer.md` | Messaging/API communication, approvals, observation |
 | `docs/04-memory-architecture.md` | Graph memory, privacy, retrieval, consolidation |
 | `docs/05-session-event-log.md` | Postgres event schema and compaction |
 | `docs/06-hands-and-mcp.md` | HandProvider, sandboxes, MCP, tool routing |
@@ -31,7 +31,7 @@ crate, translate it to `crates/<name>/...`.
 |---|---|
 | Core runtime | `moa-core` traits/types/config/events, `moa-brain` context pipeline, `moa-session` Postgres event store, `moa-orchestrator` Restate services/workflows, `moa-edge` public HTTP edge |
 | Memory and learning | `moa-memory-*` graph/ingest/lifecycle/PII/vector, `moa-skills` registry/distillation/improvement |
-| Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding providers, `moa-gateway` Slack adapter, `moa-security` vault/policy/MCP proxy |
+| Tools and providers | `moa-hands` tool routing and sandboxes, `moa-providers` LLM/embedding providers, `moa-messaging` Slack and notification adapters, `moa-security` vault/policy/MCP proxy |
 | Auth, audit, lineage | `moa-auth/*` identity/authz/OpenFGA bootstrap, `moa-ocsf` security events, `moa-lineage/*` citation, sinks, OTel, audit chain |
 | Eval and dev tooling | `moa-eval-core`, `moa-eval`, `moa-loadtest`, `moa-test-support`, `xtask`, `workspace-hack` |
 

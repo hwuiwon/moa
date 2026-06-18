@@ -191,10 +191,16 @@ pub struct MoaEnvOverlay {
     pub cloud_hands_e2b_domain: Option<String>,
     /// `MOA_CLOUD_HANDS_E2B_TEMPLATE`.
     pub cloud_hands_e2b_template: Option<String>,
-    /// `MOA_GATEWAY_SLACK_TOKEN_ENV`.
-    pub gateway_slack_token_env: Option<String>,
-    /// `MOA_GATEWAY_SLACK_APP_TOKEN_ENV`.
-    pub gateway_slack_app_token_env: Option<String>,
+    /// `MOA_MESSAGING_SLACK_TOKEN_ENV`.
+    pub messaging_slack_token_env: Option<String>,
+    /// `MOA_MESSAGING_SLACK_APP_TOKEN_ENV`.
+    pub messaging_slack_app_token_env: Option<String>,
+    /// `MOA_MESSAGING_POSTMARK_BASE_URL`.
+    pub messaging_postmark_base_url: Option<String>,
+    /// `MOA_MESSAGING_POSTMARK_MESSAGE_STREAM`.
+    pub messaging_postmark_message_stream: Option<String>,
+    /// `MOA_MESSAGING_TWILIO_BASE_URL`.
+    pub messaging_twilio_base_url: Option<String>,
     /// `MOA_PERMISSIONS_DEFAULT_POSTURE`.
     pub permissions_default_posture: Option<String>,
     /// `MOA_PERMISSIONS_AUTO_APPROVE`.
@@ -586,12 +592,24 @@ impl MoaEnvOverlay {
         set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
         self.apply_cloud(config);
         set_if_some(
-            &mut config.gateway.slack_token_env,
-            &self.gateway_slack_token_env,
+            &mut config.messaging.slack_token_env,
+            &self.messaging_slack_token_env,
         );
         set_if_some(
-            &mut config.gateway.slack_app_token_env,
-            &self.gateway_slack_app_token_env,
+            &mut config.messaging.slack_app_token_env,
+            &self.messaging_slack_app_token_env,
+        );
+        set_if_some(
+            &mut config.messaging.postmark_base_url,
+            &self.messaging_postmark_base_url,
+        );
+        set_if_some(
+            &mut config.messaging.postmark_message_stream,
+            &self.messaging_postmark_message_stream,
+        );
+        set_if_some(
+            &mut config.messaging.twilio_base_url,
+            &self.messaging_twilio_base_url,
         );
         set_if_some(
             &mut config.permissions.default_posture,
@@ -1190,6 +1208,17 @@ mod tests {
             ("MOA_TURBOPUFFER_BASE_URL", "https://tpuf.example"),
             ("MOA_TURBOPUFFER_ENVIRONMENT", "prod"),
             ("MOA_TURBOPUFFER_BAA", "true"),
+            ("MOA_MESSAGING_SLACK_TOKEN_ENV", "CUSTOM_SLACK_BOT_TOKEN"),
+            (
+                "MOA_MESSAGING_SLACK_APP_TOKEN_ENV",
+                "CUSTOM_SLACK_APP_TOKEN",
+            ),
+            (
+                "MOA_MESSAGING_POSTMARK_BASE_URL",
+                "https://postmark.example",
+            ),
+            ("MOA_MESSAGING_POSTMARK_MESSAGE_STREAM", "alerts"),
+            ("MOA_MESSAGING_TWILIO_BASE_URL", "https://twilio.example"),
             ("MOA_PROVIDERS_OPENAI_API_KEY_ENV", "CUSTOM_OPENAI_KEY"),
             ("MOA_RESTATE_INGRESS_URL", "http://restate.example:8080"),
             ("MOA_RESTATE_ADMIN_URL", "http://restate.example:9070"),
@@ -1259,6 +1288,17 @@ mod tests {
             Some("prod")
         );
         assert!(config.memory.vector.turbopuffer.baa_enabled);
+        assert_eq!(config.messaging.slack_token_env, "CUSTOM_SLACK_BOT_TOKEN");
+        assert_eq!(
+            config.messaging.slack_app_token_env,
+            "CUSTOM_SLACK_APP_TOKEN"
+        );
+        assert_eq!(
+            config.messaging.postmark_base_url,
+            "https://postmark.example"
+        );
+        assert_eq!(config.messaging.postmark_message_stream, "alerts");
+        assert_eq!(config.messaging.twilio_base_url, "https://twilio.example");
         assert_eq!(config.providers.openai.api_key_env, "CUSTOM_OPENAI_KEY");
         assert_eq!(
             config.orchestrator.endpoint.as_deref(),

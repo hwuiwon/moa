@@ -7,8 +7,8 @@ Mermaid sequence diagrams showing how MOA actually moves at runtime. Start with 
 | Short | Component | Crate |
 |---|---|---|
 | `User` | Person sending messages | — |
-| `Platform` | Slack / API caller | `moa-gateway`, `moa-edge` |
-| `Gateway` | Normalizes inbound, renders outbound | `moa-gateway` |
+| `Platform` | Slack / API caller | `moa-messaging`, `moa-edge` |
+| `Messaging` | Normalizes inbound, renders outbound | `moa-messaging` |
 | `Orch` | `BrainOrchestrator` (`LocalOrchestrator` or Restate-backed runtime) | `moa-orchestrator` |
 | `Brain` | Stateless harness loop | `moa-brain` |
 | `Pipe` | 7-stage context compilation pipeline | `moa-brain` |
@@ -31,7 +31,7 @@ sequenceDiagram
     autonumber
     actor User
     participant Platform as Slack
-    participant Gateway
+    participant Messaging
     participant Orch as Orchestrator
     participant Brain
     participant Pipe as Pipeline
@@ -42,8 +42,8 @@ sequenceDiagram
     participant Hand
 
     User->>Platform: "deploy to staging"
-    Platform->>Gateway: InboundMessage {user, workspace, text}
-    Gateway->>Orch: start_session / signal(QueueMessage)
+    Platform->>Messaging: InboundMessage {user, workspace, text}
+    Messaging->>Orch: start_session / signal(QueueMessage)
     Orch->>Log: create_session + emit UserMessage
     Orch->>Brain: spawn / wake
 
@@ -60,13 +60,13 @@ sequenceDiagram
     LLM-->>Brain: ToolCall { bash: "fly deploy --app staging" }
 
     Brain->>Log: emit ApprovalRequested
-    Orch->>Gateway: observe event
-    Gateway->>Platform: render inline buttons [Allow Once][Always][Deny]
+    Orch->>Messaging: observe event
+    Messaging->>Platform: render inline buttons [Allow Once][Always][Deny]
     Platform-->>User: approval card
 
     User->>Platform: taps [Allow Once]
-    Platform->>Gateway: callback_data
-    Gateway->>Orch: signal(ApprovalDecided)
+    Platform->>Messaging: callback_data
+    Messaging->>Orch: signal(ApprovalDecided)
     Orch->>Brain: deliver signal
     Brain->>Log: emit ApprovalDecided
 
@@ -89,8 +89,8 @@ sequenceDiagram
     end
 
     Brain->>Log: emit SessionCompleted
-    Orch->>Gateway: observe final event
-    Gateway->>Platform: render final message
+    Orch->>Messaging: observe final event
+    Messaging->>Platform: render final message
     Platform-->>User: "Deployment complete..."
 
     Note over Orch,Hand: On terminal exit, Orchestrator calls<br/>ToolRouter.destroy_session_hands(session_id)
@@ -106,13 +106,13 @@ How a new message becomes a running brain. Shows the split between `start_sessio
 sequenceDiagram
     autonumber
     participant Platform
-    participant Gateway
+    participant Messaging
     participant Orch as Orchestrator
     participant Brain
     participant Log as SessionStore
 
-    Platform->>Gateway: InboundMessage
-    Gateway->>Orch: route by session mapping
+    Platform->>Messaging: InboundMessage
+    Messaging->>Orch: route by session mapping
 
     alt No active session for this thread
         Orch->>Log: create_session(meta)
@@ -191,7 +191,7 @@ sequenceDiagram
     participant Log as SessionStore
     participant Policy as ToolPolicies
     participant Orch as Orchestrator
-    participant Gateway
+    participant Messaging
     participant Platform
     actor User
 
@@ -208,15 +208,15 @@ sequenceDiagram
         Brain->>Log: emit ApprovalRequested {risk: low|med|high}
         Brain->>Log: update_status(WaitingApproval)
 
-        Orch->>Gateway: observe ApprovalRequested
-        Gateway->>Platform: render [Allow Once][Always Allow][Deny]
+        Orch->>Messaging: observe ApprovalRequested
+        Messaging->>Platform: render [Allow Once][Always Allow][Deny]
         Platform-->>User: risk-colored card (🟢/🟡/🔴)
 
         Note over Brain,User: Brain blocks on signal_rx.recv()<br/>Can wait indefinitely — durable
 
         User->>Platform: tap button
-        Platform->>Gateway: callback
-        Gateway->>Orch: signal(ApprovalDecided {decision, pattern?})
+        Platform->>Messaging: callback
+        Messaging->>Orch: signal(ApprovalDecided {decision, pattern?})
         Orch->>Brain: deliver signal
 
         alt Always Allow
@@ -441,7 +441,7 @@ In cloud mode, each session is a Restate Virtual Object. Turns execute as durabl
 sequenceDiagram
     autonumber
     participant Platform
-    participant Gateway
+    participant Messaging
     participant Restate
     participant Session as Session VO
     participant LLM as LLMGateway
@@ -449,8 +449,8 @@ sequenceDiagram
     participant Hand as Daytona / E2B
     participant K8s as Orchestrator pod
 
-    Platform->>Gateway: inbound message
-    Gateway->>Restate: invoke Session/post_message
+    Platform->>Messaging: inbound message
+    Messaging->>Restate: invoke Session/post_message
     Restate->>K8s: route invocation
     K8s->>Session: post_message(session_id)
 
@@ -461,8 +461,8 @@ sequenceDiagram
             Session->>Log: emit ApprovalRequested
             Session->>Restate: await awakeable
             Note over Session,Restate: Invocation sleeps durably until resolved.
-            Platform->>Gateway: user tapped button
-            Gateway->>Restate: resolve awakeable
+            Platform->>Messaging: user tapped button
+            Messaging->>Restate: resolve awakeable
             Restate->>Session: resume
         else Tool executes
             Session->>Hand: provision (lazy) + execute
@@ -563,7 +563,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as Observer (Gateway / Desktop)
+    participant Client as Observer (Messaging / Desktop)
     participant Orch as Orchestrator
     participant Log as SessionStore
     participant Brain
