@@ -19,13 +19,13 @@ use moa_core::{
     HandHandle, HandProvider, McpServerConfig, MemoryToolExecutor, SandboxFile, SessionId,
     SessionStore, ToolBudgetConfig, ToolOutputConfig, WorkspaceId,
 };
-use moa_security::{ApprovalRuleStore, MCPCredentialProxy, ToolPolicies};
+use moa_security::{ActionPolicies, ActionPolicyRuleStore, MCPCredentialProxy};
 use tokio::sync::RwLock;
 
 use crate::adapters::local::LocalHandProvider;
 use crate::adapters::mcp::MCPClient;
 
-pub use policy::PreparedToolInvocation;
+pub use policy::{ActionOrigin, PreparedActionInvocation};
 pub use registration::{ToolExecution, ToolRegistry};
 
 const DEFAULT_PROVIDER_NAME: &str = "local";
@@ -43,8 +43,8 @@ pub struct ToolRouter {
     trusted_sandbox_files: RwLock<HashMap<SessionId, Vec<SandboxFile>>>,
     installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     workspace_roots: RwLock<HashMap<WorkspaceId, PathBuf>>,
-    policies: ToolPolicies,
-    rule_store: Option<Arc<dyn ApprovalRuleStore>>,
+    policies: ActionPolicies,
+    rule_store: Option<Arc<dyn ActionPolicyRuleStore>>,
     session_store: Option<Arc<dyn SessionStore>>,
     memory_tool_executor: RwLock<Option<Arc<dyn MemoryToolExecutor>>>,
     lineage: Arc<dyn moa_core::LineageHandle>,

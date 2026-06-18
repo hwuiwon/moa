@@ -400,22 +400,22 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             body: Vec::new(),
         };
     }
-    if *method == Method::GET && uri.path() == "/v1/approvals" {
+    if *method == Method::GET && uri.path() == "/v1/authz-challenges" {
         return RouteTranslation::Forward {
             method: Method::POST,
-            path: "/Approvals/list_mine".to_string(),
+            path: "/AuthzChallenges/list_mine".to_string(),
             body: Vec::new(),
         };
     }
     if *method == Method::POST
         && let Some(id) = uri
             .path()
-            .strip_prefix("/v1/approvals/")
+            .strip_prefix("/v1/authz-challenges/")
             .and_then(|rest| rest.strip_suffix("/decision"))
     {
-        let approval_id = match Uuid::parse_str(id) {
+        let challenge_id = match Uuid::parse_str(id) {
             Ok(value) => value,
-            Err(_) => return RouteTranslation::BadRequest("bad approval id"),
+            Err(_) => return RouteTranslation::BadRequest("bad authz challenge id"),
         };
         let mut value: serde_json::Value = match serde_json::from_slice(body) {
             Ok(value) => value,
@@ -424,17 +424,85 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
         let Some(object) = value.as_object_mut() else {
             return RouteTranslation::BadRequest("decision body must be object");
         };
-        object.insert("id".to_string(), serde_json::json!(approval_id));
+        object.insert("id".to_string(), serde_json::json!(challenge_id));
         let bytes = match serde_json::to_vec(&value) {
             Ok(bytes) => bytes,
             Err(error) => {
-                tracing::error!(error = %error, "serialize approval decision body failed");
+                tracing::error!(error = %error, "serialize authz challenge decision body failed");
                 return RouteTranslation::BadRequest("bad decision body");
             }
         };
         return RouteTranslation::Forward {
             method: Method::POST,
-            path: "/Approvals/decide".to_string(),
+            path: "/AuthzChallenges/decide".to_string(),
+            body: bytes,
+        };
+    }
+    if *method == Method::GET
+        && let Some(rest) = uri
+            .path()
+            .strip_prefix("/v1/workspaces/")
+            .and_then(|rest| rest.strip_suffix("/action-reviews"))
+    {
+        let workspace_id = rest.trim_matches('/');
+        if workspace_id.is_empty() || workspace_id.contains('/') {
+            return RouteTranslation::BadRequest("bad workspace id");
+        }
+        let body = match serde_json::to_vec(&serde_json::json!({ "workspace_id": workspace_id })) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(error = %error, "serialize action review list body failed");
+                return RouteTranslation::BadRequest("bad action review list body");
+            }
+        };
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/ActionReviews/list_pending".to_string(),
+            body,
+        };
+    }
+    if *method == Method::POST
+        && let Some(rest) = uri
+            .path()
+            .strip_prefix("/v1/workspaces/")
+            .and_then(|rest| rest.strip_suffix("/decision"))
+    {
+        let mut segments = rest.split('/');
+        let Some(workspace_id) = segments.next() else {
+            return RouteTranslation::BadRequest("bad workspace id");
+        };
+        if segments.next() != Some("action-reviews") {
+            return RouteTranslation::NoChange;
+        }
+        let Some(review_id_text) = segments.next() else {
+            return RouteTranslation::BadRequest("bad action review id");
+        };
+        if segments.next().is_some() || workspace_id.is_empty() {
+            return RouteTranslation::BadRequest("bad action review path");
+        }
+        let review_id = match Uuid::parse_str(review_id_text) {
+            Ok(value) => value,
+            Err(_) => return RouteTranslation::BadRequest("bad action review id"),
+        };
+        let mut value: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(value) => value,
+            Err(_) => return RouteTranslation::BadRequest("bad action review decision body"),
+        };
+        let Some(object) = value.as_object_mut() else {
+            return RouteTranslation::BadRequest("action review decision body must be object");
+        };
+        object.insert("workspace_id".to_string(), serde_json::json!(workspace_id));
+        object.insert("review_id".to_string(), serde_json::json!(review_id));
+        let bytes = match serde_json::to_vec(&value) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(error = %error, "serialize action review decision body failed");
+                return RouteTranslation::BadRequest("bad action review decision body");
+            }
+        };
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: "/ActionReviews/decide".to_string(),
             body: bytes,
         };
     }
@@ -989,30 +1057,88 @@ mod tests {
     }
 
     #[test]
-    fn approval_public_routes_translate_to_restate_handlers() {
-        // Pins: builtin approval list and decision actions stay available through public edge APIs.
-        let list_uri = "/v1/approvals"
+    fn action_review_public_routes_translate_to_restate_handlers() {
+        // Pins: workspace-admin action-review routes forward to the internal ActionReviews service.
+        let list_uri = "/v1/workspaces/workspace-a/action-reviews"
             .parse::<Uri>()
             .expect("route path should parse");
         let list_translation = translate_public_route(&Method::GET, &list_uri, &Bytes::new());
         match list_translation {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
-                assert_eq!(path, "/Approvals/list_mine");
-                assert!(
-                    body.is_empty(),
-                    "approval list should not synthesize a request body"
+                assert_eq!(path, "/ActionReviews/list_pending");
+                let forwarded: serde_json::Value =
+                    serde_json::from_slice(&body).expect("list body should be valid JSON");
+                assert_eq!(
+                    forwarded,
+                    serde_json::json!({ "workspace_id": "workspace-a" })
                 );
             }
             RouteTranslation::NoChange => {
-                panic!("approval list should translate to Approvals service")
+                panic!("action review list should translate to ActionReviews service")
             }
             RouteTranslation::BadRequest(message) => {
-                panic!("approval list should not fail translation: {message}")
+                panic!("action review list should not fail translation: {message}")
             }
         }
 
-        let decision_uri = "/v1/approvals/11111111-1111-1111-1111-111111111111/decision"
+        let decision_uri =
+            "/v1/workspaces/workspace-a/action-reviews/11111111-1111-1111-1111-111111111111/decision"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let decision_body = Bytes::from_static(br#"{"decision":"cleared","reason":null}"#);
+        let decision_translation =
+            translate_public_route(&Method::POST, &decision_uri, &decision_body);
+        match decision_translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/ActionReviews/decide");
+                let forwarded: serde_json::Value =
+                    serde_json::from_slice(&body).expect("decision body should be valid JSON");
+                assert_eq!(
+                    forwarded,
+                    serde_json::json!({
+                        "workspace_id": "workspace-a",
+                        "review_id": "11111111-1111-1111-1111-111111111111",
+                        "decision": "cleared",
+                        "reason": null
+                    })
+                );
+            }
+            RouteTranslation::NoChange => {
+                panic!("action review decision should translate to ActionReviews service")
+            }
+            RouteTranslation::BadRequest(message) => {
+                panic!("action review decision should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn authz_challenge_public_routes_translate_to_restate_handlers() {
+        // Pins: builtin async-authz challenge routes stay separate from action reviews.
+        let list_uri = "/v1/authz-challenges"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let list_translation = translate_public_route(&Method::GET, &list_uri, &Bytes::new());
+        match list_translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/AuthzChallenges/list_mine");
+                assert!(
+                    body.is_empty(),
+                    "authz challenge list should not synthesize a request body"
+                );
+            }
+            RouteTranslation::NoChange => {
+                panic!("authz challenge list should translate to AuthzChallenges service")
+            }
+            RouteTranslation::BadRequest(message) => {
+                panic!("authz challenge list should not fail translation: {message}")
+            }
+        }
+
+        let decision_uri = "/v1/authz-challenges/22222222-2222-2222-2222-222222222222/decision"
             .parse::<Uri>()
             .expect("route path should parse");
         let decision_body = Bytes::from_static(br#"{"outcome":"approved","reason":null}"#);
@@ -1021,23 +1147,23 @@ mod tests {
         match decision_translation {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
-                assert_eq!(path, "/Approvals/decide");
+                assert_eq!(path, "/AuthzChallenges/decide");
                 let forwarded: serde_json::Value =
                     serde_json::from_slice(&body).expect("decision body should be valid JSON");
                 assert_eq!(
                     forwarded,
                     serde_json::json!({
-                        "id": "11111111-1111-1111-1111-111111111111",
+                        "id": "22222222-2222-2222-2222-222222222222",
                         "outcome": "approved",
                         "reason": null
                     })
                 );
             }
             RouteTranslation::NoChange => {
-                panic!("approval decision should translate to Approvals service")
+                panic!("authz challenge decision should translate to AuthzChallenges service")
             }
             RouteTranslation::BadRequest(message) => {
-                panic!("approval decision should not fail translation: {message}")
+                panic!("authz challenge decision should not fail translation: {message}")
             }
         }
     }

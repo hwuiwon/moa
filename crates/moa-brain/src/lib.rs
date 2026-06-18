@@ -25,7 +25,4 @@ pub use pipeline::{
     build_default_pipeline_with_tools,
 };
 pub use tool_stats::{ToolStats, WorkspaceToolStats, update_ema};
-pub use turn::{
-    StreamSignalDisposition, StreamedCompletion, find_pending_approval_request,
-    stream_completion_response,
-};
+pub use turn::{StreamSignalDisposition, StreamedCompletion, stream_completion_response};

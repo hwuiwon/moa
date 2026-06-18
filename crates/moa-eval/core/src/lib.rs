@@ -22,7 +22,7 @@ pub use plan::{EvalPlan, build_eval_plan};
 pub use replay::{ReplayConfig, token_f1};
 pub use results::{EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TrajectoryStep};
 pub use types::{
-    AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode,
-    LongSessionInterleaving, LongTestCase, MemoryOverride, PermissionOverride,
-    SecondaryLongSession, SkillOverride, TestCase, TestCaseKind, TestSuite, ToolOverride,
+    ActionPolicyOverride, AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode,
+    LongSessionInterleaving, LongTestCase, MemoryOverride, SecondaryLongSession, SkillOverride,
+    TestCase, TestCaseKind, TestSuite, ToolOverride,
 };

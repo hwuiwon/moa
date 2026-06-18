@@ -18,10 +18,9 @@ impl PostgresSessionStore {
     pub async fn refresh_active_session_metric(&self) -> Result<()> {
         let sessions = self.table_name("sessions");
         let active = sqlx::query_scalar::<_, i64>(&format!(
-            "SELECT COUNT(*)::BIGINT FROM {sessions} WHERE status IN ($1, $2)"
+            "SELECT COUNT(*)::BIGINT FROM {sessions} WHERE status = $1"
         ))
         .bind(SessionStatus::Running.as_str())
-        .bind(SessionStatus::WaitingApproval.as_str())
         .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)?;

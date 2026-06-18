@@ -1,14 +1,15 @@
 //! Restate service modules hosted by the orchestrator binary.
 
+pub mod action_reviews;
 pub mod admin_maintenance;
 pub mod agents;
 pub mod analytics;
 pub mod api_keys;
-pub mod approvals;
-pub mod approvals_reaper;
 pub mod artifacts;
 pub mod audit;
 pub mod authz_admin;
+pub mod authz_challenges;
+pub mod authz_challenges_reaper;
 pub mod eval;
 pub mod experiments;
 pub mod graph_memory_maint;

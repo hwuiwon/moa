@@ -9,7 +9,7 @@ use moa_core::{
     SessionStore, ToolBudgetConfig, ToolOutputConfig,
 };
 use moa_security::{
-    ApprovalRuleStore, EnvironmentCredentialVault, MCPCredentialProxy, ToolPolicies,
+    ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
 };
 
 #[cfg(feature = "daytona")]
@@ -36,7 +36,7 @@ impl ToolRouter {
             trusted_sandbox_files: tokio::sync::RwLock::new(HashMap::new()),
             installed_files: tokio::sync::RwLock::new(HashMap::new()),
             workspace_roots: tokio::sync::RwLock::new(HashMap::new()),
-            policies: ToolPolicies::default(),
+            policies: ActionPolicies::default(),
             rule_store: None,
             session_store: None,
             memory_tool_executor: tokio::sync::RwLock::new(None),
@@ -125,7 +125,7 @@ impl ToolRouter {
         }
         .with_tool_output_config(config.tool_output.clone())
         .with_tool_budgets(config.tool_budgets.clone())
-        .with_policies(ToolPolicies::from_config(config));
+        .with_policies(ActionPolicies::from_config(config));
 
         if !config.mcp_servers.is_empty() {
             router.load_mcp_servers(config).await?;
@@ -134,9 +134,9 @@ impl ToolRouter {
         Ok(router)
     }
 
-    /// Attaches a persistent approval rule store to the router.
+    /// Attaches a persistent action-policy rule store to the router.
     #[must_use]
-    pub fn with_rule_store(mut self, rule_store: Arc<dyn ApprovalRuleStore>) -> Self {
+    pub fn with_rule_store(mut self, rule_store: Arc<dyn ActionPolicyRuleStore>) -> Self {
         self.rule_store = Some(rule_store);
         self
     }
@@ -179,7 +179,7 @@ impl ToolRouter {
 
     /// Overrides the router's policy configuration.
     #[must_use]
-    pub fn with_policies(mut self, policies: ToolPolicies) -> Self {
+    pub fn with_policies(mut self, policies: ActionPolicies) -> Self {
         self.policies = policies;
         self
     }

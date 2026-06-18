@@ -12,7 +12,7 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
-use moa_security::ToolPolicies;
+use moa_security::ActionPolicies;
 use moa_session::testing;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::{NewSkill, SkillRegistry};
@@ -29,7 +29,6 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let mut config = moa_core::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.memory.auto_bootstrap = false;
-    config.permissions.auto_approve = vec!["bash".to_string()];
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
@@ -57,7 +56,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
-            .with_policies(ToolPolicies::from_config(&config)),
+            .with_policies(ActionPolicies::from_config(&config)),
     );
     router
         .remember_workspace_root(workspace_id.clone(), workspace.clone())

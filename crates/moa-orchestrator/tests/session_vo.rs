@@ -75,7 +75,6 @@ fn session_vo_destroy_clears_state() {
     state
         .enqueue_message(test_message("hello"), Utc::now())
         .expect("enqueue should succeed");
-    state.pending_approval = Some("approval-1".to_string());
     state.last_turn_summary = Some("summary".to_string());
     state.children.push(moa_core::SubAgentChildRef {
         id: "child-1".to_string(),

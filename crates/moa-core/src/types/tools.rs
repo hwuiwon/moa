@@ -5,7 +5,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{ClaimCheck, PolicyAction, RiskLevel, SessionId, ToolCallId, UserId, WorkspaceId};
+use super::{
+    ActionClass, ActionPolicyEffect, ClaimCheck, RiskLevel, SessionId, ToolCallId, UserId,
+    WorkspaceId,
+};
 
 fn default_tool_max_output_tokens() -> u32 {
     8_000
@@ -87,7 +90,7 @@ pub enum ToolContent {
     },
 }
 
-/// High-level shape of tool inputs for normalization and approvals.
+/// High-level shape of tool inputs for normalization and action reviews.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolInputShape {
@@ -105,7 +108,7 @@ pub enum ToolInputShape {
     Json,
 }
 
-/// Strategy for rendering diffs during approvals.
+/// Strategy for rendering diffs during action reviews.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolDiffStrategy {
@@ -129,37 +132,41 @@ pub enum IdempotencyClass {
     NonIdempotent,
 }
 
-/// Static policy and approval metadata for a tool.
+/// Static action-policy metadata for a tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolPolicySpec {
-    /// Risk level shown to the user for this tool.
+    /// Risk level assigned to this tool.
     pub risk_level: RiskLevel,
-    /// Default action when no config override or approval rule matches.
-    pub default_action: PolicyAction,
-    /// Input shape used for normalization and approval summaries.
+    /// Default effect when no config override or policy rule matches.
+    pub default_effect: ActionPolicyEffect,
+    /// Policy/audit class assigned to this tool.
+    pub action_class: ActionClass,
+    /// Input shape used for normalization and review summaries.
     pub input_shape: ToolInputShape,
-    /// Diff strategy used for approval previews.
+    /// Diff strategy used for review previews.
     pub diff_strategy: ToolDiffStrategy,
 }
 
-/// Creates a read-only tool policy with auto-approval.
+/// Creates a read-only tool policy.
 pub fn read_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
     ToolPolicySpec {
         risk_level: RiskLevel::Low,
-        default_action: PolicyAction::Allow,
+        default_effect: ActionPolicyEffect::Allow,
+        action_class: ActionClass::Read,
         input_shape,
         diff_strategy: ToolDiffStrategy::None,
     }
 }
 
-/// Creates a write-capable tool policy that requires approval.
+/// Creates a write-capable tool policy.
 pub fn write_tool_policy(
     input_shape: ToolInputShape,
     diff_strategy: ToolDiffStrategy,
 ) -> ToolPolicySpec {
     ToolPolicySpec {
         risk_level: RiskLevel::Medium,
-        default_action: PolicyAction::RequireApproval,
+        default_effect: ActionPolicyEffect::Allow,
+        action_class: ActionClass::LocalWrite,
         input_shape,
         diff_strategy,
     }
@@ -381,7 +388,7 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON schema for parameters.
     pub schema: Value,
-    /// Static policy and approval metadata.
+    /// Static action-policy metadata.
     pub policy: ToolPolicySpec,
     /// Declared retry/idempotency semantics for the tool implementation.
     pub idempotency_class: IdempotencyClass,
@@ -399,11 +406,6 @@ impl ToolDefinition {
             "input_schema": self.schema,
         })
     }
-
-    /// Returns whether the tool requires explicit approval by default.
-    pub fn requires_approval(&self) -> bool {
-        matches!(self.policy.default_action, PolicyAction::RequireApproval)
-    }
 }
 
 /// Normalized policy-facing description of one tool invocation.
@@ -417,8 +419,10 @@ pub struct ToolPolicyInput {
     pub input_summary: String,
     /// Risk level assigned by the tool definition.
     pub risk_level: RiskLevel,
-    /// Default action when no config override or persisted rule matches.
-    pub default_action: PolicyAction,
+    /// Default effect when no config override or persisted rule matches.
+    pub default_effect: ActionPolicyEffect,
+    /// Policy/audit class assigned by the tool definition.
+    pub action_class: ActionClass,
 }
 
 #[cfg(test)]

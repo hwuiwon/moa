@@ -19,14 +19,14 @@ use crate::tools::file_read::resolve_sandbox_path;
 const MAX_CONTEXT_LINES: usize = 4;
 const MAX_DISAMBIGUATION_MATCHES: usize = 5;
 
-/// Planned `str_replace` mutation used by executors and approval previews.
+/// Planned `str_replace` mutation used by executors and action-review previews.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlannedStrReplace {
     /// Full file contents after the edit is applied.
     pub updated_content: String,
-    /// Existing snippet shown in approval previews.
+    /// Existing snippet shown in action-review previews.
     pub preview_before: String,
-    /// Proposed snippet shown in approval previews.
+    /// Proposed snippet shown in action-review previews.
     pub preview_after: String,
 }
 
@@ -94,7 +94,7 @@ pub async fn execute_docker(
     ))
 }
 
-/// Computes the file mutation and approval preview for a `str_replace` invocation.
+/// Computes the file mutation and action-review preview for a `str_replace` invocation.
 pub(crate) fn plan_str_replace(
     input: &str,
     existing_content: Option<&str>,

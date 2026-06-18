@@ -112,8 +112,8 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
                 .await?;
         assert_eq!(status.score_run_id, Some(run.score_run_id));
         assert!(
-            matches!(status.status.as_str(), "completed" | "waiting_approval"),
-            "experiment should complete or block on normal approval flow, got {status:?}"
+            matches!(status.status.as_str(), "completed"),
+            "experiment should complete without a blocking review state, got {status:?}"
         );
         let session_id = status
             .session_id
@@ -218,9 +218,7 @@ async fn wait_for_experiment_status(
                 .json::<ExperimentRunStatusResponse>()
                 .await
                 .context("deserialize experiment status response")?;
-        if status.session_id.is_some()
-            && matches!(status.status.as_str(), "completed" | "waiting_approval")
-        {
+        if status.session_id.is_some() && matches!(status.status.as_str(), "completed") {
             return Ok(status);
         }
         last_status = Some(status);

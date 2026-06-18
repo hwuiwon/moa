@@ -677,7 +677,6 @@ mod tests {
         // Pins: v2 wait/list behavior agrees on which sub-agent statuses are terminal.
         assert!(!is_terminal_sub_agent_state(SubAgentState::Uninitialized));
         assert!(!is_terminal_sub_agent_state(SubAgentState::Running));
-        assert!(!is_terminal_sub_agent_state(SubAgentState::WaitingApproval));
         assert!(is_terminal_sub_agent_state(SubAgentState::Completed));
         assert!(is_terminal_sub_agent_state(SubAgentState::Failed));
         assert!(is_terminal_sub_agent_state(SubAgentState::Cancelled));

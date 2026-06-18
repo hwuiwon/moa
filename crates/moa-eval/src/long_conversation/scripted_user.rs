@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use moa_core::ApprovalDecision;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -21,14 +20,11 @@ pub struct ScriptedUserScript {
     pub probe_ids: Vec<String>,
 }
 
-/// One scripted user turn and its optional approval decision.
+/// One scripted user turn and associated probe metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptedUserTurn {
     /// User utterance that starts the turn.
     pub user: ScriptedUserUtterance,
-    /// Optional approval decision to send if the turn blocks on approval.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval: Option<ScriptedApprovalDecision>,
     /// Optional memory-eval probe identifiers associated with this turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probe_ids: Vec<String>,
@@ -39,26 +35,6 @@ pub struct ScriptedUserTurn {
 pub struct ScriptedUserUtterance {
     /// User text for this turn.
     pub text: String,
-}
-
-/// Scripted approval decision emitted when a turn asks for human approval.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum ScriptedApprovalDecision {
-    /// Approves exactly one pending tool request.
-    AllowOnce,
-    /// Approves this request and persists an allow rule.
-    AlwaysAllow {
-        /// Optional approval pattern override; defaults to the runtime prompt pattern.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pattern: Option<String>,
-    },
-    /// Denies the pending tool request.
-    Deny {
-        /// Optional denial reason.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
 }
 
 /// Errors returned while reading, parsing, or validating scripted-user fixtures.
@@ -125,16 +101,6 @@ pub enum ScriptedUserError {
         scenario: String,
         /// Human-readable metadata or turn location.
         location: String,
-    },
-    /// A scripted approval value was structurally invalid.
-    #[error("scripted-user script {scenario} turn {turn_index} has invalid approval: {reason}")]
-    InvalidApproval {
-        /// Scenario id.
-        scenario: String,
-        /// Zero-based turn index.
-        turn_index: usize,
-        /// Human-readable validation reason.
-        reason: String,
     },
 }
 
@@ -225,9 +191,6 @@ impl ScriptedUserScript {
                     turn_index,
                 });
             }
-            if let Some(approval) = &turn.approval {
-                approval.validate(&self.scenario, turn_index)?;
-            }
             validate_probe_ids(
                 &self.scenario,
                 format!("turn {turn_index}").as_str(),
@@ -235,43 +198,6 @@ impl ScriptedUserScript {
             )?;
         }
         Ok(())
-    }
-}
-
-impl ScriptedApprovalDecision {
-    pub(crate) fn to_approval_decision(&self, prompt_pattern: &str) -> ApprovalDecision {
-        match self {
-            Self::AllowOnce => ApprovalDecision::AllowOnce,
-            Self::AlwaysAllow { pattern } => ApprovalDecision::AlwaysAllow {
-                pattern: pattern
-                    .clone()
-                    .unwrap_or_else(|| prompt_pattern.to_string()),
-            },
-            Self::Deny { reason } => ApprovalDecision::Deny {
-                reason: reason.clone(),
-            },
-        }
-    }
-
-    fn validate(&self, scenario: &str, turn_index: usize) -> Result<(), ScriptedUserError> {
-        match self {
-            Self::AllowOnce => Ok(()),
-            Self::AlwaysAllow {
-                pattern: Some(pattern),
-            } if pattern.trim().is_empty() => Err(ScriptedUserError::InvalidApproval {
-                scenario: scenario.to_string(),
-                turn_index,
-                reason: "always_allow pattern must not be empty".to_string(),
-            }),
-            Self::Deny {
-                reason: Some(reason),
-            } if reason.trim().is_empty() => Err(ScriptedUserError::InvalidApproval {
-                scenario: scenario.to_string(),
-                turn_index,
-                reason: "deny reason must not be empty".to_string(),
-            }),
-            Self::AlwaysAllow { .. } | Self::Deny { .. } => Ok(()),
-        }
     }
 }
 

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moa_core::{
-    ApprovalDecision, CacheReport, CompletionRequest, CompletionResponse, ContextSnapshot, Event,
-    EventRecord, LLMProvider, Result, SessionId, SessionMeta, SessionStore, TokenPricing,
-    TraceContext, WorkingContext, current_turn_root_span, record_pipeline_compile_duration,
+    CacheReport, CompletionRequest, CompletionResponse, ContextSnapshot, Event, EventRecord,
+    LLMProvider, Result, SessionId, SessionMeta, SessionStore, TokenPricing, TraceContext,
+    WorkingContext, current_turn_root_span, record_pipeline_compile_duration,
     record_turn_compaction, record_turn_event_persist_duration,
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     stable_prefix_fingerprint,
@@ -308,14 +308,6 @@ pub(super) fn complete_cache_report(
         usage.input_tokens_cache_read as f64 / report.stable_total_tokens_estimate as f64
     };
     report
-}
-
-pub(super) fn approval_decision_label(decision: &ApprovalDecision) -> &'static str {
-    match decision {
-        ApprovalDecision::AllowOnce => "allow_once",
-        ApprovalDecision::AlwaysAllow { .. } => "always_allow",
-        ApprovalDecision::Deny { .. } => "deny",
-    }
 }
 
 pub(super) async fn append_event(

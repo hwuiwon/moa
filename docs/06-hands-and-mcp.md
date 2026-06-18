@@ -32,20 +32,48 @@ materialize selected skill packages under `.moa/skills/<skill>/...`.
 
 ## Tool Router
 
-`moa-hands::ToolRouter` owns the execution decision:
+`moa-hands::ToolRouter` owns tool preparation and dispatch:
 
 1. Look up the tool in `ToolRegistry`.
 2. Normalize and budget tool input/output.
-3. Apply tool policy and approval rules.
-4. Execute through one of:
+3. Prepare `ToolPolicyInput`, the suggested action-policy pattern, and
+   workspace-admin review preview data.
+4. Evaluate action policy.
+5. Execute allowed actions through one of:
    - built-in tool handler,
    - cached hand provider,
    - MCP client.
-5. Record lineage and route the result back to the turn loop.
+6. Record lineage and route the result back to the turn loop.
 
 The default provider name is `local`. Workspace roots, active hand handles,
-MCP clients, approval rules, session store hooks, and optional memory executor
-hooks live behind async locks so the router can be shared across handlers.
+MCP clients, action-policy rule stores, session store hooks, and optional
+memory executor hooks live behind async locks so the router can be shared
+across handlers.
+
+`ActionEnvelope` is the durable policy-facing record for one tool invocation.
+It includes the review id, workspace, user, session or sub-agent origin, tool
+call id, tool name, normalized input, input summary, risk level, action class,
+optional workflow/artifact origin metadata, idempotency key, and creation time.
+The envelope is persisted only when action policy returns
+`ActionPolicyEffect::AdminReview`; normal allowed actions proceed directly.
+
+Action-policy decisions are ordered:
+
+1. Workspace-visible persistent rules match by tool name and normalized input.
+2. Configured `always_deny` tool names return `Deny`.
+3. Configured `admin_review` tool names return `AdminReview`.
+4. The tool's default effect is used, with the global default effect applying
+   to tools whose default is `Allow`.
+
+`Deny` returns a tool error and the turn continues. `AdminReview` queues a
+workspace-admin action review through `ActionReviews/request`, writes an
+`ActionReviewRequested` event for session history, returns a pending-review
+tool result to preserve LLM protocol continuity, and continues the root or
+sub-agent turn without moving the session into a waiting state. Workspace
+admins list pending reviews through `ActionReviews/list_pending`; a cleared
+review rewrites the stored tool request with a fresh tool-call id and no active
+canary before invoking `ToolExecutor`, while a denied review records the
+decision without executing the tool.
 
 ## Registry
 
@@ -57,9 +85,10 @@ Tools come from three sources:
 | Hand tools | `bash`, `file_read`, `file_write`, `file_search` | Local/Docker/Daytona/E2B hand |
 | MCP tools | GitHub, browser, database, SaaS tools | MCP transport |
 
-Tool descriptors include name, schema, execution backend, risk level, approval
-default, and output budget. The context pipeline injects only the currently
-active subset to protect prompt budget and cache stability.
+Tool descriptors include name, schema, execution backend, risk level, action
+class, default action-policy effect, and output budget. The context pipeline
+injects only the currently active subset to protect prompt budget and cache
+stability.
 
 ## Lifecycle
 
@@ -122,7 +151,7 @@ environment variables, so treat them as a weaker isolation boundary.
 - Never place provider secrets in tool-call input or model-visible context.
 - Prefer MCP or host-side helpers for external APIs instead of raw shell
   commands with secrets.
-- Use parsed command approval matching for shell tools.
+- Use parsed command normalization for shell action-policy patterns.
 - Keep generated-code sandboxes ephemeral by default.
 - Destroy or pause hands when sessions stop so stale credentials and state do
   not linger.

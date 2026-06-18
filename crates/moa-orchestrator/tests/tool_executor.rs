@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::wire::ToolDescriptor;
 use moa_core::{
-    BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, ToolCallId, ToolCallRequest,
-    ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
-    UserId, WorkspaceId, read_tool_policy, write_tool_policy,
+    ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel,
+    ToolCallId, ToolCallRequest, ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape,
+    ToolOutput, ToolPolicySpec, UserId, WorkspaceId, read_tool_policy, write_tool_policy,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::tool_executor::{
@@ -220,11 +220,13 @@ async fn list_tools_returns_workspace_tools() {
     assert!(descriptors.iter().any(|descriptor: &ToolDescriptor| {
         descriptor.name == "read_tool"
             && descriptor.idempotency_class == IdempotencyClass::Idempotent
-            && !descriptor.requires_approval
+            && descriptor.action_class == ActionClass::Read
+            && descriptor.risk_level == RiskLevel::Low
     }));
     assert!(descriptors.iter().any(|descriptor: &ToolDescriptor| {
         descriptor.name == "write_tool"
             && descriptor.idempotency_class == IdempotencyClass::NonIdempotent
-            && descriptor.requires_approval
+            && descriptor.action_class == ActionClass::LocalWrite
+            && descriptor.risk_level == RiskLevel::Medium
     }));
 }

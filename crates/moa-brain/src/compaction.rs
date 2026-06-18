@@ -219,17 +219,17 @@ fn event_summary_line(record: &EventRecord) -> String {
         Event::Warning { message } => {
             format!("#{} warning: {}", record.sequence_num, truncate(message))
         }
-        Event::ApprovalRequested {
-            tool_name,
-            input_summary,
-            ..
-        } => format!(
-            "#{} approval_requested {tool_name}: {}",
+        Event::ActionReviewRequested { envelope, .. } => format!(
+            "#{} action_review_requested {}: {}",
             record.sequence_num,
-            truncate(input_summary)
+            envelope.tool_name,
+            truncate(&envelope.input_summary)
         ),
-        Event::ApprovalDecided { decision, .. } => {
-            format!("#{} approval_decided: {decision:?}", record.sequence_num)
+        Event::ActionReviewDecided { decision, .. } => {
+            format!(
+                "#{} action_review_decided: {decision:?}",
+                record.sequence_num
+            )
         }
         Event::SubAgentSpawned {
             sub_agent_id,

@@ -1,24 +1,27 @@
-//! Tool permission policy evaluation, command matching, and approval rule storage.
+//! Tool action-policy evaluation, command matching, and rule storage.
 
 use async_trait::async_trait;
 use globset::Glob;
-use moa_core::shell::{has_approval_unsafe_shell_syntax, split_shell_chain};
+use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
-    ApprovalRule, MoaConfig, PolicyAction, PolicyScope, Result, SessionMeta, ToolPolicyInput,
-    UserId, WorkspaceId,
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, Result, SessionMeta,
+    ToolPolicyInput, UserId, WorkspaceId,
 };
 
-/// Persistent approval rule storage used by policy-aware tool routing.
+/// Persistent action-policy rule storage used by policy-aware tool routing.
 #[async_trait]
-pub trait ApprovalRuleStore: Send + Sync {
-    /// Lists all approval rules visible to a workspace.
-    async fn list_approval_rules(&self, workspace_id: &WorkspaceId) -> Result<Vec<ApprovalRule>>;
+pub trait ActionPolicyRuleStore: Send + Sync {
+    /// Lists all action-policy rules visible to a workspace.
+    async fn list_action_policy_rules(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<Vec<ActionPolicyRule>>;
 
-    /// Creates or updates an approval rule.
-    async fn upsert_approval_rule(&self, rule: ApprovalRule) -> Result<()>;
+    /// Creates or updates an action-policy rule.
+    async fn upsert_action_policy_rule(&self, rule: ActionPolicyRule) -> Result<()>;
 
-    /// Deletes an approval rule by tool and pattern.
-    async fn delete_approval_rule(
+    /// Deletes an action-policy rule by tool and pattern.
+    async fn delete_action_policy_rule(
         &self,
         workspace_id: &WorkspaceId,
         tool: &str,
@@ -28,14 +31,14 @@ pub trait ApprovalRuleStore: Send + Sync {
 
 /// Session-scoped inputs required for tool policy evaluation.
 #[derive(Debug, Clone)]
-pub struct ToolPolicyContext {
+pub struct ActionPolicyContext {
     /// Workspace associated with the current session.
     pub workspace_id: WorkspaceId,
     /// User associated with the current session.
     pub user_id: UserId,
 }
 
-impl ToolPolicyContext {
+impl ActionPolicyContext {
     /// Creates a policy context from a session metadata record.
     pub fn from_session(session: &SessionMeta) -> Self {
         Self {
@@ -47,38 +50,40 @@ impl ToolPolicyContext {
 
 /// Result of evaluating one tool invocation against the current policy set.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolicyCheck {
-    /// Action to take for this invocation.
-    pub action: PolicyAction,
+pub struct ActionPolicyCheck {
+    /// Effect to apply for this invocation.
+    pub effect: ActionPolicyEffect,
+    /// Optional human-readable reason for the decision.
+    pub reason: Option<String>,
     /// Rule that matched, if any.
-    pub matched_rule: Option<ApprovalRule>,
+    pub matched_rule: Option<ActionPolicyRule>,
 }
 
-/// Policy engine for tool execution decisions.
+/// Policy engine for tool action decisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolPolicies {
-    default_posture: String,
-    auto_approve: Vec<String>,
+pub struct ActionPolicies {
+    default_effect: ActionPolicyEffect,
+    admin_review: Vec<String>,
     always_deny: Vec<String>,
 }
 
-impl ToolPolicies {
+impl ActionPolicies {
     /// Creates policies from the loaded MOA config.
     pub fn from_config(config: &MoaConfig) -> Self {
         Self {
-            default_posture: config.permissions.default_posture.clone(),
-            auto_approve: config.permissions.auto_approve.clone(),
+            default_effect: config.permissions.default_effect,
+            admin_review: config.permissions.admin_review.clone(),
             always_deny: config.permissions.always_deny.clone(),
         }
     }
 
-    /// Evaluates a tool invocation using persistent rules, config defaults, and tool category.
+    /// Evaluates a tool invocation using persistent rules, config defaults, and tool metadata.
     pub fn check(
         &self,
         input: &ToolPolicyInput,
-        ctx: &ToolPolicyContext,
-        rules: &[ApprovalRule],
-    ) -> Result<PolicyCheck> {
+        ctx: &ActionPolicyContext,
+        rules: &[ActionPolicyRule],
+    ) -> Result<ActionPolicyCheck> {
         for rule in rules {
             if !rule_visible_to_workspace(rule, &ctx.workspace_id) {
                 continue;
@@ -87,8 +92,9 @@ impl ToolPolicies {
                 continue;
             }
             if rule_matches(rule, &input.tool_name, &input.normalized_input) {
-                return Ok(PolicyCheck {
-                    action: rule.action.clone(),
+                return Ok(ActionPolicyCheck {
+                    effect: rule.effect,
+                    reason: rule.reason.clone(),
                     matched_rule: Some(rule.clone()),
                 });
             }
@@ -99,39 +105,40 @@ impl ToolPolicies {
             .iter()
             .any(|candidate| candidate == &input.tool_name)
         {
-            return Ok(PolicyCheck {
-                action: PolicyAction::Deny,
+            return Ok(ActionPolicyCheck {
+                effect: ActionPolicyEffect::Deny,
+                reason: Some("tool is denied by action-policy config".to_string()),
                 matched_rule: None,
             });
         }
 
         if self
-            .auto_approve
+            .admin_review
             .iter()
             .any(|candidate| candidate == &input.tool_name)
         {
-            return Ok(PolicyCheck {
-                action: PolicyAction::Allow,
+            return Ok(ActionPolicyCheck {
+                effect: ActionPolicyEffect::AdminReview,
+                reason: Some("tool requires workspace admin review by config".to_string()),
                 matched_rule: None,
             });
         }
 
-        let action = if self.default_posture.eq_ignore_ascii_case("deny")
-            && matches!(input.default_action, PolicyAction::RequireApproval)
-        {
-            PolicyAction::Deny
+        let effect = if matches!(input.default_effect, ActionPolicyEffect::Allow) {
+            self.default_effect
         } else {
-            input.default_action.clone()
+            input.default_effect
         };
 
-        Ok(PolicyCheck {
-            action,
+        Ok(ActionPolicyCheck {
+            effect,
+            reason: None,
             matched_rule: None,
         })
     }
 }
 
-impl Default for ToolPolicies {
+impl Default for ActionPolicies {
     fn default() -> Self {
         Self::from_config(&MoaConfig::default())
     }
@@ -144,9 +151,9 @@ pub fn glob_match(pattern: &str, candidate: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Parses a bash command and matches it against a rule pattern.
-pub fn parse_and_match_bash(command: &str, rule_pattern: &str) -> bool {
-    if has_approval_unsafe_shell_syntax(command) {
+/// Parses a shell command and matches it against a rule pattern.
+pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> bool {
+    if has_action_policy_unsafe_shell_syntax(command) {
         return false;
     }
 
@@ -162,13 +169,13 @@ pub fn parse_and_match_bash(command: &str, rule_pattern: &str) -> bool {
         .unwrap_or_else(|_| glob_match(rule_pattern, command.trim()))
 }
 
-fn rule_visible_to_workspace(rule: &ApprovalRule, workspace_id: &WorkspaceId) -> bool {
-    matches!(rule.scope, PolicyScope::Global) || &rule.workspace_id == workspace_id
+fn rule_visible_to_workspace(rule: &ActionPolicyRule, workspace_id: &WorkspaceId) -> bool {
+    matches!(rule.scope, ActionRuleScope::Global) || &rule.workspace_id == workspace_id
 }
 
-fn rule_matches(rule: &ApprovalRule, tool: &str, normalized_input: &str) -> bool {
+fn rule_matches(rule: &ActionPolicyRule, tool: &str, normalized_input: &str) -> bool {
     if tool == "bash" {
-        return parse_and_match_bash(normalized_input, &rule.pattern);
+        return parse_and_match_command(normalized_input, &rule.pattern);
     }
 
     glob_match(&rule.pattern, normalized_input)
@@ -179,12 +186,12 @@ mod tests {
     use chrono::Utc;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        ModelId, PolicyAction, PolicyScope, RiskLevel, SessionMeta, ToolPolicyInput, UserId,
-        WorkspaceId,
+        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ModelId, RiskLevel, SessionMeta,
+        ToolPolicyInput, UserId, WorkspaceId,
     };
     use uuid::Uuid;
 
-    use super::{ToolPolicies, ToolPolicyContext, parse_and_match_bash};
+    use super::{ActionPolicies, ActionPolicyContext, parse_and_match_command};
 
     fn session() -> SessionMeta {
         SessionMeta {
@@ -196,9 +203,10 @@ mod tests {
     }
 
     #[test]
-    fn read_tools_are_auto_approved_and_bash_requires_approval() {
-        let policies = ToolPolicies::default();
-        let ctx = ToolPolicyContext::from_session(&session());
+    fn tools_default_to_allow_in_auto_mode() {
+        // Pins: auto mode executes policy-valid actions by default instead of blocking on review.
+        let policies = ActionPolicies::default();
+        let ctx = ActionPolicyContext::from_session(&session());
 
         let read = policies
             .check(
@@ -207,7 +215,8 @@ mod tests {
                     normalized_input: "src/lib.rs".to_string(),
                     input_summary: "Path: src/lib.rs".to_string(),
                     risk_level: RiskLevel::Low,
-                    default_action: PolicyAction::Allow,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: moa_core::ActionClass::Read,
                 },
                 &ctx,
                 &[],
@@ -220,28 +229,32 @@ mod tests {
                     normalized_input: "npm test".to_string(),
                     input_summary: "Command: npm test".to_string(),
                     risk_level: RiskLevel::High,
-                    default_action: PolicyAction::RequireApproval,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: moa_core::ActionClass::CommandExecution,
                 },
                 &ctx,
                 &[],
             )
             .unwrap();
 
-        assert_eq!(read.action, PolicyAction::Allow);
-        assert_eq!(bash.action, PolicyAction::RequireApproval);
+        assert_eq!(read.effect, ActionPolicyEffect::Allow);
+        assert_eq!(bash.effect, ActionPolicyEffect::Allow);
     }
 
     #[test]
     fn persistent_rule_matching_uses_glob_patterns() {
-        let policies = ToolPolicies::default();
-        let ctx = ToolPolicyContext::from_session(&session());
-        let rules = vec![moa_core::ApprovalRule {
+        // Pins: persisted action-policy rules override the tool default effect.
+        let policies = ActionPolicies::default();
+        let ctx = ActionPolicyContext::from_session(&session());
+        let rules = vec![ActionPolicyRule {
             id: Uuid::now_v7(),
             workspace_id: WorkspaceId::new("workspace"),
             tool: "file_write".to_string(),
             pattern: "src/*.rs".to_string(),
-            action: PolicyAction::Allow,
-            scope: PolicyScope::Workspace,
+            user_id: None,
+            effect: ActionPolicyEffect::AdminReview,
+            scope: ActionRuleScope::Workspace,
+            reason: Some("review source edits".to_string()),
             created_by: UserId::new("user"),
             created_at: Utc::now(),
         }];
@@ -253,14 +266,16 @@ mod tests {
                     normalized_input: "src/lib.rs".to_string(),
                     input_summary: "Path: src/lib.rs".to_string(),
                     risk_level: RiskLevel::Medium,
-                    default_action: PolicyAction::RequireApproval,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: moa_core::ActionClass::LocalWrite,
                 },
                 &ctx,
                 &rules,
             )
             .unwrap();
 
-        assert_eq!(check.action, PolicyAction::Allow);
+        assert_eq!(check.effect, ActionPolicyEffect::AdminReview);
+        assert_eq!(check.reason.as_deref(), Some("review source edits"));
         assert!(check.matched_rule.is_some());
     }
 
@@ -270,8 +285,11 @@ mod tests {
             split_shell_chain("npm test && rm -rf /"),
             vec!["npm test".to_string(), "rm -rf /".to_string()]
         );
-        assert!(!parse_and_match_bash("npm test && rm -rf /", "npm test*"));
-        assert!(parse_and_match_bash("npm test -- --watch", "npm test*"));
+        assert!(!parse_and_match_command(
+            "npm test && rm -rf /",
+            "npm test*"
+        ));
+        assert!(parse_and_match_command("npm test -- --watch", "npm test*"));
     }
 
     #[test]
@@ -285,8 +303,8 @@ mod tests {
             "npm test < /tmp/in",
         ] {
             assert!(
-                !parse_and_match_bash(command, "npm *"),
-                "{command} must not satisfy an Always Allow bash glob"
+                !parse_and_match_command(command, "npm *"),
+                "{command} must not satisfy an action-policy bash glob"
             );
         }
     }

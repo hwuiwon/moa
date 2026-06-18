@@ -3,26 +3,23 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use moa_core::events::tool_approval::PendingToolApproval;
 use moa_core::{
-    ApprovalRequest, Event, EventRecord, MoaError, PolicyAction, Result, RuntimeEvent, SessionId,
-    SessionMeta, SessionSignal, SessionStatus, SessionStore, ToolCallContent, ToolCallId,
-    ToolCardStatus, ToolInvocation, ToolUpdate,
+    ActionPolicyEffect, Event, EventRecord, MoaError, Result, RuntimeEvent, SessionId, SessionMeta,
+    SessionSignal, SessionStore, ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation,
+    ToolOutput, ToolUpdate,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{ActionOrigin, ToolRouter};
 use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use super::approval_flow::wait_for_signal_approval;
 use super::context_build::append_event;
 
 pub(super) enum ToolCallOutcome {
     Executed,
     Skipped,
-    NeedsApproval(ApprovalRequest),
     Cancelled,
 }
 
@@ -39,9 +36,9 @@ pub(super) async fn handle_tool_call(
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
     tool_dispatch_span: Option<&tracing::Span>,
-    signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
-    turn_requested: &mut bool,
-    soft_cancel_requested: &mut bool,
+    _signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
+    _turn_requested: &mut bool,
+    _soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let invocation = &call.invocation;
     let tool_id = parse_tool_id(invocation);
@@ -122,8 +119,8 @@ pub(super) async fn handle_tool_call(
     let prepared = router.prepare_invocation(session, invocation).await?;
     let summary = prepared.input_summary().to_string();
 
-    match &prepared.policy().action {
-        PolicyAction::Allow => {
+    match &prepared.policy().effect {
+        ActionPolicyEffect::Allow => {
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),
@@ -149,7 +146,7 @@ pub(super) async fn handle_tool_call(
             )
             .await
         }
-        PolicyAction::Deny => {
+        ActionPolicyEffect::Deny => {
             record_denied_tool_span(invocation, tool_dispatch_span);
             append_event(
                 &session_store,
@@ -165,7 +162,11 @@ pub(super) async fn handle_tool_call(
                 },
             )
             .await?;
-            let message = format!("tool {} denied by policy", invocation.name);
+            let message = format!(
+                "tool {} denied by action policy: {}",
+                invocation.name,
+                prepared.policy().reason.as_deref().unwrap_or("no reason")
+            );
             append_event(
                 &session_store,
                 event_tx,
@@ -188,7 +189,7 @@ pub(super) async fn handle_tool_call(
             }));
             Ok(ToolCallOutcome::Skipped)
         }
-        PolicyAction::RequireApproval => {
+        ActionPolicyEffect::AdminReview => {
             append_event(
                 &session_store,
                 event_tx,
@@ -203,64 +204,60 @@ pub(super) async fn handle_tool_call(
                 },
             )
             .await?;
-            let prompt = prepared.approval_prompt(tool_id.0);
-            let request = prompt.request.clone();
+            let envelope = prepared.envelope(
+                tool_id.0,
+                session,
+                tool_id,
+                None,
+                ActionOrigin {
+                    origin_kind: Some("brain_harness".to_string()),
+                    origin_id: Some(session_id.to_string()),
+                    origin_step_id: None,
+                    idempotency_key: invocation.id.clone(),
+                },
+            );
+            let preview = prepared.review_preview();
             append_event(
                 &session_store,
                 event_tx,
                 session_id,
-                Event::ApprovalRequested {
-                    request_id: request.request_id,
-                    awakeable_id: None,
-                    sub_agent_id: None,
-                    tool_name: request.tool_name.clone(),
-                    input_summary: request.input_summary.clone(),
-                    risk_level: request.risk_level.clone(),
-                    prompt: prompt.clone(),
+                Event::ActionReviewRequested {
+                    review_id: envelope.review_id,
+                    envelope: envelope.clone(),
+                    preview: preview.clone(),
                 },
             )
             .await?;
-            if let Some(record) = session_store
-                .transition_status(session_id, SessionStatus::WaitingApproval)
-                .await?
-                && let Some(event_tx) = event_tx
-            {
-                let _ = event_tx.send(record);
-            }
+            let message = format!(
+                "Action is pending workspace admin review: {}: {}",
+                invocation.name, summary
+            );
+            append_event(
+                &session_store,
+                event_tx,
+                session_id,
+                Event::ToolResult {
+                    tool_id,
+                    provider_tool_use_id: invocation.id.clone(),
+                    output: ToolOutput::error(message.clone(), std::time::Duration::ZERO),
+                    original_output_tokens: None,
+                    success: false,
+                    duration_ms: 0,
+                },
+            )
+            .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),
-                status: ToolCardStatus::WaitingApproval,
+                status: ToolCardStatus::PendingReview,
                 summary: summary.clone(),
-                detail: Some("Press y to allow once, a to always allow, n to deny".to_string()),
+                detail: Some(message),
             }));
-            let _ = runtime_tx.send(RuntimeEvent::ApprovalRequested(prompt));
-
-            if let Some(receiver) = signal_rx {
-                wait_for_signal_approval(
-                    session_id,
-                    session,
-                    session_store,
-                    router,
-                    invocation,
-                    tool_id,
-                    summary,
-                    prepared.policy_input().risk_level.clone(),
-                    provider_thought_signature(call).as_deref(),
-                    active_canary,
-                    event_tx,
-                    runtime_tx,
-                    cancel_token,
-                    hard_cancel_token,
-                    tool_dispatch_span,
-                    receiver,
-                    turn_requested,
-                    soft_cancel_requested,
-                )
-                .await
-            } else {
-                Ok(ToolCallOutcome::NeedsApproval(request))
-            }
+            let _ = runtime_tx.send(RuntimeEvent::ActionReviewRequested {
+                envelope: Box::new(envelope),
+                preview: Box::new(preview),
+            });
+            Ok(ToolCallOutcome::Skipped)
         }
     }
 }
@@ -432,62 +429,6 @@ async fn append_tool_call_event(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_pending_tool(
-    session_id: SessionId,
-    session: &SessionMeta,
-    session_store: Arc<dyn SessionStore>,
-    tool_router: &ToolRouter,
-    event_tx: Option<&broadcast::Sender<EventRecord>>,
-    runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    pending: PendingToolApproval,
-    active_canary: Option<&str>,
-    cancel_token: Option<&CancellationToken>,
-    hard_cancel_token: Option<&CancellationToken>,
-    tool_dispatch_span: Option<&tracing::Span>,
-) -> Result<()> {
-    let invocation = ToolInvocation {
-        id: resumed_tool_invocation_id(&pending),
-        name: pending.tool_name.clone(),
-        input: pending.input.clone(),
-    };
-    let outcome = execute_tool(
-        session_id,
-        session,
-        session_store,
-        tool_router,
-        &invocation,
-        pending.tool_id,
-        false,
-        pending.provider_thought_signature.as_deref(),
-        active_canary,
-        event_tx,
-        runtime_tx,
-        cancel_token,
-        hard_cancel_token,
-        tool_dispatch_span,
-    )
-    .await?;
-    match outcome {
-        ToolCallOutcome::Executed | ToolCallOutcome::Skipped => {}
-        ToolCallOutcome::Cancelled => {
-            tracing::warn!(
-                session_id = %session_id,
-                tool_name = %pending.tool_name,
-                "pending tool execution was cancelled"
-            );
-        }
-        ToolCallOutcome::NeedsApproval(_) => {
-            tracing::warn!(
-                session_id = %session_id,
-                tool_name = %pending.tool_name,
-                "pending tool returned NeedsApproval unexpectedly"
-            );
-        }
-    }
-    Ok(())
-}
-
 fn format_tool_output(output: &moa_core::ToolOutput) -> String {
     output.to_text()
 }
@@ -520,13 +461,6 @@ fn provider_thought_signature(call: &ToolCallContent) -> Option<String> {
         .as_ref()
         .and_then(|metadata| metadata.thought_signature())
         .map(ToOwned::to_owned)
-}
-
-pub(super) fn resumed_tool_invocation_id(pending: &PendingToolApproval) -> Option<String> {
-    pending
-        .provider_tool_use_id
-        .clone()
-        .or_else(|| Some(pending.tool_id.to_string()))
 }
 
 struct SecuredToolOutput {

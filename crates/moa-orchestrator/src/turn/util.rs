@@ -183,7 +183,7 @@ pub(crate) fn apply_response_to_history(
     }
 }
 
-/// Builds the synthetic tool output used when execution is denied after approval.
+/// Builds the synthetic tool output used when execution is denied by action policy.
 pub(crate) fn denied_tool_output(message: impl Into<String>) -> ToolOutput {
     ToolOutput::error(message.into(), Duration::ZERO)
 }

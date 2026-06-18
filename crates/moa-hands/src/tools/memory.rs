@@ -2,14 +2,15 @@
 
 use async_trait::async_trait;
 use moa_core::{
-    BuiltInTool, IdempotencyClass, PolicyAction, Result, RiskLevel, ToolContext, ToolDiffStrategy,
-    ToolInputShape, ToolOutput, ToolPolicySpec,
+    ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, Result, RiskLevel, ToolContext,
+    ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
 };
 
 fn fast_memory_policy() -> ToolPolicySpec {
     ToolPolicySpec {
         risk_level: RiskLevel::Medium,
-        default_action: PolicyAction::Allow,
+        default_effect: ActionPolicyEffect::Allow,
+        action_class: ActionClass::LocalWrite,
         input_shape: ToolInputShape::Json,
         diff_strategy: ToolDiffStrategy::None,
     }

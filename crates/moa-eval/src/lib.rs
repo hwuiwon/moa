@@ -14,10 +14,10 @@ pub mod setup;
 pub use collector::TrajectoryCollector;
 pub use engine::EvalEngine;
 pub use moa_eval_core::{
-    AgentConfig, EngineOptions, EvalError, EvalMetrics, EvalPlan, EvalResult, EvalRun, EvalScore,
-    EvalStatus, Evaluator, EvaluatorOptions, ExpectedOutput, InstructionOverride,
-    LongConversationMode, LongSessionInterleaving, LongTestCase, MemoryOverride,
-    OutputMatchEvaluator, PermissionOverride, ReplayConfig, Result, RunSummary, ScoreValue,
+    ActionPolicyOverride, AgentConfig, EngineOptions, EvalError, EvalMetrics, EvalPlan, EvalResult,
+    EvalRun, EvalScore, EvalStatus, Evaluator, EvaluatorOptions, ExpectedOutput,
+    InstructionOverride, LongConversationMode, LongSessionInterleaving, LongTestCase,
+    MemoryOverride, OutputMatchEvaluator, ReplayConfig, Result, RunSummary, ScoreValue,
     SecondaryLongSession, SkillOverride, TestCase, TestCaseKind, TestSuite, ThresholdEvaluator,
     ToolOverride, ToolSuccessEvaluator, TrajectoryMatchEvaluator, TrajectoryStep, build_eval_plan,
     build_evaluators, discover_configs, discover_suites, evaluate_run, load_agent_config,

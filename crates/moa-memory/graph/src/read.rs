@@ -26,18 +26,6 @@ const NODE_LABELS: [NodeLabel; 7] = [
     NodeLabel::Source,
 ];
 
-const EDGE_LABELS: [EdgeLabel; 9] = [
-    EdgeLabel::RelatesTo,
-    EdgeLabel::DependsOn,
-    EdgeLabel::Supersedes,
-    EdgeLabel::Contradicts,
-    EdgeLabel::DerivedFrom,
-    EdgeLabel::MentionedIn,
-    EdgeLabel::Caused,
-    EdgeLabel::LearnedFrom,
-    EdgeLabel::AppliesTo,
-];
-
 #[async_trait::async_trait]
 impl GraphStore for AgeGraphStore {
     async fn create_node(&self, intent: NodeWriteIntent) -> Result<Uuid, GraphError> {
@@ -346,7 +334,7 @@ fn push_vertex_union(builder: &mut QueryBuilder<'_, Postgres>) {
 }
 
 fn push_edge_union(builder: &mut QueryBuilder<'_, Postgres>) {
-    for (index, label) in EDGE_LABELS.iter().enumerate() {
+    for (index, label) in EdgeLabel::ALL.iter().enumerate() {
         if index > 0 {
             builder.push(" UNION ALL ");
         }

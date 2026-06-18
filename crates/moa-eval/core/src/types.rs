@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use moa_core::ActionPolicyEffect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -245,8 +246,8 @@ pub struct AgentConfig {
     pub instructions: InstructionOverride,
     /// Tool-selection overrides.
     pub tools: ToolOverride,
-    /// Permission overrides.
-    pub permissions: PermissionOverride,
+    /// Action-policy overrides.
+    pub permissions: ActionPolicyOverride,
     /// Arbitrary metadata labels for comparison and reporting.
     pub metadata: HashMap<String, String>,
 }
@@ -297,14 +298,14 @@ pub struct ToolOverride {
     pub disable: Vec<String>,
 }
 
-/// Permission overrides for an agent config.
+/// Action-policy overrides for an agent config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct PermissionOverride {
-    /// Auto-approves all tool requests.
-    pub auto_approve_all: bool,
-    /// Auto-approves the listed tools.
-    pub auto_approve: Vec<String>,
+pub struct ActionPolicyOverride {
+    /// Default effect when no rule or tool-specific config matches.
+    pub default_effect: Option<ActionPolicyEffect>,
+    /// Tools that should be recorded for workspace-admin review.
+    pub admin_review: Vec<String>,
     /// Always denies the listed tools.
     pub always_deny: Vec<String>,
 }
@@ -366,7 +367,7 @@ struct AgentConfigBody {
     memory: MemoryOverride,
     instructions: InstructionOverride,
     tools: ToolOverride,
-    permissions: PermissionOverride,
+    permissions: ActionPolicyOverride,
     metadata: HashMap<String, String>,
 }
 

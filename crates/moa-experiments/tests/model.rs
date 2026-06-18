@@ -6,6 +6,7 @@ use moa_experiments::model::{
     ExperimentTrialStopReason, ExperimentVariant,
 };
 use serde_json::json;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 #[test]
@@ -97,10 +98,6 @@ fn scorecard_carries_expected_scores_without_evaluator_execution_offline() {
 fn storage_enum_conversions_reject_unknown_database_values_offline() {
     // Pins: storage conversion helpers accept only the durable database vocabulary.
     assert_eq!(ExperimentRunStatus::Accepted.as_str(), "accepted");
-    assert_eq!(
-        ExperimentRunStatus::from_db("waiting_approval"),
-        Some(ExperimentRunStatus::WaitingApproval)
-    );
     assert_eq!(ExperimentRunStatus::from_db("queued"), None);
     assert_eq!(ExperimentTargetKind::AgentLoop.as_str(), "agent_loop");
     assert_eq!(
@@ -114,17 +111,24 @@ fn storage_enum_conversions_reject_unknown_database_values_offline() {
         Some(ExperimentTrialStatus::Dispatched)
     );
     assert_eq!(ExperimentTrialStatus::Running.as_str(), "running");
-    assert_eq!(
-        ExperimentTrialStatus::from_db("waiting_approval"),
-        Some(ExperimentTrialStatus::WaitingApproval)
-    );
     assert_eq!(ExperimentTrialStatus::from_db("queued"), None);
     assert_eq!(ExperimentTrialStopReason::MaxTurns.as_str(), "max_turns");
-    assert_eq!(
-        ExperimentTrialStopReason::from_db("approval_wait"),
-        Some(ExperimentTrialStopReason::ApprovalWait)
-    );
     assert_eq!(ExperimentTrialStopReason::from_db("timeout"), None);
+}
+
+#[test]
+fn action_policy_migration_allows_current_trial_stop_reasons_offline() {
+    // Pins: the forward action-policy migration must accept every stop reason the Rust store persists.
+    const MIGRATION: &str = include_str!(
+        "../../moa-migrations/migrations/postgres/V000302__action_policy_auto_mode.sql"
+    );
+    let migration_values = trial_stop_reason_values_from_migration(MIGRATION);
+    let model_values = current_trial_stop_reason_values();
+
+    assert_eq!(
+        migration_values, model_values,
+        "V000302 experiment_trial_stop_reason_check must match ExperimentTrialStopReason::as_str"
+    );
 }
 
 #[test]
@@ -233,4 +237,44 @@ fn record_for_target(
         completed_at: None,
         updated_at: now,
     }
+}
+
+fn current_trial_stop_reason_values() -> BTreeSet<&'static str> {
+    [
+        ExperimentTrialStopReason::Success,
+        ExperimentTrialStopReason::Failure,
+        ExperimentTrialStopReason::MaxTurns,
+        ExperimentTrialStopReason::BudgetCap,
+        ExperimentTrialStopReason::SimulatorDone,
+        ExperimentTrialStopReason::TargetTerminal,
+        ExperimentTrialStopReason::Error,
+        ExperimentTrialStopReason::Cancelled,
+    ]
+    .into_iter()
+    .map(ExperimentTrialStopReason::as_str)
+    .collect()
+}
+
+fn trial_stop_reason_values_from_migration(sql: &'static str) -> BTreeSet<&'static str> {
+    let constraint = sql
+        .split("ADD CONSTRAINT experiment_trial_stop_reason_check")
+        .nth(1)
+        .expect("V000302 should recreate experiment_trial_stop_reason_check");
+    let values = constraint
+        .split("stop_reason IN (")
+        .nth(1)
+        .expect("stop reason constraint should use IN list")
+        .split(')')
+        .next()
+        .expect("stop reason IN list should be closed");
+
+    values
+        .lines()
+        .filter_map(|line| {
+            let value = line.trim().trim_end_matches(',');
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .collect()
 }

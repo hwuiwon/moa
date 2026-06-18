@@ -21,12 +21,45 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000101__auth_baseline.sql",
     "V000201__orchestrator_baseline.sql",
     "V000301__ocsf_baseline.sql",
+    "V000302__action_policy_auto_mode.sql",
+    "V000303__age_rls_operator_resolution.sql",
 ];
 
-const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
-    name: "V000001__session_baseline.sql",
-    sql: include_str!("../migrations/postgres/V000001__session_baseline.sql"),
-}];
+const ACTION_POLICY_SCHEMA_MIGRATION_SQL: &str = r#"
+DROP TABLE IF EXISTS approval_rules;
+
+CREATE TABLE IF NOT EXISTS action_policy_rules (
+    id UUID PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT,
+    tool TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny', 'admin_review')),
+    scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
+    reason TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(workspace_id, tool, pattern)
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope
+    ON action_policy_rules(workspace_id, scope, user_id);
+"#;
+
+const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
+    SchemaMigration {
+        name: "V000001__session_baseline.sql",
+        sql: include_str!("../migrations/postgres/V000001__session_baseline.sql"),
+    },
+    SchemaMigration {
+        name: "V000302__action_policy_auto_mode.sql",
+        sql: ACTION_POLICY_SCHEMA_MIGRATION_SQL,
+    },
+    SchemaMigration {
+        name: "V000303__age_rls_operator_resolution.sql",
+        sql: include_str!("../migrations/postgres/V000303__age_rls_operator_resolution.sql"),
+    },
+];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
     name: "V000101__auth_baseline.sql",

@@ -1,4 +1,4 @@
-//! Tool input normalization, approval summaries, and local path helpers.
+//! Tool input normalization, action-review summaries, and local path helpers.
 
 use std::env;
 use std::io::ErrorKind;
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use moa_core::shell::split_shell_chain;
 use moa_core::{
-    ApprovalField, ApprovalFileDiff, MoaError, Result, ToolDiffStrategy, ToolInputShape,
+    ActionReviewField, ActionReviewFileDiff, MoaError, Result, ToolDiffStrategy, ToolInputShape,
     ToolInvocation,
 };
 use serde_json::Value;
@@ -91,7 +91,7 @@ pub(super) fn unwrap_shell_wrapper(normalized_input: &str) -> Option<String> {
     None
 }
 
-pub(super) fn approval_pattern_for(input_shape: ToolInputShape, normalized_input: &str) -> String {
+pub(super) fn action_pattern_for(input_shape: ToolInputShape, normalized_input: &str) -> String {
     if matches!(input_shape, ToolInputShape::Command) {
         let effective_command =
             unwrap_shell_wrapper(normalized_input).unwrap_or_else(|| normalized_input.to_string());
@@ -116,11 +116,11 @@ pub(super) fn approval_pattern_for(input_shape: ToolInputShape, normalized_input
     normalized_input.to_string()
 }
 
-pub(super) fn approval_fields_for(
+pub(super) fn review_fields_for(
     sandbox_root: Option<&Path>,
     input_shape: ToolInputShape,
     invocation: &ToolInvocation,
-) -> Vec<ApprovalField> {
+) -> Vec<ActionReviewField> {
     match input_shape {
         ToolInputShape::Command => {
             let command = invocation
@@ -129,12 +129,12 @@ pub(super) fn approval_fields_for(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let mut fields = vec![ApprovalField {
+            let mut fields = vec![ActionReviewField {
                 label: "Command".to_string(),
                 value: command,
             }];
             if let Some(sandbox_root) = sandbox_root {
-                fields.push(ApprovalField {
+                fields.push(ActionReviewField {
                     label: "Working dir".to_string(),
                     value: sandbox_root.display().to_string(),
                 });
@@ -142,7 +142,7 @@ pub(super) fn approval_fields_for(
             fields
         }
         ToolInputShape::Path => {
-            let mut fields = single_approval_field("Path", &invocation.input, "path");
+            let mut fields = single_review_field("Path", &invocation.input, "path");
             if invocation.name == "file_write" {
                 let content_len = invocation
                     .input
@@ -150,7 +150,7 @@ pub(super) fn approval_fields_for(
                     .and_then(Value::as_str)
                     .map(|content| content.chars().count())
                     .unwrap_or_default();
-                fields.push(ApprovalField {
+                fields.push(ActionReviewField {
                     label: "Content".to_string(),
                     value: format!("{content_len} chars"),
                 });
@@ -168,11 +168,11 @@ pub(super) fn approval_fields_for(
                     .and_then(Value::as_str)
                     .map(|content| content.chars().count())
                     .unwrap_or_default();
-                fields.push(ApprovalField {
+                fields.push(ActionReviewField {
                     label: "Old string".to_string(),
                     value: format!("{old_len} chars"),
                 });
-                fields.push(ApprovalField {
+                fields.push(ActionReviewField {
                     label: "New string".to_string(),
                     value: format!("{new_len} chars"),
                 });
@@ -181,7 +181,7 @@ pub(super) fn approval_fields_for(
                     .get("insert_after_line")
                     .and_then(Value::as_u64)
                 {
-                    fields.push(ApprovalField {
+                    fields.push(ActionReviewField {
                         label: "Insert after line".to_string(),
                         value: insert_after_line.to_string(),
                     });
@@ -189,12 +189,12 @@ pub(super) fn approval_fields_for(
             }
             fields
         }
-        ToolInputShape::Pattern => single_approval_field("Pattern", &invocation.input, "pattern"),
-        ToolInputShape::Query => single_approval_field("Query", &invocation.input, "query"),
-        ToolInputShape::Url => single_approval_field("URL", &invocation.input, "url"),
+        ToolInputShape::Pattern => single_review_field("Pattern", &invocation.input, "pattern"),
+        ToolInputShape::Query => single_review_field("Query", &invocation.input, "query"),
+        ToolInputShape::Url => single_review_field("URL", &invocation.input, "url"),
         ToolInputShape::Json => serde_json::to_string_pretty(&invocation.input)
             .map(|value| {
-                vec![ApprovalField {
+                vec![ActionReviewField {
                     label: "Input".to_string(),
                     value,
                 }]
@@ -203,23 +203,23 @@ pub(super) fn approval_fields_for(
     }
 }
 
-fn single_approval_field(label: &str, input: &Value, field: &str) -> Vec<ApprovalField> {
+fn single_review_field(label: &str, input: &Value, field: &str) -> Vec<ActionReviewField> {
     let value = input
         .get(field)
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    vec![ApprovalField {
+    vec![ActionReviewField {
         label: label.to_string(),
         value,
     }]
 }
 
-pub(super) async fn approval_diffs_for(
+pub(super) async fn review_diffs_for(
     sandbox_root: Option<&Path>,
     diff_strategy: ToolDiffStrategy,
     invocation: &ToolInvocation,
-) -> Result<Vec<ApprovalFileDiff>> {
+) -> Result<Vec<ActionReviewFileDiff>> {
     let Some(sandbox_root) = sandbox_root else {
         return Ok(Vec::new());
     };
@@ -238,7 +238,7 @@ pub(super) async fn approval_diffs_for(
                 .await?
                 .unwrap_or_default();
 
-            Ok(vec![ApprovalFileDiff {
+            Ok(vec![ActionReviewFileDiff {
                 path: path.to_string(),
                 before,
                 after: content.to_string(),
@@ -275,7 +275,7 @@ pub(super) async fn approval_diffs_for(
                 }
             };
 
-            Ok(vec![ApprovalFileDiff {
+            Ok(vec![ActionReviewFileDiff {
                 path: path.to_string(),
                 before: planned.preview_before,
                 after: planned.preview_after,
@@ -325,7 +325,7 @@ pub(super) fn expand_local_path(path: &str) -> Result<PathBuf> {
 mod tests {
     use moa_core::ToolInputShape;
 
-    use super::{approval_pattern_for, unwrap_shell_wrapper};
+    use super::{action_pattern_for, unwrap_shell_wrapper};
 
     #[test]
     fn unwrap_shell_wrapper_recognizes_supported_forms() {
@@ -352,8 +352,8 @@ mod tests {
     }
 
     #[test]
-    fn approval_pattern_unwraps_zsh_wrapper() {
-        let pattern = approval_pattern_for(
+    fn action_pattern_unwraps_zsh_wrapper() {
+        let pattern = action_pattern_for(
             ToolInputShape::Command,
             r#"zsh -lc "cd server && rg -n 'class' .""#,
         );
@@ -363,29 +363,29 @@ mod tests {
     }
 
     #[test]
-    fn approval_pattern_simple_command() {
-        let pattern = approval_pattern_for(ToolInputShape::Command, "npm test");
+    fn action_pattern_simple_command() {
+        let pattern = action_pattern_for(ToolInputShape::Command, "npm test");
         assert_eq!(pattern, "npm *");
     }
 
     #[test]
-    fn approval_pattern_single_token() {
-        let pattern = approval_pattern_for(ToolInputShape::Command, "pwd");
+    fn action_pattern_single_token() {
+        let pattern = action_pattern_for(ToolInputShape::Command, "pwd");
         assert_eq!(pattern, "pwd");
     }
 
     #[test]
-    fn approval_pattern_nested_shell_not_recursed() {
+    fn action_pattern_nested_shell_not_recursed() {
         let input = r#"bash -c "bash -c 'rm -rf /'""#;
-        let pattern = approval_pattern_for(ToolInputShape::Command, input);
+        let pattern = action_pattern_for(ToolInputShape::Command, input);
 
         assert_eq!(pattern, input);
         assert!(!pattern.starts_with("rm"));
     }
 
     #[test]
-    fn approval_pattern_chained_inner_uses_first_subcommand() {
-        let pattern = approval_pattern_for(
+    fn action_pattern_chained_inner_uses_first_subcommand() {
+        let pattern = action_pattern_for(
             ToolInputShape::Command,
             r#"zsh -lc "npm install && npm test""#,
         );
@@ -394,9 +394,9 @@ mod tests {
     }
 
     #[test]
-    fn approval_pattern_malformed_wrapper_falls_back_to_full_input() {
+    fn action_pattern_malformed_wrapper_falls_back_to_full_input() {
         let input = r#"zsh -lc "unterminated"#;
-        let pattern = approval_pattern_for(ToolInputShape::Command, input);
+        let pattern = action_pattern_for(ToolInputShape::Command, input);
 
         assert_eq!(pattern, input);
     }

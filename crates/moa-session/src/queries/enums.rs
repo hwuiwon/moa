@@ -22,8 +22,8 @@ pub(crate) fn from_db<E: FromStr>(kind: &str, value: &str) -> Result<E> {
 mod tests {
     use super::*;
     use moa_core::{
-        AttributionEffect, AttributionSubjectType, EventType, LearningCandidateStatus,
-        LearningCandidateType, LearningRiskClass, Platform, PolicyAction, PolicyScope,
+        ActionPolicyEffect, ActionRuleScope, AttributionEffect, AttributionSubjectType, EventType,
+        LearningCandidateStatus, LearningCandidateType, LearningRiskClass, Platform,
         SegmentOutcome, SessionStatus,
     };
 
@@ -35,7 +35,6 @@ mod tests {
             (SessionStatus::Created, "created"),
             (SessionStatus::Running, "running"),
             (SessionStatus::Paused, "paused"),
-            (SessionStatus::WaitingApproval, "waiting_approval"),
             (SessionStatus::Completed, "completed"),
             (SessionStatus::Cancelled, "cancelled"),
             (SessionStatus::Failed, "failed"),
@@ -70,15 +69,15 @@ mod tests {
             assert_eq!(from_db::<EventType>("event type", label).unwrap(), value);
         }
 
-        assert_eq!(PolicyAction::RequireApproval.as_str(), "require_approval");
+        assert_eq!(ActionPolicyEffect::AdminReview.as_str(), "admin_review");
         assert_eq!(
-            from_db::<PolicyAction>("approval rule action", "deny").unwrap(),
-            PolicyAction::Deny
+            from_db::<ActionPolicyEffect>("action policy effect", "deny").unwrap(),
+            ActionPolicyEffect::Deny
         );
-        assert_eq!(PolicyScope::Global.as_str(), "global");
+        assert_eq!(ActionRuleScope::Global.as_str(), "global");
         assert_eq!(
-            from_db::<PolicyScope>("approval rule scope", "workspace").unwrap(),
-            PolicyScope::Workspace
+            from_db::<ActionRuleScope>("action policy scope", "workspace").unwrap(),
+            ActionRuleScope::Workspace
         );
 
         // Experience / segment enums (formerly hand-rolled in rows.rs).

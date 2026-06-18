@@ -96,8 +96,6 @@ pub enum SubAgentState {
     Uninitialized,
     /// Child is actively running turns.
     Running,
-    /// Child is blocked on human approval.
-    WaitingApproval,
     /// Child finished successfully.
     Completed,
     /// Child failed terminally.
@@ -346,22 +344,6 @@ pub struct SubAgentTurnOutcomeRecord {
     pub turn_id: String,
     /// Core turn outcome to apply.
     pub outcome: TurnOutcome,
-}
-
-/// Turn-scoped pending approval marker for a sub-agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetSubAgentPendingApprovalInput {
-    /// Workflow turn id that requested approval.
-    pub turn_id: String,
-    /// Approval awakeable id that `SubAgent::approve` should resolve.
-    pub awakeable_id: String,
-}
-
-/// Turn-scoped pending approval clear request for a sub-agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClearSubAgentPendingApprovalInput {
-    /// Workflow turn id that completed the approval wait.
-    pub turn_id: String,
 }
 
 /// Request to reserve a child sub-agent under another sub-agent.

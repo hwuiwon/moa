@@ -37,15 +37,18 @@ use moa_orchestrator::{
     objects::sub_agent::{SubAgent, SubAgentImpl},
     objects::workspace::{WorkspaceImpl, WorkspaceObject},
     services::{
+        action_reviews::{ActionReviews, ActionReviewsImpl},
         admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
         agents::{Agents, AgentsImpl},
         analytics::{Analytics, AnalyticsImpl},
         api_keys::{ApiKeys, ApiKeysImpl},
-        approvals::{Approvals, ApprovalsImpl},
-        approvals_reaper::{ApprovalReaper, ApprovalReaperHandle, HttpAwakeableResolver},
         artifacts::{Artifacts, ArtifactsImpl},
         audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
+        authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
+        authz_challenges_reaper::{
+            AuthzChallengeReaper, AuthzChallengeReaperHandle, HttpAwakeableResolver,
+        },
         experiments::{Experiments, ExperimentsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
@@ -94,11 +97,12 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Agents",
     "AdminMaintenance",
     "Analytics",
+    "ActionReviews",
     "Artifacts",
-    "Approvals",
     "ApiKeys",
     "Audit",
     "Authz",
+    "AuthzChallenges",
     "Consolidate",
     "CronJob",
     "Experiments",
@@ -284,10 +288,11 @@ async fn main() -> anyhow::Result<()> {
         .bind(AdminMaintenanceImpl.serve())
         .bind(AnalyticsImpl.serve())
         .bind(ArtifactsImpl.serve())
-        .bind(ApprovalsImpl.serve())
+        .bind(ActionReviewsImpl.serve())
         .bind(ApiKeysImpl.serve())
         .bind(AuditImpl.serve())
-        .bind(AuthzImpl.serve());
+        .bind(AuthzImpl.serve())
+        .bind(AuthzChallengesImpl.serve());
     #[cfg(feature = "internal-eval-runner")]
     let endpoint = endpoint.bind(EvalImpl.serve());
     let endpoint = endpoint
@@ -324,8 +329,8 @@ async fn main() -> anyhow::Result<()> {
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(readiness.clone(), pool.clone(), restate_admin_url)?;
     let shutdown = CancellationToken::new();
-    let approval_reaper_handle =
-        start_approval_reaper_if_configured(&pool, moa_config.as_ref(), awakeable_resolver)?;
+    let authz_challenge_reaper_handle =
+        start_authz_challenge_reaper_if_configured(&pool, moa_config.as_ref(), awakeable_resolver)?;
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -383,7 +388,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(poller_handle) = poller_handle {
                 poller_handle.shutdown().await;
             }
-            if let Some(reaper_handle) = approval_reaper_handle {
+            if let Some(reaper_handle) = authz_challenge_reaper_handle {
                 reaper_handle.shutdown().await;
             }
 
@@ -493,16 +498,16 @@ fn start_authz_outbox_poller(
     poller_handle
 }
 
-fn start_approval_reaper_if_configured(
+fn start_authz_challenge_reaper_if_configured(
     pool: &PgPool,
     config: &MoaConfig,
     resolver: Arc<dyn AwakeableResolver>,
-) -> anyhow::Result<Option<ApprovalReaperHandle>> {
+) -> anyhow::Result<Option<AuthzChallengeReaperHandle>> {
     if config.async_authz.provider != AsyncAuthzKind::Builtin {
         return Ok(None);
     }
-    let handle = ApprovalReaper::new(pool.clone()).spawn(resolver);
-    tracing::info!("approval reaper started");
+    let handle = AuthzChallengeReaper::new(pool.clone()).spawn(resolver);
+    tracing::info!("authz challenge reaper started");
     Ok(Some(handle))
 }
 

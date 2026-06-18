@@ -6,11 +6,10 @@ mod signals;
 use std::sync::Arc;
 use std::time::Instant;
 
-use moa_core::events::tool_approval::find_pending_tool_approval;
 use moa_core::{
     CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
-    ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStatus,
-    SessionStore, StopReason, TraceContext, WorkingContext, record_turn_llm_call_duration,
+    ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStore,
+    StopReason, TraceContext, WorkingContext, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
@@ -22,12 +21,9 @@ use tracing::Instrument;
 use self::lineage::{emit_context_lineage, emit_generation_lineage};
 use self::signals::{drain_signal_queue, handle_stream_signal};
 use crate::pipeline::ContextPipeline;
-use crate::turn::{
-    StreamSignalDisposition, find_pending_approval_request, stream_completion_response,
-};
+use crate::turn::{StreamSignalDisposition, stream_completion_response};
 
 use super::StreamedTurnResult;
-use super::approval_flow::{process_resolved_approval, wait_for_approval};
 use super::budget::enforce_workspace_budget;
 use super::context_build::{
     BuildTurnContextOptions, append_event, build_cache_report, build_turn_context,
@@ -85,139 +81,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             let events = session_store
                 .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
                 .await?;
-
-            if let Some(router) = &tool_router {
-                let resolved_dispatch_span = tracing::info_span!(
-                    "tool_dispatch",
-                    moa.tool.count = tracing::field::Empty,
-                    moa.tool.parallel_count = 0i64,
-                );
-                let resolved_dispatch_started = Instant::now();
-                let resolved_dispatched = async {
-                    process_resolved_approval(
-                        session_id,
-                        &session,
-                        session_store.clone(),
-                        router,
-                        event_tx,
-                        runtime_tx,
-                        &events,
-                        cancel_token.as_ref(),
-                        hard_cancel_token.as_ref(),
-                        Some(&resolved_dispatch_span),
-                    )
-                    .await
-                }
-                .instrument(resolved_dispatch_span.clone())
-                .await?;
-                resolved_dispatch_span.record(
-                    "moa.tool.count",
-                    if resolved_dispatched { 1i64 } else { 0i64 },
-                );
-                record_turn_tool_dispatch_duration(
-                    resolved_dispatch_started.elapsed(),
-                    usize::from(resolved_dispatched),
-                );
-                if resolved_dispatched {
-                    if *soft_cancel_requested {
-                        record_turn_span_metrics(
-                            &turn_span,
-                            total_tool_calls,
-                            total_input_tokens,
-                            total_output_tokens,
-                            "cancelled",
-                        );
-                        return Ok(StreamedTurnResult::Cancelled);
-                    }
-                    continue;
-                }
-
-                if let Some(pending) = find_pending_tool_approval(&events) {
-                    if let Some(receiver) = signal_rx.as_deref_mut() {
-                        let waiting_dispatch_span = tracing::info_span!(
-                            "tool_dispatch",
-                            moa.tool.count = 1i64,
-                            moa.tool.parallel_count = 0i64,
-                        );
-                        let waiting_dispatch_started = Instant::now();
-                        let outcome = wait_for_approval(
-                            session_id,
-                            &session,
-                            session_store.clone(),
-                            router,
-                            pending,
-                            event_tx,
-                            runtime_tx,
-                            cancel_token.as_ref(),
-                            hard_cancel_token.as_ref(),
-                            Some(&waiting_dispatch_span),
-                            receiver,
-                            turn_requested,
-                            soft_cancel_requested,
-                        )
-                        .instrument(waiting_dispatch_span.clone())
-                        .await?;
-                        drain_signal_queue(
-                            Some(receiver),
-                            runtime_tx,
-                            turn_requested,
-                            soft_cancel_requested,
-                        )?;
-                        record_turn_tool_dispatch_duration(waiting_dispatch_started.elapsed(), 1);
-                        match outcome {
-                            ToolCallOutcome::Executed | ToolCallOutcome::Skipped => {
-                                if *soft_cancel_requested {
-                                    record_turn_span_metrics(
-                                        &turn_span,
-                                        total_tool_calls,
-                                        total_input_tokens,
-                                        total_output_tokens,
-                                        "cancelled",
-                                    );
-                                    return Ok(StreamedTurnResult::Cancelled);
-                                }
-                                continue;
-                            }
-                            ToolCallOutcome::NeedsApproval(request) => {
-                                record_turn_span_metrics(
-                                    &turn_span,
-                                    total_tool_calls,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    "needs_approval",
-                                );
-                                return Ok(StreamedTurnResult::NeedsApproval(request));
-                            }
-                            ToolCallOutcome::Cancelled => {
-                                record_turn_span_metrics(
-                                    &turn_span,
-                                    total_tool_calls,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    "cancelled",
-                                );
-                                return Ok(StreamedTurnResult::Cancelled);
-                            }
-                        }
-                    } else if let Some(request) = find_pending_approval_request(&events) {
-                        if let Some(record) = session_store
-                            .transition_status(session_id, SessionStatus::WaitingApproval)
-                            .await?
-                            && let Some(event_tx) = event_tx
-                        {
-                            let _ = event_tx.send(record);
-                        }
-                        record_turn_span_metrics(
-                            &turn_span,
-                            total_tool_calls,
-                            total_input_tokens,
-                            total_output_tokens,
-                            "needs_approval",
-                        );
-                        return Ok(StreamedTurnResult::NeedsApproval(request));
-                    }
-                }
-            }
 
             let pipeline_compile_span = tracing::info_span!(
                 "pipeline_compile",
@@ -436,16 +299,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                             match outcome {
                                 ToolCallOutcome::Executed => executed_tools = true,
                                 ToolCallOutcome::Skipped => {}
-                                ToolCallOutcome::NeedsApproval(request) => {
-                                    record_turn_span_metrics(
-                                        &turn_span,
-                                        total_tool_calls,
-                                        total_input_tokens,
-                                        total_output_tokens,
-                                        "needs_approval",
-                                    );
-                                    return Ok(Some(StreamedTurnResult::NeedsApproval(request)));
-                                }
                                 ToolCallOutcome::Cancelled => {
                                     record_turn_span_metrics(
                                         &turn_span,

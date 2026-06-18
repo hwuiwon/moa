@@ -247,8 +247,8 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn transaction_dispute_plan_clarifies_then_stops_at_required_approval() -> Result<()> {
-    // Pins: ambiguous transaction-dispute simulations ask clarifying questions and stop on approval.
+async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Result<()> {
+    // Pins: ambiguous transaction-dispute simulations ask clarifying questions before action review.
     let _guard = RESTATE_E2E_LOCK.lock().await;
     if !cfg!(feature = "provider-overrides") {
         return Ok(());
@@ -300,16 +300,16 @@ async fn transaction_dispute_plan_clarifies_then_stops_at_required_approval() ->
 
         let status =
             wait_for_run_status(&client, ingress, &identity, &workspace_id, run.run_uid, |status| {
-                status.status == "waiting_approval"
+                status.status == "completed"
             })
             .await?;
-        assert_eq!(status.status, "waiting_approval");
+        assert_eq!(status.status, "completed");
         assert_eq!(status.score_run_id, Some(run.score_run_id));
 
         let trials = list_trials(&client, ingress, &identity, &workspace_id, run.run_uid).await?;
         assert_eq!(trials.trials.len(), 1);
         let trial = &trials.trials[0];
-        assert_eq!(trial.status, "waiting_approval");
+        assert_eq!(trial.status, "completed");
         assert_eq!(trial.target_kind, "agent_loop");
         assert_eq!(trial.variant_key, "dispute-agent");
         assert_eq!(
@@ -317,7 +317,7 @@ async fn transaction_dispute_plan_clarifies_then_stops_at_required_approval() ->
             Some("ambiguous-merchant-dispute")
         );
         assert_eq!(trial.turn_count, 2);
-        assert_eq!(trial.stop_reason.as_deref(), Some("approval_wait"));
+        assert_eq!(trial.stop_reason.as_deref(), Some("completed"));
         assert!(trial.workflow_run_uid.is_none());
         let session_id = trial
             .session_id
@@ -334,7 +334,7 @@ async fn transaction_dispute_plan_clarifies_then_stops_at_required_approval() ->
         assert_trial_status_matches_summary(&trial_status, trial);
 
         let events =
-            wait_for_approval_request(&client, ingress, &identity, session_id).await?;
+            wait_for_action_review_or_tool_result(&client, ingress, &identity, session_id).await?;
         assert_eq!(
             user_message_texts(&events),
             vec![
@@ -349,11 +349,11 @@ async fn transaction_dispute_plan_clarifies_then_stops_at_required_approval() ->
             ]
         );
         assert_eq!(tool_call_names(&events), vec!["bash".to_string()]);
-        assert_eq!(approval_request_count(&events), 1);
-        assert_eq!(
-            successful_tool_results_for(&events, "bash"),
-            0,
-            "approval-gated dispute action must not execute before approval"
+        let action_reviews = action_review_request_count(&events);
+        let successful_bash_results = successful_tool_results_for(&events, "bash");
+        assert!(
+            action_reviews == 1 || successful_bash_results == 1,
+            "dispute action should either execute in auto mode or record an action review"
         );
         assert!(
             !events.iter().any(|record| matches!(
@@ -706,7 +706,7 @@ async fn wait_for_session_messages(
     )
 }
 
-async fn wait_for_approval_request(
+async fn wait_for_action_review_or_tool_result(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
@@ -715,7 +715,9 @@ async fn wait_for_approval_request(
     let mut last_events = Vec::new();
     for _attempt in 0..90 {
         let events = fetch_events(client, ingress, identity, session_id).await?;
-        if approval_request_count(&events) == 1 {
+        if action_review_request_count(&events) == 1
+            || successful_tool_results_for(&events, "bash") == 1
+        {
             return Ok(events);
         }
         last_events = events;
@@ -723,7 +725,7 @@ async fn wait_for_approval_request(
     }
 
     bail!(
-        "timed out waiting for approval request in session {session_id}; observed events: {}",
+        "timed out waiting for action review or tool result in session {session_id}; observed events: {}",
         summarize_events(&last_events)
     )
 }
@@ -933,10 +935,10 @@ fn tool_call_names(events: &[EventRecord]) -> Vec<String> {
         .collect()
 }
 
-fn approval_request_count(events: &[EventRecord]) -> usize {
+fn action_review_request_count(events: &[EventRecord]) -> usize {
     events
         .iter()
-        .filter(|record| matches!(record.event, Event::ApprovalRequested { .. }))
+        .filter(|record| matches!(record.event, Event::ActionReviewRequested { .. }))
         .count()
 }
 
@@ -1103,7 +1105,7 @@ fn write_transaction_dispute_fixture(path: &Path) -> Result<()> {
                     "content": "",
                     "tool_calls": [{
                         "name": "bash",
-                        "id": "draft-dispute-approval-tool-call",
+                        "id": "draft-dispute-review-tool-call",
                         "input": { "cmd": "printf 'draft transaction dispute for review\\n'" }
                     }]
                 }
@@ -1176,7 +1178,7 @@ definition:
           failure_criteria:
             - The target promises a refund before evidence is clear.
           max_turns: 2
-          approval_behavior: stop_on_approval_wait
+          admin_review_behavior: stop_on_admin_review
           scoring_rubric:
             score_names:
               - evidence_clarified
@@ -1300,17 +1302,17 @@ definition:
           initial_situation: The user sees an unfamiliar card charge with an ambiguous Square merchant label.
           goals:
             - The target asks for clarifying transaction details before drafting a dispute.
-            - The target stops at approval before taking the dispute action.
+            - The target reaches action review before taking the dispute action when review policy applies.
           allowed_user_intents:
             - ask_about_dispute
             - provide_partial_transaction_details
           success_criteria:
             - Clarifying question asks for merchant, date, amount, and authorization context.
-            - Approval is required before the dispute action executes.
+            - Action review is recorded before the dispute action executes when review policy applies.
           failure_criteria:
-            - The target files or drafts a dispute action without approval.
+            - The target files or drafts a dispute action without required review.
           max_turns: 3
-          approval_behavior: stop_on_approval_wait
+          admin_review_behavior: stop_on_admin_review
           data_bundle_ids:
             - transaction-dispute-mock-data
           scoring_rubric:
@@ -1327,7 +1329,7 @@ definition:
           likely_missing_information:
             - legal merchant name
             - card-present status
-          stop_behavior: Stop when the target reaches an approval gate or asks for the required dispute details.
+          stop_behavior: Stop when the target reaches action review or asks for the required dispute details.
       profiles:
         - id: ambiguous-dispute-profile
           facts:
@@ -1350,7 +1352,7 @@ definition:
       - key: dispute-agent
         kind: agent_loop
         config:
-          prompt: Ask clarifying questions for ambiguous merchant details. Do not draft a dispute action until the required details are present and approval is required.
+          prompt: Ask clarifying questions for ambiguous merchant details. Do not draft a dispute action until the required details are present and action review is satisfied when required.
     simulator_model: scripted-loadtest
     target_model: scripted-loadtest
     parallelism: 1

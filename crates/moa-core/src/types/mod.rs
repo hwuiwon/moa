@@ -3,7 +3,7 @@
 #[macro_use]
 mod macros;
 
-mod approval;
+mod action_policy;
 mod completion;
 mod context;
 mod events_stream;
@@ -25,9 +25,10 @@ mod snapshot;
 mod sub_agent;
 mod tools;
 
-pub use approval::{
-    ApprovalDecision, ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest,
-    ApprovalRule, PolicyAction, PolicyScope, RiskLevel,
+pub use action_policy::{
+    ActionClass, ActionEnvelope, ActionPolicyDecision, ActionPolicyEffect, ActionPolicyRule,
+    ActionReviewDecision, ActionReviewField, ActionReviewFileDiff, ActionReviewPreview,
+    ActionReviewStatus, ActionRuleScope, RiskLevel,
 };
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, JsonResponseFormat,
@@ -78,19 +79,18 @@ pub use snapshot::{
 };
 pub use sub_agent::{
     AgentPath, AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
-    CancelSubAgentInput, ClearSubAgentPendingApprovalInput, CompleteSubAgentChildInput,
-    ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, DelegationTool,
-    DelegationToolKind, DispatchSubAgentInput, ListSubAgentsInput, ListSubAgentsOutput,
-    ListedSubAgent, MarkSubAgentChildTerminalInput, MessageSubAgentInput,
-    RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent,
-    SetSubAgentPendingApprovalInput, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef,
-    SubAgentId, SubAgentMessage, SubAgentResult, SubAgentState, SubAgentStatus,
-    SubAgentTerminalResult, SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
-    SubAgentTurnResponseRecord, WaitSubAgentInput, WaitSubAgentOutput,
-    cancel_sub_agent_tool_schema, default_dispatch_budget_tokens, default_wait_timeout_ms,
-    delegation_tool_schema, delegation_tool_schemas, dispatch_sub_agent_tool_schema,
-    is_delegation_tool_name, list_sub_agents_tool_schema, message_sub_agent_tool_schema,
-    parse_delegation_tool_input, spawn_sub_agent_tool_schema, wait_sub_agent_tool_schema,
+    CancelSubAgentInput, CompleteSubAgentChildInput, ConsumeSubAgentChildResultInput,
+    ConsumeSubAgentChildResultOutput, DelegationTool, DelegationToolKind, DispatchSubAgentInput,
+    ListSubAgentsInput, ListSubAgentsOutput, ListedSubAgent, MarkSubAgentChildTerminalInput,
+    MessageSubAgentInput, RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent,
+    SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef, SubAgentId, SubAgentMessage,
+    SubAgentResult, SubAgentState, SubAgentStatus, SubAgentTerminalResult, SubAgentToolRecord,
+    SubAgentTurnOutcomeRecord, SubAgentTurnPreparation, SubAgentTurnResponseRecord,
+    WaitSubAgentInput, WaitSubAgentOutput, cancel_sub_agent_tool_schema,
+    default_dispatch_budget_tokens, default_wait_timeout_ms, delegation_tool_schema,
+    delegation_tool_schemas, dispatch_sub_agent_tool_schema, is_delegation_tool_name,
+    list_sub_agents_tool_schema, message_sub_agent_tool_schema, parse_delegation_tool_input,
+    spawn_sub_agent_tool_schema, wait_sub_agent_tool_schema,
 };
 pub use tools::{
     IdempotencyClass, ToolArtifactStream, ToolCallRequest, ToolContent, ToolDefinition,

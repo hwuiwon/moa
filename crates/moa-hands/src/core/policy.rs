@@ -1,35 +1,48 @@
-//! Policy evaluation and approval rendering for tool invocations.
+//! Policy evaluation and action-review rendering for tool invocations.
 
 use moa_core::{
-    ApprovalField, ApprovalFileDiff, ApprovalPrompt, ApprovalRequest, ApprovalRule, MoaError,
-    PolicyAction, Result, SessionMeta, ToolInvocation, ToolPolicyInput, UserId,
+    ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField, ActionReviewFileDiff,
+    ActionReviewPreview, ActionRuleScope, MoaError, Result, SessionMeta, SubAgentId, ToolCallId,
+    ToolInvocation, ToolPolicyInput, UserId,
 };
 use uuid::Uuid;
 
 use super::ToolRouter;
 use super::normalization::{
-    approval_diffs_for, approval_fields_for, approval_pattern_for, normalized_input_for,
-    summary_for,
+    action_pattern_for, normalized_input_for, review_diffs_for, review_fields_for, summary_for,
 };
+
+/// Optional origin metadata attached to an action envelope.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActionOrigin {
+    /// Origin object kind for workflow or artifact-driven actions.
+    pub origin_kind: Option<String>,
+    /// Origin object identifier for workflow or artifact-driven actions.
+    pub origin_id: Option<String>,
+    /// Origin step identifier for workflow or artifact-driven actions.
+    pub origin_step_id: Option<String>,
+    /// Explicit idempotency key supplied for side-effecting tools.
+    pub idempotency_key: Option<String>,
+}
 
 /// Prepared metadata for a concrete tool invocation.
 #[derive(Debug, Clone)]
-pub struct PreparedToolInvocation {
+pub struct PreparedActionInvocation {
     /// Normalized policy-facing description of the invocation.
     policy_input: ToolPolicyInput,
     /// Result of evaluating the invocation against the active policies.
-    policy: moa_security::PolicyCheck,
-    /// Suggested rule pattern for "Always Allow".
-    always_allow_pattern: String,
-    /// Structured approval fields for the local UI.
-    approval_fields: Vec<ApprovalField>,
+    policy: moa_security::ActionPolicyCheck,
+    /// Suggested rule pattern for future action-policy matching.
+    action_pattern: String,
+    /// Structured review fields for the local UI.
+    review_fields: Vec<ActionReviewField>,
     /// Optional inline file diffs for the local UI.
-    approval_diffs: Vec<ApprovalFileDiff>,
+    review_diffs: Vec<ActionReviewFileDiff>,
 }
 
-impl PreparedToolInvocation {
+impl PreparedActionInvocation {
     /// Returns the policy evaluation outcome for the invocation.
-    pub fn policy(&self) -> &moa_security::PolicyCheck {
+    pub fn policy(&self) -> &moa_security::ActionPolicyCheck {
         &self.policy
     }
 
@@ -43,30 +56,56 @@ impl PreparedToolInvocation {
         &self.policy_input.input_summary
     }
 
-    /// Builds the approval prompt for this invocation with the given request identifier.
-    pub fn approval_prompt(&self, request_id: Uuid) -> ApprovalPrompt {
-        ApprovalPrompt {
-            request: ApprovalRequest {
-                request_id,
-                sub_agent_id: None,
-                tool_name: self.policy_input.tool_name.clone(),
-                input_summary: self.policy_input.input_summary.clone(),
-                risk_level: self.policy_input.risk_level.clone(),
-            },
-            pattern: self.always_allow_pattern.clone(),
-            parameters: self.approval_fields.clone(),
-            file_diffs: self.approval_diffs.clone(),
+    /// Builds the durable action envelope for this invocation.
+    pub fn envelope(
+        &self,
+        review_id: Uuid,
+        session: &SessionMeta,
+        tool_call_id: ToolCallId,
+        sub_agent_id: Option<SubAgentId>,
+        origin: ActionOrigin,
+    ) -> ActionEnvelope {
+        ActionEnvelope {
+            review_id,
+            workspace_id: session.workspace_id.clone(),
+            user_id: session.user_id.clone(),
+            session_id: Some(session.id),
+            sub_agent_id,
+            tool_call_id,
+            tool_name: self.policy_input.tool_name.clone(),
+            normalized_input: self.policy_input.normalized_input.clone(),
+            input_summary: self.policy_input.input_summary.clone(),
+            risk_level: self.policy_input.risk_level,
+            action_class: self.policy_input.action_class,
+            origin_kind: origin.origin_kind,
+            origin_id: origin.origin_id,
+            origin_step_id: origin.origin_step_id,
+            idempotency_key: origin.idempotency_key,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Builds the action-review preview for this invocation.
+    pub fn review_preview(&self) -> ActionReviewPreview {
+        let mut fields = self.review_fields.clone();
+        fields.push(ActionReviewField {
+            label: "Action pattern".to_string(),
+            value: self.action_pattern.clone(),
+        });
+        ActionReviewPreview {
+            fields,
+            file_diffs: self.review_diffs.clone(),
         }
     }
 }
 
 impl ToolRouter {
-    /// Evaluates the policy action for a tool invocation in the current session.
+    /// Evaluates the policy effect for a tool invocation in the current session.
     pub async fn check_policy(
         &self,
         session: &SessionMeta,
         invocation: &ToolInvocation,
-    ) -> Result<moa_security::PolicyCheck> {
+    ) -> Result<moa_security::ActionPolicyCheck> {
         Ok(self
             .prepare_invocation(session, invocation)
             .await?
@@ -74,12 +113,12 @@ impl ToolRouter {
             .clone())
     }
 
-    /// Prepares a tool invocation for policy evaluation and approval rendering.
+    /// Prepares a tool invocation for policy evaluation and action-review rendering.
     pub async fn prepare_invocation(
         &self,
         session: &SessionMeta,
         invocation: &ToolInvocation,
-    ) -> Result<PreparedToolInvocation> {
+    ) -> Result<PreparedActionInvocation> {
         let tool_definition = self
             .registry
             .get(&invocation.name)
@@ -87,17 +126,17 @@ impl ToolRouter {
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
             rule_store
-                .list_approval_rules(&session.workspace_id)
+                .list_action_policy_rules(&session.workspace_id)
                 .await?
         } else {
             Vec::new()
         };
         let policy = self.policies.check(
             &policy_input,
-            &moa_security::ToolPolicyContext::from_session(session),
+            &moa_security::ActionPolicyContext::from_session(session),
             &rules,
         )?;
-        let approval_root = self
+        let review_root = self
             .workspace_roots
             .read()
             .await
@@ -105,18 +144,18 @@ impl ToolRouter {
             .cloned()
             .or_else(|| self.sandbox_root.clone());
 
-        Ok(PreparedToolInvocation {
-            always_allow_pattern: approval_pattern_for(
+        Ok(PreparedActionInvocation {
+            action_pattern: action_pattern_for(
                 tool_definition.policy.input_shape,
                 &policy_input.normalized_input,
             ),
-            approval_fields: approval_fields_for(
-                approval_root.as_deref(),
+            review_fields: review_fields_for(
+                review_root.as_deref(),
                 tool_definition.policy.input_shape,
                 invocation,
             ),
-            approval_diffs: approval_diffs_for(
-                approval_root.as_deref(),
+            review_diffs: review_diffs_for(
+                review_root.as_deref(),
                 tool_definition.policy.diff_strategy,
                 invocation,
             )
@@ -126,29 +165,31 @@ impl ToolRouter {
         })
     }
 
-    /// Persists an approval rule for the current workspace.
-    pub async fn store_approval_rule(
+    /// Persists an action-policy rule for the current workspace.
+    pub async fn store_action_policy_rule(
         &self,
         session: &SessionMeta,
         tool: &str,
         pattern: &str,
-        action: PolicyAction,
+        effect: ActionPolicyEffect,
         created_by: UserId,
     ) -> Result<()> {
         let Some(rule_store) = &self.rule_store else {
             return Err(MoaError::Unsupported(
-                "tool router does not have an approval rule store".to_string(),
+                "tool router does not have an action-policy rule store".to_string(),
             ));
         };
 
         rule_store
-            .upsert_approval_rule(ApprovalRule {
+            .upsert_action_policy_rule(ActionPolicyRule {
                 id: Uuid::now_v7(),
                 workspace_id: session.workspace_id.clone(),
+                user_id: None,
                 tool: tool.to_string(),
                 pattern: pattern.to_string(),
-                action,
-                scope: moa_core::PolicyScope::Workspace,
+                effect,
+                scope: ActionRuleScope::Workspace,
+                reason: None,
                 created_by,
                 created_at: chrono::Utc::now(),
             })
@@ -170,8 +211,9 @@ impl ToolRouter {
                 &normalized_input,
             ),
             normalized_input,
-            risk_level: definition.policy.risk_level.clone(),
-            default_action: definition.policy.default_action.clone(),
+            risk_level: definition.policy.risk_level,
+            default_effect: definition.policy.default_effect,
+            action_class: definition.policy.action_class,
         })
     }
 }

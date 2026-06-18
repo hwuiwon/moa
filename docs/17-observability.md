@@ -132,9 +132,9 @@ For a slow or failing behavior-lab run:
 4. Check lifecycle metrics first:
    `moa_experiment_runs_total{status,target_kind}`,
    `moa_experiment_trials_total{status,stop_reason,target_kind}`, and
-   `moa_experiment_trial_duration_seconds{status,target_kind}`. A rise in
-   `stop_reason="approval_wait"` should line up with
-   `moa_experiment_approval_waits_total{target_kind}`.
+   `moa_experiment_trial_duration_seconds{status,target_kind}`. Action-review
+   pressure should be investigated through session `ActionReviewRequested`
+   events and workspace action-review rows.
 5. For simulator pressure, compare
    `moa_simulation_turns_total{target_kind}`,
    `moa_simulation_tokens_total{role="simulator"}`,

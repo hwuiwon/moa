@@ -41,23 +41,24 @@ impl ToolRouter {
                 &tool_span,
                 session,
                 &registered_tool.execution,
-                &prepared.policy().action,
+                &prepared.policy().effect,
             );
-            let result = match &prepared.policy().action {
-                moa_core::PolicyAction::Allow => {
+            let result = match &prepared.policy().effect {
+                moa_core::ActionPolicyEffect::Allow => {
                     self.execute_authorized_inner(session, invocation, None, None)
                         .await
                 }
-                moa_core::PolicyAction::Deny => {
+                moa_core::ActionPolicyEffect::Deny => {
                     tool_span.set_attribute("moa.tool.denied", true);
                     Err(MoaError::PermissionDenied(format!(
-                        "tool {} denied by policy",
-                        invocation.name
+                        "tool {} denied by action policy: {}",
+                        invocation.name,
+                        prepared.policy().reason.as_deref().unwrap_or("no reason")
                     )))
                 }
-                moa_core::PolicyAction::RequireApproval => {
+                moa_core::ActionPolicyEffect::AdminReview => {
                     Err(MoaError::PermissionDenied(format!(
-                        "tool {} requires approval: {}",
+                        "tool {} requires workspace admin review: {}",
                         invocation.name,
                         prepared.input_summary()
                     )))
@@ -76,7 +77,7 @@ impl ToolRouter {
         .await
     }
 
-    /// Executes a tool invocation after approval has already been granted.
+    /// Executes a tool invocation that has already cleared action policy.
     pub async fn execute_authorized(
         &self,
         session: &SessionMeta,
@@ -86,7 +87,7 @@ impl ToolRouter {
             .await
     }
 
-    /// Executes a tool invocation after approval has already been granted with cancellation hooks.
+    /// Executes a tool invocation that has already cleared action policy with cancellation hooks.
     pub async fn execute_authorized_with_cancel(
         &self,
         session: &SessionMeta,
@@ -108,7 +109,7 @@ impl ToolRouter {
                 &tool_span,
                 session,
                 &registered_tool.execution,
-                &prepared.policy().action,
+                &prepared.policy().effect,
             );
             let result = self
                 .execute_authorized_inner(session, invocation, cancel_token, hard_cancel_token)
@@ -145,23 +146,24 @@ impl ToolRouter {
                 &tool_span,
                 session,
                 &registered_tool.execution,
-                &prepared.policy().action,
+                &prepared.policy().effect,
             );
-            let result = match &prepared.policy().action {
-                moa_core::PolicyAction::Allow => {
+            let result = match &prepared.policy().effect {
+                moa_core::ActionPolicyEffect::Allow => {
                     self.execute_authorized_with_recovery_inner(session, invocation)
                         .await
                 }
-                moa_core::PolicyAction::Deny => {
+                moa_core::ActionPolicyEffect::Deny => {
                     tool_span.set_attribute("moa.tool.denied", true);
                     Err(MoaError::PermissionDenied(format!(
-                        "tool {} denied by policy",
-                        invocation.name
+                        "tool {} denied by action policy: {}",
+                        invocation.name,
+                        prepared.policy().reason.as_deref().unwrap_or("no reason")
                     )))
                 }
-                moa_core::PolicyAction::RequireApproval => {
+                moa_core::ActionPolicyEffect::AdminReview => {
                     Err(MoaError::PermissionDenied(format!(
-                        "tool {} requires approval: {}",
+                        "tool {} requires workspace admin review: {}",
                         invocation.name,
                         prepared.input_summary()
                     )))
@@ -198,7 +200,7 @@ impl ToolRouter {
                 &tool_span,
                 session,
                 &registered_tool.execution,
-                &moa_core::PolicyAction::Allow,
+                &moa_core::ActionPolicyEffect::Allow,
             );
             let result = self
                 .execute_authorized_with_recovery_inner(session, invocation)

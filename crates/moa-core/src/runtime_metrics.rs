@@ -13,7 +13,10 @@ use tracing::debug;
 
 use crate::config::MetricsConfig;
 use crate::error::{MoaError, Result};
-use crate::types::{ModelId, ModelTier, SessionStatus, WorkspaceId};
+use crate::types::{
+    ActionClass, ActionPolicyEffect, ActionReviewStatus, ModelId, ModelTier, SessionStatus,
+    WorkspaceId,
+};
 
 const LATENCY_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
@@ -260,15 +263,6 @@ pub fn record_session_error(scope: &str) {
         "scope" => scope.to_string()
     )
     .increment(1);
-}
-
-/// Records approval wait latency until a decision is made or timed out.
-pub fn record_approval_wait(duration: Duration, outcome: &str) {
-    histogram!(
-        "moa_approval_wait_seconds",
-        "outcome" => outcome.to_string()
-    )
-    .record(duration.as_secs_f64());
 }
 
 /// Records one tool call completion and its latency.
@@ -613,11 +607,22 @@ pub fn record_experiment_learning_candidates(status: &str, count: u64) {
     .increment(count);
 }
 
-/// Records a trial that stopped because its target entered an approval wait.
-pub fn record_experiment_approval_wait(target_kind: &str) {
+/// Records that action policy queued a workspace-admin review.
+pub fn record_action_review_requested(effect: ActionPolicyEffect, action_class: ActionClass) {
     counter!(
-        "moa_experiment_approval_waits_total",
-        "target_kind" => target_kind.to_string()
+        "moa_action_review_requests_total",
+        "effect" => effect.as_str(),
+        "action_class" => action_class.as_str()
+    )
+    .increment(1);
+}
+
+/// Records a workspace-admin action-review decision.
+pub fn record_action_review_decision(status: ActionReviewStatus, action_class: ActionClass) {
+    counter!(
+        "moa_action_review_decisions_total",
+        "status" => status.as_str(),
+        "action_class" => action_class.as_str()
     )
     .increment(1);
 }
@@ -820,10 +825,6 @@ fn register_metric_descriptions() {
         "Total LLM request streaming duration in seconds."
     );
     describe_histogram!(
-        "moa_approval_wait_seconds",
-        "Approval wait duration in seconds."
-    );
-    describe_histogram!(
         "moa_tool_call_duration_seconds",
         "Tool execution duration in seconds."
     );
@@ -936,8 +937,12 @@ fn register_metric_descriptions() {
         "Experiment learning candidates proposed, labeled by candidate status."
     );
     describe_counter!(
-        "moa_experiment_approval_waits_total",
-        "Experiment trials that stopped on approval waits, labeled by bounded target kind."
+        "moa_action_review_requests_total",
+        "Action reviews requested by policy evaluation, labeled by effect and action class."
+    );
+    describe_counter!(
+        "moa_action_review_decisions_total",
+        "Action review decisions, labeled by status and action class."
     );
 }
 
@@ -946,7 +951,6 @@ fn session_status_label(status: &SessionStatus) -> &'static str {
         SessionStatus::Created => "created",
         SessionStatus::Running => "running",
         SessionStatus::Paused => "paused",
-        SessionStatus::WaitingApproval => "waiting_approval",
         SessionStatus::Completed => "completed",
         SessionStatus::Cancelled => "cancelled",
         SessionStatus::Failed => "failed",
@@ -1007,7 +1011,8 @@ mod tests {
         record_simulation_cost_cents("simulator", 1);
         record_experiment_score_rows("scores", 3);
         record_experiment_learning_candidates("proposed", 1);
-        record_experiment_approval_wait("agent_loop");
+        record_action_review_requested(ActionPolicyEffect::AdminReview, ActionClass::LocalWrite);
+        record_action_review_decision(ActionReviewStatus::Cleared, ActionClass::LocalWrite);
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1053,7 +1058,8 @@ mod tests {
         assert!(scrape.contains("moa_simulation_cost_cents_total"));
         assert!(scrape.contains("moa_experiment_score_rows_total"));
         assert!(scrape.contains("moa_experiment_learning_candidates_total"));
-        assert!(scrape.contains("moa_experiment_approval_waits_total"));
+        assert!(scrape.contains("moa_action_review_requests_total"));
+        assert!(scrape.contains("moa_action_review_decisions_total"));
 
         #[cfg(tokio_unstable)]
         {
@@ -1092,7 +1098,6 @@ mod tests {
             "moa_simulation_cost_cents_total",
             "moa_experiment_score_rows_total",
             "moa_experiment_learning_candidates_total",
-            "moa_experiment_approval_waits_total",
         ] {
             let described = source.contains(&format!("describe_counter!(\n        \"{metric}\""))
                 || source.contains(&format!("describe_histogram!(\n        \"{metric}\""));

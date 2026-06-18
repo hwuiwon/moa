@@ -105,23 +105,6 @@ impl SubAgent for SubAgentImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, ctx, decision))]
-    async fn approve(
-        &self,
-        ctx: SharedObjectContext<'_>,
-        decision: Json<ApprovalDecision>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("SubAgent", "approve");
-        let awakeable_id = ctx
-            .get::<Json<String>>(K_PENDING_APPROVAL)
-            .await?
-            .map(Json::into_inner)
-            .ok_or_else(|| TerminalError::new("no pending approval for this sub-agent"))?;
-        let serialized_decision = serialize_awakeable_decision(&decision.into_inner())?;
-        ctx.resolve_awakeable(&awakeable_id, serialized_decision);
-        Ok(())
-    }
-
     #[tracing::instrument(skip(self, ctx))]
     async fn prepare_turn(
         &self,
@@ -216,54 +199,6 @@ impl SubAgent for SubAgentImpl {
         ) {
             state.apply_turn_outcome(outcome);
         }
-        state.persist_into(&ctx);
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    async fn set_pending_approval(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<SetSubAgentPendingApprovalInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("SubAgent", "set_pending_approval");
-        let input = input.into_inner();
-        let mut state = SubAgentVoState::load_from(&ctx).await?;
-        if !state.active_turn_matches(&input.turn_id) {
-            tracing::warn!(
-                key = %ctx.key(),
-                record_turn_id = %input.turn_id,
-                active_turn_id = ?state.active_turn_id,
-                "ignored stale sub-agent pending approval marker"
-            );
-            return Ok(());
-        }
-        state.pending_approval = Some(input.awakeable_id);
-        state.status = Some(SubAgentState::WaitingApproval);
-        state.persist_into(&ctx);
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    async fn clear_pending_approval(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<ClearSubAgentPendingApprovalInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("SubAgent", "clear_pending_approval");
-        let input = input.into_inner();
-        let mut state = SubAgentVoState::load_from(&ctx).await?;
-        if !state.active_turn_matches(&input.turn_id) {
-            tracing::warn!(
-                key = %ctx.key(),
-                record_turn_id = %input.turn_id,
-                active_turn_id = ?state.active_turn_id,
-                "ignored stale sub-agent pending approval clear"
-            );
-            return Ok(());
-        }
-        state.pending_approval = None;
-        state.status = Some(SubAgentState::Running);
         state.persist_into(&ctx);
         Ok(())
     }
@@ -430,13 +365,6 @@ async fn prepare_turn_inner(
         state.persist_into(ctx);
         return Ok(SubAgentTurnPreparation::Outcome {
             outcome: TurnOutcome::Cancelled,
-        });
-    }
-    if state.pending_approval.is_some() {
-        state.apply_turn_outcome(TurnOutcome::WaitingApproval);
-        state.persist_into(ctx);
-        return Ok(SubAgentTurnPreparation::Outcome {
-            outcome: TurnOutcome::WaitingApproval,
         });
     }
     if state.depth > MAX_SUB_AGENT_DEPTH {

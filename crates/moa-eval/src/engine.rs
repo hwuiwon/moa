@@ -396,11 +396,6 @@ async fn run_environment(
                 }
                 continue;
             }
-            StreamedTurnResult::NeedsApproval(request) => {
-                return Err(EvalError::ApprovalRequired {
-                    tool: request.tool_name,
-                });
-            }
             StreamedTurnResult::Cancelled => {
                 return Err(EvalError::Moa(moa_core::MoaError::Cancelled));
             }

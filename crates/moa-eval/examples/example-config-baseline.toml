@@ -19,8 +19,8 @@ enabled = ["bash", "file_read", "file_write"]
 disable = []
 
 [agent.permissions]
-auto_approve_all = true
-auto_approve = []
+default_effect = "allow"
+admin_review = []
 always_deny = []
 
 [agent.metadata]

@@ -27,7 +27,6 @@ pub(super) fn handle_stream_signal(
             StreamSignalDisposition::Continue
         }
         SessionSignal::HardCancel => StreamSignalDisposition::CancelImmediately,
-        SessionSignal::ApprovalDecided { .. } => StreamSignalDisposition::Continue,
     }
 }
 
@@ -55,7 +54,6 @@ pub(super) fn drain_signal_queue(
             Ok(SessionSignal::HardCancel) => {
                 *soft_cancel_requested = true;
             }
-            Ok(SessionSignal::ApprovalDecided { .. }) => {}
             Err(mpsc::error::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 return Err(MoaError::ProviderError(

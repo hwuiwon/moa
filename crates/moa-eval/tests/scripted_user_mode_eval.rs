@@ -7,12 +7,10 @@ use moa_core::{
     MessageRole, MoaConfig, ModelCapabilities, ModelId, StopReason, TokenPricing, TokenUsage,
     ToolCallContent, ToolCallFormat, ToolInvocation,
 };
-use moa_eval::long_conversation::{
-    ScriptedApprovalDecision, ScriptedUserScript, run_scenario_with_provider,
-};
+use moa_eval::long_conversation::{ScriptedUserScript, run_scenario_with_provider};
 use moa_eval::{
-    AgentConfig, EngineOptions, EvalStatus, LongConversationMode, LongTestCase, PermissionOverride,
-    TestCase, TestCaseKind, TestSuite,
+    ActionPolicyOverride, AgentConfig, EngineOptions, EvalStatus, LongConversationMode,
+    LongTestCase, TestCase, TestCaseKind, TestSuite,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -75,11 +73,11 @@ fn recorded_long_case_still_requires_transcript() {
 }
 
 #[tokio::test]
-async fn scripted_user_script_reads_turns_approvals_fragments_and_probe_ids() -> TestResult {
+async fn scripted_user_script_reads_turns_fragments_and_probe_ids() -> TestResult {
     let temp = tempdir()?;
     let script_path = temp.path().join("script.jsonl");
     let raw = r#"{"version":1,"scenario":"scripted-user-case","expected_final_answer_fragments":["scripted final"],"probe_ids":["probe-root"]}
-{"user":{"text":"turn one"},"approval":{"decision":"always_allow","pattern":"cat *"},"probe_ids":["probe-turn-one"]}
+{"user":{"text":"turn one"},"probe_ids":["probe-turn-one"]}
 {"user":{"text":"turn two"}}
 "#;
     tokio::fs::write(&script_path, raw).await?;
@@ -99,19 +97,12 @@ async fn scripted_user_script_reads_turns_approvals_fragments_and_probe_ids() ->
         script.turns[0].probe_ids,
         vec!["probe-turn-one".to_string()]
     );
-    assert_eq!(
-        script.turns[0].approval,
-        Some(ScriptedApprovalDecision::AlwaysAllow {
-            pattern: Some("cat *".to_string())
-        })
-    );
     assert_eq!(script.turns[1].user.text, "turn two");
-    assert_eq!(script.turns[1].approval, None);
     Ok(())
 }
 
 #[tokio::test]
-async fn scripted_user_runner_drives_turn_approval_and_checks_final_answer() -> TestResult {
+async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> TestResult {
     if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
         return Ok(());
     }
@@ -122,13 +113,13 @@ async fn scripted_user_runner_drives_turn_approval_and_checks_final_answer() -> 
     let expectations_path = temp.path().join("expectations.toml");
     tokio::fs::write(
         &goal_card_path,
-        b"# Scripted user goal\nRun the approved command and report the result.\n",
+        b"# Scripted user goal\nRun the command and report the result.\n",
     )
     .await?;
     tokio::fs::write(
         &script_path,
         r#"{"version":1,"scenario":"scripted-user-runner","expected_final_answer_fragments":["scripted final"],"probe_ids":["probe-runner"]}
-{"user":{"text":"please run the approved command"},"approval":{"decision":"allow_once"},"probe_ids":["probe-approval"]}
+{"user":{"text":"please run the command"},"probe_ids":["probe-tool"]}
 "#,
     )
     .await?;
@@ -148,21 +139,14 @@ async fn scripted_user_runner_drives_turn_approval_and_checks_final_answer() -> 
     };
     let agent_config = AgentConfig {
         name: "scripted-user-agent".to_string(),
-        permissions: PermissionOverride {
-            auto_approve: vec![
-                "file_read".to_string(),
-                "file_search".to_string(),
-                "grep".to_string(),
-            ],
-            ..PermissionOverride::default()
-        },
+        permissions: ActionPolicyOverride::default(),
         ..AgentConfig::default()
     };
     let mut base_config = MoaConfig::default();
     base_config.database.url = moa_test_support::postgres::test_database_url();
     base_config.query_rewrite.enabled = false;
 
-    let provider = Arc::new(ApprovalThenFinalProvider::default());
+    let provider = Arc::new(ToolThenFinalProvider::default());
     let llm_provider: Arc<dyn LLMProvider> = provider.clone();
     let report = run_scenario_with_provider(
         &base_config,
@@ -179,32 +163,31 @@ async fn scripted_user_runner_drives_turn_approval_and_checks_final_answer() -> 
     assert_eq!(report.result.status, EvalStatus::Passed);
     assert_eq!(
         report.result.response.as_deref(),
-        Some("Approved tool completed with scripted final fragment.")
+        Some("Tool completed with scripted final fragment.")
     );
     assert_eq!(report.score_card.functional.turn_count, 1);
     assert_eq!(report.result.metrics.turn_count, 1);
     assert_eq!(
         provider.seen_user_messages(),
         vec![
-            "please run the approved command".to_string(),
-            "please run the approved command".to_string(),
+            "please run the command".to_string(),
+            "please run the command".to_string(),
         ]
     );
-    assert_eq!(
-        report
+    assert!(
+        !report
             .events
             .iter()
-            .filter(|event| matches!(event, Event::ApprovalDecided { .. }))
-            .count(),
-        1
+            .any(|event| matches!(event, Event::ActionReviewRequested { .. })),
+        "auto-mode tool execution should not create an action review"
     );
     assert!(
         report.events.iter().any(|event| matches!(
             event,
             Event::ToolResult { output, success, .. }
-                if *success && output.to_text().contains("scripted approval ok")
+                if *success && output.to_text().contains("scripted tool ok")
         )),
-        "approved bash tool result was not persisted"
+        "bash tool result was not persisted"
     );
     Ok(())
 }
@@ -286,19 +269,19 @@ async fn offline_scripted_user_replays_distilled_dispute_failure_without_live_si
     assert!(
         !report.events.iter().any(|event| matches!(
             event,
-            Event::ApprovalRequested { .. } | Event::ToolCall { .. }
+            Event::ActionReviewRequested { .. } | Event::ToolCall { .. }
         )),
-        "offline replay should not need live simulation, connector calls, or approvals"
+        "offline replay should not need live simulation, connector calls, or action reviews"
     );
     Ok(())
 }
 
 #[derive(Default)]
-struct ApprovalThenFinalProvider {
+struct ToolThenFinalProvider {
     seen_user_messages: Mutex<Vec<String>>,
 }
 
-impl ApprovalThenFinalProvider {
+impl ToolThenFinalProvider {
     fn seen_user_messages(&self) -> Vec<String> {
         self.seen_user_messages
             .lock()
@@ -308,7 +291,7 @@ impl ApprovalThenFinalProvider {
 }
 
 #[async_trait]
-impl LLMProvider for ApprovalThenFinalProvider {
+impl LLMProvider for ToolThenFinalProvider {
     fn name(&self) -> &str {
         "scripted-fake"
     }
@@ -349,9 +332,9 @@ impl LLMProvider for ApprovalThenFinalProvider {
                 text: String::new(),
                 content: vec![CompletionContent::ToolCall(ToolCallContent {
                     invocation: ToolInvocation {
-                        id: Some("tool-scripted-approval".to_string()),
+                        id: Some("tool-scripted-action".to_string()),
                         name: "bash".to_string(),
-                        input: json!({ "cmd": "printf 'scripted approval ok'" }),
+                        input: json!({ "cmd": "printf 'scripted tool ok'" }),
                     },
                     provider_metadata: None,
                 })],
@@ -365,14 +348,14 @@ impl LLMProvider for ApprovalThenFinalProvider {
             assert!(
                 request.messages.iter().any(|message| {
                     message.role == MessageRole::Tool
-                        && message.content.contains("scripted approval ok")
+                        && message.content.contains("scripted tool ok")
                 }),
-                "second request did not include approved tool output: {request:?}"
+                "second request did not include tool output: {request:?}"
             );
             CompletionResponse {
-                text: "Approved tool completed with scripted final fragment.".to_string(),
+                text: "Tool completed with scripted final fragment.".to_string(),
                 content: vec![CompletionContent::Text(
-                    "Approved tool completed with scripted final fragment.".to_string(),
+                    "Tool completed with scripted final fragment.".to_string(),
                 )],
                 stop_reason: StopReason::EndTurn,
                 model: self.capabilities().model_id,

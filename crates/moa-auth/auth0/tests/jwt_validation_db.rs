@@ -93,7 +93,7 @@ async fn jwt_validation_accepts_self_signed_auth0_token() {
     .await
     .expect("mapping row should exist");
     assert_eq!(mapped_id, first.id);
-    assert_eq!(external_id, "auth0:auth0|abc");
+    assert_eq!(external_id, "auth0:auth0|test-subject");
 }
 
 fn signed_token(

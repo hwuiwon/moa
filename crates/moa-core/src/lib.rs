@@ -44,9 +44,9 @@ pub use events::Event;
 pub use restate_observability::{current_trace_id, trace_id_for_span};
 pub use runtime_metrics::{
     TURN_LATENCY_REPORT_STEPS, TURN_STEP_DURATION_METRIC, TurnLatencyStep, init_metrics,
-    metrics_endpoint_url, record_api_key_validation_duration, record_approval_wait,
-    record_broadcast_lag, record_cache_hit_rate, record_compaction_tier_applied,
-    record_context_pipeline_construction, record_experiment_approval_wait,
+    metrics_endpoint_url, record_action_review_decision, record_action_review_requested,
+    record_api_key_validation_duration, record_broadcast_lag, record_cache_hit_rate,
+    record_compaction_tier_applied, record_context_pipeline_construction,
     record_experiment_learning_candidates, record_experiment_run, record_experiment_score_rows,
     record_experiment_trial, record_experiment_trial_duration, record_llm_cost_cents,
     record_llm_failure, record_llm_request, record_llm_request_duration,

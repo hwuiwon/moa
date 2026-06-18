@@ -31,10 +31,10 @@ Bound surfaces:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Service | `Agents`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+| Service | `ActionReviews`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
 | Workflow | `Consolidate`, `EvalRun`, `SkillLearning`, `TurnExecution`, `SubAgentTurnExecution` |
 
-Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
+Restate state is used for hot orchestration state: queued messages, status, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
 
 `Artifacts` owns import, export, listing, validation, and publish for canonical skills, connectors, and workflows. `Workflows` exposes artifact-backed workflow run lifecycle over Restate, while `moa-workflows` owns the reusable lifecycle logic and future node interpreter. The open-ended agent loop still lives in `Session` and `TurnExecution`.
 
@@ -67,14 +67,14 @@ turn loop.
 2. Ensure a task segment exists or roll to a new segment when query rewrite marks `is_new_task`.
 3. Call `LLMGateway`.
 4. Persist assistant output and tool calls.
-5. Route tool execution through `ToolExecutor`.
+5. Build an `ActionEnvelope`, evaluate action policy, and route allowed tool execution through `ToolExecutor`.
 6. Record tool usage, skill activation, token usage, and turn counts on the active segment.
 7. Apply turn outcome and update session status.
 8. Assess idle, cancelled, or completed segments and append `learning_log` entries.
 9. Derive experience records, attributions, and proposed learning candidates after assessment persistence.
 10. When skill learning is compiled, dispatch a detached `SkillLearning` workflow after experience persistence succeeds.
 
-The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for human approvals and sub-agent result waits, not for turn cancellation. Skill-learning proposal generation is intentionally detached: turn completion does not wait for a draft skill proposal, and generation failures are recorded as warning events rather than turn failures.
+The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for builtin async-authz challenges and sub-agent result waits, not for tool action review or turn cancellation. Skill-learning proposal generation is intentionally detached: turn completion does not wait for a draft skill proposal, and generation failures are recorded as warning events rather than turn failures.
 
 ### Lineage Sink Selection
 
@@ -101,20 +101,20 @@ scripted provider is not compiled in. The checked-in load-test fixture lives at
 `crates/moa-loadtest/scripts/perf-gate.json`; see `docs/20-testing.md` for the
 script format.
 
-## Approvals
+## Action Policy
 
-Risky tool calls emit `ApprovalRequested` events. In cloud mode the blocked invocation stores an awakeable ID in VO state and event payload. The gateway or REST surface resolves the approval by calling the appropriate handler with an `ApprovalDecision`.
+Tool calls are checked at the tool boundary. Auto mode defaults to `Allow`, while persisted rules and config can return `Allow`, `Deny`, or `AdminReview`.
 
 ```text
-Tool call needs approval
-  -> create awakeable
-  -> persist ApprovalRequested with awakeable id
-  -> UI renders approval
-  -> user decides
-  -> approval handler resolves the blocked turn
+Tool call
+  -> build ActionEnvelope
+  -> evaluate ActionPolicies
+  -> Allow: execute ToolExecutor
+  -> Deny: record ToolError and continue
+  -> AdminReview: persist workspace action review, return pending-review tool result, continue
 ```
 
-Sub-agent approvals include `sub_agent_id` and route back through the parent user's approval surface.
+Workspace action reviews are decided by workspace admins through `ActionReviews`; conversation clients do not unblock turns.
 
 ## Sub-Agents
 

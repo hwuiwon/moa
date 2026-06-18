@@ -676,14 +676,12 @@ pub fn redacted_event_snippet(event: &Event) -> String {
         Event::ToolError {
             tool_name, error, ..
         } => format!("tool error from {tool_name}: {error}"),
-        Event::ApprovalRequested {
-            tool_name,
-            input_summary,
-            risk_level,
-            ..
-        } => format!("approval requested for {tool_name} risk={risk_level:?}: {input_summary}"),
-        Event::ApprovalDecided { decision, .. } => {
-            format!("approval decided: {decision:?}")
+        Event::ActionReviewRequested { envelope, .. } => format!(
+            "action review requested for {} risk={:?}: {}",
+            envelope.tool_name, envelope.risk_level, envelope.input_summary
+        ),
+        Event::ActionReviewDecided { decision, .. } => {
+            format!("action review decided: {decision:?}")
         }
         Event::SubAgentSpawned { path, task, .. } => {
             format!("sub-agent {path} spawned for task: {task}")

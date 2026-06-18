@@ -28,7 +28,7 @@ contains = ["staging", "health"]
 facts = ["the response mentions deployment verification"]
 
 [cases.metadata]
-requires_approval = true
+requires_action_review = true
 
 [[cases]]
 name = "incident-triage"

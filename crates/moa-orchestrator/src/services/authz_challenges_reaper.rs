@@ -1,4 +1,4 @@
-//! Background timeout reaper for builtin approvals.
+//! Background timeout reaper for builtin async authorization challenges.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,14 +11,14 @@ use tokio::sync::oneshot;
 use tokio::time::interval;
 use uuid::Uuid;
 
-/// Approval reaper failures.
+/// Authz challenge reaper failures.
 #[derive(Debug, Error)]
 pub enum ReaperError {
     /// Database operation failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     /// Decision payload serialization failed.
-    #[error("serialize approval decision: {0}")]
+    #[error("serialize authz challenge decision: {0}")]
     Serde(#[from] serde_json::Error),
     /// HTTP client construction failed.
     #[error("build awakeable resolver HTTP client: {0}")]
@@ -39,13 +39,13 @@ pub enum ReaperError {
     Resolve(#[from] AwakeableResolveError),
 }
 
-/// Background worker that marks expired approvals as timed out.
-pub struct ApprovalReaper {
+/// Background worker that marks expired authz challenges as timed out.
+pub struct AuthzChallengeReaper {
     pool: PgPool,
     sweep_interval: Duration,
 }
 
-impl ApprovalReaper {
+impl AuthzChallengeReaper {
     /// Build a reaper with the default sweep interval.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
@@ -56,7 +56,7 @@ impl ApprovalReaper {
     }
 
     /// Spawn the reaper as a Tokio task.
-    pub fn spawn(self, resolver: Arc<dyn AwakeableResolver>) -> ApprovalReaperHandle {
+    pub fn spawn(self, resolver: Arc<dyn AwakeableResolver>) -> AuthzChallengeReaperHandle {
         let (shutdown, mut shutdown_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let mut tick = interval(self.sweep_interval);
@@ -64,17 +64,17 @@ impl ApprovalReaper {
                 tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
-                        tracing::info!("approval reaper received shutdown");
+                        tracing::info!("authz challenge reaper received shutdown");
                         break;
                     }
                     _ = tick.tick() => {}
                 }
                 if let Err(error) = self.sweep(resolver.as_ref()).await {
-                    tracing::error!(error = %error, "approval reaper sweep failed");
+                    tracing::error!(error = %error, "authz challenge reaper sweep failed");
                 }
             }
         });
-        ApprovalReaperHandle {
+        AuthzChallengeReaperHandle {
             shutdown: Some(shutdown),
             task,
         }
@@ -98,7 +98,7 @@ impl ApprovalReaper {
             let payload = serde_json::to_value(&ApprovalDecision::Timeout)?;
             if let Err(error) = resolver.resolve(awakeable_id, &payload).await {
                 tracing::warn!(
-                    approval_id = %id,
+                    authz_challenge_id = %id,
                     awakeable_id = %awakeable_id,
                     error = %error,
                     "timeout awakeable resolve failed"
@@ -110,13 +110,13 @@ impl ApprovalReaper {
     }
 }
 
-/// Handle used to stop the approval reaper.
-pub struct ApprovalReaperHandle {
+/// Handle used to stop the authz challenge reaper.
+pub struct AuthzChallengeReaperHandle {
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
 
-impl ApprovalReaperHandle {
+impl AuthzChallengeReaperHandle {
     /// Signal shutdown and wait for the task to exit.
     pub async fn shutdown(mut self) {
         if let Some(shutdown) = self.shutdown.take() {

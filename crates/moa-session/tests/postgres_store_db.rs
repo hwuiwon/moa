@@ -126,7 +126,7 @@ async fn postgres_shared_session_store_contract() {
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_approval_rules(&store).await;
+        shared::test_action_policy_rules(&store).await;
     })
     .await;
 }

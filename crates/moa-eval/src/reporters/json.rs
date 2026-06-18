@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::engine::EvalRun;
 use crate::{
-    AgentConfig, EvalError, InstructionOverride, MemoryOverride, PermissionOverride, Reporter,
+    ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, MemoryOverride, Reporter,
     Result, SkillOverride, TestCase, TestSuite, ToolOverride,
 };
 
@@ -42,7 +42,7 @@ struct JsonAgentConfigDocument<'a> {
     memory: &'a MemoryOverride,
     instructions: &'a InstructionOverride,
     tools: &'a ToolOverride,
-    permissions: &'a PermissionOverride,
+    permissions: &'a ActionPolicyOverride,
     metadata: &'a std::collections::HashMap<String, String>,
 }
 

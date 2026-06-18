@@ -196,7 +196,7 @@ impl ExperimentStore {
                     ELSE $7
                 END,
                 started_at = CASE
-                    WHEN $5 IN ('running', 'waiting_approval', 'completed', 'failed', 'cancelled')
+                    WHEN $5 IN ('running', 'completed', 'failed', 'cancelled')
                     THEN COALESCE(started_at, now())
                     ELSE started_at
                 END,
@@ -496,7 +496,7 @@ impl ExperimentStore {
                     ELSE $8
                 END,
                 started_at = CASE
-                    WHEN $5 IN ('dispatched', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled')
+                    WHEN $5 IN ('dispatched', 'running', 'completed', 'failed', 'cancelled')
                     THEN COALESCE(started_at, now())
                     ELSE started_at
                 END,
@@ -529,7 +529,7 @@ impl ExperimentStore {
         row.as_ref().map(trial_from_row).transpose()
     }
 
-    /// Marks accepted, dispatched, running, and approval-waiting trials for a run as cancelled.
+    /// Marks accepted, dispatched, and running trials for a run as cancelled.
     pub async fn cancel_active_trials(
         &self,
         scope: &MemoryScope,
@@ -552,7 +552,7 @@ impl ExperimentStore {
               AND scope = $1
               AND workspace_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-              AND status IN ('accepted', 'dispatched', 'running', 'waiting_approval')
+              AND status IN ('accepted', 'dispatched', 'running')
             RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,

@@ -18,7 +18,7 @@ use tracing::{Instrument, field, warn};
 use uuid::Uuid;
 
 use crate::{
-    approval::{ApprovalCallbackAction, prepare_outbound_message},
+    approval::prepare_outbound_message,
     messaging_receive_span,
     renderer::{SlackRenderChunk, SlackRenderer},
 };
@@ -677,45 +677,12 @@ fn push_event_origin(event: &SlackPushEventCallback) -> Option<SlackMessageRef> 
 
 async fn inbound_from_interaction_event(
     event: &SlackInteractionEvent,
-    inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
+    _inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
 ) -> Option<InboundMessage> {
-    let block_actions = match event {
-        SlackInteractionEvent::BlockActions(block_actions) => block_actions,
-        _ => return None,
+    let SlackInteractionEvent::BlockActions(_) = event else {
+        return None;
     };
-
-    let action = block_actions.actions.as_ref()?.first()?;
-    let callback = ApprovalCallbackAction::decode(action.value.as_deref()?)?;
-    let user = block_actions.user.as_ref()?;
-    let origin = interaction_origin(block_actions)?;
-    let platform_msg_id = format!(
-        "callback:{}:{}",
-        origin.ts,
-        action
-            .action_ts
-            .as_ref()
-            .map(|ts| ts.0.clone())
-            .unwrap_or_else(|| Uuid::now_v7().to_string())
-    );
-
-    inbound_contexts
-        .write()
-        .await
-        .insert(platform_msg_id.clone(), origin.clone());
-    Some(InboundMessage {
-        platform: Platform::Slack,
-        platform_msg_id,
-        user: PlatformUser {
-            platform_id: user.id.0.clone(),
-            display_name: slack_basic_user_name(user),
-            moa_user_id: None,
-        },
-        channel: slack_channel_ref(&origin.channel_id, Some(origin.thread_anchor()), &user.id.0),
-        text: callback.inbound_command(),
-        attachments: Vec::new(),
-        reply_to: Some(origin.ts),
-        timestamp: Utc::now(),
-    })
+    None
 }
 
 fn inbound_from_app_mention(message: &SlackAppMentionEvent) -> Option<InboundMessage> {
@@ -771,32 +738,6 @@ fn inbound_from_message_event(message: &SlackMessageEvent) -> Option<InboundMess
     })
 }
 
-fn interaction_origin(event: &SlackInteractionBlockActionsEvent) -> Option<SlackMessageRef> {
-    let (message_ts, channel_id) = match &event.container {
-        SlackInteractionActionContainer::Message(container) => (
-            container.message_ts.0.clone(),
-            container.channel_id.as_ref()?.0.clone(),
-        ),
-        SlackInteractionActionContainer::MessageAttachment(container) => (
-            container.message_ts.0.clone(),
-            container.channel_id.as_ref()?.0.clone(),
-        ),
-        SlackInteractionActionContainer::View(_) => return None,
-    };
-
-    let thread_ts = event
-        .message
-        .as_ref()
-        .and_then(|message| message.origin.thread_ts.as_ref())
-        .map(|ts| ts.0.clone());
-
-    Some(SlackMessageRef {
-        channel_id: Arc::<str>::from(channel_id),
-        ts: message_ts,
-        thread_ts,
-    })
-}
-
 fn slack_channel_ref(channel_id: &str, thread_ts: Option<&str>, user_id: &str) -> ChannelRef {
     if channel_id.starts_with('D') {
         return ChannelRef::DirectMessage {
@@ -822,13 +763,6 @@ fn slack_sender_name(sender: &SlackMessageSender) -> String {
         .clone()
         .or_else(|| sender.user.as_ref().map(|user| format!("<@{}>", user.0)))
         .unwrap_or_else(|| "Slack User".to_string())
-}
-
-fn slack_basic_user_name(user: &SlackBasicUserInfo) -> String {
-    user.name
-        .clone()
-        .or_else(|| user.username.clone())
-        .unwrap_or_else(|| format!("<@{}>", user.id.0))
 }
 
 fn slack_message_content(chunk: &SlackRenderChunk) -> SlackMessageContent {
@@ -889,8 +823,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parses_approval_callback_into_control_message() {
-        let request_id = Uuid::now_v7();
+    async fn ignores_legacy_review_button_interactions() {
         let event: SlackInteractionEvent = serde_json::from_value(json!({
             "type": "block_actions",
             "team": { "id": "T123", "domain": "example" },
@@ -904,15 +837,15 @@ mod tests {
             "trigger_id": "1337.42.abcd",
             "channel": { "id": "C123", "name": "general" },
             "message": {
-                "text": "approval",
+                "text": "action review",
                 "ts": "1712668800.000200",
                 "thread_ts": "1712668800.000050",
                 "channel": "C123"
             },
             "actions": [{
                 "type": "button",
-                "action_id": "allow",
-                "value": ApprovalCallbackAction::AlwaysAllow { request_id }.encode()
+                "action_id": "open",
+                "value": "action_review:open"
             }]
         }))
         .expect("slack interaction should deserialize");
@@ -921,19 +854,9 @@ mod tests {
             &event,
             Arc::new(RwLock::new(HashMap::<String, SlackMessageRef>::new())),
         )
-        .await
-        .expect("normalized callback");
+        .await;
 
-        assert_eq!(inbound.platform, Platform::Slack);
-        assert_eq!(inbound.text, format!("/approval always {request_id}"));
-        assert_eq!(inbound.reply_to, Some("1712668800.000200".to_string()));
-        assert_eq!(
-            inbound.channel,
-            ChannelRef::Thread {
-                channel_id: "C123".to_string(),
-                thread_id: "1712668800.000050".to_string()
-            }
-        );
+        assert_eq!(inbound, None);
     }
 
     #[test]

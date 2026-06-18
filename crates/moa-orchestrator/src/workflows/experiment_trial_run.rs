@@ -11,9 +11,8 @@ use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
     CompletionRequest, ContextMessage, Event, EventRange, EventRecord, EventType, MemoryScope,
     MoaError, ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore, UserId,
-    WorkspaceId, current_trace_id, record_experiment_approval_wait, record_experiment_trial,
-    record_experiment_trial_duration, record_simulation_cost_cents, record_simulation_tokens,
-    record_simulation_turn,
+    WorkspaceId, current_trace_id, record_experiment_trial, record_experiment_trial_duration,
+    record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
 };
 use moa_experiments::model::{
     ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
@@ -425,18 +424,6 @@ mod tests {
         assert_eq!(trial_simulator::effective_max_turns(5, 2), 2);
         assert_eq!(trial_simulator::effective_max_turns(0, 2), 1);
         assert_eq!(trial_simulator::effective_max_turns(3, 0), 3);
-    }
-
-    #[test]
-    fn approval_status_maps_to_waiting_approval_stop_reason() {
-        // Pins: trial execution stops on approvals and never resolves them synthetically.
-        assert_eq!(
-            target_execution::stop_for_session_status(&SessionStatus::WaitingApproval),
-            Some((
-                ExperimentTrialStatus::WaitingApproval,
-                ExperimentTrialStopReason::ApprovalWait
-            ))
-        );
     }
 
     #[test]

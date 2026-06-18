@@ -1,0 +1,49 @@
+//! Action-policy rule contract tests.
+
+use chrono::Utc;
+use moa_core::{ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, UserId, WorkspaceId};
+use moa_security::ActionPolicyRuleStore;
+use uuid::Uuid;
+
+/// Verifies persistent action-policy rule CRUD.
+pub async fn test_action_policy_rules<S>(store: &S)
+where
+    S: ActionPolicyRuleStore + ?Sized,
+{
+    let workspace_id = WorkspaceId::new("ws1");
+    let rule = ActionPolicyRule {
+        id: Uuid::now_v7(),
+        workspace_id: workspace_id.clone(),
+        user_id: None,
+        tool: "bash".to_string(),
+        pattern: "git status".to_string(),
+        effect: ActionPolicyEffect::AdminReview,
+        scope: ActionRuleScope::Workspace,
+        reason: Some("review repository command".to_string()),
+        created_by: UserId::new("u1"),
+        created_at: Utc::now(),
+    };
+
+    store
+        .upsert_action_policy_rule(rule.clone())
+        .await
+        .expect("upsert action policy rule");
+    let rules = store
+        .list_action_policy_rules(&workspace_id)
+        .await
+        .expect("list action policy rules");
+    assert!(
+        rules.iter().any(|candidate| candidate.id == rule.id
+            && candidate.effect == ActionPolicyEffect::AdminReview)
+    );
+
+    store
+        .delete_action_policy_rule(&workspace_id, &rule.tool, &rule.pattern)
+        .await
+        .expect("delete action policy rule");
+    let rules = store
+        .list_action_policy_rules(&workspace_id)
+        .await
+        .expect("list action policy rules after delete");
+    assert!(!rules.iter().any(|candidate| candidate.id == rule.id));
+}

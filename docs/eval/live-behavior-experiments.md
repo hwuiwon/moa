@@ -84,12 +84,13 @@ the `Experiments` Restate service:
 Do not document `/v1/experiments/run` as public; the public admission route is
 `/v1/experiments/run-plan`.
 
-## Approvals
+## Action Policy
 
-Live behavior experiments do not auto-approve tools. Agent-loop experiments
-follow normal session approval behavior and can surface `waiting_approval` when
-the underlying session waits for a human decision. Workflow experiment status
-mirrors the linked artifact workflow run when a workflow run has been attached.
+Live behavior experiments use the normal action-policy engine. Agent-loop
+experiments do not enter a blocking review status; an admin-review decision
+records a workspace action review and the target session continues. Workflow
+experiment status mirrors the linked artifact workflow run when a workflow run
+has been attached.
 
 ## Learning Boundary
 

@@ -35,6 +35,20 @@ pub enum EdgeLabel {
 }
 
 impl EdgeLabel {
+    /// Every supported AGE edge label.
+    pub const ALL: [Self; 10] = [
+        Self::RelatesTo,
+        Self::DependsOn,
+        Self::OwnedBy,
+        Self::Supersedes,
+        Self::Contradicts,
+        Self::DerivedFrom,
+        Self::MentionedIn,
+        Self::Caused,
+        Self::LearnedFrom,
+        Self::AppliesTo,
+    ];
+
     /// Returns the canonical AGE label string.
     pub const fn as_str(self) -> &'static str {
         match self {

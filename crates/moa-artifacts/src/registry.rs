@@ -185,8 +185,8 @@ pub enum ArtifactRunStatus {
     Queued,
     /// Run is actively executing.
     Running,
-    /// Run is waiting for human approval.
-    WaitingApproval,
+    /// Run is pending workspace-admin action review.
+    PendingReview,
     /// Run completed successfully.
     Completed,
     /// Run failed.
@@ -202,7 +202,7 @@ impl ArtifactRunStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
-            Self::WaitingApproval => "waiting_approval",
+            Self::PendingReview => "pending_review",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -217,8 +217,8 @@ pub enum ArtifactNodeRunStatus {
     Queued,
     /// Node run is actively executing.
     Running,
-    /// Node run is waiting for human approval.
-    WaitingApproval,
+    /// Node run is pending workspace-admin action review.
+    PendingReview,
     /// Node run completed successfully.
     Completed,
     /// Node run failed.
@@ -236,7 +236,7 @@ impl ArtifactNodeRunStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
-            Self::WaitingApproval => "waiting_approval",
+            Self::PendingReview => "pending_review",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -1125,7 +1125,7 @@ fn run_status_from_str(value: &str) -> Result<ArtifactRunStatus> {
     match value {
         "queued" => Ok(ArtifactRunStatus::Queued),
         "running" => Ok(ArtifactRunStatus::Running),
-        "waiting_approval" => Ok(ArtifactRunStatus::WaitingApproval),
+        "pending_review" => Ok(ArtifactRunStatus::PendingReview),
         "completed" => Ok(ArtifactRunStatus::Completed),
         "failed" => Ok(ArtifactRunStatus::Failed),
         "cancelled" => Ok(ArtifactRunStatus::Cancelled),

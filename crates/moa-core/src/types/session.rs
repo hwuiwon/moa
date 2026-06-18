@@ -2,7 +2,6 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::{Attachment, ModelId, Platform, SequenceNum, SessionId, UserId, WorkspaceId};
 
@@ -27,8 +26,6 @@ pub enum SessionStatus {
     Running,
     /// Session execution is paused.
     Paused,
-    /// Session is blocked on human approval.
-    WaitingApproval,
     /// Session finished successfully.
     Completed,
     /// Session was cancelled.
@@ -72,8 +69,6 @@ pub enum TurnOutcome {
     Continue,
     /// No more work is pending right now.
     Idle,
-    /// The session is paused on an approval boundary.
-    WaitingApproval,
     /// The session has been cancelled.
     Cancelled,
 }
@@ -88,13 +83,6 @@ pub enum SessionSignal {
     SoftCancel,
     /// Request an immediate cancellation.
     HardCancel,
-    /// Notify the session of an approval decision.
-    ApprovalDecided {
-        /// Approval request identifier.
-        request_id: Uuid,
-        /// User decision.
-        decision: super::ApprovalDecision,
-    },
 }
 
 /// Handle returned for a database checkpoint branch.

@@ -168,9 +168,9 @@ pub struct SimulationScenarioDefinition {
     /// Maximum target-agent turns in one trial.
     #[serde(default)]
     pub max_turns: u32,
-    /// Behavior when the target enters an approval wait.
+    /// Behavior when the target enters workspace-admin review.
     #[serde(default)]
-    pub approval_behavior: SimulationApprovalBehavior,
+    pub admin_review_behavior: SimulationReviewBehavior,
     /// Optional scoring rubric used by a judge.
     #[serde(default = "empty_object")]
     pub scoring_rubric: Value,
@@ -182,15 +182,15 @@ pub struct SimulationScenarioDefinition {
     pub ui: Value,
 }
 
-/// Approval-wait behavior for a simulation scenario.
+/// Admin-review behavior for a simulation scenario.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SimulationApprovalBehavior {
-    /// Stop the trial when the target asks for approval.
+pub enum SimulationReviewBehavior {
+    /// Stop the trial when the target queues admin review.
     #[default]
-    StopOnApprovalWait,
-    /// Continue by returning a synthetic approval.
-    ContinueWithSyntheticApproval,
+    StopOnAdminReview,
+    /// Continue by returning a synthetic clearance.
+    ContinueWithSyntheticClearance,
     /// Continue by returning a synthetic denial.
     ContinueWithSyntheticDenial,
 }

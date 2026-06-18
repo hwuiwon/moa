@@ -1,6 +1,5 @@
 //! Single-turn brain harness execution and the shared streamed turn engine.
 
-mod approval_flow;
 mod budget;
 mod context_build;
 mod streaming;
@@ -9,8 +8,8 @@ mod tool_dispatch;
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalRequest, EventRecord, LLMProvider, MoaError, NullLineageHandle, Result, RuntimeEvent,
-    SessionId, SessionSignal, SessionStore,
+    EventRecord, LLMProvider, MoaError, NullLineageHandle, Result, RuntimeEvent, SessionId,
+    SessionSignal, SessionStore,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -25,8 +24,6 @@ pub enum TurnResult {
     Complete,
     /// The session should continue in another turn.
     Continue,
-    /// The session is blocked waiting for an approval decision.
-    NeedsApproval(ApprovalRequest),
 }
 
 /// Outcome of the shared streamed turn engine.
@@ -36,8 +33,6 @@ pub enum StreamedTurnResult {
     Complete,
     /// The session should immediately continue with another turn.
     Continue,
-    /// The session is blocked waiting for approval.
-    NeedsApproval(ApprovalRequest),
     /// The turn was cancelled before completion.
     Cancelled,
 }
@@ -71,7 +66,6 @@ pub async fn run_brain_turn(
     match streamed {
         StreamedTurnResult::Complete => Ok(TurnResult::Complete),
         StreamedTurnResult::Continue => Ok(TurnResult::Continue),
-        StreamedTurnResult::NeedsApproval(request) => Ok(TurnResult::NeedsApproval(request)),
         StreamedTurnResult::Cancelled => Err(MoaError::ProviderError(
             "buffered brain turn was cancelled unexpectedly".to_string(),
         )),

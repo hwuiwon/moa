@@ -37,7 +37,7 @@ product database.
 | Graph-memory ingestion | Virtual Object | ingestion key |
 | Memory consolidation | Workflow | `workspace_id:logical_date` |
 | Scheduled job | Virtual Object | job name |
-| Human approval | Awakeable plus Postgres event | awakeable id |
+| Workspace action review | Service plus Postgres row/event | review id |
 
 Sessions and sub-agents are virtual objects because they receive multiple
 messages over time. `TurnExecution` and `SubAgentTurnExecution` are workflows
@@ -71,7 +71,7 @@ Current orchestrator surfaces are bound by `moa-orchestrator` at startup:
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
 | Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `EvalRun` |
-| Service | `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
+| Service | `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
 
 When adding a handler, place it by ownership:
 
@@ -90,7 +90,7 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Pending message queue | `Session` VO |
 | Current session turn progress | `TurnExecution` workflow |
 | Current sub-agent turn progress | `SubAgentTurnExecution` workflow |
-| Pending approval awakeable id | Workflow/VO state plus Postgres event |
+| Pending workspace action reviews | Postgres `workspace_action_reviews` rows |
 | Detached sub-agent result waiters | `SubAgent` VO, resolved by child terminal delivery |
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
@@ -115,28 +115,27 @@ Code inside Restate handlers must keep replay safety in mind:
 - Do not perform direct network or filesystem side effects in replay-sensitive
   sections unless they are journaled.
 
-## Approvals
+## Action Reviews
 
-Approvals use Restate awakeables for suspension and Postgres events for
-visibility:
+Action reviews do not suspend root or sub-agent workflows. The turn workflow
+stores the review request in Postgres, appends a session event, returns a
+pending-review tool result to the model, and continues:
 
 ```text
-tool call requires approval
-  -> workflow creates awakeable
-  -> approval request event is persisted with awakeable id
-  -> UI/gateway renders request
-  -> user decides
-  -> approvals handler resolves awakeable
-  -> blocked workflow resumes
+tool call requires admin review
+  -> workflow stores workspace action review
+  -> action-review event is persisted
+  -> pending-review tool result is appended
+  -> workspace admin decides later through ActionReviews
 ```
 
-Gateway processes never own pending-turn state. If a gateway restarts, it can
-reconstruct pending approvals from Postgres and resolve the Restate awakeable
-later.
+Gateway processes never own pending review state. If a gateway restarts, it can
+reconstruct pending workspace action reviews from Postgres.
 
-Sub-agent approvals route through the parent user's approval surface. The
-sub-agent owns its blocked awakeable; the parent session or approvals service
-forwards the final decision.
+Sub-agent tool calls use the same action-review path as root turns. A pending
+workspace-admin review records product state in Postgres and returns a
+pending-review tool result to the child turn; it does not create a blocked
+sub-agent awakeable.
 
 ## Cancellation
 
@@ -167,8 +166,8 @@ handler failure behind unbounded application-level retry loops.
 
 Journals are for recovery and recent debugging, not long-term product history.
 Keep completion retention short for high-volume services such as LLM and tool
-calls. Keep longer retention only where it helps operations, such as approval
-resolution, consolidation, or slow-path ingestion.
+calls. Keep longer retention only where it helps operations, such as
+action-review resolution, consolidation, or slow-path ingestion.
 
 VO state persists until explicitly cleared. Session and sub-agent state should
 be cleared after the product session is terminal and old enough that live
@@ -226,7 +225,8 @@ awakeables plus parent-cached terminal results instead of status polling.
 2. Sessions and sub-agents are virtual objects.
 3. Top-level turns run in `TurnExecution` workflows keyed by turn ID.
 4. Sub-agent turns run in `SubAgentTurnExecution` workflows keyed by turn ID.
-5. Human approvals use awakeables plus persisted session events.
+5. Workspace action reviews use the `ActionReviews` service plus Postgres rows
+   and events; they do not block turn workflows.
 6. Product-visible events, learning, memory, lineage, and audit stay in
    Postgres.
 7. Gateways and clients can always rebuild visible state from Postgres events.
