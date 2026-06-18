@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CompletionRequest, ModelCapabilities, SandboxFile, SessionId, SessionMeta, ToolContent,
-    ToolInvocation, UserId, WorkspaceId,
+    CompletionRequest, EventRecord, ModelCapabilities, SandboxFile, SessionId, SessionMeta,
+    ToolContent, ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -174,6 +174,9 @@ pub struct WorkingContext {
     /// Runtime-only trusted files to install into a hand before tool execution.
     #[serde(skip)]
     trusted_sandbox_files: Vec<SandboxFile>,
+    /// Runtime-only recent session events preloaded by the orchestrator bridge.
+    #[serde(skip)]
+    recent_events: Vec<EventRecord>,
 }
 
 impl WorkingContext {
@@ -192,6 +195,7 @@ impl WorkingContext {
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
             trusted_sandbox_files: Vec::new(),
+            recent_events: Vec::new(),
         }
     }
 
@@ -259,6 +263,16 @@ impl WorkingContext {
     /// Takes trusted sandbox files out of the context without serializing them into model metadata.
     pub fn take_trusted_sandbox_files(&mut self) -> Vec<SandboxFile> {
         std::mem::take(&mut self.trusted_sandbox_files)
+    }
+
+    /// Stores recent session events for processors that need the current turn tail.
+    pub fn set_recent_events(&mut self, events: Vec<EventRecord>) {
+        self.recent_events = events;
+    }
+
+    /// Returns recent session events preloaded for this compilation run.
+    pub fn recent_events(&self) -> &[EventRecord] {
+        &self.recent_events
     }
 
     /// Returns the most recent user-authored message text, if one exists.

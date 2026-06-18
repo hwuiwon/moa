@@ -255,13 +255,16 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
     use moa_core::{
         CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, ContextProcessor,
-        LLMProvider, ModelCapabilities, ModelId, Platform, QueryRewriteConfig, QueryRewriteResult,
-        Result, RewriteReason, RewriteSource, SessionId, SessionMeta, StopReason, TokenPricing,
-        TokenUsage, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier, Platform,
+        QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason, RewriteSource, SessionId,
+        SessionMeta, StopReason, TokenPricing, TokenUsage, ToolCallFormat, UserId, WorkingContext,
+        WorkspaceId,
     };
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::{CircuitBreaker, METADATA_KEY, QueryRewriter};
 
@@ -341,6 +344,23 @@ mod tests {
         ctx
     }
 
+    fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::from_u128(0x9000 + u128::from(sequence_num)),
+            session_id,
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc
+                .with_ymd_and_hms(2026, 6, 18, 12, sequence_num as u32, 0)
+                .single()
+                .expect("valid timestamp"),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
     fn response_json(retrieval_query: &str) -> String {
         json!({
             "retrieval_query": retrieval_query,
@@ -416,6 +436,64 @@ mod tests {
             "Fix the OAuth refresh token race condition in auth/refresh.rs"
         );
         assert_eq!(result.reason, Some(RewriteReason::CoreferenceWithHistory));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn uses_preloaded_recent_events_when_context_messages_are_empty() {
+        // Pins: Restate bridge preloaded event tails are enough for query-rewrite history.
+        let (rewriter, calls) = rewriter_with_response(response_json(
+            "Fix the OAuth refresh token race condition in auth/refresh.rs",
+        ));
+        let mut ctx = context_with_messages(Vec::new());
+        let session_id = ctx.session_id;
+        ctx.set_recent_events(vec![
+            event_record(
+                session_id,
+                1,
+                Event::UserMessage {
+                    text: "The OAuth refresh token race condition is in auth/refresh.rs"
+                        .to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            event_record(
+                session_id,
+                2,
+                Event::BrainResponse {
+                    text: "I found it.".to_string(),
+                    thought_signature: None,
+                    model: ModelId::new("mock"),
+                    model_tier: ModelTier::Main,
+                    input_tokens_uncached: 1,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 1,
+                    cost_cents: 0,
+                    duration_ms: 1,
+                },
+            ),
+            event_record(
+                session_id,
+                3,
+                Event::UserMessage {
+                    text: "fix that".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+        ]);
+
+        rewriter
+            .process(&mut ctx)
+            .await
+            .expect("query rewrite should process preloaded events");
+
+        let result = metadata_result(&ctx);
+        assert_eq!(result.source, RewriteSource::Rewritten);
+        assert_eq!(
+            result.retrieval_query,
+            "Fix the OAuth refresh token race condition in auth/refresh.rs"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

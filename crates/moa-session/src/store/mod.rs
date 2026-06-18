@@ -7,12 +7,12 @@ use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
 use moa_core::{
     ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
-    EventRange, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
+    EventRange, EventRecord, EventType, ExperienceAttribution, ExperienceRecord, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError,
     Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
     SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
     SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
-    ToolCallSummary, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
+    ToolCallId, ToolCallSummary, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
     record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
     record_session_event_replay, record_sessions_active, record_turn_completed,
 };

@@ -522,9 +522,8 @@ async fn require_grant_authority(
     agent_id: Uuid,
     user_id: Uuid,
 ) -> Result<(), HandlerError> {
-    require_agent_operator_or_tenant_admin(identity, agent_id).await?;
     if actor_user_id(identity) == Some(user_id) {
-        return Ok(());
+        return require_agent_operator_or_tenant_admin(identity, agent_id).await;
     }
     require_tenant_admin(identity).await
 }

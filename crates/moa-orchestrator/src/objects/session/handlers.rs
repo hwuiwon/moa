@@ -199,36 +199,65 @@ impl Session for SessionImpl {
     ) -> Result<Json<QueueMessageResponse>, HandlerError> {
         annotate_restate_handler_span("Session", "queue_message");
         let request = request.into_inner();
-        require_session_participant(&ctx).await?;
-        let mut pending_state = load_pending_state(&ctx).await?;
-
-        if pending_state.active_turn_id.is_none() {
-            let response = start_turn_inner(
-                &mut ctx,
-                StartTurnRequest {
-                    user_message: request.user_message,
-                    attachments: request.attachments,
-                    model: request.model,
-                },
-            )
-            .await?;
-            return Ok(Json::from(QueueMessageResponse {
-                queued: false,
-                started_turn_id: response.turn_id,
-            }));
-        }
-
-        pending_state.pending_messages.push_back(PendingMessage {
-            queued_at: durable_utc_now(&ctx).await?,
-            user_message: request.user_message,
-            attachments: request.attachments,
-            model: request.model,
-        });
-        persist_pending_state(&ctx, &pending_state);
+        let response = start_turn_inner(
+            &mut ctx,
+            StartTurnRequest {
+                user_message: request.user_message,
+                attachments: request.attachments,
+                model: request.model,
+            },
+        )
+        .await?;
         Ok(Json::from(QueueMessageResponse {
-            queued: true,
-            started_turn_id: None,
+            queued: response.queued,
+            started_turn_id: response.turn_id,
         }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn set_pending_approval(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<SetSessionPendingApprovalInput>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "set_pending_approval");
+        let input = input.into_inner();
+        let pending_state = load_pending_state(&ctx).await?;
+        if pending_state.active_turn_id.as_deref() != Some(input.turn_id.as_str()) {
+            tracing::warn!(
+                key = %ctx.key(),
+                record_turn_id = %input.turn_id,
+                active_turn_id = ?pending_state.active_turn_id,
+                "ignored stale session pending approval marker"
+            );
+            return Ok(());
+        }
+        ctx.set(K_PENDING_APPROVAL, Json::from(input.awakeable_id));
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only from TurnExecution after session participant authz has already checked.
+    async fn clear_pending_approval(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<ClearSessionPendingApprovalInput>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "clear_pending_approval");
+        let input = input.into_inner();
+        let pending_state = load_pending_state(&ctx).await?;
+        if pending_state.active_turn_id.as_deref() != Some(input.turn_id.as_str()) {
+            tracing::warn!(
+                key = %ctx.key(),
+                record_turn_id = %input.turn_id,
+                active_turn_id = ?pending_state.active_turn_id,
+                "ignored stale session pending approval clear"
+            );
+            return Ok(());
+        }
+        ctx.clear(K_PENDING_APPROVAL);
+        Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -401,7 +430,7 @@ async fn pending_approval_awakeable(ctx: &SharedObjectContext<'_>) -> Result<Str
     let events = ctx
         .run(|| async move {
             store
-                .get_events(session_id, EventRange::all())
+                .get_events(session_id, approval_event_range())
                 .await
                 .map(Json::from)
                 .map_err(HandlerError::from)
@@ -428,4 +457,14 @@ async fn pending_approval_awakeable(ctx: &SharedObjectContext<'_>) -> Result<Str
             _ => None,
         })
         .ok_or_else(|| TerminalError::new("no pending approval for this session").into())
+}
+
+fn approval_event_range() -> EventRange {
+    EventRange {
+        event_types: Some(vec![
+            EventType::ApprovalRequested,
+            EventType::ApprovalDecided,
+        ]),
+        ..EventRange::all()
+    }
 }

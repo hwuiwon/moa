@@ -1,6 +1,7 @@
 //! Durable Restate façade over the workspace LLM providers.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -43,7 +44,7 @@ pub trait LLMGateway {
 }
 
 /// Provider family selected for one request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     /// Anthropic Claude models.
     Anthropic,
@@ -70,6 +71,13 @@ enum ProviderSource {
 }
 
 type ProviderFactory = Arc<dyn Fn(&str) -> moa_core::Result<Arc<dyn LLMProvider>> + Send + Sync>;
+type ProviderCache = Arc<RwLock<HashMap<ProviderCacheKey, ResolvedProvider>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProviderCacheKey {
+    kind: ProviderKind,
+    model: ModelId,
+}
 
 #[derive(Clone)]
 struct RegisteredProvider {
@@ -106,6 +114,7 @@ pub struct ProviderRegistry {
     anthropic: Option<RegisteredProvider>,
     openai: Option<RegisteredProvider>,
     google: Option<RegisteredProvider>,
+    provider_cache: ProviderCache,
 }
 
 impl ProviderRegistry {
@@ -125,6 +134,7 @@ impl ProviderRegistry {
                 default_model: DEFAULT_GOOGLE_MODEL.to_string(),
                 source: ProviderSource::Factory(Arc::new(build_google_provider)),
             }),
+            provider_cache: ProviderCache::default(),
         }
     }
 
@@ -160,6 +170,7 @@ impl ProviderRegistry {
                     })),
                 }
             }),
+            provider_cache: ProviderCache::default(),
         }
     }
 
@@ -174,6 +185,7 @@ impl ProviderRegistry {
             anthropic: anthropic.map(RegisteredProvider::from_static),
             openai: openai.map(RegisteredProvider::from_static),
             google: google.map(RegisteredProvider::from_static),
+            provider_cache: ProviderCache::default(),
         }
     }
 
@@ -274,14 +286,23 @@ impl ProviderRegistry {
             return Ok(Some(self.provider_for(kind, &model)?.provider));
         }
 
-        if let Some(provider) = self.anthropic.as_ref() {
-            return Ok(Some(provider.build(REWRITER_ANTHROPIC_MODEL)?));
+        if self.anthropic.is_some() {
+            let model = ModelId::new(REWRITER_ANTHROPIC_MODEL);
+            return Ok(Some(
+                self.provider_for(ProviderKind::Anthropic, &model)?.provider,
+            ));
         }
-        if let Some(provider) = self.openai.as_ref() {
-            return Ok(Some(provider.build(REWRITER_OPENAI_MODEL)?));
+        if self.openai.is_some() {
+            let model = ModelId::new(REWRITER_OPENAI_MODEL);
+            return Ok(Some(
+                self.provider_for(ProviderKind::OpenAI, &model)?.provider,
+            ));
         }
-        if let Some(provider) = self.google.as_ref() {
-            return Ok(Some(provider.build(REWRITER_GOOGLE_MODEL)?));
+        if self.google.is_some() {
+            let model = ModelId::new(REWRITER_GOOGLE_MODEL);
+            return Ok(Some(
+                self.provider_for(ProviderKind::Google, &model)?.provider,
+            ));
         }
 
         Ok(None)
@@ -392,6 +413,14 @@ impl ProviderRegistry {
         kind: ProviderKind,
         model: &ModelId,
     ) -> moa_core::Result<ResolvedProvider> {
+        let cache_key = ProviderCacheKey {
+            kind,
+            model: model.clone(),
+        };
+        if let Some(resolved) = self.cached_provider(&cache_key) {
+            return Ok(resolved);
+        }
+
         let provider = self
             .provider_entry(kind)
             .ok_or_else(|| {
@@ -399,10 +428,12 @@ impl ProviderRegistry {
             })?
             .build(model.as_str())?;
 
-        Ok(ResolvedProvider {
+        let resolved = ResolvedProvider {
             provider,
             model: model.clone(),
-        })
+        };
+        self.cache_provider(cache_key, resolved.clone());
+        Ok(resolved)
     }
 
     fn provider_entry(&self, kind: ProviderKind) -> Option<&RegisteredProvider> {
@@ -411,6 +442,22 @@ impl ProviderRegistry {
             ProviderKind::OpenAI => self.openai.as_ref(),
             ProviderKind::Google => self.google.as_ref(),
         }
+    }
+
+    fn cached_provider(&self, key: &ProviderCacheKey) -> Option<ResolvedProvider> {
+        let cache = match self.provider_cache.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cache.get(key).cloned()
+    }
+
+    fn cache_provider(&self, key: ProviderCacheKey, provider: ResolvedProvider) {
+        let mut cache = match self.provider_cache.write() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cache.entry(key).or_insert(provider);
     }
 }
 
@@ -575,6 +622,7 @@ fn scripted_capabilities(model_id: &str) -> ModelCapabilities {
     }
 }
 
+#[derive(Clone)]
 struct ResolvedProvider {
     provider: Arc<dyn LLMProvider>,
     model: ModelId,
@@ -920,13 +968,23 @@ fn parse_session_id(raw: &str) -> Option<SessionId> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use moa_core::{CompletionRequest, ContextMessage, ModelId, SessionId, UserId, WorkspaceId};
+    use moa_core::{
+        CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+        LLMProvider, ModelCapabilities, ModelId, SessionId, StopReason, TokenPricing, TokenUsage,
+        ToolCallFormat, UserId, WorkspaceId,
+    };
     use serde_json::json;
 
-    use super::{ProviderKind, ProviderRegistry, session_turn_from_completion_request};
+    use super::{
+        ProviderCache, ProviderFactory, ProviderKind, ProviderRegistry, ProviderSource,
+        RegisteredProvider, session_turn_from_completion_request,
+    };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -960,6 +1018,53 @@ mod tests {
         }
     }
 
+    struct CacheTestProvider {
+        model: String,
+    }
+
+    #[async_trait]
+    impl LLMProvider for CacheTestProvider {
+        fn name(&self) -> &str {
+            "cache-test"
+        }
+
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities {
+                model_id: ModelId::new(self.model.clone()),
+                context_window: 32_000,
+                max_output: 1_024,
+                supports_tools: false,
+                supports_vision: false,
+                supports_prefix_caching: false,
+                cache_ttl: None,
+                tool_call_format: ToolCallFormat::OpenAiCompatible,
+                pricing: TokenPricing {
+                    input_per_mtok: 0.0,
+                    output_per_mtok: 0.0,
+                    cached_input_per_mtok: None,
+                    cache_write_5m_per_mtok: None,
+                    cache_write_1h_per_mtok: None,
+                },
+                native_tools: Vec::new(),
+            }
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> moa_core::Result<CompletionStream> {
+            Ok(CompletionStream::from_response(CompletionResponse {
+                text: "ok".to_string(),
+                content: vec![CompletionContent::Text("ok".to_string())],
+                stop_reason: StopReason::EndTurn,
+                model: ModelId::new(self.model.clone()),
+                usage: TokenUsage::default(),
+                duration_ms: 1,
+                thought_signature: None,
+            }))
+        }
+    }
+
     #[test]
     fn from_config_uses_configured_api_key_env_name() {
         // Pins: provider registry availability follows MoaConfig provider env-var names.
@@ -975,6 +1080,43 @@ mod tests {
 
         assert_eq!(kind, ProviderKind::OpenAI);
         assert_eq!(model, ModelId::new("gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn provider_registry_reuses_factory_provider_for_same_model() {
+        // Pins: repeated provider resolution does not rebuild factory-backed clients.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let builds_for_factory = builds.clone();
+        let factory: ProviderFactory = Arc::new(move |model| {
+            builds_for_factory.fetch_add(1, Ordering::SeqCst);
+            let provider: Arc<dyn LLMProvider> = Arc::new(CacheTestProvider {
+                model: model.to_string(),
+            });
+            Ok(provider)
+        });
+        let registry = ProviderRegistry {
+            anthropic: None,
+            openai: Some(RegisteredProvider {
+                default_model: "gpt-cache".to_string(),
+                source: ProviderSource::Factory(factory),
+            }),
+            google: None,
+            provider_cache: ProviderCache::default(),
+        };
+
+        let first = registry
+            .provider_for_model(Some("openai:gpt-cache"))
+            .expect("explicit provider model resolves");
+        let second = registry
+            .provider_for_model(Some("gpt-cache"))
+            .expect("default provider model resolves through same cache key");
+        let third = registry
+            .provider_for_model(Some("openai:gpt-cache-other"))
+            .expect("different model resolves");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
     }
 
     #[test]

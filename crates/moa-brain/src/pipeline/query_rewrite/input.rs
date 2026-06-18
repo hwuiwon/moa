@@ -32,6 +32,10 @@ impl QueryRewriter {
             return Ok(Some(input));
         }
 
+        if !ctx.recent_events().is_empty() {
+            return Ok(input_from_event_records(ctx.recent_events()));
+        }
+
         let Some(session_store) = &self.session_store else {
             return Ok(None);
         };

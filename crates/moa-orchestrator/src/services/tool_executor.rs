@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use moa_core::wire::{AppendEventRequest, ToolDescriptor, tool_descriptor};
 use moa_core::{
-    Event, EventRange, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
+    Event, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, SessionStore as _, ToolCallId, ToolCallRequest, ToolDefinition,
     ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
     record_tool_idempotency_scan,
@@ -102,14 +102,14 @@ impl ToolExecutor for ToolExecutorImpl {
             screen_tool_input_for_canary(request.active_canary.as_deref(), &serialized_input),
             ToolInputCanaryScreening::Blocked(_)
         ) {
-            if !prior_tool_call_event_exists(&ctx, &request).await? {
+            if !prior_tool_call_event_exists(&ctx, &session, &request).await? {
                 append_tool_call_event(&ctx, &request).await?;
             }
             append_tool_canary_block_events(&ctx, &request).await?;
             return Ok(Json::from(blocked_canary_output(&request.tool_name)));
         }
 
-        if !prior_tool_call_event_exists(&ctx, &request).await? {
+        if !prior_tool_call_event_exists(&ctx, &session, &request).await? {
             append_tool_call_event(&ctx, &request).await?;
         }
 
@@ -132,7 +132,7 @@ impl ToolExecutor for ToolExecutorImpl {
         if matches!(
             definition.idempotency_class,
             IdempotencyClass::NonIdempotent
-        ) && prior_non_idempotent_result_exists(&ctx, &request).await?
+        ) && prior_non_idempotent_result_exists(&ctx, &session, &request).await?
         {
             return Err(TerminalError::new(format!(
                 "refusing to re-execute non-idempotent tool {} (tool_call_id={}) because a prior result already exists",
@@ -237,6 +237,7 @@ pub fn has_prior_non_idempotent_result(events: &[EventRecord], tool_call_id: Too
     })
 }
 
+#[cfg(test)]
 fn has_prior_tool_call_event(events: &[EventRecord], tool_call_id: ToolCallId) -> bool {
     events.iter().any(|record| {
         matches!(
@@ -327,6 +328,7 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 
 async fn prior_non_idempotent_result_exists(
     ctx: &Context<'_>,
+    session: &SessionMeta,
     request: &ToolCallRequest,
 ) -> Result<bool, HandlerError> {
     let session_id = request.session_id.ok_or_else(|| {
@@ -336,35 +338,32 @@ async fn prior_non_idempotent_result_exists(
         )))
     })?;
     let store = OrchestratorCtx::current().session_store.clone();
+    let workspace_id = session.workspace_id.clone();
+    let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
-    let events = ctx
+    let exists = ctx
         .run(|| async move {
             store
-                .get_events(
+                .tool_event_exists(
+                    &workspace_id,
                     session_id,
-                    EventRange {
-                        from_seq: None,
-                        to_seq: None,
-                        event_types: Some(vec![EventType::ToolResult]),
-                        limit: None,
-                    },
+                    EventType::ToolResult,
+                    tool_call_id,
                 )
                 .await
                 .map(Json::from)
                 .map_err(HandlerError::from)
         })
-        .name("tool_executor_get_prior_tool_results")
+        .name("tool_executor_tool_result_exists")
         .await?
         .into_inner();
-    record_tool_idempotency_scan("ToolResult", events.len() as u64, scan_started.elapsed());
-    Ok(has_prior_non_idempotent_result(
-        &events,
-        request.tool_call_id,
-    ))
+    record_tool_idempotency_scan("ToolResult", 0, scan_started.elapsed());
+    Ok(exists)
 }
 
 async fn prior_tool_call_event_exists(
     ctx: &Context<'_>,
+    session: &SessionMeta,
     request: &ToolCallRequest,
 ) -> Result<bool, HandlerError> {
     let Some(session_id) = request.session_id else {
@@ -372,28 +371,22 @@ async fn prior_tool_call_event_exists(
     };
 
     let store = OrchestratorCtx::current().session_store.clone();
+    let workspace_id = session.workspace_id.clone();
+    let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
-    let events = ctx
+    let exists = ctx
         .run(|| async move {
             store
-                .get_events(
-                    session_id,
-                    EventRange {
-                        from_seq: None,
-                        to_seq: None,
-                        event_types: Some(vec![EventType::ToolCall]),
-                        limit: None,
-                    },
-                )
+                .tool_event_exists(&workspace_id, session_id, EventType::ToolCall, tool_call_id)
                 .await
                 .map(Json::from)
                 .map_err(HandlerError::from)
         })
-        .name("tool_executor_get_prior_tool_calls")
+        .name("tool_executor_tool_call_exists")
         .await?
         .into_inner();
-    record_tool_idempotency_scan("ToolCall", events.len() as u64, scan_started.elapsed());
-    Ok(has_prior_tool_call_event(&events, request.tool_call_id))
+    record_tool_idempotency_scan("ToolCall", 0, scan_started.elapsed());
+    Ok(exists)
 }
 
 async fn append_tool_call_event(

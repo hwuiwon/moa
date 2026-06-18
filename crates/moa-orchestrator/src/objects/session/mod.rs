@@ -5,14 +5,15 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use moa_core::wire::{
-    CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
-    SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
+    CancelResponse, ClearSessionPendingApprovalInput, PendingMessage, QueueMessageRequest,
+    QueueMessageResponse, RunTurnRequest, SessionSnapshot, SetSessionPendingApprovalInput,
+    StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
     TurnOutcomeKind as ExecutionTurnOutcomeKind, UpdateStatusRequest,
 };
 use moa_core::{
     ActiveSegment, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput,
-    ConsumeSubAgentChildResultOutput, Event, EventRange, MarkSubAgentChildTerminalInput, MoaError,
-    Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
+    ConsumeSubAgentChildResultOutput, Event, EventRange, EventType, MarkSubAgentChildTerminalInput,
+    MoaError, Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
     SubAgentTerminalResult, UserMessage, record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
@@ -77,6 +78,16 @@ pub trait Session {
     async fn queue_message(
         req: Json<QueueMessageRequest>,
     ) -> Result<Json<QueueMessageResponse>, HandlerError>;
+
+    /// Marks the root session as waiting on an approval awakeable.
+    async fn set_pending_approval(
+        input: Json<SetSessionPendingApprovalInput>,
+    ) -> Result<(), HandlerError>;
+
+    /// Clears the root session approval marker after the workflow resumes.
+    async fn clear_pending_approval(
+        input: Json<ClearSessionPendingApprovalInput>,
+    ) -> Result<(), HandlerError>;
 
     /// Returns a read-only snapshot of the additive `TurnExecution` lifecycle state.
     #[shared]

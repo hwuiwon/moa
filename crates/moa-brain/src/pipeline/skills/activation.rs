@@ -21,6 +21,10 @@ impl SkillInjector {
             }
         }
 
+        if !ctx.recent_events().is_empty() {
+            return Ok(extract_query_keywords_from_events(ctx.recent_events()));
+        }
+
         let Some(session_store) = &self.session_store else {
             return Ok(Vec::new());
         };

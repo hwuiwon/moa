@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use moa_core::{
-    AssessmentPhase, AttributionEffect, AttributionSubjectType, ContextSnapshot, Event,
+    AssessmentPhase, AttributionEffect, AttributionSubjectType, ContextSnapshot, Event, EventType,
     ExperienceAttribution, ExperienceRecord, FileReadDedupState, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry,
     LearningRiskClass, MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence,
@@ -197,6 +197,122 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
     );
 
     pool.close().await;
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let workspace_id = WorkspaceId::new("pg-tool-event-exists");
+    let other_workspace_id = WorkspaceId::new("pg-tool-event-exists-other");
+    let session_id = store
+        .create_session(SessionMeta {
+            workspace_id: workspace_id.clone(),
+            user_id: UserId::new("user"),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create session");
+    let other_session_id = store
+        .create_session(SessionMeta {
+            workspace_id: workspace_id.clone(),
+            user_id: UserId::new("user"),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await
+        .expect("create other session");
+    let tool_id = ToolCallId(Uuid::now_v7());
+    let other_session_tool_id = ToolCallId(Uuid::now_v7());
+    let output = ToolOutput::text("ok", Duration::from_millis(5));
+
+    store
+        .emit_event(
+            session_id,
+            Event::ToolCall {
+                tool_id,
+                provider_tool_use_id: Some("toolu_call".to_string()),
+                provider_thought_signature: None,
+                tool_name: "bash".to_string(),
+                input: serde_json::json!({"cmd": "pwd"}),
+                hand_id: None,
+            },
+        )
+        .await
+        .expect("emit tool call");
+    store
+        .emit_event(
+            session_id,
+            Event::ToolResult {
+                tool_id,
+                provider_tool_use_id: Some("toolu_call".to_string()),
+                output,
+                original_output_tokens: None,
+                success: true,
+                duration_ms: 5,
+            },
+        )
+        .await
+        .expect("emit tool result");
+    store
+        .emit_event(
+            other_session_id,
+            Event::ToolCall {
+                tool_id: other_session_tool_id,
+                provider_tool_use_id: Some("toolu_other".to_string()),
+                provider_thought_signature: None,
+                tool_name: "bash".to_string(),
+                input: serde_json::json!({"cmd": "date"}),
+                hand_id: None,
+            },
+        )
+        .await
+        .expect("emit other session tool call");
+
+    assert!(
+        store
+            .tool_event_exists(&workspace_id, session_id, EventType::ToolCall, tool_id)
+            .await
+            .expect("tool call existence query")
+    );
+    assert!(
+        store
+            .tool_event_exists(&workspace_id, session_id, EventType::ToolResult, tool_id)
+            .await
+            .expect("tool result existence query")
+    );
+    assert!(
+        !store
+            .tool_event_exists(&workspace_id, session_id, EventType::ToolError, tool_id)
+            .await
+            .expect("wrong event type query")
+    );
+    assert!(
+        !store
+            .tool_event_exists(
+                &workspace_id,
+                session_id,
+                EventType::ToolCall,
+                other_session_tool_id,
+            )
+            .await
+            .expect("other session tool query")
+    );
+    assert!(
+        !store
+            .tool_event_exists(
+                &other_workspace_id,
+                session_id,
+                EventType::ToolCall,
+                tool_id
+            )
+            .await
+            .expect("wrong workspace query")
+    );
+
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
 }

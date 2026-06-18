@@ -9,8 +9,8 @@ use moa_auth_providers::builtin_authz::BuiltinApprovalRow;
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{ApprovalDecision as AsyncApprovalDecision, IdentityType};
 use moa_core::{
-    ApprovalDecision as ToolApprovalDecision, Event, EventRange, EventRecord, SessionFilter,
-    SessionId, SessionStore as _, UserId,
+    ApprovalDecision as ToolApprovalDecision, Event, EventRange, EventRecord, EventType,
+    SessionFilter, SessionId, SessionStore as _, UserId,
 };
 use moa_ocsf::ActorInput;
 use restate_sdk::prelude::*;
@@ -337,10 +337,7 @@ async fn list_event_backed_approvals(
 
     let mut out = Vec::new();
     for session in sessions {
-        let events = session_store
-            .get_events(session.session_id, EventRange::all())
-            .await
-            .map_err(HandlerError::from)?;
+        let events = load_approval_events(session_store.as_ref(), session.session_id).await?;
         out.extend(pending_event_approval_summaries(
             session.session_id,
             &events,
@@ -364,16 +361,33 @@ async fn find_event_approval_target(
         .map_err(HandlerError::from)?;
 
     for session in sessions {
-        let events = session_store
-            .get_events(session.session_id, EventRange::all())
-            .await
-            .map_err(HandlerError::from)?;
+        let events = load_approval_events(session_store.as_ref(), session.session_id).await?;
         if let Some(target) = event_approval_target(session.session_id, &events, approval_id) {
             return Ok(target);
         }
     }
 
     Err(TerminalError::new_with_code(404, "approval not found").into())
+}
+
+async fn load_approval_events(
+    session_store: &moa_session::PostgresSessionStore,
+    session_id: SessionId,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    session_store
+        .get_events(session_id, approval_event_range())
+        .await
+        .map_err(HandlerError::from)
+}
+
+fn approval_event_range() -> EventRange {
+    EventRange {
+        event_types: Some(vec![
+            EventType::ApprovalRequested,
+            EventType::ApprovalDecided,
+        ]),
+        ..EventRange::all()
+    }
 }
 
 fn pending_event_approval_summaries(
@@ -597,6 +611,18 @@ mod tests {
         assert_eq!(
             tool_decision_from_request(&request).expect("approved maps"),
             ToolApprovalDecision::AllowOnce
+        );
+    }
+
+    #[test]
+    fn approval_event_range_filters_to_approval_lifecycle_events() {
+        // Pins: approval listing and decision fallback do not replay full session logs.
+        assert_eq!(
+            approval_event_range().event_types,
+            Some(vec![
+                EventType::ApprovalRequested,
+                EventType::ApprovalDecided
+            ])
         );
     }
 }

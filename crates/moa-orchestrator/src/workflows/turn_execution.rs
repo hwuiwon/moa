@@ -27,8 +27,9 @@ use moa_core::restate_observability::{
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
 use moa_core::wire::{
-    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
-    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
+    AppendEventRequest, ClearSessionPendingApprovalInput, CompleteSegmentRequest,
+    CreateSegmentRequest, GetSegmentBaselineRequest, RecordSegmentToolUseRequest,
+    RecordSegmentTurnUsageRequest, RunTurnRequest, SetSessionPendingApprovalInput, TurnOutcome,
     TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use moa_core::{
@@ -48,6 +49,7 @@ use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
+use crate::objects::session::SessionClient;
 use crate::services::{
     llm_gateway::LLMGatewayClient,
     session_store::RestateSessionStoreClient,
@@ -659,6 +661,13 @@ async fn handle_approval_gate(
         sub_agent_id: None,
     };
     ctx.set(K_PENDING_APPROVAL, Json::from(pending));
+    ctx.object_client::<SessionClient>(session_id.to_string())
+        .set_pending_approval(Json::from(SetSessionPendingApprovalInput {
+            turn_id: ctx.key().to_string(),
+            awakeable_id: awakeable_id.clone(),
+        }))
+        .call()
+        .await?;
     prompt.request.sub_agent_id = None;
 
     append_session_event(
@@ -701,6 +710,12 @@ async fn handle_approval_gate(
         approval_wait::outcome_label(&decision, &timed_out_reason),
     );
     ctx.clear(K_PENDING_APPROVAL);
+    ctx.object_client::<SessionClient>(session_id.to_string())
+        .clear_pending_approval(Json::from(ClearSessionPendingApprovalInput {
+            turn_id: ctx.key().to_string(),
+        }))
+        .call()
+        .await?;
     update_session_status(ctx, session_id, SessionStatus::Running).await?;
 
     let decided_by = approval_wait::system_decider_for(&decision, &timed_out_reason)
@@ -763,6 +778,12 @@ async fn cleanup_pending_approval_after_cancel(
     let serialized = serialize_awakeable_decision(&decision)?;
     ctx.resolve_awakeable(&pending.awakeable_id, serialized);
     ctx.clear(K_PENDING_APPROVAL);
+    ctx.object_client::<SessionClient>(pending.session_id.to_string())
+        .clear_pending_approval(Json::from(ClearSessionPendingApprovalInput {
+            turn_id: ctx.key().to_string(),
+        }))
+        .call()
+        .await?;
     append_session_event(
         ctx,
         pending.session_id,
@@ -1735,8 +1756,6 @@ fn to_handler_error(error: MoaError) -> HandlerError {
 }
 
 fn notify_session_of_outcome(ctx: &WorkflowContext<'_>, session_id: &str, outcome: &TurnOutcome) {
-    use crate::objects::session::SessionClient;
-
     ctx.object_client::<SessionClient>(session_id.to_string())
         .record_turn_outcome(Json::from(outcome.clone()))
         .send();

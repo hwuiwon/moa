@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 
-const TURN_EVENT_TAIL_LIMIT: usize = 16;
+const TURN_EVENT_TAIL_LIMIT: usize = 32;
 const QUERY_REWRITE_METADATA_KEY: &str = "query_rewrite";
 
 /// Query-rewrite metadata cached for repeated compiles of one user message.
@@ -106,6 +106,7 @@ pub(crate) async fn prepare_turn_request(
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
+    context.set_recent_events(recent_events);
     if let Some(sequence_num) = active_user_sequence_num {
         context.insert_metadata("_moa.turn_seq", serde_json::json!(sequence_num));
     }

@@ -117,25 +117,46 @@ pub async fn require_authz_with_delegation(
     relation: Relation,
 ) -> Result<(), AuthzCheckError> {
     if let Some(user_id) = identity.acting_on_behalf_of {
+        let agent_object_id = identity.id.to_string();
+        let agent_object = format!("{}:{agent_object_id}", ObjectType::Agent);
         if identity.identity_type != IdentityType::Agent {
+            emit_authz_audit(
+                identity,
+                &agent_object,
+                ObjectType::Agent,
+                &Relation::CanActAs,
+                false,
+            )
+            .await?;
             return Err(AuthzCheckError::Forbidden {
                 subject: fga_subject(identity),
                 object_type: ObjectType::Agent,
-                object_id: identity.id.to_string(),
+                object_id: agent_object_id,
                 relation: Relation::CanActAs,
             });
         }
 
         let delegated_user = format!("user:{user_id}");
-        let agent_object = format!("agent:{}", identity.id);
         let allowed = fga
-            .check(&delegated_user, "can_act_as", &agent_object)
+            .check(
+                &delegated_user,
+                &Relation::CanActAs.to_string(),
+                &agent_object,
+            )
             .await?;
+        emit_authz_audit(
+            identity,
+            &agent_object,
+            ObjectType::Agent,
+            &Relation::CanActAs,
+            allowed,
+        )
+        .await?;
         if !allowed {
             return Err(AuthzCheckError::Forbidden {
                 subject: format!("agent:{}", identity.id),
                 object_type: ObjectType::Agent,
-                object_id: identity.id.to_string(),
+                object_id: agent_object_id,
                 relation: Relation::CanActAs,
             });
         }

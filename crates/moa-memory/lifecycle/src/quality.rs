@@ -46,7 +46,7 @@ pub async fn compute_quality_scores(
             SELECT
                 session_id,
                 workspace_id,
-                resolution,
+                outcome,
                 1 + COALESCE(
                     SUM(turn_count) OVER (
                         PARTITION BY session_id
@@ -62,14 +62,14 @@ pub async fn compute_quality_scores(
                 ) AS end_turn
             FROM task_segments
             WHERE workspace_id = $1
-              AND resolution IS NOT NULL
+              AND outcome IS NOT NULL
               AND turn_count > 0
         ),
         scored AS (
             SELECT
                 lineage.uid,
                 COUNT(*)::bigint AS uses,
-                COUNT(*) FILTER (WHERE segment_ranges.resolution = 'resolved')::bigint AS successes
+                COUNT(*) FILTER (WHERE segment_ranges.outcome = 'resolved')::bigint AS successes
             FROM moa.retrieval_lineage AS lineage
             LEFT JOIN segment_ranges
               ON segment_ranges.workspace_id = lineage.workspace_id
@@ -92,6 +92,15 @@ pub async fn compute_quality_scores(
                        / (2.0 + scored.uses::double precision))
                   ) > $3
             RETURNING node.uid
+        ),
+        bumped AS (
+            INSERT INTO moa.workspace_state (workspace_id, changelog_version)
+            SELECT $1, 1
+            WHERE EXISTS (SELECT 1 FROM updates)
+            ON CONFLICT (workspace_id) DO UPDATE
+                SET changelog_version = moa.workspace_state.changelog_version + 1,
+                    updated_at = now()
+            RETURNING 1
         )
         SELECT COUNT(*)::bigint FROM updates
         "#,

@@ -62,7 +62,7 @@ impl ApiKeys for ApiKeysImpl {
         let identity = require_identity(&ctx)?;
         require_tenant_member(&identity).await?;
         if let Some(agent_id) = request.for_agent_id {
-            require_agent_operator_or_tenant_admin(&identity, agent_id).await?;
+            require_agent_operator_or_tenant_admin(&identity, agent_id, identity.tenant_id).await?;
         }
 
         let pool = OrchestratorCtx::current().graph_pool.clone();
@@ -398,6 +398,7 @@ async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> 
 async fn require_agent_operator_or_tenant_admin(
     identity: &Identity,
     agent_id: Uuid,
+    tenant_id: Uuid,
 ) -> Result<(), HandlerError> {
     let fga = require_fga_client()?;
     let operator = require_authz_with_delegation(
@@ -414,7 +415,7 @@ async fn require_agent_operator_or_tenant_admin(
             &fga,
             identity,
             ObjectType::Tenant,
-            identity.tenant_id,
+            tenant_id,
             Relation::Admin,
         )
         .await
@@ -431,10 +432,7 @@ async fn authorize_key_management(
         return Ok(());
     }
     if let Some(agent_id) = row.owner_agent_id {
-        let operator = require_agent_operator_or_tenant_admin(identity, agent_id).await;
-        if operator.is_ok() {
-            return Ok(());
-        }
+        return require_agent_operator_or_tenant_admin(identity, agent_id, row.tenant_id).await;
     }
 
     let fga = require_fga_client()?;

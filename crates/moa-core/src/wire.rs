@@ -143,6 +143,22 @@ pub struct QueueMessageResponse {
     pub started_turn_id: Option<String>,
 }
 
+/// Turn-scoped pending approval marker for a root session turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetSessionPendingApprovalInput {
+    /// Workflow turn id that requested approval.
+    pub turn_id: String,
+    /// Approval awakeable id that `Session::approve` should resolve.
+    pub awakeable_id: String,
+}
+
+/// Turn-scoped pending approval clear request for a root session turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearSessionPendingApprovalInput {
+    /// Workflow turn id that completed the approval wait.
+    pub turn_id: String,
+}
+
 /// Response returned by `Session/request_cancel`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelResponse {
