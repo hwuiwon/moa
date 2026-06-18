@@ -1,9 +1,14 @@
+use chrono::Utc;
+use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
+use moa_artifacts::registry::{ArtifactFile, StoredArtifactRevision};
 use moa_artifacts::skill::SkillActionKind;
 use moa_skills::artifact::{
-    SKILL_ARTIFACT_PATH, skill_definition_from_package, skill_definition_to_package,
+    SKILL_ARTIFACT_PATH, skill_artifact_document_from_package, skill_definition_from_package,
+    skill_definition_to_package, skill_package_from_artifact_revision,
 };
 use moa_skills::package::{SkillPackage, SkillPackageFile};
+use uuid::Uuid;
 
 const SKILL_MD: &str = r#"---
 name: refund-helper
@@ -112,4 +117,60 @@ fn skill_definition_to_package_replaces_skill_moa_yaml() {
 
     assert_eq!(artifact_files.len(), 1);
     assert_eq!(package.manifest.allowed_tools, vec!["bash"]);
+}
+
+#[test]
+fn published_skill_artifact_revision_files_convert_to_skill_package() {
+    // Pins: accepted skill artifacts can be materialized back into package rows.
+    let original = SkillPackage::from_skill_markdown(SKILL_MD.to_string())
+        .validate()
+        .expect("valid skill package");
+    let document = skill_artifact_document_from_package(&original, ArtifactStatus::Published)
+        .expect("skill artifact document");
+    let now = Utc::now();
+    let revision = StoredArtifactRevision {
+        artifact_uid: Uuid::now_v7(),
+        revision_uid: Uuid::now_v7(),
+        workspace_id: None,
+        user_id: None,
+        scope: "global".to_string(),
+        kind: ArtifactKind::Skill,
+        name: "refund-helper".to_string(),
+        description: "Refund support helper".to_string(),
+        tags: vec!["support".to_string()],
+        document,
+        canonical_hash: Vec::new(),
+        source_format: "yaml".to_string(),
+        source_text: Vec::new(),
+        status: ArtifactStatus::Published,
+        validation_report: serde_json::json!({}),
+        version: 1,
+        published_at: Some(now),
+        valid_to: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let files = vec![ArtifactFile {
+        file_uid: Uuid::now_v7(),
+        path: "SKILL.md".to_string(),
+        content: SKILL_MD.as_bytes().to_vec(),
+        content_sha256: Vec::new(),
+        content_type: Some("text/markdown; charset=utf-8".to_string()),
+        executable: false,
+        file_size_bytes: SKILL_MD.len() as i64,
+    }];
+
+    let package = skill_package_from_artifact_revision(&revision, files)
+        .expect("package from artifact revision")
+        .validate()
+        .expect("converted package validates");
+
+    assert_eq!(package.name, "refund-helper");
+    assert_eq!(package.files.len(), 2);
+    assert!(
+        package
+            .files
+            .iter()
+            .any(|file| file.path == SKILL_ARTIFACT_PATH)
+    );
 }

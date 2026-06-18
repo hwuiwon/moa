@@ -235,6 +235,8 @@ pub enum LearningCandidateType {
     Eval,
     /// Candidate proposes changing prompt instructions.
     Prompt,
+    /// Candidate proposes changing a reusable workflow artifact or workflow policy.
+    Workflow,
 }
 
 impl LearningCandidateType {

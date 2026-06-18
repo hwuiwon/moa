@@ -253,6 +253,17 @@ pub trait SessionStore: Send + Sync {
         ))
     }
 
+    /// Loads one full learning candidate for a workspace-scoped review path.
+    async fn get_learning_candidate(
+        &self,
+        _workspace_id: &WorkspaceId,
+        _candidate_id: uuid::Uuid,
+    ) -> Result<Option<LearningCandidate>> {
+        Err(MoaError::Unsupported(
+            "learning candidate detail reads are not supported by this session store".to_string(),
+        ))
+    }
+
     /// Lists current learning candidates for a tenant and optional status.
     async fn list_learning_candidates(
         &self,

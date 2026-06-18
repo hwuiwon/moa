@@ -386,7 +386,7 @@ async fn transaction_dispute_plan_clarifies_then_stops_at_required_approval() ->
 
 #[test]
 fn behavior_lab_simulation_path_does_not_auto_promote_or_fake_score_rows() {
-    // Pins: simulation execution records score-run parents only; learning proposals stay explicit and reviewable.
+    // Pins: simulation execution records score-run parents only; learning proposals stay explicit and require review.
     let run_workflow = include_str!("../src/workflows/experiment_run.rs");
     let trial_workflow = include_str!("../src/workflows/experiment_trial_run.rs");
     let experiments_service = include_str!("../src/services/experiments.rs");
@@ -412,7 +412,7 @@ fn behavior_lab_simulation_path_does_not_auto_promote_or_fake_score_rows() {
     );
     assert!(
         experiments_service.contains("LearningCandidateStatus::Proposed"),
-        "explicit proposals should be proposed for review"
+        "explicit proposals should wait for review"
     );
     assert!(
         !experiments_service.contains("LearningCandidateStatus::Promoted"),

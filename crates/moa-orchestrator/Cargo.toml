@@ -9,10 +9,10 @@ default = []
 integration = []
 auth0 = ["moa-auth-providers/auth0"]
 provider-overrides = ["moa-providers/scripted-provider"]
+skill-learning = ["moa-skills/skill-learning"]
 internal-eval-runner = [
     "dep:moa-eval",
     "moa-brain/eval-harness",
-    "moa-skills/internal-eval-runner",
 ]
 langfuse = ["internal-eval-runner", "moa-eval/langfuse"]
 

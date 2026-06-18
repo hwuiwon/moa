@@ -1,53 +1,22 @@
-//! Skill regression testing, suite generation, and improvement comparison.
+//! Skill regression suite source generation and comparison helpers.
 
-#[cfg(feature = "internal-eval-runner")]
-use std::path::Path;
 use std::path::PathBuf;
-#[cfg(feature = "internal-eval-runner")]
-use std::sync::Arc;
 
 use moa_core::{Event, EventRecord, MoaConfig, MoaError, Result, SessionMeta, WorkspaceId};
-#[cfg(feature = "internal-eval-runner")]
-use moa_core::{LLMProvider, SkillMetadata};
-#[cfg(feature = "internal-eval-runner")]
-use moa_eval::{EngineOptions, EvalEngine};
-#[cfg(feature = "internal-eval-runner")]
-use moa_eval_core::{
-    AgentConfig, EvalRun, EvalStatus, Evaluator, EvaluatorOptions, PermissionOverride,
-    SkillOverride, build_evaluators, evaluate_run, load_suite,
-};
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
-#[cfg(feature = "internal-eval-runner")]
-use moa_memory_graph::GraphStore;
-#[cfg(not(feature = "internal-eval-runner"))]
-use moa_session::PostgresSessionStore;
-#[cfg(feature = "internal-eval-runner")]
-use moa_session::{PostgresSessionStore, create_session_store};
 use tokio::fs;
-use uuid::Uuid;
 
-use crate::format::SkillDocument;
-#[cfg(feature = "internal-eval-runner")]
-use crate::format::{parse_skill_markdown, render_skill_markdown, skill_metadata_from_document};
-#[cfg(feature = "internal-eval-runner")]
-use crate::registry::SkillRegistry;
+use crate::format::{SkillDocument, slugify_skill_name};
 
 const DEFAULT_SUITE_TIMEOUT_SECONDS: u64 = 120;
-#[cfg(feature = "internal-eval-runner")]
-const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
-#[cfg(feature = "internal-eval-runner")]
-const DEFAULT_SKILL_EVALUATORS: &[&str] = &["trajectory", "output", "tool_success"];
 
-/// Completed execution of one skill suite.
-#[cfg(feature = "internal-eval-runner")]
-#[derive(Debug, Clone)]
-pub struct SkillEvalRun {
-    /// Loaded suite definition.
-    pub suite: TestSuite,
-    /// Config used for this run.
-    pub config: AgentConfig,
-    /// Completed eval run.
-    pub run: EvalRun,
+/// Generated regression suite source for a skill draft proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedSkillSuite {
+    /// Path relative to the configured memory root where the suite would be stored.
+    pub relative_path: String,
+    /// Pretty TOML source for the generated suite.
+    pub source_toml: String,
 }
 
 /// Aggregate regression scoring summary for one skill version.
@@ -105,176 +74,39 @@ impl SkillRegressionReport {
     }
 }
 
-/// Runs the persisted suite for one workspace skill using the configured provider selection.
-#[cfg(feature = "internal-eval-runner")]
-pub async fn run_skill_suite(
-    config: &MoaConfig,
-    _graph_store: Arc<dyn GraphStore>,
+/// Generates regression suite TOML for a newly proposed skill without writing files.
+pub fn generate_skill_test_suite_source(
     workspace_id: &WorkspaceId,
-    skill_selector: &str,
-) -> Result<SkillEvalRun> {
-    let session_store = create_session_store(config).await?;
-    let registry = SkillRegistry::new(session_store.pool().clone());
-    let resolved = resolve_workspace_skill(&registry, workspace_id, skill_selector).await?;
-    let skill_markdown = render_skill_markdown(&resolved.document)?;
-    let suite_path = skill_suite_path(config, workspace_id, &resolved.metadata.name);
-    let suite = load_suite(&suite_path).map_err(map_eval_error)?;
-
-    let temp_root = std::env::temp_dir().join(format!("moa-skill-eval-{}", Uuid::now_v7()));
-    let skill_dir = materialize_skill_dir(
-        &temp_root,
-        &resolved.document.frontmatter.name,
-        &skill_markdown,
-    )
-    .await?;
-    let eval_run = execute_skill_suite(
-        config,
-        &suite,
-        &skill_dir,
-        &resolved.document.frontmatter.name,
-        None,
-    )
-    .await;
-    let _ = remove_dir_if_exists(&temp_root).await;
-    eval_run
-}
-
-/// Runs regression tests for an updated skill candidate against the previous version.
-#[cfg(feature = "internal-eval-runner")]
-pub async fn run_skill_regression(
-    config: &MoaConfig,
-    session: &SessionMeta,
-    existing: &SkillMetadata,
-    current_markdown: &str,
-    candidate_markdown: &str,
-    llm: Arc<dyn LLMProvider>,
-) -> Result<SkillRegressionReport> {
-    let suite_path = skill_suite_path(config, &session.workspace_id, &existing.name);
-    if !fs::try_exists(&suite_path).await? {
-        return Ok(SkillRegressionReport {
-            decision: SkillRegressionDecision::MissingSuite,
-            suite_path: None,
-            previous: None,
-            candidate: None,
-            detail: "no skill regression suite found".to_string(),
-        });
-    }
-
-    let suite = load_suite(&suite_path).map_err(map_eval_error)?;
-    let estimated_cost = estimate_suite_cost(&suite, llm.as_ref()) * 2.0;
-    if estimated_cost > DEFAULT_SKILL_TEST_BUDGET_DOLLARS {
-        return Ok(SkillRegressionReport {
-            decision: SkillRegressionDecision::SkippedBudget,
-            suite_path: Some(suite_path),
-            previous: None,
-            candidate: None,
-            detail: format!(
-                "skipped regression tests because estimated cost ${estimated_cost:.4} exceeds budget ${DEFAULT_SKILL_TEST_BUDGET_DOLLARS:.2}"
-            ),
-        });
-    }
-
-    let temp_root = std::env::temp_dir().join(format!("moa-skill-regression-{}", Uuid::now_v7()));
-    let previous_document = parse_skill_markdown(current_markdown)?;
-    let candidate_document = parse_skill_markdown(candidate_markdown)?;
-    let previous_dir = materialize_skill_dir(
-        &temp_root.join("previous"),
-        &previous_document.frontmatter.name,
-        current_markdown,
-    )
-    .await?;
-    let candidate_dir = materialize_skill_dir(
-        &temp_root.join("candidate"),
-        &candidate_document.frontmatter.name,
-        candidate_markdown,
-    )
-    .await?;
-
-    let previous_run = execute_skill_suite(
-        config,
-        &suite,
-        &previous_dir,
-        &previous_document.frontmatter.name,
-        Some(llm.clone()),
-    )
-    .await?;
-    let candidate_run = execute_skill_suite(
-        config,
-        &suite,
-        &candidate_dir,
-        &candidate_document.frontmatter.name,
-        Some(llm),
-    )
-    .await?;
-
-    let _ = remove_dir_if_exists(&temp_root).await;
-
-    let previous = summarize_regression_run(&previous_run.run);
-    let candidate = summarize_regression_run(&candidate_run.run);
-    if run_has_execution_failure(&previous_run.run) || run_has_execution_failure(&candidate_run.run)
-    {
-        return Ok(SkillRegressionReport {
-            decision: SkillRegressionDecision::EvalFailed,
-            suite_path: Some(suite_path),
-            previous: Some(previous),
-            candidate: Some(candidate),
-            detail: format!("suite={} failed to complete cleanly", suite.name),
-        });
-    }
-
-    let accepted = compare_scores(&previous, &candidate);
-    let detail = format!(
-        "suite={} previous(avg={:.3}, failed={}/{}, cost=${:.4}) candidate(avg={:.3}, failed={}/{}, cost=${:.4})",
-        suite.name,
-        previous.average_score,
-        previous.failed_runs,
-        previous.total_runs,
-        previous.total_cost_dollars,
-        candidate.average_score,
-        candidate.failed_runs,
-        candidate.total_runs,
-        candidate.total_cost_dollars,
-    );
-
-    Ok(SkillRegressionReport {
-        decision: if accepted {
-            SkillRegressionDecision::Accepted
-        } else {
-            SkillRegressionDecision::Rejected
-        },
-        suite_path: Some(suite_path),
-        previous: Some(previous),
-        candidate: Some(candidate),
-        detail,
+    skill: &SkillDocument,
+    events: &[EventRecord],
+) -> Result<GeneratedSkillSuite> {
+    let suite = build_generated_suite(skill, events);
+    let source_toml = toml::to_string_pretty(&suite)
+        .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    Ok(GeneratedSkillSuite {
+        relative_path: skill_suite_relative_path(workspace_id, &skill.frontmatter.name),
+        source_toml,
     })
 }
 
-#[cfg(feature = "internal-eval-runner")]
-fn run_has_execution_failure(run: &EvalRun) -> bool {
-    run.results
-        .iter()
-        .any(|result| matches!(result.status, EvalStatus::Error | EvalStatus::Timeout))
-}
-
-/// Generates a minimal regression suite for a newly distilled skill.
+/// Generates and writes a minimal regression suite for explicit eval/test paths.
 pub async fn generate_skill_test_suite(
     config: &MoaConfig,
     session: &SessionMeta,
     skill: &SkillDocument,
     events: &[EventRecord],
 ) -> Result<PathBuf> {
-    let suite = build_generated_suite(skill, events);
-    let suite_path = skill_suite_path(config, &session.workspace_id, &skill.frontmatter.name);
+    let generated = generate_skill_test_suite_source(&session.workspace_id, skill, events)?;
+    let suite_path = PathBuf::from(&config.local.memory_dir).join(&generated.relative_path);
     if let Some(parent) = suite_path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let rendered = toml::to_string_pretty(&suite)
-        .map_err(|error| MoaError::StorageError(error.to_string()))?;
-    fs::write(&suite_path, rendered).await?;
+    fs::write(&suite_path, generated.source_toml).await?;
     Ok(suite_path)
 }
 
 /// Compares baseline and candidate summaries and returns whether the candidate is acceptable.
+#[must_use]
 pub fn compare_scores(
     previous: &SkillRegressionSummary,
     candidate: &SkillRegressionSummary,
@@ -284,40 +116,6 @@ pub fn compare_scores(
     }
 
     candidate.average_score + f64::EPSILON >= previous.average_score
-}
-
-/// Appends a skill improvement decision to the workspace `_log.md`.
-pub async fn append_skill_regression_log(
-    store: &PostgresSessionStore,
-    session: &SessionMeta,
-    skill_name: &str,
-    previous_version: &str,
-    candidate_version: &str,
-    report: &SkillRegressionReport,
-) -> Result<()> {
-    store
-        .append_learning(&moa_core::LearningEntry {
-            id: Uuid::now_v7(),
-            tenant_id: session.workspace_id.to_string(),
-            learning_type: "skill_regression".to_string(),
-            target_id: skill_name.to_string(),
-            target_label: Some(skill_name.to_string()),
-            payload: serde_json::json!({
-                "previous_version": previous_version,
-                "candidate_version": candidate_version,
-                "decision": format!("{:?}", report.decision),
-                "detail": report.detail,
-                "suite_path": report.suite_path,
-            }),
-            confidence: Some(if report.accepted() { 1.0 } else { 0.0 }),
-            source_refs: vec![session.id.0],
-            actor: format!("brain:{}", session.id),
-            valid_from: chrono::Utc::now(),
-            valid_to: None,
-            batch_id: None,
-            version: 1,
-        })
-        .await
 }
 
 fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestSuite {
@@ -350,220 +148,42 @@ fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestS
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
-async fn execute_skill_suite(
-    config: &MoaConfig,
-    suite: &TestSuite,
-    skill_dir: &Path,
-    skill_name: &str,
-    llm_provider: Option<Arc<dyn LLMProvider>>,
-) -> Result<SkillEvalRun> {
-    let agent_config = skill_agent_config(skill_name, skill_dir);
-    let evaluators = default_skill_evaluators()?;
-    let engine = EvalEngine::new(
-        config.clone(),
-        EngineOptions {
-            parallel: 1,
-            temp_dir: std::env::temp_dir().join("moa-eval-skill"),
-            ..EngineOptions::default()
-        },
-    )
-    .map_err(map_eval_error)?;
-
-    let mut run = if let Some(llm_provider) = llm_provider {
-        engine
-            .run_suite_with_provider(suite, std::slice::from_ref(&agent_config), llm_provider)
-            .await
-            .map_err(map_eval_error)?
-    } else {
-        engine
-            .run_suite(suite, std::slice::from_ref(&agent_config))
-            .await
-            .map_err(map_eval_error)?
-    };
-    evaluate_run(suite, &mut run, &evaluators)
-        .await
-        .map_err(map_eval_error)?;
-
-    Ok(SkillEvalRun {
-        suite: suite.clone(),
-        config: agent_config,
-        run,
-    })
-}
-
-#[cfg(feature = "internal-eval-runner")]
-async fn resolve_workspace_skill(
-    registry: &SkillRegistry,
-    workspace_id: &WorkspaceId,
-    selector: &str,
-) -> Result<ResolvedWorkspaceSkill> {
-    let scope = moa_core::MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let skills = registry.load_for_scope(&scope).await?;
-
-    for skill in skills {
-        let skill_markdown = registry
-            .load_skill_markdown(&scope, skill.skill_uid)
-            .await?;
-        let document = parse_skill_markdown(&skill_markdown)?;
-        let metadata = skill_metadata_from_document(skill.metadata()?.path, &document);
-        if skill_selector_matches(selector, &metadata.name) {
-            return Ok(ResolvedWorkspaceSkill { metadata, document });
-        }
-    }
-
-    Err(MoaError::StorageError(format!(
-        "skill not found in workspace: {selector}"
-    )))
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn summarize_regression_run(run: &EvalRun) -> SkillRegressionSummary {
-    let total_runs = run.results.len();
-    let failed_runs = run
-        .results
-        .iter()
-        .filter(|result| !matches!(result.status, EvalStatus::Passed | EvalStatus::Skipped))
-        .count();
-    let average_score = if run.results.is_empty() {
-        1.0
-    } else {
-        run.results.iter().map(result_score).sum::<f64>() / run.results.len() as f64
-    };
-
-    SkillRegressionSummary {
-        average_score,
-        failed_runs,
-        total_runs,
-        total_cost_dollars: run.summary.total_cost_dollars,
-    }
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn result_score(result: &moa_eval_core::EvalResult) -> f64 {
-    if result.scores.is_empty() {
-        return match result.status {
-            EvalStatus::Passed | EvalStatus::Skipped => 1.0,
-            EvalStatus::Failed | EvalStatus::Error | EvalStatus::Timeout => 0.0,
-        };
-    }
-
-    let mut total = 0.0;
-    let mut count = 0usize;
-    for score in &result.scores {
-        match &score.value {
-            moa_eval_core::ScoreValue::Numeric(value) => {
-                total += *value;
-                count += 1;
-            }
-            moa_eval_core::ScoreValue::Boolean(value) => {
-                total += if *value { 1.0 } else { 0.0 };
-                count += 1;
-            }
-            moa_eval_core::ScoreValue::Categorical(_) => {}
-        }
-    }
-
-    if count == 0 {
-        1.0
-    } else {
-        total / count as f64
-    }
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn estimate_suite_cost(suite: &TestSuite, llm: &dyn LLMProvider) -> f64 {
-    let pricing = llm.capabilities().pricing;
-    suite
-        .cases
-        .iter()
-        .map(|case| {
-            let prompt_tokens = estimate_tokens(&case.input).max(128);
-            let output_tokens = llm.capabilities().max_output.clamp(256, 2_048);
-            ((prompt_tokens as f64 * pricing.input_per_mtok)
-                + (output_tokens as f64 * pricing.output_per_mtok))
-                / 1_000_000.0
-        })
-        .sum()
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn default_skill_evaluators() -> Result<Vec<Box<dyn Evaluator>>> {
-    let names = DEFAULT_SKILL_EVALUATORS
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect::<Vec<_>>();
-    build_evaluators(&names, &EvaluatorOptions::default()).map_err(map_eval_error)
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn skill_agent_config(skill_name: &str, skill_dir: &Path) -> AgentConfig {
-    AgentConfig {
-        name: format!("skill-{skill_name}"),
-        skills: SkillOverride {
-            include: vec![skill_dir.to_string_lossy().into_owned()],
-            exclude: Vec::new(),
-            exclusive: true,
-        },
-        permissions: PermissionOverride {
-            auto_approve_all: true,
-            auto_approve: Vec::new(),
-            always_deny: Vec::new(),
-        },
-        ..AgentConfig::default()
-    }
-}
-
-#[cfg(feature = "internal-eval-runner")]
-async fn materialize_skill_dir(root: &Path, skill_name: &str, markdown: &str) -> Result<PathBuf> {
-    let slug = slugify_case_name(skill_name);
-    let skill_dir = root.join(slug);
-    fs::create_dir_all(&skill_dir).await?;
-    fs::write(skill_dir.join("SKILL.md"), markdown).await?;
-    Ok(skill_dir)
-}
-
-#[cfg(feature = "internal-eval-runner")]
-async fn remove_dir_if_exists(path: &Path) -> Result<()> {
-    if fs::try_exists(path).await? {
-        fs::remove_dir_all(path).await?;
-    }
-    Ok(())
-}
-
-fn skill_suite_path(config: &MoaConfig, workspace_id: &WorkspaceId, skill_name: &str) -> PathBuf {
-    expand_local_path(&config.local.memory_dir)
-        .join("workspaces")
+fn skill_suite_relative_path(workspace_id: &WorkspaceId, skill_name: &str) -> String {
+    PathBuf::from("workspaces")
         .join(workspace_id.as_str())
         .join("skills")
-        .join(crate::format::slugify_skill_name(skill_name))
+        .join(slugify_skill_name(skill_name))
         .join("tests")
         .join("suite.toml")
-}
-
-fn expand_local_path(path: &str) -> PathBuf {
-    if let Some(relative) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(relative);
-    }
-    PathBuf::from(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn extract_task_input(events: &[EventRecord]) -> String {
     events
         .iter()
-        .rev()
         .find_map(|record| match &record.event {
             Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => {
-                Some(text.trim().to_string())
+                Some(text.clone())
             }
             _ => None,
         })
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Use the skill to complete the task.".to_string())
+        .unwrap_or_else(|| "Run the learned workflow".to_string())
+}
+
+fn extract_response_keywords(events: &[EventRecord]) -> Vec<String> {
+    let mut keywords = events
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            Event::BrainResponse { text, .. } => Some(keywords_from_text(text)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if keywords.is_empty() {
+        keywords.push("completed".to_string());
+    }
+    keywords
 }
 
 fn extract_tool_trajectory(events: &[EventRecord]) -> Vec<String> {
@@ -576,73 +196,29 @@ fn extract_tool_trajectory(events: &[EventRecord]) -> Vec<String> {
         .collect()
 }
 
-fn extract_response_keywords(events: &[EventRecord]) -> Vec<String> {
-    let response = events
-        .iter()
-        .rev()
-        .find_map(|record| match &record.event {
-            Event::BrainResponse { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    let stopwords = [
-        "about", "after", "again", "been", "from", "have", "that", "this", "with", "your", "into",
-        "there", "would", "could", "should", "were", "them", "they",
-    ];
-    let mut keywords = Vec::new();
-
-    for token in response.split(|character: char| !character.is_alphanumeric()) {
-        let normalized = token.trim().to_ascii_lowercase();
-        if normalized.len() < 4 || stopwords.contains(&normalized.as_str()) {
-            continue;
-        }
-        if keywords.iter().any(|existing| existing == &normalized) {
-            continue;
-        }
-        keywords.push(normalized);
-        if keywords.len() == 3 {
-            break;
-        }
-    }
-
+fn keywords_from_text(text: &str) -> Vec<String> {
+    let mut keywords = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| token.len() >= 5)
+        .map(str::to_ascii_lowercase)
+        .take(5)
+        .collect::<Vec<_>>();
+    keywords.sort();
+    keywords.dedup();
     keywords
 }
 
-fn slugify_case_name(value: &str) -> String {
-    let mut slug = String::new();
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    slug.trim_matches('-').to_string()
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn estimate_tokens(text: &str) -> usize {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        0
+fn slugify_case_name(input: &str) -> String {
+    let slug = input
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_ascii_lowercase)
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.len() > 64 {
+        slug.chars().take(64).collect()
     } else {
-        trimmed.chars().count().div_ceil(4)
+        slug
     }
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn skill_selector_matches(selector: &str, name: &str) -> bool {
-    selector == name || name.contains(selector)
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn map_eval_error(error: moa_eval_core::EvalError) -> MoaError {
-    MoaError::StorageError(error.to_string())
-}
-
-#[cfg(feature = "internal-eval-runner")]
-struct ResolvedWorkspaceSkill {
-    metadata: SkillMetadata,
-    document: SkillDocument,
 }

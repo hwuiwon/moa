@@ -9,11 +9,11 @@ use moa_core::wire::AppendEventRequest;
 use moa_core::{CompletionContent, StopReason, ToolCallContent, ToolCallFormat, ToolInvocation};
 use moa_core::{
     CompletionRequest, CompletionResponse, Event, LLMProvider, MoaConfig, MoaError,
-    ModelCapabilities, ModelId, ModelTier, QueryRewriteConfig, SessionId, TokenPricing, TokenUsage,
-    UserId, WorkspaceId, record_llm_cost_cents,
+    ModelCapabilities, ModelId, ModelTask, ModelTier, QueryRewriteConfig, SessionId, TokenPricing,
+    TokenUsage, UserId, WorkspaceId, record_llm_cost_cents,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
-use moa_providers::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+use moa_providers::{AnthropicProvider, GeminiProvider, ModelRouter, OpenAIProvider};
 #[cfg(feature = "provider-overrides")]
 use moa_providers::{ScriptedProvider, ScriptedResponse};
 use restate_sdk::prelude::*;
@@ -285,6 +285,27 @@ impl ProviderRegistry {
         }
 
         Ok(None)
+    }
+
+    /// Builds a model-task router using this registry's resolved provider instances.
+    pub fn model_router_for_config(&self, config: &MoaConfig) -> moa_core::Result<ModelRouter> {
+        let main = self.provider_for_model(Some(config.model_for_task(ModelTask::MainLoop)))?;
+        let auxiliary = config
+            .models
+            .auxiliary
+            .as_deref()
+            .map(|model| self.provider_for_model(Some(model)))
+            .transpose()?;
+        Ok(ModelRouter::new(main, auxiliary))
+    }
+
+    /// Resolves the provider instance that should serve a requested model.
+    pub fn provider_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> moa_core::Result<Arc<dyn LLMProvider>> {
+        let (kind, model) = self.resolve_provider_kind(requested_model)?;
+        Ok(self.provider_for(kind, &model)?.provider)
     }
 
     fn resolve_requested_model(

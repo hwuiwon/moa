@@ -516,7 +516,8 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
 
     assert_eq!(candidate.status.as_str(), "proposed");
     assert_eq!(candidate.tenant_id, "tenant-a");
-    assert_eq!(candidate.candidate_type.as_str(), "prompt");
+    assert_eq!(candidate.candidate_type.as_str(), "workflow");
+    assert_eq!(candidate.payload["kind"], "workflow_learning_proposal");
     assert_eq!(
         candidate.promotion_requirements,
         vec![
@@ -603,7 +604,7 @@ fn experiment_proposal_path_rejects_incomplete_or_ungated_evidence() {
 
 #[test]
 fn experiment_proposal_path_does_not_publish_or_promote() {
-    // Pins: proposal execution appends proposed candidates only and never publishes artifacts or learned state.
+    // Pins: proposal execution appends proposed candidates only; review is required before publishing artifacts or learned state.
     let source = include_str!("../src/services/experiments.rs");
 
     assert!(
@@ -612,7 +613,7 @@ fn experiment_proposal_path_does_not_publish_or_promote() {
     );
     assert!(
         source.contains("LearningCandidateStatus::Proposed"),
-        "proposal path should create proposed candidates"
+        "proposal path should create candidates that wait for review"
     );
     assert!(
         !source.contains("update_learning_candidate_status"),

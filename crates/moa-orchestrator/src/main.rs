@@ -22,6 +22,8 @@ use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
 use moa_orchestrator::services::eval::{Eval, EvalImpl};
 #[cfg(feature = "internal-eval-runner")]
 use moa_orchestrator::workflows::eval_run::{EvalRun, EvalRunImpl};
+#[cfg(feature = "skill-learning")]
+use moa_orchestrator::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
 use moa_orchestrator::{
     OrchestratorCtx,
     config::{
@@ -47,6 +49,7 @@ use moa_orchestrator::{
         experiments::{Experiments, ExperimentsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
+        learning_review::{LearningReview, LearningReviewImpl},
         lineage_admin::{LineageAdmin, LineageAdminImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
         memory::{Memory, MemoryImpl},
@@ -104,6 +107,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "GraphMemoryMaint",
     "Health",
     "IngestionVO",
+    "LearningReview",
     "LineageAdmin",
     "LLMGateway",
     "Memory",
@@ -123,6 +127,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Workflows",
 ];
 const INTERNAL_EVAL_SERVICE_NAMES: &[&str] = &["Eval", "EvalRun"];
+const SKILL_LEARNING_SERVICE_NAMES: &[&str] = &["SkillLearning"];
 
 /// Process arguments for the orchestrator process.
 #[derive(Debug, Parser)]
@@ -291,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
         .bind(GraphMemoryMaintImpl.serve())
+        .bind(LearningReviewImpl.serve())
         .bind(LineageAdminImpl.serve())
         .bind(MemoryImpl.serve())
         .bind(NeonMaintImpl.serve())
@@ -306,6 +312,8 @@ async fn main() -> anyhow::Result<()> {
         .bind(ConsolidateImpl.serve());
     #[cfg(feature = "internal-eval-runner")]
     let endpoint = endpoint.bind(EvalRunImpl.serve());
+    #[cfg(feature = "skill-learning")]
+    let endpoint = endpoint.bind(SkillLearningImpl.serve());
     let endpoint = endpoint
         .bind(ExperimentRunImpl.serve())
         .bind(ExperimentTrialRunImpl.serve())
@@ -889,13 +897,27 @@ fn env_flag_from_reader(
 }
 
 fn expected_service_names() -> Vec<&'static str> {
-    expected_service_names_for_internal_eval(cfg!(feature = "internal-eval-runner"))
+    expected_service_names_for_features(
+        cfg!(feature = "internal-eval-runner"),
+        cfg!(feature = "skill-learning"),
+    )
 }
 
+#[cfg(test)]
 fn expected_service_names_for_internal_eval(internal_eval_enabled: bool) -> Vec<&'static str> {
+    expected_service_names_for_features(internal_eval_enabled, cfg!(feature = "skill-learning"))
+}
+
+fn expected_service_names_for_features(
+    internal_eval_enabled: bool,
+    skill_learning_enabled: bool,
+) -> Vec<&'static str> {
     let mut names = DEFAULT_EXPECTED_SERVICE_NAMES.to_vec();
     if internal_eval_enabled {
         names.extend_from_slice(INTERNAL_EVAL_SERVICE_NAMES);
+    }
+    if skill_learning_enabled {
+        names.extend_from_slice(SKILL_LEARNING_SERVICE_NAMES);
     }
     names
 }
@@ -923,8 +945,8 @@ fn services_registered_with_expected(
 mod tests {
     use super::{
         RegisteredDeployment, RegisteredService, env_flag_from_reader,
-        expected_service_names_for_internal_eval, services_registered,
-        services_registered_with_expected,
+        expected_service_names_for_features, expected_service_names_for_internal_eval,
+        services_registered, services_registered_with_expected,
     };
 
     fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
@@ -1024,6 +1046,24 @@ mod tests {
         assert!(
             services_registered_with_expected(&internal_deployment, &internal_names),
             "internal eval readiness should accept Eval and EvalRun when explicitly enabled"
+        );
+    }
+
+    #[test]
+    fn skill_learning_feature_adds_skill_learning_workflow() {
+        let names = expected_service_names_for_features(false, true);
+
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "SkillLearning")
+                .count(),
+            1,
+            "skill-learning feature should add SkillLearning exactly once"
+        );
+        assert!(
+            !expected_service_names_for_features(false, false).contains(&"SkillLearning"),
+            "builds without the feature must not expect SkillLearning"
         );
     }
 

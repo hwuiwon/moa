@@ -234,6 +234,8 @@ echo ">> starting ephemeral restate-server"
 restate-server \
   --node-name "e2e-${RUN_SHORT_ID}" \
   --base-dir "${RESTATE_DIR}" \
+  --bind-ip 127.0.0.1 \
+  --advertised-host 127.0.0.1 \
   --use-random-ports true \
   --log-format compact \
   --log-disable-ansi-codes true \
@@ -249,13 +251,14 @@ export MOA_RESTATE_DEPLOYMENT_HOST="127.0.0.1"
 export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
 
 run cargo test -p moa-orchestrator --tests --locked -- --test-threads=1
+run cargo test -p moa-orchestrator --locked --features provider-overrides,skill-learning skill_learning -- --test-threads=1
 run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
 run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
-  run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --profile restate-service-e2e --run-ignored ignored-only
+  run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile restate-service-e2e --run-ignored ignored-only
 
-  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides --locked
+  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides,skill-learning --locked
 
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"
@@ -286,14 +289,14 @@ if [[ "${LIVE}" -eq 1 ]]; then
     -H "content-type: application/json" \
     --data "{\"uri\":\"http://127.0.0.1:${ORCH_PORT}\"}"
 
-  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --profile orchestrator-service-e2e --run-ignored ignored-only
+  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile orchestrator-service-e2e --run-ignored ignored-only
 
   if [[ "${RUN_PROVIDERS}" -eq 1 ]]; then
     if ! truthy "${MOA_RUN_LIVE_PROVIDER_TESTS:-}"; then
       echo "refusing provider live checks without MOA_RUN_LIVE_PROVIDER_TESTS=1" >&2
       exit 2
     fi
-    run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration --profile provider-e2e --run-ignored ignored-only
+    run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile provider-e2e --run-ignored ignored-only
     run cargo nextest run -p moa-providers --locked --profile provider-e2e --run-ignored ignored-only
     run cargo nextest run -p moa-brain --locked --profile provider-e2e --run-ignored ignored-only
   fi

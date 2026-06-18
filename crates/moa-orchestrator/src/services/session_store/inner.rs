@@ -279,6 +279,26 @@ impl SessionStoreImpl {
             .map_err(HandlerError::from)
     }
 
+    pub(super) async fn get_learning_candidate_inner(
+        &self,
+        request: GetLearningCandidateRequest,
+    ) -> Result<LearningCandidate, HandlerError> {
+        self.store
+            .get_learning_candidate(&request.workspace_id, request.candidate_id)
+            .await
+            .map_err(HandlerError::from)?
+            .ok_or_else(|| {
+                TerminalError::new_with_code(
+                    404,
+                    format!(
+                        "learning candidate {} not found in workspace {}",
+                        request.candidate_id, request.workspace_id
+                    ),
+                )
+                .into()
+            })
+    }
+
     pub(super) async fn list_learning_candidates_inner(
         &self,
         request: ListLearningCandidatesRequest,

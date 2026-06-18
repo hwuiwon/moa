@@ -7,7 +7,6 @@ license.workspace = true
 [features]
 default = []
 skill-learning = ["dep:moa-eval-core", "dep:moa-providers", "dep:moa-session"]
-internal-eval-runner = ["skill-learning", "dep:moa-eval"]
 
 [dependencies]
 chrono.workspace = true
@@ -15,7 +14,6 @@ hex.workspace = true
 moa-artifacts.workspace = true
 moa-core = { workspace = true }
 moa-eval-core = { workspace = true, optional = true }
-moa-eval = { workspace = true, optional = true }
 moa-memory-graph = { workspace = true }
 moa-providers = { workspace = true, optional = true }
 moa-session = { workspace = true, optional = true }
@@ -42,14 +40,19 @@ tempfile.workspace = true
 [[test]]
 name = "distillation"
 path = "tests/distillation.rs"
-required-features = ["internal-eval-runner"]
+required-features = ["skill-learning"]
 
 [[test]]
 name = "improver"
 path = "tests/improver.rs"
-required-features = ["internal-eval-runner"]
+required-features = ["skill-learning"]
 
 [[test]]
 name = "regression"
 path = "tests/regression.rs"
-required-features = ["internal-eval-runner"]
+required-features = ["skill-learning"]
+
+[[test]]
+name = "draft_proposals"
+path = "tests/draft_proposals.rs"
+required-features = ["skill-learning"]

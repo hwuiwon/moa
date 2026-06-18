@@ -7,6 +7,7 @@ mod authz;
 mod context;
 mod database;
 mod env_overlay;
+mod learning;
 mod lineage;
 mod loader;
 mod memory;
@@ -32,6 +33,7 @@ pub use context::{
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
 pub use env_overlay::MoaEnvOverlay;
+pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
 pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
@@ -111,6 +113,8 @@ pub struct MoaConfig {
     pub query_rewrite: QueryRewriteConfig,
     /// Automated task-segment assessment controls.
     pub resolution: ResolutionConfig,
+    /// Automated learning-loop controls.
+    pub learning: LearningConfig,
     /// Incremental context snapshot settings.
     pub context_snapshot: ContextSnapshotConfig,
     /// External MCP server connections.
@@ -184,6 +188,7 @@ mod tests {
         "MOA_MEMORY_EXTRACTION_MODEL",
         "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
         "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
+        "MOA_LEARNING_SKILLS_MIN_TOOL_CALLS",
         "MOA_ORCHESTRATOR_ENDPOINT",
     ];
 
@@ -303,5 +308,27 @@ mod tests {
         assert_eq!(config.memory.extraction.model, "command-test");
         assert_eq!(config.memory.extraction.max_facts_per_chunk, 5);
         assert_eq!(config.memory.extraction.timeout_ms, 2500);
+    }
+
+    #[test]
+    fn skill_learning_defaults_to_threshold_without_runtime_gate() {
+        // Pins: compiled skill learning has no runtime enable flag; only evidence thresholds tune it.
+        let config = MoaConfig::default();
+
+        assert_eq!(config.learning.skills.min_tool_calls, 5);
+    }
+
+    #[test]
+    fn env_only_loads_skill_learning_config() {
+        // Pins: post-turn skill learning uses flat MOA env names.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        unsafe {
+            std::env::set_var("MOA_LEARNING_SKILLS_MIN_TOOL_CALLS", "7");
+        }
+
+        let config = MoaConfig::load_from_env().expect("load config from env");
+
+        assert_eq!(config.learning.skills.min_tool_calls, 7);
     }
 }

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_core::{
     AttributionEffect, AttributionSubjectType, CompletionRequest, Event, EventRecord,
-    ExperienceAttribution, ExperienceRecord, LearningCandidateStatus, MoaConfig, ModelTask, Result,
-    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
+    ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -18,11 +18,13 @@ use crate::format::{
 use crate::improver::{
     ImprovementResult, format_events_for_learning, normalize_llm_markdown, record_successful_use,
 };
-use crate::registry::{NewSkill, SkillRegistry};
-use crate::regression::generate_skill_test_suite;
+use crate::package::SkillPackage;
+use crate::proposals::{
+    SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
+};
+use crate::registry::SkillRegistry;
+use crate::regression::generate_skill_test_suite_source;
 
-/// Minimum number of tool calls required before a successful session can become a skill.
-pub const MIN_TOOL_CALLS_FOR_DISTILLATION: usize = 5;
 /// Similarity score at or above which distillation routes to existing-skill improvement.
 pub const SIMILARITY_THRESHOLD: f32 = 0.5;
 
@@ -35,22 +37,24 @@ pub enum DistillationSkipReason {
     Failure,
     /// The assessed segment outcome is not learnable enough to seed a reusable skill.
     UnlearnableOutcome,
+    /// No learning store was available to persist a reviewable draft proposal.
+    LearningStoreUnavailable,
 }
 
 /// Typed outcome of one skill-distillation attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DistillationOutcome {
-    /// A new skill was proposed and persisted when a learning store was available.
+    /// A new skill draft proposal was persisted for review.
     NewSkillProposed {
-        /// Metadata for the proposed skill.
-        skill: SkillMetadata,
+        /// Stored draft proposal.
+        proposal: SkillDraftProposal,
     },
     /// The session was routed to improvement of a similar existing skill.
     ImprovementProposed {
         /// Existing skill selected by similarity routing.
         existing_skill_id: String,
-        /// Metadata for the improved skill when an update was accepted.
-        skill: Option<SkillMetadata>,
+        /// Stored draft proposal when the improver generated a change.
+        proposal: Option<SkillDraftProposal>,
     },
     /// Distillation was intentionally skipped.
     Skipped {
@@ -92,8 +96,10 @@ pub async fn maybe_distill_skill_with_learning(
 ) -> Result<Option<SkillMetadata>> {
     match distill_skill_with_learning(config, session, events, model_router, learning_store).await?
     {
-        DistillationOutcome::NewSkillProposed { skill } => Ok(Some(skill)),
-        DistillationOutcome::ImprovementProposed { skill, .. } => Ok(skill),
+        DistillationOutcome::NewSkillProposed { proposal } => Ok(Some(proposal.metadata)),
+        DistillationOutcome::ImprovementProposed { proposal, .. } => {
+            Ok(proposal.map(|proposal| proposal.metadata))
+        }
         DistillationOutcome::Skipped { .. } => Ok(None),
     }
 }
@@ -106,7 +112,7 @@ pub async fn distill_skill_with_learning(
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<DistillationOutcome> {
-    if count_tool_calls(events) < MIN_TOOL_CALLS_FOR_DISTILLATION {
+    if count_tool_calls(events) < config.learning.skills.min_tool_calls {
         return Ok(DistillationOutcome::Skipped {
             reason: DistillationSkipReason::BelowThreshold,
         });
@@ -116,15 +122,16 @@ pub async fn distill_skill_with_learning(
             reason: DistillationSkipReason::Failure,
         });
     }
+    let Some(store) = learning_store.clone() else {
+        return Ok(DistillationOutcome::Skipped {
+            reason: DistillationSkipReason::LearningStoreUnavailable,
+        });
+    };
 
     let task_summary = extract_task_summary(events);
-    let existing_skills = if let Some(store) = &learning_store {
-        SkillRegistry::new(store.pool().clone())
-            .list_for_pipeline(&session.workspace_id)
-            .await?
-    } else {
-        Vec::new()
-    };
+    let existing_skills = SkillRegistry::new(store.pool().clone())
+        .list_for_pipeline(&session.workspace_id)
+        .await?;
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
         let existing_skill_id = existing.name.clone();
@@ -139,8 +146,8 @@ pub async fn distill_skill_with_learning(
         .await;
         return result.map(|result| DistillationOutcome::ImprovementProposed {
             existing_skill_id,
-            skill: match result {
-                ImprovementResult::Improved { metadata, .. } => Some(metadata),
+            proposal: match result {
+                ImprovementResult::Improved { proposal, .. } => Some(proposal),
                 ImprovementResult::Unchanged { .. }
                 | ImprovementResult::Rejected { .. }
                 | ImprovementResult::Skipped => None,
@@ -160,35 +167,20 @@ pub async fn distill_skill_with_learning(
     normalize_new_skill(session, &mut skill);
     let path = build_skill_path(&skill.frontmatter.name);
     let markdown = render_skill_for_registry(&skill)?;
-    let scope = moa_core::MemoryScope::Workspace {
-        workspace_id: session.workspace_id.clone(),
-    };
-    generate_skill_test_suite(config, session, &skill, events).await?;
-
-    if let Some(store) = learning_store {
-        let registry = SkillRegistry::new(store.pool().clone());
-        registry
-            .upsert_by_name(NewSkill::from_skill_markdown(
-                scope.clone(),
-                markdown.clone(),
-            ))
-            .await?;
-        append_skill_learning(
-            store.as_ref(),
-            session,
-            "skill_created",
-            &skill_metadata_from_document(path.clone(), &skill),
-            serde_json::json!({
-                "path": path.clone(),
-                "name": skill.frontmatter.name.clone(),
-                "description": skill.frontmatter.description.clone(),
-            }),
-        )
-        .await?;
-    }
-
     let metadata = skill_metadata_from_document(path, &skill);
-    Ok(DistillationOutcome::NewSkillProposed { skill: metadata })
+    let package = SkillPackage::from_skill_markdown(markdown).validate()?;
+    let generated_suite = generate_skill_test_suite_source(&session.workspace_id, &skill, events)?;
+    let proposal = store_skill_draft_proposal(
+        store.as_ref(),
+        session,
+        &package,
+        metadata,
+        SkillProposalOperation::Created,
+        SkillProposalSource::session_only(),
+        generated_suite,
+    )
+    .await?;
+    Ok(DistillationOutcome::NewSkillProposed { proposal })
 }
 
 /// Distills an assessed experience into a skill candidate and promotes it when gates pass.
@@ -204,36 +196,44 @@ pub async fn distill_skill_from_experience_with_learning(
             reason: DistillationSkipReason::UnlearnableOutcome,
         });
     }
-    if count_tool_calls(&input.events) < MIN_TOOL_CALLS_FOR_DISTILLATION {
+    if count_tool_calls(&input.events) < config.learning.skills.min_tool_calls {
         return Ok(DistillationOutcome::Skipped {
             reason: DistillationSkipReason::BelowThreshold,
         });
     }
+    let Some(store) = learning_store.clone() else {
+        return Ok(DistillationOutcome::Skipped {
+            reason: DistillationSkipReason::LearningStoreUnavailable,
+        });
+    };
 
     let task_summary = experience_similarity_text(&input.experience);
-    let existing_skills = if let Some(store) = &learning_store {
-        SkillRegistry::new(store.pool().clone())
-            .list_for_pipeline(&session.workspace_id)
-            .await?
-    } else {
-        Vec::new()
+    let existing_skills = SkillRegistry::new(store.pool().clone())
+        .list_for_pipeline(&session.workspace_id)
+        .await?;
+    let source = SkillProposalSource {
+        source_experience_ids: vec![input.experience.id],
+        task_fingerprint: Some(input.experience.task_fingerprint.clone()),
+        task_facets: Some(input.experience.task_facets.clone()),
+        confidence: Some(input.experience.confidence),
     };
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
         let existing_skill_id = existing.name.clone();
-        let result = crate::improver::improve_skill_with_learning(
+        let result = crate::improver::improve_skill_with_learning_for_sources(
             config,
             session,
             existing,
             &input.events,
             model_router,
             learning_store,
+            source,
         )
         .await;
         return result.map(|result| DistillationOutcome::ImprovementProposed {
             existing_skill_id,
-            skill: match result {
-                ImprovementResult::Improved { metadata, .. } => Some(metadata),
+            proposal: match result {
+                ImprovementResult::Improved { proposal, .. } => Some(proposal),
                 ImprovementResult::Unchanged { .. }
                 | ImprovementResult::Rejected { .. }
                 | ImprovementResult::Skipped => None,
@@ -254,117 +254,25 @@ pub async fn distill_skill_from_experience_with_learning(
     let path = build_skill_path(&skill.frontmatter.name);
     let markdown = render_skill_for_registry(&skill)?;
     let metadata = skill_metadata_from_document(path.clone(), &skill);
-    let scope = moa_core::MemoryScope::Workspace {
-        workspace_id: session.workspace_id.clone(),
-    };
+    let package = SkillPackage::from_skill_markdown(markdown).validate()?;
+    let generated_suite =
+        generate_skill_test_suite_source(&session.workspace_id, &skill, &input.events)?;
+    let proposal = store_skill_draft_proposal(
+        store.as_ref(),
+        session,
+        &package,
+        metadata,
+        SkillProposalOperation::Created,
+        source,
+        generated_suite,
+    )
+    .await?;
 
-    if let Some(store) = learning_store {
-        let now = Utc::now();
-        let candidate = crate::candidates::skill_creation_candidate(
-            session,
-            &input.experience,
-            &metadata,
-            &markdown,
-            now,
-        );
-        store.append_learning_candidate(&candidate).await?;
-        store
-            .update_learning_candidate_status(&crate::candidates::candidate_status_update(
-                candidate.id,
-                LearningCandidateStatus::Evaluating,
-                "generated skill markdown; running generation gates",
-                None,
-                Utc::now(),
-            ))
-            .await?;
-        generate_skill_test_suite(config, session, &skill, &input.events).await?;
-        let registry = SkillRegistry::new(store.pool().clone());
-        registry
-            .upsert_by_name(NewSkill::from_skill_markdown(
-                scope.clone(),
-                markdown.clone(),
-            ))
-            .await?;
-        store
-            .update_learning_candidate_status(&crate::candidates::candidate_status_update(
-                candidate.id,
-                LearningCandidateStatus::Promoted,
-                "skill package promoted after generation gates",
-                Some(serde_json::json!({
-                    "skill_name": metadata.name,
-                    "source_experience_ids": candidate.source_experience_ids,
-                })),
-                Utc::now(),
-            ))
-            .await?;
-        append_skill_learning_with_sources(
-            store.as_ref(),
-            session,
-            "skill_created",
-            &metadata,
-            serde_json::json!({
-                "path": path.clone(),
-                "name": skill.frontmatter.name.clone(),
-                "description": skill.frontmatter.description.clone(),
-                "candidate_id": candidate.id,
-                "source_experience_ids": candidate.source_experience_ids,
-                "task_fingerprint": input.experience.task_fingerprint.hash,
-            }),
-            vec![session.id.0, input.experience.id],
-        )
-        .await?;
-    }
-
-    Ok(DistillationOutcome::NewSkillProposed { skill: metadata })
+    Ok(DistillationOutcome::NewSkillProposed { proposal })
 }
 
 fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
     crate::format::render_skill_markdown(skill)
-}
-
-pub(crate) async fn append_skill_learning(
-    store: &PostgresSessionStore,
-    session: &SessionMeta,
-    learning_type: &str,
-    skill: &SkillMetadata,
-    payload: serde_json::Value,
-) -> Result<()> {
-    append_skill_learning_with_sources(
-        store,
-        session,
-        learning_type,
-        skill,
-        payload,
-        vec![session.id.0],
-    )
-    .await
-}
-
-pub(crate) async fn append_skill_learning_with_sources(
-    store: &PostgresSessionStore,
-    session: &SessionMeta,
-    learning_type: &str,
-    skill: &SkillMetadata,
-    payload: serde_json::Value,
-    source_refs: Vec<uuid::Uuid>,
-) -> Result<()> {
-    store
-        .append_learning(&moa_core::LearningEntry {
-            id: uuid::Uuid::now_v7(),
-            tenant_id: session.workspace_id.to_string(),
-            learning_type: learning_type.to_string(),
-            target_id: skill.path.to_string(),
-            target_label: Some(skill.name.clone()),
-            payload,
-            confidence: Some(1.0),
-            source_refs,
-            actor: format!("brain:{}", session.id),
-            valid_from: Utc::now(),
-            valid_to: None,
-            batch_id: None,
-            version: 1,
-        })
-        .await
 }
 
 fn count_tool_calls(events: &[EventRecord]) -> usize {
@@ -629,7 +537,10 @@ mod tests {
                 strength: 0.8,
                 summary: "focused verification passed".to_string(),
             }],
-            tools_used: vec!["bash".to_string(); MIN_TOOL_CALLS_FOR_DISTILLATION],
+            tools_used: vec![
+                "bash".to_string();
+                MoaConfig::default().learning.skills.min_tool_calls
+            ],
             skills_activated: Vec::new(),
             turn_count: 2,
             token_cost: 10,

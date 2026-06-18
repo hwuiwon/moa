@@ -748,6 +748,27 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
+            "/v1/learning-candidates/get" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LearningReview/get".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/learning-candidates/accept-skill" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LearningReview/accept_skill".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/learning-candidates/reject" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/LearningReview/reject".to_string(),
+                    body: body.to_vec(),
+                };
+            }
             "/v1/workflows/run" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
@@ -1474,6 +1495,50 @@ mod tests {
         for (public_path, internal_path) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
             let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+
+            let translation = translate_public_route(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    assert_eq!(
+                        forwarded_body,
+                        body.as_ref(),
+                        "{public_path} body should pass through unchanged"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn learning_candidate_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted learning-review edge routes forward to the internal LearningReview service paths.
+        let cases = [
+            ("/v1/learning-candidates/get", "/LearningReview/get"),
+            (
+                "/v1/learning-candidates/accept-skill",
+                "/LearningReview/accept_skill",
+            ),
+            ("/v1/learning-candidates/reject", "/LearningReview/reject"),
+        ];
+
+        for (public_path, internal_path) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let body = Bytes::from_static(
+                br#"{"workspace_id":"workspace-a","candidate_id":"11111111-1111-1111-1111-111111111111"}"#,
+            );
 
             let translation = translate_public_route(&Method::POST, &uri, &body);
 

@@ -330,11 +330,25 @@ impl ArtifactRegistry {
         scope: &MemoryScope,
         draft: NewArtifactDraft<'_>,
     ) -> Result<StoredArtifactRevision> {
+        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let stored = Self::create_draft_in_tx(conn.as_mut(), scope, draft).await?;
+        conn.commit().await?;
+        Ok(stored)
+    }
+
+    /// Creates a new draft revision using the caller's open transaction.
+    ///
+    /// The caller owns commit or rollback and should apply matching MOA scope GUCs before calling
+    /// this method when row-level security is relevant.
+    pub async fn create_draft_in_tx(
+        conn: &mut PgConnection,
+        scope: &MemoryScope,
+        draft: NewArtifactDraft<'_>,
+    ) -> Result<StoredArtifactRevision> {
         validate_source_format(draft.source_format)?;
         let parts = ArtifactScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
-        let artifact_uid = ensure_artifact(conn.as_mut(), &parts, draft.document).await?;
-        let version = next_revision_version(conn.as_mut(), artifact_uid).await?;
+        let artifact_uid = ensure_artifact(conn, &parts, draft.document).await?;
+        let version = next_revision_version(conn, artifact_uid).await?;
         let revision_uid = Uuid::now_v7();
         let definition = serde_json::to_value(draft.document)
             .map_err(|error| MoaError::SerializationError(error.to_string()))?;
@@ -365,7 +379,7 @@ impl ArtifactRegistry {
         .bind(draft.source_text)
         .bind(validation_report)
         .bind(version)
-        .execute(conn.as_mut())
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
@@ -374,21 +388,12 @@ impl ArtifactRegistry {
         )
         .bind(revision_uid)
         .bind(artifact_uid)
-        .execute(conn.as_mut())
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
-        insert_files(
-            conn.as_mut(),
-            &parts,
-            artifact_uid,
-            revision_uid,
-            draft.files,
-        )
-        .await?;
-        let stored = load_revision_by_uid(conn.as_mut(), revision_uid).await?;
-        conn.commit().await?;
-        Ok(stored)
+        insert_files(conn, &parts, artifact_uid, revision_uid, draft.files).await?;
+        load_revision_by_uid(conn, revision_uid).await
     }
 
     /// Marks a draft revision as published and supersedes older published revisions.

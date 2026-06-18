@@ -132,6 +132,7 @@ mod tests {
             (LearningCandidateType::Policy, "policy"),
             (LearningCandidateType::Eval, "eval"),
             (LearningCandidateType::Prompt, "prompt"),
+            (LearningCandidateType::Workflow, "workflow"),
         ];
         for (value, label) in candidate_types {
             assert_eq!(value.as_str(), label);

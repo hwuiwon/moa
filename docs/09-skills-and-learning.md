@@ -87,41 +87,72 @@ tenant-level rate when no similar task evidence exists.
 ## Distillation And Improvement
 
 Skill package import, export, rendering, and turn-time injection are production
-surfaces. Automatic skill distillation and improvement are internal learning
-surfaces compiled only with the `moa-skills/skill-learning` feature, and eval
-backed regression execution additionally requires `internal-eval-runner`.
+surfaces. Automatic skill distillation and improvement are learning surfaces
+compiled with the `moa-skills/skill-learning` feature. When compiled, they run by
+default after qualifying experience persistence and create draft proposals only.
+Eval-backed regression execution is owned by
+`moa-orchestrator` and additionally requires `internal-eval-runner`; `moa-skills`
+only generates reviewable regression suite source.
 
-When enabled, skill distillation runs after successful multi-step work. The
-current learning flow creates or improves workspace-scoped skills;
+Skill distillation runs after successful multi-step work that passes the
+configured evidence threshold. The current learning flow proposes
+workspace-scoped skill changes;
 deployment-wide global skills are operator imported, and user-scoped skills are
-imported explicitly. Current flow:
+imported explicitly. Current generation flow:
 
 1. Count tool calls; short/simple sessions are skipped.
 2. Extract a task summary from recent user input.
 3. Compare against existing workspace-scoped skills.
 4. If a similar skill exists, attempt improvement.
 5. Otherwise ask the configured model to produce a complete skill document.
-6. Write the skill package into the workspace skill scope.
-7. Generate a regression test suite for the skill.
-8. Append a `skill_created` learning entry when a learning store is present.
+6. Validate the generated package and store it as a workspace-scoped
+   `ArtifactKind::Skill` draft revision.
+7. Generate reviewable regression suite TOML and store it in the candidate
+   payload without writing or running the suite.
+8. Append one `LearningCandidateType::Skill` row with status `Proposed`,
+   source experience IDs, operation, draft artifact revision ID, and review
+   evidence.
 
-Skill improvement writes an updated `SKILL.md`, preserves supporting package
-files from the previous revision, and appends `skill_improved`.
+Skill improvement builds an updated `SKILL.md`, preserves supporting package
+files from the previous revision, and stores the result as a draft artifact.
+It does not write `moa.skill`, publish the artifact, or append
+`skill_improved` during generation.
+
+Current review flow:
+
+1. A workspace editor loads the full candidate through `LearningReview/get`.
+2. `LearningReview/accept_skill` validates that the candidate is a proposed
+   skill candidate and that the referenced draft artifact is publishable.
+3. Review-time regression evidence is attached to the candidate
+   `evaluation_payload`. When `internal-eval-runner` is disabled, this records
+   `"regression_execution": "unavailable"` while still requiring human review
+   and artifact validation.
+4. Accept publishes the existing draft artifact revision.
+5. Accept materializes that published revision into active `moa.skill` and
+   `moa.skill_file` rows.
+6. Accept marks the candidate `Promoted` and appends `skill_created` or
+   `skill_improved` to `learning_log`.
+7. `LearningReview/reject` marks the candidate `Rejected`, preserves draft
+   artifacts for audit, and never mutates active skill rows.
 
 The experience-native path uses `ExperienceRecord` as the learning unit. It
 requires a resolved outcome, or a high-confidence partial outcome with helpful
-verification attribution. It creates a `learning_candidates` row before mutating
-a skill package, moves the candidate through `proposed -> evaluating ->
+verification attribution. It creates a `learning_candidates` row before any
+active skill package mutation, moves the candidate through `proposed ->
 promoted` or `rejected`, and records the candidate ID plus source experience IDs
 in the learning log when promotion succeeds.
 
-Live behavior experiments use the same review boundary for any derived
-skill or workflow improvement. An experiment run may provide evidence through
-its linked session, workflow run, artifact revisions, and `analytics.score_run`,
-but the experiment path itself does not auto-create or auto-promote skills or
-workflows. Any future experiment-derived improvement writer must first append a
-`learning_candidates` proposal with the experiment evidence attached, then rely
-on explicit evaluation and human or operator review before promotion.
+Live behavior experiments use the same review boundary for any derived workflow
+or skill improvement. Experiment-derived workflow proposals capture recurring
+escalations, shared failure modes, and workflow-shape changes as
+`LearningCandidateType::Workflow`; skill proposals capture reusable handling
+instructions and optimized execution patterns as `LearningCandidateType::Skill`.
+An experiment run may provide evidence through its linked session, workflow run,
+artifact revisions, and `analytics.score_run`, but the experiment path itself
+does not auto-promote skills or workflows. Any experiment-derived improvement
+writer must first append a `learning_candidates` proposal with the experiment
+evidence attached, then rely on explicit evaluation and human or operator review
+before promotion.
 
 ## Unified Learning Pipeline
 
@@ -164,6 +195,7 @@ Current learning types include:
 
 - `skill_created`
 - `skill_improved`
+- `workflow_improved`
 - `memory_updated`
 - `segment_assessed`
 

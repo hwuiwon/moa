@@ -658,6 +658,14 @@ impl SessionStore for PostgresSessionStore {
         PostgresSessionStore::append_learning_candidate(self, candidate).await
     }
 
+    async fn get_learning_candidate(
+        &self,
+        workspace_id: &WorkspaceId,
+        candidate_id: Uuid,
+    ) -> Result<Option<LearningCandidate>> {
+        PostgresSessionStore::get_learning_candidate(self, workspace_id, candidate_id).await
+    }
+
     async fn list_learning_candidates(
         &self,
         tenant_id: &str,

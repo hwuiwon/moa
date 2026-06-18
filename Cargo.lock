@@ -4053,7 +4053,6 @@ dependencies = [
  "hex",
  "moa-artifacts",
  "moa-core",
- "moa-eval",
  "moa-eval-core",
  "moa-memory-graph",
  "moa-providers",

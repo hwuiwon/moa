@@ -2,13 +2,18 @@
 
 mod support;
 
-use moa_core::{Result, WorkspaceId};
-use moa_skills::package::{SkillPackage, SkillPackageFile};
+use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
+use moa_artifacts::validation::validate_for_status;
+use moa_core::{MoaError, Result, WorkspaceId};
+use moa_skills::artifact::skill_artifact_document_from_package;
+use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage};
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use uuid::Uuid;
 
 use support::skill_graph::{
-    DISTILLED_SKILL, GRAPH_TEST_LOCK, IMPROVED_SKILL, purge_test_skill_name, workspace_scope,
+    DISTILLED_SKILL, GRAPH_TEST_LOCK, IMPROVED_SKILL, map_sqlx_error, purge_test_skill_name,
+    workspace_scope,
 };
 
 #[tokio::test]
@@ -86,6 +91,89 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     assert_eq!(skills[0].skill_uid, third_uid);
     assert_eq!(skills[0].version, 2);
     assert_eq!(skills[0].previous_skill_uid, Some(first_uid));
+    let artifact_registry = ArtifactRegistry::new(store.pool().clone());
+    let published = artifact_registry
+        .load_visible_published(
+            &workspace_scope(&workspace_name),
+            ArtifactKind::Skill,
+            "debug-oauth-refresh",
+        )
+        .await?
+        .expect("direct skill import writes a published artifact");
+    assert_eq!(published.status, ArtifactStatus::Published);
+    assert_eq!(published.version, 2);
+    assert_eq!(
+        skill_artifact_revision_count(&store, &workspace_name, "debug-oauth-refresh").await?,
+        2
+    );
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn registry_materializes_published_skill_artifact_without_duplicate_revision() -> Result<()> {
+    // Pins: review acceptance can publish a skill artifact and materialize it without re-publishing.
+    let _guard = GRAPH_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let workspace_name = format!("workspace-artifact-materialize-{}", Uuid::now_v7());
+    let scope = workspace_scope(&workspace_name);
+    let skill_registry = SkillRegistry::new(store.pool().clone());
+    let artifact_registry = ArtifactRegistry::new(store.pool().clone());
+    let package = SkillPackage::from_skill_markdown(DISTILLED_SKILL.to_string()).validate()?;
+    let document = skill_artifact_document_from_package(&package, ArtifactStatus::Draft)?;
+    let source = document
+        .to_yaml()
+        .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+    let artifact_files = artifact_files_from_package(&package);
+    let draft = artifact_registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "yaml",
+                source_text: source.as_bytes(),
+                files: &artifact_files,
+            },
+        )
+        .await?;
+    let published = artifact_registry
+        .publish_revision(
+            &scope,
+            draft.revision_uid,
+            &validate_for_status(&document, ArtifactStatus::Published),
+        )
+        .await?;
+
+    let published_files = artifact_registry
+        .load_files(&scope, published.revision_uid)
+        .await?;
+    let first_uid = skill_registry
+        .materialize_published_artifact_revision(&scope, &published, published_files.clone())
+        .await?;
+    let second_uid = skill_registry
+        .materialize_published_artifact_revision(&scope, &published, published_files)
+        .await?;
+    let package = skill_registry
+        .load_package_by_name(&scope, "debug-oauth-refresh")
+        .await?
+        .expect("materialized skill package exists");
+
+    assert_eq!(first_uid, second_uid);
+    assert_eq!(package.skill.skill_uid, first_uid);
+    assert_eq!(package.skill.version, 1);
+    assert_eq!(package.files.len(), 2);
+    assert!(
+        package
+            .files
+            .iter()
+            .any(|file| file.path == "SKILL.md" && !file.executable)
+    );
+    assert_eq!(
+        skill_artifact_revision_count(&store, &workspace_name, "debug-oauth-refresh").await?,
+        1,
+        "materialization must not insert another published artifact revision"
+    );
 
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
 }
@@ -161,4 +249,35 @@ fn package_with_script(script: Vec<u8>) -> SkillPackage {
         SkillPackageFile::new("SKILL.md", DISTILLED_SKILL.as_bytes().to_vec())
             .with_content_type("text/markdown; charset=utf-8"),
     ])
+}
+
+fn artifact_files_from_package(package: &ValidatedSkillPackage) -> Vec<NewArtifactFile> {
+    package
+        .files
+        .iter()
+        .map(|file| NewArtifactFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+            content_type: file.content_type.clone(),
+            executable: file.executable,
+        })
+        .collect()
+}
+
+async fn skill_artifact_revision_count(
+    store: &moa_session::PostgresSessionStore,
+    workspace_id: &str,
+    skill_name: &str,
+) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT count(*) \
+         FROM moa.artifact a \
+         JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid \
+         WHERE a.workspace_id = $1 AND a.kind = 'skill' AND a.name = $2",
+    )
+    .bind(workspace_id)
+    .bind(skill_name)
+    .fetch_one(store.pool())
+    .await
+    .map_err(map_sqlx_error)
 }

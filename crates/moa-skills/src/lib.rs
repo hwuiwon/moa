@@ -12,6 +12,8 @@ pub mod format;
 pub mod improver;
 pub mod lessons;
 pub mod package;
+#[cfg(feature = "skill-learning")]
+pub mod proposals;
 pub mod registry;
 #[cfg(feature = "skill-learning")]
 pub mod regression;

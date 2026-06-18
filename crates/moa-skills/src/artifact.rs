@@ -4,6 +4,7 @@ use moa_artifacts::document::{
     ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactMetadata, ArtifactStatus,
     ArtifactUi,
 };
+use moa_artifacts::registry::{ArtifactFile, NewArtifactFile, StoredArtifactRevision};
 use moa_artifacts::skill::{SkillDefinition, SkillInstructionSource};
 use moa_core::{MoaError, Result};
 use serde_json::Value;
@@ -69,6 +70,67 @@ pub fn skill_definition_to_package(
             .with_content_type("application/yaml; charset=utf-8"),
     );
     Ok(SkillPackage::new(output))
+}
+
+/// Builds a skill package from a published canonical skill artifact revision and its files.
+pub fn skill_package_from_artifact_revision(
+    revision: &StoredArtifactRevision,
+    files: Vec<ArtifactFile>,
+) -> Result<SkillPackage> {
+    if revision.kind != ArtifactKind::Skill {
+        return Err(MoaError::ValidationError(format!(
+            "artifact revision {} is not a skill artifact",
+            revision.revision_uid
+        )));
+    }
+    if revision.status != ArtifactStatus::Published {
+        return Err(MoaError::ValidationError(format!(
+            "artifact revision {} must be published before skill materialization",
+            revision.revision_uid
+        )));
+    }
+    let ArtifactDefinition::Skill(definition) = &revision.document.definition else {
+        return Err(MoaError::ValidationError(format!(
+            "artifact revision {} does not contain a skill definition",
+            revision.revision_uid
+        )));
+    };
+    let package_files = files
+        .into_iter()
+        .map(|file| SkillPackageFile {
+            path: file.path,
+            content: file.content,
+            content_type: file.content_type,
+            executable: file.executable,
+        })
+        .collect();
+    skill_definition_to_package(definition, package_files)
+}
+
+pub(crate) fn artifact_file_from_skill_file(file: &ValidatedSkillPackageFile) -> NewArtifactFile {
+    NewArtifactFile {
+        path: file.path.clone(),
+        content: file.content.clone(),
+        content_type: file.content_type.clone(),
+        executable: file.executable,
+    }
+}
+
+pub(crate) fn skill_artifact_source_text(
+    package: &ValidatedSkillPackage,
+    document: &ArtifactDocument,
+) -> Result<Vec<u8>> {
+    if let Some(file) = package
+        .files
+        .iter()
+        .find(|file| file.path == SKILL_ARTIFACT_PATH)
+    {
+        return Ok(file.content.clone());
+    }
+    document
+        .to_yaml()
+        .map(String::into_bytes)
+        .map_err(|error| MoaError::SerializationError(error.to_string()))
 }
 
 pub(crate) fn skill_definition_from_parts(

@@ -31,8 +31,8 @@ Bound surfaces:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Service | `Agents`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
-| Workflow | `Consolidate`, `EvalRun`, `TurnExecution`, `SubAgentTurnExecution` |
+| Service | `Agents`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+| Workflow | `Consolidate`, `EvalRun`, `SkillLearning`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Restate state is used for hot orchestration state: queued messages, status, pending approvals, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
 
@@ -72,8 +72,9 @@ turn loop.
 7. Apply turn outcome and update session status.
 8. Assess idle, cancelled, or completed segments and append `learning_log` entries.
 9. Derive experience records, attributions, and proposed learning candidates after assessment persistence.
+10. When skill learning is compiled, dispatch a detached `SkillLearning` workflow after experience persistence succeeds.
 
-The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for human approvals and sub-agent result waits, not for turn cancellation.
+The turn loop is durable because external calls and side effects are wrapped through Restate handlers or `ctx.run()` boundaries. Cancellation is delivered through a workflow promise; the workflow checks it at deterministic boundaries and races it against the in-flight LLM call. Awakeables are used for human approvals and sub-agent result waits, not for turn cancellation. Skill-learning proposal generation is intentionally detached: turn completion does not wait for a draft skill proposal, and generation failures are recorded as warning events rather than turn failures.
 
 ### Lineage Sink Selection
 
@@ -185,7 +186,7 @@ The local compose stack still uses:
 - graph memory store, ingestion, and hybrid retrieval stack
 - the same context pipeline
 - the same tool router and permission store
-- the same skill distillation and learning-log paths when a learning store is present
+- the same draft skill proposal and review paths when skill learning is compiled
 
 Scheduling and recovery are Restate-managed in both local development and cloud
 deployments.
@@ -200,7 +201,9 @@ The orchestrator is responsible for connecting task work to learning:
 - Experience extraction writes immutable `experience_records` from assessed segments.
 - Attribution writes `experience_attributions` for skills, tools, memory, policy, and verification evidence.
 - Candidate generation writes proposed `learning_candidates`; automatic promotion is gated by explicit status transitions.
+- `SkillLearning` writes only draft skill artifacts and proposed skill candidates.
+- `LearningReview` is the only runtime service that publishes accepted skill drafts, materializes active `moa.skill` rows, appends `skill_created` or `skill_improved`, and marks the candidate promoted.
 - Memory consolidation writes `memory_updated`.
-- Skill distillation and improvement write `skill_created` and `skill_improved`.
+- Rejected skill candidates preserve draft artifacts for audit and never update active skills.
 
 This makes the learning pipeline event-sourced enough to audit and rollback without hiding updates inside model prompts.

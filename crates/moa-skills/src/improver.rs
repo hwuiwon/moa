@@ -1,42 +1,35 @@
-//! Existing-skill self-improvement logic.
+//! Existing-skill self-improvement draft generation.
 
 use std::sync::Arc;
-#[cfg(feature = "internal-eval-runner")]
-use std::sync::OnceLock;
 
 use chrono::Utc;
-#[cfg(feature = "internal-eval-runner")]
 use moa_core::{
-    CompletionRequest, LearningCandidate, LearningCandidateStatus, LearningCandidateType,
-    LearningRiskClass, MemoryScope, ModelTask,
+    CompletionRequest, Event, EventRecord, MemoryScope, MoaConfig, ModelTask, Result, SessionMeta,
+    SkillMetadata,
 };
-use moa_core::{Event, EventRecord, MoaConfig, Result, SessionMeta, SkillMetadata};
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
 
-use crate::format::SkillDocument;
-#[cfg(feature = "internal-eval-runner")]
-use crate::format::{parse_skill_markdown, render_skill_markdown, skill_metadata_from_document};
-#[cfg(feature = "internal-eval-runner")]
+use crate::format::{
+    SkillDocument, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
+};
 use crate::package::{SKILL_MD_PATH, SkillPackage, SkillPackageFile, ValidatedSkillPackageFile};
-#[cfg(feature = "internal-eval-runner")]
-use crate::registry::{NewSkill, SkillRegistry};
-#[cfg(feature = "internal-eval-runner")]
-use crate::regression::{append_skill_regression_log, run_skill_regression};
-
-#[cfg(feature = "internal-eval-runner")]
-static IMPROVEMENT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+use crate::proposals::{
+    SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
+};
+use crate::registry::SkillRegistry;
+use crate::regression::generate_skill_test_suite_source;
 
 /// Outcome of one attempted existing-skill improvement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImprovementResult {
-    /// The candidate was accepted and became the active skill version.
+    /// The candidate was stored as a reviewable draft and the active skill was left unchanged.
     Improved {
-        /// Metadata for the active improved version.
-        metadata: SkillMetadata,
+        /// Stored draft proposal.
+        proposal: SkillDraftProposal,
         /// Previous semantic skill version.
         previous_version: String,
-        /// Accepted semantic skill version.
+        /// Proposed semantic skill version.
         version: String,
     },
     /// The LLM concluded the current skill already covers the successful run.
@@ -44,16 +37,16 @@ pub enum ImprovementResult {
         /// Metadata for the unchanged active skill.
         metadata: SkillMetadata,
     },
-    /// The proposed candidate regressed and the previous version remains active.
+    /// The generated output was rejected before a draft was stored.
     Rejected {
-        /// Regression report explaining why the candidate was rejected.
-        report: crate::regression::SkillRegressionReport,
+        /// Human-readable rejection reason.
+        reason: String,
     },
     /// No improvement was attempted because the requested skill could not be loaded.
     Skipped,
 }
 
-/// Compares a run against an existing skill and updates it when the LLM proposes a better version.
+/// Compares a run against an existing skill and proposes an update when useful.
 pub async fn maybe_improve_skill(
     config: &MoaConfig,
     session: &SessionMeta,
@@ -73,7 +66,7 @@ pub async fn maybe_improve_skill(
     .await
 }
 
-/// Compares a run against an existing skill and records learning-log entries when provided.
+/// Compares a run against an existing skill and records a draft proposal when provided.
 pub async fn maybe_improve_skill_with_learning(
     config: &MoaConfig,
     session: &SessionMeta,
@@ -92,14 +85,14 @@ pub async fn maybe_improve_skill_with_learning(
     )
     .await?
     {
-        ImprovementResult::Improved { metadata, .. } => Ok(Some(metadata)),
+        ImprovementResult::Improved { proposal, .. } => Ok(Some(proposal.metadata)),
         ImprovementResult::Unchanged { .. }
         | ImprovementResult::Rejected { .. }
         | ImprovementResult::Skipped => Ok(None),
     }
 }
 
-/// Compares a run against an existing skill and returns a typed outcome for tests and callers.
+/// Compares a run against an existing skill and returns a typed proposal outcome.
 pub async fn improve_skill_with_learning(
     config: &MoaConfig,
     session: &SessionMeta,
@@ -108,47 +101,30 @@ pub async fn improve_skill_with_learning(
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
 ) -> Result<ImprovementResult> {
-    #[cfg(not(feature = "internal-eval-runner"))]
-    {
-        let _ = (
-            config,
-            session,
-            existing,
-            events,
-            model_router,
-            learning_store,
-        );
-        Ok(ImprovementResult::Skipped)
-    }
-
-    #[cfg(feature = "internal-eval-runner")]
-    {
-        improve_skill_with_learning_inner(
-            config,
-            session,
-            existing,
-            events,
-            model_router,
-            learning_store,
-        )
-        .await
-    }
+    improve_skill_with_learning_for_sources(
+        config,
+        session,
+        existing,
+        events,
+        model_router,
+        learning_store,
+        SkillProposalSource::session_only(),
+    )
+    .await
 }
 
-#[cfg(feature = "internal-eval-runner")]
-async fn improve_skill_with_learning_inner(
-    config: &MoaConfig,
+pub(crate) async fn improve_skill_with_learning_for_sources(
+    _config: &MoaConfig,
     session: &SessionMeta,
     existing: &SkillMetadata,
     events: &[EventRecord],
     model_router: Arc<ModelRouter>,
     learning_store: Option<Arc<PostgresSessionStore>>,
+    source: SkillProposalSource,
 ) -> Result<ImprovementResult> {
-    let Some(store) = learning_store.clone() else {
+    let Some(store) = learning_store else {
         return Ok(ImprovementResult::Skipped);
     };
-    let lock = IMPROVEMENT_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-    let _guard = lock.lock().await;
     let registry = SkillRegistry::new(store.pool().clone());
     let scope = MemoryScope::Workspace {
         workspace_id: session.workspace_id.clone(),
@@ -180,6 +156,11 @@ async fn improve_skill_with_learning_inner(
 
     let previous_version = current.frontmatter.version();
     let mut improved = parse_skill_markdown(updated_text)?;
+    if improved.frontmatter.name != current.frontmatter.name {
+        return Ok(ImprovementResult::Rejected {
+            reason: "skill improvement changed the target skill name".to_string(),
+        });
+    }
     improved
         .frontmatter
         .set_created(current.frontmatter.created());
@@ -201,134 +182,31 @@ async fn improve_skill_with_learning_inner(
 
     let candidate_markdown = render_skill_markdown(&improved)?;
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
-    let candidate = LearningCandidate {
-        id: uuid::Uuid::now_v7(),
-        tenant_id: session.workspace_id.to_string(),
-        workspace_id: session.workspace_id.clone(),
-        user_id: None,
-        candidate_type: LearningCandidateType::Skill,
-        status: LearningCandidateStatus::Proposed,
-        target_id: Some(metadata.path.clone()),
-        target_label: Some(metadata.name.clone()),
-        task_fingerprint: None,
-        task_facets: None,
-        payload: serde_json::json!({
-            "operation": "skill_improved",
-            "name": metadata.name.clone(),
-            "path": metadata.path.clone(),
-            "previous_version": previous_version.clone(),
-            "candidate_version": improved.frontmatter.version(),
-            "skill_markdown": candidate_markdown.clone(),
-            "source_session_id": session.id.to_string(),
-        }),
-        evaluation_payload: None,
-        source_experience_ids: Vec::new(),
-        confidence: Some(1.0),
-        risk_class: LearningRiskClass::Medium,
-        promotion_requirements: vec!["regression_comparison".to_string()],
-        status_reason: None,
-        batch_id: None,
-        created_at: now,
-        updated_at: now,
-    };
-    store.append_learning_candidate(&candidate).await?;
-    store
-        .update_learning_candidate_status(&crate::candidates::candidate_status_update(
-            candidate.id,
-            LearningCandidateStatus::Evaluating,
-            "candidate skill revision staged for regression",
-            None,
-            Utc::now(),
-        ))
-        .await?;
-    registry
-        .upsert_by_name(NewSkill::from_package(
-            scope.clone(),
-            package_with_replaced_skill_md(&stored_package.files, candidate_markdown.clone()),
-        ))
-        .await?;
-    let report = run_skill_regression(
-        config,
-        session,
-        existing,
-        &current_markdown,
-        &candidate_markdown,
-        llm.clone(),
-    )
-    .await?;
-    append_skill_regression_log(
+    let candidate_package =
+        package_with_replaced_skill_md(&stored_package.files, candidate_markdown).validate()?;
+    let generated_suite =
+        generate_skill_test_suite_source(&session.workspace_id, &improved, events)?;
+    let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,
-        &current.frontmatter.name,
-        &current.frontmatter.version(),
-        &improved.frontmatter.version(),
-        &report,
+        &candidate_package,
+        metadata,
+        SkillProposalOperation::Improved {
+            previous_version: previous_version.clone(),
+        },
+        source,
+        generated_suite,
     )
     .await?;
-
-    if !report.accepted() {
-        let mut restored = current.clone();
-        record_successful_use(&mut restored, now);
-        restored
-            .frontmatter
-            .set_regression_count(restored.frontmatter.regression_count().saturating_add(1));
-        let markdown = render_skill_markdown(&restored)?;
-        registry
-            .upsert_by_name(NewSkill::from_package(
-                scope,
-                package_with_replaced_skill_md(&stored_package.files, markdown),
-            ))
-            .await?;
-        store
-            .update_learning_candidate_status(&crate::candidates::candidate_status_update(
-                candidate.id,
-                LearningCandidateStatus::Rejected,
-                "skill regression rejected candidate",
-                Some(serde_json::json!({
-                    "decision": format!("{:?}", report.decision),
-                    "detail": report.detail.clone(),
-                })),
-                Utc::now(),
-            ))
-            .await?;
-        return Ok(ImprovementResult::Rejected { report });
-    }
-
     let version = improved.frontmatter.version();
-    store
-        .update_learning_candidate_status(&crate::candidates::candidate_status_update(
-            candidate.id,
-            LearningCandidateStatus::Promoted,
-            "skill regression accepted candidate",
-            Some(serde_json::json!({ "version": version.clone() })),
-            Utc::now(),
-        ))
-        .await?;
-    crate::distiller::append_skill_learning(
-        store.as_ref(),
-        session,
-        "skill_improved",
-        &metadata,
-        serde_json::json!({
-            "path": metadata.path.clone(),
-            "name": metadata.name.clone(),
-            "previous_version": previous_version,
-            "version": version,
-            "candidate_id": candidate.id,
-            "originating_session_id": session.id.to_string(),
-            "diff_summary": summarize_diff(&current_markdown, &candidate_markdown),
-        }),
-    )
-    .await?;
 
     Ok(ImprovementResult::Improved {
-        metadata,
-        previous_version: current.frontmatter.version(),
-        version: improved.frontmatter.version(),
+        proposal,
+        previous_version,
+        version,
     })
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn package_with_replaced_skill_md(
     files: &[ValidatedSkillPackageFile],
     skill_md: String,
@@ -376,7 +254,6 @@ pub(crate) fn record_successful_use(skill: &mut SkillDocument, now: chrono::Date
     skill.frontmatter.set_updated(now);
 }
 
-#[cfg(feature = "internal-eval-runner")]
 pub(crate) fn record_successful_use_with_baseline(
     next_skill: &mut SkillDocument,
     previous_skill: &SkillDocument,
@@ -396,7 +273,6 @@ pub(crate) fn record_successful_use_with_baseline(
     next_skill.frontmatter.set_updated(now);
 }
 
-#[cfg(feature = "internal-eval-runner")]
 pub(crate) fn bump_version(version: &str) -> String {
     let mut parts = Vec::new();
     for segment in version.split('.') {
@@ -420,7 +296,6 @@ pub(crate) fn bump_version(version: &str) -> String {
         .join(".")
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn bump_version_for_change(version: &str, breaking_change: bool) -> String {
     if breaking_change {
         return bump_major_version(version);
@@ -428,7 +303,6 @@ fn bump_version_for_change(version: &str, breaking_change: bool) -> String {
     bump_version(version)
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn bump_major_version(version: &str) -> String {
     let Some(major) = version.split('.').next() else {
         return "2.0".to_string();
@@ -439,7 +313,6 @@ fn bump_major_version(version: &str) -> String {
     }
 }
 
-#[cfg(feature = "internal-eval-runner")]
 fn skill_signature_changed(previous: &SkillDocument, candidate: &SkillDocument) -> bool {
     previous.frontmatter.allowed_tools != candidate.frontmatter.allowed_tools
         || previous.frontmatter.compatibility != candidate.frontmatter.compatibility
@@ -452,19 +325,6 @@ fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_use
     ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
 }
 
-#[cfg(feature = "internal-eval-runner")]
-fn summarize_diff(previous: &str, candidate: &str) -> String {
-    if previous == candidate {
-        return "unchanged".to_string();
-    }
-
-    let previous_lines = previous.lines().count();
-    let candidate_lines = candidate.lines().count();
-    let line_delta = candidate_lines as isize - previous_lines as isize;
-    format!("body changed; line_delta={line_delta}")
-}
-
-#[cfg(feature = "internal-eval-runner")]
 fn build_improvement_prompt(current_skill: &str, events: &[EventRecord]) -> String {
     format!(
         "You are improving an existing MOA Agent Skill.\n\

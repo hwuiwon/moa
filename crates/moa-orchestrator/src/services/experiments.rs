@@ -999,7 +999,7 @@ pub fn build_experiment_learning_candidate(
         tenant_id: evidence.tenant_id,
         workspace_id: evidence.workspace_id,
         user_id: None,
-        candidate_type: LearningCandidateType::Prompt,
+        candidate_type: LearningCandidateType::Workflow,
         status: LearningCandidateStatus::Proposed,
         target_id: Some(format!("experiment_run:{}", evidence.run.run_uid)),
         target_label: Some(format!("Experiment proposal for {}", evidence.run.name)),
@@ -1029,7 +1029,7 @@ fn experiment_learning_candidate_payload(
 ) -> Value {
     let run = evidence.run;
     serde_json::json!({
-        "kind": "experiment_learning_proposal",
+        "kind": "workflow_learning_proposal",
         "source": "Experiments/propose_improvements",
         "tenant_id": evidence.tenant_id,
         "workspace_id": evidence.workspace_id,
@@ -1147,8 +1147,7 @@ fn deterministic_candidate_id(
     idempotency_key: &str,
 ) -> Uuid {
     let digest = blake3::hash(
-        format!("experiment_learning_proposal:{workspace_id}:{run_uid}:{idempotency_key}")
-            .as_bytes(),
+        format!("workflow_learning_proposal:{workspace_id}:{run_uid}:{idempotency_key}").as_bytes(),
     );
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);

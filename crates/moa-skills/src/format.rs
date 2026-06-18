@@ -26,7 +26,7 @@ const META_USE_COUNT: &str = "moa-use-count";
 const META_LAST_USED: &str = "moa-last-used";
 const META_SUCCESS_RATE: &str = "moa-success-rate";
 const META_ESTIMATED_TOKENS: &str = "moa-estimated-tokens";
-#[cfg(feature = "internal-eval-runner")]
+#[cfg(feature = "skill-learning")]
 const META_IMPROVED_FROM: &str = "moa-improved-from";
 const META_REGRESSION_COUNT: &str = "moa-regression-count";
 
@@ -73,7 +73,7 @@ impl SkillFrontmatter {
             .unwrap_or_else(|| DEFAULT_VERSION.to_string())
     }
 
-    #[cfg(feature = "internal-eval-runner")]
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_version(&mut self, value: impl Into<String>) {
         self.insert_metadata(META_VERSION, value.into());
     }
@@ -95,7 +95,7 @@ impl SkillFrontmatter {
             .unwrap_or_else(Utc::now)
     }
 
-    #[cfg(feature = "internal-eval-runner")]
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_created(&mut self, value: DateTime<Utc>) {
         self.insert_metadata(META_CREATED, format_timestamp(value));
     }
@@ -168,7 +168,7 @@ impl SkillFrontmatter {
             .unwrap_or_else(|| estimate_skill_tokens(body))
     }
 
-    #[cfg(feature = "internal-eval-runner")]
+    #[cfg(feature = "skill-learning")]
     pub(crate) fn set_improved_from(&mut self, value: Option<String>) {
         self.set_optional_metadata(META_IMPROVED_FROM, value);
     }
@@ -176,11 +176,6 @@ impl SkillFrontmatter {
     /// Returns how many candidate improvements were rolled back for this skill.
     pub fn regression_count(&self) -> u32 {
         self.metadata_u32(META_REGRESSION_COUNT).unwrap_or(0)
-    }
-
-    #[cfg(feature = "internal-eval-runner")]
-    pub(crate) fn set_regression_count(&mut self, value: u32) {
-        self.insert_metadata(META_REGRESSION_COUNT, value.to_string());
     }
 
     /// Returns one raw metadata value by key.

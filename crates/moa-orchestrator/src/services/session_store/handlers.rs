@@ -449,6 +449,29 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    async fn get_learning_candidate(
+        &self,
+        ctx: Context<'_>,
+        request: Json<GetLearningCandidateRequest>,
+    ) -> Result<Json<LearningCandidate>, HandlerError> {
+        annotate_restate_handler_span("SessionStore", "get_learning_candidate");
+        let store = self.store.clone();
+        let request = request.into_inner();
+        authorize_workspace_read(&ctx, &request.workspace_id).await?;
+        let service = Self { store };
+
+        Ok(ctx
+            .run(|| async move {
+                service
+                    .get_learning_candidate_inner(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("get_learning_candidate")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     async fn list_learning_candidates(
         &self,
         ctx: Context<'_>,
@@ -571,6 +594,23 @@ async fn authorize_session_read(
         ObjectType::Session,
         session_id,
         Relation::Participant,
+    )
+    .await
+    .map_err(translate_authz_error)
+}
+
+async fn authorize_workspace_read(
+    ctx: &impl RequestHeaders,
+    workspace_id: &WorkspaceId,
+) -> Result<(), HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Workspace,
+        workspace_id,
+        Relation::Member,
     )
     .await
     .map_err(translate_authz_error)

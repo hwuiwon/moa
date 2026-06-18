@@ -7,8 +7,9 @@ mod support;
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, SESSION_WITH_5_TOOL_CALLS,
-    active_semantic_version, configured_test_db, learning_store, load_session_fixture,
-    scripted_router, seed_skill, skill_row_count, test_config, workspace_scope,
+    active_semantic_version, artifact_revision_count, configured_test_db, learning_store,
+    load_session_fixture, scripted_router, seed_skill, skill_row_count, test_config,
+    workspace_scope,
 };
 
 #[tokio::test]
@@ -44,11 +45,11 @@ async fn improver_with_changed_body_bumps_minor_version() {
     assert_eq!(version, "1.3");
     assert_eq!(
         active_semantic_version(&test_db, &scope, "auth-flow").await,
-        "1.3"
+        "1.2"
     );
     assert_eq!(
         skill_row_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
-        2
+        1
     );
 }
 
@@ -111,12 +112,12 @@ async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version()
     assert_eq!(version, "2.0");
     assert_eq!(
         active_semantic_version(&test_db, &scope, "auth-flow").await,
-        "2.0"
+        "1.2"
     );
 }
 
 #[tokio::test]
-async fn improver_concurrent_attempts_on_same_skill_serialize_with_correct_version_bumps() {
+async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
@@ -183,16 +184,20 @@ async fn improver_concurrent_attempts_on_same_skill_serialize_with_correct_versi
     }
     assert_eq!(
         active_semantic_version(&test_db, &scope, "auth-flow").await,
-        "1.7"
+        "1.2"
     );
     assert_eq!(
         skill_row_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
-        6
+        1
+    );
+    assert_eq!(
+        artifact_revision_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
+        2
     );
 }
 
 #[tokio::test]
-async fn improver_emits_lineage_event_with_diff_summary() {
+async fn improver_emits_review_candidate_with_lineage_payload() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
@@ -202,7 +207,7 @@ async fn improver_emits_lineage_event_with_diff_summary() {
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
     let store = learning_store(&test_db);
 
-    improve_skill_with_learning(
+    let result = improve_skill_with_learning(
         &config,
         &loaded.session,
         &existing,
@@ -213,26 +218,29 @@ async fn improver_emits_lineage_event_with_diff_summary() {
     .await
     .expect("improve and emit lineage");
 
-    let entries = store
-        .list_learnings(
-            loaded.session.workspace_id.as_str(),
-            Some("skill_improved"),
-            10,
-        )
+    let ImprovementResult::Improved { proposal, .. } = result else {
+        panic!("expected improvement proposal");
+    };
+    let candidate = store
+        .get_learning_candidate(&loaded.session.workspace_id, proposal.candidate_id)
         .await
-        .expect("list skill_improved learning entries");
-    assert_eq!(entries.len(), 1);
-    let payload = &entries[0].payload;
+        .expect("load improvement candidate")
+        .expect("candidate exists");
+    let payload = &candidate.payload;
     assert_eq!(payload["previous_version"], "1.2");
-    assert_eq!(payload["version"], "1.3");
-    assert_eq!(
-        payload["originating_session_id"],
-        loaded.session.id.to_string()
-    );
+    assert_eq!(payload["source_session_id"], loaded.session.id.to_string());
     assert!(
-        payload["diff_summary"]
+        payload["skill_markdown"]
             .as_str()
-            .expect("diff summary is string")
-            .contains("body changed")
+            .expect("skill markdown is string")
+            .contains("name: auth-flow")
+    );
+    assert_eq!(
+        payload["skill_metadata"]["name"], "auth-flow",
+        "payload carries the target skill metadata for review"
+    );
+    assert_eq!(
+        payload["skill_metadata"]["path"], ".moa/skills/auth-flow/SKILL.md",
+        "review can materialize the target skill path"
     );
 }

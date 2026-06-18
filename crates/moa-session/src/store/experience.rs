@@ -1,6 +1,7 @@
 //! Experience-learning operations for the Postgres session store.
 
 use super::*;
+use sqlx::PgConnection;
 
 impl PostgresSessionStore {
     /// Appends or idempotently refreshes one experience record.
@@ -78,6 +79,25 @@ impl PostgresSessionStore {
         rows.iter().map(experience_record_from_row).collect()
     }
 
+    /// Loads one experience record by session and experience ID.
+    pub async fn get_experience_record(
+        &self,
+        session_id: moa_core::SessionId,
+        experience_id: Uuid,
+    ) -> Result<Option<ExperienceRecord>> {
+        let experience_records = self.table_name("experience_records");
+        let row = sqlx::query(&format!(
+            "SELECT {EXPERIENCE_RECORD_COLUMNS} FROM {experience_records} \
+             WHERE session_id = $1 AND id = $2"
+        ))
+        .bind(session_id.0)
+        .bind(experience_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        row.as_ref().map(experience_record_from_row).transpose()
+    }
+
     /// Appends or idempotently refreshes attribution records.
     pub async fn append_experience_attributions(
         &self,
@@ -138,6 +158,17 @@ impl PostgresSessionStore {
 
     /// Appends or idempotently refreshes one learning candidate.
     pub async fn append_learning_candidate(&self, candidate: &LearningCandidate) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(map_sqlx_error)?;
+        self.append_learning_candidate_with_conn(&mut conn, candidate)
+            .await
+    }
+
+    /// Appends or idempotently refreshes one learning candidate using an existing connection.
+    pub async fn append_learning_candidate_with_conn(
+        &self,
+        conn: &mut PgConnection,
+        candidate: &LearningCandidate,
+    ) -> Result<()> {
         let learning_candidates = self.table_name("learning_candidates");
         sqlx::query(&format!(
             "INSERT INTO {learning_candidates} \
@@ -151,11 +182,11 @@ impl PostgresSessionStore {
                  target_id = EXCLUDED.target_id, \
                  target_label = EXCLUDED.target_label, \
                  payload = EXCLUDED.payload, \
-                 evaluation_payload = EXCLUDED.evaluation_payload, \
+                 evaluation_payload = COALESCE(EXCLUDED.evaluation_payload, {learning_candidates}.evaluation_payload), \
                  confidence = EXCLUDED.confidence, \
                  risk_class = EXCLUDED.risk_class, \
                  promotion_requirements = EXCLUDED.promotion_requirements, \
-                 status_reason = EXCLUDED.status_reason, \
+                 status_reason = COALESCE(EXCLUDED.status_reason, {learning_candidates}.status_reason), \
                  updated_at = EXCLUDED.updated_at"
         ))
         .bind(candidate.id)
@@ -179,7 +210,7 @@ impl PostgresSessionStore {
         .bind(candidate.batch_id)
         .bind(candidate.created_at)
         .bind(candidate.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())
@@ -212,30 +243,45 @@ impl PostgresSessionStore {
         rows.iter().map(learning_candidate_from_row).collect()
     }
 
+    /// Loads one full learning candidate by workspace and candidate ID.
+    pub async fn get_learning_candidate(
+        &self,
+        workspace_id: &WorkspaceId,
+        candidate_id: Uuid,
+    ) -> Result<Option<LearningCandidate>> {
+        let mut conn = self.pool.acquire().await.map_err(map_sqlx_error)?;
+        self.get_learning_candidate_with_conn(&mut conn, workspace_id, candidate_id)
+            .await
+    }
+
+    /// Loads one full learning candidate by workspace and candidate ID using an existing connection.
+    pub async fn get_learning_candidate_with_conn(
+        &self,
+        conn: &mut PgConnection,
+        workspace_id: &WorkspaceId,
+        candidate_id: Uuid,
+    ) -> Result<Option<LearningCandidate>> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let row = sqlx::query(&format!(
+            "SELECT {LEARNING_CANDIDATE_COLUMNS} FROM {learning_candidates} \
+             WHERE workspace_id = $1 AND id = $2"
+        ))
+        .bind(workspace_id.to_string())
+        .bind(candidate_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        row.as_ref().map(learning_candidate_from_row).transpose()
+    }
+
     /// Applies an explicit candidate status transition.
     pub async fn update_learning_candidate_status(
         &self,
         update: &LearningCandidateStatusUpdate,
     ) -> Result<()> {
-        let learning_candidates = self.table_name("learning_candidates");
-        let affected = sqlx::query(&format!(
-            "UPDATE {learning_candidates} SET \
-                 status = $1, \
-                 status_reason = $2, \
-                 evaluation_payload = COALESCE($3, evaluation_payload), \
-                 updated_at = $4 \
-             WHERE id = $5"
-        ))
-        .bind(update.status.as_str())
-        .bind(update.status_reason.as_deref())
-        .bind(update.evaluation_payload.clone().map(Json))
-        .bind(update.updated_at)
-        .bind(update.candidate_id)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?
-        .rows_affected();
-
+        let affected = self
+            .update_learning_candidate_status_with_expected(update, None)
+            .await?;
         if affected == 0 {
             return Err(MoaError::StorageError(format!(
                 "learning candidate `{}` was not found",
@@ -243,6 +289,64 @@ impl PostgresSessionStore {
             )));
         }
         Ok(())
+    }
+
+    /// Applies a status transition only when the candidate is still in the expected status.
+    pub async fn update_learning_candidate_status_from(
+        &self,
+        update: &LearningCandidateStatusUpdate,
+        expected_status: LearningCandidateStatus,
+    ) -> Result<bool> {
+        self.update_learning_candidate_status_with_expected(update, Some(expected_status))
+            .await
+            .map(|affected| affected > 0)
+    }
+
+    async fn update_learning_candidate_status_with_expected(
+        &self,
+        update: &LearningCandidateStatusUpdate,
+        expected_status: Option<LearningCandidateStatus>,
+    ) -> Result<u64> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let affected = if let Some(expected_status) = expected_status {
+            sqlx::query(&format!(
+                "UPDATE {learning_candidates} SET \
+                     status = $1, \
+                     status_reason = $2, \
+                     evaluation_payload = COALESCE($3, evaluation_payload), \
+                     updated_at = $4 \
+                 WHERE id = $5 AND status = $6"
+            ))
+            .bind(update.status.as_str())
+            .bind(update.status_reason.as_deref())
+            .bind(update.evaluation_payload.clone().map(Json))
+            .bind(update.updated_at)
+            .bind(update.candidate_id)
+            .bind(expected_status.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected()
+        } else {
+            sqlx::query(&format!(
+                "UPDATE {learning_candidates} SET \
+                 status = $1, \
+                 status_reason = $2, \
+                 evaluation_payload = COALESCE($3, evaluation_payload), \
+                 updated_at = $4 \
+                 WHERE id = $5"
+            ))
+            .bind(update.status.as_str())
+            .bind(update.status_reason.as_deref())
+            .bind(update.evaluation_payload.clone().map(Json))
+            .bind(update.updated_at)
+            .bind(update.candidate_id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected()
+        };
+        Ok(affected)
     }
 
     /// Lists task-conditioned strategy success aggregates for one fingerprint.

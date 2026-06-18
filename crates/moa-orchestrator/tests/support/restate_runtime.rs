@@ -80,16 +80,21 @@ pub async fn register_deployment(admin_url: &str, deployment_uri: &str) -> Resul
             Ok(response) if Instant::now() < deadline => {
                 tracing::debug!(
                     status = %response.status(),
+                    deployment_uri,
                     "waiting to register Restate deployment"
                 );
             }
             Err(error) if Instant::now() < deadline => {
-                tracing::debug!(%error, "waiting to register Restate deployment");
+                tracing::debug!(
+                    %error,
+                    deployment_uri,
+                    "waiting to register Restate deployment"
+                );
             }
             Ok(response) => {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                bail!("register deployment returned {status}: {text}");
+                bail!("register deployment {deployment_uri} returned {status}: {text}");
             }
             Err(error) => return Err(error).context("register deployment with Restate admin"),
         }

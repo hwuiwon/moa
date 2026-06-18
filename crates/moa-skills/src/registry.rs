@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
+use moa_artifacts::document::ArtifactStatus;
 use moa_artifacts::registry::{
-    ArtifactScopeParts, NewArtifactFile, NewPublishedArtifactRevision, insert_published_revision,
+    ArtifactFile, ArtifactScopeParts, NewPublishedArtifactRevision, StoredArtifactRevision,
+    insert_published_revision,
 };
 use moa_core::{
     MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SkillMetadata, UserId, WorkspaceId,
@@ -15,7 +16,10 @@ use moka::future::Cache;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
-use crate::artifact::{SKILL_ARTIFACT_PATH, skill_artifact_document_from_package};
+use crate::artifact::{
+    artifact_file_from_skill_file, skill_artifact_document_from_package,
+    skill_artifact_source_text, skill_package_from_artifact_revision,
+};
 use crate::format::build_skill_path;
 use crate::package::{
     SKILL_MD_PATH, SkillPackage, SkillPackageManifest, ValidatedSkillPackage,
@@ -140,6 +144,12 @@ impl StoredSkillPackage {
 pub struct SkillRegistry {
     pool: PgPool,
     cache: Cache<MemoryScope, Vec<Skill>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArtifactMirror {
+    InsertPublishedRevision,
+    AlreadyPublished,
 }
 
 impl SkillRegistry {
@@ -292,7 +302,14 @@ impl SkillRegistry {
         let skill = ValidatedNewSkill::from_new(skill)?;
         let mut conn =
             ScopedConn::begin(&self.pool, &ScopeContext::from(skill.scope.clone())).await?;
-        let uid = insert_skill(conn.as_mut(), &skill, 1, None).await?;
+        let uid = insert_skill(
+            conn.as_mut(),
+            &skill,
+            1,
+            None,
+            ArtifactMirror::InsertPublishedRevision,
+        )
+        .await?;
         conn.commit().await?;
         self.cache.invalidate_all();
         Ok(uid)
@@ -303,7 +320,30 @@ impl SkillRegistry {
         let skill = ValidatedNewSkill::from_new(skill)?;
         let mut conn =
             ScopedConn::begin(&self.pool, &ScopeContext::from(skill.scope.clone())).await?;
-        let uid = upsert_by_name(conn.as_mut(), &skill).await?;
+        let uid = upsert_by_name(
+            conn.as_mut(),
+            &skill,
+            ArtifactMirror::InsertPublishedRevision,
+        )
+        .await?;
+        conn.commit().await?;
+        self.cache.invalidate_all();
+        Ok(uid)
+    }
+
+    /// Materializes a published skill artifact revision into active `moa.skill` rows.
+    pub async fn materialize_published_artifact_revision(
+        &self,
+        scope: &MemoryScope,
+        revision: &StoredArtifactRevision,
+        files: Vec<ArtifactFile>,
+    ) -> Result<Uuid> {
+        ensure_revision_matches_scope(scope, revision)?;
+        let package = skill_package_from_artifact_revision(revision, files)?;
+        let skill = ValidatedNewSkill::from_new(NewSkill::from_package(scope.clone(), package))?;
+        let mut conn =
+            ScopedConn::begin(&self.pool, &ScopeContext::from(skill.scope.clone())).await?;
+        let uid = upsert_by_name(conn.as_mut(), &skill, ArtifactMirror::AlreadyPublished).await?;
         conn.commit().await?;
         self.cache.invalidate_all();
         Ok(uid)
@@ -503,7 +543,11 @@ async fn load_skill_files_for_skills(
     Ok(files_by_skill)
 }
 
-async fn upsert_by_name(conn: &mut PgConnection, skill: &ValidatedNewSkill) -> Result<Uuid> {
+async fn upsert_by_name(
+    conn: &mut PgConnection,
+    skill: &ValidatedNewSkill,
+    artifact_mirror: ArtifactMirror,
+) -> Result<Uuid> {
     let (workspace_id, user_id) = scope_parts(&skill.scope);
     let active = sqlx::query(
         r#"
@@ -544,11 +588,12 @@ async fn upsert_by_name(conn: &mut PgConnection, skill: &ValidatedNewSkill) -> R
             skill,
             existing_version.saturating_add(1),
             Some(existing_uid),
+            artifact_mirror,
         )
         .await;
     }
 
-    insert_skill(conn, skill, 1, None).await
+    insert_skill(conn, skill, 1, None, artifact_mirror).await
 }
 
 async fn insert_skill(
@@ -556,6 +601,7 @@ async fn insert_skill(
     skill: &ValidatedNewSkill,
     version: i32,
     previous_skill_uid: Option<Uuid>,
+    artifact_mirror: ArtifactMirror,
 ) -> Result<Uuid> {
     let (workspace_id, user_id) = scope_parts(&skill.scope);
     let skill_uid = Uuid::now_v7();
@@ -613,7 +659,9 @@ async fn insert_skill(
         .map_err(map_sqlx_error)?;
     }
 
-    insert_skill_artifact(conn, skill, version).await?;
+    if artifact_mirror == ArtifactMirror::InsertPublishedRevision {
+        insert_skill_artifact(conn, skill, version).await?;
+    }
 
     Ok(skill_uid)
 }
@@ -647,30 +695,37 @@ async fn insert_skill_artifact(
     .map(|_| ())
 }
 
-fn artifact_file_from_skill_file(file: &ValidatedSkillPackageFile) -> NewArtifactFile {
-    NewArtifactFile {
-        path: file.path.clone(),
-        content: file.content.clone(),
-        content_type: file.content_type.clone(),
-        executable: file.executable,
+fn ensure_revision_matches_scope(
+    scope: &MemoryScope,
+    revision: &StoredArtifactRevision,
+) -> Result<()> {
+    let matches_scope = match scope {
+        MemoryScope::Global => {
+            revision.scope == "global"
+                && revision.workspace_id.is_none()
+                && revision.user_id.is_none()
+        }
+        MemoryScope::Workspace { workspace_id } => {
+            revision.scope == "workspace"
+                && revision.workspace_id.as_ref() == Some(workspace_id)
+                && revision.user_id.is_none()
+        }
+        MemoryScope::User {
+            workspace_id,
+            user_id,
+        } => {
+            revision.scope == "user"
+                && revision.workspace_id.as_ref() == Some(workspace_id)
+                && revision.user_id.as_ref() == Some(user_id)
+        }
+    };
+    if matches_scope {
+        return Ok(());
     }
-}
-
-fn skill_artifact_source_text(
-    package: &ValidatedSkillPackage,
-    document: &ArtifactDocument,
-) -> Result<Vec<u8>> {
-    if let Some(file) = package
-        .files
-        .iter()
-        .find(|file| file.path == SKILL_ARTIFACT_PATH)
-    {
-        return Ok(file.content.clone());
-    }
-    document
-        .to_yaml()
-        .map(String::into_bytes)
-        .map_err(|error| MoaError::SerializationError(error.to_string()))
+    Err(MoaError::ValidationError(format!(
+        "artifact revision {} scope {} cannot be materialized into requested skill scope",
+        revision.revision_uid, revision.scope
+    )))
 }
 
 fn scope_parts(scope: &MemoryScope) -> (Option<String>, Option<String>) {

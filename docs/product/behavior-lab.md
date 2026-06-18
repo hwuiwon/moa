@@ -91,8 +91,12 @@ returns run comparisons plus scenario and variant deltas. `Analytics` owns
 broader product insights; clients should not query raw SQL from the UI.
 
 Experiment-derived improvements cross one explicit review boundary:
-`Experiments/propose_improvements` creates proposed `learning_candidates`.
-Behavior Lab does not auto-promote skills, workflows, or learning entries.
+`Experiments/propose_improvements` creates proposed `learning_candidates` and
+may attach draft artifact revision IDs when it has a concrete reviewed patch to
+preserve. Behavior Lab does not auto-promote skills, workflows, artifacts, or
+learning entries. Promotion must happen through the relevant review surface, so
+experiment evidence can inform a change without publishing or materializing it
+as live behavior.
 
 ## Future MCP Adapter
 

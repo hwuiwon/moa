@@ -317,6 +317,15 @@ pub struct AppendLearningCandidateRequest {
     pub candidate: LearningCandidate,
 }
 
+/// Request payload for `SessionStore/get_learning_candidate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetLearningCandidateRequest {
+    /// Workspace that owns the candidate.
+    pub workspace_id: WorkspaceId,
+    /// Candidate identifier to load.
+    pub candidate_id: Uuid,
+}
+
 /// Request payload for `SessionStore/list_learning_candidates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListLearningCandidatesRequest {
@@ -333,6 +342,48 @@ pub struct ListLearningCandidatesRequest {
 pub struct UpdateLearningCandidateStatusRequest {
     /// Candidate status transition.
     pub update: LearningCandidateStatusUpdate,
+}
+
+/// Review action requested for one learning candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningCandidateReviewAction {
+    /// Accept the candidate and promote it through the relevant review path.
+    Accept,
+    /// Reject the candidate while preserving its draft artifacts for audit.
+    Reject,
+}
+
+/// Request payload for reviewing one learning candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningCandidateReviewRequest {
+    /// Workspace that owns the candidate.
+    pub workspace_id: WorkspaceId,
+    /// Candidate identifier to review.
+    pub candidate_id: Uuid,
+    /// Review decision to apply.
+    pub action: LearningCandidateReviewAction,
+    /// Subject identifier for the human or service reviewer.
+    pub reviewer_subject: String,
+    /// Optional human-readable review reason.
+    pub reason: Option<String>,
+}
+
+/// Response payload returned after reviewing one learning candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningCandidateReviewResponse {
+    /// Candidate whose status was updated.
+    pub candidate_id: Uuid,
+    /// Candidate status after the review action.
+    pub status: LearningCandidateStatus,
+    /// Artifact that the candidate refers to, when applicable.
+    pub artifact_uid: Option<Uuid>,
+    /// Draft artifact revision that the candidate refers to, when applicable.
+    pub draft_artifact_revision_uid: Option<Uuid>,
+    /// Published artifact revision created by acceptance, when applicable.
+    pub published_artifact_revision_uid: Option<Uuid>,
+    /// Materialized skill row created by acceptance, when applicable.
+    pub skill_uid: Option<Uuid>,
 }
 
 /// Request payload for recording active-segment tool usage.

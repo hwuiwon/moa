@@ -650,6 +650,13 @@ async fn experience_records_and_candidates_round_trip() {
     assert_eq!(experiences[0].id, experience.id);
     assert_eq!(experiences[0].task_fingerprint.hash, "task-hash");
     assert_eq!(experiences[0].task_facets.domain.as_deref(), Some("auth"));
+    let loaded_experience = store
+        .get_experience_record(session_id, experience.id)
+        .await
+        .expect("load experience by id")
+        .expect("experience exists");
+    assert_eq!(loaded_experience.id, experience.id);
+    assert_eq!(loaded_experience.session_id, session_id);
     let attributions = store
         .list_experience_attributions(experience.id)
         .await
@@ -689,6 +696,136 @@ async fn experience_records_and_candidates_round_trip() {
 
     drop(store);
     cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_store_learning_candidate_review_lookup() {
+    with_test_store(|store| async move {
+        let workspace_id = WorkspaceId::new("pg-review");
+        let other_workspace_id = WorkspaceId::new("pg-review-other");
+        let source_experience_id = Uuid::now_v7();
+        let artifact_uid = Uuid::now_v7();
+        let draft_revision_uid = Uuid::now_v7();
+        let payload = serde_json::json!({
+            "kind": "skill_draft_proposal",
+            "operation": "skill_created",
+            "artifact_uid": artifact_uid.to_string(),
+            "draft_artifact_revision_uid": draft_revision_uid.to_string(),
+            "package": {
+                "files": [
+                    {
+                        "path": "SKILL.md",
+                        "source": "# Reviewable Skill\n\nUse this when the reviewed task recurs."
+                    }
+                ]
+            }
+        });
+        let now = Utc::now();
+        let candidate = LearningCandidate {
+            id: Uuid::now_v7(),
+            tenant_id: "pg-review".to_string(),
+            workspace_id: workspace_id.clone(),
+            user_id: None,
+            candidate_type: LearningCandidateType::Skill,
+            status: LearningCandidateStatus::Proposed,
+            target_id: Some("skills/reviewable-skill".to_string()),
+            target_label: Some("reviewable-skill".to_string()),
+            task_fingerprint: None,
+            task_facets: None,
+            payload: payload.clone(),
+            evaluation_payload: None,
+            source_experience_ids: vec![source_experience_id],
+            confidence: Some(0.82),
+            risk_class: LearningRiskClass::Low,
+            promotion_requirements: vec!["human_review".to_string()],
+            status_reason: None,
+            batch_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store
+            .append_learning_candidate(&candidate)
+            .await
+            .expect("append review candidate");
+
+        // Pins: review services can load full proposed candidates by id before accepting or rejecting them.
+        let loaded = store
+            .get_learning_candidate(&workspace_id, candidate.id)
+            .await
+            .expect("load candidate by id")
+            .expect("candidate exists in owning workspace");
+        assert_eq!(loaded.id, candidate.id);
+        assert_eq!(loaded.workspace_id, workspace_id);
+        assert_eq!(loaded.candidate_type, LearningCandidateType::Skill);
+        assert_eq!(loaded.status, LearningCandidateStatus::Proposed);
+        assert_eq!(loaded.target_label.as_deref(), Some("reviewable-skill"));
+        assert_eq!(loaded.payload, payload);
+        assert_eq!(loaded.source_experience_ids, vec![source_experience_id]);
+        assert_eq!(loaded.risk_class, LearningRiskClass::Low);
+
+        let stale_update = LearningCandidateStatusUpdate {
+            candidate_id: candidate.id,
+            status: LearningCandidateStatus::Rejected,
+            status_reason: Some("stale reviewer".to_string()),
+            evaluation_payload: Some(serde_json::json!({"reviewer_subject": "user:stale"})),
+            updated_at: Utc::now(),
+        };
+        let stale_changed = store
+            .update_learning_candidate_status_from(
+                &stale_update,
+                LearningCandidateStatus::Evaluating,
+            )
+            .await
+            .expect("stale compare-and-set status update");
+        assert!(
+            !stale_changed,
+            "status update with the wrong expected state must not change the candidate"
+        );
+        let still_proposed = store
+            .get_learning_candidate(&workspace_id, candidate.id)
+            .await
+            .expect("reload proposed candidate")
+            .expect("candidate remains visible");
+        assert_eq!(still_proposed.status, LearningCandidateStatus::Proposed);
+        assert_eq!(still_proposed.evaluation_payload, None);
+
+        let cross_workspace = store
+            .get_learning_candidate(&other_workspace_id, candidate.id)
+            .await
+            .expect("cross-workspace lookup should not fail");
+        assert_eq!(cross_workspace, None);
+
+        let evaluation_payload = serde_json::json!({
+            "reviewer_subject": "user:reviewer",
+            "decision": "reject"
+        });
+        store
+            .update_learning_candidate_status(&LearningCandidateStatusUpdate {
+                candidate_id: candidate.id,
+                status: LearningCandidateStatus::Rejected,
+                status_reason: Some("needs clearer evidence".to_string()),
+                evaluation_payload: Some(evaluation_payload.clone()),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("reject candidate");
+
+        let rejected = store
+            .get_learning_candidate(&workspace_id, candidate.id)
+            .await
+            .expect("reload rejected candidate")
+            .expect("candidate remains visible in owning workspace");
+        assert_eq!(rejected.status, LearningCandidateStatus::Rejected);
+        assert_eq!(
+            rejected.status_reason.as_deref(),
+            Some("needs clearer evidence")
+        );
+        assert_eq!(rejected.evaluation_payload, Some(evaluation_payload));
+        assert_eq!(rejected.payload, payload);
+    })
+    .await;
 }
 
 #[tokio::test]

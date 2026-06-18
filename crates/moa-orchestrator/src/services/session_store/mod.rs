@@ -9,9 +9,9 @@ use std::sync::Arc;
 use moa_core::wire::{
     AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
     AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
-    GetSegmentBaselineRequest, InitSessionVoRequest, ListExperienceAttributionsRequest,
-    ListExperienceRecordsRequest, ListLearningCandidatesRequest, ListSessionsRequest,
-    ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
+    GetLearningCandidateRequest, GetSegmentBaselineRequest, InitSessionVoRequest,
+    ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListLearningCandidatesRequest,
+    ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
     RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
     RecordSegmentTurnUsageRequest, SearchEventsRequest, UpdateLearningCandidateStatusRequest,
     UpdateSegmentAssessmentRequest, UpdateStatusRequest, WorkspaceCostSinceRequest,
@@ -19,7 +19,7 @@ use moa_core::wire::{
 use moa_core::{
     Event, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
     SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore, SessionSummary,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, record_session_error,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, WorkspaceId, record_session_error,
 };
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
@@ -131,6 +131,11 @@ pub trait RestateSessionStore {
     async fn append_learning_candidate(
         request: Json<AppendLearningCandidateRequest>,
     ) -> Result<(), HandlerError>;
+
+    /// Loads one full learning candidate by workspace and candidate ID.
+    async fn get_learning_candidate(
+        request: Json<GetLearningCandidateRequest>,
+    ) -> Result<Json<LearningCandidate>, HandlerError>;
 
     /// Lists learning candidates for a tenant.
     async fn list_learning_candidates(

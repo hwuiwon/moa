@@ -34,8 +34,8 @@ The root workspace currently contains:
 | `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
 | `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
-| `moa-skills` | Skill parser, DB-backed package registry, distillation, improvement, regression generation |
-| `moa-eval` | Evaluation harness |
+| `moa-skills` | Skill parser, DB-backed active package registry, draft proposal generation, and regression suite source generation |
+| `moa-eval` | Evaluation harness used by CI and optional orchestrator-owned internal eval execution |
 | `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |
 | `xtask` | Repo-local audits and maintenance commands |
@@ -135,7 +135,7 @@ Implemented architectural pillars:
 - Postgres session store with event log, analytics, task segments, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and skill resolution-rate ranking.
-- Skill distillation/improvement with learning-log emission.
+- Draft-only skill distillation/improvement proposals with explicit review acceptance before learning-log emission.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
 - Hosted API automation surfaces.
 

@@ -242,6 +242,18 @@ pub async fn load_active_skill(test_db: &TestDb, scope: &MemoryScope, skill_name
         .expect("active skill exists")
 }
 
+/// Loads the active skill row by name when one exists.
+pub async fn load_optional_active_skill(
+    test_db: &TestDb,
+    scope: &MemoryScope,
+    skill_name: &str,
+) -> Option<Skill> {
+    SkillRegistry::new(test_db.store().pool().clone())
+        .load_by_name(scope, skill_name)
+        .await
+        .expect("load optional active skill")
+}
+
 /// Loads the active skill's required `SKILL.md` markdown by name.
 pub async fn load_active_skill_markdown(
     test_db: &TestDb,
@@ -313,13 +325,37 @@ pub async fn skill_row_count(
         .expect("count skill rows")
 }
 
-/// Removes all active and historical rows for one test skill name.
+/// Counts artifact revisions for one workspace skill artifact.
+pub async fn artifact_revision_count(
+    test_db: &TestDb,
+    workspace_id: &WorkspaceId,
+    skill_name: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) \
+         FROM moa.artifact a \
+         JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid \
+         WHERE a.workspace_id = $1 AND a.kind = 'skill' AND a.name = $2",
+    )
+    .bind(workspace_id.as_str())
+    .bind(skill_name)
+    .fetch_one(test_db.store().pool())
+    .await
+    .expect("count skill artifact revisions")
+}
+
+/// Removes all active, historical, and mirrored artifact rows for one test skill name.
 pub async fn purge_skill_name(test_db: &TestDb, skill_name: &str) {
     sqlx::query("DELETE FROM moa.skill WHERE name = $1")
         .bind(skill_name)
         .execute(test_db.store().pool())
         .await
         .expect("purge test skill rows");
+    sqlx::query("DELETE FROM moa.artifact WHERE kind = 'skill' AND name = $1")
+        .bind(skill_name)
+        .execute(test_db.store().pool())
+        .await
+        .expect("purge test skill artifact rows");
 }
 
 fn push_event(events: &mut Vec<EventRecord>, session_id: SessionId, event: Event) {

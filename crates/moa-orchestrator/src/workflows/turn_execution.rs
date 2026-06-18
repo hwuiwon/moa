@@ -61,6 +61,8 @@ use crate::turn::util::{
     stable_tool_call_id, summarize_response_text, tool_call_is_allowed, turn_outcome_for_response,
 };
 use crate::workflows::approval_wait;
+#[cfg(feature = "skill-learning")]
+use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PENDING_APPROVAL: &str = "pending_approval";
@@ -1098,7 +1100,12 @@ async fn emit_experience_for_assessment(
     );
     let attributions = attributions_for_experience(&experience, segment_events, now);
     let candidates = propose_candidates_for_experience(&experience, &attributions, now);
-    let store = OrchestratorCtx::current().session_store.clone();
+    let runtime = OrchestratorCtx::current();
+    let store = runtime.session_store.clone();
+    #[cfg(feature = "skill-learning")]
+    let experience_id = experience.id;
+    #[cfg(feature = "skill-learning")]
+    let min_skill_learning_tool_calls = runtime.config.learning.skills.min_tool_calls;
     let learning_error = ctx
         .run(move || {
             let store = store.clone();
@@ -1141,7 +1148,44 @@ async fn emit_experience_for_assessment(
             },
         )
         .await?;
+        return Ok(());
     }
+    #[cfg(feature = "skill-learning")]
+    if skill_learning_dispatch_is_eligible(segment_events, min_skill_learning_tool_calls) {
+        dispatch_skill_learning_after_experience(ctx, meta.id, experience_id).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "skill-learning")]
+fn skill_learning_dispatch_is_eligible(
+    segment_events: &[EventRecord],
+    min_tool_calls: usize,
+) -> bool {
+    segment_events
+        .iter()
+        .filter(|record| matches!(record.event, Event::ToolCall { .. }))
+        .count()
+        >= min_tool_calls
+}
+
+#[cfg(feature = "skill-learning")]
+async fn dispatch_skill_learning_after_experience(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    experience_id: uuid::Uuid,
+) -> Result<(), HandlerError> {
+    ctx.workflow_client::<SkillLearningClient>(experience_id.to_string())
+        .run(Json(RunSkillLearningRequest {
+            session_id,
+            experience_id,
+        }))
+        .send();
+    tracing::debug!(
+        session_id = %session_id,
+        experience_id = %experience_id,
+        "dispatched detached skill learning workflow"
+    );
     Ok(())
 }
 

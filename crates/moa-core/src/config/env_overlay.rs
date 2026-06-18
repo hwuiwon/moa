@@ -344,6 +344,8 @@ pub struct MoaEnvOverlay {
     pub resolution_structural_min_samples: Option<usize>,
     /// `MOA_RESOLUTION_IDLE_TIMEOUT_MINUTES`.
     pub resolution_idle_timeout_minutes: Option<u64>,
+    /// `MOA_LEARNING_SKILLS_MIN_TOOL_CALLS`.
+    pub learning_skills_min_tool_calls: Option<usize>,
     /// `MOA_CONTEXT_SNAPSHOT_ENABLED`.
     pub context_snapshot_enabled: Option<bool>,
     /// `MOA_CONTEXT_SNAPSHOT_MAX_SIZE_BYTES`.
@@ -666,6 +668,7 @@ impl MoaEnvOverlay {
         self.apply_tooling(config);
         self.apply_query_rewrite(config);
         self.apply_resolution(config);
+        self.apply_learning(config);
         set_copy_if_some(
             &mut config.context_snapshot.enabled,
             self.context_snapshot_enabled,
@@ -1053,6 +1056,13 @@ impl MoaEnvOverlay {
         set_copy_if_some(
             &mut config.resolution.idle_timeout_minutes,
             self.resolution_idle_timeout_minutes,
+        );
+    }
+
+    fn apply_learning(&self, config: &mut MoaConfig) {
+        set_copy_if_some(
+            &mut config.learning.skills.min_tool_calls,
+            self.learning_skills_min_tool_calls,
         );
     }
 }

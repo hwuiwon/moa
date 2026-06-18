@@ -127,7 +127,8 @@ async fn approval_allow_once_round_trip_through_restate() -> Result<()> {
 
         let prompt = format!(
             "Use the bash tool exactly once to run `printf '{approval_token}\\n'`. \
-             Do not answer from memory. After the tool succeeds, answer with exactly {approval_token}."
+             Fact: approval allow-once flow requested shell execution for {approval_token}. \
+             Do not answer from memory. After the tool succeeds, answer with the token and a durable Fact line."
         );
         let post_message = client.post(object_url(ingress, session_id, "post_message"));
         with_identity(post_message, &identity)
@@ -443,7 +444,9 @@ fn write_scripted_approval_fixture(path: &Path, approval_token: &str) -> Result<
             },
             {
                 "completion": {
-                    "content": approval_token,
+                    "content": format!(
+                        "{approval_token}\nFact: approval allow-once flow completed for {approval_token}"
+                    ),
                     "tool_calls": []
                 }
             }

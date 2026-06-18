@@ -233,7 +233,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::POSTGRES_MIGRATION_FILES;
+    use super::{ORCHESTRATOR_SCHEMA_MIGRATIONS, POSTGRES_MIGRATION_FILES};
 
     #[test]
     fn central_manifest_matches_embedded_postgres_files() {
@@ -257,5 +257,19 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(manifest, files);
+    }
+
+    #[test]
+    fn orchestrator_agents_status_constraint_is_schema_local() {
+        let sql = ORCHESTRATOR_SCHEMA_MIGRATIONS[0].sql;
+
+        assert!(
+            sql.contains("conrelid = 'agents'::regclass"),
+            "agents_status_check existence check must be scoped to the current schema's agents table"
+        );
+        assert!(
+            sql.contains("ALTER TABLE agents VALIDATE CONSTRAINT agents_status_check"),
+            "agents_status_check should still be validated after being added"
+        );
     }
 }
