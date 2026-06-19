@@ -499,7 +499,6 @@ fn session_status_from_db(value: &str) -> Result<SessionStatus> {
         "created" => Ok(SessionStatus::Created),
         "running" => Ok(SessionStatus::Running),
         "paused" => Ok(SessionStatus::Paused),
-        "waiting_approval" => Ok(SessionStatus::WaitingApproval),
         "completed" => Ok(SessionStatus::Completed),
         "cancelled" => Ok(SessionStatus::Cancelled),
         "failed" => Ok(SessionStatus::Failed),

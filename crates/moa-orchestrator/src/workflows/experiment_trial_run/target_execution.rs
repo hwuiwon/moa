@@ -1,7 +1,8 @@
 //! Target execution paths for behavior-lab trial workflows.
 
 use super::status::{
-    attach_trial_session, attach_trial_workflow_run, increment_trial_turn, stop_trial,
+    attach_trial_session, attach_trial_workflow_run, increment_trial_turn,
+    status_response_from_record, stop_trial,
 };
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
 use super::*;
@@ -19,10 +20,16 @@ struct TargetUsageObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkflowTrialStop {
+    status: ExperimentTrialStatus,
+    stop_reason: ExperimentTrialStopReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct StartedWorkflowRun {
     run_uid: Uuid,
-    trial_status: ExperimentTrialStatus,
-    stop_reason: ExperimentTrialStopReason,
+    trial: ExperimentTrialRecord,
+    stop: Option<WorkflowTrialStop>,
     error: Option<String>,
 }
 
@@ -206,15 +213,19 @@ pub(super) async fn run_workflow_trial(
     tracing::Span::current()
         .set_attribute("moa.experiment.workflow_run_uid", run.run_uid.to_string());
 
-    stop_trial(
-        ctx,
-        request.workspace_id,
-        trial.trial_uid,
-        run.trial_status,
-        run.stop_reason,
-        run.error,
-    )
-    .await
+    if let Some(stop) = run.stop {
+        return stop_trial(
+            ctx,
+            request.workspace_id,
+            trial.trial_uid,
+            stop.status,
+            stop.stop_reason,
+            run.error,
+        )
+        .await;
+    }
+
+    status_response_from_record(request.workspace_id, run.trial)
 }
 
 async fn create_new_session(
@@ -376,7 +387,6 @@ fn target_is_waiting_or_idle(status: &SessionStatus, snapshot: &SessionSnapshot)
         status,
         SessionStatus::Paused
             | SessionStatus::Completed
-            | SessionStatus::WaitingApproval
             | SessionStatus::Cancelled
             | SessionStatus::Failed
     ) && snapshot.active_turn_id.is_none()
@@ -406,12 +416,17 @@ async fn start_and_attach_workflow_run(
                 )
                 .await
                 .map_err(workflow_handler_error)?;
-            attach_trial_workflow_run(pool, scope, trial_uid, run.run_uid).await?;
-            let (trial_status, stop_reason) = trial_status_from_workflow_status(&run.status);
+            let trial = attach_trial_workflow_run(pool, scope, trial_uid, run.run_uid).await?;
+            let stop = trial_stop_for_workflow_status(&run.status).map(|(status, stop_reason)| {
+                WorkflowTrialStop {
+                    status,
+                    stop_reason,
+                }
+            });
             Ok::<_, HandlerError>(Json::from(StartedWorkflowRun {
                 run_uid: run.run_uid,
-                trial_status,
-                stop_reason,
+                trial,
+                stop,
                 error: run.error,
             }))
         })
@@ -431,10 +446,6 @@ pub(super) fn stop_for_session_status(
     status: &SessionStatus,
 ) -> Option<(ExperimentTrialStatus, ExperimentTrialStopReason)> {
     match status {
-        SessionStatus::WaitingApproval => Some((
-            ExperimentTrialStatus::WaitingApproval,
-            ExperimentTrialStopReason::ApprovalWait,
-        )),
         SessionStatus::Completed => Some((
             ExperimentTrialStatus::Completed,
             ExperimentTrialStopReason::TargetTerminal,
@@ -451,26 +462,25 @@ pub(super) fn stop_for_session_status(
     }
 }
 
-fn trial_status_from_workflow_status(
+fn trial_stop_for_workflow_status(
     status: &ArtifactRunStatus,
-) -> (ExperimentTrialStatus, ExperimentTrialStopReason) {
+) -> Option<(ExperimentTrialStatus, ExperimentTrialStopReason)> {
     match status {
-        ArtifactRunStatus::WaitingApproval => (
-            ExperimentTrialStatus::WaitingApproval,
-            ExperimentTrialStopReason::ApprovalWait,
-        ),
-        ArtifactRunStatus::Failed => (
-            ExperimentTrialStatus::Failed,
-            ExperimentTrialStopReason::Error,
-        ),
-        ArtifactRunStatus::Cancelled => (
-            ExperimentTrialStatus::Cancelled,
-            ExperimentTrialStopReason::Cancelled,
-        ),
-        ArtifactRunStatus::Queued | ArtifactRunStatus::Running | ArtifactRunStatus::Completed => (
+        ArtifactRunStatus::Queued
+        | ArtifactRunStatus::Running
+        | ArtifactRunStatus::PendingReview
+        | ArtifactRunStatus::Completed => Some((
             ExperimentTrialStatus::Completed,
             ExperimentTrialStopReason::TargetTerminal,
-        ),
+        )),
+        ArtifactRunStatus::Failed => Some((
+            ExperimentTrialStatus::Failed,
+            ExperimentTrialStopReason::Error,
+        )),
+        ArtifactRunStatus::Cancelled => Some((
+            ExperimentTrialStatus::Cancelled,
+            ExperimentTrialStopReason::Cancelled,
+        )),
     }
 }
 
@@ -520,6 +530,53 @@ mod tests {
         assert_eq!(
             transcript[1].content,
             "Target response: first target response"
+        );
+    }
+
+    #[test]
+    fn workflow_pending_review_and_active_statuses_stop_trials_offline() {
+        // Pins: workflow runtime start is currently fire-and-forget, so non-failed/non-cancelled run states must release experiment dispatch slots.
+        assert_eq!(
+            trial_stop_for_workflow_status(&ArtifactRunStatus::Queued),
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
+        );
+        assert_eq!(
+            trial_stop_for_workflow_status(&ArtifactRunStatus::Running),
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
+        );
+        assert_eq!(
+            trial_stop_for_workflow_status(&ArtifactRunStatus::PendingReview),
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
+        );
+        assert_eq!(
+            trial_stop_for_workflow_status(&ArtifactRunStatus::Completed),
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
+        );
+        assert_eq!(
+            trial_stop_for_workflow_status(&ArtifactRunStatus::Failed),
+            Some((
+                ExperimentTrialStatus::Failed,
+                ExperimentTrialStopReason::Error,
+            ))
+        );
+        assert_eq!(
+            trial_stop_for_workflow_status(&ArtifactRunStatus::Cancelled),
+            Some((
+                ExperimentTrialStatus::Cancelled,
+                ExperimentTrialStopReason::Cancelled,
+            ))
         );
     }
 

@@ -201,11 +201,11 @@ pub struct MoaEnvOverlay {
     pub messaging_postmark_message_stream: Option<String>,
     /// `MOA_MESSAGING_TWILIO_BASE_URL`.
     pub messaging_twilio_base_url: Option<String>,
-    /// `MOA_PERMISSIONS_DEFAULT_POSTURE`.
-    pub permissions_default_posture: Option<String>,
-    /// `MOA_PERMISSIONS_AUTO_APPROVE`.
+    /// `MOA_PERMISSIONS_DEFAULT_EFFECT`.
+    pub permissions_default_effect: Option<crate::ActionPolicyEffect>,
+    /// `MOA_PERMISSIONS_ADMIN_REVIEW`.
     #[serde(deserialize_with = "deserialize_optional_list")]
-    pub permissions_auto_approve: Option<Vec<String>>,
+    pub permissions_admin_review: Option<Vec<String>>,
     /// `MOA_PERMISSIONS_ALWAYS_DENY`.
     #[serde(deserialize_with = "deserialize_optional_list")]
     pub permissions_always_deny: Option<Vec<String>>,
@@ -613,13 +613,13 @@ impl MoaEnvOverlay {
             &mut config.messaging.twilio_base_url,
             &self.messaging_twilio_base_url,
         );
-        set_if_some(
-            &mut config.permissions.default_posture,
-            &self.permissions_default_posture,
+        set_copy_if_some(
+            &mut config.permissions.default_effect,
+            self.permissions_default_effect,
         );
         set_vec_if_some(
-            &mut config.permissions.auto_approve,
-            &self.permissions_auto_approve,
+            &mut config.permissions.admin_review,
+            &self.permissions_admin_review,
         );
         set_vec_if_some(
             &mut config.permissions.always_deny,
@@ -1248,7 +1248,8 @@ mod tests {
             ),
             ("MOA_METRICS_ENABLED", "true"),
             ("MOA_METRICS_LISTEN", "127.0.0.1:9091"),
-            ("MOA_PERMISSIONS_AUTO_APPROVE", "file_read,grep"),
+            ("MOA_PERMISSIONS_ADMIN_REVIEW", "bash,file_write"),
+            ("MOA_PERMISSIONS_DEFAULT_EFFECT", "admin_review"),
         ]))
         .expect("overlay should deserialize");
 
@@ -1350,7 +1351,11 @@ mod tests {
         );
         assert!(config.metrics.enabled);
         assert_eq!(config.metrics.listen, "127.0.0.1:9091");
-        assert_eq!(config.permissions.auto_approve, ["file_read", "grep"]);
+        assert_eq!(config.permissions.admin_review, ["bash", "file_write"]);
+        assert_eq!(
+            config.permissions.default_effect,
+            crate::ActionPolicyEffect::AdminReview
+        );
     }
 
     #[test]

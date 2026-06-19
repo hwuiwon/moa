@@ -14,8 +14,6 @@ pub enum ExperimentRunStatus {
     Accepted,
     /// The run is executing.
     Running,
-    /// The run is blocked on an approval decision.
-    WaitingApproval,
     /// The run finished successfully.
     Completed,
     /// The run finished with an error.
@@ -31,7 +29,6 @@ impl ExperimentRunStatus {
         match self {
             Self::Accepted => "accepted",
             Self::Running => "running",
-            Self::WaitingApproval => "waiting_approval",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -44,7 +41,6 @@ impl ExperimentRunStatus {
         match value {
             "accepted" => Some(Self::Accepted),
             "running" => Some(Self::Running),
-            "waiting_approval" => Some(Self::WaitingApproval),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
             "cancelled" => Some(Self::Cancelled),
@@ -69,8 +65,6 @@ pub enum ExperimentTrialStatus {
     Dispatched,
     /// The trial is executing.
     Running,
-    /// The trial is blocked on an approval decision.
-    WaitingApproval,
     /// The trial completed successfully.
     Completed,
     /// The trial finished with an error.
@@ -87,7 +81,6 @@ impl ExperimentTrialStatus {
             Self::Accepted => "accepted",
             Self::Dispatched => "dispatched",
             Self::Running => "running",
-            Self::WaitingApproval => "waiting_approval",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -101,7 +94,6 @@ impl ExperimentTrialStatus {
             "accepted" => Some(Self::Accepted),
             "dispatched" => Some(Self::Dispatched),
             "running" => Some(Self::Running),
-            "waiting_approval" => Some(Self::WaitingApproval),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
             "cancelled" => Some(Self::Cancelled),
@@ -132,8 +124,6 @@ pub enum ExperimentTrialStopReason {
     SimulatorDone,
     /// The target session or workflow reached a terminal state.
     TargetTerminal,
-    /// The target stopped at an approval wait.
-    ApprovalWait,
     /// The trial stopped because execution failed.
     Error,
     /// The trial stopped because it was cancelled.
@@ -151,7 +141,6 @@ impl ExperimentTrialStopReason {
             Self::BudgetCap => "budget_cap",
             Self::SimulatorDone => "simulator_done",
             Self::TargetTerminal => "target_terminal",
-            Self::ApprovalWait => "approval_wait",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
         }
@@ -167,7 +156,6 @@ impl ExperimentTrialStopReason {
             "budget_cap" => Some(Self::BudgetCap),
             "simulator_done" => Some(Self::SimulatorDone),
             "target_terminal" => Some(Self::TargetTerminal),
-            "approval_wait" => Some(Self::ApprovalWait),
             "error" => Some(Self::Error),
             "cancelled" => Some(Self::Cancelled),
             _ => None,

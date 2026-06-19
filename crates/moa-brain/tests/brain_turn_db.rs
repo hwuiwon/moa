@@ -7,14 +7,14 @@ use moa_brain::{
     pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
 };
 use moa_core::{
-    ApprovalDecision, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
-    Event, EventFilter, EventRange, EventRecord, EventType, LLMProvider, MoaConfig,
-    ModelCapabilities, Result, RuntimeEvent, SequenceNum, SessionFilter, SessionId, SessionMeta,
-    SessionStatus, SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage,
-    ToolCallContent, ToolCallFormat, ToolCallId, ToolInvocation, ToolOutput, UserId, WorkspaceId,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventFilter,
+    EventRange, EventRecord, EventType, LLMProvider, MoaConfig, ModelCapabilities, Result,
+    RuntimeEvent, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat,
+    ToolCallId, ToolInvocation, ToolOutput, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
-use moa_security::ToolPolicies;
+use moa_security::ActionPolicies;
 use moa_session::{PostgresSessionStore, testing};
 use serde_json::json;
 use tempfile::tempdir;
@@ -780,14 +780,14 @@ impl LLMProvider for SessionSearchArtifactLlmProvider {
 }
 
 #[derive(Default)]
-struct OpenAiApprovalLoopLlmProvider {
+struct OpenAiToolLoopLlmProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
 }
 
 #[async_trait]
-impl LLMProvider for OpenAiApprovalLoopLlmProvider {
+impl LLMProvider for OpenAiToolLoopLlmProvider {
     fn name(&self) -> &str {
-        "openai-approval-loop"
+        "openai-tool-loop"
     }
 
     fn capabilities(&self) -> ModelCapabilities {
@@ -818,9 +818,9 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
                 text: String::new(),
                 content: vec![CompletionContent::ToolCall(ToolCallContent {
                     invocation: ToolInvocation {
-                        id: Some("fc_approval_1".to_string()),
+                        id: Some("fc_action_1".to_string()),
                         name: "bash".to_string(),
-                        input: json!({ "cmd": "printf 'hello from approved openai tool'" }),
+                        input: json!({ "cmd": "printf 'hello from openai tool'" }),
                     },
                     provider_metadata: None,
                 })],
@@ -833,24 +833,22 @@ impl LLMProvider for OpenAiApprovalLoopLlmProvider {
         } else {
             let tool_result = request.messages.iter().find(|message| {
                 message.role == moa_core::MessageRole::Tool
-                    && message.tool_use_id.as_deref() == Some("fc_approval_1")
+                    && message.tool_use_id.as_deref() == Some("fc_action_1")
             });
             assert!(
                 tool_result.is_some(),
-                "expected function_call_output for fc_approval_1 after approval; request was: {request:?}"
+                "expected function_call_output for fc_action_1 after tool execution; request was: {request:?}"
             );
             assert!(
                 request
                     .messages
                     .iter()
-                    .any(|message| { message.content.contains("hello from approved openai tool") }),
-                "expected tool output to be preserved after approval; request was: {request:?}"
+                    .any(|message| { message.content.contains("hello from openai tool") }),
+                "expected tool output to be preserved after execution; request was: {request:?}"
             );
             CompletionResponse {
-                text: "Approved tool completed".to_string(),
-                content: vec![CompletionContent::Text(
-                    "Approved tool completed".to_string(),
-                )],
+                text: "Tool completed".to_string(),
+                content: vec![CompletionContent::Text("Tool completed".to_string())],
                 stop_reason: StopReason::EndTurn,
                 model: moa_core::ModelId::new("gpt-5.4"),
                 usage: token_usage(20, 7),
@@ -1441,7 +1439,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
 }
 
 #[tokio::test]
-async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
+async fn run_brain_turn_executes_tool_in_auto_mode() {
     let session = SessionMeta {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
@@ -1477,36 +1475,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
     .await
     .unwrap();
 
-    let request = match result {
-        TurnResult::NeedsApproval(request) => request,
-        other => panic!("expected pending approval, got {other:?}"),
-    };
-    assert_eq!(llm.requests.lock().await.len(), 1);
-    store
-        .emit_event(
-            session.id,
-            Event::ApprovalDecided {
-                request_id: request.request_id,
-                sub_agent_id: None,
-                decision: ApprovalDecision::AllowOnce,
-                decided_by: "user".to_string(),
-                decided_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let resumed = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(resumed, TurnResult::Complete);
+    assert_eq!(result, TurnResult::Complete);
     assert_eq!(llm.requests.lock().await.len(), 2);
 
     let events = store.events.lock().await.clone();
@@ -1526,7 +1495,7 @@ async fn run_brain_turn_pauses_for_approval_then_executes_tool() {
 }
 
 #[tokio::test]
-async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
+async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_execution() {
     let session = SessionMeta {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
@@ -1538,7 +1507,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
         &session.id,
         0,
         Event::UserMessage {
-            text: "Use a tool that requires approval".to_string(),
+            text: "Use a tool".to_string(),
             attachments: Vec::new(),
         },
     )];
@@ -1550,7 +1519,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
         store.clone(),
         tool_router.tool_schemas(),
     );
-    let llm = Arc::new(OpenAiApprovalLoopLlmProvider::default());
+    let llm = Arc::new(OpenAiToolLoopLlmProvider::default());
 
     let result = run_brain_turn(
         session.id,
@@ -1562,36 +1531,7 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
     .await
     .unwrap();
 
-    let request = match result {
-        TurnResult::NeedsApproval(request) => request,
-        other => panic!("expected pending approval, got {other:?}"),
-    };
-
-    store
-        .emit_event(
-            session.id,
-            Event::ApprovalDecided {
-                request_id: request.request_id,
-                sub_agent_id: None,
-                decision: ApprovalDecision::AllowOnce,
-                decided_by: "user".to_string(),
-                decided_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let resumed = run_brain_turn(
-        session.id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(resumed, TurnResult::Complete);
+    assert_eq!(result, TurnResult::Complete);
 
     let events = store.events.lock().await.clone();
     assert!(events.iter().any(|record| matches!(
@@ -1600,11 +1540,11 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_approval() {
             provider_tool_use_id: Some(provider_tool_use_id),
             success,
             ..
-        } if *success && provider_tool_use_id == "fc_approval_1"
+        } if *success && provider_tool_use_id == "fc_action_1"
     )));
     assert!(events.iter().any(|record| matches!(
         &record.event,
-        Event::BrainResponse { text, .. } if text == "Approved tool completed"
+        Event::BrainResponse { text, .. } if text == "Tool completed"
     )));
 }
 
@@ -1645,29 +1585,7 @@ async fn run_brain_turn_persists_truncated_tool_result_metadata() {
     .await
     .unwrap();
 
-    let request = match result {
-        TurnResult::NeedsApproval(request) => request,
-        other => panic!("expected pending approval, got {other:?}"),
-    };
-    store
-        .emit_event(
-            session.id,
-            Event::ApprovalDecided {
-                request_id: request.request_id,
-                sub_agent_id: None,
-                decision: ApprovalDecision::AllowOnce,
-                decided_by: "user".to_string(),
-                decided_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let resumed = run_brain_turn(session.id, store.clone(), llm, &pipeline, Some(tool_router))
-        .await
-        .unwrap();
-
-    assert_eq!(resumed, TurnResult::Complete);
+    assert_eq!(result, TurnResult::Complete);
 
     let events = store.events.lock().await.clone();
     assert!(events.iter().any(|record| matches!(
@@ -1710,13 +1628,12 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
         .unwrap();
 
     let sandbox_dir = tempdir().unwrap();
-    let mut config = MoaConfig::default();
-    config.permissions.auto_approve = vec!["bash".to_string()];
+    let config = MoaConfig::default();
     let tool_router = Arc::new(
         ToolRouter::new_local(sandbox_dir.path())
             .await
             .unwrap()
-            .with_policies(ToolPolicies::from_config(&config))
+            .with_policies(ActionPolicies::from_config(&config))
             .with_session_store(store.clone()),
     );
     let pipeline =
@@ -1804,13 +1721,12 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         .unwrap();
 
     let sandbox_dir = tempdir().unwrap();
-    let mut config = MoaConfig::default();
-    config.permissions.auto_approve = vec!["bash".to_string()];
+    let config = MoaConfig::default();
     let tool_router = Arc::new(
         ToolRouter::new_local(sandbox_dir.path())
             .await
             .unwrap()
-            .with_policies(ToolPolicies::from_config(&config))
+            .with_policies(ActionPolicies::from_config(&config))
             .with_session_store(store.clone()),
     );
     let pipeline =
@@ -2228,7 +2144,7 @@ async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execu
 }
 
 #[tokio::test]
-async fn always_allow_rule_persists_and_skips_next_approval() {
+async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
     let dir = tempdir().unwrap();
     let store = test_session_store().await;
     let tool_router = Arc::new(
@@ -2274,44 +2190,18 @@ async fn always_allow_rule_persists_and_skips_next_approval() {
     )
     .await
     .unwrap();
-    let request = match first {
-        TurnResult::NeedsApproval(request) => request,
-        other => panic!("expected pending approval, got {other:?}"),
-    };
-
-    store
-        .emit_event(
-            session_id,
-            Event::ApprovalDecided {
-                request_id: request.request_id,
-                sub_agent_id: None,
-                decision: ApprovalDecision::AlwaysAllow {
-                    pattern: "printf *".to_string(),
-                },
-                decided_by: "user".to_string(),
-                decided_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let resumed = run_brain_turn(
-        session_id,
-        store.clone(),
-        llm.clone(),
-        &pipeline,
-        Some(tool_router.clone()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(resumed, TurnResult::Complete);
+    assert_eq!(first, TurnResult::Complete);
     assert_eq!(
         store
-            .list_approval_rules(&WorkspaceId::new("workspace"))
+            .list_action_policy_rules_for_tool(
+                &WorkspaceId::new("workspace"),
+                &UserId::new("user"),
+                "bash",
+            )
             .await
             .unwrap()
             .len(),
-        1
+        0
     );
 
     store

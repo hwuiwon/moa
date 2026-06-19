@@ -3,8 +3,7 @@
 #[cfg(feature = "slack")]
 use moa_core::{ChannelRef, InboundMessage, trace_name_from_message};
 
-pub mod approval;
-pub mod approval_state;
+pub mod action_review;
 pub mod control;
 pub mod edit_window;
 #[cfg(feature = "postmark")]
@@ -17,13 +16,7 @@ pub mod twilio;
 #[cfg(feature = "slack")]
 pub mod slack;
 
-pub use approval::{
-    ApprovalCallbackAction, approval_buttons, prepare_outbound_message, resolved_approval_buttons,
-};
-pub use approval_state::{
-    ApprovalClickOutcome, ApprovalLifecycleState, ApprovalStateTracker, approval_state_marker,
-    parse_approval_decision,
-};
+pub use action_review::prepare_outbound_message;
 pub use control::{MessagingControlAction, control_action_for_inbound};
 pub use edit_window::{
     MessagingEditOutcome, MessagingEditResponse, edit_with_followup_fallback,

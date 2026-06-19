@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
+    ActionPolicyRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
     EventRange, EventRecord, EventType, ExperienceAttribution, ExperienceRecord, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError,
     Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
@@ -16,7 +16,7 @@ use moa_core::{
     record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
     record_session_event_replay, record_sessions_active, record_turn_completed,
 };
-use moa_security::ApprovalRuleStore;
+use moa_security::ActionPolicyRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
 use tracing::warn;
 use uuid::Uuid;
@@ -28,12 +28,12 @@ use crate::queries::{
     EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
     LEARNING_CANDIDATE_COLUMNS, LEARNING_ENTRY_COLUMNS, SESSION_INSERT_COLUMNS,
     SESSION_SELECT_COLUMNS, SESSION_SUMMARY_COLUMNS, TASK_SEGMENT_COLUMNS,
-    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, approval_rule_from_row, experience_attribution_from_row,
-    experience_record_from_row, from_db, learning_candidate_from_row, learning_entry_from_row,
-    map_sqlx_error, session_meta_from_row, session_summary_from_row, task_segment_from_row,
-    task_strategy_success_rate_from_row,
+    TASK_STRATEGY_SUCCESS_RATE_COLUMNS, action_policy_rule_from_row,
+    experience_attribution_from_row, experience_record_from_row, from_db,
+    learning_candidate_from_row, learning_entry_from_row, map_sqlx_error, session_meta_from_row,
+    session_summary_from_row, task_segment_from_row, task_strategy_success_rate_from_row,
 };
-mod approval;
+mod action_policy;
 mod experience;
 mod helpers;
 mod learning;

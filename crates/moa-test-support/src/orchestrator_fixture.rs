@@ -111,7 +111,18 @@ impl OrchestratorTestFixture {
         if let Ok(ingress_url) = std::env::var("MOA_TEST_EXTERNAL_INGRESS_URL") {
             return Self::external(ingress_url);
         }
-        Self::internal().await
+        Self::internal(None).await
+    }
+
+    /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
+    ///
+    /// This bypasses the shared fixture because `MOA_PROVIDERS_OVERRIDE=scripted`
+    /// is loaded when the orchestrator starts.
+    pub async fn with_script(script: serde_json::Value) -> Result<Self> {
+        if std::env::var("MOA_TEST_EXTERNAL_INGRESS_URL").is_ok() {
+            bail!("dedicated scripted fixtures cannot use an external orchestrator");
+        }
+        Self::internal(Some(script)).await
     }
 
     fn external(raw_ingress_url: String) -> Result<Self> {
@@ -147,7 +158,7 @@ impl OrchestratorTestFixture {
         })
     }
 
-    async fn internal() -> Result<Self> {
+    async fn internal(script: Option<serde_json::Value>) -> Result<Self> {
         let repo_root = repo_root();
         ensure_postgres_image(&repo_root).await?;
         let postgres = start_postgres_container().await?;
@@ -177,7 +188,13 @@ impl OrchestratorTestFixture {
             .tempdir()
             .context("create scripted-provider tempdir")?;
         let script_path = script_dir.path().join("default-script.json");
-        std::fs::write(&script_path, default_script()).with_context(|| {
+        let script_body = match script {
+            Some(script) => {
+                serde_json::to_vec(&script).context("serialize scripted provider fixture")?
+            }
+            None => default_script(),
+        };
+        std::fs::write(&script_path, script_body).with_context(|| {
             format!("write scripted provider fixture {}", script_path.display())
         })?;
 
@@ -221,7 +238,8 @@ impl OrchestratorTestFixture {
         })
     }
 
-    async fn grant_workspace_member(
+    /// Grants the provided identity workspace-member access.
+    pub async fn grant_workspace_member_identity(
         &self,
         identity: &Identity,
         workspace_id: &WorkspaceId,
@@ -249,6 +267,23 @@ impl OrchestratorTestFixture {
         )
         .await
         .context("grant fixture session participation")
+    }
+
+    /// Grants the fixture client's default identity workspace-admin access.
+    pub async fn grant_default_workspace_admin(&self, workspace_id: &WorkspaceId) -> Result<()> {
+        let identity = self
+            .client
+            .identity
+            .as_ref()
+            .context("fixture test client must carry identity headers")?;
+        self.apply_raw_tuple(
+            TupleOp::Write,
+            &identity_subject(identity),
+            "admin",
+            &format!("workspace:{workspace_id}"),
+        )
+        .await
+        .context("grant fixture workspace admin")
     }
 
     async fn apply_raw_tuple(
@@ -353,7 +388,7 @@ impl IsolatedTest<'_> {
             .context("fixture test client must carry identity headers")?
             .clone();
         self.fixture
-            .grant_workspace_member(&identity, &workspace_id)
+            .grant_workspace_member_identity(&identity, &workspace_id)
             .await?;
         let meta = SessionMeta {
             id: session_id,
@@ -498,7 +533,8 @@ impl TestApiClient {
         }
     }
 
-    async fn post_call<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    /// Sends an authenticated JSON POST request and decodes a JSON response.
+    pub async fn post_call<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: serde::Serialize + ?Sized,
         Resp: serde::de::DeserializeOwned,
@@ -540,7 +576,8 @@ impl TestApiClient {
         decode_response(response.send().await.context("send orchestrator request")?).await
     }
 
-    async fn post_void<Req>(&self, path: &str, body: &Req) -> Result<()>
+    /// Sends an authenticated JSON POST request that must return a success status.
+    pub async fn post_void<Req>(&self, path: &str, body: &Req) -> Result<()>
     where
         Req: serde::Serialize + ?Sized,
     {

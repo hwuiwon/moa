@@ -4,7 +4,6 @@ use super::*;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::SessionStore as _;
 
 impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
@@ -37,27 +36,6 @@ impl Session for SessionImpl {
             },
         )
         .await?;
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx, decision))]
-    async fn approve(
-        &self,
-        ctx: SharedObjectContext<'_>,
-        decision: Json<ApprovalDecision>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "approve");
-        let awakeable_id = pending_approval_awakeable(&ctx).await?;
-        let decision = decision.into_inner();
-        let serialized_decision = serialize_awakeable_decision(&decision)?;
-
-        ctx.resolve_awakeable(&awakeable_id, serialized_decision);
-        tracing::info!(
-            key = %ctx.key(),
-            awakeable_id,
-            ?decision,
-            "resolved session approval awakeable"
-        );
         Ok(())
     }
 
@@ -214,52 +192,6 @@ impl Session for SessionImpl {
         }))
     }
 
-    #[tracing::instrument(skip(self, ctx, input))]
-    // SAFETY: called only from TurnExecution after session participant authz has already checked.
-    async fn set_pending_approval(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<SetSessionPendingApprovalInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "set_pending_approval");
-        let input = input.into_inner();
-        let pending_state = load_pending_state(&ctx).await?;
-        if pending_state.active_turn_id.as_deref() != Some(input.turn_id.as_str()) {
-            tracing::warn!(
-                key = %ctx.key(),
-                record_turn_id = %input.turn_id,
-                active_turn_id = ?pending_state.active_turn_id,
-                "ignored stale session pending approval marker"
-            );
-            return Ok(());
-        }
-        ctx.set(K_PENDING_APPROVAL, Json::from(input.awakeable_id));
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx, input))]
-    // SAFETY: called only from TurnExecution after session participant authz has already checked.
-    async fn clear_pending_approval(
-        &self,
-        ctx: ObjectContext<'_>,
-        input: Json<ClearSessionPendingApprovalInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Session", "clear_pending_approval");
-        let input = input.into_inner();
-        let pending_state = load_pending_state(&ctx).await?;
-        if pending_state.active_turn_id.as_deref() != Some(input.turn_id.as_str()) {
-            tracing::warn!(
-                key = %ctx.key(),
-                record_turn_id = %input.turn_id,
-                active_turn_id = ?pending_state.active_turn_id,
-                "ignored stale session pending approval clear"
-            );
-            return Ok(());
-        }
-        ctx.clear(K_PENDING_APPROVAL);
-        Ok(())
-    }
-
     #[tracing::instrument(skip(self, ctx))]
     async fn snapshot(
         &self,
@@ -414,57 +346,4 @@ async fn require_session_participant(ctx: &ObjectContext<'_>) -> Result<(), Hand
     )
     .await
     .map_err(translate_authz_error)
-}
-
-async fn pending_approval_awakeable(ctx: &SharedObjectContext<'_>) -> Result<String, HandlerError> {
-    if let Some(awakeable_id) = ctx
-        .get::<Json<String>>(K_PENDING_APPROVAL)
-        .await?
-        .map(Json::into_inner)
-    {
-        return Ok(awakeable_id);
-    }
-
-    let session_id = parse_session_key(ctx.key())?;
-    let store = crate::OrchestratorCtx::current().session_store.clone();
-    let events = ctx
-        .run(|| async move {
-            store
-                .get_events(session_id, approval_event_range())
-                .await
-                .map(Json::from)
-                .map_err(HandlerError::from)
-        })
-        .name("session_pending_approval_events")
-        .await?
-        .into_inner();
-    let mut decided = std::collections::HashSet::new();
-    for record in &events {
-        if let Event::ApprovalDecided { request_id, .. } = &record.event {
-            decided.insert(*request_id);
-        }
-    }
-
-    events
-        .iter()
-        .rev()
-        .find_map(|record| match &record.event {
-            Event::ApprovalRequested {
-                request_id,
-                awakeable_id: Some(awakeable_id),
-                ..
-            } if !decided.contains(request_id) => Some(awakeable_id.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| TerminalError::new("no pending approval for this session").into())
-}
-
-fn approval_event_range() -> EventRange {
-    EventRange {
-        event_types: Some(vec![
-            EventType::ApprovalRequested,
-            EventType::ApprovalDecided,
-        ]),
-        ..EventRange::all()
-    }
 }

@@ -8,12 +8,12 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, EventType,
+    ActionClass, Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, EventType,
     ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType,
-    LearningRiskClass, MemoryScope, SegmentAssessment, SegmentCompletion, SegmentId, SessionFilter,
-    SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate, ToolDefinition,
-    UserId, WorkspaceId,
+    LearningRiskClass, MemoryScope, RiskLevel, SegmentAssessment, SegmentCompletion, SegmentId,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate,
+    ToolDefinition, UserId, WorkspaceId,
 };
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -141,22 +141,6 @@ pub struct QueueMessageResponse {
     pub queued: bool,
     /// Turn ID when the message started a workflow immediately.
     pub started_turn_id: Option<String>,
-}
-
-/// Turn-scoped pending approval marker for a root session turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetSessionPendingApprovalInput {
-    /// Workflow turn id that requested approval.
-    pub turn_id: String,
-    /// Approval awakeable id that `Session::approve` should resolve.
-    pub awakeable_id: String,
-}
-
-/// Turn-scoped pending approval clear request for a root session turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClearSessionPendingApprovalInput {
-    /// Workflow turn id that completed the approval wait.
-    pub turn_id: String,
 }
 
 /// Response returned by `Session/request_cancel`.
@@ -2480,18 +2464,20 @@ pub struct ToolDescriptor {
     pub schema: serde_json::Value,
     /// Declared retry/idempotency contract for the tool.
     pub idempotency_class: IdempotencyClass,
-    /// Whether the tool requires approval by default.
-    pub requires_approval: bool,
+    /// Risk level assigned to this tool.
+    pub risk_level: RiskLevel,
+    /// Policy/audit class assigned to this tool.
+    pub action_class: ActionClass,
 }
 
 /// Builds the public descriptor for one registered tool definition.
 pub fn tool_descriptor(definition: ToolDefinition) -> ToolDescriptor {
-    let requires_approval = definition.requires_approval();
     ToolDescriptor {
         name: definition.name,
         description: definition.description,
         schema: definition.schema,
         idempotency_class: definition.idempotency_class,
-        requires_approval,
+        risk_level: definition.policy.risk_level,
+        action_class: definition.policy.action_class,
     }
 }

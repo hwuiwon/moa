@@ -21,12 +21,98 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000101__auth_baseline.sql",
     "V000201__orchestrator_baseline.sql",
     "V000301__ocsf_baseline.sql",
+    "V000302__action_policy_auto_mode.sql",
+    "V000303__age_rls_operator_resolution.sql",
 ];
 
-const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
-    name: "V000001__session_baseline.sql",
-    sql: include_str!("../migrations/postgres/V000001__session_baseline.sql"),
-}];
+// Schema-isolated session tests do not own artifact/experiment tables. Keep
+// this DDL equal to the session-owned prefix of V000302.
+const ACTION_POLICY_SCHEMA_MIGRATION_SQL: &str = r#"
+DROP TABLE IF EXISTS approval_rules;
+
+CREATE TABLE IF NOT EXISTS action_policy_rules (
+    id UUID PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT,
+    tool TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny', 'admin_review')),
+    scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
+    reason TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT action_policy_rules_global_workspace_check
+        CHECK (
+            (scope = 'global' AND workspace_id = 'global')
+            OR (scope = 'workspace' AND workspace_id <> 'global')
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope
+    ON action_policy_rules(workspace_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS idx_action_policy_rules_lookup
+    ON action_policy_rules(workspace_id, tool, user_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_action_policy_rules_unique_scope
+    ON action_policy_rules(workspace_id, tool, pattern, COALESCE(user_id, ''));
+
+SELECT moa.apply_three_tier_rls('action_policy_rules'::REGCLASS);
+
+CREATE TABLE IF NOT EXISTS workspace_action_reviews (
+    id UUID PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
+    sub_agent_id TEXT,
+    tool_call_id UUID NOT NULL,
+    tool_name TEXT NOT NULL,
+    action_class TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    input_summary TEXT NOT NULL,
+    normalized_input TEXT NOT NULL,
+    envelope JSONB NOT NULL,
+    preview JSONB NOT NULL,
+    tool_request JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'cleared', 'denied')),
+    requested_by TEXT NOT NULL,
+    requested_event_recorded_at TIMESTAMPTZ,
+    decided_by TEXT,
+    deny_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    decided_at TIMESTAMPTZ,
+    decision_event_recorded_at TIMESTAMPTZ,
+    execution_tool_call_id UUID,
+    execution_requested_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_pending
+    ON workspace_action_reviews(workspace_id, created_at DESC)
+    WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_session
+    ON workspace_action_reviews(session_id, created_at DESC)
+    WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_scope
+    ON workspace_action_reviews(workspace_id, scope, user_id);
+
+SELECT moa.apply_three_tier_rls('workspace_action_reviews'::REGCLASS);
+"#;
+
+const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
+    SchemaMigration {
+        name: "V000001__session_baseline.sql",
+        sql: include_str!("../migrations/postgres/V000001__session_baseline.sql"),
+    },
+    SchemaMigration {
+        name: "V000302__action_policy_auto_mode.sql",
+        sql: ACTION_POLICY_SCHEMA_MIGRATION_SQL,
+    },
+    SchemaMigration {
+        name: "V000303__age_rls_operator_resolution.sql",
+        sql: include_str!("../migrations/postgres/V000303__age_rls_operator_resolution.sql"),
+    },
+];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
     name: "V000101__auth_baseline.sql",
@@ -233,7 +319,10 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{ORCHESTRATOR_SCHEMA_MIGRATIONS, POSTGRES_MIGRATION_FILES};
+    use super::{
+        ACTION_POLICY_SCHEMA_MIGRATION_SQL, ORCHESTRATOR_SCHEMA_MIGRATIONS,
+        POSTGRES_MIGRATION_FILES,
+    };
 
     #[test]
     fn central_manifest_matches_embedded_postgres_files() {
@@ -270,6 +359,21 @@ mod tests {
         assert!(
             sql.contains("ALTER TABLE agents VALIDATE CONSTRAINT agents_status_check"),
             "agents_status_check should still be validated after being added"
+        );
+    }
+
+    #[test]
+    fn action_policy_schema_migration_matches_refinery_session_subset() {
+        let refinery_sql =
+            include_str!("../migrations/postgres/V000302__action_policy_auto_mode.sql");
+        let (session_subset, _) = refinery_sql
+            .split_once("\nALTER TABLE moa.artifact_run")
+            .expect("action policy migration should end session-owned DDL before artifact DDL");
+
+        assert_eq!(
+            ACTION_POLICY_SCHEMA_MIGRATION_SQL.trim(),
+            session_subset.trim(),
+            "schema-isolated session helper must stay in sync with the session-owned prefix of V000302"
         );
     }
 }

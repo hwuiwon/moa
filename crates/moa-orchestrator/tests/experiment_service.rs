@@ -738,7 +738,7 @@ fn experiments_run_dispatches_agent_loop_and_workflow_targets_to_experiment_run_
 
 #[test]
 fn experiment_run_workflow_drives_session_without_eval_or_direct_turn_execution() {
-    // Pins: agent-loop experiments enter the normal Session path and do not bypass approvals.
+    // Pins: agent-loop experiments enter the normal Session path and do not bypass action policy.
     let source = experiment_run_workflow_source();
 
     assert!(
@@ -758,8 +758,8 @@ fn experiment_run_workflow_drives_session_without_eval_or_direct_turn_execution(
         "ExperimentRun must not call moa-eval streamed turn execution"
     );
     assert!(
-        !source.contains("ApprovalDecision::Allow"),
-        "ExperimentRun must not auto-approve tools"
+        !source.contains("ActionReviewDecision::Cleared"),
+        "ExperimentRun must not clear action reviews"
     );
 }
 
@@ -837,8 +837,7 @@ fn experiment_cancellation_marks_active_trial_rows() {
         "parent workflow cancellation reconciliation should be journaled"
     );
     assert!(
-        store_source
-            .contains("AND status IN ('accepted', 'dispatched', 'running', 'waiting_approval')"),
+        store_source.contains("AND status IN ('accepted', 'dispatched', 'running')"),
         "store helper should only cancel non-terminal trial rows"
     );
 }
@@ -868,8 +867,8 @@ fn experiment_trial_run_workflow_is_bound_and_expected_by_readiness() {
 }
 
 #[test]
-fn experiment_trial_run_queues_simulator_messages_without_target_tools_or_auto_approval() {
-    // Pins: simulator trials enter the target through Session/queue_message and never bypass approvals.
+fn experiment_trial_run_queues_simulator_messages_without_target_tools_or_review_clearance() {
+    // Pins: simulator trials enter the target through Session/queue_message and never bypass action policy.
     let source = experiment_trial_run_workflow_source();
 
     assert!(
@@ -885,16 +884,16 @@ fn experiment_trial_run_queues_simulator_messages_without_target_tools_or_auto_a
         "simulator provider calls should not expose target tools"
     );
     assert!(
-        source.contains("ExperimentTrialStatus::WaitingApproval"),
-        "approval waits should persist waiting_approval"
+        !source.contains("ActionReviewDecision::Cleared"),
+        "simulator trials should not clear action reviews"
     );
     assert!(
         !source.contains("TurnExecutionClient"),
         "ExperimentTrialRun must not invoke TurnExecution directly"
     );
     assert!(
-        !source.contains("ApprovalDecision::Allow"),
-        "ExperimentTrialRun must not auto-approve tools"
+        !source.contains("ActionReviewDecision::Cleared"),
+        "ExperimentTrialRun must not auto-clear reviewed actions"
     );
 }
 

@@ -503,8 +503,8 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     .await
     .expect("ownership fact ingests");
 
-    assert_eq!(dependency.inserted, 1);
-    assert_eq!(ownership.inserted, 1);
+    assert_eq!(dependency.inserted, 1, "{dependency:?}");
+    assert_eq!(ownership.inserted, 1, "{ownership:?}");
 
     let facts = active_workspace_fact_rows(test_db.store().pool(), workspace_id).await;
     let dependency_uid = fact_uid_with_subject(&facts, "audit-shipper-dep-test");

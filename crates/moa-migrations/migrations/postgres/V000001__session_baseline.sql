@@ -208,22 +208,6 @@ CREATE INDEX IF NOT EXISTS idx_events_scope ON events(workspace_id, scope, user_
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_fts ON events USING GIN(search_vector);
 
-CREATE TABLE IF NOT EXISTS approval_rules (
-    id UUID PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    user_id TEXT,
-    tool TEXT NOT NULL,
-    pattern TEXT NOT NULL,
-    action TEXT NOT NULL,
-    scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
-    created_by TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(workspace_id, tool, pattern)
-);
-
-CREATE INDEX IF NOT EXISTS idx_approval_rules_scope
-    ON approval_rules(workspace_id, scope, user_id);
-
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -892,7 +876,6 @@ CREATE INDEX IF NOT EXISTS idx_learning_log_scope
 
 SELECT moa.apply_three_tier_rls('sessions'::REGCLASS);
 SELECT moa.apply_three_tier_rls('events'::REGCLASS);
-SELECT moa.apply_three_tier_rls('approval_rules'::REGCLASS);
 SELECT moa.apply_three_tier_rls('pending_signals'::REGCLASS);
 SELECT moa.apply_three_tier_rls('context_snapshots'::REGCLASS);
 SELECT moa.apply_three_tier_rls('task_segments'::REGCLASS);
@@ -2861,7 +2844,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact_run (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (scope IS NOT NULL),
-    CHECK (status IN ('queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled'))
+    CHECK (status IN ('queued', 'running', 'pending_review', 'completed', 'failed', 'cancelled'))
 );
 
 CREATE INDEX IF NOT EXISTS artifact_run_scope_idx
@@ -2896,7 +2879,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact_node_run (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (scope IS NOT NULL),
-    CHECK (status IN ('queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled', 'skipped'))
+    CHECK (status IN ('queued', 'running', 'pending_review', 'completed', 'failed', 'cancelled', 'skipped'))
 );
 
 CREATE INDEX IF NOT EXISTS artifact_node_run_run_idx
@@ -2936,7 +2919,7 @@ CREATE TABLE IF NOT EXISTS moa.experiment_run (
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     name TEXT NOT NULL,
     target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'workflow')),
-    status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled')),
+    status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'cancelled')),
     target JSONB NOT NULL,
     variant JSONB NOT NULL,
     scorecard JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -3043,7 +3026,7 @@ CREATE TABLE IF NOT EXISTS moa.experiment_trial (
     user_id TEXT,
     scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
     trial_key TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled')),
+    status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'cancelled')),
     target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'workflow')),
     variant_key TEXT NOT NULL,
     plan_revision_uid UUID NOT NULL,
@@ -3068,7 +3051,6 @@ CREATE TABLE IF NOT EXISTS moa.experiment_trial (
             'budget_cap',
             'simulator_done',
             'target_terminal',
-            'approval_wait',
             'error',
             'cancelled'
         )
@@ -3112,7 +3094,6 @@ ALTER TABLE moa.experiment_trial
         'accepted',
         'dispatched',
         'running',
-        'waiting_approval',
         'completed',
         'failed',
         'cancelled'

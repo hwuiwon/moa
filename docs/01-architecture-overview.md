@@ -106,7 +106,7 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 `moa-orchestrator` exposes Restate handlers:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
-- Services: `Agents`, `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
+- Services: `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
   `Experiments`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`,
   `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`,
   `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami`

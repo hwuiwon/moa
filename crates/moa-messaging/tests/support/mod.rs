@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalRequest, ChannelRef, InboundMessage, MessageContent, MessageId, MoaError,
-    OutboundMessage, Platform, PlatformUser, RiskLevel, SessionId, types::Attachment,
+    ChannelRef, InboundMessage, MessageContent, MessageId, MoaError, OutboundMessage, Platform,
+    PlatformUser, SessionId, types::Attachment,
 };
 use moa_messaging::MessagingSendResponse;
 use unicode_segmentation::UnicodeSegmentation;
@@ -43,29 +43,12 @@ pub fn text_message(text: impl Into<String>) -> OutboundMessage {
     }
 }
 
-/// Builds the canonical approval request used by button-rendering tests.
-pub fn approval_request() -> ApprovalRequest {
-    ApprovalRequest {
-        request_id: fixed_request_id(),
-        sub_agent_id: None,
-        tool_name: "bash".to_string(),
-        input_summary: "npm test".to_string(),
-        risk_level: RiskLevel::High,
-    }
-}
-
 /// Returns a deterministic session id for messaging control-flow tests.
 pub fn fixed_session_id() -> SessionId {
     SessionId(
         Uuid::parse_str("018f6d7a-0b0c-7d00-8000-000000000002")
             .expect("fixed session UUID should parse"),
     )
-}
-
-/// Returns the fixed approval request UUID used by callback tests.
-pub fn fixed_request_id() -> Uuid {
-    Uuid::parse_str("018f6d7a-0b0c-7d00-8000-000000000001")
-        .expect("fixed approval UUID should parse")
 }
 
 /// Builds a canonical inbound message for control-signal tests.

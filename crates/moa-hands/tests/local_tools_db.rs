@@ -444,7 +444,7 @@ async fn file_operations_reject_path_traversal() {
 }
 
 #[tokio::test]
-async fn approval_prompt_uses_remembered_workspace_root_for_commands() {
+async fn action_review_preview_uses_remembered_workspace_root_for_commands() {
     let dir = tempdir().unwrap();
     let workspace_root = dir.path().join("workspace-root");
     tokio::fs::create_dir_all(&workspace_root).await.unwrap();
@@ -467,9 +467,9 @@ async fn approval_prompt_uses_remembered_workspace_root_for_commands() {
         )
         .await
         .unwrap();
-    let prompt = prepared.approval_prompt(uuid::Uuid::now_v7());
-    let working_dir = prompt
-        .parameters
+    let preview = prepared.review_preview();
+    let working_dir = preview
+        .fields
         .iter()
         .find(|field| field.label == "Working dir")
         .map(|field| field.value.clone());
@@ -481,7 +481,7 @@ async fn approval_prompt_uses_remembered_workspace_root_for_commands() {
 }
 
 #[tokio::test]
-async fn approval_prompt_str_replace_diff_is_surgical() {
+async fn action_review_preview_str_replace_diff_is_surgical() {
     let dir = tempdir().unwrap();
     let workspace_root = dir.path().join("workspace-root");
     tokio::fs::create_dir_all(workspace_root.join("src"))
@@ -529,13 +529,13 @@ async fn approval_prompt_str_replace_diff_is_surgical() {
         )
         .await
         .unwrap();
-    let prompt = prepared.approval_prompt(uuid::Uuid::now_v7());
+    let preview = prepared.review_preview();
 
-    assert_eq!(prompt.file_diffs.len(), 1);
-    assert!(prompt.file_diffs[0].before.contains("target_line();"));
-    assert!(prompt.file_diffs[0].after.contains("renamed_line();"));
-    assert!(!prompt.file_diffs[0].before.contains("line01"));
-    assert!(!prompt.file_diffs[0].after.contains("line12"));
+    assert_eq!(preview.file_diffs.len(), 1);
+    assert!(preview.file_diffs[0].before.contains("target_line();"));
+    assert!(preview.file_diffs[0].after.contains("renamed_line();"));
+    assert!(!preview.file_diffs[0].before.contains("line01"));
+    assert!(!preview.file_diffs[0].after.contains("line12"));
 }
 
 #[tokio::test]
@@ -727,6 +727,7 @@ async fn bash_respects_timeout() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
 async fn session_search_finds_prior_events() {
     let dir = tempdir().unwrap();
     let session_store = test_session_store().await;
@@ -789,6 +790,7 @@ async fn session_search_finds_prior_events() {
 }
 
 #[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
 async fn session_search_filters_error_events() {
     let dir = tempdir().unwrap();
     let session_store = test_session_store().await;

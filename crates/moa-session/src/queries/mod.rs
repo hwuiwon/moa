@@ -1,7 +1,7 @@
 //! Query helpers for mapping `PostgreSQL` rows into MOA core types.
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ApprovalRule, ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningEntry,
+    ActionPolicyRule, ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningEntry,
     MoaError, ModelId, Result, SegmentAssessment, SegmentId, SessionId, SessionMeta,
     SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, UserId, WorkspaceId,
 };

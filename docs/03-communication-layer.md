@@ -1,6 +1,6 @@
 # 03 — Communication Layer
 
-_Client surfaces, messaging adapters, approvals, and observation._
+_Client surfaces, messaging adapters, action review, and observation._
 
 ## Product Surfaces
 
@@ -9,9 +9,9 @@ MOA has several front doors over the same session model:
 | Surface | Primary crate | Use |
 |---|---|---|
 | REST/API | `moa-edge`, `moa-orchestrator` | Cloud, automation, diagnostics, and integration entrypoints |
-| Messaging adapters | `moa-messaging` | Slack conversations, approvals, email notifications, and SMS notifications |
+| Messaging adapters | `moa-messaging` | Slack conversations, action-review notifications, email notifications, and SMS notifications |
 
-The interfaces differ in rendering and transport. They all eventually create or address a `SessionId`, append user messages, observe session events, and resolve approvals.
+The interfaces differ in rendering and transport. They all eventually create or address a `SessionId`, append user messages, observe session events, and show action-review state.
 
 ## Message Normalization
 
@@ -25,7 +25,7 @@ Messaging platforms normalize inbound traffic into the shared platform DTOs in `
 - reply anchor
 - timestamp
 
-Outbound rendering is platform-specific, but the payload model is shared: text, markdown, code blocks, diffs, tool cards, approval requests, and status updates.
+Outbound rendering is platform-specific, but the payload model is shared: text, markdown, code blocks, diffs, tool cards, action-review requests, and status updates.
 
 ## Session Mapping
 
@@ -36,25 +36,21 @@ Outbound rendering is platform-specific, but the payload model is shared: text, 
 
 The durable state is not stored in the client. Clients can reconnect by replaying Postgres events and, in cloud mode, querying Restate status.
 
-## Approvals
+## Action Reviews
 
-Approval requests are session events with enough information for any surface to render:
+Workspace-admin action reviews are persisted records with enough information for an admin surface to render:
 
-- request ID
-- optional Restate awakeable ID
-- optional sub-agent ID
-- tool name
-- risk level
-- input summary
-- structured prompt data, including diffs and suggested allow patterns
+- review ID and workspace
+- durable `ActionEnvelope`
+- `ActionReviewPreview` with summary fields and diffs
+- status and decision metadata
 
-The default actions are:
+Admin actions are:
 
-- Allow once
-- Always allow with a scoped rule
-- Deny with an optional reason
+- Clear, which executes the stored request with a fresh tool-call ID.
+- Deny, which records the decision and does not execute the action.
 
-Approval rules are stored in Postgres through the shared approval rule store. Shell approvals are matched at parsed command boundaries so one approval does not accidentally cover chained commands.
+Conversation clients do not resolve blocking tool gates. Admin review returns a pending-review tool result to the model and the root or sub-agent workflow continues.
 
 ## Observation
 

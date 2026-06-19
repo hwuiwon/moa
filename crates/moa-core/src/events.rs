@@ -1,19 +1,15 @@
 //! Session event definitions and helpers.
 
-pub mod tool_approval;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ApprovalDecision, ApprovalPrompt, Attachment, CacheReport, EventType, ModelId, ModelTier,
-    RiskLevel, SegmentId, SessionStatus, SubAgentId, SubAgentState, ToolCallId, ToolOutput, UserId,
-    WorkspaceId,
+    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, EventType,
+    ModelId, ModelTier, SegmentId, SessionStatus, SubAgentId, SubAgentState, ToolCallId,
+    ToolOutput, UserId, WorkspaceId,
 };
-
-pub use tool_approval::*;
 
 /// Append-only session event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,35 +161,22 @@ pub enum Event {
         /// Whether the failure is retryable.
         retryable: bool,
     },
-    /// A tool call needs approval.
-    ApprovalRequested {
-        /// Approval request identifier.
-        request_id: Uuid,
-        /// Restate awakeable identifier used to resume the blocked turn.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        awakeable_id: Option<String>,
-        /// Child sub-agent that owns the approval, when the request originated from a nested actor.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        sub_agent_id: Option<SubAgentId>,
-        /// Tool name.
-        tool_name: String,
-        /// Concise input summary.
-        input_summary: String,
-        /// Assigned risk level.
-        risk_level: RiskLevel,
-        /// Full approval prompt with parsed parameters, diffs, and allow pattern.
-        prompt: ApprovalPrompt,
+    /// A tool call was queued for workspace-admin action review.
+    ActionReviewRequested {
+        /// Workspace-admin review identifier.
+        review_id: Uuid,
+        /// Durable policy-facing action envelope.
+        envelope: ActionEnvelope,
+        /// Human-readable review preview.
+        preview: ActionReviewPreview,
     },
-    /// An approval request was decided.
-    ApprovalDecided {
-        /// Approval request identifier.
-        request_id: Uuid,
-        /// Child sub-agent that owned the approval, when the decision came from a nested actor.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        sub_agent_id: Option<SubAgentId>,
-        /// User decision.
-        decision: ApprovalDecision,
-        /// User who decided.
+    /// A workspace-admin action review was decided.
+    ActionReviewDecided {
+        /// Workspace-admin review identifier.
+        review_id: Uuid,
+        /// Review decision.
+        decision: ActionReviewDecision,
+        /// User who decided the review.
         decided_by: String,
         /// Decision timestamp.
         decided_at: DateTime<Utc>,
@@ -348,8 +331,8 @@ impl Event {
             Self::ToolCall { .. } => EventType::ToolCall,
             Self::ToolResult { .. } => EventType::ToolResult,
             Self::ToolError { .. } => EventType::ToolError,
-            Self::ApprovalRequested { .. } => EventType::ApprovalRequested,
-            Self::ApprovalDecided { .. } => EventType::ApprovalDecided,
+            Self::ActionReviewRequested { .. } => EventType::ActionReviewRequested,
+            Self::ActionReviewDecided { .. } => EventType::ActionReviewDecided,
             Self::SubAgentSpawned { .. } => EventType::SubAgentSpawned,
             Self::SubAgentMessageSent { .. } => EventType::SubAgentMessageSent,
             Self::SubAgentStatusChanged { .. } => EventType::SubAgentStatusChanged,
@@ -382,8 +365,8 @@ impl Event {
             Self::ToolCall { .. } => "ToolCall",
             Self::ToolResult { .. } => "ToolResult",
             Self::ToolError { .. } => "ToolError",
-            Self::ApprovalRequested { .. } => "ApprovalRequested",
-            Self::ApprovalDecided { .. } => "ApprovalDecided",
+            Self::ActionReviewRequested { .. } => "ActionReviewRequested",
+            Self::ActionReviewDecided { .. } => "ActionReviewDecided",
             Self::SubAgentSpawned { .. } => "SubAgentSpawned",
             Self::SubAgentMessageSent { .. } => "SubAgentMessageSent",
             Self::SubAgentStatusChanged { .. } => "SubAgentStatusChanged",
@@ -491,26 +474,39 @@ mod tests {
 
     use super::*;
 
-    fn sample_approval_prompt(
-        request_id: Uuid,
+    fn sample_action_envelope(
+        review_id: Uuid,
         tool_name: &str,
         input_summary: &str,
-        risk_level: RiskLevel,
-    ) -> ApprovalPrompt {
-        ApprovalPrompt {
-            request: crate::types::ApprovalRequest {
-                request_id,
-                sub_agent_id: None,
-                tool_name: tool_name.to_string(),
-                input_summary: input_summary.to_string(),
-                risk_level: risk_level.clone(),
-            },
-            pattern: input_summary.to_string(),
-            parameters: vec![crate::types::ApprovalField {
+        risk_level: crate::types::RiskLevel,
+    ) -> ActionEnvelope {
+        ActionEnvelope {
+            review_id,
+            workspace_id: WorkspaceId::new("workspace-1"),
+            user_id: UserId::new("user-1"),
+            session_id: Some(crate::types::SessionId::new()),
+            sub_agent_id: None,
+            tool_call_id: ToolCallId::from(review_id),
+            tool_name: tool_name.to_string(),
+            normalized_input: input_summary.to_string(),
+            input_summary: input_summary.to_string(),
+            risk_level,
+            action_class: crate::types::ActionClass::LocalWrite,
+            origin_kind: None,
+            origin_id: None,
+            origin_step_id: None,
+            idempotency_key: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_action_review_preview(input_summary: &str) -> ActionReviewPreview {
+        ActionReviewPreview {
+            fields: vec![crate::types::ActionReviewField {
                 label: "Path".to_string(),
                 value: input_summary.to_string(),
             }],
-            file_diffs: vec![crate::types::ApprovalFileDiff {
+            file_diffs: vec![crate::types::ActionReviewFileDiff {
                 path: input_summary.to_string(),
                 before: String::new(),
                 after: "hello\n".to_string(),
@@ -539,25 +535,23 @@ mod tests {
     }
 
     #[test]
-    fn approval_requested_event_round_trips_full_prompt() {
-        let request_id = Uuid::now_v7();
-        let event = Event::ApprovalRequested {
-            request_id,
-            awakeable_id: None,
-            sub_agent_id: None,
-            tool_name: "file_write".to_string(),
-            input_summary: "notes/today.md".to_string(),
-            risk_level: RiskLevel::Medium,
-            prompt: sample_approval_prompt(
-                request_id,
+    fn action_review_requested_event_round_trips_full_payload() {
+        // Pins: workspace-admin action-review events preserve policy envelope and preview details.
+        let review_id = Uuid::now_v7();
+        let event = Event::ActionReviewRequested {
+            review_id,
+            envelope: sample_action_envelope(
+                review_id,
                 "file_write",
                 "notes/today.md",
-                RiskLevel::Medium,
+                crate::types::RiskLevel::Medium,
             ),
+            preview: sample_action_review_preview("notes/today.md"),
         };
 
-        let json = serde_json::to_string(&event).expect("serialize approval request");
-        let decoded: Event = serde_json::from_str(&json).expect("deserialize approval request");
+        let json = serde_json::to_string(&event).expect("serialize action review request");
+        let decoded: Event =
+            serde_json::from_str(&json).expect("deserialize action review request");
         assert_eq!(decoded, event);
     }
 

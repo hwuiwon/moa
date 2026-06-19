@@ -1,68 +1,71 @@
-//! Restate service for workspace-scoped tool policy checks and approval rule writes.
+//! Restate service for workspace-scoped action-policy checks.
 
 use std::sync::Arc;
 
 use moa_core::{
-    ApprovalPrompt, ApprovalRule, MoaError, PolicyAction, SessionMeta, ToolInvocation, UserId,
+    ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, MoaError,
+    SessionMeta, SubAgentId, ToolCallId, ToolInvocation,
 };
-use moa_hands::ToolRouter;
+use moa_hands::{ActionOrigin, ToolRouter};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use moa_core::restate_observability::annotate_restate_handler_span;
 
-/// Request payload for `WorkspaceStore/prepare_tool_approval`.
+/// Request payload for `WorkspaceStore/prepare_action_review`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PrepareToolApprovalRequest {
+pub struct PrepareActionReviewRequest {
     /// Session metadata used for workspace-scoped policy evaluation.
     pub session: SessionMeta,
     /// Tool invocation that is about to execute.
     pub invocation: ToolInvocation,
-    /// Stable approval request identifier to embed into the rendered prompt.
-    pub request_id: Uuid,
+    /// Stable review identifier to embed in the envelope when review is needed.
+    pub review_id: Uuid,
+    /// Stable tool-call identifier for event correlation.
+    pub tool_call_id: ToolCallId,
+    /// Sub-agent that requested the action, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_agent_id: Option<SubAgentId>,
+    /// Origin object kind for workflow or artifact-driven actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_kind: Option<String>,
+    /// Origin object identifier for workflow or artifact-driven actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
+    /// Origin step identifier for workflow or artifact-driven actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_step_id: Option<String>,
+    /// Explicit idempotency key supplied for side-effecting tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
-/// Prepared policy decision and optional approval prompt for one tool call.
+/// Prepared policy decision and review payload for one tool call.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PreparedToolApproval {
-    /// Final policy action for this invocation.
-    pub action: PolicyAction,
-    /// Matching approval rule when the decision came from persisted policy.
-    pub matched_rule: Option<ApprovalRule>,
+pub struct PreparedActionReview {
+    /// Final policy effect for this invocation.
+    pub effect: ActionPolicyEffect,
+    /// Optional human-readable reason for the decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Matching action-policy rule when the decision came from persisted policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_rule: Option<ActionPolicyRule>,
     /// Human-readable invocation summary.
     pub input_summary: String,
-    /// Approval prompt rendered for the UI when approval is required.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<ApprovalPrompt>,
+    /// Durable action envelope for review/audit.
+    pub envelope: ActionEnvelope,
+    /// Human-readable action-review preview.
+    pub preview: ActionReviewPreview,
 }
 
-/// Request payload for `WorkspaceStore/store_approval_rule`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct StoreApprovalRuleRequest {
-    /// Session metadata used to determine the owning workspace.
-    pub session: SessionMeta,
-    /// Tool name the rule applies to.
-    pub tool_name: String,
-    /// Glob pattern or normalized shell pattern to persist.
-    pub pattern: String,
-    /// Rule action to store.
-    pub action: PolicyAction,
-    /// User that approved the rule.
-    pub created_by: UserId,
-}
-
-/// Restate service surface for workspace-scoped approval policy operations.
+/// Restate service surface for workspace-scoped action-policy operations.
 #[restate_sdk::service]
 pub trait WorkspaceStore {
-    /// Evaluates policy for one tool invocation and prepares an approval prompt when needed.
-    async fn prepare_tool_approval(
-        request: Json<PrepareToolApprovalRequest>,
-    ) -> Result<Json<PreparedToolApproval>, HandlerError>;
-
-    /// Persists a workspace-scoped approval rule.
-    async fn store_approval_rule(
-        request: Json<StoreApprovalRuleRequest>,
-    ) -> Result<(), HandlerError>;
+    /// Evaluates policy for one tool invocation and prepares an action-review payload.
+    async fn prepare_action_review(
+        request: Json<PrepareActionReviewRequest>,
+    ) -> Result<Json<PreparedActionReview>, HandlerError>;
 }
 
 /// Concrete Restate service implementation backed by the shared tool router.
@@ -81,12 +84,13 @@ impl WorkspaceStoreImpl {
 
 impl WorkspaceStore for WorkspaceStoreImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn prepare_tool_approval(
+    // SAFETY: internal workflow call after the owning session or sub-agent has admitted the caller; user-facing review listing and decisions authorize in `ActionReviews`.
+    async fn prepare_action_review(
         &self,
         ctx: Context<'_>,
-        request: Json<PrepareToolApprovalRequest>,
-    ) -> Result<Json<PreparedToolApproval>, HandlerError> {
-        annotate_restate_handler_span("WorkspaceStore", "prepare_tool_approval");
+        request: Json<PrepareActionReviewRequest>,
+    ) -> Result<Json<PreparedActionReview>, HandlerError> {
+        annotate_restate_handler_span("WorkspaceStore", "prepare_action_review");
         let request = request.into_inner();
         let router = self.router.clone();
 
@@ -96,42 +100,28 @@ impl WorkspaceStore for WorkspaceStoreImpl {
                     .prepare_invocation(&request.session, &request.invocation)
                     .await
                     .map_err(to_handler_error)?;
-                Ok(Json::from(PreparedToolApproval {
-                    action: prepared.policy().action.clone(),
+                let origin = ActionOrigin {
+                    origin_kind: request.origin_kind,
+                    origin_id: request.origin_id,
+                    origin_step_id: request.origin_step_id,
+                    idempotency_key: request.idempotency_key,
+                };
+                Ok(Json::from(PreparedActionReview {
+                    effect: prepared.policy().effect,
+                    reason: prepared.policy().reason.clone(),
                     matched_rule: prepared.policy().matched_rule.clone(),
                     input_summary: prepared.input_summary().to_string(),
-                    prompt: matches!(prepared.policy().action, PolicyAction::RequireApproval)
-                        .then(|| prepared.approval_prompt(request.request_id)),
+                    envelope: prepared.envelope(
+                        request.review_id,
+                        &request.session,
+                        request.tool_call_id,
+                        request.sub_agent_id,
+                        origin,
+                    ),
+                    preview: prepared.review_preview(),
                 }))
             })
-            .name("prepare_tool_approval")
-            .await?)
-    }
-
-    #[tracing::instrument(skip(self, ctx, request))]
-    async fn store_approval_rule(
-        &self,
-        ctx: Context<'_>,
-        request: Json<StoreApprovalRuleRequest>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("WorkspaceStore", "store_approval_rule");
-        let request = request.into_inner();
-        let router = self.router.clone();
-
-        Ok(ctx
-            .run(|| async move {
-                router
-                    .store_approval_rule(
-                        &request.session,
-                        &request.tool_name,
-                        &request.pattern,
-                        request.action,
-                        request.created_by,
-                    )
-                    .await
-                    .map_err(to_handler_error)
-            })
-            .name("store_approval_rule")
+            .name("prepare_action_review")
             .await?)
     }
 }

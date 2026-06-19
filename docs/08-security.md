@@ -10,9 +10,9 @@ injection defenses, and audit._
 | Local development API | Usable by default | Engineer controls the dev stack. |
 | Cloud API and messaging | Secure by default | Agents run persistently and users may be offline. |
 
-Usable local mode allows common read tools and requires approval for writes or
-execution. Secure cloud mode requires explicit tool enablement per workspace,
-approval for write/exec tools unless a scoped rule exists, sandboxed code
+Usable local mode allows tool execution by default so local development keeps
+moving. Secure cloud mode requires explicit tool enablement per workspace,
+action-policy rules for deny or workspace-admin review, sandboxed code
 execution, and host-side credential access only.
 
 ## Identity And Authorization
@@ -86,19 +86,22 @@ If a model repeatedly emits malicious tool calls after receiving blocked-tool
 feedback, the remaining control point is the turn retry/circuit-breaker policy.
 Do not treat prompt filtering as a complete security boundary.
 
-## Tool Approval
+## Action Policy
 
-Approval decisions are scoped to parsed tool intent, not raw command strings.
-Shell approval matching must split command chains so approval for one command
-does not cover `&&`, `||`, `;`, or pipe-connected follow-up commands.
+Action-policy decisions are scoped to parsed tool intent, not raw command
+strings. Shell matching splits command chains so a rule for one command does not
+cover `&&`, `||`, `;`, or pipe-connected follow-up commands.
 
-Approval rows are durable product state. Restate awakeables are the wakeup
-mechanism for blocked turns, not the audit record.
+Default tool policy is auto-mode `allow`. Workspace/global rules and config can
+return `allow`, `deny`, or `admin_review`. `admin_review` persists a
+workspace-action review row plus event, returns a pending-review tool result to
+the model, and does not block the root or sub-agent workflow. Workspace admins
+clear or deny the stored action later through the action-review service.
 
 ## Security Audit
 
 MOA emits OCSF v1.3 security events for authentication, authorization,
-API-key lifecycle, agent lifecycle, approvals, and SCIM lifecycle changes.
+API-key lifecycle, agent lifecycle, action reviews, and SCIM lifecycle changes.
 Denied authorization decisions are always emitted when security audit is
 configured. Allow decisions are high-volume and controlled by config.
 

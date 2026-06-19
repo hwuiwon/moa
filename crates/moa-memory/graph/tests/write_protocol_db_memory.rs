@@ -55,6 +55,27 @@ fn node_intent(
     }
 }
 
+fn edge_intent(
+    workspace_id: &str,
+    label: EdgeLabel,
+    start_uid: Uuid,
+    end_uid: Uuid,
+    index: usize,
+) -> EdgeWriteIntent {
+    EdgeWriteIntent {
+        uid: Uuid::now_v7(),
+        label,
+        start_uid,
+        end_uid,
+        properties: json!({ "kind": "test-edge", "index": index }),
+        workspace_id: Some(workspace_id.to_string()),
+        user_id: None,
+        scope: "workspace".to_string(),
+        actor_id: Uuid::now_v7().to_string(),
+        actor_kind: "system".to_string(),
+    }
+}
+
 async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a> {
     let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
     let mut conn = ScopedConn::begin(pool, &ctx)
@@ -267,19 +288,16 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         4
     );
 
-    let edge = EdgeWriteIntent {
-        uid: Uuid::now_v7(),
-        label: EdgeLabel::RelatesTo,
-        start_uid: new_uid,
-        end_uid: target_uid,
-        properties: json!({ "kind": "test-edge" }),
-        workspace_id: Some(workspace_id.clone()),
-        user_id: None,
-        scope: "workspace".to_string(),
-        actor_id: Uuid::now_v7().to_string(),
-        actor_kind: "system".to_string(),
-    };
-    graph.create_edge(edge).await.expect("create graph edge");
+    graph
+        .create_edge(edge_intent(
+            &workspace_id,
+            EdgeLabel::RelatesTo,
+            new_uid,
+            target_uid,
+            0,
+        ))
+        .await
+        .expect("create graph edge");
     assert_eq!(
         workspace_version(session_store.pool(), &workspace_id).await,
         5
@@ -322,6 +340,58 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
 
     let _ = graph.hard_purge(old_uid, "redacted:cleanup").await;
     let _ = graph.hard_purge(target_uid, "redacted:cleanup").await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn write_protocol_creates_every_edge_label() {
+    // Pins: every static AGE edge template can create its canonical label.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let workspace_id = format!("edge-labels-{}", Uuid::now_v7().simple());
+    let graph = graph_store(session_store.pool(), &workspace_id);
+    let now = Utc::now();
+    let start_uid = graph
+        .create_node(node_intent(
+            &workspace_id,
+            NodeLabel::Fact,
+            "edge-label source",
+            now,
+            None,
+        ))
+        .await
+        .expect("create source node");
+    let end_uid = graph
+        .create_node(node_intent(
+            &workspace_id,
+            NodeLabel::Entity,
+            "edge-label target",
+            now,
+            None,
+        ))
+        .await
+        .expect("create target node");
+    let labels = EdgeLabel::ALL;
+
+    for (index, label) in labels.iter().copied().enumerate() {
+        let intent = edge_intent(&workspace_id, label, start_uid, end_uid, index);
+        let expected_uid = intent.uid;
+        let actual_uid = graph
+            .create_edge(intent)
+            .await
+            .unwrap_or_else(|error| panic!("create {} edge: {error}", label.as_str()));
+        assert_eq!(actual_uid, expected_uid);
+    }
+    assert_eq!(
+        workspace_version(session_store.pool(), &workspace_id).await,
+        2 + labels.len() as i64
+    );
+
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

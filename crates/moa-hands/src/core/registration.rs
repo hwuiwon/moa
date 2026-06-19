@@ -6,8 +6,9 @@ use std::sync::Arc;
 use crate::adapters::mcp::McpDiscoveredTool;
 use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
-    BuiltInTool, IdempotencyClass, PolicyAction, SandboxTier, ToolBudgetConfig, ToolDefinition,
-    ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy, write_tool_policy,
+    ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, SandboxTier, ToolBudgetConfig,
+    ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy,
+    write_tool_policy,
 };
 use serde_json::{Value, json};
 
@@ -16,7 +17,8 @@ use super::DEFAULT_PROVIDER_NAME;
 pub(crate) fn execute_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
     ToolPolicySpec {
         risk_level: moa_core::RiskLevel::High,
-        default_action: PolicyAction::RequireApproval,
+        default_effect: ActionPolicyEffect::Allow,
+        action_class: ActionClass::CommandExecution,
         input_shape,
         diff_strategy: ToolDiffStrategy::None,
     }
@@ -75,7 +77,13 @@ impl RegisteredTool {
                 name: name.clone(),
                 description: tool.description,
                 schema: tool.input_schema,
-                policy: execute_tool_policy(ToolInputShape::Json),
+                policy: ToolPolicySpec {
+                    risk_level: moa_core::RiskLevel::High,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: ActionClass::ExternalWrite,
+                    input_shape: ToolInputShape::Json,
+                    diff_strategy: ToolDiffStrategy::None,
+                },
                 idempotency_class: IdempotencyClass::NonIdempotent,
                 max_output_tokens: 8_000,
             },

@@ -13,8 +13,8 @@ use moa_core::{LLMProvider, MoaError, ModelTask};
 use moa_core::{LearningCandidate, MemoryScope, MoaConfig, Result};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::{
-    AgentConfig, EngineOptions, EvalEngine, EvalResult, EvalRun, EvalStatus, Evaluator,
-    EvaluatorOptions, PermissionOverride, ScoreValue, SkillOverride, TestSuite, build_evaluators,
+    ActionPolicyOverride, AgentConfig, EngineOptions, EvalEngine, EvalResult, EvalRun, EvalStatus,
+    Evaluator, EvaluatorOptions, ScoreValue, SkillOverride, TestSuite, build_evaluators,
     evaluate_run,
 };
 #[cfg(feature = "internal-eval-runner")]
@@ -402,11 +402,7 @@ fn skill_agent_config(skill_name: &str, skill_dir: &Path, label: &str) -> AgentC
             exclude: Vec::new(),
             exclusive: true,
         },
-        permissions: PermissionOverride {
-            auto_approve_all: true,
-            auto_approve: Vec::new(),
-            always_deny: Vec::new(),
-        },
+        permissions: ActionPolicyOverride::default(),
         ..AgentConfig::default()
     }
 }

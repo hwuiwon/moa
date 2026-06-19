@@ -5,11 +5,16 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ApprovalRule, MoaError, PolicyAction, PolicyScope, UserId, WorkspaceId};
+use moa_authz::require_authz_with_delegation;
+use moa_authz_schema::{ObjectType, Relation};
+use moa_core::{
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, UserId, WorkspaceId,
+};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
+use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateReport, ConsolidateRequest, consolidate_workflow_id,
@@ -17,17 +22,17 @@ use crate::workflows::consolidate::{
 use moa_core::restate_observability::annotate_restate_handler_span;
 
 const K_CONFIG: &str = "config";
-const K_APPROVAL_POLICY: &str = "approval_policy";
+const K_ACTION_POLICY: &str = "action_policy";
 const K_LAST_CONSOLIDATION: &str = "last_consolidation";
 const K_NEXT_CONSOLIDATION: &str = "next_consolidation";
 const K_CONSOLIDATION_IN_PROGRESS: &str = "consolidation_in_progress";
 
-/// Workspace-scoped approval policy snapshot mirrored into Restate object state.
+/// Workspace-scoped action policy snapshot mirrored into Restate object state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct WorkspaceApprovalPolicy {
-    /// Persisted approval rules visible to the workspace.
+pub struct WorkspaceActionPolicy {
+    /// Persisted action-policy rules visible to the workspace.
     #[serde(default)]
-    pub rules: Vec<ApprovalRule>,
+    pub rules: Vec<ActionPolicyRule>,
 }
 
 /// Input payload used to initialize a workspace object.
@@ -39,9 +44,9 @@ pub struct WorkspaceConfig {
     pub name: String,
     /// Hour of day in UTC at which the next consolidation should be scheduled.
     pub consolidation_hour_utc: u8,
-    /// Approval rules mirrored into Restate state for status and bootstrap flows.
+    /// Action-policy rules mirrored into Restate state for status and bootstrap flows.
     #[serde(default)]
-    pub approval_policy: WorkspaceApprovalPolicy,
+    pub action_policy: WorkspaceActionPolicy,
 }
 
 /// Read-only workspace orchestration status projection.
@@ -57,17 +62,17 @@ pub struct WorkspaceStatus {
     pub pages_count: u64,
 }
 
-/// Request payload for storing a workspace-scoped allow rule.
+/// Request payload for storing a workspace-scoped action-policy rule.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AlwaysAllowPattern {
+pub struct WorkspaceActionPolicyRuleInput {
     /// Tool name the rule applies to.
     pub tool_name: String,
     /// Persisted normalized pattern.
     pub pattern: String,
-    /// User who approved the rule.
-    pub created_by: UserId,
-    /// Approval timestamp.
-    pub created_at: DateTime<Utc>,
+    /// Effect applied when the rule matches.
+    pub effect: ActionPolicyEffect,
+    /// Optional reason stored with the rule.
+    pub reason: Option<String>,
 }
 
 /// Serializable projection of the Workspace VO's durable keys.
@@ -75,8 +80,8 @@ pub struct AlwaysAllowPattern {
 pub struct WorkspaceVoState {
     /// Workspace configuration payload.
     pub config: Option<WorkspaceConfig>,
-    /// Approval policy snapshot.
-    pub approval_policy: WorkspaceApprovalPolicy,
+    /// Action policy snapshot.
+    pub action_policy: WorkspaceActionPolicy,
     /// Most recent completion timestamp.
     pub last_consolidation: Option<DateTime<Utc>>,
     /// Next scheduled consolidation timestamp.
@@ -110,10 +115,7 @@ impl VoState for WorkspaceVoState {
     async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
         Ok(Self {
             config: reader.get_json(K_CONFIG).await?,
-            approval_policy: reader
-                .get_json(K_APPROVAL_POLICY)
-                .await?
-                .unwrap_or_default(),
+            action_policy: reader.get_json(K_ACTION_POLICY).await?.unwrap_or_default(),
             last_consolidation: reader.get_json(K_LAST_CONSOLIDATION).await?,
             next_consolidation: reader.get_json(K_NEXT_CONSOLIDATION).await?,
             consolidation_in_progress: reader
@@ -127,8 +129,8 @@ impl VoState for WorkspaceVoState {
         set_or_clear_opt(ctx, K_CONFIG, self.config.as_ref());
         set_or_clear_opt(
             ctx,
-            K_APPROVAL_POLICY,
-            (!self.approval_policy.rules.is_empty()).then_some(&self.approval_policy),
+            K_ACTION_POLICY,
+            (!self.action_policy.rules.is_empty()).then_some(&self.action_policy),
         );
         set_or_clear_opt(ctx, K_LAST_CONSOLIDATION, self.last_consolidation.as_ref());
         set_or_clear_opt(ctx, K_NEXT_CONSOLIDATION, self.next_consolidation.as_ref());
@@ -172,12 +174,14 @@ pub trait WorkspaceObject {
     /// Initializes the workspace object with its persisted config and schedules the first run.
     async fn init(config: Json<WorkspaceConfig>) -> Result<(), HandlerError>;
 
-    /// Returns the current workspace-scoped approval rules mirrored into Restate state.
+    /// Returns the current workspace-scoped action-policy rules mirrored into Restate state.
     #[shared]
-    async fn get_approval_policy() -> Result<Json<WorkspaceApprovalPolicy>, HandlerError>;
+    async fn get_action_policy() -> Result<Json<WorkspaceActionPolicy>, HandlerError>;
 
-    /// Persists one always-allow rule and updates the VO snapshot.
-    async fn add_always_allow(pattern: Json<AlwaysAllowPattern>) -> Result<(), HandlerError>;
+    /// Persists one action-policy rule and updates the VO snapshot.
+    async fn add_action_policy_rule(
+        pattern: Json<WorkspaceActionPolicyRuleInput>,
+    ) -> Result<(), HandlerError>;
 
     /// Schedules the next daily consolidation workflow.
     async fn schedule_consolidation() -> Result<(), HandlerError>;
@@ -212,58 +216,62 @@ impl WorkspaceObject for WorkspaceImpl {
 
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
         state.config = Some(config.clone());
-        state.approval_policy = config.approval_policy.clone();
+        state.action_policy = config.action_policy.clone();
         state.persist_into(&ctx);
 
-        persist_policy_rules(config.id.clone(), &state.approval_policy.rules).await?;
+        persist_policy_rules(config.id.clone(), &state.action_policy.rules).await?;
         schedule_consolidation_inner(&ctx, &mut state).await?;
         state.persist_into(&ctx);
         Ok(())
     }
 
     #[tracing::instrument(skip(self, ctx))]
-    async fn get_approval_policy(
+    async fn get_action_policy(
         &self,
         ctx: SharedObjectContext<'_>,
-    ) -> Result<Json<WorkspaceApprovalPolicy>, HandlerError> {
-        annotate_restate_handler_span("Workspace", "get_approval_policy");
+    ) -> Result<Json<WorkspaceActionPolicy>, HandlerError> {
+        annotate_restate_handler_span("Workspace", "get_action_policy");
         Ok(Json::from(
-            WorkspaceVoState::load_from(&ctx).await?.approval_policy,
+            WorkspaceVoState::load_from(&ctx).await?.action_policy,
         ))
     }
 
     #[tracing::instrument(skip(self, ctx, pattern))]
-    async fn add_always_allow(
+    async fn add_action_policy_rule(
         &self,
         ctx: ObjectContext<'_>,
-        pattern: Json<AlwaysAllowPattern>,
+        pattern: Json<WorkspaceActionPolicyRuleInput>,
     ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Workspace", "add_always_allow");
+        annotate_restate_handler_span("Workspace", "add_action_policy_rule");
         let pattern = pattern.into_inner();
         let workspace_id = parse_workspace_key(ctx.key());
+        let identity = require_workspace_admin(&ctx, &workspace_id).await?;
+        let created_at = durable_utc_now(&ctx).await?;
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let _ = state.ensure_initialized()?;
 
-        let rule = ApprovalRule {
+        let rule = ActionPolicyRule {
             id: Uuid::now_v7(),
             workspace_id: workspace_id.clone(),
+            user_id: None,
             tool: pattern.tool_name.clone(),
             pattern: pattern.pattern.clone(),
-            action: PolicyAction::Allow,
-            scope: PolicyScope::Workspace,
-            created_by: pattern.created_by.clone(),
-            created_at: pattern.created_at,
+            effect: pattern.effect,
+            scope: ActionRuleScope::Workspace,
+            reason: pattern.reason,
+            created_by: UserId::new(identity.id.to_string()),
+            created_at,
         };
 
         if let Some(existing) = state
-            .approval_policy
+            .action_policy
             .rules
             .iter_mut()
             .find(|existing| existing.tool == rule.tool && existing.pattern == rule.pattern)
         {
             *existing = rule.clone();
         } else {
-            state.approval_policy.rules.push(rule.clone());
+            state.action_policy.rules.push(rule.clone());
         }
         state.persist_into(&ctx);
         persist_policy_rules(workspace_id, &[rule]).await?;
@@ -339,6 +347,24 @@ impl WorkspaceObject for WorkspaceImpl {
     }
 }
 
+async fn require_workspace_admin(
+    ctx: &ObjectContext<'_>,
+    workspace_id: &WorkspaceId,
+) -> Result<moa_core::traits::Identity, HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Workspace,
+        workspace_id,
+        Relation::Admin,
+    )
+    .await
+    .map_err(translate_authz_error)?;
+    Ok(identity)
+}
+
 async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerError> {
     let ctx = OrchestratorCtx::current();
     let count = sqlx::query_scalar::<_, i64>(
@@ -394,7 +420,7 @@ async fn durable_utc_now(ctx: &ObjectContext<'_>) -> Result<DateTime<Utc>, Handl
 
 async fn persist_policy_rules(
     workspace_id: WorkspaceId,
-    rules: &[ApprovalRule],
+    rules: &[ActionPolicyRule],
 ) -> Result<(), HandlerError> {
     if rules.is_empty() {
         return Ok(());
@@ -408,7 +434,7 @@ async fn persist_policy_rules(
 
     let result: Result<(), MoaError> = async {
         for rule in normalized_rules {
-            store.upsert_approval_rule(rule).await?;
+            store.upsert_action_policy_rule(rule).await?;
         }
         Ok(())
     }
@@ -502,7 +528,7 @@ mod tests {
                 id: WorkspaceId::new("workspace"),
                 name: "workspace".to_string(),
                 consolidation_hour_utc: 3,
-                approval_policy: WorkspaceApprovalPolicy::default(),
+                action_policy: WorkspaceActionPolicy::default(),
             }),
             consolidation_in_progress: true,
             ..WorkspaceVoState::default()

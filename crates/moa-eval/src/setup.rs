@@ -18,18 +18,19 @@ use moa_brain::{
     },
 };
 use moa_core::{
-    ContextProcessor, LLMProvider, MoaConfig, SessionMeta, SessionStore, UserId, WorkspaceId,
+    ActionPolicyEffect, ContextProcessor, LLMProvider, MoaConfig, SessionMeta, SessionStore,
+    UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{
     build_provider_from_selection, resolve_provider_selection, resolve_rewriter_provider,
 };
-use moa_security::{ApprovalRuleStore, ToolPolicies};
+use moa_security::{ActionPolicies, ActionPolicyRuleStore};
 use moa_session::PostgresSessionStore;
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::{AgentConfig, EvalError, PermissionOverride, Result};
+use crate::{ActionPolicyOverride, AgentConfig, EvalError, Result};
 
 const DEFAULT_EVAL_WORKSPACE: &str = "eval";
 const DEFAULT_EVAL_USER: &str = "eval-runner";
@@ -88,7 +89,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         PostgresSessionStore::new_in_schema(&base_config.database.url, &schema_name).await?,
     );
     let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
-    let rule_store: Arc<dyn ApprovalRuleStore> = session_store_concrete.clone();
+    let rule_store: Arc<dyn ActionPolicyRuleStore> = session_store_concrete.clone();
     seed_memory(base_config, agent_config).await?;
 
     let tool_router = Arc::new(
@@ -147,14 +148,14 @@ async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Res
 async fn build_tool_router(
     base_config: &MoaConfig,
     session_store: Arc<dyn SessionStore>,
-    rule_store: Arc<dyn ApprovalRuleStore>,
+    rule_store: Arc<dyn ActionPolicyRuleStore>,
     workspace_dir: &Path,
     agent_config: &AgentConfig,
 ) -> Result<ToolRouter> {
     let router = ToolRouter::new_local(workspace_dir).await?;
     let available_tools = router.tool_names();
     validate_named_tools(&available_tools, &agent_config.tools.disable)?;
-    validate_named_tools(&available_tools, &agent_config.permissions.auto_approve)?;
+    validate_named_tools(&available_tools, &agent_config.permissions.admin_review)?;
     validate_named_tools(&available_tools, &agent_config.permissions.always_deny)?;
     if let Some(enabled) = &agent_config.tools.enabled {
         validate_named_tools(&available_tools, enabled)?;
@@ -282,17 +283,19 @@ fn compose_identity_prompt(instructions: &crate::InstructionOverride) -> String 
 
 fn build_eval_policies(
     base_config: &MoaConfig,
-    permissions: &PermissionOverride,
+    permissions: &ActionPolicyOverride,
     enabled_tools: &[String],
-) -> ToolPolicies {
+) -> ActionPolicies {
     let mut config = base_config.clone();
-    config.permissions.auto_approve = if permissions.auto_approve_all {
-        enabled_tools.to_vec()
-    } else {
-        permissions.auto_approve.clone()
-    };
+    config.permissions.default_effect = permissions
+        .default_effect
+        .unwrap_or(ActionPolicyEffect::Allow);
+    if enabled_tools.is_empty() {
+        config.permissions.default_effect = ActionPolicyEffect::Deny;
+    }
+    config.permissions.admin_review = permissions.admin_review.clone();
     config.permissions.always_deny = permissions.always_deny.clone();
-    ToolPolicies::from_config(&config)
+    ActionPolicies::from_config(&config)
 }
 
 fn resolve_enabled_tools(available_tools: &[String], agent_config: &AgentConfig) -> Vec<String> {
@@ -391,7 +394,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{build_agent_environment_with_provider, slugify_name};
-    use crate::{AgentConfig, PermissionOverride, ToolOverride};
+    use crate::{ActionPolicyOverride, AgentConfig, ToolOverride};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
         TokenUsage {
@@ -458,10 +461,7 @@ mod tests {
                 enabled: Some(vec!["file_read".to_string()]),
                 ..ToolOverride::default()
             },
-            permissions: PermissionOverride {
-                auto_approve_all: true,
-                ..PermissionOverride::default()
-            },
+            permissions: ActionPolicyOverride::default(),
             ..AgentConfig::default()
         };
 

@@ -27,58 +27,46 @@ use moa_core::restate_observability::{
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
 use moa_core::wire::{
-    AppendEventRequest, ClearSessionPendingApprovalInput, CompleteSegmentRequest,
-    CreateSegmentRequest, GetSegmentBaselineRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, RunTurnRequest, SetSessionPendingApprovalInput, TurnOutcome,
-    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
+    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
+    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest,
 };
 use moa_core::{
-    ActiveSegment, ApprovalDecision, ApprovalPrompt, AssessmentPhase, CompletionRequest,
-    CompletionResponse, Event, EventRange, EventRecord, EventType, LearningEntry, MoaError,
-    ModelTier, PolicyAction, QueryRewriteResult, SandboxFile, SegmentId, SessionId, SessionMeta,
-    SessionStatus, SessionStore as _, TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest,
-    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
-    TurnReplayCounters, is_delegation_tool_name, record_approval_wait, record_session_error,
-    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
-    scope_turn_replay_counters,
+    ActionPolicyEffect, ActiveSegment, AssessmentPhase, CompletionRequest, CompletionResponse,
+    Event, EventRange, EventRecord, EventType, LearningEntry, MoaError, ModelTier,
+    QueryRewriteResult, SandboxFile, SegmentId, SessionId, SessionMeta, SessionStore as _,
+    TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
+    TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
+    is_delegation_tool_name, record_session_error, record_turn_event_persist_duration,
+    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    record_turn_workflow_outcome, scope_turn_latency_counters, scope_turn_replay_counters,
 };
 use restate_sdk::prelude::*;
-use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
 use crate::objects::session::SessionClient;
 use crate::services::{
+    action_reviews::{ActionReviewsClient, RequestActionReview},
     llm_gateway::LLMGatewayClient,
     session_store::RestateSessionStoreClient,
     tool_executor::ToolExecutorClient,
-    workspace_store::{PrepareToolApprovalRequest, StoreApprovalRuleRequest, WorkspaceStoreClient},
+    workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient},
 };
-use crate::turn::approval::{parse_awakeable_decision, serialize_awakeable_decision};
 use crate::turn::util::{
-    allowed_tool_names, denied_tool_output, disallowed_tool_output, ensure_delegation_tool_schemas,
-    ensure_dispatch_tool_schema, meaningful_cancel_reason, response_tool_calls,
-    stable_tool_call_id, summarize_response_text, tool_call_is_allowed, turn_outcome_for_response,
+    allowed_tool_names, blocked_canary_tool_output, denied_tool_output, disallowed_tool_output,
+    ensure_delegation_tool_schemas, ensure_dispatch_tool_schema, meaningful_cancel_reason,
+    response_tool_calls, stable_tool_call_id, summarize_response_text, tool_call_is_allowed,
+    tool_input_leaks_canary, turn_outcome_for_response,
 };
-use crate::workflows::approval_wait;
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
-const K_PENDING_APPROVAL: &str = "pending_approval";
 const K_PHASE: &str = "phase";
 const K_USER_MESSAGE_SEQUENCE: &str = "user_message_sequence";
 const K_QUERY_REWRITE_CACHE: &str = "query_rewrite_cache";
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct PendingApprovalState {
-    awakeable_id: String,
-    request_id: uuid::Uuid,
-    session_id: SessionId,
-    sub_agent_id: Option<String>,
-}
 
 #[derive(Clone, Debug)]
 struct BodyOutcome {
@@ -144,9 +132,6 @@ impl TurnExecution for TurnExecutionImpl {
                     TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
                     TurnOutcomeKind::Failed => TurnPhase::Failed,
                 };
-                if matches!(body.kind, TurnOutcomeKind::Cancelled) {
-                    cleanup_pending_approval_after_cancel(&ctx, session_id, &body.message).await?;
-                }
                 ctx.set(K_PHASE, Json::from(phase));
                 TurnOutcome {
                     turn_id: request.turn_id.clone(),
@@ -300,12 +285,6 @@ async fn execute_turn_inside_workflow(
                     message: last_summary
                         .take()
                         .unwrap_or_else(|| "turn cancelled by provider".to_string()),
-                });
-            }
-            CoreTurnOutcome::WaitingApproval => {
-                return Ok(BodyOutcome {
-                    kind: TurnOutcomeKind::Failed,
-                    message: "turn unexpectedly returned while waiting for approval".to_string(),
                 });
             }
             CoreTurnOutcome::Idle => {
@@ -489,48 +468,70 @@ async fn handle_tool_call(
 
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
 
-    let policy = ctx
+    let prepared_action = ctx
         .service_client::<WorkspaceStoreClient>()
-        .prepare_tool_approval(Json(PrepareToolApprovalRequest {
+        .prepare_action_review(Json(PrepareActionReviewRequest {
             session: meta.clone(),
             invocation: invocation.clone(),
-            request_id: tool_id.0,
+            review_id: tool_id.0,
+            tool_call_id: tool_id,
+            sub_agent_id: None,
+            origin_kind: None,
+            origin_id: None,
+            origin_step_id: None,
+            idempotency_key: invocation.id.clone(),
         }))
         .call()
         .await?
         .into_inner();
 
-    if matches!(policy.action, PolicyAction::Deny) {
-        append_session_event(
-            ctx,
-            session_id,
-            Event::ToolError {
-                tool_id,
-                provider_tool_use_id: invocation.id.clone(),
-                tool_name: invocation.name.clone(),
-                error: format!("tool {} denied by policy", invocation.name),
-                retryable: false,
-            },
-        )
-        .await?;
+    if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
+        let reason = prepared_action
+            .reason
+            .as_deref()
+            .unwrap_or("denied by action policy");
+        let output = denied_tool_output(format!(
+            "Tool {} denied by action policy: {reason}",
+            invocation.name
+        ));
+        append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
         return Ok(());
     }
 
-    if matches!(policy.action, PolicyAction::RequireApproval) {
-        let decided =
-            handle_approval_gate(ctx, session_id, meta, &invocation, tool_id, policy.prompt)
-                .await?;
-        if !decided.allow_execution {
-            append_tool_result_event(
-                ctx,
-                session_id,
-                tool_id,
-                &invocation,
-                &decided.denied_output,
-            )
-            .await?;
+    if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
+        let tool_request = ToolCallRequest {
+            tool_call_id: tool_id,
+            provider_tool_use_id: invocation.id.clone(),
+            tool_name: invocation.name.clone(),
+            input: invocation.input.clone(),
+            active_canary: active_canary.map(ToOwned::to_owned),
+            session_id: Some(session_id),
+            workspace_id: meta.workspace_id.clone(),
+            user_id: meta.user_id.clone(),
+            idempotency_key: invocation.id.clone(),
+        };
+        if tool_input_leaks_canary(active_canary, &tool_request.input).map_err(to_handler_error)? {
+            let output = blocked_canary_tool_output(&invocation.name);
+            append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
             return Ok(());
         }
+        ctx.service_client::<ActionReviewsClient>()
+            .request(Json::from(RequestActionReview {
+                envelope: prepared_action.envelope,
+                preview: prepared_action.preview,
+                tool_request,
+            }))
+            .call()
+            .await?;
+        let output = ToolOutput::error(
+            format!(
+                "Action is pending workspace admin review: {}: {}",
+                invocation.name, prepared_action.input_summary
+            ),
+            Duration::ZERO,
+        );
+        append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+        return Ok(());
     }
 
     let span = tool_dispatch_span(&invocation.name);
@@ -615,188 +616,6 @@ async fn handle_delegation_tool(
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
-    Ok(())
-}
-
-struct ApprovalOutcome {
-    allow_execution: bool,
-    denied_output: ToolOutput,
-}
-
-impl ApprovalOutcome {
-    fn allow_execution() -> Self {
-        Self {
-            allow_execution: true,
-            denied_output: ToolOutput::error("", Duration::ZERO),
-        }
-    }
-
-    fn deny(denied_output: ToolOutput) -> Self {
-        Self {
-            allow_execution: false,
-            denied_output,
-        }
-    }
-}
-
-async fn handle_approval_gate(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    meta: &SessionMeta,
-    invocation: &ToolInvocation,
-    tool_id: ToolCallId,
-    prompt: Option<ApprovalPrompt>,
-) -> Result<ApprovalOutcome, HandlerError> {
-    let mut prompt = prompt.ok_or_else(|| {
-        TerminalError::new(format!(
-            "workspace store did not return an approval prompt for tool {}",
-            invocation.name
-        ))
-    })?;
-    let (awakeable_id, awakeable) = ctx.awakeable::<String>();
-    let pending = PendingApprovalState {
-        awakeable_id: awakeable_id.clone(),
-        request_id: tool_id.0,
-        session_id,
-        sub_agent_id: None,
-    };
-    ctx.set(K_PENDING_APPROVAL, Json::from(pending));
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .set_pending_approval(Json::from(SetSessionPendingApprovalInput {
-            turn_id: ctx.key().to_string(),
-            awakeable_id: awakeable_id.clone(),
-        }))
-        .call()
-        .await?;
-    prompt.request.sub_agent_id = None;
-
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ApprovalRequested {
-            request_id: prompt.request.request_id,
-            awakeable_id: Some(awakeable_id),
-            sub_agent_id: None,
-            tool_name: prompt.request.tool_name.clone(),
-            input_summary: prompt.request.input_summary.clone(),
-            risk_level: prompt.request.risk_level.clone(),
-            prompt: prompt.clone(),
-        },
-    )
-    .await?;
-
-    assess_current_active_segment(ctx, session_id, AssessmentPhase::Immediate, &[]).await?;
-    update_session_status(ctx, session_id, SessionStatus::WaitingApproval).await?;
-    let approval_timeout = approval_wait::configured_timeout();
-    let timed_out_reason = approval_wait::timeout_reason(approval_timeout);
-    let approval_started = Instant::now();
-    let decision = restate_sdk::select! {
-        decision = awakeable => {
-            parse_awakeable_decision(&decision?)?
-        },
-        reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
-            ApprovalDecision::Deny {
-                reason: Some(approval_wait::cancel_reason(&reason?)),
-            }
-        },
-        _ = ctx.sleep(approval_timeout) => {
-            ApprovalDecision::Deny {
-                reason: Some(timed_out_reason.clone()),
-            }
-        }
-    };
-    record_approval_wait(
-        approval_started.elapsed(),
-        approval_wait::outcome_label(&decision, &timed_out_reason),
-    );
-    ctx.clear(K_PENDING_APPROVAL);
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .clear_pending_approval(Json::from(ClearSessionPendingApprovalInput {
-            turn_id: ctx.key().to_string(),
-        }))
-        .call()
-        .await?;
-    update_session_status(ctx, session_id, SessionStatus::Running).await?;
-
-    let decided_by = approval_wait::system_decider_for(&decision, &timed_out_reason)
-        .unwrap_or_else(|| meta.user_id.as_str())
-        .to_string();
-
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ApprovalDecided {
-            request_id: prompt.request.request_id,
-            sub_agent_id: None,
-            decision: decision.clone(),
-            decided_by,
-            decided_at: durable_utc_now(ctx).await?,
-        },
-    )
-    .await?;
-
-    match decision {
-        ApprovalDecision::AllowOnce => Ok(ApprovalOutcome::allow_execution()),
-        ApprovalDecision::AlwaysAllow { pattern } => {
-            ctx.service_client::<WorkspaceStoreClient>()
-                .store_approval_rule(Json(StoreApprovalRuleRequest {
-                    session: meta.clone(),
-                    tool_name: invocation.name.clone(),
-                    pattern,
-                    action: PolicyAction::Allow,
-                    created_by: meta.user_id.clone(),
-                }))
-                .call()
-                .await?;
-            Ok(ApprovalOutcome::allow_execution())
-        }
-        ApprovalDecision::Deny { reason } => {
-            let message = reason.unwrap_or_else(|| "Denied by the user".to_string());
-            Ok(ApprovalOutcome::deny(denied_tool_output(format!(
-                "Tool execution denied: {message}"
-            ))))
-        }
-    }
-}
-
-async fn cleanup_pending_approval_after_cancel(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    reason: &str,
-) -> Result<(), HandlerError> {
-    let Some(pending) = ctx
-        .get::<Json<PendingApprovalState>>(K_PENDING_APPROVAL)
-        .await?
-        .map(Json::into_inner)
-    else {
-        return Ok(());
-    };
-
-    let decision = ApprovalDecision::Deny {
-        reason: Some(approval_wait::cancel_reason(reason)),
-    };
-    let serialized = serialize_awakeable_decision(&decision)?;
-    ctx.resolve_awakeable(&pending.awakeable_id, serialized);
-    ctx.clear(K_PENDING_APPROVAL);
-    ctx.object_client::<SessionClient>(pending.session_id.to_string())
-        .clear_pending_approval(Json::from(ClearSessionPendingApprovalInput {
-            turn_id: ctx.key().to_string(),
-        }))
-        .call()
-        .await?;
-    append_session_event(
-        ctx,
-        pending.session_id,
-        Event::ApprovalDecided {
-            request_id: pending.request_id,
-            sub_agent_id: pending.sub_agent_id,
-            decision,
-            decided_by: "system:cancel".to_string(),
-            decided_at: durable_utc_now(ctx).await?,
-        },
-    )
-    .await?;
-    update_session_status(ctx, session_id, SessionStatus::Cancelled).await?;
     Ok(())
 }
 
@@ -1689,18 +1508,6 @@ async fn load_session_meta(
         .name("turn_execution_load_session_meta")
         .await?
         .into_inner())
-}
-
-async fn update_session_status(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    status: SessionStatus,
-) -> Result<(), HandlerError> {
-    ctx.service_client::<RestateSessionStoreClient>()
-        .update_status(Json(UpdateStatusRequest { session_id, status }))
-        .call()
-        .await
-        .map_err(HandlerError::from)
 }
 
 fn create_turn_span(

@@ -10,7 +10,7 @@ Postgres stores:
 
 - session metadata
 - append-only event records
-- approval rules
+- action policy rules
 - pending signals
 - context snapshots
 - task segments
@@ -103,7 +103,7 @@ The event table uses a generated `tsvector` column and a GIN index for cross-ses
 | User input | `UserMessage`, `QueuedMessage` |
 | Brain output | `BrainThinking`, `BrainResponse`, `CacheReport` |
 | Tools | `ToolCall`, `ToolResult`, `ToolError` |
-| Approvals | `ApprovalRequested`, `ApprovalDecided` |
+| Action review | `ActionReviewRequested`, `ActionReviewDecided` |
 | Memory | `MemoryRead`, `MemoryWrite`, `MemoryIngest` |
 | Hands | `HandProvisioned`, `HandDestroyed`, `HandError` |
 | Compaction | `Checkpoint` |
@@ -152,7 +152,7 @@ to one parent run ID while preserving scoped reads.
 - `workspace_id`, `user_id`, generated `scope`, and three-tier RLS match the
   artifact and learning-candidate model.
 - `target_kind` is `agent_loop` or `workflow`.
-- `status` is `accepted`, `dispatched`, `running`, `waiting_approval`,
+- `status` is `accepted`, `dispatched`, `running`,
   `completed`, `failed`, or `cancelled`.
 - `target`, `variant`, and `scorecard` are the accepted experiment payloads.
 - `score_run_id` references `analytics.score_run(run_id)` and is the join key
@@ -198,7 +198,7 @@ Replay is history-first:
 
 1. Load session metadata.
 2. Load event records ordered by `sequence_num`.
-3. Reconstruct visible messages, tool state, approvals, and checkpoints.
+3. Reconstruct visible messages, tool state, action reviews, and checkpoints.
 4. Attach to live runtime streams when available.
 
 The orchestrator publishes live runtime events during turn execution. Cloud runtime state is queryable through Restate and recoverable from the durable event log.
@@ -211,7 +211,7 @@ Compaction is segment-aware because segment start/completion events remain durab
 - errors and warnings
 - active tool context
 - segment boundaries
-- unresolved approvals
+- pending action reviews
 - checkpoint summaries
 
 The compactor stage can create checkpoint events, but it does not remove event history from Postgres.

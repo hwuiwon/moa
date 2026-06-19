@@ -6,7 +6,6 @@ use moa_core::TurnOutcome;
 pub(super) const K_META: &str = "meta";
 pub(super) const K_STATUS: &str = "status";
 pub(super) const K_PENDING: &str = "pending";
-pub(super) const K_PENDING_APPROVAL: &str = "pending_approval";
 pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_CANCEL_FLAG: &str = "cancel_flag";
@@ -21,8 +20,6 @@ pub struct SessionVoState {
     pub status: Option<SessionStatus>,
     /// Buffered user messages waiting for the next `TurnExecution` workflow.
     pub pending: Vec<UserMessage>,
-    /// Placeholder for approval state introduced in R07.
-    pub pending_approval: Option<String>,
     /// Placeholder for sub-agent children introduced in R08.
     pub children: Vec<SubAgentChildRef>,
     /// Human-readable stub summary of the last drained turn.
@@ -74,7 +71,6 @@ impl SessionVoState {
         let next_status = match outcome {
             TurnOutcome::Continue => SessionStatus::Running,
             TurnOutcome::Idle => SessionStatus::Paused,
-            TurnOutcome::WaitingApproval => SessionStatus::WaitingApproval,
             TurnOutcome::Cancelled => SessionStatus::Cancelled,
         };
         self.set_status(next_status.clone(), now);
@@ -203,7 +199,6 @@ impl VoState for SessionVoState {
             meta: reader.get_json(K_META).await?,
             status: reader.get_json(K_STATUS).await?,
             pending: reader.get_json(K_PENDING).await?.unwrap_or_default(),
-            pending_approval: reader.get_json(K_PENDING_APPROVAL).await?,
             children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
             last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
             cancel_flag: reader.get_json(K_CANCEL_FLAG).await?,
@@ -215,7 +210,6 @@ impl VoState for SessionVoState {
         set_or_clear_opt(ctx, K_META, self.meta.as_ref());
         set_or_clear_opt(ctx, K_STATUS, self.status.as_ref());
         set_or_clear_vec(ctx, K_PENDING, &self.pending);
-        set_or_clear_opt(ctx, K_PENDING_APPROVAL, self.pending_approval.as_ref());
         set_or_clear_vec(ctx, K_CHILDREN, &self.children);
         set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
         set_or_clear_opt(ctx, K_CANCEL_FLAG, self.cancel_flag.as_ref());
@@ -302,7 +296,6 @@ mod tests {
         state
             .enqueue_message(test_message("hello"), Utc::now())
             .expect("enqueue should succeed");
-        state.pending_approval = Some("approval-1".to_string());
         state.children.push(moa_core::SubAgentChildRef {
             id: "child-1".to_string(),
             task_hash: "hash-1".to_string(),

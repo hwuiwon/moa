@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use moa_core::{
-    MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput, TraceContext,
-    record_tool_call, record_tool_output_truncated_metric,
+    ActionPolicyEffect, MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput,
+    TraceContext, record_tool_call, record_tool_output_truncated_metric,
 };
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -33,7 +33,7 @@ pub(super) fn record_tool_invocation_metadata(
     span: &tracing::Span,
     session: &SessionMeta,
     execution: &ToolExecution,
-    action: &moa_core::PolicyAction,
+    effect: &ActionPolicyEffect,
 ) {
     TraceContext::from_session_meta(session, None).apply_to_span(span);
 
@@ -46,8 +46,8 @@ pub(super) fn record_tool_invocation_metadata(
     span.set_attribute("langfuse.observation.metadata.tool_category", category);
     span.set_attribute("langfuse.observation.metadata.sandbox_tier", sandbox_tier);
     span.set_attribute(
-        "langfuse.observation.metadata.approval_required",
-        matches!(action, moa_core::PolicyAction::RequireApproval),
+        "langfuse.observation.metadata.action_review_required",
+        matches!(effect, ActionPolicyEffect::AdminReview),
     );
 }
 

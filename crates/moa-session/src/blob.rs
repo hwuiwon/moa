@@ -342,35 +342,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_file_diff_strings_are_claim_checked_and_round_trip() {
-        // Pins: approval diff bodies use session event claim checks and still replay as full prompts.
+    async fn action_review_file_diff_strings_are_claim_checked_and_round_trip() {
+        // Pins: action-review diff bodies use session event claim checks and still replay as full previews.
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FileBlobStore::new(dir.path().join("blobs"));
         let session_id = SessionId::new();
-        let request_id = uuid::Uuid::now_v7();
+        let review_id = uuid::Uuid::now_v7();
         let before = "old line\n".repeat(32);
         let after = "new line\n".repeat(32);
-        let event = Event::ApprovalRequested {
-            request_id,
-            awakeable_id: Some("awakeable-1".to_string()),
-            sub_agent_id: None,
-            tool_name: "file_write".to_string(),
-            input_summary: "write src/lib.rs".to_string(),
-            risk_level: moa_core::RiskLevel::High,
-            prompt: moa_core::ApprovalPrompt {
-                request: moa_core::ApprovalRequest {
-                    request_id,
-                    sub_agent_id: None,
-                    tool_name: "file_write".to_string(),
-                    input_summary: "write src/lib.rs".to_string(),
-                    risk_level: moa_core::RiskLevel::High,
-                },
-                pattern: "file_write src/lib.rs".to_string(),
-                parameters: vec![moa_core::ApprovalField {
+        let event = Event::ActionReviewRequested {
+            review_id,
+            envelope: moa_core::ActionEnvelope {
+                review_id,
+                workspace_id: moa_core::WorkspaceId::new("workspace"),
+                user_id: moa_core::UserId::new("user"),
+                session_id: Some(session_id),
+                sub_agent_id: None,
+                tool_call_id: moa_core::ToolCallId(review_id),
+                tool_name: "file_write".to_string(),
+                normalized_input: "src/lib.rs".to_string(),
+                input_summary: "write src/lib.rs".to_string(),
+                risk_level: moa_core::RiskLevel::High,
+                action_class: moa_core::ActionClass::LocalWrite,
+                origin_kind: None,
+                origin_id: None,
+                origin_step_id: None,
+                idempotency_key: None,
+                created_at: chrono::Utc::now(),
+            },
+            preview: moa_core::ActionReviewPreview {
+                fields: vec![moa_core::ActionReviewField {
                     label: "path".to_string(),
                     value: "src/lib.rs".to_string(),
                 }],
-                file_diffs: vec![moa_core::ApprovalFileDiff {
+                file_diffs: vec![moa_core::ActionReviewFileDiff {
                     path: "src/lib.rs".to_string(),
                     before,
                     after,
@@ -381,14 +386,14 @@ mod tests {
 
         let payload = encode_event_for_storage(&store, &session_id, &event, 64)
             .await
-            .expect("approval event should encode with claim checks");
+            .expect("action-review event should encode with claim checks");
         let first_diff = payload
             .get("data")
-            .and_then(|data| data.get("prompt"))
-            .and_then(|prompt| prompt.get("file_diffs"))
+            .and_then(|data| data.get("preview"))
+            .and_then(|preview| preview.get("file_diffs"))
             .and_then(Value::as_array)
             .and_then(|diffs| diffs.first())
-            .expect("encoded approval event should include first file diff");
+            .expect("encoded action-review event should include first file diff");
 
         assert!(
             first_diff
@@ -407,7 +412,7 @@ mod tests {
 
         let decoded = decode_event_from_storage(&store, &session_id, payload)
             .await
-            .expect("approval event should decode claim checks");
+            .expect("action-review event should decode claim checks");
         assert_eq!(decoded, event);
     }
 }

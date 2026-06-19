@@ -5,23 +5,21 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use moa_core::wire::{
-    CancelResponse, ClearSessionPendingApprovalInput, PendingMessage, QueueMessageRequest,
-    QueueMessageResponse, RunTurnRequest, SessionSnapshot, SetSessionPendingApprovalInput,
-    StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
+    CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
+    SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
     TurnOutcomeKind as ExecutionTurnOutcomeKind, UpdateStatusRequest,
 };
 use moa_core::{
-    ActiveSegment, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput,
-    ConsumeSubAgentChildResultOutput, Event, EventRange, EventType, MarkSubAgentChildTerminalInput,
-    MoaError, Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
-    SubAgentTerminalResult, UserMessage, record_turn_event_persist_duration,
+    ActiveSegment, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
+    MarkSubAgentChildTerminalInput, MoaError, Result as MoaResult, SessionId, SessionMeta,
+    SessionStatus, SubAgentChildRef, SubAgentTerminalResult, UserMessage,
+    record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::objects::sub_agent::SubAgentClient;
 use crate::services::session_store::RestateSessionStoreClient;
-use crate::turn::approval::serialize_awakeable_decision;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_vec};
 use crate::workflows::turn_execution::TurnExecutionClient;
 use moa_core::restate_observability::{annotate_restate_handler_span, event_persist_span};
@@ -31,7 +29,6 @@ mod persistence;
 mod state;
 
 use persistence::{parse_session_key, sync_status, to_handler_error};
-use state::K_PENDING_APPROVAL;
 pub use state::SessionVoState;
 
 const K_PENDING_STATE: &str = "pending_state";
@@ -51,10 +48,6 @@ pub trait Session {
 
     /// Appends a user message and drives turns until the session becomes idle or blocked.
     async fn post_message(msg: Json<UserMessage>) -> Result<(), HandlerError>;
-
-    /// Resolves the currently pending approval decision for the blocked turn.
-    #[shared]
-    async fn approve(decision: Json<ApprovalDecision>) -> Result<(), HandlerError>;
 
     /// Requests a cooperative soft or hard cancellation.
     async fn cancel(mode: Json<CancelMode>) -> Result<(), HandlerError>;
@@ -78,16 +71,6 @@ pub trait Session {
     async fn queue_message(
         req: Json<QueueMessageRequest>,
     ) -> Result<Json<QueueMessageResponse>, HandlerError>;
-
-    /// Marks the root session as waiting on an approval awakeable.
-    async fn set_pending_approval(
-        input: Json<SetSessionPendingApprovalInput>,
-    ) -> Result<(), HandlerError>;
-
-    /// Clears the root session approval marker after the workflow resumes.
-    async fn clear_pending_approval(
-        input: Json<ClearSessionPendingApprovalInput>,
-    ) -> Result<(), HandlerError>;
 
     /// Returns a read-only snapshot of the additive `TurnExecution` lifecycle state.
     #[shared]

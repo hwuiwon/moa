@@ -5,16 +5,14 @@ use std::collections::HashMap;
 use chrono::Utc;
 use moa_core::wire::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
-    ApprovalDecision, AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
-    ClearSubAgentPendingApprovalInput, CompleteSubAgentChildInput, CompletionRequest,
-    ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, ContextMessage, Event,
-    MarkSubAgentChildTerminalInput, MoaError, ModelCapabilities, ModelId,
+    AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput, CompleteSubAgentChildInput,
+    CompletionRequest, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
+    ContextMessage, Event, MarkSubAgentChildTerminalInput, MoaError, ModelCapabilities, ModelId,
     RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent, SessionId,
-    SessionMeta, SessionStatus, SetSubAgentPendingApprovalInput, SubAgentChildRef, SubAgentId,
-    SubAgentMessage, SubAgentResult, SubAgentState, SubAgentStatus, SubAgentTerminalResult,
-    SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
-    SubAgentTurnResponseRecord, TurnOutcome, UserId, UserMessage, WorkspaceId,
-    delegation_tool_schemas, dispatch_sub_agent_tool_schema,
+    SessionMeta, SessionStatus, SubAgentChildRef, SubAgentId, SubAgentMessage, SubAgentResult,
+    SubAgentState, SubAgentStatus, SubAgentTerminalResult, SubAgentToolRecord,
+    SubAgentTurnOutcomeRecord, SubAgentTurnPreparation, SubAgentTurnResponseRecord, TurnOutcome,
+    UserId, UserMessage, WorkspaceId, delegation_tool_schemas, dispatch_sub_agent_tool_schema,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;
@@ -25,7 +23,6 @@ use crate::sub_agent_dispatch::{
     MAX_SUB_AGENT_DEPTH, child_agent_path, refund_child_budget, reserve_child_budget,
     validate_dispatch_budget, validate_dispatch_limits,
 };
-use crate::turn::approval::serialize_awakeable_decision;
 use crate::turn::util::{apply_response_to_history, summarize_response_text};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec};
 use moa_core::restate_observability::annotate_restate_handler_span;
@@ -37,8 +34,8 @@ mod state;
 
 use persistence::{persist_parent_session_event, render_user_message, to_handler_error};
 use request::{build_completion_request, synthetic_session_meta};
+use state::MAX_TURNS_PER_POST;
 pub use state::SubAgentVoState;
-use state::{K_PENDING_APPROVAL, MAX_TURNS_PER_POST};
 
 /// Maximum one-turn runner iterations a sub-agent workflow may execute before failing.
 pub(crate) const MAX_SUB_AGENT_TURNS_PER_WORKFLOW: usize = MAX_TURNS_PER_POST;
@@ -60,10 +57,6 @@ pub trait SubAgent {
     /// Requests cooperative cancellation for the child.
     async fn cancel(reason: String) -> Result<(), HandlerError>;
 
-    /// Resolves the currently pending approval decision for the child.
-    #[shared]
-    async fn approve(decision: Json<ApprovalDecision>) -> Result<(), HandlerError>;
-
     /// Compiles the next turn input or returns an immediate child outcome.
     async fn prepare_turn() -> Result<Json<SubAgentTurnPreparation>, HandlerError>;
 
@@ -81,16 +74,6 @@ pub trait SubAgent {
     /// Applies a turn-scoped core turn outcome to child lifecycle state.
     async fn apply_turn_outcome(
         outcome: Json<SubAgentTurnOutcomeRecord>,
-    ) -> Result<(), HandlerError>;
-
-    /// Marks the child as waiting on an approval awakeable.
-    async fn set_pending_approval(
-        input: Json<SetSubAgentPendingApprovalInput>,
-    ) -> Result<(), HandlerError>;
-
-    /// Clears the child approval marker after the workflow resumes.
-    async fn clear_pending_approval(
-        input: Json<ClearSubAgentPendingApprovalInput>,
     ) -> Result<(), HandlerError>;
 
     /// Reserves a nested child under this sub-agent.

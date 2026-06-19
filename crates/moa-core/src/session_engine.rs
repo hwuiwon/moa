@@ -1,20 +1,11 @@
 //! Shared session-lifecycle rules used by multiple orchestrator adapters.
 
-use crate::events::tool_approval::{
-    find_pending_tool_approval, find_resolved_pending_tool_approval,
-};
 use crate::{Event, EventRecord, SessionMeta, SessionStatus};
 
 /// Returns whether the persisted session log indicates more work is required.
 pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]) -> bool {
     if matches!(session.status, SessionStatus::Cancelled) {
         return false;
-    }
-
-    if find_pending_tool_approval(events).is_some()
-        || find_resolved_pending_tool_approval(events).is_some()
-    {
-        return true;
     }
 
     events
@@ -31,8 +22,9 @@ pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]
             | Event::QueuedMessage { .. }
             | Event::ToolResult { .. }
             | Event::ToolError { .. }
-            | Event::ApprovalDecided { .. }
             | Event::ToolCall { .. } => Some(true),
+            // Action reviews are workspace-admin state and do not resume the turn loop by themselves.
+            Event::ActionReviewRequested { .. } | Event::ActionReviewDecided { .. } => Some(false),
             _ => Some(false),
         })
         .unwrap_or(false)

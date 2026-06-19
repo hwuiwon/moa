@@ -12,18 +12,18 @@ use moa_brain::{
         attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
         experience::experience_from_assessment,
     },
-    run_streamed_turn_with_signals,
+    run_streamed_turn,
 };
 use moa_core::transcript::Transcript;
 use moa_core::{
     AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, Event,
     EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
     ModelCapabilities, RuntimeEvent, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionSignal, TaskSegment,
-    deterministic_segment_id, record_broadcast_lag,
+    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, TaskSegment,
+    deterministic_segment_id,
 };
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ use super::score_card::{
     CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
     SafetyScores, ScoreCard, ToolScores,
 };
-use super::scripted_user::{ScriptedApprovalDecision, ScriptedUserScript, ScriptedUserTurn};
+use super::scripted_user::{ScriptedUserScript, ScriptedUserTurn};
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
 use crate::{
@@ -530,12 +530,11 @@ async fn drive_one_turn(
     session_id: SessionId,
     llm_provider: Arc<dyn LLMProvider>,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    signal_state: &mut TurnSignalState,
     cancel_token: &CancellationToken,
     hard_cancel_token: &CancellationToken,
 ) -> Result<()> {
     for turn_index in 0..MAX_LONG_CONVERSATION_AGENT_TURNS {
-        let outcome = run_streamed_turn_with_signals(
+        let outcome = run_streamed_turn(
             session_id,
             environment.session_store.clone(),
             llm_provider.clone(),
@@ -543,9 +542,6 @@ async fn drive_one_turn(
             Some(environment.tool_router.clone()),
             runtime_tx,
             None,
-            &mut signal_state.signal_rx,
-            &mut signal_state.turn_requested,
-            &mut signal_state.soft_cancel_requested,
             Some(cancel_token.clone()),
             Some(hard_cancel_token.clone()),
         )
@@ -559,11 +555,6 @@ async fn drive_one_turn(
                         "agent exceeded the maximum of {MAX_LONG_CONVERSATION_AGENT_TURNS} turns"
                     )));
                 }
-            }
-            StreamedTurnResult::NeedsApproval(request) => {
-                return Err(EvalError::ApprovalRequired {
-                    tool: request.tool_name,
-                });
             }
             StreamedTurnResult::Cancelled => {
                 return Err(EvalError::Moa(moa_core::MoaError::Cancelled));
@@ -581,8 +572,6 @@ struct TranscriptSession {
     provider_turn_index: usize,
     user_turn_count: usize,
     runtime_tx: broadcast::Sender<RuntimeEvent>,
-    signal_tx: mpsc::Sender<SessionSignal>,
-    signal_state: TurnSignalState,
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 }
@@ -594,7 +583,6 @@ impl TranscriptSession {
         transcript: Transcript,
     ) -> Self {
         let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
-        let (signal_tx, signal_rx) = mpsc::channel::<SessionSignal>(16);
         Self {
             session_id,
             llm_provider,
@@ -602,8 +590,6 @@ impl TranscriptSession {
             provider_turn_index: 0,
             user_turn_count: 0,
             runtime_tx,
-            signal_tx,
-            signal_state: TurnSignalState::new(signal_rx),
             cancel_token: CancellationToken::new(),
             hard_cancel_token: CancellationToken::new(),
         }
@@ -632,19 +618,12 @@ impl TranscriptSession {
             user_text.as_str(),
         )
         .await?;
-        spawn_scripted_signal_task(
-            case,
-            user_text.as_str(),
-            None,
-            &self.runtime_tx,
-            &self.signal_tx,
-        );
+        let _ = case;
         drive_one_turn(
             environment,
             self.session_id,
             self.llm_provider.clone(),
             &self.runtime_tx,
-            &mut self.signal_state,
             &self.cancel_token,
             &self.hard_cancel_token,
         )
@@ -669,8 +648,6 @@ struct ScriptedUserSession {
     llm_provider: Arc<dyn LLMProvider>,
     user_turn_count: usize,
     runtime_tx: broadcast::Sender<RuntimeEvent>,
-    signal_tx: mpsc::Sender<SessionSignal>,
-    signal_state: TurnSignalState,
     cancel_token: CancellationToken,
     hard_cancel_token: CancellationToken,
 }
@@ -678,14 +655,11 @@ struct ScriptedUserSession {
 impl ScriptedUserSession {
     fn new(session_id: SessionId, llm_provider: Arc<dyn LLMProvider>) -> Self {
         let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
-        let (signal_tx, signal_rx) = mpsc::channel::<SessionSignal>(16);
         Self {
             session_id,
             llm_provider,
             user_turn_count: 0,
             runtime_tx,
-            signal_tx,
-            signal_state: TurnSignalState::new(signal_rx),
             cancel_token: CancellationToken::new(),
             hard_cancel_token: CancellationToken::new(),
         }
@@ -705,19 +679,12 @@ impl ScriptedUserSession {
             user_text.as_str(),
         )
         .await?;
-        spawn_scripted_signal_task(
-            case,
-            user_text.as_str(),
-            turn.approval.as_ref(),
-            &self.runtime_tx,
-            &self.signal_tx,
-        );
+        let _ = case;
         drive_one_turn(
             environment,
             self.session_id,
             self.llm_provider.clone(),
             &self.runtime_tx,
-            &mut self.signal_state,
             &self.cancel_token,
             &self.hard_cancel_token,
         )
@@ -1158,120 +1125,6 @@ fn latest_non_manifest_user_message(request: &CompletionRequest) -> Option<Strin
                 && !message.content.contains("<available_skills>")
         })
         .map(|message| message.content.clone())
-}
-
-struct TurnSignalState {
-    signal_rx: mpsc::Receiver<SessionSignal>,
-    turn_requested: bool,
-    soft_cancel_requested: bool,
-}
-
-impl TurnSignalState {
-    fn new(signal_rx: mpsc::Receiver<SessionSignal>) -> Self {
-        Self {
-            signal_rx,
-            turn_requested: false,
-            soft_cancel_requested: false,
-        }
-    }
-}
-
-fn spawn_scripted_signal_task(
-    case: &TestCase,
-    user_text: &str,
-    turn_decision: Option<&ScriptedApprovalDecision>,
-    runtime_tx: &broadcast::Sender<RuntimeEvent>,
-    signal_tx: &mpsc::Sender<SessionSignal>,
-) {
-    let scripted_decision = turn_decision
-        .cloned()
-        .or_else(|| scripted_approval_decision(case, user_text));
-    let Some(scripted_decision) = scripted_decision else {
-        return;
-    };
-
-    let case_name = case.name.clone();
-    let mut runtime_rx = runtime_tx.subscribe();
-    let signal_tx = signal_tx.clone();
-    tokio::spawn(async move {
-        loop {
-            match runtime_rx.recv().await {
-                Ok(RuntimeEvent::ApprovalRequested(prompt)) => {
-                    let decision = scripted_decision.to_approval_decision(&prompt.pattern);
-                    if let Err(error) = signal_tx
-                        .send(SessionSignal::ApprovalDecided {
-                            request_id: prompt.request.request_id,
-                            decision,
-                        })
-                        .await
-                    {
-                        tracing::warn!(
-                            scenario = %case_name,
-                            error = %error,
-                            "failed to send scripted long-conversation approval signal"
-                        );
-                    }
-                    break;
-                }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                    record_broadcast_lag("runtime", "skip_with_gap", dropped);
-                    tracing::warn!(
-                        scenario = %case_name,
-                        dropped,
-                        "runtime stream subscriber fell behind before scripted approval request"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        scenario = %case_name,
-                        error = %error,
-                        "runtime stream closed before scripted approval request"
-                    );
-                    break;
-                }
-            }
-        }
-    });
-}
-
-fn scripted_approval_decision(
-    case: &TestCase,
-    user_text: &str,
-) -> Option<ScriptedApprovalDecision> {
-    if let Some(value) = case
-        .metadata
-        .get("scripted_approval_decisions")
-        .and_then(Value::as_object)
-        .and_then(|decisions| decisions.get(user_text))
-    {
-        return parse_scripted_decision(value);
-    }
-
-    (case.metadata.get("approval_turn").and_then(Value::as_str) == Some(user_text))
-        .then_some(ScriptedApprovalDecision::AllowOnce)
-}
-
-fn parse_scripted_decision(value: &Value) -> Option<ScriptedApprovalDecision> {
-    let mut normalized = match value {
-        Value::Object(_) => value.clone(),
-        _ => serde_json::json!({ "decision": "allow_once" }),
-    };
-    if let Value::Object(object) = &mut normalized {
-        object
-            .entry("decision".to_string())
-            .or_insert_with(|| Value::String("allow_once".to_string()));
-    }
-    match serde_json::from_value(normalized) {
-        Ok(decision) => Some(decision),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "unknown scripted long-conversation approval decision"
-            );
-            None
-        }
-    }
 }
 
 fn build_score_card(

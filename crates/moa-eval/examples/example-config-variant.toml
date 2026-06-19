@@ -19,8 +19,8 @@ system_prompt_override = "You are a concise deployment assistant."
 disable = ["file_write"]
 
 [agent.permissions]
-auto_approve_all = false
-auto_approve = ["bash"]
+default_effect = "allow"
+admin_review = ["bash"]
 always_deny = ["file_write"]
 
 [agent.metadata]

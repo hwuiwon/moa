@@ -15,7 +15,7 @@ use moa_core::{
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
-use moa_security::ToolPolicies;
+use moa_security::ActionPolicies;
 use moa_session::testing;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -66,7 +66,6 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     config.models.main = "claude-sonnet-4-6".to_string();
     config.general.workspace_instructions = Some("Cache integration guidance.\n".repeat(200));
     config.compaction.recent_turns_verbatim = 2;
-    config.permissions.auto_approve = vec!["bash".to_string(), "str_replace".to_string()];
 
     let (session_store, _database_url, _schema_name) =
         testing::create_isolated_test_store().await?;
@@ -85,7 +84,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
-            .with_policies(ToolPolicies::from_config(&config))
+            .with_policies(ActionPolicies::from_config(&config))
             .with_session_store(session_store.clone()),
     );
     router

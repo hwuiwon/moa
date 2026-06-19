@@ -1,4 +1,4 @@
-//! Tool permission policies and approval rule storage abstractions.
+//! Tool action policies and rule storage abstractions.
 
 pub mod injection;
 pub mod mcp_proxy;
@@ -12,7 +12,7 @@ pub use injection::{
 };
 pub use mcp_proxy::{EnvironmentCredentialVault, MCPCredentialProxy, McpSessionToken};
 pub use policies::{
-    ApprovalRuleStore, PolicyCheck, ToolPolicies, ToolPolicyContext, glob_match,
-    parse_and_match_bash,
+    ActionPolicies, ActionPolicyCheck, ActionPolicyContext, ActionPolicyRuleStore,
+    GLOBAL_ACTION_POLICY_WORKSPACE_ID, glob_match, parse_and_match_command,
 };
 pub use vault::FileVault;

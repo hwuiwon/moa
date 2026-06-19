@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::ApprovalPrompt;
+use super::{ActionEnvelope, ActionReviewPreview};
 
 /// Inline tool card lifecycle state used by the local UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,8 +11,8 @@ use super::ApprovalPrompt;
 pub enum ToolCardStatus {
     /// The tool call is known but not yet executed.
     Pending,
-    /// The tool is waiting for approval.
-    WaitingApproval,
+    /// The tool is pending workspace-admin review.
+    PendingReview,
     /// The tool is actively executing.
     Running,
     /// The tool completed successfully.
@@ -51,8 +51,13 @@ pub enum RuntimeEvent {
     },
     /// A tool card should be inserted or updated.
     ToolUpdate(ToolUpdate),
-    /// Human approval is required before a tool can execute.
-    ApprovalRequested(ApprovalPrompt),
+    /// Workspace-admin action review was requested for a tool.
+    ActionReviewRequested {
+        /// Durable policy-facing action envelope.
+        envelope: Box<ActionEnvelope>,
+        /// Human-readable review preview.
+        preview: Box<ActionReviewPreview>,
+    },
     /// Session token totals changed.
     UsageUpdated {
         /// Aggregate input and output token count for the current session.
@@ -74,7 +79,7 @@ impl RuntimeEvent {
             Self::AssistantDelta(_) => "assistant_delta",
             Self::AssistantFinished { .. } => "assistant_finished",
             Self::ToolUpdate(_) => "tool_update",
-            Self::ApprovalRequested(_) => "approval_requested",
+            Self::ActionReviewRequested { .. } => "action_review_requested",
             Self::UsageUpdated { .. } => "usage_updated",
             Self::Notice(_) => "notice",
             Self::TurnCompleted => "turn_completed",

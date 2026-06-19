@@ -53,10 +53,10 @@ pub enum EventType {
     ToolResult,
     /// `ToolError`.
     ToolError,
-    /// `ApprovalRequested`.
-    ApprovalRequested,
-    /// `ApprovalDecided`.
-    ApprovalDecided,
+    /// `ActionReviewRequested`.
+    ActionReviewRequested,
+    /// `ActionReviewDecided`.
+    ActionReviewDecided,
     /// `SubAgentSpawned`.
     SubAgentSpawned,
     /// `SubAgentMessageSent`.

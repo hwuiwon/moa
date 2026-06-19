@@ -227,9 +227,7 @@ pub(super) fn status_response_from_record(
 pub(super) fn trial_status_allows_child_start(status: ExperimentTrialStatus) -> bool {
     matches!(
         status,
-        ExperimentTrialStatus::Accepted
-            | ExperimentTrialStatus::Dispatched
-            | ExperimentTrialStatus::WaitingApproval
+        ExperimentTrialStatus::Accepted | ExperimentTrialStatus::Dispatched
     )
 }
 
@@ -247,9 +245,6 @@ fn record_trial_metrics(trial: &ExperimentTrialRecord) {
         trial.stop_reason.map(ExperimentTrialStopReason::as_str),
         trial.target_kind.as_str(),
     );
-    if trial.stop_reason == Some(ExperimentTrialStopReason::ApprovalWait) {
-        record_experiment_approval_wait(trial.target_kind.as_str());
-    }
     if let (Some(started_at), Some(completed_at)) = (trial.started_at, trial.completed_at)
         && let Ok(duration) = completed_at.signed_duration_since(started_at).to_std()
     {

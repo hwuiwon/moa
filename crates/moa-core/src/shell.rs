@@ -51,8 +51,8 @@ pub fn split_shell_chain(command: &str) -> Vec<String> {
     sub_commands
 }
 
-/// Returns true when a command contains shell syntax that approval rules cannot safely normalize.
-pub fn has_approval_unsafe_shell_syntax(command: &str) -> bool {
+/// Returns true when a command contains shell syntax that action policy cannot safely normalize.
+pub fn has_action_policy_unsafe_shell_syntax(command: &str) -> bool {
     let mut chars = command.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
@@ -113,7 +113,7 @@ fn push_sub_command(sub_commands: &mut Vec<String>, current: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_approval_unsafe_shell_syntax, split_shell_chain};
+    use super::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 
     #[test]
     fn split_shell_chain_breaks_on_supported_operators() {
@@ -147,8 +147,8 @@ mod tests {
             "npm test < /tmp/in",
         ] {
             assert!(
-                has_approval_unsafe_shell_syntax(command),
-                "{command} should be unsafe for approval matching"
+                has_action_policy_unsafe_shell_syntax(command),
+                "{command} should be unsafe for action-policy matching"
             );
         }
     }
@@ -162,7 +162,7 @@ mod tests {
             "printf '`literal`'",
         ] {
             assert!(
-                !has_approval_unsafe_shell_syntax(command),
+                !has_action_policy_unsafe_shell_syntax(command),
                 "{command} should remain matchable"
             );
         }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ApprovalRequest, SessionId, SessionStatus, UserId};
+use super::{ActionEnvelope, ActionReviewPreview, SessionId, SessionStatus, UserId};
 
 /// Platform a session or message originated from.
 #[derive(
@@ -131,7 +131,7 @@ pub struct DiffHunk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
-    /// Tool execution is pending approval or scheduling.
+    /// Tool execution is pending review or scheduling.
     Pending,
     /// Tool execution is in progress.
     Running,
@@ -167,8 +167,13 @@ pub enum MessageContent {
         /// Optional detailed output.
         detail: Option<String>,
     },
-    /// Approval request card.
-    ApprovalRequest { request: ApprovalRequest },
+    /// Workspace-admin action-review request card.
+    ActionReviewRequest {
+        /// Durable policy-facing action envelope.
+        envelope: Box<ActionEnvelope>,
+        /// Human-readable review preview.
+        preview: Box<ActionReviewPreview>,
+    },
     /// Session status update.
     StatusUpdate {
         /// Session identifier.

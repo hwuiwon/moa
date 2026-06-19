@@ -836,17 +836,7 @@ async fn fetch_current_supersession_target(
 
 async fn delete_age_node(conn: &mut PgConnection, label: NodeLabel, uid: Uuid) -> Result<()> {
     let vertex_table = age_table(label.as_str());
-    for edge_label in [
-        EdgeLabel::RelatesTo,
-        EdgeLabel::DependsOn,
-        EdgeLabel::Supersedes,
-        EdgeLabel::Contradicts,
-        EdgeLabel::DerivedFrom,
-        EdgeLabel::MentionedIn,
-        EdgeLabel::Caused,
-        EdgeLabel::LearnedFrom,
-        EdgeLabel::AppliesTo,
-    ] {
+    for edge_label in EdgeLabel::ALL {
         let sql = format!(
             r#"
             WITH victim AS (

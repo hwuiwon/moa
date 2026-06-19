@@ -1,12 +1,11 @@
 //! Shared streamed-turn helpers used by the buffered harness and the Restate orchestrator.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ApprovalRequest, CompletionContent, CompletionRequest, CompletionResponse, Event, EventRecord,
-    LLMProvider, Result, RuntimeEvent, SessionSignal, record_turn_llm_ttft,
+    CompletionContent, CompletionRequest, CompletionResponse, LLMProvider, Result, RuntimeEvent,
+    SessionSignal, record_turn_llm_ttft,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -192,59 +191,11 @@ where
     })
 }
 
-/// Returns the oldest unresolved approval request in the event log.
-pub fn find_pending_approval_request(events: &[EventRecord]) -> Option<ApprovalRequest> {
-    let mut requests = Vec::new();
-    let mut decisions = HashSet::new();
-    let mut completed = HashSet::new();
-
-    for record in events {
-        match &record.event {
-            Event::ApprovalRequested {
-                request_id,
-                tool_name,
-                input_summary,
-                risk_level,
-                ..
-            } => {
-                requests.push((
-                    record.sequence_num,
-                    ApprovalRequest {
-                        request_id: *request_id,
-                        sub_agent_id: None,
-                        tool_name: tool_name.clone(),
-                        input_summary: input_summary.clone(),
-                        risk_level: risk_level.clone(),
-                    },
-                ));
-            }
-            Event::ApprovalDecided { request_id, .. } => {
-                decisions.insert(*request_id);
-            }
-            Event::ToolResult { tool_id, .. } | Event::ToolError { tool_id, .. } => {
-                completed.insert(tool_id.0);
-            }
-            _ => {}
-        }
-    }
-
-    requests.sort_by_key(|(sequence_num, _)| *sequence_num);
-    requests.into_iter().find_map(|(_, request)| {
-        (!decisions.contains(&request.request_id) && !completed.contains(&request.request_id))
-            .then_some(request)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use chrono::Utc;
-    use moa_core::events::tool_approval::find_resolved_pending_tool_approval;
-    use moa_core::{
-        ApprovalDecision, CompletionResponse, SessionId, StopReason, TokenUsage, ToolCallId,
-    };
-    use uuid::Uuid;
+    use moa_core::{CompletionResponse, StopReason, TokenUsage};
 
     use super::*;
 
@@ -254,20 +205,6 @@ mod tests {
             input_tokens_cache_write: 0,
             input_tokens_cache_read: 0,
             output_tokens,
-        }
-    }
-
-    fn event_record(sequence_num: u64, event: Event) -> EventRecord {
-        EventRecord {
-            id: Uuid::now_v7(),
-            session_id: SessionId::new(),
-            sequence_num,
-            event_type: event.event_type(),
-            event,
-            timestamp: Utc::now(),
-            brain_id: None,
-            hand_id: None,
-            token_count: None,
         }
     }
 
@@ -342,62 +279,5 @@ mod tests {
         assert_eq!(streamed.streamed_text, "Fresh answer");
         assert!(runtime_events.contains(&RuntimeEvent::Notice("Searching the web...".to_string())));
         assert!(runtime_events.contains(&RuntimeEvent::AssistantStarted));
-    }
-
-    #[test]
-    fn resolved_pending_tool_approval_preserves_provider_tool_use_id() {
-        let tool_id = ToolCallId::new();
-        let events = vec![
-            event_record(
-                0,
-                Event::ToolCall {
-                    tool_id,
-                    provider_tool_use_id: Some("fc_pending_1".to_string()),
-                    provider_thought_signature: None,
-                    tool_name: "bash".to_string(),
-                    input: serde_json::json!({ "cmd": "pwd" }),
-                    hand_id: None,
-                },
-            ),
-            event_record(
-                1,
-                Event::ApprovalRequested {
-                    request_id: tool_id.0,
-                    awakeable_id: None,
-                    sub_agent_id: None,
-                    tool_name: "bash".to_string(),
-                    input_summary: "pwd".to_string(),
-                    risk_level: moa_core::RiskLevel::Medium,
-                    prompt: moa_core::ApprovalPrompt {
-                        request: ApprovalRequest {
-                            request_id: tool_id.0,
-                            sub_agent_id: None,
-                            tool_name: "bash".to_string(),
-                            input_summary: "pwd".to_string(),
-                            risk_level: moa_core::RiskLevel::Medium,
-                        },
-                        pattern: "bash:*".to_string(),
-                        parameters: Vec::new(),
-                        file_diffs: Vec::new(),
-                    },
-                },
-            ),
-            event_record(
-                2,
-                Event::ApprovalDecided {
-                    request_id: tool_id.0,
-                    sub_agent_id: None,
-                    decision: ApprovalDecision::AllowOnce,
-                    decided_by: "user".to_string(),
-                    decided_at: Utc::now(),
-                },
-            ),
-        ];
-
-        let pending = find_resolved_pending_tool_approval(&events).expect("pending approval");
-        assert_eq!(
-            pending.provider_tool_use_id.as_deref(),
-            Some("fc_pending_1")
-        );
     }
 }

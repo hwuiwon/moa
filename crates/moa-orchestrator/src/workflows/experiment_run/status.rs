@@ -112,7 +112,6 @@ async fn derived_session_status(
         SessionStatus::Created => row_status,
         SessionStatus::Running => ExperimentRunStatus::Running,
         SessionStatus::Paused | SessionStatus::Completed => ExperimentRunStatus::Completed,
-        SessionStatus::WaitingApproval => ExperimentRunStatus::WaitingApproval,
         SessionStatus::Cancelled => ExperimentRunStatus::Cancelled,
         SessionStatus::Failed => ExperimentRunStatus::Failed,
     }))
@@ -123,8 +122,9 @@ fn experiment_status_from_artifact_status(
 ) -> Option<ExperimentRunStatus> {
     match status {
         ArtifactRunStatus::Queued => None,
-        ArtifactRunStatus::Running => Some(ExperimentRunStatus::Running),
-        ArtifactRunStatus::WaitingApproval => Some(ExperimentRunStatus::WaitingApproval),
+        ArtifactRunStatus::Running | ArtifactRunStatus::PendingReview => {
+            Some(ExperimentRunStatus::Running)
+        }
         ArtifactRunStatus::Completed => Some(ExperimentRunStatus::Completed),
         ArtifactRunStatus::Failed => Some(ExperimentRunStatus::Failed),
         ArtifactRunStatus::Cancelled => Some(ExperimentRunStatus::Cancelled),

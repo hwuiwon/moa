@@ -15,6 +15,17 @@ schema = "public"
 owner = "moa-session"
 
 [[table]]
+name = "action_policy_rules"
+schema = "public"
+owner = "moa-session"
+
+[[table]]
+name = "workspace_action_reviews"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-orchestrator"]
+
+[[table]]
 name = "task_segments"
 schema = "public"
 owner = "moa-session"

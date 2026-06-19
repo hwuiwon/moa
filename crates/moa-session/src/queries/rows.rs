@@ -439,26 +439,33 @@ fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAsses
         .transpose()
 }
 
-/// Maps an `approval_rules` row into an `ApprovalRule`.
-pub(crate) fn approval_rule_from_row(row: &PgRow) -> Result<ApprovalRule> {
-    Ok(ApprovalRule {
+/// Maps an `action_policy_rules` row into an `ActionPolicyRule`.
+pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRule> {
+    Ok(ActionPolicyRule {
         id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
         workspace_id: WorkspaceId(
             row.try_get::<String, _>("workspace_id")
                 .map_err(map_sqlx_error)?,
         ),
+        user_id: row
+            .try_get::<Option<String>, _>("user_id")
+            .map_err(map_sqlx_error)?
+            .map(moa_core::UserId),
         tool: row.try_get::<String, _>("tool").map_err(map_sqlx_error)?,
         pattern: row
             .try_get::<String, _>("pattern")
             .map_err(map_sqlx_error)?,
-        action: from_db(
-            "approval rule action",
-            &row.try_get::<String, _>("action").map_err(map_sqlx_error)?,
+        effect: from_db(
+            "action policy effect",
+            &row.try_get::<String, _>("effect").map_err(map_sqlx_error)?,
         )?,
         scope: from_db(
-            "approval rule scope",
+            "action policy scope",
             &row.try_get::<String, _>("scope").map_err(map_sqlx_error)?,
         )?,
+        reason: row
+            .try_get::<Option<String>, _>("reason")
+            .map_err(map_sqlx_error)?,
         created_by: moa_core::UserId(
             row.try_get::<String, _>("created_by")
                 .map_err(map_sqlx_error)?,

@@ -4,7 +4,6 @@ use super::*;
 
 pub(super) const K_STATUS: &str = "status";
 pub(super) const K_PENDING: &str = "pending";
-pub(super) const K_PENDING_APPROVAL: &str = "pending_approval";
 pub(super) const K_CHILDREN: &str = "children";
 pub(super) const K_LAST_TURN_SUMMARY: &str = "last_turn_summary";
 pub(super) const K_PARENT_SESSION: &str = "parent_session";
@@ -58,8 +57,6 @@ pub struct SubAgentVoState {
     pub pending: Vec<UserMessage>,
     /// Buffered conversation history carried across turns.
     pub history: Vec<ContextMessage>,
-    /// Pending approval awakeable when blocked.
-    pub pending_approval: Option<String>,
     /// Child sub-agents currently owned by this sub-agent.
     pub children: Vec<SubAgentChildRef>,
     /// Summary of the last assistant response.
@@ -120,7 +117,6 @@ impl SubAgentVoState {
             attachments: Vec::new(),
         }];
         self.history.clear();
-        self.pending_approval = None;
         self.children.clear();
         self.last_turn_summary = None;
         self.tools_invoked = 0;
@@ -195,7 +191,6 @@ impl SubAgentVoState {
         let state = match outcome {
             TurnOutcome::Continue => SubAgentState::Running,
             TurnOutcome::Idle => SubAgentState::Completed,
-            TurnOutcome::WaitingApproval => SubAgentState::WaitingApproval,
             TurnOutcome::Cancelled => SubAgentState::Cancelled,
         };
         self.status = Some(state);
@@ -264,9 +259,7 @@ impl SubAgentVoState {
                     .unwrap_or_else(|| "sub-agent cancelled".to_string()),
             ),
             SubAgentState::Failed => Some("sub-agent failed".to_string()),
-            SubAgentState::Uninitialized
-            | SubAgentState::Running
-            | SubAgentState::WaitingApproval => {
+            SubAgentState::Uninitialized | SubAgentState::Running => {
                 Some("sub-agent finished before reaching a terminal state".to_string())
             }
         };
@@ -302,7 +295,6 @@ impl VoState for SubAgentVoState {
             model: reader.get_json(K_MODEL).await?,
             pending: reader.get_json(K_PENDING).await?.unwrap_or_default(),
             history: reader.get_json(K_HISTORY).await?.unwrap_or_default(),
-            pending_approval: reader.get_json(K_PENDING_APPROVAL).await?,
             children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
             last_turn_summary: reader.get_json(K_LAST_TURN_SUMMARY).await?,
             tools_invoked: reader.get_json(K_TOOLS_INVOKED).await?.unwrap_or_default(),
@@ -336,7 +328,6 @@ impl VoState for SubAgentVoState {
         set_or_clear_opt(ctx, K_MODEL, self.model.as_ref());
         set_or_clear_vec(ctx, K_PENDING, &self.pending);
         set_or_clear_vec(ctx, K_HISTORY, &self.history);
-        set_or_clear_opt(ctx, K_PENDING_APPROVAL, self.pending_approval.as_ref());
         set_or_clear_vec(ctx, K_CHILDREN, &self.children);
         set_or_clear_opt(ctx, K_LAST_TURN_SUMMARY, self.last_turn_summary.as_ref());
         set_or_clear_scalar(ctx, K_TOOLS_INVOKED, self.tools_invoked, 0);
@@ -536,14 +527,6 @@ mod tests {
         assert!(!running_result.success);
         assert_eq!(
             running_result.error.as_deref(),
-            Some("sub-agent finished before reaching a terminal state")
-        );
-
-        running.apply_turn_outcome(TurnOutcome::WaitingApproval);
-        let waiting_result = running.build_result("waiting-child".to_string());
-        assert!(!waiting_result.success);
-        assert_eq!(
-            waiting_result.error.as_deref(),
             Some("sub-agent finished before reaching a terminal state")
         );
 

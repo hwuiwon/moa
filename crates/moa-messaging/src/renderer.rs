@@ -1,8 +1,7 @@
 //! Shared rendering helpers for messaging platform adapters.
 
 use moa_core::{
-    ApprovalRequest, MessageContent, OutboundMessage, Platform, SessionStatus, ToolStatus,
-    types::DiffHunk,
+    MessageContent, OutboundMessage, Platform, SessionStatus, ToolStatus, types::DiffHunk,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -63,7 +62,9 @@ impl SlackRenderer {
                 summary,
                 detail,
             } => render_tool_card(tool, status, summary, detail.as_deref()),
-            MessageContent::ApprovalRequest { request } => render_approval_request(request),
+            MessageContent::ActionReviewRequest { envelope, preview } => {
+                render_action_review_request(envelope, preview)
+            }
             MessageContent::StatusUpdate {
                 session_id,
                 status,
@@ -156,14 +157,32 @@ fn render_tool_card(
     text
 }
 
-fn render_approval_request(request: &ApprovalRequest) -> String {
-    format!(
-        "{} Approval required: {}\n{}\nRequest: {}",
-        risk_icon(&request.risk_level),
-        request.tool_name,
-        request.input_summary,
-        request.request_id
-    )
+pub(crate) fn render_action_review_request(
+    envelope: &moa_core::ActionEnvelope,
+    preview: &moa_core::ActionReviewPreview,
+) -> String {
+    let mut rendered = format!(
+        "{} Action review requested: {}\n{}\nReview: {}",
+        risk_icon(&envelope.risk_level),
+        envelope.tool_name,
+        envelope.input_summary,
+        envelope.review_id
+    );
+    for field in &preview.fields {
+        rendered.push('\n');
+        rendered.push_str(&field.label);
+        rendered.push_str(": ");
+        rendered.push_str(&field.value);
+    }
+    rendered
+}
+
+fn risk_icon(risk_level: &moa_core::RiskLevel) -> &'static str {
+    match risk_level {
+        moa_core::RiskLevel::Low => "🟢",
+        moa_core::RiskLevel::Medium => "🟡",
+        moa_core::RiskLevel::High => "🔴",
+    }
 }
 
 fn tool_status_icon(status: &ToolStatus) -> &'static str {
@@ -180,18 +199,9 @@ fn session_status_icon(status: &SessionStatus) -> &'static str {
         SessionStatus::Created => "🆕",
         SessionStatus::Running => "🔄",
         SessionStatus::Paused => "⏸",
-        SessionStatus::WaitingApproval => "🟡",
         SessionStatus::Completed => "✅",
         SessionStatus::Cancelled => "⏹",
         SessionStatus::Failed => "❌",
-    }
-}
-
-fn risk_icon(risk_level: &moa_core::RiskLevel) -> &'static str {
-    match risk_level {
-        moa_core::RiskLevel::Low => "🟢",
-        moa_core::RiskLevel::Medium => "🟡",
-        moa_core::RiskLevel::High => "🔴",
     }
 }
 
@@ -306,8 +316,10 @@ fn slack_button(button: &ActionButton) -> SlackBlockButtonElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::approval_buttons;
-    use moa_core::RiskLevel;
+    use moa_core::{
+        ActionButton, ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview,
+        ButtonStyle, RiskLevel, ToolCallId, UserId, WorkspaceId,
+    };
 
     #[cfg(feature = "slack")]
     #[test]
@@ -339,18 +351,40 @@ mod tests {
     #[cfg(feature = "slack")]
     #[test]
     fn slack_renderer_attaches_buttons_to_last_chunk_only() {
-        let request_id = uuid::Uuid::now_v7();
         let message = OutboundMessage {
-            content: MessageContent::ApprovalRequest {
-                request: ApprovalRequest {
-                    request_id,
+            content: MessageContent::ActionReviewRequest {
+                envelope: Box::new(ActionEnvelope {
+                    review_id: uuid::Uuid::now_v7(),
+                    workspace_id: WorkspaceId::new("workspace-a"),
+                    user_id: UserId::new("user-a"),
+                    session_id: None,
                     sub_agent_id: None,
+                    tool_call_id: ToolCallId::new(),
                     tool_name: "bash".to_string(),
+                    normalized_input: "npm test".to_string(),
                     input_summary: "npm test".to_string(),
                     risk_level: RiskLevel::High,
-                },
+                    action_class: ActionClass::CommandExecution,
+                    origin_kind: None,
+                    origin_id: None,
+                    origin_step_id: None,
+                    idempotency_key: None,
+                    created_at: chrono::Utc::now(),
+                }),
+                preview: Box::new(ActionReviewPreview {
+                    fields: vec![ActionReviewField {
+                        label: "Command".to_string(),
+                        value: "npm test".to_string(),
+                    }],
+                    file_diffs: Vec::new(),
+                }),
             },
-            buttons: approval_buttons(Platform::Slack, request_id),
+            buttons: vec![ActionButton {
+                id: "open".to_string(),
+                label: "Open".to_string(),
+                style: ButtonStyle::Primary,
+                callback_data: "noop".to_string(),
+            }],
             reply_to: Some("123".to_string()),
             ephemeral: false,
         };

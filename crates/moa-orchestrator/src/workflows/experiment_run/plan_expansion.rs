@@ -338,12 +338,6 @@ pub(super) fn aggregate_status_for_trials(
     }
     if trials
         .iter()
-        .any(|trial| trial.status == ExperimentTrialStatus::WaitingApproval)
-    {
-        return ExperimentRunStatus::WaitingApproval;
-    }
-    if trials
-        .iter()
         .any(|trial| trial.status == ExperimentTrialStatus::Failed)
     {
         return ExperimentRunStatus::Failed;
@@ -438,9 +432,7 @@ pub(super) fn active_plan_trial_count(trials: &[ExperimentTrialRecord]) -> usize
 pub(super) fn trial_status_occupies_dispatch_slot(status: ExperimentTrialStatus) -> bool {
     matches!(
         status,
-        ExperimentTrialStatus::Dispatched
-            | ExperimentTrialStatus::Running
-            | ExperimentTrialStatus::WaitingApproval
+        ExperimentTrialStatus::Dispatched | ExperimentTrialStatus::Running
     )
 }
 

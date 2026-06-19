@@ -23,7 +23,6 @@ pub use score_card::{
     MetricRow, SafetyScores, ScoreCard, ToolScores,
 };
 pub use scripted_user::{
-    ScriptedApprovalDecision, ScriptedUserError, ScriptedUserScript, ScriptedUserTurn,
-    ScriptedUserUtterance,
+    ScriptedUserError, ScriptedUserScript, ScriptedUserTurn, ScriptedUserUtterance,
 };
 pub use transcript_runner::{LongRunReport, run_scenario_with_provider};

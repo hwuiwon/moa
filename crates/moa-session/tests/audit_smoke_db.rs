@@ -14,6 +14,7 @@ fn pgaudit_smoke_requested() -> bool {
 }
 
 #[tokio::test]
+#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
 async fn pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_view()
 -> Result<(), Box<dyn Error>> {
     let pool = PgPool::connect(&test_database_url()).await?;

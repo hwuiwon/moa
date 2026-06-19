@@ -10,4 +10,4 @@ pub use adapters::daytona::DaytonaHandProvider;
 pub use adapters::e2b::E2BHandProvider;
 pub use adapters::local::LocalHandProvider;
 pub use adapters::mcp::{MCPClient, McpDiscoveredTool};
-pub use core::{ToolExecution, ToolRegistry, ToolRouter};
+pub use core::{ActionOrigin, PreparedActionInvocation, ToolExecution, ToolRegistry, ToolRouter};

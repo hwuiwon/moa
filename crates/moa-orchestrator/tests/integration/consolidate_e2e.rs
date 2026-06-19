@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use moa_core::WorkspaceId;
 use moa_orchestrator::objects::workspace::{
-    WorkspaceApprovalPolicy, WorkspaceConfig, WorkspaceStatus,
+    WorkspaceActionPolicy, WorkspaceConfig, WorkspaceStatus,
 };
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
 use moa_test_support::postgres::test_database_url;
@@ -75,7 +75,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         id: workspace_id.clone(),
         name: "Workspace Consolidate E2E".to_string(),
         consolidation_hour_utc: 2,
-        approval_policy: WorkspaceApprovalPolicy::default(),
+        action_policy: WorkspaceActionPolicy::default(),
     };
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 
