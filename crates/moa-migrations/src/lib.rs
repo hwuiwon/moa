@@ -25,6 +25,8 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000303__age_rls_operator_resolution.sql",
 ];
 
+// Schema-isolated session tests do not own artifact/experiment tables. Keep
+// this DDL equal to the session-owned prefix of V000302.
 const ACTION_POLICY_SCHEMA_MIGRATION_SQL: &str = r#"
 DROP TABLE IF EXISTS approval_rules;
 
@@ -38,7 +40,12 @@ CREATE TABLE IF NOT EXISTS action_policy_rules (
     scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
     reason TEXT,
     created_by TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT action_policy_rules_global_workspace_check
+        CHECK (
+            (scope = 'global' AND workspace_id = 'global')
+            OR (scope = 'workspace' AND workspace_id <> 'global')
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope
@@ -83,6 +90,7 @@ CREATE TABLE IF NOT EXISTS workspace_action_reviews (
 CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_pending
     ON workspace_action_reviews(workspace_id, created_at DESC)
     WHERE status = 'pending';
+
 CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_session
     ON workspace_action_reviews(session_id, created_at DESC)
     WHERE session_id IS NOT NULL;
@@ -312,7 +320,10 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{ORCHESTRATOR_SCHEMA_MIGRATIONS, POSTGRES_MIGRATION_FILES};
+    use super::{
+        ACTION_POLICY_SCHEMA_MIGRATION_SQL, ORCHESTRATOR_SCHEMA_MIGRATIONS,
+        POSTGRES_MIGRATION_FILES,
+    };
 
     #[test]
     fn central_manifest_matches_embedded_postgres_files() {
@@ -349,6 +360,21 @@ mod tests {
         assert!(
             sql.contains("ALTER TABLE agents VALIDATE CONSTRAINT agents_status_check"),
             "agents_status_check should still be validated after being added"
+        );
+    }
+
+    #[test]
+    fn action_policy_schema_migration_matches_refinery_session_subset() {
+        let refinery_sql =
+            include_str!("../migrations/postgres/V000302__action_policy_auto_mode.sql");
+        let (session_subset, _) = refinery_sql
+            .split_once("\nALTER TABLE moa.artifact_run")
+            .expect("action policy migration should end session-owned DDL before artifact DDL");
+
+        assert_eq!(
+            ACTION_POLICY_SCHEMA_MIGRATION_SQL.trim(),
+            session_subset.trim(),
+            "schema-isolated session helper must stay in sync with the session-owned prefix of V000302"
         );
     }
 }

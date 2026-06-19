@@ -5,12 +5,11 @@ use std::time::Instant;
 
 use moa_core::{
     ActionPolicyEffect, Event, EventRecord, MoaError, Result, RuntimeEvent, SessionId, SessionMeta,
-    SessionSignal, SessionStore, ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation,
-    ToolUpdate,
+    SessionStore, ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation, ToolUpdate,
 };
 use moa_hands::ToolRouter;
 use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -36,9 +35,6 @@ pub(super) async fn handle_tool_call(
     cancel_token: Option<&CancellationToken>,
     hard_cancel_token: Option<&CancellationToken>,
     tool_dispatch_span: Option<&tracing::Span>,
-    _signal_rx: Option<&mut mpsc::Receiver<SessionSignal>>,
-    _turn_requested: &mut bool,
-    _soft_cancel_requested: &mut bool,
 ) -> Result<ToolCallOutcome> {
     let invocation = &call.invocation;
     let tool_id = parse_tool_id(invocation);

@@ -36,9 +36,9 @@ use crate::services::{
     workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient},
 };
 use crate::turn::util::{
-    allowed_tool_names, blocked_canary_message, blocked_canary_tool_output, denied_tool_output,
-    disallowed_tool_output, meaningful_cancel_reason, response_tool_calls, stable_tool_call_id,
-    tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
+    allowed_tool_names, blocked_canary_tool_output, denied_tool_output, disallowed_tool_output,
+    meaningful_cancel_reason, response_tool_calls, stable_tool_call_id, tool_call_is_allowed,
+    tool_input_leaks_canary, turn_outcome_for_response,
 };
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
@@ -417,18 +417,6 @@ async fn handle_tool_call(
             .reason
             .as_deref()
             .unwrap_or("denied by action policy");
-        append_session_event(
-            ctx,
-            session_id,
-            Event::ToolError {
-                tool_id,
-                provider_tool_use_id: invocation.id.clone(),
-                tool_name: invocation.name.clone(),
-                error: format!("tool {} denied by action policy: {reason}", invocation.name),
-                retryable: false,
-            },
-        )
-        .await?;
         let output = denied_tool_output(format!(
             "Tool {} denied by action policy: {reason}",
             invocation.name
@@ -461,18 +449,6 @@ async fn handle_tool_call(
         if tool_input_leaks_canary(tool_context.active_canary, &tool_request.input)
             .map_err(|error| TerminalError::new(format!("serialize tool input: {error}")))?
         {
-            append_session_event(
-                ctx,
-                session_id,
-                Event::ToolError {
-                    tool_id,
-                    provider_tool_use_id: invocation.id.clone(),
-                    tool_name: invocation.name.clone(),
-                    error: blocked_canary_message(&invocation.name),
-                    retryable: false,
-                },
-            )
-            .await?;
             let output = blocked_canary_tool_output(&invocation.name);
             append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
             record_denied_tool(

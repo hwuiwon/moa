@@ -59,11 +59,12 @@ The envelope is persisted only when action policy returns
 
 Action-policy decisions are ordered:
 
-1. Workspace-visible persistent rules match by tool name and normalized input.
-2. Configured `always_deny` tool names return `Deny`.
-3. Configured `admin_review` tool names return `AdminReview`.
-4. The tool's default effect is used, with the global default effect applying
-   to tools whose default is `Allow`.
+1. Workspace-visible persistent rules match by tool name and normalized input;
+   the strictest matching rule wins.
+2. Configured `always_deny` and `admin_review` tool names can tighten the
+   matched rule result.
+3. The stricter of the tool's default effect and the global default effect is
+   used when no rule or configured tool policy matches.
 
 `Deny` returns a tool error and the turn continues. `AdminReview` queues a
 workspace-admin action review through `ActionReviews/request`, writes an

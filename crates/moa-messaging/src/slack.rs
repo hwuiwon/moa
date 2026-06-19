@@ -220,9 +220,7 @@ impl PlatformAdapter for SlackAdapter {
     /// Starts the Slack Socket Mode listener and forwards normalized updates.
     async fn start(&self, event_tx: mpsc::Sender<InboundMessage>) -> Result<()> {
         let client = self.client.clone();
-        let callbacks = SlackSocketModeListenerCallbacks::new()
-            .with_push_events(handle_push_event)
-            .with_interaction_events(handle_interaction_event);
+        let callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(handle_push_event);
 
         let listener_environment = Arc::new(
             SlackClientEventsListenerEnvironment::new(client).with_user_state(SlackListenerState {
@@ -598,33 +596,6 @@ async fn handle_push_event(
     Ok(())
 }
 
-async fn handle_interaction_event(
-    event: SlackInteractionEvent,
-    _client: Arc<SlackClient<SlackClientHyperHttpsConnector>>,
-    state: SlackClientEventsUserState,
-) -> UserCallbackResult<()> {
-    let shared = {
-        let guard = state.read().await;
-        guard.get_user_state::<SlackListenerState>().cloned()
-    };
-    let Some(shared) = shared else {
-        warn!("slack listener state missing for interaction event");
-        return Ok(());
-    };
-
-    if let Some(inbound) = inbound_from_interaction_event(&event, shared.inbound_contexts).await {
-        let messaging_span = messaging_receive_span(&inbound);
-        async {
-            if shared.event_tx.send(inbound).await.is_err() {
-                warn!("slack inbound receiver dropped");
-            }
-        }
-        .instrument(messaging_span)
-        .await;
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SlackTarget {
     channel_id: Arc<str>,
@@ -673,16 +644,6 @@ fn push_event_origin(event: &SlackPushEventCallback) -> Option<SlackMessageRef> 
         }),
         _ => None,
     }
-}
-
-async fn inbound_from_interaction_event(
-    event: &SlackInteractionEvent,
-    _inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
-) -> Option<InboundMessage> {
-    let SlackInteractionEvent::BlockActions(_) = event else {
-        return None;
-    };
-    None
 }
 
 fn inbound_from_app_mention(message: &SlackAppMentionEvent) -> Option<InboundMessage> {
@@ -820,43 +781,6 @@ mod tests {
                 user_id: "U123".to_string()
             }
         );
-    }
-
-    #[tokio::test]
-    async fn ignores_legacy_review_button_interactions() {
-        let event: SlackInteractionEvent = serde_json::from_value(json!({
-            "type": "block_actions",
-            "team": { "id": "T123", "domain": "example" },
-            "user": { "id": "U123", "username": "alice", "name": "Alice" },
-            "api_app_id": "A123",
-            "container": {
-                "type": "message",
-                "message_ts": "1712668800.000200",
-                "channel_id": "C123"
-            },
-            "trigger_id": "1337.42.abcd",
-            "channel": { "id": "C123", "name": "general" },
-            "message": {
-                "text": "action review",
-                "ts": "1712668800.000200",
-                "thread_ts": "1712668800.000050",
-                "channel": "C123"
-            },
-            "actions": [{
-                "type": "button",
-                "action_id": "open",
-                "value": "action_review:open"
-            }]
-        }))
-        .expect("slack interaction should deserialize");
-
-        let inbound = inbound_from_interaction_event(
-            &event,
-            Arc::new(RwLock::new(HashMap::<String, SlackMessageRef>::new())),
-        )
-        .await;
-
-        assert_eq!(inbound, None);
     }
 
     #[test]

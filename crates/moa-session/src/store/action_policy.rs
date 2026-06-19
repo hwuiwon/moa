@@ -1,6 +1,7 @@
 //! Action-policy rule operations for the Postgres session store.
 
-use moa_core::UserId;
+use moa_core::{ActionRuleScope, UserId, WorkspaceId};
+use moa_security::GLOBAL_ACTION_POLICY_WORKSPACE_ID;
 
 use super::*;
 
@@ -16,12 +17,13 @@ impl PostgresSessionStore {
         let rows = sqlx::query(&format!(
             "SELECT id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
              FROM {action_policy_rules} \
-             WHERE (workspace_id = $1 OR scope = 'global') \
-               AND (user_id IS NULL OR user_id = $2) \
-               AND tool = $3 \
+             WHERE (workspace_id = $1 OR (workspace_id = $2 AND scope = 'global')) \
+               AND (user_id IS NULL OR user_id = $3) \
+               AND tool = $4 \
              ORDER BY created_at ASC"
         ))
         .bind(workspace_id.to_string())
+        .bind(GLOBAL_ACTION_POLICY_WORKSPACE_ID)
         .bind(user_id.to_string())
         .bind(tool)
         .fetch_all(&self.pool)
@@ -34,6 +36,7 @@ impl PostgresSessionStore {
     /// Creates or updates an action-policy rule.
     pub async fn upsert_action_policy_rule(&self, rule: ActionPolicyRule) -> Result<()> {
         let action_policy_rules = self.table_name("action_policy_rules");
+        let workspace_id = stored_workspace_id_for_rule(&rule);
         sqlx::query(&format!(
             "INSERT INTO {action_policy_rules} (id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
@@ -45,7 +48,7 @@ impl PostgresSessionStore {
                  created_at = EXCLUDED.created_at"
         ))
         .bind(rule.id)
-        .bind(rule.workspace_id.to_string())
+        .bind(workspace_id.to_string())
         .bind(rule.user_id.as_ref().map(ToString::to_string))
         .bind(rule.tool)
         .bind(rule.pattern)
@@ -86,6 +89,14 @@ impl PostgresSessionStore {
         .map_err(map_sqlx_error)?;
 
         Ok(())
+    }
+}
+
+fn stored_workspace_id_for_rule(rule: &ActionPolicyRule) -> WorkspaceId {
+    if matches!(rule.scope, ActionRuleScope::Global) {
+        WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID)
+    } else {
+        rule.workspace_id.clone()
     }
 }
 

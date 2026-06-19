@@ -289,9 +289,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                                 cancel_token.as_ref(),
                                 hard_cancel_token.as_ref(),
                                 Some(&tool_dispatch_span),
-                                signal_rx.as_deref_mut(),
-                                turn_requested,
-                                soft_cancel_requested,
                             )
                             .await?;
                             emitted_tool_calls += 1;

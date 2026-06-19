@@ -58,7 +58,7 @@ pub struct ActionReviewSummary {
     pub deny_reason: Option<String>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
-    /// Expiration timestamp, when configured.
+    /// Expiration timestamp reserved for a future reaper; current reviews do not set it.
     pub expires_at: Option<DateTime<Utc>>,
     /// Decision timestamp, when present.
     pub decided_at: Option<DateTime<Utc>>,
@@ -170,6 +170,14 @@ impl ActionReviews for ActionReviewsImpl {
                         .call()
                         .await?;
                 }
+            }
+            if session_id.is_none() {
+                tracing::warn!(
+                    action_review.id = %stored.summary.id,
+                    workspace_id = %stored.summary.workspace_id,
+                    sub_agent_id = ?stored.summary.sub_agent_id,
+                    "action review has no session id; skipping session event append"
+                );
             }
             let pool = OrchestratorCtx::current().graph_pool.clone();
             let workspace_id = stored.summary.workspace_id.clone();

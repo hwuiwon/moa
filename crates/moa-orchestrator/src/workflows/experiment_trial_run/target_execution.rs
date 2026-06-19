@@ -468,8 +468,8 @@ fn trial_stop_for_workflow_status(
     match status {
         ArtifactRunStatus::Queued
         | ArtifactRunStatus::Running
-        | ArtifactRunStatus::PendingReview => None,
-        ArtifactRunStatus::Completed => Some((
+        | ArtifactRunStatus::PendingReview
+        | ArtifactRunStatus::Completed => Some((
             ExperimentTrialStatus::Completed,
             ExperimentTrialStopReason::TargetTerminal,
         )),
@@ -534,19 +534,28 @@ mod tests {
     }
 
     #[test]
-    fn workflow_pending_review_and_active_statuses_do_not_stop_trials_offline() {
-        // Pins: artifact workflow pending-review/active states must not become experiment terminal states.
+    fn workflow_pending_review_and_active_statuses_stop_trials_offline() {
+        // Pins: workflow runtime start is currently fire-and-forget, so non-failed/non-cancelled run states must release experiment dispatch slots.
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::Queued),
-            None
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
         );
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::Running),
-            None
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
         );
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::PendingReview),
-            None
+            Some((
+                ExperimentTrialStatus::Completed,
+                ExperimentTrialStopReason::TargetTerminal,
+            ))
         );
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::Completed),

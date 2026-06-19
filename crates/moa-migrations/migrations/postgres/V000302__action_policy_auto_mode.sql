@@ -10,7 +10,12 @@ CREATE TABLE IF NOT EXISTS action_policy_rules (
     scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
     reason TEXT,
     created_by TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT action_policy_rules_global_workspace_check
+        CHECK (
+            (scope = 'global' AND workspace_id = 'global')
+            OR (scope = 'workspace' AND workspace_id <> 'global')
+        )
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope

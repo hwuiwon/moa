@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use moa_core::{ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, UserId, WorkspaceId};
-use moa_security::ActionPolicyRuleStore;
+use moa_security::{ActionPolicyRuleStore, GLOBAL_ACTION_POLICY_WORKSPACE_ID};
 use uuid::Uuid;
 
 /// Verifies persistent action-policy rule CRUD.
@@ -46,6 +46,22 @@ where
         .upsert_action_policy_rule(user_rule.clone())
         .await
         .expect("upsert user-scoped action policy rule");
+    let global_rule = ActionPolicyRule {
+        id: Uuid::now_v7(),
+        workspace_id: WorkspaceId::new("source-workspace"),
+        user_id: None,
+        tool: "bash".to_string(),
+        pattern: "git fetch".to_string(),
+        effect: ActionPolicyEffect::Deny,
+        scope: ActionRuleScope::Global,
+        reason: Some("deployment-wide deny".to_string()),
+        created_by: user_id.clone(),
+        created_at: Utc::now(),
+    };
+    store
+        .upsert_action_policy_rule(global_rule.clone())
+        .await
+        .expect("upsert global action policy rule");
     let rules = store
         .list_action_policy_rules_for_tool(&workspace_id, &user_id, "bash")
         .await
@@ -58,6 +74,8 @@ where
         rules.iter().any(|candidate| candidate.id == user_rule.id
             && candidate.effect == ActionPolicyEffect::Deny)
     );
+    assert!(rules.iter().any(|candidate| candidate.id == global_rule.id
+        && candidate.workspace_id == WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID)));
 
     let other_user_rules = store
         .list_action_policy_rules_for_tool(&workspace_id, &other_user_id, "bash")
@@ -72,6 +90,22 @@ where
         !other_user_rules
             .iter()
             .any(|candidate| candidate.id == user_rule.id)
+    );
+
+    let other_workspace_rules = store
+        .list_action_policy_rules_for_tool(&WorkspaceId::new("ws2"), &user_id, "bash")
+        .await
+        .expect("list action policy rules for other workspace");
+    assert!(
+        !other_workspace_rules
+            .iter()
+            .any(|candidate| candidate.id == rule.id)
+    );
+    assert!(
+        other_workspace_rules
+            .iter()
+            .any(|candidate| candidate.id == global_rule.id
+                && candidate.workspace_id == WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID))
     );
 
     store

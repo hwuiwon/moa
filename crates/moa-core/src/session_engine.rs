@@ -23,6 +23,7 @@ pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]
             | Event::ToolResult { .. }
             | Event::ToolError { .. }
             | Event::ToolCall { .. } => Some(true),
+            // Action reviews are workspace-admin state and do not resume the turn loop by themselves.
             Event::ActionReviewRequested { .. } | Event::ActionReviewDecided { .. } => Some(false),
             _ => Some(false),
         })
