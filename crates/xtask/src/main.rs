@@ -8,6 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+mod check_architecture_boundaries;
 mod check_eval_budgets;
 mod compare_eval_reports;
 mod compute_memory_quality_scores;
@@ -23,6 +24,7 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("audit-paths") => cmd_audit_paths(),
+        Some("check-architecture-boundaries") => check_architecture_boundaries::run(),
         Some("check-migrations") => cmd_check_migrations(),
         Some("check-eval-budgets") => check_eval_budgets::run(args),
         Some("compare-eval-reports") => compare_eval_reports::run(args),

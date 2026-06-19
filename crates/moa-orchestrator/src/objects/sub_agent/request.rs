@@ -34,7 +34,7 @@ fn clamp_sub_agent_max_output(capabilities: &ModelCapabilities, budget_remaining
 pub(super) fn filtered_tool_schemas(
     tool_subset: &[String],
 ) -> Result<Vec<serde_json::Value>, HandlerError> {
-    let configured = OrchestratorCtx::current().tool_schemas.clone();
+    let configured = OrchestratorCtx::current_tool_schemas();
     let allowed = tool_subset
         .iter()
         .cloned()
@@ -65,8 +65,7 @@ pub(super) fn filtered_tool_schemas(
 pub(super) fn configured_model_capabilities(
     model: &ModelId,
 ) -> Result<ModelCapabilities, HandlerError> {
-    OrchestratorCtx::current()
-        .providers
+    OrchestratorCtx::current_provider_registry()
         .capabilities_for_model(Some(model.as_str()))
         .map_err(to_handler_error)
 }

@@ -375,8 +375,7 @@ async fn retrieve_debug_inner(
     )
     .await?;
 
-    let lineage_enabled = OrchestratorCtx::current()
-        .config
+    let lineage_enabled = OrchestratorCtx::current_config()
         .observability
         .lineage
         .enabled;
@@ -456,20 +455,20 @@ async fn lookup_seed_uids(
 fn memory_stack(scope: &MemoryScope) -> (Arc<dyn GraphStore>, Arc<HybridRetriever>) {
     let graph = Arc::new(graph_store(scope));
     let runtime = OrchestratorCtx::current();
-    let pool = runtime.graph_pool.clone();
+    let pool = runtime.graph_pool();
+    let config = runtime.config();
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
         ScopeContext::new(scope.clone()),
     ));
-    let retriever =
-        HybridRetriever::from_config(runtime.config.as_ref(), pool, graph.clone(), vector)
-            .with_assume_app_role(true);
+    let retriever = HybridRetriever::from_config(config.as_ref(), pool, graph.clone(), vector)
+        .with_assume_app_role(true);
     (graph, Arc::new(retriever))
 }
 
 fn graph_store(scope: &MemoryScope) -> AgeGraphStore {
     AgeGraphStore::scoped_for_app_role(
-        OrchestratorCtx::current().graph_pool.clone(),
+        OrchestratorCtx::current_graph_pool(),
         ScopeContext::new(scope.clone()),
     )
 }
@@ -559,7 +558,7 @@ fn record_debug_retrieval_lineage(
     };
     let json = serde_json::to_value(LineageEvent::Retrieval(record))
         .map_err(|error| TerminalError::new(format!("serialize debug lineage: {error}")))?;
-    OrchestratorCtx::current().lineage.record(json);
+    OrchestratorCtx::current_lineage().record(json);
     Ok(turn_id)
 }
 

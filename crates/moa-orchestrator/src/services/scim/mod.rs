@@ -202,12 +202,6 @@ pub fn map_db(error: sqlx::Error) -> ScimResponseError {
     ScimResponseError::internal("database error")
 }
 
-/// Map an outbox error into a SCIM response.
-pub fn map_outbox(error: moa_authz::AuthzError) -> ScimResponseError {
-    tracing::error!(error = %error, "SCIM outbox error");
-    ScimResponseError::internal("authorization outbox error")
-}
-
 fn map_auth_error(error: AuthError) -> ScimResponseError {
     match error {
         AuthError::InvalidFormat | AuthError::Rejected | AuthError::Expired => {

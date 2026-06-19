@@ -6,6 +6,7 @@ use std::time::Instant;
 use moa_core::{
     ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionStore,
     record_context_pipeline_construction, record_retrieval_embedder_construction,
+    traits::EmbeddingProvider,
 };
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 
@@ -18,7 +19,7 @@ use super::memory::{GraphMemoryRetriever, SharedGraphMemoryRetriever};
 use super::query_rewrite::QueryRewriter;
 use super::runner::ContextPipeline;
 use super::runtime_context::RuntimeContextProcessor;
-use super::skills::SkillInjector;
+use super::skills::{SharedSkillInjector, SkillInjector};
 use super::tools::ToolDefinitionProcessor;
 
 /// Builds a context pipeline without a memory backend.
@@ -78,6 +79,10 @@ pub struct GraphMemoryPipelineOptions {
     pub graph_pool: sqlx::PgPool,
     /// Optional process-wide graph-memory retriever reused across pipelines.
     pub shared_graph_memory_retriever: Option<Arc<GraphMemoryRetriever>>,
+    /// Optional retrieval embedder used when building a graph-memory retriever locally.
+    pub retrieval_embedder: Option<Arc<dyn EmbeddingProvider>>,
+    /// Optional process-wide skill injector reused across pipelines.
+    pub shared_skill_injector: Option<Arc<SkillInjector>>,
     /// Optional LLM provider used by context compaction.
     pub compaction_llm_provider: Option<Arc<dyn LLMProvider>>,
     /// Optional LLM provider used by query rewriting.
@@ -116,6 +121,17 @@ pub fn build_default_graph_memory_retriever(
         }
     };
 
+    build_graph_memory_retriever(config, graph_pool, retrieval_embedder, lineage)
+}
+
+/// Builds a graph-memory retriever from caller-provided runtime dependencies.
+#[must_use]
+pub fn build_graph_memory_retriever(
+    config: &MoaConfig,
+    graph_pool: sqlx::PgPool,
+    retrieval_embedder: Option<Arc<dyn EmbeddingProvider>>,
+    lineage: Arc<dyn LineageHandle>,
+) -> Arc<GraphMemoryRetriever> {
     Arc::new(
         GraphMemoryRetriever::new_with_config(config.clone(), graph_pool, retrieval_embedder)
             .with_lineage(lineage),
@@ -133,6 +149,8 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     let GraphMemoryPipelineOptions {
         graph_pool,
         shared_graph_memory_retriever,
+        retrieval_embedder,
+        shared_skill_injector,
         compaction_llm_provider,
         query_rewrite_llm_provider,
         discovered_workspace_instructions,
@@ -159,7 +177,16 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
             )
         };
     let graph_memory_retriever = shared_graph_memory_retriever.unwrap_or_else(|| {
-        build_default_graph_memory_retriever(config, graph_pool.clone(), lineage.clone())
+        if retrieval_embedder.is_some() {
+            build_graph_memory_retriever(
+                config,
+                graph_pool.clone(),
+                retrieval_embedder,
+                lineage.clone(),
+            )
+        } else {
+            build_default_graph_memory_retriever(config, graph_pool.clone(), lineage.clone())
+        }
     });
     let vector_retrieval_available = graph_memory_retriever.has_vector_retrieval();
     let query_rewriter: Option<Box<dyn ContextProcessor>> = if config.query_rewrite.enabled {
@@ -192,11 +219,14 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     if let Some(query_rewriter) = query_rewriter {
         stages.push(query_rewriter);
     }
-    stages.push(Box::new(
-        SkillInjector::new(graph_pool.clone())
-            .with_session_store(session_store.clone())
-            .with_budget_config(config.skill_budget.clone()),
-    ));
+    let skill_injector = shared_skill_injector.unwrap_or_else(|| {
+        Arc::new(
+            SkillInjector::new(graph_pool.clone())
+                .with_session_store(session_store.clone())
+                .with_budget_config(config.skill_budget.clone()),
+        )
+    });
+    stages.push(Box::new(SharedSkillInjector::new(skill_injector)));
     if config.memory.digest.enabled {
         stages.push(Box::new(DigestProcessor::new(
             graph_pool.clone(),

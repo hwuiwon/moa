@@ -246,6 +246,8 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
                 shared_graph_memory_retriever: None,
+                retrieval_embedder: None,
+                shared_skill_injector: None,
                 compaction_llm_provider: Some(provider.clone()),
                 query_rewrite_llm_provider: Some(provider.clone()),
                 discovered_workspace_instructions: discovered_instructions.clone(),
@@ -436,6 +438,8 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
                 shared_graph_memory_retriever: None,
+                retrieval_embedder: None,
+                shared_skill_injector: None,
                 compaction_llm_provider: Some(sonnet_provider.clone()),
                 query_rewrite_llm_provider: Some(sonnet_provider.clone()),
                 discovered_workspace_instructions: discovered_instructions.clone(),
@@ -488,6 +492,8 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
                 shared_graph_memory_retriever: None,
+                retrieval_embedder: None,
+                shared_skill_injector: None,
                 compaction_llm_provider: Some(cross_session_provider.clone()),
                 query_rewrite_llm_provider: Some(cross_session_provider.clone()),
                 discovered_workspace_instructions: discovered_instructions.clone(),
@@ -525,6 +531,8 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             GraphMemoryPipelineOptions {
                 graph_pool: store.pool().clone(),
                 shared_graph_memory_retriever: None,
+                retrieval_embedder: None,
+                shared_skill_injector: None,
                 compaction_llm_provider: Some(cold_session_provider.clone()),
                 query_rewrite_llm_provider: Some(cold_session_provider.clone()),
                 discovered_workspace_instructions: cold_instructions,
@@ -568,6 +576,8 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
         GraphMemoryPipelineOptions {
             graph_pool: store.pool().clone(),
             shared_graph_memory_retriever: None,
+            retrieval_embedder: None,
+            shared_skill_injector: None,
             compaction_llm_provider: Some(opus_provider.clone()),
             query_rewrite_llm_provider: Some(opus_provider.clone()),
             discovered_workspace_instructions: discovered_instructions,

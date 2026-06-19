@@ -31,6 +31,38 @@ impl PostgresSessionStore {
         Ok(())
     }
 
+    /// Appends one learning-log entry using the caller's open transaction.
+    pub async fn append_learning_in_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        entry: &LearningEntry,
+    ) -> Result<()> {
+        let learning_log = self.table_name("learning_log");
+        sqlx::query(&format!(
+            "INSERT INTO {learning_log} \
+             (id, tenant_id, workspace_id, learning_type, target_id, target_label, payload, confidence, \
+              source_refs, actor, valid_from, valid_to, batch_id, version) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+        ))
+        .bind(entry.id)
+        .bind(&entry.tenant_id)
+        .bind(&entry.learning_type)
+        .bind(&entry.target_id)
+        .bind(entry.target_label.as_deref())
+        .bind(Json(entry.payload.clone()))
+        .bind(entry.confidence)
+        .bind(&entry.source_refs)
+        .bind(&entry.actor)
+        .bind(entry.valid_from)
+        .bind(entry.valid_to)
+        .bind(entry.batch_id)
+        .bind(entry.version)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
     /// Lists current learning-log entries for a tenant.
     pub async fn list_learnings(
         &self,

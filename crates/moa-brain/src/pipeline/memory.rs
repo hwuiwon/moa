@@ -10,7 +10,7 @@ use chrono::Utc;
 use moa_core::{
     ContextMessage, ContextProcessor, LineageHandle, MemoryRerankerMode, MemoryScope,
     NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext,
-    WorkingContext, traits::EmbeddingProvider,
+    ScopeTier, WorkingContext, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -191,6 +191,10 @@ impl GraphMemoryRetriever {
     }
 
     fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
+        if matches!(scope.tier(), ScopeTier::User) {
+            return Ok(Arc::new(self.build_runtime_for_scope(scope)));
+        }
+
         let mut runtimes = self.scoped_runtimes.lock().map_err(|_| {
             moa_core::MoaError::StorageError("graph memory runtime cache lock poisoned".to_string())
         })?;
@@ -198,6 +202,12 @@ impl GraphMemoryRetriever {
             return Ok(runtime.clone());
         }
 
+        let runtime = Arc::new(self.build_runtime_for_scope(scope));
+        runtimes.insert(scope.clone(), runtime.clone());
+        Ok(runtime)
+    }
+
+    fn build_runtime_for_scope(&self, scope: &MemoryScope) -> ScopedRetrievalRuntime {
         let scope_context = ScopeContext::from(scope.clone());
         let vector: Arc<dyn VectorStore> = if self.assume_app_role {
             Arc::new(PgvectorStore::new_for_app_role(
@@ -228,12 +238,10 @@ impl GraphMemoryRetriever {
         } else {
             crate::retrieval::CachedHybridRetriever::new(hybrid, self.pool.clone())
         };
-        let runtime = Arc::new(ScopedRetrievalRuntime {
+        ScopedRetrievalRuntime {
             graph,
             hybrid: Arc::new(cached),
-        });
-        runtimes.insert(scope.clone(), runtime.clone());
-        Ok(runtime)
+        }
     }
 }
 
@@ -570,8 +578,8 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContextProcessor, ModelCapabilities, ModelId, Platform, QueryRewriteResult, SessionId,
-        SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        ContextProcessor, MemoryScope, ModelCapabilities, ModelId, Platform, QueryRewriteResult,
+        SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
     };
     use sqlx::postgres::PgPoolOptions;
 
@@ -592,6 +600,50 @@ mod tests {
 
         assert_eq!(shared.name(), "graph_memory");
         assert_eq!(shared.stage(), 7);
+    }
+
+    #[tokio::test]
+    async fn user_scoped_runtime_is_not_cached_in_process_lifetime_map() {
+        // Pins: process-wide graph-memory retrievers must not retain one runtime per user.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let retriever = GraphMemoryRetriever::new(pool, None);
+        let workspace_id = WorkspaceId::new("workspace");
+        let user_scope = MemoryScope::User {
+            workspace_id: workspace_id.clone(),
+            user_id: UserId::new("user"),
+        };
+        let workspace_scope = MemoryScope::Workspace { workspace_id };
+
+        retriever
+            .runtime_for_scope(&user_scope)
+            .expect("user runtime should build");
+        assert_eq!(
+            retriever
+                .scoped_runtimes
+                .lock()
+                .expect("runtime cache lock")
+                .len(),
+            0,
+            "user scopes should not grow the process-lifetime runtime cache"
+        );
+
+        retriever
+            .runtime_for_scope(&workspace_scope)
+            .expect("workspace runtime should build");
+        retriever
+            .runtime_for_scope(&workspace_scope)
+            .expect("workspace runtime should be reused");
+        assert_eq!(
+            retriever
+                .scoped_runtimes
+                .lock()
+                .expect("runtime cache lock")
+                .len(),
+            1,
+            "workspace scopes should still reuse one cached runtime"
+        );
     }
 
     #[test]

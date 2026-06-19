@@ -10,18 +10,15 @@ Caveats are grouped by root cause / architectural boundary, not by the crate whe
 
 Messaging adapters normalize platform-specific callback payloads into text control messages instead of typed messaging events. The fix is the same everywhere: widen `PlatformAdapter` to emit structured callback events alongside `InboundMessage`.
 
-### Slack approval buttons are normalized back into control messages
+### Slack interactive actions are normalized back into control messages
 
 - `crates/moa-messaging/src/slack.rs` receives Block Kit button actions over Socket Mode.
 - The core `PlatformAdapter` trait still only emits `InboundMessage`.
-- The adapter converts approval button clicks into normalized commands such as `/approval deny <request_id>`.
-- If adapters need richer structured callbacks later, `InboundMessage.text` should stop carrying control commands.
-
-### The unified approval layer still targets inline buttons first
-
-- `crates/moa-messaging/src/approval.rs` is the single source of truth for approval callback encoding and default approval buttons.
-- Slack consumes that callback format and button set, with a fallback to text commands when inline buttons are unavailable.
-- The generic messaging surface still has no first-class modal representation. `PlatformCapabilities.supports_modals` is informative today, but the unified approval flow still chooses inline buttons when available and text fallback otherwise.
+- The adapter converts current interactive actions into normalized text commands.
+- If adapters need richer structured callbacks later, `InboundMessage.text`
+  should stop carrying control commands. Workspace action review decisions and
+  builtin async-authz challenge decisions should remain distinct callback types
+  rather than sharing a generic control-message path.
 
 ---
 
@@ -44,8 +41,8 @@ Slack rendering is intentionally minimal. Upgrading it requires a proper platfor
 
 ### Slack rendering is intentionally minimal Block Kit
 
-- `crates/moa-messaging/src/renderer.rs` splits Slack output at the 40K text cap and renders approval buttons as Block Kit actions.
-- Normal text/code/diff output stays text-first, with Block Kit only added when interactive buttons are needed.
+- `crates/moa-messaging/src/renderer.rs` splits Slack output at the 40K text cap and keeps normal text/code/diff output text-first.
+- Block Kit remains an optional rendering detail for interactive controls.
 - The adapter uses `chat.update` directly and advertises a 1-second edit interval, but does not yet coalesce bursts of intermediate status updates into a smarter buffer.
 - If Slack becomes a primary surface, the next upgrade should add richer per-event thread rendering and more deliberate edit throttling/coalescing.
 

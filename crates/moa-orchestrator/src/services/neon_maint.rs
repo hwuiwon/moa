@@ -57,10 +57,9 @@ impl NeonMaint for NeonMaintImpl {
                 }
 
                 let orchestrator_ctx = OrchestratorCtx::current();
-                let manager = moa_session::NeonBranchManager::from_config(
-                    orchestrator_ctx.config.as_ref(),
-                )
-                .map_err(|error| TerminalError::new(format!("neon manager init: {error}")))?;
+                let config = orchestrator_ctx.config();
+                let manager = moa_session::NeonBranchManager::from_config(config.as_ref())
+                    .map_err(|error| TerminalError::new(format!("neon manager init: {error}")))?;
                 let deleted = manager
                     .cleanup_expired()
                     .await

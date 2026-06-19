@@ -58,6 +58,8 @@ async fn digest_processor_registers_at_documented_position() {
         GraphMemoryPipelineOptions {
             graph_pool: pool,
             shared_graph_memory_retriever: None,
+            retrieval_embedder: None,
+            shared_skill_injector: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,

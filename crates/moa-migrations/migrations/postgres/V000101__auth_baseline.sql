@@ -113,7 +113,8 @@ CREATE TABLE builtin_pending_approvals (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at          TIMESTAMPTZ NOT NULL,
     decided_at          TIMESTAMPTZ,
-    decided_by_user_id  UUID
+    decided_by_user_id  UUID,
+    resolved_at         TIMESTAMPTZ
 );
 
 CREATE INDEX idx_builtin_approvals_pending
@@ -175,3 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_authz_outbox_terminal_cleanup
 CREATE INDEX IF NOT EXISTS idx_builtin_approvals_terminal_cleanup
     ON builtin_pending_approvals(decided_at, expires_at)
     WHERE status IN ('approved', 'denied', 'timeout');
+
+CREATE INDEX IF NOT EXISTS idx_builtin_approvals_unresolved_terminal
+    ON builtin_pending_approvals(decided_at, expires_at)
+    WHERE status IN ('approved', 'denied', 'timeout') AND resolved_at IS NULL;

@@ -281,7 +281,7 @@ async fn list_inner(request: SkillListRequest) -> Result<SkillListResponse, Hand
 }
 
 fn skill_registry() -> SkillRegistry {
-    SkillRegistry::new(OrchestratorCtx::current().graph_pool.clone())
+    SkillRegistry::new(OrchestratorCtx::current_graph_pool())
 }
 
 async fn authorize_workspace(

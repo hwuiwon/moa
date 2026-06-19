@@ -76,8 +76,8 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         let request = request.into_inner();
         authorize_workspace_admin(&ctx, &request.workspace_id).await?;
         let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool.clone();
-        let config = runtime.config.clone();
+        let pool = runtime.graph_pool();
+        let config = runtime.config();
 
         Ok(ctx
             .run(|| async move {
@@ -117,7 +117,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         let request = request.into_inner();
         authorize_workspace_admin(&ctx, &request.workspace_id).await?;
         validate_promotion_action(&request.action, "rollback")?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -144,7 +144,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         let request = request.into_inner();
         authorize_workspace_admin(&ctx, &request.workspace_id).await?;
         validate_promotion_action(&request.action, "finalize")?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -170,7 +170,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_create");
         authorize_tenant_admin(&ctx).await?;
         let request = request.into_inner();
-        let config = OrchestratorCtx::current().config.clone();
+        let config = OrchestratorCtx::current_config().clone();
 
         Ok(ctx
             .run(|| async move {
@@ -194,7 +194,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<CheckpointListResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_list");
         authorize_tenant_admin(&ctx).await?;
-        let config = OrchestratorCtx::current().config.clone();
+        let config = OrchestratorCtx::current_config().clone();
 
         Ok(ctx
             .run(|| async move {
@@ -219,7 +219,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_rollback");
         authorize_tenant_admin(&ctx).await?;
         let request = request.into_inner();
-        let config = OrchestratorCtx::current().config.clone();
+        let config = OrchestratorCtx::current_config().clone();
 
         Ok(ctx
             .run(|| async move {
@@ -256,7 +256,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<CheckpointCleanupResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "checkpoint_cleanup");
         authorize_tenant_admin(&ctx).await?;
-        let config = OrchestratorCtx::current().config.clone();
+        let config = OrchestratorCtx::current_config().clone();
 
         Ok(ctx
             .run(|| async move {

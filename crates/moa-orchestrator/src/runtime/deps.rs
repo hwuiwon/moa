@@ -1,0 +1,228 @@
+//! Dependency construction for orchestrator runtime startup.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{Context as AnyhowContext, Result};
+use moa_authz::{AwakeableResolver, FgaClient};
+use moa_brain::{
+    build_graph_memory_retriever,
+    pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector},
+};
+use moa_core::{MoaConfig, record_retrieval_embedder_construction, traits::EmbeddingProvider};
+use moa_hands::ToolRouter;
+use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
+use moa_providers::{ProviderRegistry, build_embedding_provider_from_config};
+use moa_session::PostgresSessionStore;
+use serde_json::Value;
+use sqlx::PgPool;
+
+use crate::{
+    config::ProvidersOverride,
+    ctx::{
+        AuthDeps, LineageDeps, MemoryDeps, OrchestratorCtx, PersistenceDeps, ProviderDeps, ToolDeps,
+    },
+    lineage::{LineageSinkRuntime, build_lineage_sink},
+    runtime::jobs::{restate_ingress_base_url, start_authz_outbox_poller},
+    services::{authz_challenges_reaper::HttpAwakeableResolver, scim::ScimState},
+};
+
+/// Constructed dependencies shared by Restate handlers and process services.
+pub struct RuntimeDeps {
+    /// Shared orchestrator configuration.
+    pub config: Arc<MoaConfig>,
+    /// Runtime Postgres pool.
+    pub pool: PgPool,
+    /// Session and analytics store backed by Postgres.
+    pub session_store: Arc<PostgresSessionStore>,
+    /// Optional OpenFGA authorization client.
+    pub fga_client: Option<FgaClient>,
+    /// Authentication, token-vault, and async-approval providers.
+    pub auth_providers: moa_auth_providers::Providers,
+    /// Configured LLM provider registry.
+    pub providers: Arc<ProviderRegistry>,
+    /// Optional embedding provider.
+    pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// Tool router used by ToolExecutor and workspace services.
+    pub tool_router: Arc<ToolRouter>,
+    /// Precompiled tool schemas.
+    pub tool_schemas: Arc<Vec<Value>>,
+    /// Graph-memory retriever used by the context pipeline.
+    pub graph_memory_retriever: Arc<GraphMemoryRetriever>,
+    /// Skill injector used by the context pipeline.
+    pub skill_injector: Arc<SkillInjector>,
+    /// Selected lineage sink and optional writer.
+    pub lineage: LineageSinkRuntime,
+    /// Awakeable resolver used by builtin async authorization.
+    pub awakeable_resolver: Arc<dyn AwakeableResolver>,
+    /// Optional OpenFGA outbox poller handle.
+    pub authz_outbox_poller: Option<moa_authz::PollerHandle>,
+}
+
+impl RuntimeDeps {
+    /// Builds all runtime dependencies from configuration and the runtime pool.
+    pub async fn build(
+        config: Arc<MoaConfig>,
+        pool: PgPool,
+        restate_ingress_url: &str,
+        providers_override: ProvidersOverride,
+        skip_fga: bool,
+    ) -> Result<Self> {
+        moa_authz::configure_security_audit(pool.clone(), config.audit_security.emit_authz_allows);
+        let fga_client = if skip_fga {
+            tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
+            None
+        } else {
+            Some(build_fga_client(config.as_ref())?)
+        };
+        let authz_outbox_poller = fga_client
+            .clone()
+            .map(|fga_client| start_authz_outbox_poller(&pool, fga_client));
+        let session_store = Arc::new(
+            PostgresSessionStore::from_existing_pool(&config.database.url, pool.clone()).await?,
+        );
+        let awakeable_resolver: Arc<dyn AwakeableResolver> = Arc::new(HttpAwakeableResolver::new(
+            restate_ingress_base_url(restate_ingress_url),
+        )?);
+        let auth_providers = moa_auth_providers::build_providers_with_resolver(
+            config.as_ref(),
+            Arc::new(pool.clone()),
+            Some(awakeable_resolver.clone()),
+        )
+        .context("build providers bundle")?;
+
+        let providers = Arc::new(build_provider_registry(
+            config.as_ref(),
+            providers_override,
+        )?);
+        let embedding_provider = build_embedding_provider_from_config(config.as_ref())?;
+        let tool_router = Arc::new(
+            ToolRouter::from_config(config.as_ref())
+                .await?
+                .with_rule_store(session_store.clone())
+                .with_session_store(session_store.clone()),
+        );
+        let lineage = build_lineage_sink(config.as_ref(), pool.clone()).await?;
+        let retrieval_embedder = build_retrieval_embedder(config.as_ref());
+        let graph_memory_retriever = build_graph_memory_retriever(
+            config.as_ref(),
+            session_store.pool().clone(),
+            retrieval_embedder,
+            lineage.handle.clone(),
+        );
+        let skill_injector = Arc::new(
+            SkillInjector::new(session_store.pool().clone())
+                .with_session_store(session_store.clone())
+                .with_budget_config(config.skill_budget.clone()),
+        );
+        let tool_schemas = Arc::new(tool_router.tool_schemas());
+        let _ = moa_memory_ingest::install_runtime_with_config(pool.clone(), config.as_ref());
+
+        Ok(Self {
+            config,
+            pool,
+            session_store,
+            fga_client,
+            auth_providers,
+            providers,
+            embedding_provider,
+            tool_router,
+            tool_schemas,
+            graph_memory_retriever,
+            skill_injector,
+            lineage,
+            awakeable_resolver,
+            authz_outbox_poller,
+        })
+    }
+
+    /// Installs these dependencies into the process-wide handler context.
+    pub fn install_orchestrator_ctx(&self) -> Result<(), &'static str> {
+        OrchestratorCtx::install(Arc::new(self.orchestrator_ctx()))
+    }
+
+    /// Builds SCIM HTTP server state from the runtime dependencies.
+    #[must_use]
+    pub fn scim_state(&self, scim_base_url: String) -> ScimState {
+        ScimState::new(
+            self.pool.clone(),
+            Arc::new(moa_auth_providers::LocalAuthProvider::new(Arc::new(
+                self.pool.clone(),
+            ))),
+            self.fga_client.clone(),
+            scim_base_url,
+        )
+    }
+
+    fn orchestrator_ctx(&self) -> OrchestratorCtx {
+        OrchestratorCtx::new(
+            self.config.clone(),
+            PersistenceDeps::new(
+                self.session_store.clone(),
+                self.session_store.pool().clone(),
+            ),
+            AuthDeps::new(self.fga_client.clone(), self.auth_providers.clone()),
+            ProviderDeps::new(self.providers.clone(), self.embedding_provider.clone()),
+            ToolDeps::new(self.tool_router.clone(), self.tool_schemas.clone()),
+            MemoryDeps::new(
+                self.graph_memory_retriever.clone(),
+                self.skill_injector.clone(),
+            ),
+            LineageDeps::new(self.lineage.handle.clone(), self.lineage.writer.clone()),
+        )
+    }
+}
+
+fn build_retrieval_embedder(config: &MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {
+    let embedder_started = Instant::now();
+    match build_embedder_from_config(config, EmbedderConstructionRole::Retrieval) {
+        Ok(embedder) => {
+            record_retrieval_embedder_construction("success", embedder_started.elapsed());
+            Some(embedder)
+        }
+        Err(error) => {
+            record_retrieval_embedder_construction("failure", embedder_started.elapsed());
+            tracing::warn!(
+                %error,
+                "graph memory vector retrieval disabled because the retrieval embedder could not be constructed"
+            );
+            None
+        }
+    }
+}
+
+fn build_provider_registry(
+    config: &MoaConfig,
+    providers_override: ProvidersOverride,
+) -> Result<ProviderRegistry> {
+    match providers_override {
+        ProvidersOverride::None => Ok(ProviderRegistry::from_config(config)),
+        ProvidersOverride::Scripted { path } => {
+            tracing::warn!(
+                path = %path.display(),
+                "loading scripted provider override (test mode)"
+            );
+            Ok(ProviderRegistry::scripted(path)?)
+        }
+        ProvidersOverride::Mock { seed } => {
+            tracing::warn!(seed, "using mock provider override (test mode)");
+            Ok(ProviderRegistry::mock(seed)?)
+        }
+    }
+}
+
+fn build_fga_client(config: &MoaConfig) -> Result<FgaClient> {
+    let openfga = config
+        .authz
+        .openfga
+        .as_ref()
+        .context("authz.openfga config missing")?;
+    FgaClient::new(moa_authz::FgaConfig {
+        url: openfga.url.clone(),
+        preshared_key: openfga.preshared_key.clone(),
+        store_id: openfga.store_id.clone(),
+        model_id: openfga.model_id.clone(),
+        timeout_ms: openfga.timeout_ms,
+    })
+    .context("build OpenFGA client")
+}

@@ -15,10 +15,11 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest, PrivacyExportResponse,
 };
-use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId};
+use moa_core::{UserId, WorkspaceId};
 use moa_lineage_audit::PiiVault;
-use moa_memory_graph::{
-    AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
+use moa_memory_graph::{ChangelogRecord, write_and_bump};
+use moa_memory_pii::erasure::{
+    EraseCandidate, GraphErasureAudit, enumerate_erase_candidates, hard_purge_erase_candidates,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -38,7 +39,6 @@ const APPROVAL_PUBLIC_KEY_ENV: &str = "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX";
 const EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
 const EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
 const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
-const ERASE_CHUNK_SIZE: usize = 1000;
 const ERASE_SAMPLE_LIMIT: usize = 20;
 
 /// Restate service surface for protected privacy administration.
@@ -78,7 +78,7 @@ impl Privacy for PrivacyImpl {
             &subject_user_id,
             workspace,
         )?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -107,11 +107,11 @@ impl Privacy for PrivacyImpl {
             &subject_user_id,
             workspace,
         )?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         let erase_ctx = PrivacyEraseContext::from_request(pool, request, claims)?;
 
         Ok(ctx
-            .run(|| async move { execute_privacy_erase(erase_ctx).await.map(Json::from) })
+            .run(|| async move { run_privacy_erase(erase_ctx).await.map(Json::from) })
             .name("privacy_erase")
             .await?)
     }
@@ -334,19 +334,6 @@ impl PrivacyEraseContext {
     }
 }
 
-/// One graph-memory candidate selected for privacy erasure.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct EraseCandidate {
-    /// Candidate node UID.
-    pub uid: Uuid,
-    /// Candidate graph label.
-    pub label: String,
-    /// Candidate node name.
-    pub name: String,
-    /// Candidate PII class.
-    pub pii_class: String,
-}
-
 async fn authorize_privacy_export(
     ctx: &impl RequestHeaders,
     workspace_id: Option<&WorkspaceId>,
@@ -452,15 +439,17 @@ async fn execute_privacy_export(
     })
 }
 
-/// Executes privacy erasure with graph hard-purge audit and PII-vault subject-key erasure.
-pub async fn execute_privacy_erase(
+/// Runs privacy erasure after authz and approval-token verification have completed.
+pub async fn run_privacy_erase(
     ctx: PrivacyEraseContext,
 ) -> Result<PrivacyEraseResponse, HandlerError> {
     if ctx.reason.trim().is_empty() {
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
     consume_approval_jti(&ctx.pool, &ctx.claims).await?;
-    let candidates = enumerate_erase_candidates(&ctx).await?;
+    let candidates = enumerate_erase_candidates(&ctx.pool, &ctx.workspace_id, &ctx.subject_user_id)
+        .await
+        .map_err(handler_error)?;
 
     if ctx.dry_run {
         return Ok(erase_response(&ctx, &candidates, 0, 0));
@@ -472,23 +461,10 @@ pub async fn execute_privacy_erase(
         return Ok(erase_response(&ctx, &candidates, 0, pii_vault_erased));
     }
 
-    let graph = erase_graph_store(&ctx.pool, &ctx.workspace_id, &ctx.subject_user_id);
-    let mut erased_count = 0usize;
-    for chunk in candidates.chunks(ERASE_CHUNK_SIZE) {
-        for candidate in chunk {
-            let metadata = erase_audit_metadata(&ctx);
-            hard_purge_with_audit(
-                &graph,
-                candidate.uid,
-                &format!("erase:{}", ctx.claims.jti),
-                Some(metadata),
-            )
+    let erased_count =
+        hard_purge_erase_candidates(&ctx.pool, &graph_erasure_audit(&ctx), &candidates)
             .await
             .map_err(handler_error)?;
-            erased_count = erased_count.saturating_add(1);
-        }
-    }
-    emit_erase_summary(&ctx, erased_count).await?;
 
     Ok(erase_response(
         &ctx,
@@ -641,103 +617,15 @@ async fn erase_pii_vault_subject(ctx: &PrivacyEraseContext) -> Result<u64, Handl
         .map_err(handler_error)
 }
 
-fn erase_graph_store(pool: &PgPool, workspace_id: &str, subject_user_id: &str) -> AgeGraphStore {
-    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(subject_user_id));
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope)
-}
-
-async fn enumerate_erase_candidates(
-    ctx: &PrivacyEraseContext,
-) -> Result<Vec<EraseCandidate>, HandlerError> {
-    let mut tx = begin_app_scoped_tx(&ctx.pool, &ctx.workspace_id, &ctx.subject_user_id).await?;
-    let rows = sqlx::query_as::<_, EraseCandidate>(
-        r#"
-        SELECT uid, label, name, pii_class
-        FROM moa.node_index
-        WHERE workspace_id = $1
-          AND valid_to IS NULL
-          AND (
-              user_id = $2
-              OR properties_summary->>'user_id' = $2
-          )
-        ORDER BY uid
-        "#,
-    )
-    .bind(&ctx.workspace_id)
-    .bind(&ctx.subject_user_id)
-    .fetch_all(tx.as_mut())
-    .await
-    .map_err(handler_error)?;
-    tx.commit().await.map_err(handler_error)?;
-    Ok(rows)
-}
-
-/// Begins a transaction scoped as `moa_app` for one workspace-bound subject user.
-pub async fn begin_app_scoped_tx<'a>(
-    pool: &'a PgPool,
-    workspace_id: &str,
-    subject_user_id: &str,
-) -> Result<ScopedConn<'a>, HandlerError> {
-    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(subject_user_id));
-    let mut tx = ScopedConn::begin(pool, &scope)
-        .await
-        .map_err(handler_error)?;
-    sqlx::query("SET LOCAL ROLE moa_app")
-        .execute(tx.as_mut())
-        .await
-        .map_err(handler_error)?;
-    Ok(tx)
-}
-
-fn erase_audit_metadata(ctx: &PrivacyEraseContext) -> Value {
-    json!({
-        "reason": ctx.reason.as_str(),
-        "approver_id": ctx.claims.sub.as_str(),
-        "approval_token_jti": ctx.claims.jti.as_str(),
-        "subject_user_id": ctx.subject_user_id.as_str(),
-        "workspace_id": ctx.workspace_id.as_str(),
-        "op": "erase",
-    })
-}
-
-async fn emit_erase_summary(
-    ctx: &PrivacyEraseContext,
-    erased_count: usize,
-) -> Result<(), HandlerError> {
-    let mut tx = begin_app_scoped_tx(&ctx.pool, &ctx.workspace_id, &ctx.subject_user_id).await?;
-    write_and_bump(
-        tx.as_mut(),
-        ChangelogRecord {
-            workspace_id: Some(ctx.workspace_id.clone()),
-            user_id: None,
-            scope: "workspace".to_string(),
-            actor_id: Some(ctx.claims.sub.clone()),
-            actor_kind: "admin".to_string(),
-            op: "erase".to_string(),
-            target_kind: "user".to_string(),
-            target_label: "User".to_string(),
-            target_uid: ctx.subject_user,
-            payload: json!({
-                "reason": ctx.reason.as_str(),
-                "subject_user_id": ctx.subject_user_id.as_str(),
-                "erased_count": erased_count,
-            }),
-            redaction_marker: None,
-            pii_class: "phi".to_string(),
-            audit_metadata: Some(json!({
-                "approver_id": ctx.claims.sub.as_str(),
-                "approval_token_jti": ctx.claims.jti.as_str(),
-                "subject_user_id": ctx.subject_user_id.as_str(),
-                "workspace_id": ctx.workspace_id.as_str(),
-                "op": "erase",
-            })),
-            cause_change_id: None,
-        },
-    )
-    .await
-    .map_err(handler_error)?;
-    tx.commit().await.map_err(handler_error)?;
-    Ok(())
+fn graph_erasure_audit(ctx: &PrivacyEraseContext) -> GraphErasureAudit {
+    GraphErasureAudit {
+        workspace_id: ctx.workspace_id.clone(),
+        subject_user: ctx.subject_user,
+        subject_user_id: ctx.subject_user_id.clone(),
+        reason: ctx.reason.clone(),
+        approver_id: ctx.claims.sub.clone(),
+        approval_token_jti: ctx.claims.jti.clone(),
+    }
 }
 
 fn erase_response(

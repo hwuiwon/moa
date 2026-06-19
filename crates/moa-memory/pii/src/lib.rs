@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod erasure;
 pub mod mock;
 pub mod openai_filter;
 

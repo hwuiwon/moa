@@ -25,13 +25,13 @@ The root workspace currently contains:
 | `moa-lineage/audit` (`moa-lineage-audit`) | Compliance audit hash chain, Merkle root, signing, and DSAR support |
 | `moa-auth/authz-schema` (`moa-authz-schema`) | Typed OpenFGA tuple keys and model constants |
 | `moa-auth/authz` (`moa-authz`) | OpenFGA client, authorization checks, transactional outbox, and outbox poller |
-| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin approvals, null token vault, and provider bundle construction |
+| `moa-auth/providers` (`moa-auth-providers`) | Local API keys, disabled auth, builtin async-authz challenges, null token vault, and provider bundle construction |
 | `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0 and generic OIDC providers gated by the `auth0` feature |
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and authorization-model bootstrap binary |
 | `moa-ocsf` | OCSF v1.3 security-event types, emit helpers, signing, and persistence |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
-| `moa-orchestrator` | Restate services, virtual objects, workflows, `moa-orchestrator-bin` cloud binary |
+| `moa-orchestrator` | One production binary with Restate services, virtual objects, workflows, and in-process application/repository boundaries |
 | `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
 | `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
 | `moa-skills` | Skill parser, DB-backed active package registry, draft proposal generation, and regression suite source generation |
@@ -121,9 +121,9 @@ and deployment setup. Key groups:
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
 | `MOA_CLOUD_*` | cloud mode and hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
-| `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, async approvals, and OCSF security-event audit |
+| `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_MESSAGING_*` | messaging adapter settings |
-| `MOA_PERMISSIONS_*` | default approval posture |
+| `MOA_PERMISSIONS_*` | default action-policy posture for tool execution |
 | `MOA_COMPACTION_*` | history compaction thresholds |
 
 ## Current Implementation State
@@ -131,7 +131,7 @@ and deployment setup. Key groups:
 Implemented architectural pillars:
 
 - Restate cloud orchestration with session, sub-agent, workspace, service, and workflow handlers.
-- Restate orchestrator for local development and cloud execution.
+- One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Postgres session store with event log, analytics, task segments, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and skill resolution-rate ranking.

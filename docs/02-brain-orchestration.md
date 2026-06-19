@@ -17,7 +17,8 @@ _Restate orchestration, hosted API runtime mode, turn execution, and sub-agents.
 
 ## Cloud Runtime
 
-`moa-orchestrator` is an HTTP handler service registered with Restate. At startup it:
+`moa-orchestrator` is the single production binary and HTTP handler service
+registered with Restate. At startup it:
 
 1. Loads shared `MoaConfig` from flat `MOA_...` environment variables.
 2. Connects to Postgres and runs session migrations.
@@ -26,13 +27,26 @@ _Restate orchestration, hosted API runtime mode, turn execution, and sub-agents.
 5. Binds Restate services, virtual objects, and workflows.
 6. Starts the Restate endpoint and a separate health/readiness endpoint.
 
-Bound surfaces:
+Default production Restate bindings:
 
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LLMGateway`, `NeonMaint`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
-| Workflow | `Consolidate`, `EvalRun`, `SkillLearning`, `TurnExecution`, `SubAgentTurnExecution` |
+| Service | `ActionReviews`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+| Workflow | `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution` |
+
+Feature-gated Restate bindings:
+
+| Feature | Additional bindings |
+|---|---|
+| `internal-eval-runner` | `Eval` service and `EvalRun` workflow |
+| `skill-learning` | `SkillLearning` workflow |
+
+Internal application boundaries for action reviews, builtin async-authz
+challenges, learning review, experiments, analytics, privacy, lineage admin,
+provider routing, and memory retrieval are in-process boundaries behind the
+handlers above. They are extraction seams inside the monolith, not a direction
+to create internal network services.
 
 Restate state is used for hot orchestration state: queued messages, status, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
 

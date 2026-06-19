@@ -49,6 +49,8 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         GraphMemoryPipelineOptions {
             graph_pool,
             shared_graph_memory_retriever: None,
+            retrieval_embedder: None,
+            shared_skill_injector: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             discovered_workspace_instructions: None,

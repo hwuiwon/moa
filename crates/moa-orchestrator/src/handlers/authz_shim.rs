@@ -18,8 +18,7 @@ pub fn require_identity(ctx: &impl RequestHeaders) -> Result<Identity, HandlerEr
 /// Return the process-wide FGA client or fail closed.
 pub fn require_fga_client() -> Result<FgaClient, HandlerError> {
     OrchestratorCtx::current()
-        .fga_client
-        .clone()
+        .fga_client()
         .ok_or_else(|| TerminalError::new_with_code(503, "authorization engine unavailable").into())
 }
 

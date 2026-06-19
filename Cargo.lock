@@ -3803,13 +3803,16 @@ name = "moa-memory-pii"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "moa-core",
  "moa-memory-graph",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
  "wiremock",
  "workspace-hack",
 ]
@@ -3931,6 +3934,7 @@ dependencies = [
  "moa-memory-graph",
  "moa-memory-ingest",
  "moa-memory-lifecycle",
+ "moa-memory-pii",
  "moa-memory-vector",
  "moa-migrations",
  "moa-ocsf",
@@ -4065,6 +4069,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
  "tracing",

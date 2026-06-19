@@ -14,6 +14,7 @@
 //! audited by its authors. Internal engineering forensics are not blocked by
 //! that gate.
 
+pub mod admin;
 pub mod error;
 pub mod export;
 pub mod merkle;

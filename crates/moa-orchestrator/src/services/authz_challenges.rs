@@ -3,13 +3,14 @@
 use chrono::{DateTime, Utc};
 use moa_auth_providers::builtin_authz::BuiltinApprovalRow;
 use moa_core::restate_observability::annotate_restate_handler_span;
-use moa_core::traits::{ApprovalDecision as AsyncApprovalDecision, IdentityType};
-use moa_ocsf::ActorInput;
+use moa_core::traits::IdentityType;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
+use crate::authz_challenges::app as authz_challenge_app;
+use crate::authz_challenges::store as authz_challenge_store;
 use crate::handlers::authz_shim::require_identity;
 
 /// Async authorization challenge summary returned to users.
@@ -68,12 +69,17 @@ impl AuthzChallenges for AuthzChallengesImpl {
                 TerminalError::new_with_code(403, "only users can list authz challenges").into(),
             );
         }
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
-                list_builtin_challenges(pool, identity.id)
+                authz_challenge_store::list_pending_builtin_challenges(pool, identity.id)
                     .await
+                    .map(|rows| {
+                        rows.into_iter()
+                            .map(summary_from_builtin_row)
+                            .collect::<Vec<_>>()
+                    })
                     .map(Json::from)
             })
             .name("authz_challenges_list_mine")
@@ -96,10 +102,11 @@ impl AuthzChallenges for AuthzChallengesImpl {
             .into());
         }
         let request = request.into_inner();
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
+        let mark_resolved_pool = pool.clone();
         let resolved = ctx
             .run(|| async move {
-                decide_builtin_challenge(pool, identity.id, request)
+                authz_challenge_app::decide_builtin_challenge(pool, identity.id, request)
                     .await
                     .map(Json::from)
             })
@@ -107,159 +114,29 @@ impl AuthzChallenges for AuthzChallengesImpl {
             .await?
             .into_inner();
 
-        let decision = match resolved.status.as_str() {
-            "approved" => AsyncApprovalDecision::Approved,
-            "denied" => AsyncApprovalDecision::Denied {
-                reason: resolved.deny_reason,
-            },
-            other => {
-                return Err(TerminalError::new(format!(
-                    "unexpected authz challenge status after decision: {other}"
-                ))
-                .into());
-            }
-        };
-        ctx.resolve_awakeable(&resolved.awakeable_id, Json::from(decision));
+        ctx.resolve_awakeable(&resolved.awakeable_id, Json::from(resolved.decision));
+        ctx.run(|| async move {
+            authz_challenge_store::mark_builtin_challenge_resolved(&mark_resolved_pool, resolved.id)
+                .await
+                .map_err(|error| {
+                    HandlerError::from(TerminalError::new(format!(
+                        "mark authz challenge resolved: {error}"
+                    )))
+                })
+        })
+        .name("authz_challenges_mark_resolved")
+        .await?;
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResolvedAuthzChallenge {
-    awakeable_id: String,
-    status: String,
-    deny_reason: Option<String>,
-}
-
-async fn list_builtin_challenges(
-    pool: sqlx::PgPool,
-    deciding_user_id: Uuid,
-) -> Result<Vec<AuthzChallengeSummary>, HandlerError> {
-    let rows: Vec<BuiltinApprovalRow> = sqlx::query_as(
-        r#"
-        SELECT id, session_id, deciding_user_id, tenant_id, awakeable_id,
-               action_summary, action_details, status, deny_reason,
-               created_at, expires_at, decided_at, decided_by_user_id
-        FROM builtin_pending_approvals
-        WHERE deciding_user_id = $1 AND status = 'pending' AND expires_at > NOW()
-        ORDER BY created_at DESC
-        LIMIT 100
-        "#,
-    )
-    .bind(deciding_user_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|error| TerminalError::new(format!("list authz challenges: {error}")))?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| AuthzChallengeSummary {
-            id: row.id,
-            session_id: row.session_id,
-            action_summary: row.action_summary,
-            action_details: row.action_details,
-            created_at: row.created_at,
-            expires_at: row.expires_at,
-        })
-        .collect())
-}
-
-async fn decide_builtin_challenge(
-    pool: sqlx::PgPool,
-    deciding_user_id: Uuid,
-    request: AuthzChallengeDecisionRequest,
-) -> Result<ResolvedAuthzChallenge, HandlerError> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
-    let row: Option<BuiltinApprovalRow> = sqlx::query_as(
-        r#"
-        SELECT id, session_id, deciding_user_id, tenant_id, awakeable_id,
-               action_summary, action_details, status, deny_reason,
-               created_at, expires_at, decided_at, decided_by_user_id
-        FROM builtin_pending_approvals
-        WHERE id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(request.id)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(|error| TerminalError::new(format!("load authz challenge: {error}")))?;
-    let Some(row) = row else {
-        return Err(TerminalError::new_with_code(404, "authz challenge not found").into());
-    };
-
-    if row.deciding_user_id != deciding_user_id {
-        return Err(TerminalError::new_with_code(403, "not your authz challenge").into());
+fn summary_from_builtin_row(row: BuiltinApprovalRow) -> AuthzChallengeSummary {
+    AuthzChallengeSummary {
+        id: row.id,
+        session_id: row.session_id,
+        action_summary: row.action_summary,
+        action_details: row.action_details,
+        created_at: row.created_at,
+        expires_at: row.expires_at,
     }
-    if row.status != "pending" {
-        return Err(TerminalError::new_with_code(
-            409,
-            format!("authz challenge already {}", row.status),
-        )
-        .into());
-    }
-    if row.expires_at <= Utc::now() {
-        return Err(TerminalError::new_with_code(410, "authz challenge expired").into());
-    }
-
-    let (status, decision) = match request.outcome.as_str() {
-        "approved" => ("approved", AsyncApprovalDecision::Approved),
-        "denied" => (
-            "denied",
-            AsyncApprovalDecision::Denied {
-                reason: request.reason.clone(),
-            },
-        ),
-        other => {
-            return Err(TerminalError::new_with_code(400, format!("bad outcome: {other}")).into());
-        }
-    };
-
-    let updated: BuiltinApprovalRow = sqlx::query_as(
-        r#"
-        UPDATE builtin_pending_approvals
-        SET status = $2,
-            deny_reason = $3,
-            decided_at = NOW(),
-            decided_by_user_id = $4
-        WHERE id = $1
-        RETURNING id, session_id, deciding_user_id, tenant_id, awakeable_id,
-                  action_summary, action_details, status, deny_reason,
-                  created_at, expires_at, decided_at, decided_by_user_id
-        "#,
-    )
-    .bind(request.id)
-    .bind(status)
-    .bind(match &decision {
-        AsyncApprovalDecision::Denied { reason } => reason.as_deref(),
-        AsyncApprovalDecision::Approved | AsyncApprovalDecision::Timeout => None,
-    })
-    .bind(deciding_user_id)
-    .fetch_one(&mut *transaction)
-    .await
-    .map_err(|error| TerminalError::new(format!("update authz challenge: {error}")))?;
-
-    moa_ocsf::emit_approval_decided_tx(
-        &mut transaction,
-        updated.tenant_id,
-        ActorInput::user(deciding_user_id),
-        updated.id,
-        updated.status == "approved",
-    )
-    .await
-    .map_err(|error| TerminalError::new(format!("audit authz challenge decision: {error}")))?;
-
-    transaction
-        .commit()
-        .await
-        .map_err(|error| TerminalError::new(format!("db commit: {error}")))?;
-
-    Ok(ResolvedAuthzChallenge {
-        awakeable_id: updated.awakeable_id,
-        status: updated.status,
-        deny_reason: updated.deny_reason,
-    })
 }

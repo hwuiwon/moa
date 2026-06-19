@@ -13,6 +13,7 @@ skill-learning = ["moa-skills/skill-learning"]
 internal-eval-runner = [
     "dep:moa-eval",
     "moa-brain/eval-harness",
+    "moa-skills/regression",
 ]
 langfuse = ["internal-eval-runner", "moa-eval/langfuse"]
 
@@ -47,6 +48,7 @@ moa-lineage-audit = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-lineage-sink = { workspace = true }
 moa-memory-graph = { workspace = true }
+moa-memory-pii = { workspace = true }
 moa-memory-lifecycle = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-ocsf.workspace = true

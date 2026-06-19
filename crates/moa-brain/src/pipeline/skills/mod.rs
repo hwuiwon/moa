@@ -40,10 +40,39 @@ pub struct SkillInjector {
     budget_config: SkillBudgetConfig,
 }
 
+/// Shared skill-injection stage backed by a process-wide injector.
+#[derive(Clone)]
+pub struct SharedSkillInjector {
+    inner: Arc<SkillInjector>,
+}
+
 enum SkillSource {
     Registry(PgPool),
     #[cfg(test)]
     Static(Vec<SkillMetadata>),
+}
+
+impl SharedSkillInjector {
+    /// Creates a shared skill processor from a prebuilt injector.
+    #[must_use]
+    pub fn new(inner: Arc<SkillInjector>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ContextProcessor for SharedSkillInjector {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn stage(&self) -> u8 {
+        self.inner.stage()
+    }
+
+    async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        self.inner.process(ctx).await
+    }
 }
 
 impl SkillInjector {
@@ -215,9 +244,9 @@ mod tests {
     use moa_core::{ContextMessage, ContextProcessor, SkillBudgetConfig};
     use serde_json::json;
 
-    use super::SkillInjector;
     use super::test_support::{capabilities, session, skills};
     use super::tier1_metadata::{MANIFEST_FOOTER, MANIFEST_PREAMBLE};
+    use super::{SharedSkillInjector, SkillInjector};
 
     #[tokio::test]
     async fn skill_injector_formats_dynamic_metadata() {
@@ -383,5 +412,15 @@ mod tests {
             injector.compute_budget(1_200_000).max_manifest_chars,
             12_000
         );
+    }
+
+    #[tokio::test]
+    async fn shared_skill_injector_preserves_processor_identity() {
+        // Pins: injected skill runtime remains the stage-5 skills processor.
+        let shared =
+            SharedSkillInjector::new(std::sync::Arc::new(SkillInjector::from_skills(Vec::new())));
+
+        assert_eq!(shared.name(), "skills");
+        assert_eq!(shared.stage(), 5);
     }
 }

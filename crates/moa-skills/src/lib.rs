@@ -15,6 +15,7 @@ pub mod package;
 #[cfg(feature = "skill-learning")]
 pub mod proposals;
 pub mod registry;
-#[cfg(feature = "skill-learning")]
+#[cfg(feature = "regression")]
 pub mod regression;
 pub mod render;
+pub mod review;

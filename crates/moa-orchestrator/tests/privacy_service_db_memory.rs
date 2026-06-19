@@ -8,11 +8,12 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::{ScopeContext, UserId, WorkspaceId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_pii::erasure::begin_app_scoped_tx;
 use moa_memory_vector::PgvectorStore;
 use moa_orchestrator::services::privacy::{
     ApprovalClaims, ApprovalTokenVerifier, Ed25519ManifestSigner, PrivacyEraseContext,
-    PrivacyExportContext, begin_app_scoped_tx, ensure_jti_inserted, execute_privacy_erase,
-    finalize_archive_to_bytes, write_export_readme, write_manifest,
+    PrivacyExportContext, ensure_jti_inserted, finalize_archive_to_bytes, run_privacy_erase,
+    write_export_readme, write_manifest,
 };
 use moa_session::testing;
 use serde_json::json;
@@ -261,7 +262,7 @@ async fn privacy_erase_dry_run() {
         pii_vault_secret: None,
     };
 
-    let response = execute_privacy_erase(ctx).await.expect("run dry erase");
+    let response = run_privacy_erase(ctx).await.expect("run dry erase");
 
     assert!(response.dry_run);
     assert_eq!(response.candidate_count, 1);
@@ -308,7 +309,7 @@ async fn privacy_erase_basic() {
         pii_vault_secret: Some(pii_vault_secret()),
     };
 
-    let response = execute_privacy_erase(ctx).await.expect("run erasure");
+    let response = run_privacy_erase(ctx).await.expect("run erasure");
 
     assert_eq!(response.erased_count, 1);
     assert_eq!(response.pii_vault_erased, 1);
@@ -359,7 +360,7 @@ async fn privacy_erase_idempotent() {
         claims: valid_claims_for(subject, &workspace_id, "erase"),
         pii_vault_secret: None,
     };
-    execute_privacy_erase(first).await.expect("first erasure");
+    run_privacy_erase(first).await.expect("first erasure");
     let after_first = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let second = PrivacyEraseContext {
         pool: store.pool().clone(),
@@ -372,7 +373,7 @@ async fn privacy_erase_idempotent() {
         pii_vault_secret: None,
     };
 
-    let response = execute_privacy_erase(second).await.expect("second erasure");
+    let response = run_privacy_erase(second).await.expect("second erasure");
 
     assert_eq!(response.candidate_count, 0);
     assert_eq!(response.erased_count, 0);
@@ -415,7 +416,7 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
         pii_vault_secret: None,
     };
 
-    let response = execute_privacy_erase(ctx)
+    let response = run_privacy_erase(ctx)
         .await
         .expect("wrong workspace erasure is idempotent");
 

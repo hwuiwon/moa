@@ -154,9 +154,7 @@ async fn cancel_inner(
 }
 
 fn workflow_runtime() -> WorkflowRuntime {
-    WorkflowRuntime::new(ArtifactRegistry::new(
-        OrchestratorCtx::current().graph_pool.clone(),
-    ))
+    WorkflowRuntime::new(ArtifactRegistry::new(OrchestratorCtx::current_graph_pool()))
 }
 
 async fn authorize_workspace(

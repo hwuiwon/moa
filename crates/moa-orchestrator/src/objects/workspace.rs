@@ -367,6 +367,7 @@ async fn require_workspace_admin(
 
 async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerError> {
     let ctx = OrchestratorCtx::current();
+    let pool = ctx.graph_pool();
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)::bigint
@@ -376,7 +377,7 @@ async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerErr
         "#,
     )
     .bind(workspace_id.as_str())
-    .fetch_one(&ctx.graph_pool)
+    .fetch_one(&pool)
     .await
     .map_err(HandlerError::from)?;
     Ok(count.max(0) as u64)
@@ -426,7 +427,7 @@ async fn persist_policy_rules(
         return Ok(());
     }
 
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let mut normalized_rules = rules.to_vec();
     for rule in &mut normalized_rules {
         rule.workspace_id = workspace_id.clone();

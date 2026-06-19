@@ -16,13 +16,13 @@ use moa_core::wire::{
     ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{MemoryScope, ModelId, SessionId, WorkspaceId};
+use moa_experiments::app::{
+    ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
+};
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
     ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
     ExperimentVariant,
-};
-use moa_orchestrator::services::experiments::{
-    ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -574,7 +574,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
 #[test]
 fn experiment_proposal_path_rejects_incomplete_or_ungated_evidence() {
     // Pins: proposal writes must not rely on parent rows without completed trials and score rows.
-    let source = normalized_source(include_str!("../src/services/experiments.rs"));
+    let source = normalized_source(include_str!("../../moa-experiments/src/app.rs"));
 
     assert!(
         source.contains("require_completed_run(&run)?;"),
@@ -605,34 +605,38 @@ fn experiment_proposal_path_rejects_incomplete_or_ungated_evidence() {
 #[test]
 fn experiment_proposal_path_does_not_publish_or_promote() {
     // Pins: proposal execution appends proposed candidates only; review is required before publishing artifacts or learned state.
-    let source = include_str!("../src/services/experiments.rs");
+    let service_source = include_str!("../src/services/experiments.rs");
+    let app_source = include_str!("../../moa-experiments/src/app.rs");
 
     assert!(
-        source.contains("append_learning_candidate(&candidate)"),
+        service_source.contains("append_learning_candidate(&proposal.candidate)"),
         "proposal path should append a learning candidate for review"
     );
     assert!(
-        source.contains("LearningCandidateStatus::Proposed"),
+        app_source.contains("LearningCandidateStatus::Proposed"),
         "proposal path should create candidates that wait for review"
     );
     assert!(
-        !source.contains("update_learning_candidate_status"),
+        !service_source.contains("update_learning_candidate_status")
+            && !app_source.contains("update_learning_candidate_status"),
         "proposal path must not transition candidate status"
     );
     assert!(
-        !source.contains("LearningCandidateStatus::Promoted"),
+        !service_source.contains("LearningCandidateStatus::Promoted")
+            && !app_source.contains("LearningCandidateStatus::Promoted"),
         "proposal path must not promote candidates"
     );
     assert!(
-        !source.contains("publish_revision("),
+        !service_source.contains("publish_revision(") && !app_source.contains("publish_revision("),
         "proposal path must not publish artifact revisions"
     );
     assert!(
-        !source.contains("bootstrap_global"),
+        !service_source.contains("bootstrap_global") && !app_source.contains("bootstrap_global"),
         "proposal path must not import or publish skills"
     );
     assert!(
-        !source.contains("WorkflowRuntime::new"),
+        !service_source.contains("WorkflowRuntime::new")
+            && !app_source.contains("WorkflowRuntime::new"),
         "proposal path must not start or publish workflows"
     );
 }
@@ -640,10 +644,11 @@ fn experiment_proposal_path_does_not_publish_or_promote() {
 #[test]
 fn experiments_generate_plan_uses_provider_json_schema_and_stores_draft_artifact_only() {
     // Pins: plan generation is model-backed draft artifact creation, not durable execution.
-    let source = normalized_source(include_str!("../src/services/experiments.rs"));
+    let service_source = normalized_source(include_str!("../src/services/experiments.rs"));
+    let app_source = normalized_source(include_str!("../../moa-experiments/src/app.rs"));
 
     assert!(
-        source.contains(&normalized_source(
+        service_source.contains(&normalized_source(
             "async fn generate_plan(
                  request: Json<ExperimentGeneratePlanRequest>,
              ) -> Result<Json<ExperimentGeneratePlanResponse>, HandlerError>;"
@@ -651,27 +656,27 @@ fn experiments_generate_plan_uses_provider_json_schema_and_stores_draft_artifact
         "Experiments should expose a generate_plan service method"
     );
     assert!(
-        source.contains("LLMGatewayImpl::new(runtime.providers.clone())"),
+        service_source.contains("LLMGatewayImpl::new(runtime.provider_registry())"),
         "generate_plan should use the configured provider registry through the LLM gateway"
     );
     assert!(
-        source.contains("JsonResponseFormat::strict_json_schema"),
+        app_source.contains("JsonResponseFormat::strict_json_schema"),
         "generate_plan should ask providers for structured experiment_plan JSON"
     );
     assert!(
-        source.contains("document.kind != ArtifactKind::ExperimentPlan"),
+        app_source.contains("document.kind != ArtifactKind::ExperimentPlan"),
         "generate_plan should reject non-experiment_plan generated artifacts"
     );
     assert!(
-        source.contains("validate_for_status(document, ArtifactStatus::Draft)"),
+        app_source.contains("validate_for_status(document, ArtifactStatus::Draft)"),
         "generate_plan should draft-validate generated artifacts"
     );
     assert!(
-        source.contains("NewArtifactDraft"),
+        app_source.contains("NewArtifactDraft"),
         "generate_plan should store through ArtifactRegistry::create_draft"
     );
     assert!(
-        source.contains("source_format: GENERATED_PLAN_SOURCE_FORMAT"),
+        app_source.contains("source_format: GENERATED_PLAN_SOURCE_FORMAT"),
         "generated artifact source format should be json"
     );
 }
@@ -679,7 +684,7 @@ fn experiments_generate_plan_uses_provider_json_schema_and_stores_draft_artifact
 #[test]
 fn experiments_generate_plan_rejects_invalid_generated_plan_before_storage() {
     // Pins: invalid LLM output fails validation before ArtifactRegistry::create_draft can persist it.
-    let source = normalized_source(include_str!("../src/services/experiments.rs"));
+    let source = normalized_source(include_str!("../../moa-experiments/src/app.rs"));
     let validation_index = source
         .find("require_valid_generated_plan(&document)?;")
         .expect("generate_plan should validate the generated document");
@@ -825,12 +830,17 @@ fn experiment_run_workflow_expands_plan_and_dispatches_bounded_trial_workflows()
 fn experiment_cancellation_marks_active_trial_rows() {
     // Pins: cancelling a parent run prevents remaining accepted/running work from looking active.
     let service_source = include_str!("../src/services/experiments.rs");
+    let app_source = include_str!("../../moa-experiments/src/app.rs");
     let workflow_source = experiment_run_workflow_source();
     let store_source = include_str!("../../moa-experiments/src/store.rs");
 
     assert!(
-        service_source.contains(".cancel_active_trials(&scope, request.run_uid, reason.clone())"),
-        "service cancellation should mark active child trials immediately"
+        service_source.contains("cancel_run(pool, request)"),
+        "service cancellation should dispatch to the experiment app boundary"
+    );
+    assert!(
+        app_source.contains(".cancel_active_trials(&scope, request.run_uid, reason.clone())"),
+        "experiment app cancellation should mark active child trials immediately"
     );
     assert!(
         workflow_source.contains(".name(\"experiment_plan_cancel_active_trials\")"),
@@ -845,7 +855,7 @@ fn experiment_cancellation_marks_active_trial_rows() {
 #[test]
 fn experiment_trial_run_workflow_is_bound_and_expected_by_readiness() {
     // Pins: Task 6 adds a real Restate workflow, not a helper-only executor.
-    let main_source = include_str!("../src/main.rs");
+    let endpoint_source = include_str!("../src/runtime/endpoint.rs");
     let workflows_source = include_str!("../src/workflows/mod.rs");
 
     assert!(
@@ -853,15 +863,16 @@ fn experiment_trial_run_workflow_is_bound_and_expected_by_readiness() {
         "workflow module should expose ExperimentTrialRun"
     );
     assert!(
-        main_source.contains("experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl}"),
-        "orchestrator main should import the ExperimentTrialRun workflow"
+        endpoint_source
+            .contains("experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl}"),
+        "orchestrator endpoint builder should import the ExperimentTrialRun workflow"
     );
     assert!(
-        main_source.contains(".bind(ExperimentTrialRunImpl.serve())"),
+        endpoint_source.contains(".bind(ExperimentTrialRunImpl.serve())"),
         "orchestrator endpoint should bind ExperimentTrialRun"
     );
     assert!(
-        main_source.contains("\"ExperimentTrialRun\""),
+        endpoint_source.contains("\"ExperimentTrialRun\""),
         "readiness expected services should include ExperimentTrialRun"
     );
 }
@@ -1045,48 +1056,60 @@ fn experiment_trial_run_supports_current_workflow_runtime_without_fake_stepping(
 #[test]
 fn experiment_score_handlers_resolve_run_uids_through_scoped_experiment_runs() {
     // Pins: score APIs reject cross-workspace experiment IDs by resolving run_uid through a scoped experiment load.
-    let source = normalized_source(include_str!("../src/services/experiments.rs"));
+    let service_source = normalized_source(include_str!("../src/services/experiments.rs"));
+    let app_source = normalized_source(include_str!("../../moa-experiments/src/app.rs"));
 
     assert!(
-        source.contains(&normalized_source(
+        service_source.contains("scores(pool, request)"),
+        "scores handler should dispatch to the experiment app boundary"
+    );
+    assert!(
+        app_source.contains(&normalized_source(
             "let scope = workspace_scope(request.workspace_id.clone());
              let run = load_required_run(&ExperimentStore::new(pool.clone()), &scope, request.run_uid).await?;"
         )),
-        "scores handler must load the experiment run in the requested workspace before reading scores"
+        "experiment app must load the experiment run in the requested workspace before reading scores"
     );
     assert!(
-        source.contains(&normalized_source("run_id: run.score_run_id")),
-        "scores handler must query analytics scores by resolved score_run_id"
+        app_source.contains(&normalized_source("run_id: run.score_run_id")),
+        "experiment app must query analytics scores by resolved score_run_id"
     );
     assert!(
-        !source.contains(&normalized_source("run_id: request.run_uid")),
-        "scores handler must not treat experiment run_uid as a score run id"
+        !service_source.contains(&normalized_source("run_id: request.run_uid"))
+            && !app_source.contains(&normalized_source("run_id: request.run_uid")),
+        "score handling must not treat experiment run_uid as a score run id"
     );
 
     assert!(
-        source.contains(&normalized_source(
+        service_source.contains("compare_runs(pool, request)"),
+        "compare handler should dispatch to the experiment app boundary"
+    );
+    assert!(
+        app_source.contains(&normalized_source(
             "let scope = workspace_scope(request.workspace_id.clone());
              let store = ExperimentStore::new(pool.clone());
              let base_run = load_required_run(&store, &scope, request.base_run_uid).await?;
              let new_run = load_required_run(&store, &scope, request.new_run_uid).await?;"
         )),
-        "compare handler must load both experiment runs in the requested workspace"
+        "experiment app must load both experiment runs in the requested workspace"
     );
     assert!(
-        source.contains(&normalized_source("base_run: base_run.score_run_id")),
-        "compare handler must pass the resolved baseline score_run_id to the shared score helper"
+        app_source.contains(&normalized_source("base_run: base_run.score_run_id")),
+        "experiment app must pass the resolved baseline score_run_id to the shared score helper"
     );
     assert!(
-        source.contains(&normalized_source("new_run: new_run.score_run_id")),
-        "compare handler must pass the resolved new score_run_id to the shared score helper"
+        app_source.contains(&normalized_source("new_run: new_run.score_run_id")),
+        "experiment app must pass the resolved new score_run_id to the shared score helper"
     );
     assert!(
-        !source.contains(&normalized_source("base_run: request.base_run_uid")),
-        "compare handler must not treat baseline experiment run_uid as a score run id"
+        !service_source.contains(&normalized_source("base_run: request.base_run_uid"))
+            && !app_source.contains(&normalized_source("base_run: request.base_run_uid")),
+        "compare handling must not treat baseline experiment run_uid as a score run id"
     );
     assert!(
-        !source.contains(&normalized_source("new_run: request.new_run_uid")),
-        "compare handler must not treat new experiment run_uid as a score run id"
+        !service_source.contains(&normalized_source("new_run: request.new_run_uid"))
+            && !app_source.contains(&normalized_source("new_run: request.new_run_uid")),
+        "compare handling must not treat new experiment run_uid as a score run id"
     );
 }
 

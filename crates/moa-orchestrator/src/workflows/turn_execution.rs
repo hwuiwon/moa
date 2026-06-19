@@ -228,7 +228,7 @@ async fn execute_turn_inside_workflow(
     ctx.set(K_USER_MESSAGE_SEQUENCE, Json::from(user_sequence_num));
     ctx.clear(K_QUERY_REWRITE_CACHE);
 
-    let max_turns = OrchestratorCtx::current().config.session_limits.max_turns;
+    let max_turns = OrchestratorCtx::current_config().session_limits.max_turns;
     let max_turns = if max_turns == 0 {
         usize::MAX
     } else {
@@ -336,8 +336,7 @@ async fn run_once_inside_workflow(
     }
 
     let meta = load_session_meta(ctx, session_id).await?;
-    OrchestratorCtx::current()
-        .tool_router
+    OrchestratorCtx::current_tool_router()
         .set_trusted_sandbox_files(&meta, trusted_sandbox_files)
         .await;
     let active_segment = ensure_current_segment(ctx, session_id, &meta, &mut request).await?;
@@ -690,7 +689,7 @@ async fn assess_completed_segment_at_transition(
     completed: &moa_brain::pipeline::segments::SegmentCompleted,
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), HandlerError> {
-    if !OrchestratorCtx::current().config.resolution.enabled {
+    if !OrchestratorCtx::current_config().resolution.enabled {
         return Ok(());
     }
 
@@ -783,7 +782,7 @@ async fn assess_current_active_segment(
     overrides: &[AssessmentOverride],
 ) -> Result<(), HandlerError> {
     let runtime = OrchestratorCtx::current();
-    if !runtime.config.resolution.enabled {
+    if !runtime.config().resolution.enabled {
         return Ok(());
     }
 
@@ -941,11 +940,11 @@ async fn emit_experience_for_assessment(
     let attributions = attributions_for_experience(&experience, segment_events, now);
     let candidates = propose_candidates_for_experience(&experience, &attributions, now);
     let runtime = OrchestratorCtx::current();
-    let store = runtime.session_store.clone();
+    let store = runtime.session_store();
     #[cfg(feature = "skill-learning")]
     let experience_id = experience.id;
     #[cfg(feature = "skill-learning")]
-    let min_skill_learning_tool_calls = runtime.config.learning.skills.min_tool_calls;
+    let min_skill_learning_tool_calls = runtime.config().learning.skills.min_tool_calls;
     let learning_error = ctx
         .run(move || {
             let store = store.clone();
@@ -1035,7 +1034,7 @@ async fn record_segment_assessment_learning(
     segment_id: SegmentId,
     assessment: &moa_core::SegmentAssessment,
 ) -> Result<(), HandlerError> {
-    let session_store = OrchestratorCtx::current().session_store.clone();
+    let session_store = OrchestratorCtx::current_session_store();
     let tenant_id = tenant_id.to_string();
     let assessment = assessment.clone();
     ctx.run(|| async move {
@@ -1073,7 +1072,7 @@ async fn load_events_in_range(
     range: EventRange,
     operation_name: &'static str,
 ) -> Result<Vec<EventRecord>, HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     Ok(ctx
         .run(move || {
             let store = store.clone();
@@ -1187,7 +1186,7 @@ async fn load_session_events_fallback(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<Vec<EventRecord>, HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     Ok(ctx
         .run(move || {
             let store = store.clone();
@@ -1274,7 +1273,7 @@ fn assess_segment_events(
     phase: AssessmentPhase,
     extra_overrides: &[AssessmentOverride],
 ) -> moa_core::SegmentAssessment {
-    let config = OrchestratorCtx::current().config.resolution.clone();
+    let config = OrchestratorCtx::current_config().resolution.clone();
     let tool = tool_signal::score(segment_events);
     let verification = verification_signal::score(segment_events);
     let continuation = continuation_signal::score(
@@ -1496,7 +1495,7 @@ async fn load_session_meta(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
 ) -> Result<SessionMeta, HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     Ok(ctx
         .run(|| async move {
             store
@@ -1526,8 +1525,7 @@ fn create_turn_span(
         meta,
         prompt,
         turn_number as i64,
-        OrchestratorCtx::current()
-            .config
+        OrchestratorCtx::current_config()
             .observability
             .environment
             .as_deref(),

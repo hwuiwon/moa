@@ -110,6 +110,24 @@ make build-timings
 
 The report is written under `target/cargo-timings/`.
 
+## Architecture Boundary Check
+
+Run the boundary scanner after touching Restate handlers, workflows, runtime
+dependency wiring, or domain repository seams:
+
+```bash
+cargo run -p xtask -- check-architecture-boundaries
+```
+
+The check fails on new direct SQL in
+`crates/moa-orchestrator/src/services/**` or
+`crates/moa-orchestrator/src/workflows/**`, and on new raw
+`OrchestratorCtx` dependency access such as `current_graph_pool()` or
+`current_session_store()`. If a handler truly needs a temporary exception,
+record it in the scanner allowlist with a concrete reason and exact expected
+count. Prefer moving SQL to a repository or domain crate and passing concrete
+dependencies from the composition root instead of expanding the allowlist.
+
 ## Clean E2E Runner
 
 Use the clean runner for certification instead of the persistent compose

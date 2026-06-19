@@ -151,7 +151,7 @@ impl ExperimentRun for ExperimentRunImpl {
         if request.run_uid.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "experiment run id mismatch").into());
         }
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         Ok(ctx
             .run(|| async move { status_response(pool, request).await.map(Json::from) })
             .name("experiment_run_status")
@@ -205,7 +205,7 @@ async fn persist_run_status(
     error: Option<String>,
     completed_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     ctx.run(|| async move {
         update_run_status(pool, scope, run_uid, status, error, completed_at).await?;
@@ -222,7 +222,7 @@ async fn persist_attached_session(
     run_uid: Uuid,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     ctx.run(|| async move {
         attach_session(pool, scope, run_uid, session_id).await?;
         Ok::<_, HandlerError>(Json::from(()))

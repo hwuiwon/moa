@@ -6,9 +6,11 @@ license.workspace = true
 
 [features]
 default = []
-skill-learning = ["dep:moa-eval-core", "dep:moa-providers", "dep:moa-session"]
+regression = ["dep:moa-eval-core"]
+skill-learning = ["regression", "dep:moa-providers", "dep:moa-session"]
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 hex.workspace = true
 moa-artifacts.workspace = true
@@ -23,6 +25,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "chrono", "json", "uuid"] }
+thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -50,7 +53,7 @@ required-features = ["skill-learning"]
 [[test]]
 name = "regression"
 path = "tests/regression.rs"
-required-features = ["skill-learning"]
+required-features = ["regression"]
 
 [[test]]
 name = "draft_proposals"
