@@ -68,7 +68,7 @@ pub struct LoadedSession {
 
 /// Returns a configured Postgres test database when the opt-in URL is set.
 pub async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_TEST_POSTGRES_URL")?;
+    std::env::var_os("MOA_DATABASE_URL")?;
     Some(
         bootstrap_test_db()
             .await

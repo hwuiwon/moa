@@ -90,7 +90,7 @@ Live tests are ignored by default. Run them only with explicit credentials:
 
 ```sh
 MOA_RUN_LIVE_SCIM_TESTS=1 \
-MOA_TEST_SCIM_BASE_URL=http://localhost:10022/scim/v2 \
+MOA_SCIM_BASE_URL=http://localhost:10022/scim/v2 \
 MOA_TEST_SCIM_TOKEN=<scim-api-key> \
 cargo test -p moa-orchestrator --test scim_compliance_live -- --ignored
 ```

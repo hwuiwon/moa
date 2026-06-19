@@ -2446,15 +2446,11 @@ impl IsolatedEvalStore {
 }
 
 fn test_database_url() -> Result<String> {
-    env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| env::var("TEST_DATABASE_URL"))
-        .or_else(|_| env::var("DATABASE_URL"))
-        .map_err(|_| {
-            EvalError::InvalidConfig(
-                "MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL must be set for memory retrieval eval"
-                    .to_string(),
-            )
-        })
+    env::var("MOA_DATABASE_URL").map_err(|_| {
+        EvalError::InvalidConfig(
+            "MOA_DATABASE_URL must be set for memory retrieval eval".to_string(),
+        )
+    })
 }
 
 #[derive(Debug, Clone)]

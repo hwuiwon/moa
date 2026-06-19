@@ -4,7 +4,12 @@ FROM rust:1.95.0-bookworm AS builder
 WORKDIR /build
 
 COPY . .
-RUN cargo build --locked --release -p moa-orchestrator --bin moa-orchestrator-bin
+ARG MOA_ORCHESTRATOR_FEATURES=""
+RUN if [ -n "${MOA_ORCHESTRATOR_FEATURES}" ]; then \
+      cargo build --locked --release -p moa-orchestrator --bin moa-orchestrator-bin --features "${MOA_ORCHESTRATOR_FEATURES}"; \
+    else \
+      cargo build --locked --release -p moa-orchestrator --bin moa-orchestrator-bin; \
+    fi
 
 FROM debian:12-slim
 RUN apt-get update \
@@ -15,7 +20,7 @@ RUN apt-get update \
     && chown -R 65532:65534 /var/lib/moa
 
 COPY --from=builder /build/target/release/moa-orchestrator-bin /usr/local/bin/moa-orchestrator
-COPY --from=builder /build/crates/moa-session/migrations /migrations
+COPY --from=builder /build/crates/moa-migrations/migrations /migrations
 
 EXPOSE 9080 9081
 

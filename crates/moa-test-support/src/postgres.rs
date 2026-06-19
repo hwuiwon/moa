@@ -13,18 +13,15 @@ pub use contracts::{
 };
 
 /// Default Docker Compose Postgres URL used by local MOA tests.
-pub const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
+pub const DEFAULT_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 
 /// Returns the Postgres URL used by integration tests.
 ///
-/// Lookup order is `MOA_TEST_POSTGRES_URL`, then `TEST_DATABASE_URL`, then
-/// `DATABASE_URL`, and finally the repository Docker Compose default.
+/// Uses the same `MOA_DATABASE_URL` runtime setting as the service, falling
+/// back to the repository Docker Compose default when unset.
 #[must_use]
 pub fn test_database_url() -> String {
-    std::env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string())
+    std::env::var("MOA_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string())
 }
 
 /// One isolated Postgres schema and session store for a test.

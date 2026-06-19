@@ -30,9 +30,7 @@ pub async fn migrated_ocsf_pool() -> sqlx::PgPool {
 }
 
 fn test_database_url() -> String {
-    std::env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string())
 }
 

@@ -31,7 +31,7 @@ Use when the test must:
 - exercise a public API of the crate
 - coordinate multiple modules
 - use fixtures from `moa-test-support` or `wiremock`
-- talk to a real Postgres instance (with `MOA_TEST_POSTGRES_URL` set, `#[ignore]` if unset)
+- talk to a real Postgres instance (with `MOA_DATABASE_URL` set, `#[ignore]` if unset)
 
 Examples already in the repo:
 

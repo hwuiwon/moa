@@ -13,9 +13,9 @@ jobs:
     timeout-minutes: 30
     env:
       MOA_PROVIDERS_OVERRIDE: scripted:/loadtest-scripts/perf-gate.json
-      MOA_TEST_EXTERNAL_INGRESS_URL: http://localhost:18080
-      MOA_TEST_EXTERNAL_ADMIN_URL: http://localhost:9070
-      MOA_TEST_EXTERNAL_POSTGRES_URL: postgres://moa_owner:dev@localhost:25432/moa
+      MOA_RESTATE_INGRESS_URL: http://localhost:18080
+      MOA_RESTATE_ADMIN_URL: http://localhost:9070
+      MOA_DATABASE_URL: postgres://moa_owner:dev@localhost:25432/moa
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
     steps:
@@ -36,8 +36,22 @@ jobs:
       - name: Check architecture boundaries
         run: cargo run -p xtask -- check-architecture-boundaries
 
+      - name: Start Postgres and OpenFGA
+        run: docker compose up -d --build postgres openfga
+
+      - name: Bootstrap OpenFGA
+        run: |
+          MOA_AUTHZ_OPENFGA_URL=http://localhost:10030 \
+          MOA_AUTHZ_OPENFGA_PRESHARED_KEY=localdev-preshared-key-do-not-use-in-prod \
+          MOA_FGA_ENV_OUTPUT=.env.fga \
+          cargo run -q -p moa-fga-bootstrap
+
       - name: Start Restate-backed orchestrator stack
-        run: docker compose up -d --build postgres restate moa-orchestrator restate-register
+        run: |
+          set -a
+          . ./.env.fga
+          set +a
+          docker compose up -d --build restate moa-orchestrator restate-register
 
       - name: Wait for Restate registration
         run: |
@@ -55,7 +69,7 @@ jobs:
 
       - name: Dump compose logs
         if: failure()
-        run: docker compose logs postgres restate moa-orchestrator restate-register
+        run: docker compose logs postgres openfga restate moa-orchestrator restate-register
 
       - name: Stop compose stack
         if: always()

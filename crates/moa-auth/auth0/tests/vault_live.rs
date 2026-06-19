@@ -1,7 +1,7 @@
 //! Live Auth0 Token Vault tests.
 //!
 //! Requires `MOA_RUN_LIVE_AUTH0_TESTS=1` plus:
-//! `MOA_TEST_AUTH0_DOMAIN`, `MOA_TEST_AUTH0_CLIENT_ID`, `MOA_TEST_AUTH0_CLIENT_SECRET`,
+//! `MOA_AUTH_AUTH0_DOMAIN`, `MOA_AUTH_AUTH0_CLIENT_ID_ENV`, `MOA_AUTH_AUTH0_CLIENT_SECRET_ENV`,
 //! `MOA_TEST_AUTH0_USER_ID`, `MOA_TEST_AUTH0_TENANT_ID`,
 //! `MOA_TEST_AUTH0_SUB`, and `MOA_TEST_AUTH0_CONNECTION`.
 
@@ -22,9 +22,9 @@ async fn live_auth0_token_vault_returns_third_party_token() {
         return;
     }
     let pool = support::migrated_auth0_pool().await;
-    let domain = required_env("MOA_TEST_AUTH0_DOMAIN");
-    let client_id = required_env("MOA_TEST_AUTH0_CLIENT_ID");
-    let client_secret = required_env("MOA_TEST_AUTH0_CLIENT_SECRET");
+    let domain = required_env("MOA_AUTH_AUTH0_DOMAIN");
+    let client_id = required_pointed_env("MOA_AUTH_AUTH0_CLIENT_ID_ENV");
+    let client_secret = required_pointed_env("MOA_AUTH_AUTH0_CLIENT_SECRET_ENV");
     let user_id = required_uuid("MOA_TEST_AUTH0_USER_ID");
     let tenant_id = required_uuid("MOA_TEST_AUTH0_TENANT_ID");
     let sub = required_env("MOA_TEST_AUTH0_SUB");
@@ -101,6 +101,11 @@ async fn upsert_linked_user(
 fn required_env(name: &str) -> String {
     std::env::var(name)
         .unwrap_or_else(|_| panic!("{name} is required when MOA_RUN_LIVE_AUTH0_TESTS=1"))
+}
+
+fn required_pointed_env(pointer_name: &str) -> String {
+    let env_name = required_env(pointer_name);
+    required_env(&env_name)
 }
 
 fn required_uuid(name: &str) -> Uuid {

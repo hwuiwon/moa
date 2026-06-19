@@ -109,7 +109,7 @@ Then load only the relevant reference file:
 Use this when tests pass alone but fail after other suites, when global memory rows leak across scenarios, or when local service state is uncertain.
 
 1. Check stack state first with `docker compose ps` and, when needed, `docker ps --filter 'name=moa'`.
-2. Record `MOA_TEST_POSTGRES_URL`, database name, schema assumptions, and whether SQLx offline data or live Postgres is being used.
+2. Record `MOA_DATABASE_URL`, database name, schema assumptions, and whether SQLx offline data or live Postgres is being used.
 3. Inspect shared tables that commonly outlive a single test, especially graph-memory indexes such as `moa.node_index` and any global/workspace rows.
 4. Prefer isolated schema/database setup or explicit fixture cleanup over weakening assertions.
 5. If the stack was started only for diagnosis, stop it with `docker compose down` and verify no MOA containers remain.

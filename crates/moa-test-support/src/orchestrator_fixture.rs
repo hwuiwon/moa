@@ -2,7 +2,7 @@
 //!
 //! The fixture is shared while at least one test holds its returned `Arc`;
 //! later callers isolate themselves with unique workspace/user prefixes.
-//! Set `MOA_TEST_EXTERNAL_INGRESS_URL` to reuse an already-running stack
+//! Set `MOA_RESTATE_INGRESS_URL` to reuse an already-running stack
 //! instead of starting Docker containers.
 
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ impl OrchestratorTestFixture {
     }
 
     async fn build() -> Result<Self> {
-        if let Ok(ingress_url) = std::env::var("MOA_TEST_EXTERNAL_INGRESS_URL") {
+        if let Ok(ingress_url) = std::env::var("MOA_RESTATE_INGRESS_URL") {
             return Self::external(ingress_url);
         }
         Self::internal(None).await
@@ -103,7 +103,7 @@ impl OrchestratorTestFixture {
 
     /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
     pub async fn with_script(script: serde_json::Value) -> Result<Self> {
-        if std::env::var("MOA_TEST_EXTERNAL_INGRESS_URL").is_ok() {
+        if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
         Self::internal(Some(script)).await
@@ -112,15 +112,12 @@ impl OrchestratorTestFixture {
     fn external(raw_ingress_url: String) -> Result<Self> {
         let repo_root = repo_root();
         let ingress_url = trim_url(&raw_ingress_url)?;
-        let admin_url = std::env::var("MOA_TEST_EXTERNAL_ADMIN_URL")
-            .or_else(|_| std::env::var("MOA_RESTATE_ADMIN_URL"))
+        let admin_url = std::env::var("MOA_RESTATE_ADMIN_URL")
             .ok()
             .map(|url| trim_url(&url))
             .transpose()?
             .unwrap_or_else(|| derive_admin_url(&ingress_url));
-        let postgres_url = std::env::var("MOA_TEST_EXTERNAL_POSTGRES_URL")
-            .or_else(|_| std::env::var("MOA_DATABASE_URL"))
-            .unwrap_or_default();
+        let postgres_url = std::env::var("MOA_DATABASE_URL").unwrap_or_default();
         let fga_client = external_fga_client(&repo_root)?;
         let client = TestApiClient::new(&ingress_url)
             .context("construct test client")?

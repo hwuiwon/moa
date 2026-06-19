@@ -11,7 +11,7 @@ async fn scim_user_lifecycle_smoke() {
         return;
     }
 
-    let base_url = required_env("MOA_TEST_SCIM_BASE_URL");
+    let base_url = required_env("MOA_SCIM_BASE_URL");
     let token = required_env("MOA_TEST_SCIM_TOKEN");
     let client = reqwest::Client::new();
     let external_id = format!("codex-{}", Uuid::new_v4());

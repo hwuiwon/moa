@@ -732,7 +732,7 @@ async fn bash_respects_timeout() {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn session_search_finds_prior_events() {
     let dir = tempdir().unwrap();
     let session_store = test_session_store().await;
@@ -795,7 +795,7 @@ async fn session_search_finds_prior_events() {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn session_search_filters_error_events() {
     let dir = tempdir().unwrap();
     let session_store = test_session_store().await;

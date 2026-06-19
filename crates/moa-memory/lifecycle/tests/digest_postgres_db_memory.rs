@@ -13,7 +13,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_TEST_POSTGRES_URL")?;
+    std::env::var_os("MOA_DATABASE_URL")?;
     Some(
         bootstrap_test_db()
             .await
@@ -22,7 +22,7 @@ async fn configured_test_db() -> Option<TestDb> {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL and a reachable Postgres instance"]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
 async fn digest_rls_blocks_cross_user_and_cross_workspace_reads() {
     // Pins: app-role digest reads reveal only the caller's user digest plus workspace digest.
     let Some(test_db) = configured_test_db().await else {
@@ -108,7 +108,7 @@ async fn digest_rls_blocks_cross_user_and_cross_workspace_reads() {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL and a reachable Postgres instance"]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
 async fn digest_row_schema_pinned_across_writer_and_reader() {
     // Pins: lifecycle writer rows can be read and injected by the brain-local digest reader.
     let Some(test_db) = configured_test_db().await else {

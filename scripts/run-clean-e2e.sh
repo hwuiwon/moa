@@ -272,7 +272,6 @@ restate-server \
 RESTATE_PID=$!
 wait_for_restate_ports "${RESTATE_LOG}"
 
-export MOA_TEST_POSTGRES_URL="${DB_URL}"
 export MOA_DATABASE_URL="${DB_URL}"
 export MOA_RESTATE_INGRESS_URL="${RESTATE_INGRESS_URL}"
 export MOA_RESTATE_ADMIN_URL="${RESTATE_ADMIN_URL}"

@@ -34,7 +34,7 @@ jobs:
       - name: Run perf gate
         run: cargo run -p moa-loadtest --release --bin perf_gate -- --duration 5m
         env:
-          DATABASE_URL: postgres://postgres:ci@localhost/postgres
+          MOA_DATABASE_URL: postgres://postgres:ci@localhost/postgres
           COHERE_API_KEY: ${{ secrets.COHERE_API_KEY_CI }}
       - uses: actions/upload-artifact@v4
         if: always()
@@ -81,7 +81,7 @@ jobs:
         with:
           cache-on-failure: true
       - name: Build orchestrator
-        run: cargo build -p moa-orchestrator --bin moa-orchestrator-bin
+        run: cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides
       - name: Start orchestrator with scripted providers
         env:
           MOA_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres

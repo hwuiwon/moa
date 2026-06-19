@@ -169,7 +169,7 @@ The flag conventions are documented in `certify`'s `references/test-matrix.md`. 
 - Unit tests: inline `#[cfg(test)] mod tests` at the bottom of the source file holding the SUT.
 - Integration tests: `crates/<crate>/tests/<topic>_<lane>.rs` when they need DB/service/live/Docker resources; one file per topic, not one big file.
 - Shared test utilities: use `moa-test-support` for fixtures, `wiremock` for HTTP fakes, scripted providers for LLM behavior.
-- Postgres-backed tests: connect through the per-crate test bootstrap helper, set `MOA_TEST_POSTGRES_URL` for local runs, `#[ignore]` if unset.
+- Postgres-backed tests: connect through the per-crate test bootstrap helper, set `MOA_DATABASE_URL` for local runs, `#[ignore]` if unset.
 
 ## Output Format
 

@@ -55,9 +55,7 @@ async fn resolve_parent_branch_id(project_id: &str) -> Option<String> {
 
 async fn live_neon_config() -> Option<MoaConfig> {
     let project_id = std::env::var("NEON_PROJECT_ID").ok()?;
-    let database_url = std::env::var("TEST_DATABASE_URL")
-        .ok()
-        .or_else(|| std::env::var("NEON_DB_URL").ok())?;
+    let database_url = std::env::var("MOA_DATABASE_URL").ok()?;
     let parent_branch_id = resolve_parent_branch_id(&project_id).await?;
 
     let mut config = MoaConfig::default();
@@ -95,9 +93,8 @@ fn require_neon_live_env() -> bool {
         );
     }
     assert!(
-        std::env::var("TEST_DATABASE_URL").is_ok_and(|value| !value.trim().is_empty())
-            || std::env::var("NEON_DB_URL").is_ok_and(|value| !value.trim().is_empty()),
-        "MOA_RUN_LIVE_NEON_TESTS=1 requires TEST_DATABASE_URL or NEON_DB_URL"
+        std::env::var("MOA_DATABASE_URL").is_ok_and(|value| !value.trim().is_empty()),
+        "MOA_RUN_LIVE_NEON_TESTS=1 requires MOA_DATABASE_URL"
     );
     true
 }
@@ -158,7 +155,7 @@ async fn live_session_store(database_url: &str) -> PostgresSessionStore {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
+#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, MOA_DATABASE_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_branch_manager_create_list_get_rollback_and_discard_checkpoint() {
     if !require_neon_live_env() {
         return;
@@ -199,7 +196,7 @@ async fn neon_branch_manager_create_list_get_rollback_and_discard_checkpoint() {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
+#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, MOA_DATABASE_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_checkpoint_branch_connection_is_copy_on_write() {
     if !require_neon_live_env() {
         return;
@@ -282,7 +279,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, TEST_DATABASE_URL/NEON_DB_URL, and optional NEON_PARENT_BRANCH_ID"]
+#[ignore = "requires MOA_RUN_LIVE_NEON_TESTS=1, NEON_API_KEY, NEON_PROJECT_ID, MOA_DATABASE_URL, and optional NEON_PARENT_BRANCH_ID"]
 async fn neon_checkpoint_capacity_limit_rejects_extra_branch() {
     if !require_neon_live_env() {
         return;

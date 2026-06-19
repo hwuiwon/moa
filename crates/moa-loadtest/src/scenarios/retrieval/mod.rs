@@ -94,8 +94,8 @@ pub async fn run_perf_gate(cfg: PerfGateConfig) -> Result<()> {
 }
 
 async fn run_perf_gate_inner(cfg: &PerfGateConfig, metrics: &PrometheusHandle) -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL")
-        .context("DATABASE_URL is required for perf_gate Postgres/AGE/pgvector access")?;
+    let database_url = std::env::var("MOA_DATABASE_URL")
+        .context("MOA_DATABASE_URL is required for perf_gate Postgres/AGE/pgvector access")?;
     let api_key = std::env::var("COHERE_API_KEY")
         .context("COHERE_API_KEY is required for perf_gate embeddings")?;
     let embedder = Arc::new(CohereV4Embedder::new(SecretString::from(api_key)));

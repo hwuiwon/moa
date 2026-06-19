@@ -523,9 +523,7 @@ mod tests {
 
     fn test_moa_config() -> MoaConfig {
         let mut config = MoaConfig::default();
-        if let Ok(url) =
-            std::env::var("TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"))
-        {
+        if let Ok(url) = std::env::var("MOA_DATABASE_URL") {
             config.database.url = url;
         }
         config

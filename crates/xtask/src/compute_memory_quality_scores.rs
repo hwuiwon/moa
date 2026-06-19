@@ -70,9 +70,8 @@ impl Options {
         }
 
         let database_url = database_url
-            .or_else(|| env::var("MOA_TEST_POSTGRES_URL").ok())
-            .or_else(|| env::var("DATABASE_URL").ok())
-            .context("--database-url or MOA_TEST_POSTGRES_URL/DATABASE_URL is required")?;
+            .or_else(|| env::var("MOA_DATABASE_URL").ok())
+            .context("--database-url or MOA_DATABASE_URL is required")?;
         Ok(Self {
             database_url,
             workspace: workspace.context("--workspace <id> is required")?,

@@ -77,8 +77,8 @@ fn live_config() -> Option<LiveConfig> {
         return None;
     }
     Some(LiveConfig {
-        domain: required_env("MOA_TEST_AUTH0_DOMAIN"),
-        audience: required_env("MOA_TEST_AUTH0_AUDIENCE"),
+        domain: required_env("MOA_AUTH_AUTH0_DOMAIN"),
+        audience: required_env("MOA_AUTH_AUTH0_AUDIENCE"),
     })
 }
 

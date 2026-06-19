@@ -40,10 +40,7 @@ fn main() -> Result<()> {
 }
 
 fn cmd_migrate_test_db() -> Result<()> {
-    let database_url = env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| env::var("TEST_DATABASE_URL"))
-        .or_else(|_| env::var("DATABASE_URL"))
-        .context("MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL must be set")?;
+    let database_url = env::var("MOA_DATABASE_URL").context("MOA_DATABASE_URL must be set")?;
     let redacted = redact_password(&database_url);
     println!(
         "test database configured at {redacted}; MOA integration tests create migrated isolated schemas during bootstrap"

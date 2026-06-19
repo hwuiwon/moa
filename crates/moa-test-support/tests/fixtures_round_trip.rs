@@ -99,7 +99,7 @@ fn transcript_validate_rejects_turn_without_terminal_event() {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL and a reachable Postgres instance"]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
 async fn bootstrap_test_db_creates_isolated_schema_and_drops_on_drop() {
     let db = bootstrap_test_db().await.expect("bootstrap test db");
     let database_url = db.database_url().to_string();

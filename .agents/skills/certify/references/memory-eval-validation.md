@@ -13,7 +13,7 @@ Use this reference when validating memory-retrieval baselines, query-rewrite gat
 
 1. Verify the local compose state before assuming Postgres is running.
 2. Bring up Postgres only when the eval path needs it: `docker compose up -d postgres`.
-3. Set `MOA_TEST_POSTGRES_URL` for the local Postgres instance.
+3. Set `MOA_DATABASE_URL` for the local Postgres instance.
 4. Generate or reuse the corpus required by the eval command.
 5. Run the memory retrieval eval and write a fresh report under `target/memory-eval/`.
 6. Run `check-eval-budgets --suite memory_retrieval` with `MOA_EVAL_PREVIOUS_MEMORY_REPORT` when comparing against an existing baseline.

@@ -32,49 +32,49 @@ const MATRIX_MAX_PER_SKILL_CHARS: usize = 128;
 type TestResult = Result<(), Box<dyn Error>>;
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn code_task_30_turns_with_str_replace_and_recovery_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("code_task_30_turns_with_str_replace_and_recovery").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn research_task_with_web_fetch_and_memory_writes_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("research_task_with_web_fetch_and_memory_writes").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn long_running_deploy_with_action_review_checkpoint_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("long_running_deploy_with_approval_pause_and_resume").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn session_resume_after_orchestrator_crash_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("session_resume_after_orchestrator_crash").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn concurrent_workspace_writes_to_same_subgraph_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("concurrent_workspace_writes_to_same_subgraph").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn skill_distillation_after_complex_run_then_reuse_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("skill_distillation_after_complex_run_then_reuse").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn experience_learning_task_conditioned_strategy_reuse_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations(EXPERIENCE_LEARNING_SCENARIO).await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn experience_learning_task_conditioned_strategy_reuse_matrix_covers_task_variety()
 -> TestResult {
     // Pins: task-conditioned learning reuses the expected skill across varied task profiles.
@@ -82,25 +82,25 @@ async fn experience_learning_task_conditioned_strategy_reuse_matrix_covers_task_
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn prompt_injection_in_tool_results_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("prompt_injection_in_tool_results").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn multi_observer_local_and_daemon_runtime_parity_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("multi_observer_local_and_daemon_runtime_parity").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn context_compaction_under_sustained_token_pressure_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("context_compaction_under_sustained_token_pressure").await
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL"]
+#[ignore = "requires MOA_DATABASE_URL"]
 async fn canary_token_must_not_leak_through_tool_chain_meets_budgets() -> TestResult {
     assert_scenario_meets_expectations("canary_token_must_not_leak_through_tool_chain").await
 }
@@ -114,7 +114,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
     let expectations = load_expectations(&scenario_dir.join("expectations.toml"))?;
     let transcript_path = case.long_case()?.transcript.clone();
     let transcript = Transcript::read_jsonl(&transcript_path)?;
-    if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
+    if std::env::var_os("MOA_DATABASE_URL").is_none() {
         return Ok(());
     }
     let recorded = RecordedScriptedProvider::with_strict_matching(transcript);
@@ -250,7 +250,7 @@ async fn assert_experience_learning_matrix_cases() -> TestResult {
         .join(EXPERIENCE_LEARNING_MATRIX_FILE);
     let matrix = load_learning_matrix(&matrix_path)?;
     assert_learning_matrix_shape(&matrix);
-    if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
+    if std::env::var_os("MOA_DATABASE_URL").is_none() {
         return Ok(());
     }
 

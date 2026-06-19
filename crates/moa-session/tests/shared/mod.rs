@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 /// Returns whether Prompt 04 Postgres tests should connect to the configured database.
 pub fn postgres_url_is_configured() -> bool {
-    std::env::var_os("MOA_TEST_POSTGRES_URL").is_some()
+    std::env::var_os("MOA_DATABASE_URL").is_some()
 }
 
 /// Returns a double-quoted PostgreSQL identifier.

@@ -6,7 +6,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn registry_preserves_scope_precedence_and_published_supersession() -> Result<()> {
     // Pins: artifact visibility uses the same user > workspace > global tiers as skills.
     let (store, database_url, schema_name) =
@@ -159,7 +159,7 @@ async fn registry_preserves_scope_precedence_and_published_supersession() -> Res
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn registry_persists_behavior_lab_artifact_kinds() -> Result<()> {
     // Pins: the DB registry accepts behavior-lab artifact kinds through the forward constraint.
     let (store, database_url, schema_name) =

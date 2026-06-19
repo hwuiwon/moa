@@ -16,7 +16,7 @@ use uuid::Uuid;
 static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn workspace_scoped_run_insert_load_round_trip_db() -> Result<()> {
     // Pins: workspace-scoped experiment metadata persists and loads through the scoped store.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -56,7 +56,7 @@ async fn workspace_scoped_run_insert_load_round_trip_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn missing_artifact_revision_rejects_experiment_insert_db() -> Result<()> {
     // Pins: experiment artifact revision links are backed by enforced artifact_revision FKs.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -81,7 +81,7 @@ async fn missing_artifact_revision_rejects_experiment_insert_db() -> Result<()> 
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn workspace_a_cannot_load_workspace_b_run_db() -> Result<()> {
     // Pins: exact scoped loads cannot cross workspace boundaries.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -111,7 +111,7 @@ async fn workspace_a_cannot_load_workspace_b_run_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn idempotency_key_deduplicates_within_scope_not_across_workspaces_db() -> Result<()> {
     // Pins: scoped idempotency returns the existing row only inside the same workspace.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -146,7 +146,7 @@ async fn idempotency_key_deduplicates_within_scope_not_across_workspaces_db() ->
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn idempotency_duplicate_does_not_add_artifact_revision_links_db() -> Result<()> {
     // Pins: scoped idempotency returns before duplicate requests mutate revision links or score runs.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -184,7 +184,7 @@ async fn idempotency_duplicate_does_not_add_artifact_revision_links_db() -> Resu
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn score_run_id_from_another_workspace_rejects_insert_db() -> Result<()> {
     // Pins: experiment runs cannot attach to an existing score-run parent from another workspace.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -217,7 +217,7 @@ async fn score_run_id_from_another_workspace_rejects_insert_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn cross_workspace_artifact_revision_rejects_insert_db() -> Result<()> {
     // Pins: experiment artifact links must target revisions visible from the requested scope.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -248,7 +248,7 @@ async fn cross_workspace_artifact_revision_rejects_insert_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn workflow_run_and_session_links_persist_db() -> Result<()> {
     // Pins: session and workflow artifact-run links persist on experiment records.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -282,7 +282,7 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn terminal_run_status_cannot_be_overwritten_db() -> Result<()> {
     // Pins: terminal runs keep their final status, error, and completed_at across late updates.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -329,7 +329,7 @@ async fn terminal_run_status_cannot_be_overwritten_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_insert_load_list_round_trip_db() -> Result<()> {
     // Pins: trial rows persist through scoped store paths without introducing a trial event table.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -386,7 +386,7 @@ async fn trial_insert_load_list_round_trip_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_key_deduplicates_within_run_db() -> Result<()> {
     // Pins: run-scoped trial keys are idempotent and duplicate requests do not create score parents.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -428,7 +428,7 @@ async fn trial_key_deduplicates_within_run_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_rejects_cross_workspace_score_run_db() -> Result<()> {
     // Pins: trial-level score runs cannot be attached across workspace scope boundaries.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -469,7 +469,7 @@ async fn trial_rejects_cross_workspace_score_run_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_rejects_cross_workspace_artifact_revision_db() -> Result<()> {
     // Pins: trial artifact pins must be visible from the requested experiment scope.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -508,7 +508,7 @@ async fn trial_rejects_cross_workspace_artifact_revision_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     // Pins: trial session/workflow/trace links, turn counts, and terminal status persist.
     let _guard = DB_TEST_LOCK.lock().await;
@@ -598,7 +598,7 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_trials_db()
 -> Result<()> {
     // Pins: parent run cancellation marks pending/dispatched/running trials clearly but preserves partial results.
@@ -728,7 +728,7 @@ async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_tri
 }
 
 #[tokio::test]
-#[ignore = "requires local Postgres configured through MOA_TEST_POSTGRES_URL, TEST_DATABASE_URL, or DATABASE_URL"]
+#[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn concurrent_trial_creation_uses_unique_workspace_ids_db() -> Result<()> {
     // Pins: trial creation is parallel-safe when callers use unique workspace IDs.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;

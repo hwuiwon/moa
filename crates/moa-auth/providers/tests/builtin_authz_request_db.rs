@@ -9,7 +9,7 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "requires DATABASE_URL pointing at a local Postgres test database"]
+#[ignore = "requires MOA_DATABASE_URL pointing at a local Postgres test database"]
 async fn request_approval_inserts_pending_row() {
     // Pins: builtin provider persists exactly one pending approval for the awakeable.
     let pool = migrated_pool().await;
@@ -60,7 +60,7 @@ async fn request_approval_inserts_pending_row() {
 }
 
 #[tokio::test]
-#[ignore = "requires DATABASE_URL pointing at a local Postgres test database"]
+#[ignore = "requires MOA_DATABASE_URL pointing at a local Postgres test database"]
 async fn request_approval_requires_tenant_id_in_action_details() {
     // Pins: missing internal tenant metadata is rejected before any row is inserted.
     let pool = migrated_pool().await;
@@ -115,9 +115,7 @@ async fn migrated_pool() -> sqlx::PgPool {
 }
 
 fn test_database_url() -> String {
-    std::env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
+    std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string())
 }
 

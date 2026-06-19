@@ -9,7 +9,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_TEST_POSTGRES_URL")?;
+    std::env::var_os("MOA_DATABASE_URL")?;
     Some(
         bootstrap_test_db()
             .await
@@ -18,7 +18,7 @@ async fn configured_test_db() -> Option<TestDb> {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_TEST_POSTGRES_URL and a reachable Postgres instance"]
+#[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
 async fn quality_scores_use_task_segment_outcomes_and_bump_workspace_version_once() {
     // Pins: lifecycle quality scoring reads task_segments.outcome and invalidates retrieval cache exactly when scores change.
     let Some(test_db) = configured_test_db().await else {

@@ -146,7 +146,7 @@ providers or billed embedding APIs. It does require a local Postgres URL,
 usually from the MOA compose stack:
 
 ```bash
-export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
+export MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
 cargo run -p xtask -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr
 cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/report.json
 cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/report.json
@@ -505,7 +505,7 @@ Nightly and manual scale checks use the `full` corpus profile. Use the same
 retrieval and budget commands, but keep the artifacts separate from PR output:
 
 ```bash
-export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
+export MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
 cargo run -p xtask -- generate-memory-eval-corpus --profile full --seed 1 --seed 2 --seed 3 --output target/memory-eval/full
 cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/full --output target/memory-eval/full-report.json
 cargo run -p xtask -- check-eval-budgets --suite memory_retrieval --max-regression-pct 5 --memory-eval-report target/memory-eval/full-report.json
@@ -535,7 +535,7 @@ docs/eval/baselines/memory-retrieval-pr-natural-baseline.json
 Use it when evaluating an implementation candidate:
 
 ```bash
-export MOA_TEST_POSTGRES_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
+export MOA_DATABASE_URL=postgres://moa_owner:dev@127.0.0.1:10040/moa
 export MOA_EVAL_PREVIOUS_MEMORY_REPORT=docs/eval/baselines/memory-retrieval-pr-baseline.json
 cargo run -p xtask -- generate-memory-eval-corpus --profile pr --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-candidate
 cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr-candidate --output target/memory-eval/candidate-report.json

@@ -104,7 +104,7 @@ async fn scripted_user_script_reads_turns_fragments_and_probe_ids() -> TestResul
 
 #[tokio::test]
 async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> TestResult {
-    if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
+    if std::env::var_os("MOA_DATABASE_URL").is_none() {
         return Ok(());
     }
 
@@ -285,7 +285,7 @@ fn assert_tool_turn_lineage_is_captured(
 #[tokio::test]
 async fn offline_scripted_user_replays_distilled_dispute_failure_without_live_simulation()
 -> TestResult {
-    if std::env::var_os("MOA_TEST_POSTGRES_URL").is_none() {
+    if std::env::var_os("MOA_DATABASE_URL").is_none() {
         return Ok(());
     }
 

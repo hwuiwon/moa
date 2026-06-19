@@ -13,7 +13,7 @@ use uuid::Uuid;
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_TEST_POSTGRES_URL")?;
+    std::env::var_os("MOA_DATABASE_URL")?;
     Some(
         bootstrap_test_db()
             .await

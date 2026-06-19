@@ -7,10 +7,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 async fn test_pool() -> PgPool {
-    let database_url = std::env::var("MOA_TEST_POSTGRES_URL")
-        .or_else(|_| std::env::var("TEST_DATABASE_URL"))
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .or_else(|_| std::env::var("MOA_DATABASE_URL"))
+    let database_url = std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
     let schema_name = format!("authz_outbox_test_{}", Uuid::new_v4().simple());
     let search_path = format!("{}, public", quote_identifier(&schema_name));
