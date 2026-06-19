@@ -11,6 +11,8 @@ where
     S: ActionPolicyRuleStore + ?Sized,
 {
     let workspace_id = WorkspaceId::new("ws1");
+    let user_id = UserId::new("u1");
+    let other_user_id = UserId::new("u2");
     let rule = ActionPolicyRule {
         id: Uuid::now_v7(),
         workspace_id: workspace_id.clone(),
@@ -20,7 +22,19 @@ where
         effect: ActionPolicyEffect::AdminReview,
         scope: ActionRuleScope::Workspace,
         reason: Some("review repository command".to_string()),
-        created_by: UserId::new("u1"),
+        created_by: user_id.clone(),
+        created_at: Utc::now(),
+    };
+    let user_rule = ActionPolicyRule {
+        id: Uuid::now_v7(),
+        workspace_id: workspace_id.clone(),
+        user_id: Some(user_id.clone()),
+        tool: "bash".to_string(),
+        pattern: "git push".to_string(),
+        effect: ActionPolicyEffect::Deny,
+        scope: ActionRuleScope::Workspace,
+        reason: Some("user-specific deny".to_string()),
+        created_by: user_id.clone(),
         created_at: Utc::now(),
     };
 
@@ -28,22 +42,46 @@ where
         .upsert_action_policy_rule(rule.clone())
         .await
         .expect("upsert action policy rule");
+    store
+        .upsert_action_policy_rule(user_rule.clone())
+        .await
+        .expect("upsert user-scoped action policy rule");
     let rules = store
-        .list_action_policy_rules(&workspace_id)
+        .list_action_policy_rules_for_tool(&workspace_id, &user_id, "bash")
         .await
         .expect("list action policy rules");
     assert!(
         rules.iter().any(|candidate| candidate.id == rule.id
             && candidate.effect == ActionPolicyEffect::AdminReview)
     );
+    assert!(
+        rules.iter().any(|candidate| candidate.id == user_rule.id
+            && candidate.effect == ActionPolicyEffect::Deny)
+    );
+
+    let other_user_rules = store
+        .list_action_policy_rules_for_tool(&workspace_id, &other_user_id, "bash")
+        .await
+        .expect("list action policy rules for other user");
+    assert!(
+        other_user_rules
+            .iter()
+            .any(|candidate| candidate.id == rule.id)
+    );
+    assert!(
+        !other_user_rules
+            .iter()
+            .any(|candidate| candidate.id == user_rule.id)
+    );
 
     store
-        .delete_action_policy_rule(&workspace_id, &rule.tool, &rule.pattern)
+        .delete_action_policy_rule(&workspace_id, None, &rule.tool, &rule.pattern)
         .await
         .expect("delete action policy rule");
     let rules = store
-        .list_action_policy_rules(&workspace_id)
+        .list_action_policy_rules_for_tool(&workspace_id, &user_id, "bash")
         .await
         .expect("list action policy rules after delete");
     assert!(!rules.iter().any(|candidate| candidate.id == rule.id));
+    assert!(rules.iter().any(|candidate| candidate.id == user_rule.id));
 }

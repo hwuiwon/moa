@@ -70,10 +70,11 @@ workspace-admin action review through `ActionReviews/request`, writes an
 `ActionReviewRequested` event for session history, returns a pending-review
 tool result to preserve LLM protocol continuity, and continues the root or
 sub-agent turn without moving the session into a waiting state. Workspace
-admins list pending reviews through `ActionReviews/list_pending`; a cleared
-review rewrites the stored tool request with a fresh tool-call id and no active
-canary before invoking `ToolExecutor`, while a denied review records the
-decision without executing the tool.
+admins list pending reviews through `ActionReviews/list_pending`. Review
+requests are canary-screened before persistence and store no canary token; a
+cleared review rewrites the stored tool request with a fresh tool-call id before
+invoking `ToolExecutor`, while a denied review records the decision without
+executing the tool.
 
 ## Registry
 

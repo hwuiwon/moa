@@ -10,17 +10,24 @@ CREATE TABLE IF NOT EXISTS action_policy_rules (
     scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
     reason TEXT,
     created_by TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(workspace_id, tool, pattern)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope
     ON action_policy_rules(workspace_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS idx_action_policy_rules_lookup
+    ON action_policy_rules(workspace_id, tool, user_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_action_policy_rules_unique_scope
+    ON action_policy_rules(workspace_id, tool, pattern, COALESCE(user_id, ''));
+
+SELECT moa.apply_three_tier_rls('action_policy_rules'::REGCLASS);
 
 CREATE TABLE IF NOT EXISTS workspace_action_reviews (
     id UUID PRIMARY KEY,
     workspace_id TEXT NOT NULL,
-    session_id UUID,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
     sub_agent_id TEXT,
     tool_call_id UUID NOT NULL,
     tool_name TEXT NOT NULL,
@@ -34,11 +41,15 @@ CREATE TABLE IF NOT EXISTS workspace_action_reviews (
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'cleared', 'denied', 'expired')),
     requested_by TEXT NOT NULL,
+    requested_event_recorded_at TIMESTAMPTZ,
     decided_by TEXT,
     deny_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ,
-    decided_at TIMESTAMPTZ
+    decided_at TIMESTAMPTZ,
+    decision_event_recorded_at TIMESTAMPTZ,
+    execution_tool_call_id UUID,
+    execution_requested_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_pending
@@ -48,13 +59,10 @@ CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_pending
 CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_session
     ON workspace_action_reviews(session_id, created_at DESC)
     WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_scope
+    ON workspace_action_reviews(workspace_id, scope, user_id);
 
-UPDATE moa.artifact_run SET status = 'running' WHERE status = 'waiting_approval';
-UPDATE moa.artifact_node_run SET status = 'running' WHERE status = 'waiting_approval';
-UPDATE moa.experiment_run SET status = 'running' WHERE status = 'waiting_approval';
-UPDATE moa.experiment_trial
-SET status = 'running', stop_reason = NULL
-WHERE status = 'waiting_approval' OR stop_reason = 'approval_wait';
+SELECT moa.apply_three_tier_rls('workspace_action_reviews'::REGCLASS);
 
 ALTER TABLE moa.artifact_run
     DROP CONSTRAINT IF EXISTS artifact_run_status_check;

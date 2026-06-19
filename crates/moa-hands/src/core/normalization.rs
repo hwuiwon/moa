@@ -23,6 +23,7 @@ const SHELL_WRAPPERS: &[(&str, &[&str])] = &[
 ];
 
 const BARE_SHELL_NAMES: &[&str] = &["zsh", "bash", "sh", "dash", "fish"];
+const MAX_REVIEW_DIFF_CHARS: usize = 16_384;
 
 pub(super) fn normalized_input_for(input_shape: ToolInputShape, input: &Value) -> Result<String> {
     let value = match input_shape {
@@ -240,8 +241,8 @@ pub(super) async fn review_diffs_for(
 
             Ok(vec![ActionReviewFileDiff {
                 path: path.to_string(),
-                before,
-                after: content.to_string(),
+                before: cap_review_text(before),
+                after: cap_review_text(content.to_string()),
                 language_hint: language_hint_for_path(path),
             }])
         }
@@ -277,11 +278,24 @@ pub(super) async fn review_diffs_for(
 
             Ok(vec![ActionReviewFileDiff {
                 path: path.to_string(),
-                before: planned.preview_before,
-                after: planned.preview_after,
+                before: cap_review_text(planned.preview_before),
+                after: cap_review_text(planned.preview_after),
                 language_hint: language_hint_for_path(path),
             }])
         }
+    }
+}
+
+fn cap_review_text(value: String) -> String {
+    let mut chars = value.chars();
+    let capped = chars
+        .by_ref()
+        .take(MAX_REVIEW_DIFF_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{capped}\n\n[preview truncated at {MAX_REVIEW_DIFF_CHARS} chars]")
+    } else {
+        capped
     }
 }
 

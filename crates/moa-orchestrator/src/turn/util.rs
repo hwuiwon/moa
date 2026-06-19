@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, SessionId,
+    CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Result, SessionId,
     StopReason, ToolCallContent, ToolCallId, ToolOutput, TurnOutcome, delegation_tool_schemas,
     dispatch_sub_agent_tool_schema,
 };
+use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use uuid::Uuid;
 
 /// Returns the structured tool calls emitted in one completion response.
@@ -101,6 +102,28 @@ pub(crate) fn disallowed_tool_output(tool_name: &str) -> ToolOutput {
         format!("Tool {tool_name} is not allowed for this agent turn."),
         Duration::ZERO,
     )
+}
+
+/// Returns whether serialized tool input contains a protected canary marker.
+pub(crate) fn tool_input_leaks_canary(
+    active_canary: Option<&str>,
+    input: &serde_json::Value,
+) -> Result<bool> {
+    let serialized_input = serde_json::to_string(input)?;
+    Ok(matches!(
+        screen_tool_input_for_canary(active_canary, &serialized_input),
+        ToolInputCanaryScreening::Blocked(_)
+    ))
+}
+
+/// Builds the synthetic tool output used when execution leaks a canary.
+pub(crate) fn blocked_canary_tool_output(tool_name: &str) -> ToolOutput {
+    ToolOutput::error(blocked_canary_message(tool_name), Duration::ZERO)
+}
+
+/// Returns the model-visible canary block message for a tool.
+pub(crate) fn blocked_canary_message(tool_name: &str) -> String {
+    format!("Tool {tool_name} blocked because it leaked a protected canary token.")
 }
 
 /// Computes a stable tool-call identifier from provider output.
@@ -202,7 +225,8 @@ mod tests {
     use super::{
         allowed_tool_names, disallowed_tool_output, ensure_delegation_tool_schemas,
         ensure_dispatch_tool_schema, meaningful_cancel_reason, stable_tool_call_id,
-        summarize_response_text, tool_call_is_allowed, turn_outcome_for_response,
+        summarize_response_text, tool_call_is_allowed, tool_input_leaks_canary,
+        turn_outcome_for_response,
     };
 
     fn completion_response(
@@ -260,6 +284,13 @@ mod tests {
         );
 
         assert_eq!(turn_outcome_for_response(&response), TurnOutcome::Cancelled);
+    }
+
+    #[test]
+    fn tool_input_leaks_canary_detects_active_marker() {
+        // Pins: admin-review paths share the same canary screening as direct execution.
+        let input = json!({"cmd":"printf moa_canary_test"});
+        assert!(tool_input_leaks_canary(None, &input).expect("canary screen should serialize"));
     }
 
     #[test]

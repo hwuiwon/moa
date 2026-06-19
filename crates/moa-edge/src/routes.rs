@@ -417,26 +417,14 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             Ok(value) => value,
             Err(_) => return RouteTranslation::BadRequest("bad authz challenge id"),
         };
-        let mut value: serde_json::Value = match serde_json::from_slice(body) {
-            Ok(value) => value,
-            Err(_) => return RouteTranslation::BadRequest("bad decision body"),
-        };
-        let Some(object) = value.as_object_mut() else {
-            return RouteTranslation::BadRequest("decision body must be object");
-        };
-        object.insert("id".to_string(), serde_json::json!(challenge_id));
-        let bytes = match serde_json::to_vec(&value) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::error!(error = %error, "serialize authz challenge decision body failed");
-                return RouteTranslation::BadRequest("bad decision body");
-            }
-        };
-        return RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/AuthzChallenges/decide".to_string(),
-            body: bytes,
-        };
+        return translate_json_object_with_fields(
+            body,
+            "/AuthzChallenges/decide",
+            "bad decision body",
+            "decision body must be object",
+            "serialize authz challenge decision body failed",
+            [("id", serde_json::json!(challenge_id))],
+        );
     }
     if *method == Method::GET
         && let Some(rest) = uri
@@ -484,27 +472,17 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             Ok(value) => value,
             Err(_) => return RouteTranslation::BadRequest("bad action review id"),
         };
-        let mut value: serde_json::Value = match serde_json::from_slice(body) {
-            Ok(value) => value,
-            Err(_) => return RouteTranslation::BadRequest("bad action review decision body"),
-        };
-        let Some(object) = value.as_object_mut() else {
-            return RouteTranslation::BadRequest("action review decision body must be object");
-        };
-        object.insert("workspace_id".to_string(), serde_json::json!(workspace_id));
-        object.insert("review_id".to_string(), serde_json::json!(review_id));
-        let bytes = match serde_json::to_vec(&value) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::error!(error = %error, "serialize action review decision body failed");
-                return RouteTranslation::BadRequest("bad action review decision body");
-            }
-        };
-        return RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/ActionReviews/decide".to_string(),
-            body: bytes,
-        };
+        return translate_json_object_with_fields(
+            body,
+            "/ActionReviews/decide",
+            "bad action review decision body",
+            "action review decision body must be object",
+            "serialize action review decision body failed",
+            [
+                ("workspace_id", serde_json::json!(workspace_id)),
+                ("review_id", serde_json::json!(review_id)),
+            ],
+        );
     }
     if *method == Method::POST {
         match uri.path() {
@@ -929,19 +907,39 @@ fn translate_agent_act_as(agent_id: &str, body: &Bytes, target: &str) -> RouteTr
         Ok(value) => value,
         Err(_) => return RouteTranslation::BadRequest("bad agent id"),
     };
+    translate_json_object_with_fields(
+        body,
+        target,
+        "bad agent act-as body",
+        "agent act-as body must be object",
+        "serialize agent act-as body failed",
+        [("agent_id", serde_json::json!(agent_id))],
+    )
+}
+
+fn translate_json_object_with_fields<const N: usize>(
+    body: &Bytes,
+    target: &str,
+    bad_body_message: &'static str,
+    non_object_message: &'static str,
+    serialize_log_message: &'static str,
+    fields: [(&str, serde_json::Value); N],
+) -> RouteTranslation {
     let mut value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(value) => value,
-        Err(_) => return RouteTranslation::BadRequest("bad agent act-as body"),
+        Err(_) => return RouteTranslation::BadRequest(bad_body_message),
     };
     let Some(object) = value.as_object_mut() else {
-        return RouteTranslation::BadRequest("agent act-as body must be object");
+        return RouteTranslation::BadRequest(non_object_message);
     };
-    object.insert("agent_id".to_string(), serde_json::json!(agent_id));
+    for (name, field_value) in fields {
+        object.insert(name.to_string(), field_value);
+    }
     let bytes = match serde_json::to_vec(&value) {
         Ok(bytes) => bytes,
         Err(error) => {
-            tracing::error!(error = %error, "serialize agent act-as body failed");
-            return RouteTranslation::BadRequest("bad agent act-as body");
+            tracing::error!(error = %error, "{serialize_log_message}");
+            return RouteTranslation::BadRequest(bad_body_message);
         }
     };
     RouteTranslation::Forward {

@@ -157,7 +157,7 @@ fn render_tool_card(
     text
 }
 
-fn render_action_review_request(
+pub(crate) fn render_action_review_request(
     envelope: &moa_core::ActionEnvelope,
     preview: &moa_core::ActionReviewPreview,
 ) -> String {

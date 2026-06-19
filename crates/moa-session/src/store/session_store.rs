@@ -76,6 +76,35 @@ impl PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)
     }
+
+    /// Returns whether a persisted action-review event exists without decoding matching payloads.
+    pub async fn action_review_event_exists(
+        &self,
+        workspace_id: &WorkspaceId,
+        session_id: moa_core::SessionId,
+        event_type: EventType,
+        review_id: Uuid,
+    ) -> Result<bool> {
+        let events = self.table_name("events");
+        sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT EXISTS (\
+                 SELECT 1 \
+                 FROM {events} \
+                 WHERE workspace_id = $1 \
+                   AND event_type = $2 \
+                   AND payload -> 'data' ? 'review_id' \
+                   AND payload -> 'data' ->> 'review_id' = $3 \
+                   AND session_id = $4\
+             )"
+        ))
+        .bind(workspace_id.as_str())
+        .bind(event_type.as_str())
+        .bind(review_id.to_string())
+        .bind(session_id.0)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)
+    }
 }
 
 #[async_trait]

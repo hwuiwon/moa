@@ -126,7 +126,11 @@ impl ToolRouter {
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
             rule_store
-                .list_action_policy_rules(&session.workspace_id)
+                .list_action_policy_rules_for_tool(
+                    &session.workspace_id,
+                    &session.user_id,
+                    &invocation.name,
+                )
                 .await?
         } else {
             Vec::new()
@@ -136,30 +140,49 @@ impl ToolRouter {
             &moa_security::ActionPolicyContext::from_session(session),
             &rules,
         )?;
-        let review_root = self
-            .workspace_roots
-            .read()
-            .await
-            .get(&session.workspace_id)
-            .cloned()
-            .or_else(|| self.sandbox_root.clone());
-
-        Ok(PreparedActionInvocation {
-            action_pattern: action_pattern_for(
+        let needs_review_preview = matches!(policy.effect, ActionPolicyEffect::AdminReview);
+        let review_root = if needs_review_preview {
+            self.workspace_roots
+                .read()
+                .await
+                .get(&session.workspace_id)
+                .cloned()
+                .or_else(|| self.sandbox_root.clone())
+        } else {
+            None
+        };
+        let action_pattern = if needs_review_preview {
+            action_pattern_for(
                 tool_definition.policy.input_shape,
                 &policy_input.normalized_input,
-            ),
-            review_fields: review_fields_for(
+            )
+        } else {
+            String::new()
+        };
+        let review_fields = if needs_review_preview {
+            review_fields_for(
                 review_root.as_deref(),
                 tool_definition.policy.input_shape,
                 invocation,
-            ),
-            review_diffs: review_diffs_for(
+            )
+        } else {
+            Vec::new()
+        };
+        let review_diffs = if needs_review_preview {
+            review_diffs_for(
                 review_root.as_deref(),
                 tool_definition.policy.diff_strategy,
                 invocation,
             )
-            .await?,
+            .await?
+        } else {
+            Vec::new()
+        };
+
+        Ok(PreparedActionInvocation {
+            action_pattern,
+            review_fields,
+            review_diffs,
             policy_input,
             policy,
         })

@@ -11,10 +11,12 @@ use moa_core::{
 /// Persistent action-policy rule storage used by policy-aware tool routing.
 #[async_trait]
 pub trait ActionPolicyRuleStore: Send + Sync {
-    /// Lists all action-policy rules visible to a workspace.
-    async fn list_action_policy_rules(
+    /// Lists action-policy rules visible to one workspace user and tool.
+    async fn list_action_policy_rules_for_tool(
         &self,
         workspace_id: &WorkspaceId,
+        user_id: &UserId,
+        tool: &str,
     ) -> Result<Vec<ActionPolicyRule>>;
 
     /// Creates or updates an action-policy rule.
@@ -24,6 +26,7 @@ pub trait ActionPolicyRuleStore: Send + Sync {
     async fn delete_action_policy_rule(
         &self,
         workspace_id: &WorkspaceId,
+        user_id: Option<&UserId>,
         tool: &str,
         pattern: &str,
     ) -> Result<()>;
@@ -85,7 +88,7 @@ impl ActionPolicies {
         rules: &[ActionPolicyRule],
     ) -> Result<ActionPolicyCheck> {
         for rule in rules {
-            if !rule_visible_to_workspace(rule, &ctx.workspace_id) {
+            if !rule_visible_to_context(rule, ctx) {
                 continue;
             }
             if rule.tool != input.tool_name {
@@ -169,8 +172,14 @@ pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> bool {
         .unwrap_or_else(|_| glob_match(rule_pattern, command.trim()))
 }
 
-fn rule_visible_to_workspace(rule: &ActionPolicyRule, workspace_id: &WorkspaceId) -> bool {
-    matches!(rule.scope, ActionRuleScope::Global) || &rule.workspace_id == workspace_id
+fn rule_visible_to_context(rule: &ActionPolicyRule, ctx: &ActionPolicyContext) -> bool {
+    if !(matches!(rule.scope, ActionRuleScope::Global) || rule.workspace_id == ctx.workspace_id) {
+        return false;
+    }
+
+    rule.user_id
+        .as_ref()
+        .is_none_or(|user_id| user_id == &ctx.user_id)
 }
 
 fn rule_matches(rule: &ActionPolicyRule, tool: &str, normalized_input: &str) -> bool {
@@ -277,6 +286,64 @@ mod tests {
         assert_eq!(check.effect, ActionPolicyEffect::AdminReview);
         assert_eq!(check.reason.as_deref(), Some("review source edits"));
         assert!(check.matched_rule.is_some());
+    }
+
+    #[test]
+    fn user_scoped_rules_only_match_the_current_user() {
+        // Pins: a user-scoped action-policy rule must not affect other workspace users.
+        let policies = ActionPolicies::default();
+        let rule = ActionPolicyRule {
+            id: Uuid::now_v7(),
+            workspace_id: WorkspaceId::new("workspace"),
+            tool: "bash".to_string(),
+            pattern: "git push".to_string(),
+            user_id: Some(UserId::new("target-user")),
+            effect: ActionPolicyEffect::Deny,
+            scope: ActionRuleScope::Workspace,
+            reason: Some("target user only".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: Utc::now(),
+        };
+        let input = ToolPolicyInput {
+            tool_name: "bash".to_string(),
+            normalized_input: "git push".to_string(),
+            input_summary: "Command: git push".to_string(),
+            risk_level: RiskLevel::High,
+            default_effect: ActionPolicyEffect::Allow,
+            action_class: moa_core::ActionClass::CommandExecution,
+        };
+
+        let other_session = SessionMeta {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("other-user"),
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let other_check = policies
+            .check(
+                &input,
+                &ActionPolicyContext::from_session(&other_session),
+                std::slice::from_ref(&rule),
+            )
+            .expect("policy evaluation for other user");
+        assert_eq!(other_check.effect, ActionPolicyEffect::Allow);
+        assert!(other_check.matched_rule.is_none());
+
+        let target_session = SessionMeta {
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: UserId::new("target-user"),
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let target_check = policies
+            .check(
+                &input,
+                &ActionPolicyContext::from_session(&target_session),
+                &[rule],
+            )
+            .expect("policy evaluation for target user");
+        assert_eq!(target_check.effect, ActionPolicyEffect::Deny);
+        assert!(target_check.matched_rule.is_some());
     }
 
     #[test]

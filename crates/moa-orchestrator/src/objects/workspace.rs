@@ -5,6 +5,8 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use moa_authz::require_authz_with_delegation;
+use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
     ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, UserId, WorkspaceId,
 };
@@ -12,6 +14,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
+use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateReport, ConsolidateRequest, consolidate_workflow_id,
@@ -68,12 +71,8 @@ pub struct WorkspaceActionPolicyRuleInput {
     pub pattern: String,
     /// Effect applied when the rule matches.
     pub effect: ActionPolicyEffect,
-    /// User who created the rule.
-    pub created_by: UserId,
     /// Optional reason stored with the rule.
     pub reason: Option<String>,
-    /// Rule creation timestamp.
-    pub created_at: DateTime<Utc>,
 }
 
 /// Serializable projection of the Workspace VO's durable keys.
@@ -246,6 +245,8 @@ impl WorkspaceObject for WorkspaceImpl {
         annotate_restate_handler_span("Workspace", "add_action_policy_rule");
         let pattern = pattern.into_inner();
         let workspace_id = parse_workspace_key(ctx.key());
+        let identity = require_workspace_admin(&ctx, &workspace_id).await?;
+        let created_at = durable_utc_now(&ctx).await?;
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let _ = state.ensure_initialized()?;
 
@@ -258,8 +259,8 @@ impl WorkspaceObject for WorkspaceImpl {
             effect: pattern.effect,
             scope: ActionRuleScope::Workspace,
             reason: pattern.reason,
-            created_by: pattern.created_by.clone(),
-            created_at: pattern.created_at,
+            created_by: UserId::new(identity.id.to_string()),
+            created_at,
         };
 
         if let Some(existing) = state
@@ -344,6 +345,24 @@ impl WorkspaceObject for WorkspaceImpl {
             pages_count,
         }))
     }
+}
+
+async fn require_workspace_admin(
+    ctx: &ObjectContext<'_>,
+    workspace_id: &WorkspaceId,
+) -> Result<moa_core::traits::Identity, HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Workspace,
+        workspace_id,
+        Relation::Admin,
+    )
+    .await
+    .map_err(translate_authz_error)?;
+    Ok(identity)
 }
 
 async fn count_graph_nodes(workspace_id: &WorkspaceId) -> Result<u64, HandlerError> {

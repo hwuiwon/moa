@@ -1,20 +1,29 @@
 //! Action-policy rule operations for the Postgres session store.
 
+use moa_core::UserId;
+
 use super::*;
 
 impl PostgresSessionStore {
-    /// Lists action-policy rules visible to the provided workspace.
-    pub async fn list_action_policy_rules(
+    /// Lists action-policy rules visible to one workspace user and tool.
+    pub async fn list_action_policy_rules_for_tool(
         &self,
         workspace_id: &WorkspaceId,
+        user_id: &UserId,
+        tool: &str,
     ) -> Result<Vec<ActionPolicyRule>> {
         let action_policy_rules = self.table_name("action_policy_rules");
         let rows = sqlx::query(&format!(
             "SELECT id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
-             FROM {action_policy_rules} WHERE workspace_id = $1 OR scope = 'global' \
+             FROM {action_policy_rules} \
+             WHERE (workspace_id = $1 OR scope = 'global') \
+               AND (user_id IS NULL OR user_id = $2) \
+               AND tool = $3 \
              ORDER BY created_at ASC"
         ))
         .bind(workspace_id.to_string())
+        .bind(user_id.to_string())
+        .bind(tool)
         .fetch_all(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -28,8 +37,7 @@ impl PostgresSessionStore {
         sqlx::query(&format!(
             "INSERT INTO {action_policy_rules} (id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
-             ON CONFLICT (workspace_id, tool, pattern) DO UPDATE SET \
-                 user_id = EXCLUDED.user_id, \
+             ON CONFLICT (workspace_id, tool, pattern, (COALESCE(user_id, ''))) DO UPDATE SET \
                  effect = EXCLUDED.effect, \
                  scope = EXCLUDED.scope, \
                  reason = EXCLUDED.reason, \
@@ -57,14 +65,20 @@ impl PostgresSessionStore {
     pub async fn delete_action_policy_rule(
         &self,
         workspace_id: &WorkspaceId,
+        user_id: Option<&UserId>,
         tool: &str,
         pattern: &str,
     ) -> Result<()> {
         let action_policy_rules = self.table_name("action_policy_rules");
         sqlx::query(&format!(
-            "DELETE FROM {action_policy_rules} WHERE workspace_id = $1 AND tool = $2 AND pattern = $3"
+            "DELETE FROM {action_policy_rules} \
+             WHERE workspace_id = $1 \
+               AND ((user_id IS NULL AND $2::text IS NULL) OR user_id = $2) \
+               AND tool = $3 \
+               AND pattern = $4"
         ))
         .bind(workspace_id.to_string())
+        .bind(user_id.map(ToString::to_string))
         .bind(tool)
         .bind(pattern)
         .execute(&self.pool)
@@ -77,12 +91,15 @@ impl PostgresSessionStore {
 
 #[async_trait]
 impl ActionPolicyRuleStore for PostgresSessionStore {
-    /// Lists action-policy rules visible to a workspace.
-    async fn list_action_policy_rules(
+    /// Lists action-policy rules visible to one workspace user and tool.
+    async fn list_action_policy_rules_for_tool(
         &self,
         workspace_id: &WorkspaceId,
+        user_id: &UserId,
+        tool: &str,
     ) -> Result<Vec<ActionPolicyRule>> {
-        self.list_action_policy_rules(workspace_id).await
+        self.list_action_policy_rules_for_tool(workspace_id, user_id, tool)
+            .await
     }
 
     /// Creates or updates an action-policy rule.
@@ -94,10 +111,11 @@ impl ActionPolicyRuleStore for PostgresSessionStore {
     async fn delete_action_policy_rule(
         &self,
         workspace_id: &WorkspaceId,
+        user_id: Option<&UserId>,
         tool: &str,
         pattern: &str,
     ) -> Result<()> {
-        self.delete_action_policy_rule(workspace_id, tool, pattern)
+        self.delete_action_policy_rule(workspace_id, user_id, tool, pattern)
             .await
     }
 }

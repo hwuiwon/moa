@@ -6,9 +6,9 @@ use std::time::Instant;
 use moa_core::{
     ActionPolicyEffect, Event, EventRecord, MoaError, Result, RuntimeEvent, SessionId, SessionMeta,
     SessionSignal, SessionStore, ToolCallContent, ToolCallId, ToolCardStatus, ToolInvocation,
-    ToolOutput, ToolUpdate,
+    ToolUpdate,
 };
-use moa_hands::{ActionOrigin, ToolRouter};
+use moa_hands::ToolRouter;
 use moa_security::{InputClassification, ToolInputCanaryScreening, inspect_input};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -190,6 +190,7 @@ pub(super) async fn handle_tool_call(
             Ok(ToolCallOutcome::Skipped)
         }
         ActionPolicyEffect::AdminReview => {
+            record_denied_tool_span(invocation, tool_dispatch_span);
             append_event(
                 &session_store,
                 event_tx,
@@ -204,59 +205,30 @@ pub(super) async fn handle_tool_call(
                 },
             )
             .await?;
-            let envelope = prepared.envelope(
-                tool_id.0,
-                session,
-                tool_id,
-                None,
-                ActionOrigin {
-                    origin_kind: Some("brain_harness".to_string()),
-                    origin_id: Some(session_id.to_string()),
-                    origin_step_id: None,
-                    idempotency_key: invocation.id.clone(),
-                },
-            );
-            let preview = prepared.review_preview();
-            append_event(
-                &session_store,
-                event_tx,
-                session_id,
-                Event::ActionReviewRequested {
-                    review_id: envelope.review_id,
-                    envelope: envelope.clone(),
-                    preview: preview.clone(),
-                },
-            )
-            .await?;
             let message = format!(
-                "Action is pending workspace admin review: {}: {}",
+                "tool {} requires workspace admin review, but the local brain harness does not have a durable action-review queue: {}",
                 invocation.name, summary
             );
             append_event(
                 &session_store,
                 event_tx,
                 session_id,
-                Event::ToolResult {
+                Event::ToolError {
                     tool_id,
                     provider_tool_use_id: invocation.id.clone(),
-                    output: ToolOutput::error(message.clone(), std::time::Duration::ZERO),
-                    original_output_tokens: None,
-                    success: false,
-                    duration_ms: 0,
+                    tool_name: invocation.name.clone(),
+                    error: message.clone(),
+                    retryable: false,
                 },
             )
             .await?;
             let _ = runtime_tx.send(RuntimeEvent::ToolUpdate(ToolUpdate {
                 tool_id: tool_id.0,
                 tool_name: invocation.name.clone(),
-                status: ToolCardStatus::PendingReview,
+                status: ToolCardStatus::Failed,
                 summary: summary.clone(),
                 detail: Some(message),
             }));
-            let _ = runtime_tx.send(RuntimeEvent::ActionReviewRequested {
-                envelope: Box::new(envelope),
-                preview: Box::new(preview),
-            });
             Ok(ToolCallOutcome::Skipped)
         }
     }

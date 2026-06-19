@@ -18,7 +18,7 @@ use tracing::{Instrument, field, warn};
 use uuid::Uuid;
 
 use crate::{
-    approval::prepare_outbound_message,
+    action_review::prepare_outbound_message,
     messaging_receive_span,
     renderer::{SlackRenderChunk, SlackRenderer},
 };

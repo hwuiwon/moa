@@ -2193,7 +2193,11 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
     assert_eq!(first, TurnResult::Complete);
     assert_eq!(
         store
-            .list_action_policy_rules(&WorkspaceId::new("workspace"))
+            .list_action_policy_rules_for_tool(
+                &WorkspaceId::new("workspace"),
+                &UserId::new("user"),
+                "bash",
+            )
             .await
             .unwrap()
             .len(),

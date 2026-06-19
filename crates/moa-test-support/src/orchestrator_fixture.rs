@@ -238,7 +238,8 @@ impl OrchestratorTestFixture {
         })
     }
 
-    async fn grant_workspace_member(
+    /// Grants the provided identity workspace-member access.
+    pub async fn grant_workspace_member_identity(
         &self,
         identity: &Identity,
         workspace_id: &WorkspaceId,
@@ -387,7 +388,7 @@ impl IsolatedTest<'_> {
             .context("fixture test client must carry identity headers")?
             .clone();
         self.fixture
-            .grant_workspace_member(&identity, &workspace_id)
+            .grant_workspace_member_identity(&identity, &workspace_id)
             .await?;
         let meta = SessionMeta {
             id: session_id,

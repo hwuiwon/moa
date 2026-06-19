@@ -84,6 +84,7 @@ impl WorkspaceStoreImpl {
 
 impl WorkspaceStore for WorkspaceStoreImpl {
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal workflow call after the owning session or sub-agent has admitted the caller; user-facing review listing and decisions authorize in `ActionReviews`.
     async fn prepare_action_review(
         &self,
         ctx: Context<'_>,

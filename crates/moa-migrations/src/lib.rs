@@ -38,12 +38,58 @@ CREATE TABLE IF NOT EXISTS action_policy_rules (
     scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
     reason TEXT,
     created_by TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(workspace_id, tool, pattern)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope
     ON action_policy_rules(workspace_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS idx_action_policy_rules_lookup
+    ON action_policy_rules(workspace_id, tool, user_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_action_policy_rules_unique_scope
+    ON action_policy_rules(workspace_id, tool, pattern, COALESCE(user_id, ''));
+
+SELECT moa.apply_three_tier_rls('action_policy_rules'::REGCLASS);
+
+CREATE TABLE IF NOT EXISTS workspace_action_reviews (
+    id UUID PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
+    sub_agent_id TEXT,
+    tool_call_id UUID NOT NULL,
+    tool_name TEXT NOT NULL,
+    action_class TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    input_summary TEXT NOT NULL,
+    normalized_input TEXT NOT NULL,
+    envelope JSONB NOT NULL,
+    preview JSONB NOT NULL,
+    tool_request JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'cleared', 'denied', 'expired')),
+    requested_by TEXT NOT NULL,
+    requested_event_recorded_at TIMESTAMPTZ,
+    decided_by TEXT,
+    deny_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    decided_at TIMESTAMPTZ,
+    decision_event_recorded_at TIMESTAMPTZ,
+    execution_tool_call_id UUID,
+    execution_requested_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_pending
+    ON workspace_action_reviews(workspace_id, created_at DESC)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_session
+    ON workspace_action_reviews(session_id, created_at DESC)
+    WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_scope
+    ON workspace_action_reviews(workspace_id, scope, user_id);
+
+SELECT moa.apply_three_tier_rls('workspace_action_reviews'::REGCLASS);
 "#;
 
 const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[

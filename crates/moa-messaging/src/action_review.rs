@@ -2,6 +2,8 @@
 
 use moa_core::{MessageContent, OutboundMessage, Platform, PlatformCapabilities};
 
+use crate::renderer::render_action_review_request;
+
 /// Adds platform-native action-review affordances to an outbound message when possible.
 pub fn prepare_outbound_message(
     _platform: Platform,
@@ -13,38 +15,10 @@ pub fn prepare_outbound_message(
     };
 
     if !capabilities.supports_inline_buttons {
-        message.content = MessageContent::Markdown(action_review_text(envelope, preview));
+        message.content = MessageContent::Markdown(render_action_review_request(envelope, preview));
     }
 
     message
-}
-
-fn action_review_text(
-    envelope: &moa_core::ActionEnvelope,
-    preview: &moa_core::ActionReviewPreview,
-) -> String {
-    let mut text = format!(
-        "{} Action review requested: {}\n{}\nReview: {}",
-        risk_icon(&envelope.risk_level),
-        envelope.tool_name,
-        envelope.input_summary,
-        envelope.review_id
-    );
-    for field in &preview.fields {
-        text.push_str("\n");
-        text.push_str(&field.label);
-        text.push_str(": ");
-        text.push_str(&field.value);
-    }
-    text
-}
-
-fn risk_icon(risk_level: &moa_core::RiskLevel) -> &'static str {
-    match risk_level {
-        moa_core::RiskLevel::Low => "🟢",
-        moa_core::RiskLevel::Medium => "🟡",
-        moa_core::RiskLevel::High => "🔴",
-    }
 }
 
 #[cfg(test)]
