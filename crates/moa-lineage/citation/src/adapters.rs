@@ -4,12 +4,13 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use moa_lineage_core::{Citation, VerifierResult};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
 /// One retrieved chunk as presented to a provider.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkRef {
     /// MOA chunk or node identifier.
     pub chunk_id: Uuid,

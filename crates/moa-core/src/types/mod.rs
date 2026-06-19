@@ -35,8 +35,8 @@ pub use completion::{
     ProviderToolCallMetadata, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
 };
 pub use context::{
-    ContextMessage, ExcludedItem, MessageRole, ProcessorOutput, WorkingContext,
-    estimate_text_tokens,
+    ContextMessage, ContextSourceKind, ContextSourceRef, ExcludedItem, MessageRole,
+    ProcessorOutput, WorkingContext, estimate_text_tokens,
 };
 pub use events_stream::{ClaimCheck, EventFilter, EventRange, EventRecord, EventType, SequenceNum};
 pub use experience::{

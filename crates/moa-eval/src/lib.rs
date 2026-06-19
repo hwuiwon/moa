@@ -29,4 +29,4 @@ pub use reporters::JsonReporter;
 #[cfg(feature = "langfuse")]
 pub use reporters::LangfuseReporter;
 pub use reporters::{ReporterOptions, TerminalReporter, build_reporters};
-pub use setup::{AgentEnvironment, build_agent_environment};
+pub use setup::{AgentEnvironment, EvalLineageHandle, build_agent_environment};

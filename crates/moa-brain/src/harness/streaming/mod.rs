@@ -1,6 +1,5 @@
 //! Shared streamed-turn execution loop.
 
-mod lineage;
 mod signals;
 
 use std::sync::Arc;
@@ -18,8 +17,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use self::lineage::{emit_context_lineage, emit_generation_lineage};
 use self::signals::{drain_signal_queue, handle_stream_signal};
+use crate::lineage::{emit_context_lineage, emit_generation_lineage};
 use crate::pipeline::ContextPipeline;
 use crate::turn::{StreamSignalDisposition, stream_completion_response};
 
@@ -208,6 +207,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 response_cost_cents,
                 llm_call_duration,
                 &llm_call_span,
+                None,
             )
             .await;
             llm_call_span.record(

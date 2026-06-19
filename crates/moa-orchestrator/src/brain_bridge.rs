@@ -5,7 +5,7 @@ use std::time::Instant;
 use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
-    pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
+    lineage::emit_context_lineage, pipeline::history::HISTORY_SNAPSHOT_METADATA_KEY,
 };
 use moa_core::{
     CompletionRequest, ContextSnapshot, EventRange, QueryRewriteResult, Result, SandboxFile,
@@ -13,6 +13,8 @@ use moa_core::{
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     session_engine::session_requires_processing,
 };
+use moa_lineage_citation::ChunkRef;
+use moa_lineage_core::TurnId;
 use moa_security::inject_canary;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
@@ -53,11 +55,15 @@ pub(crate) struct PreparedTurnRequestOutput {
     pub trusted_sandbox_files: Vec<SandboxFile>,
     /// Query rewrite cache entry observed during compilation.
     pub query_rewrite_cache: Option<QueryRewriteCacheEntry>,
+    /// Citable context chunks selected from the compiled provider window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citation_sources: Vec<ChunkRef>,
 }
 
 /// Compiles the next LLM request for a session from durable state.
 pub(crate) async fn prepare_turn_request(
     session_id: SessionId,
+    turn_id: TurnId,
     active_user_sequence_num: Option<u64>,
     cached_query_rewrite: Option<QueryRewriteCacheEntry>,
 ) -> Result<PreparedTurnRequestOutput> {
@@ -73,6 +79,7 @@ pub(crate) async fn prepare_turn_request(
             active_canary: None,
             trusted_sandbox_files: Vec::new(),
             query_rewrite_cache: None,
+            citation_sources: Vec::new(),
         });
     }
 
@@ -90,6 +97,7 @@ pub(crate) async fn prepare_turn_request(
                 None
             }
         };
+    let lineage = ctx.lineage();
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         config.as_ref(),
         session_store.clone(),
@@ -102,7 +110,7 @@ pub(crate) async fn prepare_turn_request(
             query_rewrite_llm_provider: query_rewrite_provider,
             discovered_workspace_instructions: None,
             tool_schemas: ctx.tool_schemas().as_ref().clone(),
-            lineage: ctx.lineage(),
+            lineage: lineage.clone(),
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);
@@ -110,6 +118,7 @@ pub(crate) async fn prepare_turn_request(
     if let Some(sequence_num) = active_user_sequence_num {
         context.insert_metadata("_moa.turn_seq", serde_json::json!(sequence_num));
     }
+    context.insert_metadata("_moa.turn_id", serde_json::json!(turn_id.0.to_string()));
     if let Some(cache) = cached_query_rewrite
         .filter(|cache| Some(cache.user_sequence_num) == active_user_sequence_num)
     {
@@ -120,10 +129,20 @@ pub(crate) async fn prepare_turn_request(
     }
     let pipeline_span = tracing::info_span!("pipeline_compile");
     let compile_started = Instant::now();
-    pipeline.run(&mut context).instrument(pipeline_span).await?;
+    pipeline
+        .run(&mut context)
+        .instrument(pipeline_span.clone())
+        .await?;
     let compile_duration = compile_started.elapsed();
     record_pipeline_compile_duration(compile_duration);
     record_turn_pipeline_compile_duration(compile_duration);
+    let citation_sources = emit_context_lineage(
+        lineage.as_ref(),
+        turn_id,
+        &session,
+        &context,
+        &pipeline_span,
+    );
     let active_canary = if context.tools().is_empty() {
         None
     } else {
@@ -153,6 +172,7 @@ pub(crate) async fn prepare_turn_request(
         active_canary,
         trusted_sandbox_files,
         query_rewrite_cache,
+        citation_sources,
     })
 }
 

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use moa_brain::{
     ContextPipeline,
@@ -18,8 +18,8 @@ use moa_brain::{
     },
 };
 use moa_core::{
-    ActionPolicyEffect, ContextProcessor, LLMProvider, MoaConfig, SessionMeta, SessionStore,
-    UserId, WorkspaceId,
+    ActionPolicyEffect, ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionMeta,
+    SessionStore, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{
@@ -27,6 +27,7 @@ use moa_providers::{
 };
 use moa_security::{ActionPolicies, ActionPolicyRuleStore};
 use moa_session::PostgresSessionStore;
+use serde_json::Value;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -53,6 +54,37 @@ pub struct AgentEnvironment {
     pub workspace_id: WorkspaceId,
     /// User identifier used inside the run.
     pub user_id: UserId,
+    /// In-memory lineage handle used to retain eval-run lineage events.
+    pub lineage: Arc<EvalLineageHandle>,
+}
+
+/// In-memory lineage handle for isolated eval runs.
+#[derive(Debug, Default)]
+pub struct EvalLineageHandle {
+    events: Mutex<Vec<Value>>,
+}
+
+impl EvalLineageHandle {
+    /// Returns a snapshot of all captured lineage JSON events.
+    #[must_use]
+    pub fn events(&self) -> Vec<Value> {
+        match self.events.lock() {
+            Ok(events) => events.clone(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to read eval lineage events");
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl LineageHandle for EvalLineageHandle {
+    fn record(&self, evt_json: Value) {
+        match self.events.lock() {
+            Ok(mut events) => events.push(evt_json),
+            Err(error) => tracing::warn!(%error, "failed to record eval lineage event"),
+        }
+    }
 }
 
 /// Builds a complete isolated agent environment from an agent config.
@@ -84,6 +116,7 @@ pub(crate) async fn build_agent_environment_with_provider(
 
     let workspace_id = WorkspaceId::new(slugify_name(&agent_config.name).as_str());
     let user_id = UserId::new(DEFAULT_EVAL_USER);
+    let lineage = Arc::new(EvalLineageHandle::default());
     let schema_name = format!("eval_{}", Uuid::now_v7().simple());
     let session_store_concrete = Arc::new(
         PostgresSessionStore::new_in_schema(&base_config.database.url, &schema_name).await?,
@@ -119,6 +152,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         session_store_concrete.pool().clone(),
         llm_provider.clone(),
         tool_router.as_ref(),
+        lineage.clone(),
     )
     .await?;
 
@@ -131,6 +165,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         session_id,
         workspace_id,
         user_id,
+        lineage,
     })
 }
 
@@ -178,6 +213,7 @@ async fn build_pipeline(
     graph_pool: sqlx::PgPool,
     llm_provider: Arc<dyn LLMProvider>,
     tool_router: &ToolRouter,
+    lineage: Arc<dyn LineageHandle>,
 ) -> Result<ContextPipeline> {
     let identity_prompt = compose_identity_prompt(&agent_config.instructions);
     let workspace_instructions =
@@ -207,7 +243,10 @@ async fn build_pipeline(
             .with_budget_config(base_config.skill_budget.clone()),
     ));
     stages.extend([
-        Box::new(GraphMemoryRetriever::new(graph_pool, None)) as Box<dyn ContextProcessor>,
+        Box::new(
+            GraphMemoryRetriever::new_with_config(base_config.clone(), graph_pool, None)
+                .with_lineage(lineage),
+        ) as Box<dyn ContextProcessor>,
         Box::new(HistoryCompiler::with_compaction(
             session_store.clone(),
             llm_provider,

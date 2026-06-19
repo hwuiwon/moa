@@ -1,7 +1,7 @@
 //! Serializable lineage records emitted by retrieval, context, and generation.
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, SessionId, UserId, WorkspaceId};
+use moa_core::{ContextSourceRef, MemoryScope, SessionId, UserId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
@@ -273,6 +273,9 @@ pub struct ContextChunk {
     pub estimated_tokens: u32,
     /// Context role.
     pub role: String,
+    /// Structured source references represented by this context chunk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<ContextSourceRef>,
 }
 
 /// One context truncation event.
@@ -319,6 +322,12 @@ pub struct GenerationLineage {
     pub trace_id: Option<String>,
     /// OTel span ID when available.
     pub span_id: Option<String>,
+    /// Persisted `BrainResponse` event id for the generated answer when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_event_id: Option<Uuid>,
+    /// Persisted `BrainResponse` event sequence number when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_event_sequence_num: Option<u64>,
 }
 
 /// Provider token usage normalized for lineage storage.
@@ -366,6 +375,12 @@ pub struct CitationLineage {
     pub ts: DateTime<Utc>,
     /// Full answer text that was checked.
     pub answer_text: String,
+    /// Persisted `BrainResponse` event id for the answer when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_event_id: Option<Uuid>,
+    /// Persisted `BrainResponse` event sequence number when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_event_sequence_num: Option<u64>,
     /// Byte offsets for each answer sentence.
     pub answer_sentence_offsets: Vec<(u32, u32)>,
     /// Normalized citation records.

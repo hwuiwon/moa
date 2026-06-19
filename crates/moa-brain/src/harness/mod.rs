@@ -8,8 +8,8 @@ mod tool_dispatch;
 use std::sync::Arc;
 
 use moa_core::{
-    EventRecord, LLMProvider, MoaError, NullLineageHandle, Result, RuntimeEvent, SessionId,
-    SessionSignal, SessionStore,
+    EventRecord, LLMProvider, LineageHandle, MoaError, NullLineageHandle, Result, RuntimeEvent,
+    SessionId, SessionSignal, SessionStore,
 };
 use moa_hands::ToolRouter;
 use tokio::sync::{broadcast, mpsc};
@@ -45,6 +45,26 @@ pub async fn run_brain_turn(
     pipeline: &ContextPipeline,
     tool_router: Option<Arc<ToolRouter>>,
 ) -> Result<TurnResult> {
+    run_brain_turn_with_lineage(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        tool_router,
+        Arc::new(NullLineageHandle),
+    )
+    .await
+}
+
+/// Runs one buffered turn of the brain harness with explicit lineage capture.
+pub async fn run_brain_turn_with_lineage(
+    session_id: SessionId,
+    session_store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LLMProvider>,
+    pipeline: &ContextPipeline,
+    tool_router: Option<Arc<ToolRouter>>,
+    lineage: Arc<dyn LineageHandle>,
+) -> Result<TurnResult> {
     let (runtime_tx, _) = broadcast::channel(256);
     let streamed = streaming::run_streamed_turn_with_tools_mode(
         session_id,
@@ -59,7 +79,7 @@ pub async fn run_brain_turn(
         None,
         None,
         None,
-        Arc::new(NullLineageHandle),
+        lineage,
     )
     .await?;
 
@@ -85,6 +105,35 @@ pub async fn run_streamed_turn(
     cancel_token: Option<CancellationToken>,
     hard_cancel_token: Option<CancellationToken>,
 ) -> Result<StreamedTurnResult> {
+    run_streamed_turn_with_lineage(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        tool_router,
+        runtime_tx,
+        event_tx,
+        cancel_token,
+        hard_cancel_token,
+        Arc::new(NullLineageHandle),
+    )
+    .await
+}
+
+/// Runs the shared streamed turn engine with explicit lineage capture.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_streamed_turn_with_lineage(
+    session_id: SessionId,
+    session_store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LLMProvider>,
+    pipeline: &ContextPipeline,
+    tool_router: Option<Arc<ToolRouter>>,
+    runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    event_tx: Option<&broadcast::Sender<EventRecord>>,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
+    lineage: Arc<dyn LineageHandle>,
+) -> Result<StreamedTurnResult> {
     streaming::run_streamed_turn_with_tools_mode(
         session_id,
         session_store,
@@ -98,7 +147,7 @@ pub async fn run_streamed_turn(
         None,
         None,
         None,
-        Arc::new(NullLineageHandle),
+        lineage,
     )
     .await
 }
@@ -119,6 +168,41 @@ pub async fn run_streamed_turn_with_signals(
     cancel_token: Option<CancellationToken>,
     hard_cancel_token: Option<CancellationToken>,
 ) -> Result<StreamedTurnResult> {
+    run_streamed_turn_with_signals_and_lineage(
+        session_id,
+        session_store,
+        llm_provider,
+        pipeline,
+        tool_router,
+        runtime_tx,
+        event_tx,
+        signal_rx,
+        turn_requested,
+        soft_cancel_requested,
+        cancel_token,
+        hard_cancel_token,
+        Arc::new(NullLineageHandle),
+    )
+    .await
+}
+
+/// Runs the shared streamed turn engine while consuming signals with lineage capture.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_streamed_turn_with_signals_and_lineage(
+    session_id: SessionId,
+    session_store: Arc<dyn SessionStore>,
+    llm_provider: Arc<dyn LLMProvider>,
+    pipeline: &ContextPipeline,
+    tool_router: Option<Arc<ToolRouter>>,
+    runtime_tx: &broadcast::Sender<RuntimeEvent>,
+    event_tx: Option<&broadcast::Sender<EventRecord>>,
+    signal_rx: &mut mpsc::Receiver<SessionSignal>,
+    turn_requested: &mut bool,
+    soft_cancel_requested: &mut bool,
+    cancel_token: Option<CancellationToken>,
+    hard_cancel_token: Option<CancellationToken>,
+    lineage: Arc<dyn LineageHandle>,
+) -> Result<StreamedTurnResult> {
     streaming::run_streamed_turn_with_tools_mode(
         session_id,
         session_store,
@@ -132,7 +216,7 @@ pub async fn run_streamed_turn_with_signals(
         Some(signal_rx),
         Some(turn_requested),
         Some(soft_cancel_requested),
-        Arc::new(NullLineageHandle),
+        lineage,
     )
     .await
 }

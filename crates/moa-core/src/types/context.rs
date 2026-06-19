@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::{
     CompletionRequest, EventRecord, ModelCapabilities, SandboxFile, SessionId, SessionMeta,
-    ToolContent, ToolInvocation, UserId, WorkspaceId,
+    ToolCallId, ToolContent, ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -23,6 +24,117 @@ pub enum MessageRole {
     Assistant,
     /// Tool result content.
     Tool,
+}
+
+/// Origin category for a compiled context message or chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSourceKind {
+    /// Message came from the append-only session event log.
+    SessionEvent,
+    /// Message came from graph memory retrieval.
+    GraphMemory,
+    /// Message came from a tool-call event.
+    ToolCall,
+    /// Message came from a tool-result event.
+    ToolResult,
+    /// Message came from a tool-error event.
+    ToolError,
+    /// Message was synthesized by a context processor.
+    Synthetic,
+}
+
+/// Structured provenance for a compiled context message or chunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSourceRef {
+    /// Source category.
+    pub kind: ContextSourceKind,
+    /// Source object identifier, such as a graph node or session event id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uid: Option<Uuid>,
+    /// Persisted session event id, when the source is an event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<Uuid>,
+    /// Persisted session event sequence number, when the source is an event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_sequence_num: Option<u64>,
+    /// Tool call id, when the source is a tool event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<ToolCallId>,
+    /// Human-readable source label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl ContextSourceRef {
+    /// Creates a source ref for a persisted session event.
+    #[must_use]
+    pub fn session_event(record: &EventRecord) -> Self {
+        Self {
+            kind: ContextSourceKind::SessionEvent,
+            source_uid: Some(record.id),
+            event_id: Some(record.id),
+            event_sequence_num: Some(record.sequence_num),
+            tool_id: None,
+            label: Some(format!("{:?}", record.event_type).to_ascii_lowercase()),
+        }
+    }
+
+    /// Creates a source ref for a persisted tool call event.
+    #[must_use]
+    pub fn tool_call_event(record: &EventRecord, tool_id: ToolCallId) -> Self {
+        Self {
+            kind: ContextSourceKind::ToolCall,
+            tool_id: Some(tool_id),
+            ..Self::session_event(record)
+        }
+    }
+
+    /// Creates a source ref for a persisted tool result event.
+    #[must_use]
+    pub fn tool_result_event(record: &EventRecord, tool_id: ToolCallId) -> Self {
+        Self {
+            kind: ContextSourceKind::ToolResult,
+            tool_id: Some(tool_id),
+            ..Self::session_event(record)
+        }
+    }
+
+    /// Creates a source ref for a persisted tool error event.
+    #[must_use]
+    pub fn tool_error_event(record: &EventRecord, tool_id: ToolCallId) -> Self {
+        Self {
+            kind: ContextSourceKind::ToolError,
+            tool_id: Some(tool_id),
+            ..Self::session_event(record)
+        }
+    }
+
+    /// Creates a source ref for a graph-memory node.
+    #[must_use]
+    pub fn graph_memory(uid: Uuid, label: impl Into<String>) -> Self {
+        Self {
+            kind: ContextSourceKind::GraphMemory,
+            source_uid: Some(uid),
+            event_id: None,
+            event_sequence_num: None,
+            tool_id: None,
+            label: Some(label.into()),
+        }
+    }
+
+    /// Creates a source ref for a synthesized context section.
+    #[must_use]
+    pub fn synthetic(label: impl Into<String>) -> Self {
+        Self {
+            kind: ContextSourceKind::Synthetic,
+            source_uid: None,
+            event_id: None,
+            event_sequence_num: None,
+            tool_id: None,
+            label: Some(label.into()),
+        }
+    }
 }
 
 /// Single compiled context message.
@@ -47,6 +159,9 @@ pub struct ContextMessage {
     /// Provider-specific tool use identifier for tool result messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// Structured source references used by lineage and audit paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<ContextSourceRef>,
 }
 
 impl ContextMessage {
@@ -60,6 +175,7 @@ impl ContextMessage {
             content_blocks: None,
             tool_invocation: None,
             tool_use_id: None,
+            source_refs: Vec::new(),
         }
     }
 
@@ -73,6 +189,7 @@ impl ContextMessage {
             content_blocks: None,
             tool_invocation: None,
             tool_use_id: None,
+            source_refs: Vec::new(),
         }
     }
 
@@ -94,6 +211,7 @@ impl ContextMessage {
             content_blocks: None,
             tool_invocation: None,
             tool_use_id: None,
+            source_refs: Vec::new(),
         }
     }
 
@@ -107,6 +225,7 @@ impl ContextMessage {
             content_blocks: None,
             tool_invocation: None,
             tool_use_id: None,
+            source_refs: Vec::new(),
         }
     }
 
@@ -129,6 +248,7 @@ impl ContextMessage {
             content_blocks: None,
             tool_invocation: Some(invocation),
             tool_use_id: None,
+            source_refs: Vec::new(),
         }
     }
 
@@ -146,7 +266,22 @@ impl ContextMessage {
             content_blocks,
             tool_invocation: None,
             tool_use_id: Some(tool_use_id.into()),
+            source_refs: Vec::new(),
         }
+    }
+
+    /// Adds one structured source reference.
+    #[must_use]
+    pub fn with_source_ref(mut self, source: ContextSourceRef) -> Self {
+        self.source_refs.push(source);
+        self
+    }
+
+    /// Replaces structured source references.
+    #[must_use]
+    pub fn with_source_refs(mut self, sources: impl IntoIterator<Item = ContextSourceRef>) -> Self {
+        self.source_refs = sources.into_iter().collect();
+        self
     }
 }
 
@@ -340,8 +475,9 @@ pub fn estimate_text_tokens(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextMessage, MessageRole};
+    use super::{ContextMessage, ContextSourceKind, ContextSourceRef, MessageRole};
     use crate::types::{ToolContent, ToolInvocation};
+    use uuid::Uuid;
 
     #[test]
     fn context_message_tool_result_preserves_text_and_blocks() {
@@ -380,5 +516,18 @@ mod tests {
         assert_eq!(message.tool_invocation, Some(invocation));
         assert!(message.content_blocks.is_none());
         assert!(message.tool_use_id.is_none());
+    }
+
+    #[test]
+    fn context_message_source_refs_are_preserved() {
+        // Pins: compiled context messages can carry structured lineage provenance.
+        let uid = Uuid::now_v7();
+        let source = ContextSourceRef::graph_memory(uid, "Fact:oauth");
+        let message =
+            ContextMessage::user("OAuth uses access tokens.").with_source_ref(source.clone());
+
+        assert_eq!(message.source_refs, vec![source]);
+        assert_eq!(message.source_refs[0].kind, ContextSourceKind::GraphMemory);
+        assert_eq!(message.source_refs[0].source_uid, Some(uid));
     }
 }

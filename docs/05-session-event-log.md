@@ -92,6 +92,11 @@ CREATE TABLE task_segments (
 
 The event table uses a generated `tsvector` column and a GIN index for cross-session search. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
 
+Context compilation preserves event provenance in-memory when replaying session
+history. Compiled context messages can carry the source event id, event sequence
+number, and tool id; context lineage copies those references so citations can be
+joined back to the durable event rows without parsing rendered prompt text.
+
 ## Event Types
 
 `crates/moa-core/src/events.rs` defines the serialized event enum. Current major groups:

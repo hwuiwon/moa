@@ -170,10 +170,12 @@ Artifacts are written to:
 ```text
 target/score-cards/<scenario>.json
 target/eval-output/<scenario>-events.json
+target/eval-output/<scenario>-lineage.json
 ```
 
-Use the score card to identify what changed and the event file to identify
-where it happened.
+Use the score card to identify what changed, the event file to identify where
+it happened, and the lineage file to inspect retrieval, generation, citation,
+and score lineage emitted during the run.
 
 ## Triage
 

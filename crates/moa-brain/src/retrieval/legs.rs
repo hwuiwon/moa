@@ -489,13 +489,14 @@ pub async fn write_retrieval_lineage(
     let mut conn = begin_scoped(&pool, &write_scope, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "INSERT INTO moa.retrieval_lineage \
-         (workspace_id, user_id, session_id, turn_seq, uid, rank, retrieved_at) ",
+         (workspace_id, user_id, session_id, turn_seq, turn_id, uid, rank, retrieved_at) ",
     );
     builder.push_values(ranked_uids.iter().enumerate(), |mut row, (index, uid)| {
         row.push_bind(workspace_id.as_str())
             .push_bind(user_id.as_str())
             .push_bind(lineage.session_id.0)
             .push_bind(lineage.turn_seq)
+            .push_bind(lineage.turn_id.map(|turn_id| turn_id.0))
             .push_bind(*uid)
             .push_bind(i32::try_from(index + 1).unwrap_or(i32::MAX))
             .push_bind(retrieved_at);

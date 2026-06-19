@@ -130,6 +130,7 @@ fn compacted_tool_result(message: &ContextMessage, placeholder: &str) -> Context
             text: placeholder.to_string(),
         }]),
     )
+    .with_source_refs(message.source_refs.clone())
 }
 
 #[cfg(test)]

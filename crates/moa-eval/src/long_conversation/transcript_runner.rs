@@ -12,7 +12,7 @@ use moa_brain::{
         attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
         experience::experience_from_assessment,
     },
-    run_streamed_turn,
+    run_streamed_turn_with_lineage,
 };
 use moa_core::transcript::Transcript;
 use moa_core::{
@@ -40,6 +40,7 @@ use crate::{
     AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus, LongConversationMode,
     LongSessionInterleaving, LongTestCase, Result, ScoreValue, TestCase,
 };
+use moa_lineage_core::LineageEvent;
 
 const MAX_LONG_CONVERSATION_AGENT_TURNS: usize = 32;
 
@@ -52,6 +53,8 @@ pub struct LongRunReport {
     pub score_card: ScoreCard,
     /// Lineage score rows ready for `analytics.scores`.
     pub score_records: Vec<moa_lineage_core::ScoreRecord>,
+    /// Raw lineage events emitted through the eval run's hot-path lineage handle.
+    pub lineage_events: Vec<Value>,
     /// Persisted event payloads emitted during the run.
     pub events: Vec<Event>,
     /// Learning artifacts persisted while the scenario ran.
@@ -471,11 +474,13 @@ fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
         &execution,
         input.started_at,
     );
-    let score_records = score_card.to_score_records(
+    let lineage_events = input.environment.lineage.events();
+    let mut score_records = score_card.to_score_records(
         input.environment.workspace_id.clone(),
         input.environment.user_id.clone(),
         input.environment.session_id,
     );
+    score_records.extend(lineage_events.iter().filter_map(lineage_score_record));
     let result = EvalResult {
         test_case: input.case.name.clone(),
         agent_config: input.agent_config.name.clone(),
@@ -494,10 +499,22 @@ fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
         result,
         score_card,
         score_records,
+        lineage_events,
         events: event_payloads,
         learning: LearningRunSummary::default(),
         skill_manifest_observations: Vec::new(),
         phase_comparison: None,
+    }
+}
+
+fn lineage_score_record(event: &Value) -> Option<moa_lineage_core::ScoreRecord> {
+    match serde_json::from_value::<LineageEvent>(event.clone()) {
+        Ok(LineageEvent::Eval(record)) => Some(record),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!(%error, "failed to decode eval lineage event");
+            None
+        }
     }
 }
 
@@ -534,7 +551,7 @@ async fn drive_one_turn(
     hard_cancel_token: &CancellationToken,
 ) -> Result<()> {
     for turn_index in 0..MAX_LONG_CONVERSATION_AGENT_TURNS {
-        let outcome = run_streamed_turn(
+        let outcome = run_streamed_turn_with_lineage(
             session_id,
             environment.session_store.clone(),
             llm_provider.clone(),
@@ -544,6 +561,7 @@ async fn drive_one_turn(
             None,
             Some(cancel_token.clone()),
             Some(hard_cancel_token.clone()),
+            environment.lineage.clone(),
         )
         .await?;
 

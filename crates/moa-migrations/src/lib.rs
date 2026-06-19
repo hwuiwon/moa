@@ -24,6 +24,7 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000302__action_policy_auto_mode.sql",
     "V000303__age_rls_operator_resolution.sql",
     "V000304__builtin_approvals_resolved_marker.sql",
+    "V000305__retrieval_lineage_turn_id.sql",
 ];
 
 // Schema-isolated session tests do not own artifact/experiment tables. Keep
@@ -112,6 +113,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000303__age_rls_operator_resolution.sql",
         sql: include_str!("../migrations/postgres/V000303__age_rls_operator_resolution.sql"),
+    },
+    SchemaMigration {
+        name: "V000305__retrieval_lineage_turn_id.sql",
+        sql: include_str!("../migrations/postgres/V000305__retrieval_lineage_turn_id.sql"),
     },
 ];
 

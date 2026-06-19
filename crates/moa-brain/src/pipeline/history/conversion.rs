@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use moa_core::{
-    ContextMessage, Event, EventRecord, Result, ToolCallId, ToolContent, ToolOutput,
-    ToolOutputConfig, truncate_head_tail,
+    ContextMessage, ContextSourceRef, Event, EventRecord, Result, ToolCallId, ToolContent,
+    ToolOutput, ToolOutputConfig, truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
 
@@ -25,22 +25,24 @@ fn event_to_context_message(
     file_read_paths: &HashMap<ToolCallId, String>,
 ) -> Option<Result<CompiledRecordMessage>> {
     match &record.event {
-        Event::UserMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(
+        Event::UserMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
             ContextMessage::user(text.clone()),
-        ))),
+            record,
+        )))),
         Event::QueuedMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(
-            ContextMessage::user(text.clone()),
+            sourced_message(ContextMessage::user(text.clone()), record),
         ))),
         Event::BrainResponse {
             text,
             thought_signature,
             ..
-        } => Some(Ok(CompiledRecordMessage::plain(
+        } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
             ContextMessage::assistant_with_thought_signature(
                 text.clone(),
                 thought_signature.clone(),
             ),
-        ))),
+            record,
+        )))),
         Event::ToolCall {
             tool_id,
             provider_tool_use_id,
@@ -64,7 +66,8 @@ fn event_to_context_message(
                             },
                             format!("<tool_call name=\"{tool_name}\">{serialized}</tool_call>"),
                             provider_thought_signature.clone(),
-                        ),
+                        )
+                        .with_source_ref(ContextSourceRef::tool_call_event(record, *tool_id)),
                     )
                 })
                 .map_err(Into::into),
@@ -76,6 +79,7 @@ fn event_to_context_message(
             provider_tool_use_id,
             ..
         } => Some(Ok(tool_result_context_message(
+            record,
             provider_tool_use_id
                 .clone()
                 .unwrap_or_else(|| tool_id.to_string()),
@@ -101,39 +105,50 @@ fn event_to_context_message(
                             text: replayable_error,
                         }]),
                     )
+                    .with_source_ref(ContextSourceRef::tool_error_event(record, *tool_id))
                 }
                 None => ContextMessage::tool(format!(
                     "<tool_error id=\"{tool_id}\">{error}</tool_error>"
-                )),
+                ))
+                .with_source_ref(ContextSourceRef::tool_error_event(record, *tool_id)),
             },
         ))),
-        Event::Warning { message } => Some(Ok(CompiledRecordMessage::plain(
+        Event::Warning { message } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
             ContextMessage::system(format!("<warning>{message}</warning>")),
+            record,
+        )))),
+        Event::MemoryRead { path, scope } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::system(format!(
+                "<memory_event kind=\"read\" scope=\"{scope}\">{path}</memory_event>"
+            ))
+            .with_source_ref(ContextSourceRef::session_event(record)),
         ))),
-        Event::MemoryRead { path, scope } => {
-            Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
-                format!("<memory_event kind=\"read\" scope=\"{scope}\">{path}</memory_event>"),
-            ))))
-        }
-        Event::MemoryWrite { path, summary, .. } => {
-            Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
-                format!("<memory_write path=\"{path}\">{summary}</memory_write>"),
-            ))))
-        }
+        Event::MemoryWrite { path, summary, .. } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::system(format!(
+                "<memory_write path=\"{path}\">{summary}</memory_write>"
+            ))
+            .with_source_ref(ContextSourceRef::session_event(record)),
+        ))),
         Event::MemoryIngest {
             source_name,
             source_path,
             ..
-        } => Some(Ok(CompiledRecordMessage::plain(ContextMessage::system(
-            format!(
+        } => Some(Ok(CompiledRecordMessage::plain(
+            ContextMessage::system(format!(
                 "<memory_ingest source_name=\"{source_name}\" source_path=\"{source_path}\" />"
-            ),
-        )))),
+            ))
+            .with_source_ref(ContextSourceRef::session_event(record)),
+        ))),
         _ => None,
     }
 }
 
+fn sourced_message(message: ContextMessage, record: &EventRecord) -> ContextMessage {
+    message.with_source_ref(ContextSourceRef::session_event(record))
+}
+
 fn tool_result_context_message(
+    record: &EventRecord,
     tool_use_id: String,
     tool_id: ToolCallId,
     success: bool,
@@ -162,7 +177,8 @@ fn tool_result_context_message(
                 wrap_untrusted_tool_output(&replayable_text)
             ),
             replayable_tool_content_blocks(output, &replayable_text, tool_output),
-        ),
+        )
+        .with_source_ref(ContextSourceRef::tool_result_event(record, tool_id)),
         tool_result: file_read_path.as_ref().map(|path| ToolResultReplayMeta {
             tool_use_id,
             tool_id,

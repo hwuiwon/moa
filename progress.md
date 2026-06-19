@@ -1,27 +1,75 @@
-# Progress: Action Policy Auto Mode Planning
+# Progress: Lineage Linkage Hardening
 
-## 2026-06-18
+## 2026-06-19
 
-- Read the `planning-with-files` skill and ran its session catchup script.
-- Read the relevant `graphify` skill sections and confirmed this task should use graphify first because the repo has an existing graph for codebase architecture questions.
-- Created persistent planning files in the MOA repo root.
-- Ran `graphify query` for the action-policy redesign. It identified approval service, turn execution, sub-agent execution, policy, session status, and tests as the relevant implementation surfaces.
-- Ran an initial approval/policy text search. The search included two missing top-level paths, but still produced useful crate and docs hits; this was recorded as a search-shape issue, not a code issue.
-- Read the relevant architecture docs for runtime services, brain orchestration, communication approvals, hands/MCP tool routing, security approval semantics, and event-log groups. The docs currently encode the blocking approval model and must be updated as part of the breaking change.
-- Read core approval, session, sub-agent, wire, event, tool, runtime-event, and session-engine types. Blocking approval is embedded in serialized events, lifecycle statuses, replay helpers, and tool policy metadata, so the plan should make a clean breaking type replacement.
-- Read security policy, config, session-store approval rules, migration snippets, `WorkspaceStore`, `Approvals`, and approval reaper code. The clean boundary is to rename/replace the policy service and store types, while being careful not to conflate privacy approval-token flows with tool/action review.
-- Read root and sub-agent turn execution approval gates. Both workflows block on awakeables and must be changed together.
-- Located the actual session/sub-agent object modules after an incorrect initial path guess.
-- Read session and sub-agent VO trait, handler, and state modules. The plan must delete pending approval VO state/methods and event-based pending awakeable reconstruction.
-- Read `moa-hands` policy, dispatch, registration, normalization, and router struct files. The router already has the right policy/evaluation boundary but its names/defaults are approval-centric.
-- Read `ToolExecutor`, public edge approval routes, and orchestrator startup registration. Policy is checked before `ToolExecutor`, while edge/startup expose `Approvals` as a named product surface that must be renamed for action review.
-- Mapped the main tests that currently pin approval behavior across orchestrator E2E, behavior lab, experiment service, tool executor descriptors, hands diff previews, shell matching, and session blob claim checks.
-- Checked migration numbering and workspace package names for focused verification. A new forward migration after `V000301__ocsf_baseline.sql` is the clean path.
-- Checked public tool descriptors, runtime metrics, analytics status parsing, experiment status models, and artifact workflow statuses for remaining `waiting_approval` surfaces.
-- Checked OpenFGA relation names and existing workspace-admin authorization helpers. The action-review service can use `Workspace:Admin`.
-- Checked skill/workflow context surfaces. Current tool calls do not carry strict skill-step origin, so the plan should add optional origin fields in the action envelope without overbuilding manifest validation in the first pass.
-- Created executable plan at `docs/engineering-discipline/plans/2026-06-18-action-policy-auto-mode.md`.
-- Self-reviewed the plan for placeholder terms and ambiguity; tightened admin-cleared execution to use a fresh tool-call id and removed optional implementation branches.
-- Began executing with `run-plan`. Task 1's core-only implementation passed focused core checks, but the information-isolated validator failed on full-workspace build because downstream crates intentionally had not yet migrated from the removed core approval API.
-- Amended the plan with a `Run-Plan Execution Boundary`: detailed Tasks 1-10 are now ordered checklist sections inside one executable end-to-end task, with full workspace and E2E verification at that boundary instead of after the intentionally breaking core-only slice.
-- After the executable task hit the validator retry limit, added `Executable Task B: Clean Up Residual Tool-Approval Language` to target remaining docs/comments/helper names such as `single_approval_field`, `has_approval_unsafe_shell_syntax`, and `approval matching` in tool/action surfaces.
+- Read planning-with-files, Rust, and test-authoring skill instructions.
+- Ran planning session catchup; no unsynced recovery output was reported.
+- Read `docs/01-architecture-overview.md`, `docs/02-brain-orchestration.md`,
+  `docs/04-memory-architecture.md`, `docs/05-session-event-log.md`, and
+  `docs/07-context-pipeline.md`.
+- Confirmed existing uncommitted eval/harness lineage changes are present and
+  should be preserved.
+- Replaced completed action-policy root planning files with active lineage
+  planning files.
+- Created executable plan at
+  `docs/engineering-discipline/plans/2026-06-19-lineage-linkage.md`.
+- Started Task 1: durable turn-id propagation in the production Restate path.
+- Patched `prepare_turn_request` to accept a typed `TurnId`, insert
+  `_moa.turn_id` before pipeline execution, and pass the workflow key from
+  `TurnExecution`.
+- Ran `cargo check -p moa-orchestrator --tests --locked`; it passed.
+- Added nullable `turn_id` to retrieval sidecar lineage context and writer SQL.
+- Added migration
+  `crates/moa-migrations/migrations/postgres/V000305__retrieval_lineage_turn_id.sql`
+  and registered it in `moa-migrations`.
+- Added citation/generation answer-event id and sequence fields; production
+  `TurnExecution` now does a bounded recent `BrainResponse` lookup and attaches
+  the matching event record when found.
+- Added citation verifier overhead metrics for source count, answer bytes, and
+  verifier duration.
+- Updated architecture docs for production lineage linkage, retrieval sidecar
+  `turn_id`, and context source refs.
+- Ran focused unit tests:
+  - `cargo test -p moa-core --locked context_message_source_refs_are_preserved -- --nocapture`
+  - `cargo test -p moa-brain --features eval-harness --locked context_chunk_preserves_structured_source_refs -- --nocapture`
+  - `cargo test -p moa-brain --locked lineage_context_uses_compiled_turn_id_metadata -- --nocapture`
+  - `cargo test -p moa-brain --features eval-harness --locked citation_lineage_cites_context_source_for_answer -- --nocapture`
+- Mutation-verified `context_chunk_preserves_structured_source_refs` by
+  temporarily forcing chunk `source_uid` to the session id; the test failed on
+  the source UID assertion, then passed after revert.
+- Ran verification:
+  - `cargo fmt --all`
+  - `cargo check -p moa-brain --features eval-harness --tests --locked`
+  - `cargo check -p moa-orchestrator --tests --locked`
+  - `cargo check -p moa-migrations --tests --locked`
+  - `cargo check -p moa-eval --tests --locked`
+  - `cargo run -p xtask -- check-migrations`
+  - `cargo clippy -p moa-brain --features eval-harness --tests --locked -- -D warnings`
+  - `cargo clippy -p moa-orchestrator --tests --locked -- -D warnings`
+  - `cargo clippy -p moa-migrations --tests --locked -- -D warnings`
+  - `git diff --check`
+- Started Task 2: structured source refs for context lineage.
+- Added `ContextSourceKind` and `ContextSourceRef` to `moa-core`, plus
+  `ContextMessage.source_refs` and builder helpers.
+- Added `ContextChunk.source_refs` in `moa-lineage-core`.
+- Preserved event/tool source refs during history conversion and compacted error
+  replay.
+- Added graph-memory source refs when the memory retriever inserts the rendered
+  memory reminder.
+- Updated context lineage chunk construction to copy refs and use the first real
+  source UID as the legacy `source_uid`.
+- Ran `cargo check -p moa-brain --features eval-harness --tests --locked`; it
+  passed.
+- Ran `cargo check -p moa-orchestrator --tests --locked`; it passed.
+- Started Task 3: production generation/citation lineage emission.
+- Promoted the harness lineage helpers to shared `moa_brain::lineage`.
+- Added `ChunkRef` serde derives and direct manifest dependencies where needed.
+- Production request preparation now emits `ContextLineage` and carries citable
+  chunks through `PreparedTurnRequestOutput`.
+- `TurnExecution` now emits `GenerationLineage`, `CitationLineage`, and related
+  scores after the LLM gateway returns.
+- Fixed missing `serde` and `moa-lineage-citation` manifest dependencies found
+  by focused checks.
+- Ran `cargo check -p moa-brain --features eval-harness --tests --locked`; it
+  passed.
+- Ran `cargo check -p moa-orchestrator --tests --locked`; it passed.

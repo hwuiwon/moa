@@ -17,6 +17,7 @@ use moa_brain::learning::{
     attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
     experience::experience_from_assessment,
 };
+use moa_brain::lineage::emit_generation_lineage;
 use moa_brain::pipeline::segments::SegmentTracker;
 use moa_brain::segment_assessment::{
     AssessmentOverride, SegmentAssessor, continuation_signal, self_assessment_signal,
@@ -27,9 +28,10 @@ use moa_core::restate_observability::{
     event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
 };
 use moa_core::wire::{
-    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetSegmentBaselineRequest,
-    RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest, RunTurnRequest, TurnOutcome,
-    TurnOutcomeKind, TurnPhase, TurnProgress, UpdateSegmentAssessmentRequest,
+    AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
+    GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
+    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+    UpdateSegmentAssessmentRequest,
 };
 use moa_core::{
     ActionPolicyEffect, ActiveSegment, AssessmentPhase, CompletionRequest, CompletionResponse,
@@ -41,6 +43,8 @@ use moa_core::{
     record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
     record_turn_workflow_outcome, scope_turn_latency_counters, scope_turn_replay_counters,
 };
+use moa_lineage_citation::ChunkRef;
+use moa_lineage_core::TurnId;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
@@ -85,6 +89,7 @@ struct BuiltTurnRequest {
     request: CompletionRequest,
     active_canary: Option<String>,
     trusted_sandbox_files: Vec<SandboxFile>,
+    citation_sources: Vec<ChunkRef>,
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -124,8 +129,10 @@ impl TurnExecution for TurnExecutionImpl {
         );
 
         let session_id = parse_session_id(&request.session_id)?;
+        let turn_id = parse_turn_id(&request.turn_id)?;
         let workflow_started = Instant::now();
-        let outcome = match execute_turn_inside_workflow(&ctx, &request, session_id).await {
+        let outcome = match execute_turn_inside_workflow(&ctx, &request, session_id, turn_id).await
+        {
             Ok(body) => {
                 let phase = match body.kind {
                     TurnOutcomeKind::Completed => TurnPhase::Completed,
@@ -208,6 +215,7 @@ async fn execute_turn_inside_workflow(
     ctx: &WorkflowContext<'_>,
     request: &RunTurnRequest,
     session_id: SessionId,
+    turn_id: TurnId,
 ) -> Result<BodyOutcome, HandlerError> {
     if let Some(reason) = cancel_requested(ctx).await? {
         return Ok(BodyOutcome {
@@ -255,7 +263,7 @@ async fn execute_turn_inside_workflow(
             let turn_latency_counters = Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
             let turn_started = Instant::now();
             let turn_result = scope_turn_latency_counters(turn_latency_counters.clone(), async {
-                run_once_inside_workflow(ctx, session_id, &mut last_summary)
+                run_once_inside_workflow(ctx, session_id, turn_id, &mut last_summary)
                     .instrument(turn_root_span.clone())
                     .await
             })
@@ -314,6 +322,7 @@ async fn execute_turn_inside_workflow(
 async fn run_once_inside_workflow(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    turn_id: TurnId,
     last_summary: &mut Option<String>,
 ) -> Result<CoreTurnOutcome, HandlerError> {
     if let Some(reason) = cancel_requested(ctx).await? {
@@ -322,13 +331,14 @@ async fn run_once_inside_workflow(
     }
 
     ctx.set(K_PHASE, Json::from(TurnPhase::Compiling));
-    let Some(built_request) = build_request_inside_workflow(ctx, session_id).await? else {
+    let Some(built_request) = build_request_inside_workflow(ctx, session_id, turn_id).await? else {
         return Ok(CoreTurnOutcome::Idle);
     };
     let BuiltTurnRequest {
         mut request,
         active_canary,
         trusted_sandbox_files,
+        citation_sources,
     } = built_request;
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
@@ -353,6 +363,12 @@ async fn run_once_inside_workflow(
     ensure_dispatch_tool_schema(&mut request);
     ensure_delegation_tool_schemas(&mut request);
     let allowed_tools = allowed_tool_names(&request);
+    let request_model = request
+        .model
+        .as_ref()
+        .map(|model| model.as_str())
+        .unwrap_or(meta.model.as_str())
+        .to_string();
 
     ctx.set(K_PHASE, Json::from(TurnPhase::Streaming));
     let span = llm_call_span(&meta);
@@ -370,10 +386,30 @@ async fn run_once_inside_workflow(
                 .complete(Json::from(request))
                 .call() => {
                     response?.into_inner()
-                }
+            }
         }
     };
-    record_turn_llm_call_duration(llm_started.elapsed());
+    let llm_call_duration = llm_started.elapsed();
+    record_turn_llm_call_duration(llm_call_duration);
+    let response_usage = response.token_usage();
+    let response_cost_cents =
+        crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), response_usage);
+    let response_event = latest_matching_brain_response_event(ctx, session_id, &response).await?;
+    let lineage = OrchestratorCtx::current_lineage();
+    emit_generation_lineage(
+        lineage.as_ref(),
+        turn_id,
+        &meta,
+        "llm_gateway",
+        &request_model,
+        &response,
+        &citation_sources,
+        response_cost_cents,
+        llm_call_duration,
+        &span,
+        response_event.as_ref(),
+    )
+    .await;
 
     record_response(ctx, session_id, &response, last_summary).await?;
 
@@ -400,6 +436,7 @@ async fn run_once_inside_workflow(
 async fn build_request_inside_workflow(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    turn_id: TurnId,
 ) -> Result<Option<BuiltTurnRequest>, HandlerError> {
     let active_user_sequence_num = ctx
         .get::<Json<u64>>(K_USER_MESSAGE_SEQUENCE)
@@ -411,10 +448,15 @@ async fn build_request_inside_workflow(
         .map(Json::into_inner);
     let prepared = ctx
         .run(|| async move {
-            prepare_turn_request(session_id, active_user_sequence_num, cached_query_rewrite)
-                .await
-                .map(Json::from)
-                .map_err(to_handler_error)
+            prepare_turn_request(
+                session_id,
+                turn_id,
+                active_user_sequence_num,
+                cached_query_rewrite,
+            )
+            .await
+            .map(Json::from)
+            .map_err(to_handler_error)
         })
         .name("prepare_turn_request")
         .await?
@@ -431,6 +473,7 @@ async fn build_request_inside_workflow(
             request: *request,
             active_canary: prepared.active_canary,
             trusted_sandbox_files: prepared.trusted_sandbox_files,
+            citation_sources: prepared.citation_sources,
         }),
     })
 }
@@ -1392,6 +1435,31 @@ async fn record_response(
     Ok(())
 }
 
+async fn latest_matching_brain_response_event(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    response: &CompletionResponse,
+) -> Result<Option<EventRecord>, HandlerError> {
+    let events = ctx
+        .service_client::<RestateSessionStoreClient>()
+        .get_events(Json(GetEventsRequest {
+            session_id,
+            range: EventRange::recent(8),
+        }))
+        .call()
+        .await?
+        .into_inner();
+    Ok(events
+        .into_iter()
+        .filter(|record| match &record.event {
+            Event::BrainResponse { text, model, .. } => {
+                text == &response.text && model == &response.model
+            }
+            _ => false,
+        })
+        .max_by_key(|record| record.sequence_num))
+}
+
 async fn record_segment_tool_use(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -1544,6 +1612,12 @@ fn parse_session_id(raw: &str) -> Result<SessionId, HandlerError> {
     uuid::Uuid::parse_str(raw)
         .map(SessionId)
         .map_err(|error| TerminalError::new(format!("invalid session_id `{raw}`: {error}")).into())
+}
+
+fn parse_turn_id(raw: &str) -> Result<TurnId, HandlerError> {
+    uuid::Uuid::parse_str(raw)
+        .map(TurnId)
+        .map_err(|error| TerminalError::new(format!("invalid turn_id `{raw}`: {error}")).into())
 }
 
 async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, HandlerError> {

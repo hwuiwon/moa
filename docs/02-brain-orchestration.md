@@ -99,6 +99,13 @@ The turn loop is durable because external calls and side effects are wrapped thr
 
 The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer that drains on shutdown. Maximum queue depth and batch size come from `config.observability.lineage` in `MoaConfig`.
 
+`TurnExecution` threads its workflow key through context compilation as the
+lineage `turn_id`. Graph-memory retrieval, compiled context, generation,
+citation, and online score records for the same user turn use that id so
+`LineageAdmin/explain` can render one turn tree. The compiled-context record
+also carries structured source references for event-log messages, tool
+messages, and graph-memory nodes when those sources are known.
+
 ### Provider Overrides For Test Runs
 
 `MOA_PROVIDERS_OVERRIDE` is a dev/CI-only startup switch for replacing normal

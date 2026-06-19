@@ -45,6 +45,7 @@ moa-eval = { workspace = true, optional = true }
 moa-experiments.workspace = true
 moa-hands = { workspace = true }
 moa-lineage-audit = { workspace = true }
+moa-lineage-citation = { workspace = true }
 moa-lineage-core = { workspace = true }
 moa-lineage-sink = { workspace = true }
 moa-memory-graph = { workspace = true }

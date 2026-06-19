@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
-use moa_brain::{StreamedTurnResult, run_streamed_turn};
+use moa_brain::{StreamedTurnResult, run_streamed_turn_with_lineage};
 use moa_core::{Event, EventRange, LLMProvider, MoaConfig, RuntimeEvent};
 use opentelemetry::trace::TraceContextExt;
 use tokio::sync::broadcast;
@@ -373,7 +373,7 @@ async fn run_environment(
     let (runtime_tx, _) = broadcast::channel::<RuntimeEvent>(256);
 
     for turn_index in 0..MAX_AGENT_TURNS {
-        let outcome = run_streamed_turn(
+        let outcome = run_streamed_turn_with_lineage(
             environment.session_id,
             environment.session_store.clone(),
             environment.llm_provider.clone(),
@@ -383,6 +383,7 @@ async fn run_environment(
             None,
             Some(cancel_token.clone()),
             Some(hard_cancel_token.clone()),
+            environment.lineage.clone(),
         )
         .await?;
 

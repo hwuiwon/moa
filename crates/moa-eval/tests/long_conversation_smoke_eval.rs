@@ -217,6 +217,10 @@ fn write_report_artifacts(
         eval_output_dir.join(format!("{scenario_name}-events.json")),
         serde_json::to_vec_pretty(&report.events)?,
     )?;
+    std::fs::write(
+        eval_output_dir.join(format!("{scenario_name}-lineage.json")),
+        serde_json::to_vec_pretty(&report.lineage_events)?,
+    )?;
     Ok(())
 }
 

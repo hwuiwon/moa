@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_core::{MemoryScope, MoaConfig, ScopeContext, ScopedConn, SessionId};
+use moa_lineage_core::TurnId;
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
@@ -92,6 +93,8 @@ pub struct RetrievalRequest {
 pub struct LineageContext {
     /// Session that issued the retrieval.
     pub session_id: SessionId,
+    /// Durable lineage turn id when known.
+    pub turn_id: Option<TurnId>,
     /// Monotonic turn sequence when known.
     pub turn_seq: i64,
 }

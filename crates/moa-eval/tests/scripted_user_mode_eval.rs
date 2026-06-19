@@ -12,6 +12,7 @@ use moa_eval::{
     ActionPolicyOverride, AgentConfig, EngineOptions, EvalStatus, LongConversationMode,
     LongTestCase, TestCase, TestCaseKind, TestSuite,
 };
+use moa_lineage_core::{LineageEvent, ScoreValue as LineageScoreValue};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -167,6 +168,7 @@ async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> Test
     );
     assert_eq!(report.score_card.functional.turn_count, 1);
     assert_eq!(report.result.metrics.turn_count, 1);
+    assert_tool_turn_lineage_is_captured(&report)?;
     assert_eq!(
         provider.seen_user_messages(),
         vec![
@@ -189,6 +191,94 @@ async fn scripted_user_runner_drives_tool_turn_and_checks_final_answer() -> Test
         )),
         "bash tool result was not persisted"
     );
+    Ok(())
+}
+
+fn assert_tool_turn_lineage_is_captured(
+    report: &moa_eval::long_conversation::LongRunReport,
+) -> TestResult {
+    // Pins: eval runs retain streamed context, generation, and citation verifier lineage.
+    let lineage_events = report
+        .lineage_events
+        .iter()
+        .map(|event| serde_json::from_value::<LineageEvent>(event.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        lineage_events
+            .iter()
+            .filter(|event| matches!(event, LineageEvent::Context(_)))
+            .count(),
+        2,
+        "tool flow should compile context for the tool-call and final-answer provider turns"
+    );
+    assert_eq!(
+        lineage_events
+            .iter()
+            .filter(|event| matches!(event, LineageEvent::Generation(_)))
+            .count(),
+        2,
+        "tool flow should capture generation lineage for both provider responses"
+    );
+    let citation_events = lineage_events
+        .iter()
+        .filter_map(|event| match event {
+            LineageEvent::Citation(record) => Some(record),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        citation_events.len(),
+        2,
+        "tool flow should emit citation lineage for both provider responses"
+    );
+    let cited_answer = citation_events
+        .iter()
+        .find(|event| !event.citations.is_empty())
+        .expect("final answer should cite the tool-result context");
+    assert_eq!(
+        cited_answer.citations.len(),
+        1,
+        "final answer should produce one best citation candidate"
+    );
+    assert_eq!(
+        cited_answer.citations[0].verifier.method,
+        "bm25+lexical_overlap"
+    );
+
+    let citation_scores = report
+        .score_records
+        .iter()
+        .filter(|record| record.name == "citation_verified")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        citation_scores.len(),
+        1,
+        "citation verifier score should be retained in report.score_records"
+    );
+    assert_eq!(
+        citation_scores[0].model_or_evaluator,
+        "bm25+lexical_overlap"
+    );
+
+    let lexical_scores = report
+        .score_records
+        .iter()
+        .filter(|record| record.name == "lexical_overlap")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lexical_scores.len(),
+        1,
+        "lexical-overlap score should be retained in report.score_records"
+    );
+    match lexical_scores[0].value {
+        LineageScoreValue::Numeric(score) => {
+            assert!(
+                score > 0.0,
+                "lexical-overlap score should reflect shared terms"
+            );
+        }
+        ref other => panic!("lexical-overlap score should be numeric, got {other:?}"),
+    }
     Ok(())
 }
 

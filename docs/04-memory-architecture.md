@@ -90,9 +90,10 @@ The memory processor runs after query rewriting and before history compilation. 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
 When `memory.retrieval.lineage_enabled` is true, retrieval records best-effort
-lineage rows after ranking: workspace, user, session, turn sequence, node UID,
-rank, and timestamp. The write is fire-and-forget and flag-dark by default, so
-normal retrieval does not wait on lineage persistence.
+lineage rows after ranking: workspace, user, session, turn sequence, durable
+turn id when known, node UID, rank, and timestamp. The write is fire-and-forget
+and flag-dark by default, so normal retrieval does not wait on lineage
+persistence.
 
 ## Consolidation
 
