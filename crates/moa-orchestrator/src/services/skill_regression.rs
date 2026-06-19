@@ -18,6 +18,8 @@ use moa_eval::{
     evaluate_run,
 };
 #[cfg(feature = "internal-eval-runner")]
+use moa_providers::ProviderRegistry;
+#[cfg(feature = "internal-eval-runner")]
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::SkillRegistry;
 #[cfg(feature = "internal-eval-runner")]
@@ -30,9 +32,6 @@ use serde_json::{Value, json};
 use tokio::fs;
 #[cfg(feature = "internal-eval-runner")]
 use uuid::Uuid;
-
-#[cfg(feature = "internal-eval-runner")]
-use crate::services::llm_gateway::ProviderRegistry;
 
 #[cfg(feature = "internal-eval-runner")]
 const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
@@ -205,11 +204,11 @@ async fn internal_eval_regression_report_inner(
     }
 
     let executed = execute_previous_and_candidate(
-        &config,
-        &suite,
-        &skill_name,
-        &previous_markdown,
-        &candidate_markdown,
+        config.clone(),
+        suite.clone(),
+        skill_name.clone(),
+        previous_markdown,
+        candidate_markdown,
         provider,
     )
     .await?;
@@ -318,26 +317,34 @@ struct ExecutedRegressionRuns {
 
 #[cfg(feature = "internal-eval-runner")]
 async fn execute_previous_and_candidate(
-    config: &MoaConfig,
-    suite: &TestSuite,
-    skill_name: &str,
-    previous_markdown: &str,
-    candidate_markdown: &str,
+    config: MoaConfig,
+    suite: TestSuite,
+    skill_name: String,
+    previous_markdown: String,
+    candidate_markdown: String,
     provider: Arc<dyn LLMProvider>,
 ) -> Result<ExecutedRegressionRuns> {
     let temp_root = std::env::temp_dir().join(format!("moa-skill-review-{}", Uuid::now_v7()));
-    let previous_dir =
-        materialize_skill_dir(&temp_root.join("previous"), skill_name, previous_markdown).await?;
-    let candidate_dir =
-        materialize_skill_dir(&temp_root.join("candidate"), skill_name, candidate_markdown).await?;
+    let previous_dir = materialize_skill_dir(
+        temp_root.join("previous"),
+        skill_name.clone(),
+        previous_markdown,
+    )
+    .await?;
+    let candidate_dir = materialize_skill_dir(
+        temp_root.join("candidate"),
+        skill_name.clone(),
+        candidate_markdown,
+    )
+    .await?;
 
     let previous = execute_skill_suite(
-        config,
-        suite,
-        &previous_dir,
-        skill_name,
+        config.clone(),
+        suite.clone(),
+        previous_dir,
+        skill_name.clone(),
         provider.clone(),
-        "previous",
+        "previous".to_string(),
     )
     .await;
     let candidate = match previous {
@@ -345,10 +352,10 @@ async fn execute_previous_and_candidate(
             let candidate = execute_skill_suite(
                 config,
                 suite,
-                &candidate_dir,
+                candidate_dir,
                 skill_name,
                 provider,
-                "candidate",
+                "candidate".to_string(),
             )
             .await;
             candidate.map(|candidate| ExecutedRegressionRuns {
@@ -365,16 +372,16 @@ async fn execute_previous_and_candidate(
 
 #[cfg(feature = "internal-eval-runner")]
 async fn execute_skill_suite(
-    config: &MoaConfig,
-    suite: &TestSuite,
-    skill_dir: &Path,
-    skill_name: &str,
+    config: MoaConfig,
+    suite: TestSuite,
+    skill_dir: PathBuf,
+    skill_name: String,
     provider: Arc<dyn LLMProvider>,
-    label: &str,
+    label: String,
 ) -> Result<EvalRun> {
-    let agent_config = skill_agent_config(skill_name, skill_dir, label);
+    let agent_config = skill_agent_config(&skill_name, &skill_dir, &label);
     let engine = EvalEngine::new(
-        config.clone(),
+        config,
         EngineOptions {
             parallel: 1,
             temp_dir: std::env::temp_dir().join("moa-eval-skill-review"),
@@ -383,11 +390,11 @@ async fn execute_skill_suite(
     )
     .map_err(map_eval_error)?;
     let mut run = engine
-        .run_suite_with_provider(suite, std::slice::from_ref(&agent_config), provider)
+        .run_suite_with_provider(&suite, std::slice::from_ref(&agent_config), provider)
         .await
         .map_err(map_eval_error)?;
     let evaluators = default_skill_evaluators()?;
-    evaluate_run(suite, &mut run, &evaluators)
+    evaluate_run(&suite, &mut run, &evaluators)
         .await
         .map_err(map_eval_error)?;
     Ok(run)
@@ -408,8 +415,12 @@ fn skill_agent_config(skill_name: &str, skill_dir: &Path, label: &str) -> AgentC
 }
 
 #[cfg(feature = "internal-eval-runner")]
-async fn materialize_skill_dir(root: &Path, skill_name: &str, markdown: &str) -> Result<PathBuf> {
-    let slug = slugify_skill_name(skill_name);
+async fn materialize_skill_dir(
+    root: PathBuf,
+    skill_name: String,
+    markdown: String,
+) -> Result<PathBuf> {
+    let slug = slugify_skill_name(&skill_name);
     let skill_dir = root.join(slug);
     fs::create_dir_all(&skill_dir).await?;
     fs::write(skill_dir.join("SKILL.md"), markdown).await?;

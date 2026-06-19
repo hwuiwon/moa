@@ -9,7 +9,8 @@ use sqlx::PgPool;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::time::interval;
-use uuid::Uuid;
+
+use crate::authz_challenges::store as authz_challenge_store;
 
 /// Authz challenge reaper failures.
 #[derive(Debug, Error)]
@@ -20,6 +21,9 @@ pub enum ReaperError {
     /// Decision payload serialization failed.
     #[error("serialize authz challenge decision: {0}")]
     Serde(#[from] serde_json::Error),
+    /// Persisted challenge status cannot be resolved.
+    #[error("invalid terminal authz challenge status: {0}")]
+    InvalidStatus(String),
     /// HTTP client construction failed.
     #[error("build awakeable resolver HTTP client: {0}")]
     BuildClient(reqwest::Error),
@@ -82,31 +86,39 @@ impl AuthzChallengeReaper {
 
     /// Run one timeout sweep.
     pub async fn sweep(&self, resolver: &dyn AwakeableResolver) -> Result<usize, ReaperError> {
-        let expired: Vec<(Uuid, String)> = sqlx::query_as(
-            r#"
-            UPDATE builtin_pending_approvals
-            SET status = 'timeout',
-                decided_at = NOW()
-            WHERE status = 'pending' AND expires_at <= NOW()
-            RETURNING id, awakeable_id
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let unresolved =
+            authz_challenge_store::unresolved_terminal_builtin_challenges(&self.pool).await?;
 
-        for (id, awakeable_id) in &expired {
-            let payload = serde_json::to_value(&ApprovalDecision::Timeout)?;
-            if let Err(error) = resolver.resolve(awakeable_id, &payload).await {
+        for challenge in &unresolved {
+            let decision = decision_from_unresolved_challenge(challenge)?;
+            let payload = serde_json::to_value(&decision)?;
+            if let Err(error) = resolver.resolve(&challenge.awakeable_id, &payload).await {
                 tracing::warn!(
-                    authz_challenge_id = %id,
-                    awakeable_id = %awakeable_id,
+                    authz_challenge_id = %challenge.id,
+                    awakeable_id = %challenge.awakeable_id,
                     error = %error,
-                    "timeout awakeable resolve failed"
+                    "authz challenge awakeable resolve failed"
                 );
+                continue;
             }
+            authz_challenge_store::mark_builtin_challenge_resolved(&self.pool, challenge.id)
+                .await?;
         }
 
-        Ok(expired.len())
+        Ok(unresolved.len())
+    }
+}
+
+fn decision_from_unresolved_challenge(
+    challenge: &authz_challenge_store::UnresolvedBuiltinChallenge,
+) -> Result<ApprovalDecision, ReaperError> {
+    match challenge.status.as_str() {
+        "approved" => Ok(ApprovalDecision::Approved),
+        "denied" => Ok(ApprovalDecision::Denied {
+            reason: challenge.deny_reason.clone(),
+        }),
+        "timeout" => Ok(ApprovalDecision::Timeout),
+        other => Err(ReaperError::InvalidStatus(other.to_string())),
     }
 }
 
@@ -174,5 +186,40 @@ impl AwakeableResolver for HttpAwakeableResolver {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn unresolved_challenge_status_maps_to_awakeable_decision() {
+        // Pins: the reaper reconstructs the original terminal decision before retrying delivery.
+        let denied = authz_challenge_store::UnresolvedBuiltinChallenge {
+            id: Uuid::now_v7(),
+            awakeable_id: "awakeable-denied".to_string(),
+            status: "denied".to_string(),
+            deny_reason: Some("policy denied".to_string()),
+        };
+        let timeout = authz_challenge_store::UnresolvedBuiltinChallenge {
+            id: Uuid::now_v7(),
+            awakeable_id: "awakeable-timeout".to_string(),
+            status: "timeout".to_string(),
+            deny_reason: None,
+        };
+
+        assert_eq!(
+            decision_from_unresolved_challenge(&denied).expect("denial maps"),
+            ApprovalDecision::Denied {
+                reason: Some("policy denied".to_string())
+            }
+        );
+        assert_eq!(
+            decision_from_unresolved_challenge(&timeout).expect("timeout maps"),
+            ApprovalDecision::Timeout
+        );
     }
 }

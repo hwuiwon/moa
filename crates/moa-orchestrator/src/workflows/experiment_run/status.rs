@@ -79,7 +79,7 @@ pub(super) async fn workflow_status_response(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunStatusRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     Ok(ctx
         .run(|| async move { status_response(pool, request).await.map(Json::from) })
         .name("experiment_run_response")
@@ -103,8 +103,7 @@ async fn derived_session_status(
     let Some(session_id) = session_id else {
         return Ok(Some(row_status));
     };
-    let session = OrchestratorCtx::current()
-        .session_store
+    let session = OrchestratorCtx::current_session_store()
         .get_session(session_id)
         .await
         .map_err(moa_error_to_handler_error)?;

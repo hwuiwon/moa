@@ -1,0 +1,328 @@
+//! Admin helpers for compliance lineage audit reads, verification, export, and erasure.
+
+use std::path::Path;
+
+use chrono::{DateTime, Utc};
+use serde_json::Value;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+use crate::{
+    AuditError, DsarBundle, DsarExporter, PiiVault, Result, SigningKey, blake3_merkle_root,
+};
+use moa_lineage_core::chain::{HashChain, hash_from_slice};
+
+/// One compliance lineage row used by hash-chain verification.
+#[derive(Debug, Clone)]
+pub struct ComplianceRow {
+    /// Turn identifier for the row.
+    pub turn_id: Uuid,
+    /// Numeric lineage record kind.
+    pub record_kind: i16,
+    /// Timestamp when the row was captured.
+    pub ts: DateTime<Utc>,
+    /// Canonical lineage payload.
+    pub payload: Value,
+    /// Stored integrity hash.
+    pub integrity_hash: Vec<u8>,
+    /// Stored previous-row hash.
+    pub prev_hash: Option<Vec<u8>>,
+}
+
+/// Verification result for a lineage hash-chain window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerificationReport {
+    /// Number of records verified.
+    pub records: usize,
+}
+
+/// Stored audit root window metadata.
+#[derive(Debug, Clone)]
+pub struct AuditRootRow {
+    /// Audit root identifier.
+    pub root_id: Uuid,
+    /// Workspace covered by the root.
+    pub workspace_id: String,
+    /// Root window start timestamp.
+    pub window_start: DateTime<Utc>,
+    /// Root window end timestamp.
+    pub window_end: DateTime<Utc>,
+    /// Stored Merkle root bytes.
+    pub merkle_root: Vec<u8>,
+}
+
+/// Loads a published audit root by root UUID or S3 object URI.
+pub async fn load_audit_root(
+    pool: &PgPool,
+    workspace_id: &str,
+    id_or_uri: &str,
+) -> Result<AuditRootRow> {
+    let row = if let Ok(root_id) = Uuid::parse_str(id_or_uri) {
+        sqlx::query(
+            r#"
+            SELECT root_id, workspace_id, window_start, window_end, merkle_root
+            FROM analytics.audit_roots
+            WHERE workspace_id = $1 AND root_id = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(root_id)
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT root_id, workspace_id, window_start, window_end, merkle_root
+            FROM analytics.audit_roots
+            WHERE workspace_id = $1 AND s3_object_uri = $2
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(id_or_uri)
+        .fetch_one(pool)
+        .await?
+    };
+    Ok(AuditRootRow {
+        root_id: row.try_get("root_id")?,
+        workspace_id: row.try_get("workspace_id")?,
+        window_start: row.try_get("window_start")?,
+        window_end: row.try_get("window_end")?,
+        merkle_root: row.try_get("merkle_root")?,
+    })
+}
+
+/// Loads compliance rows for a relative hot-store interval.
+pub async fn load_compliance_rows_for_interval(
+    pool: &PgPool,
+    workspace_id: &str,
+    since: &str,
+) -> Result<Vec<ComplianceRow>> {
+    load_compliance_rows(
+        sqlx::query(
+            r#"
+            SELECT turn_id, record_kind, ts, payload, integrity_hash, prev_hash
+            FROM analytics.turn_lineage
+            WHERE workspace_id = $1
+              AND prev_hash IS NOT NULL
+              AND ts > now() - ($2::text)::interval
+            ORDER BY ts ASC, turn_id ASC, record_kind ASC
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(since)
+        .fetch_all(pool)
+        .await?,
+    )
+}
+
+/// Loads compliance rows for an exact audit-root window.
+pub async fn load_compliance_rows_for_window(
+    pool: &PgPool,
+    workspace_id: &str,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+) -> Result<Vec<ComplianceRow>> {
+    load_compliance_rows(
+        sqlx::query(
+            r#"
+            SELECT turn_id, record_kind, ts, payload, integrity_hash, prev_hash
+            FROM analytics.turn_lineage
+            WHERE workspace_id = $1
+              AND prev_hash IS NOT NULL
+              AND ts >= $2
+              AND ts <= $3
+            ORDER BY ts ASC, turn_id ASC, record_kind ASC
+            "#,
+        )
+        .bind(workspace_id)
+        .bind(window_start)
+        .bind(window_end)
+        .fetch_all(pool)
+        .await?,
+    )
+}
+
+/// Verifies hash-chain links and an optional Merkle root for compliance rows.
+pub fn verify_compliance_rows(
+    rows: Vec<ComplianceRow>,
+    expected_root: Option<Vec<u8>>,
+) -> Result<VerificationReport> {
+    let mut leaves = Vec::with_capacity(rows.len());
+    let mut previous_integrity: Option<&[u8]> = None;
+    for (index, row) in rows.iter().enumerate() {
+        if let (Some(previous), Some(prev_hash)) = (previous_integrity, row.prev_hash.as_deref())
+            && prev_hash != previous
+        {
+            return Err(AuditError::ChainMismatch {
+                index,
+                message: format!(
+                    "chain link mismatch at turn={} kind={} ts={}",
+                    row.turn_id, row.record_kind, row.ts
+                ),
+            });
+        }
+        let prev = row.prev_hash.as_deref().map(hash_from_slice).transpose()?;
+        let (actual, _) = HashChain::link(prev, &row.payload)?;
+        if actual.as_bytes() != row.integrity_hash.as_slice() {
+            return Err(AuditError::ChainMismatch {
+                index,
+                message: format!(
+                    "chain mismatch at turn={} kind={} ts={}",
+                    row.turn_id, row.record_kind, row.ts
+                ),
+            });
+        }
+        previous_integrity = Some(&row.integrity_hash);
+        leaves.push(row.integrity_hash.clone());
+    }
+    if let Some(expected_root) = expected_root {
+        let actual_root = blake3_merkle_root(&leaves)?;
+        if actual_root.as_bytes() != expected_root.as_slice() {
+            return Err(AuditError::Invalid(
+                "merkle root mismatch for verified window".to_string(),
+            ));
+        }
+    }
+    Ok(VerificationReport {
+        records: rows.len(),
+    })
+}
+
+/// Writes a DSAR bundle from already-collected lineage records.
+pub async fn export_dsar_bundle(
+    workspace_id: &str,
+    subject: &str,
+    records: Vec<Value>,
+    bundle_path: &Path,
+) -> Result<DsarBundle> {
+    let signing = local_service_signing_key("dsar-export");
+    let exporter = DsarExporter::new(signing);
+    exporter
+        .export_records(
+            workspace_id,
+            subject.as_bytes().to_vec(),
+            records,
+            Vec::new(),
+            bundle_path,
+        )
+        .await
+}
+
+/// Marks a lineage PII-vault subject pseudonym as erased.
+pub async fn erase_subject_pseudonym(
+    pool: &PgPool,
+    workspace_id: &str,
+    subject_pseudonym: &[u8],
+    secret: Vec<u8>,
+    key_handle: &str,
+) -> Result<u64> {
+    let vault = PiiVault::with_pool(pool.clone(), secret, key_handle);
+    vault.erase_subject(workspace_id, subject_pseudonym).await
+}
+
+/// Builds the deterministic local service signing key for admin exports.
+#[must_use]
+pub fn local_service_signing_key(label: &str) -> SigningKey {
+    SigningKey::from_seed(
+        label.to_string(),
+        *blake3::hash(format!("moa-orchestrator-local-signing:{label}").as_bytes()).as_bytes(),
+    )
+}
+
+fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<ComplianceRow>> {
+    rows.into_iter()
+        .map(|row| {
+            Ok(ComplianceRow {
+                turn_id: row.try_get("turn_id")?,
+                record_kind: row.try_get("record_kind")?,
+                ts: row.try_get("ts")?,
+                payload: row.try_get("payload")?,
+                integrity_hash: row.try_get("integrity_hash")?,
+                prev_hash: row.try_get("prev_hash")?,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ComplianceRow, verify_compliance_rows};
+    use crate::blake3_merkle_root;
+    use chrono::Utc;
+    use moa_lineage_core::chain::HashChain;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn verify_compliance_rows_pins_chain_and_merkle_root() {
+        // Pins: compliance audit verification checks exact hash-chain links and the published Merkle root.
+        let first_payload = json!({"record": {"kind": "first"}});
+        let second_payload = json!({"record": {"kind": "second"}});
+        let (first_hash, first_prev) =
+            HashChain::link(None, &first_payload).expect("first hash should compute");
+        let (second_hash, second_prev) =
+            HashChain::link(Some(first_hash), &second_payload).expect("second hash should compute");
+        let leaves = vec![
+            first_hash.as_bytes().to_vec(),
+            second_hash.as_bytes().to_vec(),
+        ];
+        let root = blake3_merkle_root(&leaves).expect("root should compute");
+        let rows = vec![
+            ComplianceRow {
+                turn_id: Uuid::new_v4(),
+                record_kind: 1,
+                ts: Utc::now(),
+                payload: first_payload,
+                integrity_hash: first_hash.as_bytes().to_vec(),
+                prev_hash: first_prev.map(|hash| hash.as_bytes().to_vec()),
+            },
+            ComplianceRow {
+                turn_id: Uuid::new_v4(),
+                record_kind: 2,
+                ts: Utc::now(),
+                payload: second_payload,
+                integrity_hash: second_hash.as_bytes().to_vec(),
+                prev_hash: second_prev.map(|hash| hash.as_bytes().to_vec()),
+            },
+        ];
+
+        let report = verify_compliance_rows(rows, Some(root.as_bytes().to_vec()))
+            .expect("valid chain should verify");
+
+        assert_eq!(report.records, 2);
+    }
+
+    #[test]
+    fn verify_compliance_rows_rejects_broken_chain_link() {
+        // Pins: compliance audit verification detects a stored prev_hash that does not match the previous row.
+        let first_payload = json!({"record": {"kind": "first"}});
+        let second_payload = json!({"record": {"kind": "second"}});
+        let (first_hash, first_prev) =
+            HashChain::link(None, &first_payload).expect("first hash should compute");
+        let (second_hash, _) =
+            HashChain::link(Some(first_hash), &second_payload).expect("second hash should compute");
+        let rows = vec![
+            ComplianceRow {
+                turn_id: Uuid::new_v4(),
+                record_kind: 1,
+                ts: Utc::now(),
+                payload: first_payload,
+                integrity_hash: first_hash.as_bytes().to_vec(),
+                prev_hash: first_prev.map(|hash| hash.as_bytes().to_vec()),
+            },
+            ComplianceRow {
+                turn_id: Uuid::new_v4(),
+                record_kind: 2,
+                ts: Utc::now(),
+                payload: second_payload,
+                integrity_hash: second_hash.as_bytes().to_vec(),
+                prev_hash: Some([9_u8; 32].to_vec()),
+            },
+        ];
+
+        let error = verify_compliance_rows(rows, None)
+            .expect_err("broken chain link should fail verification");
+
+        assert!(error.to_string().contains("chain link mismatch"));
+    }
+}

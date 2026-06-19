@@ -12,126 +12,38 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::{Parser, Subcommand};
-use moa_authz::AwakeableResolver;
-use moa_brain::build_default_graph_memory_retriever;
-use moa_core::config::{AsyncAuthzKind, AuthHeaderTrustKind};
+use moa_core::config::AuthHeaderTrustKind;
 use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
-use moa_hands::ToolRouter;
-use moa_memory_ingest::{IngestionVO, IngestionVOImpl};
-#[cfg(feature = "internal-eval-runner")]
-use moa_orchestrator::services::eval::{Eval, EvalImpl};
-#[cfg(feature = "internal-eval-runner")]
-use moa_orchestrator::workflows::eval_run::{EvalRun, EvalRunImpl};
-#[cfg(feature = "skill-learning")]
-use moa_orchestrator::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
 use moa_orchestrator::{
-    OrchestratorCtx,
     config::{
         ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
         skip_fga_from_env,
     },
     ctx::{self, HeaderTrustMode},
-    lineage::build_lineage_sink,
-    objects::cron_job::{CronJob, CronJobImpl},
-    objects::session::{Session, SessionImpl},
-    objects::sub_agent::{SubAgent, SubAgentImpl},
-    objects::workspace::{WorkspaceImpl, WorkspaceObject},
-    services::{
-        action_reviews::{ActionReviews, ActionReviewsImpl},
-        admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
-        agents::{Agents, AgentsImpl},
-        analytics::{Analytics, AnalyticsImpl},
-        api_keys::{ApiKeys, ApiKeysImpl},
-        artifacts::{Artifacts, ArtifactsImpl},
-        audit::{Audit, AuditImpl},
-        authz_admin::{Authz, AuthzImpl},
-        authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
-        authz_challenges_reaper::{
-            AuthzChallengeReaper, AuthzChallengeReaperHandle, HttpAwakeableResolver,
+    runtime::{
+        database::{apply_database_migrations, build_database_pool, database_search_path},
+        deps::RuntimeDeps,
+        endpoint::{
+            DeploymentListResponse, RegisteredDeployment, build_endpoint, services_registered,
         },
-        experiments::{Experiments, ExperimentsImpl},
-        graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
-        health::{Health, HealthImpl},
-        learning_review::{LearningReview, LearningReviewImpl},
-        lineage_admin::{LineageAdmin, LineageAdminImpl},
-        llm_gateway::{LLMGateway, LLMGatewayImpl, ProviderRegistry},
-        memory::{Memory, MemoryImpl},
-        neon_maint::{NeonMaint, NeonMaintImpl},
-        privacy::{Privacy, PrivacyImpl},
-        scim::{self, ScimState},
-        session_store::{RestateSessionStore, SessionStoreImpl},
-        skills::{Skills, SkillsImpl},
-        tenants::{Tenants, TenantsImpl},
-        tool_executor::{ToolExecutor, ToolExecutorImpl},
-        whoami::{Whoami, WhoamiImpl},
-        workflows::{Workflows, WorkflowsImpl},
-        workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
+        jobs::{
+            restate_ingress_base_url, spawn_default_cron_bootstrap,
+            start_authz_challenge_reaper_if_configured,
+        },
     },
-    workflows::{
-        consolidate::{Consolidate, ConsolidateImpl},
-        experiment_run::{ExperimentRun, ExperimentRunImpl},
-        experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl},
-        sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
-        turn_execution::{TurnExecution, TurnExecutionImpl},
-    },
+    services::scim::{self, ScimState},
 };
-use moa_providers::build_embedding_provider_from_config;
-use moa_session::PostgresSessionStore;
 use reqwest::Client;
 use restate_sdk::prelude::*;
-use serde::Deserialize;
-use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_RESTATE_PORT: u16 = 10020;
-const DEFAULT_RESTATE_INGRESS_PORT: u16 = 8080;
 const DEFAULT_HEALTH_PORT: u16 = 10021;
 const DEFAULT_SCIM_PORT: u16 = 10022;
 const ADMIN_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
-const CRON_BOOTSTRAP_ATTEMPTS: u32 = 60;
-const CRON_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(2);
 const SHUTDOWN_DRAIN_DELAY: Duration = Duration::from_secs(5);
-const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
-    "Agents",
-    "AdminMaintenance",
-    "Analytics",
-    "ActionReviews",
-    "Artifacts",
-    "ApiKeys",
-    "Audit",
-    "Authz",
-    "AuthzChallenges",
-    "Consolidate",
-    "CronJob",
-    "Experiments",
-    "ExperimentRun",
-    "ExperimentTrialRun",
-    "GraphMemoryMaint",
-    "Health",
-    "IngestionVO",
-    "LearningReview",
-    "LineageAdmin",
-    "LLMGateway",
-    "Memory",
-    "NeonMaint",
-    "Privacy",
-    "Session",
-    "SessionStore",
-    "Skills",
-    "SubAgent",
-    "SubAgentTurnExecution",
-    "Tenants",
-    "ToolExecutor",
-    "TurnExecution",
-    "Workspace",
-    "WorkspaceStore",
-    "Whoami",
-    "Workflows",
-];
-const INTERNAL_EVAL_SERVICE_NAMES: &[&str] = &["Eval", "EvalRun"];
-const SKILL_LEARNING_SERVICE_NAMES: &[&str] = &["SkillLearning"];
 
 /// Process arguments for the orchestrator process.
 #[derive(Debug, Parser)]
@@ -171,12 +83,7 @@ async fn main() -> anyhow::Result<()> {
             ..TelemetryConfig::default()
         },
     )?;
-    let database_search_path = moa_config
-        .database
-        .schema
-        .as_deref()
-        .map(|schema_name| format!("{}, public", quote_identifier(schema_name)))
-        .unwrap_or_else(|| "public".to_string());
+    let database_search_path = database_search_path(moa_config.as_ref());
     let migration_pool = build_database_pool(
         moa_config.database.admin_url(),
         &database_search_path,
@@ -203,134 +110,35 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("connect runtime database pool")?;
-    moa_authz::configure_security_audit(pool.clone(), moa_config.audit_security.emit_authz_allows);
-    let fga_client = if skip_fga {
-        tracing::warn!("MOA_SKIP_FGA set; authz outbox poller disabled");
-        None
-    } else {
-        Some(build_fga_client(moa_config.as_ref())?)
-    };
-    let poller_handle = fga_client
-        .clone()
-        .map(|fga_client| start_authz_outbox_poller(&pool, fga_client));
-    let session_store = Arc::new(
-        PostgresSessionStore::from_existing_pool(&moa_config.database.url, pool.clone()).await?,
-    );
-    let awakeable_resolver: Arc<dyn AwakeableResolver> = Arc::new(HttpAwakeableResolver::new(
-        cron_bootstrap_ingress_url(&restate_ingress_url),
-    )?);
-    let auth_providers = moa_auth_providers::build_providers_with_resolver(
-        moa_config.as_ref(),
-        Arc::new(pool.clone()),
-        Some(awakeable_resolver.clone()),
+    let mut runtime_deps = RuntimeDeps::build(
+        moa_config.clone(),
+        pool.clone(),
+        &restate_ingress_url,
+        providers_override,
+        skip_fga,
     )
-    .context("build providers bundle")?;
-
-    let llm_providers = Arc::new(match providers_override {
-        ProvidersOverride::None => ProviderRegistry::from_config(moa_config.as_ref()),
-        ProvidersOverride::Scripted { path } => {
-            tracing::warn!(
-                path = %path.display(),
-                "loading scripted provider override (test mode)"
-            );
-            ProviderRegistry::scripted(path)?
-        }
-        ProvidersOverride::Mock { seed } => {
-            tracing::warn!(seed, "using mock provider override (test mode)");
-            ProviderRegistry::mock(seed)?
-        }
-    });
-    let embedding_provider = build_embedding_provider_from_config(moa_config.as_ref())?;
-    let tool_router = Arc::new(
-        ToolRouter::from_config(moa_config.as_ref())
-            .await?
-            .with_rule_store(session_store.clone())
-            .with_session_store(session_store.clone()),
-    );
-    let lineage = build_lineage_sink(moa_config.as_ref(), pool.clone()).await?;
-    let graph_memory_retriever = build_default_graph_memory_retriever(
-        moa_config.as_ref(),
-        session_store.pool().clone(),
-        lineage.handle.clone(),
-    );
-    let ctx = Arc::new(OrchestratorCtx {
-        config: moa_config.clone(),
-        session_store: session_store.clone(),
-        graph_pool: session_store.pool().clone(),
-        fga_client,
-        auth_providers: auth_providers.clone(),
-        providers: llm_providers.clone(),
-        embedding_provider: embedding_provider.clone(),
-        tool_router: tool_router.clone(),
-        tool_schemas: Arc::new(tool_router.tool_schemas()),
-        graph_memory_retriever,
-        lineage: lineage.handle.clone(),
-        lineage_writer: lineage.writer.clone(),
-    });
-    OrchestratorCtx::install(ctx).expect("install orchestrator ctx");
-    let _ = moa_memory_ingest::install_runtime_with_config(pool.clone(), moa_config.as_ref());
+    .await?;
+    runtime_deps
+        .install_orchestrator_ctx()
+        .map_err(anyhow::Error::msg)?;
     let scim_base_url = std::env::var("MOA_SCIM_BASE_URL")
         .unwrap_or_else(|_| format!("http://localhost:{}/scim/v2", args.scim_port));
-    let scim_state = ScimState::new(
-        pool.clone(),
-        Arc::new(moa_auth_providers::LocalAuthProvider::new(Arc::new(
-            pool.clone(),
-        ))),
-        OrchestratorCtx::current().fga_client.clone(),
-        scim_base_url,
-    );
+    let scim_state = runtime_deps.scim_state(scim_base_url);
 
-    let endpoint = Endpoint::builder()
-        .bind(HealthImpl.serve())
-        .bind(SessionStoreImpl::new(session_store.clone()).serve())
-        .bind(LLMGatewayImpl::new(llm_providers).serve())
-        .bind(AgentsImpl.serve())
-        .bind(AdminMaintenanceImpl.serve())
-        .bind(AnalyticsImpl.serve())
-        .bind(ArtifactsImpl.serve())
-        .bind(ActionReviewsImpl.serve())
-        .bind(ApiKeysImpl.serve())
-        .bind(AuditImpl.serve())
-        .bind(AuthzImpl.serve())
-        .bind(AuthzChallengesImpl.serve());
-    #[cfg(feature = "internal-eval-runner")]
-    let endpoint = endpoint.bind(EvalImpl.serve());
-    let endpoint = endpoint
-        .bind(ExperimentsImpl.serve())
-        .bind(IngestionVOImpl.serve())
-        .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
-        .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
-        .bind(GraphMemoryMaintImpl.serve())
-        .bind(LearningReviewImpl.serve())
-        .bind(LineageAdminImpl.serve())
-        .bind(MemoryImpl.serve())
-        .bind(NeonMaintImpl.serve())
-        .bind(PrivacyImpl.serve())
-        .bind(SkillsImpl.serve())
-        .bind(CronJobImpl.serve())
-        .bind(SessionImpl.serve())
-        .bind(SubAgentImpl.serve())
-        .bind(TenantsImpl.serve())
-        .bind(WorkspaceImpl.serve())
-        .bind(WhoamiImpl.serve())
-        .bind(WorkflowsImpl.serve())
-        .bind(ConsolidateImpl.serve());
-    #[cfg(feature = "internal-eval-runner")]
-    let endpoint = endpoint.bind(EvalRunImpl.serve());
-    #[cfg(feature = "skill-learning")]
-    let endpoint = endpoint.bind(SkillLearningImpl.serve());
-    let endpoint = endpoint
-        .bind(ExperimentRunImpl.serve())
-        .bind(ExperimentTrialRunImpl.serve())
-        .bind(SubAgentTurnExecutionImpl.serve())
-        .bind(TurnExecutionImpl.serve())
-        .build();
+    let endpoint = build_endpoint(
+        runtime_deps.session_store.clone(),
+        runtime_deps.providers.clone(),
+        runtime_deps.tool_router.clone(),
+    );
 
     let readiness = Arc::new(AtomicBool::new(false));
     let probe_state = ProbeState::new(readiness.clone(), pool.clone(), restate_admin_url)?;
     let shutdown = CancellationToken::new();
-    let authz_challenge_reaper_handle =
-        start_authz_challenge_reaper_if_configured(&pool, moa_config.as_ref(), awakeable_resolver)?;
+    let authz_challenge_reaper_handle = start_authz_challenge_reaper_if_configured(
+        &pool,
+        moa_config.as_ref(),
+        runtime_deps.awakeable_resolver.clone(),
+    )?;
 
     let restate_listener = bind_listener(args.port).await?;
     let health_listener = bind_listener(args.health_port).await?;
@@ -350,10 +158,16 @@ async fn main() -> anyhow::Result<()> {
         "starting moa-orchestrator"
     );
     readiness.store(true, Ordering::Release);
-    let _cron_bootstrap = spawn_default_cron_bootstrap(
-        probe_state.clone(),
-        cron_bootstrap_ingress_url(&restate_ingress_url),
-    );
+    let _cron_bootstrap = {
+        let probe_state = probe_state.clone();
+        spawn_default_cron_bootstrap(
+            move || {
+                let probe_state = probe_state.clone();
+                async move { probe_state.fetch_deployments().await }
+            },
+            restate_ingress_base_url(&restate_ingress_url),
+        )
+    };
 
     tokio::select! {
         result = &mut restate_server => {
@@ -385,14 +199,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("shutdown signal received, draining");
             readiness.store(false, Ordering::Release);
 
-            if let Some(poller_handle) = poller_handle {
+            if let Some(poller_handle) = runtime_deps.authz_outbox_poller.take() {
                 poller_handle.shutdown().await;
             }
             if let Some(reaper_handle) = authz_challenge_reaper_handle {
                 reaper_handle.shutdown().await;
             }
 
-            if let Some(writer) = OrchestratorCtx::current().lineage_writer.clone() {
+            if let Some(writer) = runtime_deps.lineage.writer.clone() {
                 tracing::info!("draining lineage writer");
                 match writer.shutdown().await {
                     Ok(stats) => tracing::info!(
@@ -431,84 +245,6 @@ fn header_trust_mode_from_config(config: &MoaConfig) -> HeaderTrustMode {
         AuthHeaderTrustKind::Strict => HeaderTrustMode::Strict,
         AuthHeaderTrustKind::Lenient => HeaderTrustMode::Lenient,
     }
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-async fn build_database_pool(
-    database_url: &str,
-    database_search_path: &str,
-    max_connections: u32,
-    connect_timeout: Duration,
-) -> anyhow::Result<PgPool> {
-    PgPoolOptions::new()
-        .max_connections(max_connections)
-        .acquire_timeout(connect_timeout)
-        .after_connect({
-            let database_search_path = database_search_path.to_string();
-            move |conn, _meta| {
-                let database_search_path = database_search_path.clone();
-                Box::pin(async move {
-                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
-                        .bind(database_search_path)
-                        .execute(conn)
-                        .await?;
-                    Ok(())
-                })
-            }
-        })
-        .connect(database_url)
-        .await
-        .map_err(Into::into)
-}
-
-async fn apply_database_migrations(config: &MoaConfig, _pool: &PgPool) -> anyhow::Result<()> {
-    moa_migrations::run(config.database.admin_url())
-        .await
-        .context("apply database migrations")?;
-    Ok(())
-}
-
-fn build_fga_client(config: &MoaConfig) -> anyhow::Result<moa_authz::FgaClient> {
-    let openfga = config
-        .authz
-        .openfga
-        .as_ref()
-        .context("authz.openfga config missing")?;
-    moa_authz::FgaClient::new(moa_authz::FgaConfig {
-        url: openfga.url.clone(),
-        preshared_key: openfga.preshared_key.clone(),
-        store_id: openfga.store_id.clone(),
-        model_id: openfga.model_id.clone(),
-        timeout_ms: openfga.timeout_ms,
-    })
-    .context("build OpenFGA client")
-}
-
-fn start_authz_outbox_poller(
-    pool: &PgPool,
-    fga_client: moa_authz::FgaClient,
-) -> moa_authz::PollerHandle {
-    let outbox_poller =
-        moa_authz::OutboxPoller::new(pool.clone(), fga_client, moa_authz::PollerConfig::default());
-    let poller_handle = outbox_poller.spawn();
-    tracing::info!("authz outbox poller started");
-    poller_handle
-}
-
-fn start_authz_challenge_reaper_if_configured(
-    pool: &PgPool,
-    config: &MoaConfig,
-    resolver: Arc<dyn AwakeableResolver>,
-) -> anyhow::Result<Option<AuthzChallengeReaperHandle>> {
-    if config.async_authz.provider != AsyncAuthzKind::Builtin {
-        return Ok(None);
-    }
-    let handle = AuthzChallengeReaper::new(pool.clone()).spawn(resolver);
-    tracing::info!("authz challenge reaper started");
-    Ok(Some(handle))
 }
 
 #[derive(Clone)]
@@ -584,23 +320,6 @@ impl ProbeState {
             .context("decode Restate deployment list response")?;
         Ok(payload.deployments)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct DeploymentListResponse {
-    deployments: Vec<RegisteredDeployment>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisteredDeployment {
-    id: String,
-    services: Vec<RegisteredService>,
-    uri: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisteredService {
-    name: String,
 }
 
 async fn live_handler() -> impl IntoResponse {
@@ -681,123 +400,6 @@ fn spawn_scim_server(
     shutdown: CancellationToken,
 ) -> JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move { serve_scim_server(listener, state, shutdown).await })
-}
-
-fn spawn_default_cron_bootstrap(state: ProbeState, ingress_url: String) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        for attempt in 1..=CRON_BOOTSTRAP_ATTEMPTS {
-            match state.fetch_deployments().await {
-                Ok(deployments) if services_registered(&deployments) => {
-                    if let Err(error) = install_default_cron_jobs(&ingress_url).await {
-                        tracing::warn!(
-                            error = %error,
-                            "failed to install default cron jobs; will not retry"
-                        );
-                    }
-                    return;
-                }
-                Ok(_) => tracing::debug!(
-                    attempt,
-                    "waiting for Restate service registration before cron bootstrap"
-                ),
-                Err(error) => tracing::debug!(
-                    attempt,
-                    error = %error,
-                    "failed to check Restate registration before cron bootstrap"
-                ),
-            }
-            tokio::time::sleep(CRON_BOOTSTRAP_INTERVAL).await;
-        }
-
-        tracing::warn!(
-            attempts = CRON_BOOTSTRAP_ATTEMPTS,
-            "default cron job bootstrap timed out waiting for Restate registration"
-        );
-    })
-}
-
-fn cron_bootstrap_ingress_url(configured_ingress_url: &str) -> String {
-    let trimmed = configured_ingress_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return format!("http://localhost:{DEFAULT_RESTATE_INGRESS_PORT}");
-    }
-    trimmed.to_string()
-}
-
-async fn install_default_cron_jobs(ingress_url: &str) -> anyhow::Result<()> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("build cron-bootstrap HTTP client")?;
-    let ingress_url = ingress_url.trim_end_matches('/');
-
-    for job in default_cron_jobs() {
-        let response = client
-            .post(format!("{ingress_url}/CronJob/{}/configure", job.key))
-            .header(
-                "idempotency-key",
-                format!("cron-config-{}-{}", job.key, job.version),
-            )
-            .header("content-type", "application/json")
-            .json(&job.body)
-            .send()
-            .await
-            .with_context(|| format!("configure cron job {}", job.key))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            bail!("cron configure {} returned {status}: {text}", job.key);
-        }
-
-        tracing::info!(key = job.key, "cron job configured");
-    }
-
-    Ok(())
-}
-
-struct DefaultCronJob {
-    key: &'static str,
-    body: serde_json::Value,
-    version: &'static str,
-}
-
-fn default_cron_jobs() -> Vec<DefaultCronJob> {
-    vec![
-        DefaultCronJob {
-            key: "graph_memory_compact",
-            body: serde_json::json!({
-                "schedule": "0 0 * * * *",
-                "timezone": "UTC",
-                "target_service": "GraphMemoryMaint",
-                "target_handler": "compact",
-                "payload": {}
-            }),
-            version: "v1",
-        },
-        DefaultCronJob {
-            key: "segment_materialized_views_refresh",
-            body: serde_json::json!({
-                "schedule": "0 */15 * * * *",
-                "timezone": "UTC",
-                "target_service": "SessionStore",
-                "target_handler": "refresh_segment_materialized_views",
-                "payload": {}
-            }),
-            version: "v1",
-        },
-        DefaultCronJob {
-            key: "neon_prune_branches",
-            body: serde_json::json!({
-                "schedule": "0 0 0,6,12,18 * * *",
-                "timezone": "UTC",
-                "target_service": "NeonMaint",
-                "target_handler": "prune_branches",
-                "payload": null
-            }),
-            version: "v1",
-        },
-    ]
 }
 
 async fn bind_listener(port: u16) -> anyhow::Result<TcpListener> {
@@ -901,176 +503,9 @@ fn env_flag_from_reader(
         .unwrap_or(default)
 }
 
-fn expected_service_names() -> Vec<&'static str> {
-    expected_service_names_for_features(
-        cfg!(feature = "internal-eval-runner"),
-        cfg!(feature = "skill-learning"),
-    )
-}
-
-#[cfg(test)]
-fn expected_service_names_for_internal_eval(internal_eval_enabled: bool) -> Vec<&'static str> {
-    expected_service_names_for_features(internal_eval_enabled, cfg!(feature = "skill-learning"))
-}
-
-fn expected_service_names_for_features(
-    internal_eval_enabled: bool,
-    skill_learning_enabled: bool,
-) -> Vec<&'static str> {
-    let mut names = DEFAULT_EXPECTED_SERVICE_NAMES.to_vec();
-    if internal_eval_enabled {
-        names.extend_from_slice(INTERNAL_EVAL_SERVICE_NAMES);
-    }
-    if skill_learning_enabled {
-        names.extend_from_slice(SKILL_LEARNING_SERVICE_NAMES);
-    }
-    names
-}
-
-fn services_registered(deployments: &[RegisteredDeployment]) -> bool {
-    let expected_services = expected_service_names();
-    services_registered_with_expected(deployments, &expected_services)
-}
-
-fn services_registered_with_expected(
-    deployments: &[RegisteredDeployment],
-    expected_services: &[&str],
-) -> bool {
-    deployments.iter().any(|deployment| {
-        expected_services.iter().all(|expected| {
-            deployment
-                .services
-                .iter()
-                .any(|service| service.name == *expected)
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        RegisteredDeployment, RegisteredService, env_flag_from_reader,
-        expected_service_names_for_features, expected_service_names_for_internal_eval,
-        services_registered, services_registered_with_expected,
-    };
-
-    fn deployment_with_services(services: &[&str]) -> RegisteredDeployment {
-        RegisteredDeployment {
-            id: "dp_test".to_string(),
-            uri: Some("http://localhost:10020".to_string()),
-            services: services
-                .iter()
-                .map(|name| RegisteredService {
-                    name: (*name).to_string(),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn default_expected_services_hide_hosted_eval() {
-        let names = expected_service_names_for_internal_eval(false);
-
-        assert!(
-            !names.contains(&"Eval"),
-            "default product readiness must not expect hosted Eval service"
-        );
-        assert!(
-            !names.contains(&"EvalRun"),
-            "default product readiness must not expect hosted EvalRun workflow"
-        );
-        assert!(
-            names.contains(&"Experiments"),
-            "default product readiness should include Experiments"
-        );
-        assert!(
-            names.contains(&"ExperimentRun"),
-            "default product readiness should include ExperimentRun"
-        );
-        assert!(
-            names.contains(&"ExperimentTrialRun"),
-            "default product readiness should include ExperimentTrialRun"
-        );
-    }
-
-    #[test]
-    fn internal_eval_gate_adds_hosted_eval_services() {
-        let names = expected_service_names_for_internal_eval(true);
-
-        assert_eq!(
-            names.iter().filter(|name| **name == "Eval").count(),
-            1,
-            "internal eval gate should add Eval exactly once"
-        );
-        assert_eq!(
-            names.iter().filter(|name| **name == "EvalRun").count(),
-            1,
-            "internal eval gate should add EvalRun exactly once"
-        );
-        assert!(
-            names.contains(&"Experiments"),
-            "internal eval mode should keep Experiments registered"
-        );
-        assert!(
-            names.contains(&"ExperimentRun"),
-            "internal eval mode should keep ExperimentRun registered"
-        );
-        assert!(
-            names.contains(&"ExperimentTrialRun"),
-            "internal eval mode should keep ExperimentTrialRun registered"
-        );
-    }
-
-    #[test]
-    fn registration_check_requires_all_expected_services() {
-        let names =
-            expected_service_names_for_internal_eval(cfg!(feature = "internal-eval-runner"));
-        let deployments = vec![deployment_with_services(&names)];
-
-        assert!(services_registered(&deployments));
-    }
-
-    #[test]
-    fn registration_check_rejects_partial_deployments() {
-        let deployments = vec![deployment_with_services(&["Health", "SessionStore"])];
-
-        assert!(!services_registered(&deployments));
-    }
-
-    #[test]
-    fn internal_eval_registration_requires_eval_and_eval_run_when_enabled() {
-        let default_names = expected_service_names_for_internal_eval(false);
-        let internal_names = expected_service_names_for_internal_eval(true);
-        let default_deployment = vec![deployment_with_services(&default_names)];
-        let internal_deployment = vec![deployment_with_services(&internal_names)];
-
-        assert!(
-            !services_registered_with_expected(&default_deployment, &internal_names),
-            "internal eval readiness must reject a deployment missing Eval and EvalRun"
-        );
-        assert!(
-            services_registered_with_expected(&internal_deployment, &internal_names),
-            "internal eval readiness should accept Eval and EvalRun when explicitly enabled"
-        );
-    }
-
-    #[test]
-    fn skill_learning_feature_adds_skill_learning_workflow() {
-        let names = expected_service_names_for_features(false, true);
-
-        assert_eq!(
-            names
-                .iter()
-                .filter(|name| **name == "SkillLearning")
-                .count(),
-            1,
-            "skill-learning feature should add SkillLearning exactly once"
-        );
-        assert!(
-            !expected_service_names_for_features(false, false).contains(&"SkillLearning"),
-            "builds without the feature must not expect SkillLearning"
-        );
-    }
+    use super::env_flag_from_reader;
 
     #[test]
     fn env_flag_understands_common_truthy_and_falsey_values() {

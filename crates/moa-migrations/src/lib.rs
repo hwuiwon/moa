@@ -23,6 +23,7 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000301__ocsf_baseline.sql",
     "V000302__action_policy_auto_mode.sql",
     "V000303__age_rls_operator_resolution.sql",
+    "V000304__builtin_approvals_resolved_marker.sql",
 ];
 
 // Schema-isolated session tests do not own artifact/experiment tables. Keep

@@ -83,7 +83,7 @@ impl Analytics for AnalyticsImpl {
         annotate_restate_handler_span("Analytics", "session_stats");
         let request = request.into_inner();
         authorize_session_participant(&ctx, request.session_id).await?;
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
             .run(|| async move {
@@ -106,7 +106,7 @@ impl Analytics for AnalyticsImpl {
         annotate_restate_handler_span("Analytics", "workspace_stats");
         let request = request.into_inner();
         authorize_workspace_member(&ctx, &request.workspace_id).await?;
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
             .run(|| async move {
@@ -141,7 +141,7 @@ impl Analytics for AnalyticsImpl {
                 authorize_deployment_operator(&ctx).await?;
             }
         }
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
             .run(|| async move {
@@ -165,7 +165,7 @@ impl Analytics for AnalyticsImpl {
         annotate_restate_handler_span("Analytics", "cache_stats");
         let request = request.into_inner();
         authorize_workspace_member(&ctx, &request.workspace_id).await?;
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
             .run(|| async move {
@@ -196,7 +196,7 @@ impl Analytics for AnalyticsImpl {
         annotate_restate_handler_span("Analytics", "experiment_stats");
         let request = request.into_inner();
         authorize_workspace_member(&ctx, &request.workspace_id).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { experiment_stats_inner(pool, request).await.map(Json::from) })
@@ -219,7 +219,7 @@ impl Analytics for AnalyticsImpl {
             }
             LearningCandidateReadScope::Tenant => authorize_tenant_admin(&ctx).await?,
         };
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
             .run(|| async move {
@@ -245,7 +245,7 @@ impl Analytics for AnalyticsImpl {
         annotate_restate_handler_span("Analytics", "session_search");
         let request = request.into_inner();
         authorize_workspace_member(&ctx, &request.workspace_id).await?;
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
             .run(|| async move {

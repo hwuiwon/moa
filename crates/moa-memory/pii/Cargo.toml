@@ -6,12 +6,15 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+moa-core = { workspace = true }
 moa-memory-graph = { workspace = true }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "uuid"] }
 thiserror.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]

@@ -302,6 +302,35 @@ impl PostgresSessionStore {
             .map(|affected| affected > 0)
     }
 
+    /// Applies a status transition in the caller's open transaction.
+    pub async fn update_learning_candidate_status_from_in_tx(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        update: &LearningCandidateStatusUpdate,
+        expected_status: LearningCandidateStatus,
+    ) -> Result<bool> {
+        let learning_candidates = self.table_name("learning_candidates");
+        let affected = sqlx::query(&format!(
+            "UPDATE {learning_candidates} SET \
+                 status = $1, \
+                 status_reason = $2, \
+                 evaluation_payload = COALESCE($3, evaluation_payload), \
+                 updated_at = $4 \
+             WHERE id = $5 AND status = $6"
+        ))
+        .bind(update.status.as_str())
+        .bind(update.status_reason.as_deref())
+        .bind(update.evaluation_payload.clone().map(Json))
+        .bind(update.updated_at)
+        .bind(update.candidate_id)
+        .bind(expected_status.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
     async fn update_learning_candidate_status_with_expected(
         &self,
         update: &LearningCandidateStatusUpdate,

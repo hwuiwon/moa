@@ -188,7 +188,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
     ) -> Result<Json<ExperimentTrialRunStatusResponse>, HandlerError> {
         annotate_restate_handler_span("ExperimentTrialRun", "status");
         let request = request.into_inner();
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         Ok(ctx
             .run(|| async move { trial_status_response(pool, request).await.map(Json::from) })
             .name("experiment_trial_status")

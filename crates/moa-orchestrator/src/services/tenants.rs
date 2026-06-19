@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::identity_admin::tenants as tenant_admin;
 
 /// Request for configuring a tenant audit destination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,14 +61,13 @@ impl Tenants for TenantsImpl {
         let identity = require_identity(&ctx)?;
         let tenant_id = tenant_id.into_inner();
         require_tenant_admin(&identity, tenant_id).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
-                let key_id = moa_ocsf::ensure_key(&pool, tenant_id)
+                tenant_admin::ensure_signing_key(pool, tenant_id)
                     .await
-                    .map_err(|error| TerminalError::new(format!("ensure signing key: {error}")))?;
-                Ok(Json(key_id))
+                    .map(Json)
             })
             .name("tenants_ensure_signing_key")
             .await?)
@@ -83,14 +83,13 @@ impl Tenants for TenantsImpl {
         let identity = require_identity(&ctx)?;
         let tenant_id = tenant_id.into_inner();
         require_tenant_admin(&identity, tenant_id).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
-                let key_id = moa_ocsf::rotate_key(&pool, tenant_id)
+                tenant_admin::rotate_signing_key(pool, tenant_id)
                     .await
-                    .map_err(|error| TerminalError::new(format!("rotate signing key: {error}")))?;
-                Ok(Json(key_id))
+                    .map(Json)
             })
             .name("tenants_rotate_signing_key")
             .await?)
@@ -107,38 +106,10 @@ impl Tenants for TenantsImpl {
         let request = request.into_inner();
         validate_destination(&request)?;
         require_tenant_admin(&identity, request.tenant_id).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
-            .run(|| async move {
-                sqlx::query(
-                    r#"
-                    INSERT INTO tenant_audit_destinations
-                        (tenant_id, bucket_name, region, assume_role_arn,
-                         key_prefix, object_lock_days, encryption_kms_key_arn)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    ON CONFLICT (tenant_id)
-                    DO UPDATE SET
-                        bucket_name = EXCLUDED.bucket_name,
-                        region = EXCLUDED.region,
-                        assume_role_arn = EXCLUDED.assume_role_arn,
-                        key_prefix = EXCLUDED.key_prefix,
-                        object_lock_days = EXCLUDED.object_lock_days,
-                        encryption_kms_key_arn = EXCLUDED.encryption_kms_key_arn
-                    "#,
-                )
-                .bind(request.tenant_id)
-                .bind(&request.bucket_name)
-                .bind(&request.region)
-                .bind(request.assume_role_arn.as_deref())
-                .bind(request.key_prefix.as_deref().unwrap_or("ocsf/"))
-                .bind(request.object_lock_days.unwrap_or(2190))
-                .bind(request.encryption_kms_key_arn.as_deref())
-                .execute(&pool)
-                .await
-                .map_err(|error| TerminalError::new(format!("set audit destination: {error}")))?;
-                Ok(())
-            })
+            .run(|| async move { tenant_admin::set_audit_destination(pool, request).await })
             .name("tenants_set_audit_destination")
             .await?)
     }

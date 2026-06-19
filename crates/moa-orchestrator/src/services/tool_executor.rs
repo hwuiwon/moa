@@ -286,7 +286,7 @@ async fn resolve_session(
     request: &ToolCallRequest,
 ) -> Result<SessionMeta, HandlerError> {
     if let Some(session_id) = request.session_id {
-        let store = OrchestratorCtx::current().session_store.clone();
+        let store = OrchestratorCtx::current_session_store();
         return Ok(ctx
             .run(|| async move {
                 store
@@ -337,7 +337,7 @@ async fn prior_non_idempotent_result_exists(
             request.tool_name
         )))
     })?;
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let workspace_id = session.workspace_id.clone();
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
@@ -370,7 +370,7 @@ async fn prior_tool_call_event_exists(
         return Ok(false);
     };
 
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let workspace_id = session.workspace_id.clone();
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();

@@ -13,6 +13,15 @@ use tempfile::{TempDir, tempdir, tempdir_in};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+async fn admin_review_router(sandbox_root: impl AsRef<Path>) -> ToolRouter {
+    let mut config = moa_core::MoaConfig::default();
+    config.permissions.default_effect = moa_core::ActionPolicyEffect::AdminReview;
+    ToolRouter::new_local(sandbox_root)
+        .await
+        .unwrap()
+        .with_policies(moa_security::ActionPolicies::from_config(&config))
+}
+
 fn docker_mountable_tempdir() -> TempDir {
     let macos_docker_tmp = Path::new("/private/tmp");
     if macos_docker_tmp.exists() {
@@ -448,9 +457,7 @@ async fn action_review_preview_uses_remembered_workspace_root_for_commands() {
     let dir = tempdir().unwrap();
     let workspace_root = dir.path().join("workspace-root");
     tokio::fs::create_dir_all(&workspace_root).await.unwrap();
-    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
-        .await
-        .unwrap();
+    let router = admin_review_router(dir.path().join("sandboxes")).await;
     let session = session();
     router
         .remember_workspace_root(session.workspace_id.clone(), workspace_root.clone())
@@ -506,9 +513,7 @@ async fn action_review_preview_str_replace_diff_is_surgical() {
     )
     .await
     .unwrap();
-    let router = ToolRouter::new_local(dir.path().join("sandboxes"))
-        .await
-        .unwrap();
+    let router = admin_review_router(dir.path().join("sandboxes")).await;
     let session = session();
     router
         .remember_workspace_root(session.workspace_id.clone(), workspace_root)

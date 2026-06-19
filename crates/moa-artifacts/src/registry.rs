@@ -404,6 +404,20 @@ impl ArtifactRegistry {
         report: &ValidationReport,
     ) -> Result<StoredArtifactRevision> {
         let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let stored = Self::publish_revision_in_tx(conn.as_mut(), revision_uid, report).await?;
+        conn.commit().await?;
+        Ok(stored)
+    }
+
+    /// Marks a draft revision as published using the caller's open transaction.
+    ///
+    /// The caller owns commit or rollback and should apply matching MOA scope GUCs before calling
+    /// this method when row-level security is relevant.
+    pub async fn publish_revision_in_tx(
+        conn: &mut PgConnection,
+        revision_uid: Uuid,
+        report: &ValidationReport,
+    ) -> Result<StoredArtifactRevision> {
         let artifact_uid = sqlx::query_scalar::<_, Uuid>(
             r#"
             SELECT artifact_uid
@@ -414,7 +428,7 @@ impl ArtifactRegistry {
             "#,
         )
         .bind(revision_uid)
-        .fetch_one(conn.as_mut())
+        .fetch_one(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
@@ -430,7 +444,7 @@ impl ArtifactRegistry {
         )
         .bind(artifact_uid)
         .bind(revision_uid)
-        .execute(conn.as_mut())
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
@@ -445,11 +459,11 @@ impl ArtifactRegistry {
                 updated_at = now()
             WHERE revision_uid = $1
               AND valid_to IS NULL
-            "#,
+        "#,
         )
         .bind(revision_uid)
         .bind(validation_report)
-        .execute(conn.as_mut())
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
@@ -458,13 +472,11 @@ impl ArtifactRegistry {
         )
         .bind(revision_uid)
         .bind(artifact_uid)
-        .execute(conn.as_mut())
+        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
-        let stored = load_revision_by_uid(conn.as_mut(), revision_uid).await?;
-        conn.commit().await?;
-        Ok(stored)
+        load_revision_by_uid(conn, revision_uid).await
     }
 
     /// Loads the most specific visible artifact revision by kind and name.
@@ -525,7 +537,7 @@ impl ArtifactRegistry {
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(revision_uid)
-        .fetch_optional(conn.as_mut())
+        .fetch_optional(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
@@ -568,7 +580,7 @@ impl ArtifactRegistry {
         .bind(parts.user_id.as_deref())
         .bind(kind.as_ref().map(ToString::to_string))
         .bind(status.as_ref().map(ToString::to_string))
-        .fetch_all(conn.as_mut())
+        .fetch_all(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
@@ -621,7 +633,7 @@ impl ArtifactRegistry {
         .bind(run.output)
         .bind(run.error)
         .bind(run.idempotency_key)
-        .fetch_one(conn.as_mut())
+        .fetch_one(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
@@ -652,7 +664,7 @@ impl ArtifactRegistry {
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
-        .fetch_optional(conn.as_mut())
+        .fetch_optional(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
@@ -689,7 +701,7 @@ impl ArtifactRegistry {
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(reason)
-        .fetch_optional(conn.as_mut())
+        .fetch_optional(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
@@ -724,7 +736,7 @@ impl ArtifactRegistry {
         .bind(node_run.output)
         .bind(node_run.error)
         .bind(node_run.completed_at)
-        .execute(conn.as_mut())
+        .execute(&mut *conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
@@ -846,7 +858,7 @@ async fn load_visible_with_status(
     .bind(kind.to_string())
     .bind(name)
     .bind(status.as_ref().map(ToString::to_string))
-    .fetch_optional(conn.as_mut())
+    .fetch_optional(&mut *conn.as_mut())
     .await
     .map_err(map_sqlx_error)?;
     conn.commit().await?;
@@ -911,7 +923,7 @@ async fn ensure_artifact(
     .bind(&document.metadata.name)
     .bind(&document.metadata.description)
     .bind(&document.metadata.tags)
-    .execute(conn)
+    .execute(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
@@ -923,7 +935,7 @@ async fn next_revision_version(conn: &mut PgConnection, artifact_uid: Uuid) -> R
         "SELECT max(version) FROM moa.artifact_revision WHERE artifact_uid = $1",
     )
     .bind(artifact_uid)
-    .fetch_one(conn)
+    .fetch_one(&mut *conn)
     .await
     .map_err(map_sqlx_error)?
     .unwrap_or(0)
@@ -988,7 +1000,7 @@ async fn load_revision_by_uid(
         "#,
     )
     .bind(revision_uid)
-    .fetch_one(conn)
+    .fetch_one(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
     revision_from_row(&row)
@@ -1018,7 +1030,7 @@ async fn load_files(
     .bind(parts.workspace_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(revision_uid)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 

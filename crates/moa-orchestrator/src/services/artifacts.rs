@@ -355,7 +355,7 @@ fn parse_status(status: &str) -> Result<ArtifactStatus, HandlerError> {
 }
 
 fn artifact_registry() -> ArtifactRegistry {
-    ArtifactRegistry::new(OrchestratorCtx::current().graph_pool.clone())
+    ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
 }
 
 async fn authorized_write_scope(

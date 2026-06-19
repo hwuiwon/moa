@@ -62,7 +62,7 @@ pub(crate) async fn prepare_turn_request(
     cached_query_rewrite: Option<QueryRewriteCacheEntry>,
 ) -> Result<PreparedTurnRequestOutput> {
     let ctx = OrchestratorCtx::current();
-    let session_store = ctx.session_store.clone();
+    let session_store = ctx.session_store();
     let session = session_store.get_session(session_id).await?;
     let recent_events = session_store
         .get_events(session_id, EventRange::recent(TURN_EVENT_TAIL_LIMIT))
@@ -76,33 +76,33 @@ pub(crate) async fn prepare_turn_request(
         });
     }
 
-    let capabilities = ctx
-        .providers
-        .capabilities_for_model(Some(session.model.as_str()))?;
-    let query_rewrite_provider = match ctx
-        .providers
-        .resolve_rewriter_provider(&ctx.config.query_rewrite)
-    {
-        Ok(provider) => provider,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to resolve query rewriter provider; continuing without query rewriting"
-            );
-            None
-        }
-    };
+    let provider_registry = ctx.provider_registry();
+    let config = ctx.config();
+    let capabilities = provider_registry.capabilities_for_model(Some(session.model.as_str()))?;
+    let query_rewrite_provider =
+        match provider_registry.resolve_rewriter_provider(&config.query_rewrite) {
+            Ok(provider) => provider,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to resolve query rewriter provider; continuing without query rewriting"
+                );
+                None
+            }
+        };
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
-        ctx.config.as_ref(),
+        config.as_ref(),
         session_store.clone(),
         GraphMemoryPipelineOptions {
-            graph_pool: ctx.graph_pool.clone(),
-            shared_graph_memory_retriever: Some(ctx.graph_memory_retriever.clone()),
+            graph_pool: ctx.graph_pool(),
+            shared_graph_memory_retriever: Some(ctx.graph_memory_retriever()),
+            retrieval_embedder: None,
+            shared_skill_injector: Some(ctx.skill_injector()),
             compaction_llm_provider: None,
             query_rewrite_llm_provider: query_rewrite_provider,
             discovered_workspace_instructions: None,
-            tool_schemas: ctx.tool_schemas.as_ref().clone(),
-            lineage: ctx.lineage.clone(),
+            tool_schemas: ctx.tool_schemas().as_ref().clone(),
+            lineage: ctx.lineage(),
         },
     );
     let mut context = WorkingContext::new(&session, capabilities);

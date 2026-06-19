@@ -13,7 +13,7 @@ pub(super) async fn load_simulator_context(
     workspace_id: WorkspaceId,
     trial: ExperimentTrialRecord,
 ) -> Result<SimulatorContext, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
@@ -119,7 +119,7 @@ pub(super) async fn simulator_next_user_message(
     transcript: &[ContextMessage],
     turn_index: u32,
 ) -> Result<String, HandlerError> {
-    let gateway = LLMGatewayImpl::new(OrchestratorCtx::current().providers.clone());
+    let gateway = LLMGatewayImpl::new(OrchestratorCtx::current_provider_registry());
     let mut request = CompletionRequest::new(format!(
         "Generate simulator user message number {}.",
         turn_index + 1

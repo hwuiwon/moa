@@ -171,7 +171,7 @@ async fn load_plan_expansion(
     run_uid: Uuid,
     plan_revision_uid: Uuid,
 ) -> Result<PlanExpansion, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
@@ -242,7 +242,7 @@ async fn create_plan_trial_rows(
     workspace_id: WorkspaceId,
     trials: Vec<ExpandedPlanTrial>,
 ) -> Result<Vec<PlanTrialDispatch>, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
@@ -272,7 +272,7 @@ async fn aggregate_plan_status(
     workspace_id: WorkspaceId,
     run_uid: Uuid,
 ) -> Result<PlanStatusAggregate, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
@@ -379,7 +379,7 @@ async fn cancel_active_plan_trials(
     run_uid: Uuid,
     reason: String,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
@@ -406,7 +406,7 @@ async fn claim_plan_trial_dispatches(
 
     let limit = i64::try_from(available_slots)
         .map_err(|_| TerminalError::new("experiment dispatch parallelism is too large"))?;
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {

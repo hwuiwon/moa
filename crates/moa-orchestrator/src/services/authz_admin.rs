@@ -60,7 +60,7 @@ impl Authz for AuthzImpl {
         )
         .await
         .map_err(translate_authz_error)?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {

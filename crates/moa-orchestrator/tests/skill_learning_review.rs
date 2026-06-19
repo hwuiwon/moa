@@ -1,5 +1,7 @@
 //! Learning-review service tests for skill draft acceptance and rejection.
 
+#![recursion_limit = "256"]
+
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -9,16 +11,22 @@ use moa_core::wire::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
 };
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    MemoryScope, MoaConfig, WorkspaceId,
+    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    LearningCandidateType, LearningEntry, LearningRiskClass, MemoryScope, MoaConfig, MoaError,
+    WorkspaceId,
 };
 use moa_orchestrator::services::learning_review::{
     accept_skill_candidate_after_authz, get_learning_candidate_after_authz,
     reject_learning_candidate_after_authz,
 };
+use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, ValidatedSkillPackage};
 use moa_skills::registry::SkillRegistry;
+use moa_skills::review::{
+    LearningReviewStore, LearningReviewStoreFuture, SkillReviewAction, SkillReviewRequest,
+    prepare_skill_acceptance, promote_claimed_skill_candidate,
+};
 use moa_test_support::postgres::bootstrap_test_db;
 use serde_json::json;
 use uuid::Uuid;
@@ -63,6 +71,8 @@ mod skill_learning_review {
         let response = accept_skill_candidate_after_authz(
             store.clone(),
             config,
+            #[cfg(feature = "internal-eval-runner")]
+            review_providers(),
             LearningCandidateReviewRequest {
                 workspace_id: workspace_id.clone(),
                 candidate_id: candidate.id,
@@ -125,11 +135,22 @@ mod skill_learning_review {
                 .expect("accepted response includes skill uid")
                 .to_string()
         );
-        assert_eq!(evaluation["regression_execution"], "unavailable");
-        assert_eq!(
-            evaluation["regression_report"]["reason"],
-            "internal-eval-runner feature disabled"
-        );
+        #[cfg(feature = "internal-eval-runner")]
+        {
+            assert_eq!(evaluation["regression_execution"], "skipped");
+            assert_eq!(
+                evaluation["regression_report"]["reason"],
+                "no previous active skill exists for comparison"
+            );
+        }
+        #[cfg(not(feature = "internal-eval-runner"))]
+        {
+            assert_eq!(evaluation["regression_execution"], "unavailable");
+            assert_eq!(
+                evaluation["regression_report"]["reason"],
+                "internal-eval-runner feature disabled"
+            );
+        }
         assert_eq!(
             evaluation["regression_report"]["runner"], "moa-eval",
             "review payload should identify the orchestrator-owned eval runner"
@@ -234,6 +255,96 @@ mod skill_learning_review {
         );
     }
 
+    #[tokio::test]
+    async fn promotion_rolls_back_materialized_skill_when_learning_append_fails() {
+        // Pins: accept promotion publishes, materializes, promotes, and appends learning in one transaction.
+        let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
+        let workspace_id = unique_workspace("review-rollback");
+        let scope = workspace_scope(&workspace_id);
+        let skill_name = unique_skill_name("review-rollback");
+        let package = skill_package(&skill_name, "Review rollback draft skills");
+        let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
+        let candidate = append_candidate(
+            &test_db,
+            &workspace_id,
+            LearningCandidateType::Skill,
+            LearningCandidateStatus::Proposed,
+            "skill_created",
+            &skill_name,
+            &draft,
+        )
+        .await;
+        let review_store = FailingLearningAppendStore {
+            store: Arc::new(test_db.store().clone()),
+        };
+        let request = SkillReviewRequest {
+            workspace_id: workspace_id.clone(),
+            candidate_id: candidate.id,
+            action: SkillReviewAction::Accept,
+            reviewer_subject: "user:reviewer".to_string(),
+            reason: Some("exercise rollback".to_string()),
+        };
+        let pool = test_db.store().pool().clone();
+        let prepared = prepare_skill_acceptance(&review_store, pool.clone(), &request)
+            .await
+            .expect("prepare skill acceptance");
+
+        let error = promote_claimed_skill_candidate(
+            &review_store,
+            pool,
+            &request,
+            prepared,
+            json!({"regression_execution": "skipped"}),
+        )
+        .await
+        .expect_err("injected learning append failure should abort promotion");
+        assert!(
+            error
+                .to_string()
+                .contains("injected learning append failure"),
+            "error should preserve the append failure: {error}"
+        );
+
+        let active_skill = SkillRegistry::new(test_db.store().pool().clone())
+            .load_by_name(&scope, &skill_name)
+            .await
+            .expect("load optional active skill");
+        assert!(
+            active_skill.is_none(),
+            "failed promotion must roll back active skill materialization"
+        );
+        let artifact = ArtifactRegistry::new(test_db.store().pool().clone())
+            .load_revision(&scope, draft.revision_uid)
+            .await
+            .expect("load draft after rollback")
+            .expect("draft artifact remains");
+        assert_eq!(
+            artifact.status,
+            ArtifactStatus::Draft,
+            "failed promotion must roll back artifact publication"
+        );
+        let reloaded = test_db
+            .store()
+            .get_learning_candidate(&workspace_id, candidate.id)
+            .await
+            .expect("reload candidate")
+            .expect("candidate remains");
+        assert_eq!(
+            reloaded.status,
+            LearningCandidateStatus::Evaluating,
+            "claiming the candidate happens before promotion gates, but final promotion rolls back"
+        );
+        let learnings = test_db
+            .store()
+            .list_learnings(workspace_id.as_str(), Some("skill_created"), 10)
+            .await
+            .expect("list learning entries");
+        assert!(
+            learnings.is_empty(),
+            "failed promotion must not append promoted learning"
+        );
+    }
+
     #[test]
     fn accept_reject_requires_workspace_editor() {
         // Pins: LearningReview handlers authorize workspace editor access before candidate payload reads.
@@ -253,11 +364,12 @@ mod skill_learning_review {
             let auth_pos = handler_source
                 .find("authorize_workspace_editor(&ctx, &request.workspace_id).await?")
                 .expect("handler authorizes workspace editor");
-            let run_pos = handler_source
+            let boundary_pos = handler_source
                 .find(".run(|| async move")
-                .expect("handler enters ctx.run after authorization");
+                .or_else(|| handler_source.find("let runtime = OrchestratorCtx::current();"))
+                .expect("handler enters protected runtime work after authorization");
             assert!(
-                auth_pos < run_pos,
+                auth_pos < boundary_pos,
                 "{handler} must authorize before reading or mutating candidate state"
             );
         }
@@ -307,6 +419,8 @@ mod skill_learning_review {
             accept_skill_candidate_after_authz(
                 store.clone(),
                 config.clone(),
+                #[cfg(feature = "internal-eval-runner")]
+                review_providers(),
                 review_request(
                     &workspace_id,
                     workflow_candidate.id,
@@ -332,6 +446,8 @@ mod skill_learning_review {
             accept_skill_candidate_after_authz(
                 store.clone(),
                 config,
+                #[cfg(feature = "internal-eval-runner")]
+                review_providers(),
                 review_request(
                     &workspace_id,
                     non_proposed.id,
@@ -363,11 +479,79 @@ mod skill_learning_review {
         }
     }
 
+    #[derive(Clone)]
+    struct FailingLearningAppendStore {
+        store: Arc<PostgresSessionStore>,
+    }
+
+    impl LearningReviewStore for FailingLearningAppendStore {
+        fn get_learning_candidate<'a>(
+            &'a self,
+            workspace_id: &'a WorkspaceId,
+            candidate_id: Uuid,
+        ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
+            Box::pin(async move {
+                self.store
+                    .get_learning_candidate(workspace_id, candidate_id)
+                    .await
+            })
+        }
+
+        fn update_learning_candidate_status_from<'a>(
+            &'a self,
+            update: &'a LearningCandidateStatusUpdate,
+            expected_status: LearningCandidateStatus,
+        ) -> LearningReviewStoreFuture<'a, bool> {
+            Box::pin(async move {
+                self.store
+                    .update_learning_candidate_status_from(update, expected_status)
+                    .await
+            })
+        }
+
+        fn update_learning_candidate_status_from_in_tx<'a>(
+            &'a self,
+            conn: &'a mut sqlx::PgConnection,
+            update: &'a LearningCandidateStatusUpdate,
+            expected_status: LearningCandidateStatus,
+        ) -> LearningReviewStoreFuture<'a, bool> {
+            Box::pin(async move {
+                self.store
+                    .update_learning_candidate_status_from_in_tx(conn, update, expected_status)
+                    .await
+            })
+        }
+
+        fn append_learning<'a>(
+            &'a self,
+            entry: &'a LearningEntry,
+        ) -> LearningReviewStoreFuture<'a, ()> {
+            Box::pin(async move { self.store.append_learning(entry).await })
+        }
+
+        fn append_learning_in_tx<'a>(
+            &'a self,
+            _conn: &'a mut sqlx::PgConnection,
+            _entry: &'a LearningEntry,
+        ) -> LearningReviewStoreFuture<'a, ()> {
+            Box::pin(async move {
+                Err(MoaError::StorageError(
+                    "injected learning append failure".to_string(),
+                ))
+            })
+        }
+    }
+
     fn review_config(test_db: &moa_test_support::postgres::TestDb) -> Arc<MoaConfig> {
         let mut config = MoaConfig::default();
         config.database.url = test_db.database_url().to_string();
         config.query_rewrite.enabled = false;
         Arc::new(config)
+    }
+
+    #[cfg(feature = "internal-eval-runner")]
+    fn review_providers() -> Arc<moa_providers::ProviderRegistry> {
+        Arc::new(moa_providers::ProviderRegistry::default())
     }
 
     fn unique_workspace(prefix: &str) -> WorkspaceId {
@@ -379,12 +563,7 @@ mod skill_learning_review {
     }
 
     fn short_uuid() -> String {
-        Uuid::now_v7()
-            .simple()
-            .to_string()
-            .chars()
-            .take(8)
-            .collect()
+        Uuid::now_v7().simple().to_string()
     }
 
     fn skill_package(skill_name: &str, description: &str) -> ValidatedSkillPackage {
@@ -477,7 +656,7 @@ mod skill_learning_review {
                     "relative_path": format!("workspaces/{}/skills/{skill_name}/tests/suite.toml", workspace_id.as_str()),
                     "source_format": "toml",
                     "source_text": format!(
-                        "name = \"{skill_name}-regression\"\n\n[[cases]]\nname = \"smoke\"\ninput = \"run it\"\n"
+                        "[suite]\nname = \"{skill_name}-regression\"\n\n[[cases]]\nname = \"smoke\"\ninput = \"run it\"\n"
                     ),
                 },
             }),

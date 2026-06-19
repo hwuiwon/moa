@@ -11,7 +11,8 @@ use moa_core::{
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 use moa_skills::distiller::{
-    DistillationOutcome, ExperienceDistillationInput, distill_skill_from_experience_with_learning,
+    ExperienceDistillationInput, SkillProposalGeneration,
+    distill_skill_from_experience_with_learning, proposal_generation_from_distillation,
 };
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -70,10 +71,10 @@ impl SkillLearning for SkillLearningImpl {
         annotate_restate_handler_span("SkillLearning", "run");
         let request = request.into_inner();
         let runtime = OrchestratorCtx::current();
-        let store = runtime.session_store.clone();
-        let config = runtime.config.as_ref().clone();
+        let store = runtime.session_store();
+        let config = runtime.config().as_ref().clone();
         let router = match runtime
-            .providers
+            .provider_registry()
             .model_router_for_config(&config)
             .map(Arc::new)
         {
@@ -178,10 +179,10 @@ pub async fn run_skill_learning_for_experience(
     )
     .await?;
 
-    Ok(report_from_distillation(
+    Ok(report_from_proposal_generation(
         request.session_id,
         request.experience_id,
-        outcome,
+        proposal_generation_from_distillation(outcome),
     ))
 }
 
@@ -287,30 +288,29 @@ async fn bounded_segment_events(
     store.get_events(session_id, range).await
 }
 
-fn report_from_distillation(
+fn report_from_proposal_generation(
     session_id: SessionId,
     experience_id: Uuid,
-    outcome: DistillationOutcome,
+    outcome: SkillProposalGeneration,
 ) -> SkillLearningReport {
     match outcome {
-        DistillationOutcome::NewSkillProposed { proposal }
-        | DistillationOutcome::ImprovementProposed {
-            proposal: Some(proposal),
-            ..
+        SkillProposalGeneration::Proposed {
+            candidate_id,
+            draft_artifact_revision_uid,
         } => SkillLearningReport {
             session_id,
             experience_id,
             outcome: "proposed".to_string(),
             message: None,
-            candidate_id: Some(proposal.candidate_id),
-            draft_artifact_revision_uid: Some(proposal.draft_artifact_revision_uid),
+            candidate_id: Some(candidate_id),
+            draft_artifact_revision_uid: Some(draft_artifact_revision_uid),
         },
-        DistillationOutcome::ImprovementProposed { .. } => skipped_report(
+        SkillProposalGeneration::Unchanged => skipped_report(
             session_id,
             experience_id,
             "existing skill did not need a draft",
         ),
-        DistillationOutcome::Skipped { reason } => {
+        SkillProposalGeneration::Skipped { reason } => {
             skipped_report(session_id, experience_id, format!("{reason:?}"))
         }
     }

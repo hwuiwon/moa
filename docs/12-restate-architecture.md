@@ -16,9 +16,9 @@ what must stay out of Restate state.
 
 | Restate primitive | Use in MOA | Reason |
 |---|---|---|
-| Service | Stateless calls such as `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Analytics`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
+| Service | Stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Analytics`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `EvalRun` | One logical run per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -65,13 +65,29 @@ cancellation do not wait behind a long turn.
 
 ## Handler Surfaces
 
-Current orchestrator surfaces are bound by `moa-orchestrator` at startup:
+Current orchestrator surfaces are bound by one `moa-orchestrator` production
+binary at startup. Domain logic behind those handlers should stay in-process
+behind application services, repositories, or domain crates.
+
+Default production bindings:
 
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `EvalRun` |
-| Service | `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Audit`, `Authz`, `GraphMemoryMaint`, `Health`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `WorkspaceStore`, `Whoami` |
+| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
+| Service | `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+
+Feature-gated bindings:
+
+| Feature | Additional bindings |
+|---|---|
+| `internal-eval-runner` | `Eval` service and `EvalRun` workflow |
+| `skill-learning` | `SkillLearning` workflow |
+
+Internal application boundaries for action reviews, builtin async-authz
+challenges, learning review, experiments, analytics, privacy, lineage admin,
+provider routing, and memory retrieval are extraction seams inside the
+monolith. They are not a direction to create internal network services.
 
 When adding a handler, place it by ownership:
 

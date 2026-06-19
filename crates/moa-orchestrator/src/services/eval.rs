@@ -119,7 +119,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "plan");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let config = OrchestratorCtx::current().config.as_ref().clone();
+        let config = OrchestratorCtx::current_config().as_ref().clone();
 
         Ok(ctx
             .run(|| async move {
@@ -232,7 +232,7 @@ impl Eval for EvalImpl {
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
         authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -254,7 +254,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "datasets_list");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -289,8 +289,8 @@ impl Eval for EvalImpl {
         #[cfg(feature = "internal-eval-runner")]
         {
             let runtime = OrchestratorCtx::current();
-            let config = runtime.config.as_ref().clone();
-            let pool = runtime.graph_pool.clone();
+            let config = runtime.config().as_ref().clone();
+            let pool = runtime.graph_pool();
 
             run_replay_request_isolated(config, pool, request)
                 .await
@@ -308,7 +308,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "scores");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -338,7 +338,7 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "compare");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
@@ -711,7 +711,7 @@ async fn execute_eval_run_request_inner(
         },
     )?;
     let engine = EvalEngine::new(
-        OrchestratorCtx::current().config.as_ref().clone(),
+        OrchestratorCtx::current_config().as_ref().clone(),
         EngineOptions {
             parallel: usize::try_from(request.parallel)
                 .map_err(|_| EvalServiceError::IntegerTooLarge { field: "parallel" })?,

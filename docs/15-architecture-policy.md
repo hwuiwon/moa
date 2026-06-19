@@ -78,6 +78,34 @@ Anti-patterns:
 - adding empty connector traits or clients before connector work is actively
   scheduled.
 
+## Modular Monolith Boundary Policy
+
+MOA remains one production binary. `moa-orchestrator` is the Restate transport,
+workflow, and composition boundary for that binary; it is not a place to collect
+domain rules or persistence details. Extraction readiness means domain logic can
+move behind a different implementation at the composition root later, while
+current production calls stay in-process.
+
+Allowed responsibilities:
+
+| Boundary | Owns |
+|---|---|
+| Restate handlers and workflows | Authentication context, authorization checks, DTO translation, `ctx.run` durability boundaries, Restate service/workflow calls, and transport-level telemetry |
+| Application services | Use-case orchestration, business decisions, state transitions, idempotency, domain events, and calls to repositories or existing typed domain APIs |
+| Repositories | SQL, row mapping, transactional persistence helpers, storage errors, and Postgres-specific query optimization |
+| Domain crates | Stable domain models, traits, validation, policy types, reusable algorithms, and tests that should outlive the current Restate adapter |
+| Composition code | Constructing concrete dependencies, feature-gated bindings, background jobs, provider selection, and wiring in-process implementations into `OrchestratorCtx` |
+
+Handlers may validate transport shape and reject unauthenticated or unauthorized
+requests, but policy decisions after that point belong in an application or
+domain layer. Repositories should never call Restate handlers, reach into global
+context, or own product policy. Domain crates should not depend on
+`moa-orchestrator` or on handler DTOs.
+
+Do not add internal network services, RPC clients, or remote-service seams for
+this effort. A future deployed split must be replaceable from composition code
+without changing turn workflows, handler contracts, or domain tests.
+
 ## Decision Records
 
 Accepted decisions are immutable. Supersession should be recorded explicitly in

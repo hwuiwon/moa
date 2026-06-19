@@ -103,19 +103,32 @@ Phase 1 auth work adds `AuthProvider`, `TokenVaultProvider`, and
 
 ### Cloud
 
-`moa-orchestrator` exposes Restate handlers:
+`moa-orchestrator` exposes Restate handlers from one production binary. Domain
+logic behind those handlers should live in in-process application services,
+repositories, or domain crates so a future extraction can replace a composition
+binding without changing handler contracts.
+
+Default production bindings:
 
 - Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
 - Services: `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
-  `Experiments`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`,
-  `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`,
-  `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami`
+  `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`,
+  `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`,
+  `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
+  `Workflows`, `WorkspaceStore`, `Whoami`
 - Workflows: `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
   `TurnExecution`, `SubAgentTurnExecution`
 
-When built with `internal-eval-runner`, the orchestrator also binds internal
-`Eval` and `EvalRun` handlers. They are not part of the default cloud
-registration.
+Feature-gated bindings:
+
+- `internal-eval-runner`: `Eval` service and `EvalRun` workflow.
+- `skill-learning`: detached `SkillLearning` workflow.
+
+Internal application boundaries are in-process modules or domain crates behind
+these handlers, not separate network services. Current examples include action
+review policy and storage, builtin async-authz challenge storage, learning
+review promotion, experiments, analytics, privacy, lineage admin, provider
+routing, and graph memory retrieval.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 

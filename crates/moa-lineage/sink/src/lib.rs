@@ -1,5 +1,7 @@
 //! mpsc to fjall to TimescaleDB lineage writer.
 
+pub mod admin;
+
 mod error;
 mod fjall_journal;
 mod mpsc_sink;

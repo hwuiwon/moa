@@ -338,13 +338,29 @@ impl SkillRegistry {
         revision: &StoredArtifactRevision,
         files: Vec<ArtifactFile>,
     ) -> Result<Uuid> {
+        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let uid = self
+            .materialize_published_artifact_revision_in_tx(conn.as_mut(), scope, revision, files)
+            .await?;
+        conn.commit().await?;
+        Ok(uid)
+    }
+
+    /// Materializes a published skill artifact revision using the caller's open transaction.
+    ///
+    /// The caller owns commit or rollback and should apply matching MOA scope GUCs before calling
+    /// this method when row-level security is relevant.
+    pub async fn materialize_published_artifact_revision_in_tx(
+        &self,
+        conn: &mut PgConnection,
+        scope: &MemoryScope,
+        revision: &StoredArtifactRevision,
+        files: Vec<ArtifactFile>,
+    ) -> Result<Uuid> {
         ensure_revision_matches_scope(scope, revision)?;
         let package = skill_package_from_artifact_revision(revision, files)?;
         let skill = ValidatedNewSkill::from_new(NewSkill::from_package(scope.clone(), package))?;
-        let mut conn =
-            ScopedConn::begin(&self.pool, &ScopeContext::from(skill.scope.clone())).await?;
-        let uid = upsert_by_name(conn.as_mut(), &skill, ArtifactMirror::AlreadyPublished).await?;
-        conn.commit().await?;
+        let uid = upsert_by_name(conn, &skill, ArtifactMirror::AlreadyPublished).await?;
         self.cache.invalidate_all();
         Ok(uid)
     }
@@ -389,7 +405,7 @@ async fn load_visible_skill_by_uid(
     .bind(workspace_id.as_deref())
     .bind(user_id.as_deref())
     .bind(skill_uid)
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
@@ -418,7 +434,7 @@ async fn load_visible_skills(conn: &mut PgConnection, scope: &MemoryScope) -> Re
     )
     .bind(workspace_id.as_deref())
     .bind(user_id.as_deref())
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
@@ -459,7 +475,7 @@ async fn load_visible_skill_by_name(
     .bind(workspace_id.as_deref())
     .bind(user_id.as_deref())
     .bind(skill_name)
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
@@ -477,7 +493,7 @@ async fn load_skill_markdown(conn: &mut PgConnection, skill_uid: Uuid) -> Result
     )
     .bind(skill_uid)
     .bind(SKILL_MD_PATH)
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(map_sqlx_error)?
     .ok_or_else(|| MoaError::StorageError(format!("SKILL.md not found for skill {skill_uid}")))?;
@@ -502,7 +518,7 @@ async fn load_skill_files(
         "#,
     )
     .bind(skill_uid)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
@@ -528,7 +544,7 @@ async fn load_skill_files_for_skills(
         "#,
     )
     .bind(skill_uids)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 

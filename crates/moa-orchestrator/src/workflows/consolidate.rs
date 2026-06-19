@@ -345,7 +345,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<MergeStats, HandlerError> {
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         let workspace_id = request.workspace_id.clone();
         self.ctx
             .run(|| async move {
@@ -365,7 +365,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<DecayStats, HandlerError> {
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         let workspace_id = request.workspace_id.clone();
         self.ctx
             .run(|| async move {
@@ -390,7 +390,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
         now: DateTime<Utc>,
     ) -> Result<SweepStats, HandlerError> {
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         let workspace_id = request.workspace_id.clone();
         self.ctx
             .run(|| async move {
@@ -410,9 +410,9 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
     ) -> Result<BackfillStats, HandlerError> {
         let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool.clone();
+        let pool = runtime.graph_pool();
         let workspace_id = request.workspace_id.clone();
-        let embedder = runtime.embedding_provider.clone();
+        let embedder = runtime.embedding_provider();
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::backfill_entities(&pool, &workspace_id, embedder)
@@ -432,9 +432,9 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<DigestStats, HandlerError> {
         let runtime = OrchestratorCtx::current();
-        let pool = runtime.graph_pool.clone();
+        let pool = runtime.graph_pool();
         let workspace_id = request.workspace_id.clone();
-        let digest_config = runtime.config.memory.digest.clone();
+        let digest_config = runtime.config().memory.digest.clone();
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::rebuild_digests(&pool, &workspace_id, now, &digest_config)
@@ -510,7 +510,7 @@ async fn record_memory_learning(
     {
         return Ok(());
     }
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let report = report.clone();
     ctx.run(|| async move {
         store

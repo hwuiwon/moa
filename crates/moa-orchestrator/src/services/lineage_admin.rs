@@ -4,18 +4,17 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::WorkspaceId;
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     LineageEraseRequest, LineageEraseResponse, LineageExplainRequest, LineageExplainResponse,
     LineageExportRequest, LineageExportResponse, LineageQueryRequest, LineageQueryResponse,
-    LineageRecordView, LineageVerifyRequest, LineageVerifyResponse,
+    LineageVerifyRequest, LineageVerifyResponse,
 };
-use moa_core::{SessionId, UserId, WorkspaceId};
-use moa_lineage_audit::{DsarExporter, PiiVault, SigningKey, blake3_merkle_root};
-use moa_lineage_core::chain::{HashChain, hash_from_slice};
+use moa_lineage_audit::admin as lineage_audit_admin;
+use moa_lineage_sink::admin as lineage_sink_admin;
 use restate_sdk::prelude::*;
-use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
@@ -68,7 +67,7 @@ impl LineageAdmin for LineageAdminImpl {
         annotate_restate_handler_span("LineageAdmin", "explain");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { explain_inner(pool, request).await.map(Json::from) })
@@ -85,7 +84,7 @@ impl LineageAdmin for LineageAdminImpl {
         annotate_restate_handler_span("LineageAdmin", "query");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { query_inner(pool, request).await.map(Json::from) })
@@ -102,7 +101,7 @@ impl LineageAdmin for LineageAdminImpl {
         annotate_restate_handler_span("LineageAdmin", "export");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Admin).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { export_inner(pool, request).await.map(Json::from) })
@@ -119,7 +118,7 @@ impl LineageAdmin for LineageAdminImpl {
         annotate_restate_handler_span("LineageAdmin", "verify");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { verify_inner(pool, request).await.map(Json::from) })
@@ -136,46 +135,13 @@ impl LineageAdmin for LineageAdminImpl {
         annotate_restate_handler_span("LineageAdmin", "erase");
         let request = request.into_inner();
         authorize_workspace(&ctx, &request.workspace_id, Relation::Admin).await?;
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move { erase_inner(pool, request).await.map(Json::from) })
             .name("lineage_erase")
             .await?)
     }
-}
-
-/// One compliance lineage row used by hash-chain verification.
-#[derive(Debug, Clone)]
-pub struct ComplianceRow {
-    /// Turn identifier for the row.
-    pub turn_id: Uuid,
-    /// Numeric lineage record kind.
-    pub record_kind: i16,
-    /// Timestamp when the row was captured.
-    pub ts: chrono::DateTime<chrono::Utc>,
-    /// Canonical lineage payload.
-    pub payload: Value,
-    /// Stored integrity hash.
-    pub integrity_hash: Vec<u8>,
-    /// Stored previous-row hash.
-    pub prev_hash: Option<Vec<u8>>,
-}
-
-/// Verification result for a lineage hash-chain window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VerificationReport {
-    /// Number of records verified.
-    pub records: usize,
-}
-
-#[derive(Debug)]
-struct AuditRootRow {
-    root_id: Uuid,
-    workspace_id: String,
-    window_start: chrono::DateTime<chrono::Utc>,
-    window_end: chrono::DateTime<chrono::Utc>,
-    merkle_root: Vec<u8>,
 }
 
 async fn authorize_workspace(
@@ -200,24 +166,9 @@ async fn explain_inner(
     pool: PgPool,
     request: LineageExplainRequest,
 ) -> Result<LineageExplainResponse, HandlerError> {
-    let rows = sqlx::query(
-        r#"
-        SELECT turn_id, session_id, user_id, workspace_id, ts, record_kind, payload
-        FROM analytics.turn_lineage
-        WHERE workspace_id = $1 AND (session_id = $2 OR turn_id = $2)
-        ORDER BY ts ASC, record_kind ASC
-        "#,
-    )
-    .bind(request.workspace_id.as_str())
-    .bind(request.id)
-    .fetch_all(&pool)
-    .await
-    .map_err(handler_error)?;
-
-    let records = rows
-        .into_iter()
-        .map(lineage_record_from_row)
-        .collect::<Result<Vec<_>, HandlerError>>()?;
+    let records = lineage_sink_admin::explain_records(&pool, &request.workspace_id, request.id)
+        .await
+        .map_err(handler_error)?;
     Ok(LineageExplainResponse {
         id: request.id,
         records,
@@ -245,13 +196,12 @@ async fn query_inner(
         .execute(&mut *tx)
         .await
         .map_err(handler_error)?;
-    let rows: Value = sqlx::query_scalar(&format!(
-        "SELECT COALESCE(jsonb_agg(row_to_json(lineage_query)), '[]'::jsonb) \
-         FROM ({prepared}) lineage_query"
-    ))
-    .bind(request.workspace_id.as_str())
-    .bind(&request.since)
-    .fetch_one(&mut *tx)
+    let rows = lineage_sink_admin::execute_prepared_lineage_query(
+        &mut tx,
+        &prepared,
+        &request.workspace_id,
+        &request.since,
+    )
     .await
     .map_err(handler_error)?;
     tx.commit().await.map_err(handler_error)?;
@@ -262,41 +212,23 @@ async fn export_inner(
     pool: PgPool,
     request: LineageExportRequest,
 ) -> Result<LineageExportResponse, HandlerError> {
-    let pattern = format!("%{}%", request.subject);
-    let records: Vec<Value> = sqlx::query_scalar(
-        r#"
-        SELECT row_to_json(lineage_row)::jsonb
-        FROM (
-            SELECT turn_id, session_id, user_id, workspace_id, ts, record_kind, payload,
-                   integrity_hash, prev_hash
-            FROM analytics.turn_lineage
-            WHERE workspace_id = $1 AND payload::text ILIKE $2
-            ORDER BY ts ASC, turn_id ASC, record_kind ASC
-            LIMIT 10000
-        ) lineage_row
-        "#,
+    let records = lineage_sink_admin::load_dsar_export_records(
+        &pool,
+        &request.workspace_id,
+        &request.subject,
     )
-    .bind(request.workspace_id.as_str())
-    .bind(pattern)
-    .fetch_all(&pool)
     .await
     .map_err(handler_error)?;
-
     let export_dir = create_temp_dir("moa-lineage-export").await?;
     let bundle_path = export_dir.join("lineage-dsar.zip");
-    let signing = service_signing_key("dsar-export");
-    let exporter = DsarExporter::new(signing);
-    let subject_pseudonym = request.subject.as_bytes().to_vec();
-    let bundle = exporter
-        .export_records(
-            request.workspace_id.as_str(),
-            subject_pseudonym,
-            records,
-            Vec::new(),
-            &bundle_path,
-        )
-        .await
-        .map_err(handler_error)?;
+    let bundle = lineage_audit_admin::export_dsar_bundle(
+        request.workspace_id.as_str(),
+        &request.subject,
+        records,
+        &bundle_path,
+    )
+    .await
+    .map_err(handler_error)?;
     let archive = tokio::fs::read(&bundle_path).await.map_err(handler_error)?;
     cleanup_temp_dir(&export_dir).await;
 
@@ -313,9 +245,15 @@ async fn verify_inner(
     request: LineageVerifyRequest,
 ) -> Result<LineageVerifyResponse, HandlerError> {
     if request.window == "hot" || request.window == "db" {
-        let rows =
-            load_compliance_rows_for_interval(&pool, &request.workspace_id, &request.since).await?;
-        let report = verify_compliance_rows(rows, None)?;
+        let rows = lineage_audit_admin::load_compliance_rows_for_interval(
+            &pool,
+            request.workspace_id.as_str(),
+            &request.since,
+        )
+        .await
+        .map_err(handler_error)?;
+        let report =
+            lineage_audit_admin::verify_compliance_rows(rows, None).map_err(handler_error)?;
         return Ok(LineageVerifyResponse {
             workspace_id: request.workspace_id,
             records: usize_to_u64(report.records),
@@ -325,15 +263,20 @@ async fn verify_inner(
         });
     }
 
-    let root = load_audit_root(&pool, &request.workspace_id, &request.window).await?;
-    let rows = load_compliance_rows_for_window(
+    let root =
+        lineage_audit_admin::load_audit_root(&pool, request.workspace_id.as_str(), &request.window)
+            .await
+            .map_err(handler_error)?;
+    let rows = lineage_audit_admin::load_compliance_rows_for_window(
         &pool,
-        &request.workspace_id,
+        request.workspace_id.as_str(),
         root.window_start,
         root.window_end,
     )
-    .await?;
-    let report = verify_compliance_rows(rows, Some(root.merkle_root))?;
+    .await
+    .map_err(handler_error)?;
+    let report = lineage_audit_admin::verify_compliance_rows(rows, Some(root.merkle_root))
+        .map_err(handler_error)?;
     Ok(LineageVerifyResponse {
         workspace_id: WorkspaceId::new(root.workspace_id),
         records: usize_to_u64(report.records),
@@ -354,11 +297,15 @@ async fn erase_inner(
         )
     })?;
     let secret = pii_vault_secret_from_env()?.unwrap_or_default();
-    let vault = PiiVault::with_pool(pool, secret, "lineage-erase");
-    let subjects = vault
-        .erase_subject(request.workspace_id.as_str(), &subject)
-        .await
-        .map_err(handler_error)?;
+    let subjects = lineage_audit_admin::erase_subject_pseudonym(
+        &pool,
+        request.workspace_id.as_str(),
+        &subject,
+        secret,
+        "lineage-erase",
+    )
+    .await
+    .map_err(handler_error)?;
     Ok(LineageEraseResponse {
         workspace_id: request.workspace_id,
         subjects,
@@ -396,183 +343,6 @@ pub fn prepare_lineage_sql(sql: &str) -> Result<String, HandlerError> {
     prepared.push_str(replacement);
     prepared.push_str(&trimmed[idx + "from lineage".len()..]);
     Ok(prepared)
-}
-
-/// Verifies hash-chain links and an optional Merkle root for compliance rows.
-pub fn verify_compliance_rows(
-    rows: Vec<ComplianceRow>,
-    expected_root: Option<Vec<u8>>,
-) -> Result<VerificationReport, HandlerError> {
-    let mut leaves = Vec::with_capacity(rows.len());
-    let mut previous_integrity: Option<&[u8]> = None;
-    for row in &rows {
-        if let (Some(previous), Some(prev_hash)) = (previous_integrity, row.prev_hash.as_deref())
-            && prev_hash != previous
-        {
-            return Err(TerminalError::new(format!(
-                "chain link mismatch at turn={} kind={} ts={}",
-                row.turn_id, row.record_kind, row.ts
-            ))
-            .into());
-        }
-        let prev = row
-            .prev_hash
-            .as_deref()
-            .map(hash_from_slice)
-            .transpose()
-            .map_err(handler_error)?;
-        let (actual, _) = HashChain::link(prev, &row.payload).map_err(handler_error)?;
-        if actual.as_bytes() != row.integrity_hash.as_slice() {
-            return Err(TerminalError::new(format!(
-                "chain mismatch at turn={} kind={} ts={}",
-                row.turn_id, row.record_kind, row.ts
-            ))
-            .into());
-        }
-        previous_integrity = Some(&row.integrity_hash);
-        leaves.push(row.integrity_hash.clone());
-    }
-    if let Some(expected_root) = expected_root {
-        let actual_root = blake3_merkle_root(&leaves).map_err(handler_error)?;
-        if actual_root.as_bytes() != expected_root.as_slice() {
-            return Err(TerminalError::new("merkle root mismatch for verified window").into());
-        }
-    }
-    Ok(VerificationReport {
-        records: rows.len(),
-    })
-}
-
-async fn load_audit_root(
-    pool: &PgPool,
-    workspace_id: &WorkspaceId,
-    id_or_uri: &str,
-) -> Result<AuditRootRow, HandlerError> {
-    let row = if let Ok(root_id) = Uuid::parse_str(id_or_uri) {
-        sqlx::query(
-            r#"
-            SELECT root_id, workspace_id, window_start, window_end, merkle_root
-            FROM analytics.audit_roots
-            WHERE workspace_id = $1 AND root_id = $2
-            "#,
-        )
-        .bind(workspace_id.as_str())
-        .bind(root_id)
-        .fetch_one(pool)
-        .await
-        .map_err(handler_error)?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT root_id, workspace_id, window_start, window_end, merkle_root
-            FROM analytics.audit_roots
-            WHERE workspace_id = $1 AND s3_object_uri = $2
-            "#,
-        )
-        .bind(workspace_id.as_str())
-        .bind(id_or_uri)
-        .fetch_one(pool)
-        .await
-        .map_err(handler_error)?
-    };
-    Ok(AuditRootRow {
-        root_id: row.try_get("root_id").map_err(handler_error)?,
-        workspace_id: row.try_get("workspace_id").map_err(handler_error)?,
-        window_start: row.try_get("window_start").map_err(handler_error)?,
-        window_end: row.try_get("window_end").map_err(handler_error)?,
-        merkle_root: row.try_get("merkle_root").map_err(handler_error)?,
-    })
-}
-
-async fn load_compliance_rows_for_interval(
-    pool: &PgPool,
-    workspace_id: &WorkspaceId,
-    since: &str,
-) -> Result<Vec<ComplianceRow>, HandlerError> {
-    load_compliance_rows(
-        sqlx::query(
-            r#"
-            SELECT turn_id, record_kind, ts, payload, integrity_hash, prev_hash
-            FROM analytics.turn_lineage
-            WHERE workspace_id = $1
-              AND prev_hash IS NOT NULL
-              AND ts > now() - ($2::text)::interval
-            ORDER BY ts ASC, turn_id ASC, record_kind ASC
-            "#,
-        )
-        .bind(workspace_id.as_str())
-        .bind(since)
-        .fetch_all(pool)
-        .await
-        .map_err(handler_error)?,
-    )
-}
-
-async fn load_compliance_rows_for_window(
-    pool: &PgPool,
-    workspace_id: &WorkspaceId,
-    window_start: chrono::DateTime<chrono::Utc>,
-    window_end: chrono::DateTime<chrono::Utc>,
-) -> Result<Vec<ComplianceRow>, HandlerError> {
-    load_compliance_rows(
-        sqlx::query(
-            r#"
-            SELECT turn_id, record_kind, ts, payload, integrity_hash, prev_hash
-            FROM analytics.turn_lineage
-            WHERE workspace_id = $1
-              AND prev_hash IS NOT NULL
-              AND ts >= $2
-              AND ts <= $3
-            ORDER BY ts ASC, turn_id ASC, record_kind ASC
-            "#,
-        )
-        .bind(workspace_id.as_str())
-        .bind(window_start)
-        .bind(window_end)
-        .fetch_all(pool)
-        .await
-        .map_err(handler_error)?,
-    )
-}
-
-fn load_compliance_rows(
-    rows: Vec<sqlx::postgres::PgRow>,
-) -> Result<Vec<ComplianceRow>, HandlerError> {
-    rows.into_iter()
-        .map(|row| {
-            Ok(ComplianceRow {
-                turn_id: row.try_get("turn_id").map_err(handler_error)?,
-                record_kind: row.try_get("record_kind").map_err(handler_error)?,
-                ts: row.try_get("ts").map_err(handler_error)?,
-                payload: row.try_get("payload").map_err(handler_error)?,
-                integrity_hash: row.try_get("integrity_hash").map_err(handler_error)?,
-                prev_hash: row.try_get("prev_hash").map_err(handler_error)?,
-            })
-        })
-        .collect()
-}
-
-fn lineage_record_from_row(row: sqlx::postgres::PgRow) -> Result<LineageRecordView, HandlerError> {
-    let session_id: Uuid = row.try_get("session_id").map_err(handler_error)?;
-    let user_id: String = row.try_get("user_id").map_err(handler_error)?;
-    let workspace_id: String = row.try_get("workspace_id").map_err(handler_error)?;
-    Ok(LineageRecordView {
-        turn_id: row.try_get("turn_id").map_err(handler_error)?,
-        session_id: Some(SessionId(session_id)),
-        workspace_id: Some(WorkspaceId::new(workspace_id)),
-        user_id: Some(UserId::new(user_id)),
-        ts: row.try_get("ts").map_err(handler_error)?,
-        record_kind: row.try_get("record_kind").map_err(handler_error)?,
-        payload: row.try_get("payload").map_err(handler_error)?,
-        summary: None,
-    })
-}
-
-fn service_signing_key(label: &str) -> SigningKey {
-    SigningKey::from_seed(
-        label.to_string(),
-        *blake3::hash(format!("moa-orchestrator-local-signing:{label}").as_bytes()).as_bytes(),
-    )
 }
 
 fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {

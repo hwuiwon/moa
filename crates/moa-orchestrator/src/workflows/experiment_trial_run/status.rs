@@ -7,7 +7,7 @@ pub(super) async fn insert_or_load_trial(
     workspace_id: WorkspaceId,
     trial: NewExperimentTrial,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
@@ -30,7 +30,7 @@ pub(super) async fn persist_trial_status(
     stop_reason: Option<ExperimentTrialStopReason>,
     error: Option<String>,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
@@ -52,7 +52,7 @@ pub(super) async fn persist_trial_status_by_key(
     stop_reason: Option<ExperimentTrialStopReason>,
     error: Option<String>,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     ctx.run(|| async move {
         let store = ExperimentStore::new(pool.clone());
@@ -96,7 +96,7 @@ pub(super) async fn increment_trial_turn(
     workspace_id: WorkspaceId,
     trial_uid: Uuid,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
@@ -118,7 +118,7 @@ pub(super) async fn attach_trial_session(
     trial_uid: Uuid,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .attach_trial_session(&scope, trial_uid, session_id)
@@ -141,7 +141,7 @@ pub(super) async fn attach_current_trial_trace(
         return Ok(());
     };
     tracing::Span::current().set_attribute("moa.experiment.trace_id", trace_id.clone());
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)

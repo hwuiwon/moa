@@ -63,6 +63,44 @@ pub enum DistillationOutcome {
     },
 }
 
+/// Proposal-level outcome distilled from a skill generation attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillProposalGeneration {
+    /// A reviewable skill draft proposal was created.
+    Proposed {
+        /// Proposed learning-candidate ID.
+        candidate_id: uuid::Uuid,
+        /// Draft artifact revision that contains the generated skill package.
+        draft_artifact_revision_uid: uuid::Uuid,
+    },
+    /// Similar-skill routing found no useful draft change.
+    Unchanged,
+    /// Distillation was intentionally skipped.
+    Skipped {
+        /// Stable skip reason.
+        reason: DistillationSkipReason,
+    },
+}
+
+/// Converts a full distillation outcome into proposal-level review state.
+#[must_use]
+pub fn proposal_generation_from_distillation(
+    outcome: DistillationOutcome,
+) -> SkillProposalGeneration {
+    match outcome {
+        DistillationOutcome::NewSkillProposed { proposal }
+        | DistillationOutcome::ImprovementProposed {
+            proposal: Some(proposal),
+            ..
+        } => SkillProposalGeneration::Proposed {
+            candidate_id: proposal.candidate_id,
+            draft_artifact_revision_uid: proposal.draft_artifact_revision_uid,
+        },
+        DistillationOutcome::ImprovementProposed { .. } => SkillProposalGeneration::Unchanged,
+        DistillationOutcome::Skipped { reason } => SkillProposalGeneration::Skipped { reason },
+    }
+}
+
 /// Segment-native input for experience-backed skill distillation.
 #[derive(Debug, Clone)]
 pub struct ExperienceDistillationInput {

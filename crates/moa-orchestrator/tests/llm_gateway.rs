@@ -7,9 +7,8 @@ use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
     MoaError, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
 };
-use moa_orchestrator::services::llm_gateway::{
-    LLMGatewayImpl, ProviderKind, ProviderRegistry, compute_cost_cents,
-};
+use moa_orchestrator::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
+use moa_providers::ProviderRegistry;
 use moa_test_support::pricing::PricingTable;
 
 const CENTS_PER_DOLLAR: f64 = 100.0;
@@ -103,92 +102,6 @@ impl LLMProvider for MockProvider {
 enum MockOutcome {
     Success(CompletionResponse),
     Error(String),
-}
-
-#[test]
-fn llm_gateway_resolve_provider_for_claude_model() {
-    let registry = ProviderRegistry::with_static_providers(
-        Some(Arc::new(MockProvider::success(
-            "anthropic",
-            "claude-sonnet-4-6",
-            token_pricing_from_fixture("anthropic", "claude-sonnet-4-6"),
-        ))),
-        None,
-        None,
-    );
-
-    let (provider_kind, model_id) = registry
-        .resolve_provider_kind(Some("claude-sonnet-4-6"))
-        .expect("claude model should resolve");
-
-    assert_eq!(provider_kind, ProviderKind::Anthropic);
-    assert_eq!(model_id.as_str(), "claude-sonnet-4-6");
-}
-
-#[test]
-fn llm_gateway_resolve_provider_for_gpt_model() {
-    let registry = ProviderRegistry::with_static_providers(
-        None,
-        Some(Arc::new(MockProvider::success(
-            "openai",
-            "gpt-5.4",
-            token_pricing_from_fixture("openai", "gpt-4.1"),
-        ))),
-        None,
-    );
-
-    let (provider_kind, model_id) = registry
-        .resolve_provider_kind(Some("gpt-5.4"))
-        .expect("gpt model should resolve");
-
-    assert_eq!(provider_kind, ProviderKind::OpenAI);
-    assert_eq!(model_id.as_str(), "gpt-5.4");
-}
-
-#[test]
-fn llm_gateway_resolve_provider_for_prefixed_google_model() {
-    let registry = ProviderRegistry::with_static_providers(
-        None,
-        None,
-        Some(Arc::new(MockProvider::success(
-            "google",
-            "gemini-3-flash-preview",
-            token_pricing_from_fixture("gemini", "gemini-3-flash-preview"),
-        ))),
-    );
-
-    let (provider_kind, model_id) = registry
-        .resolve_provider_kind(Some("google:gemini-3-flash-preview"))
-        .expect("prefixed google model should resolve");
-
-    assert_eq!(provider_kind, ProviderKind::Google);
-    assert_eq!(model_id.as_str(), "gemini-3-flash-preview");
-}
-
-#[test]
-fn llm_gateway_resolve_provider_for_configured_static_default_model() {
-    let registry = ProviderRegistry::with_static_providers(
-        None,
-        Some(Arc::new(MockProvider::success(
-            "scripted",
-            "scripted-loadtest",
-            TokenPricing {
-                input_per_mtok: 0.0,
-                output_per_mtok: 0.0,
-                cached_input_per_mtok: Some(0.0),
-                cache_write_5m_per_mtok: None,
-                cache_write_1h_per_mtok: None,
-            },
-        ))),
-        None,
-    );
-
-    let (provider_kind, model_id) = registry
-        .resolve_provider_kind(Some("scripted-loadtest"))
-        .expect("configured static default model should resolve");
-
-    assert_eq!(provider_kind, ProviderKind::OpenAI);
-    assert_eq!(model_id.as_str(), "scripted-loadtest");
 }
 
 #[test]

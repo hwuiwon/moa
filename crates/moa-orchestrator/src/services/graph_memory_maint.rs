@@ -90,7 +90,7 @@ impl GraphMemoryMaint for GraphMemoryMaintImpl {
                 .await?
                 .into_inner(),
         };
-        let pool = OrchestratorCtx::current().graph_pool.clone();
+        let pool = OrchestratorCtx::current_graph_pool();
         let discovery_request = request.clone();
         let workspace_ids = ctx
             .run(|| async move {

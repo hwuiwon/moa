@@ -124,7 +124,7 @@ async fn create_new_session(
     model: ModelId,
     request: &ExperimentRunWorkflowRequest,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let identity = request.identity.clone();
     Ok(ctx
         .run(|| async move {
@@ -148,7 +148,7 @@ async fn start_and_attach_workflow_run(
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
 ) -> Result<StartedWorkflowRun, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     Ok(ctx
         .run(|| async move {
             let run = workflow_runtime(pool.clone())

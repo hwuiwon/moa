@@ -234,7 +234,7 @@ async fn create_new_session(
     model: ModelId,
     identity: &Identity,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let identity = identity.clone();
     Ok(ctx
         .run(|| async move {
@@ -273,7 +273,7 @@ async fn load_session_events(
     session_id: SessionId,
     range: EventRange,
 ) -> Result<Vec<EventRecord>, HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     Ok(ctx
         .run(|| async move {
             store
@@ -318,7 +318,7 @@ async fn record_target_usage_after(
     session_id: SessionId,
     sequence_num: &mut u64,
 ) -> Result<(), HandlerError> {
-    let store = OrchestratorCtx::current().session_store.clone();
+    let store = OrchestratorCtx::current_session_store();
     let range = event_range_after(*sequence_num);
     let previous_sequence = *sequence_num;
     let observation = ctx
@@ -401,7 +401,7 @@ async fn start_and_attach_workflow_run(
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
 ) -> Result<StartedWorkflowRun, HandlerError> {
-    let pool = OrchestratorCtx::current().graph_pool.clone();
+    let pool = OrchestratorCtx::current_graph_pool();
     Ok(ctx
         .run(|| async move {
             let run = workflow_runtime(pool.clone())
