@@ -22,14 +22,21 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn action_policy_auto_mode_executes_shell_without_user_approval() -> Result<()> {
+async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Result<()> {
+    // Pins: action-policy E2E scenarios share one scripted fixture process.
+    let fixture = OrchestratorTestFixture::with_script(action_policy_script()).await?;
+    action_policy_auto_mode_executes_shell_without_user_approval(&fixture).await?;
+    admin_review_policy_records_pending_review_and_turn_continues(&fixture).await?;
+    workspace_admin_clear_executes_stored_review_action(&fixture).await?;
+    workspace_admin_deny_does_not_execute_stored_review_action(&fixture).await?;
+    workspace_member_cannot_decide_action_review(&fixture).await?;
+    Ok(())
+}
+
+async fn action_policy_auto_mode_executes_shell_without_user_approval(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
     // Pins: a formerly gated bash action executes under action-policy auto mode.
-    let fixture = OrchestratorTestFixture::with_script(bash_script(
-        "auto-mode-bash",
-        "printf auto-mode-ok",
-        "Auto mode finished.",
-    ))
-    .await?;
     let test = fixture.isolated().await;
     let session_id = test.create_session("auto-mode").await?;
 
@@ -52,16 +59,10 @@ async fn action_policy_auto_mode_executes_shell_without_user_approval() -> Resul
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn admin_review_policy_records_pending_review_and_turn_continues() -> Result<()> {
+async fn admin_review_policy_records_pending_review_and_turn_continues(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
     // Pins: admin-review policy records a pending workspace action review without blocking.
-    let fixture = OrchestratorTestFixture::with_script(bash_script(
-        "pending-review-bash",
-        "printf should-not-run-before-clear",
-        "Admin review path continued.",
-    ))
-    .await?;
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-pending").await?;
     let meta = test.client().get_session(session_id).await?;
@@ -105,16 +106,10 @@ async fn admin_review_policy_records_pending_review_and_turn_continues() -> Resu
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn workspace_admin_clear_executes_stored_review_action() -> Result<()> {
+async fn workspace_admin_clear_executes_stored_review_action(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
     // Pins: clearing a workspace action review executes the stored request with a fresh tool id.
-    let fixture = OrchestratorTestFixture::with_script(bash_script(
-        "clear-review-bash",
-        "printf clear-review-ok",
-        "Clear review path continued.",
-    ))
-    .await?;
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-clear").await?;
     let meta = test.client().get_session(session_id).await?;
@@ -180,16 +175,10 @@ async fn workspace_admin_clear_executes_stored_review_action() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn workspace_admin_deny_does_not_execute_stored_review_action() -> Result<()> {
+async fn workspace_admin_deny_does_not_execute_stored_review_action(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
     // Pins: denying a workspace action review records the decision without executing the stored action.
-    let fixture = OrchestratorTestFixture::with_script(bash_script(
-        "deny-review-bash",
-        "printf deny-review-should-not-run",
-        "Deny review path continued.",
-    ))
-    .await?;
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-deny").await?;
     let meta = test.client().get_session(session_id).await?;
@@ -234,16 +223,10 @@ async fn workspace_admin_deny_does_not_execute_stored_review_action() -> Result<
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
-async fn workspace_member_cannot_decide_action_review() -> Result<()> {
+async fn workspace_member_cannot_decide_action_review(
+    fixture: &OrchestratorTestFixture,
+) -> Result<()> {
     // Pins: non-admin workspace members cannot list or decide action reviews.
-    let fixture = OrchestratorTestFixture::with_script(bash_script(
-        "member-denied-bash",
-        "printf member-denied-should-not-run",
-        "Member denial path continued.",
-    ))
-    .await?;
     let test = fixture.isolated().await;
     let session_id = test.create_session("member-denied").await?;
     let meta = test.client().get_session(session_id).await?;
@@ -407,7 +390,7 @@ async fn decide_review(
         .await
 }
 
-fn bash_script(provider_tool_id: &str, cmd: &str, final_text: &str) -> serde_json::Value {
+fn action_policy_script() -> serde_json::Value {
     json!({
         "default": {
             "completion": {
@@ -416,23 +399,39 @@ fn bash_script(provider_tool_id: &str, cmd: &str, final_text: &str) -> serde_jso
             }
         },
         "responses": [
-            {
-                "completion": {
-                    "content": "",
-                    "tool_calls": [{
-                        "name": "bash",
-                        "id": provider_tool_id,
-                        "input": { "cmd": cmd }
-                    }]
-                }
-            },
-            {
-                "completion": {
-                    "content": final_text,
-                    "tool_calls": []
-                }
-            }
+            bash_tool_response("auto-mode-bash", "printf auto-mode-ok"),
+            text_response("Auto mode finished."),
+            bash_tool_response("pending-review-bash", "printf should-not-run-before-clear"),
+            text_response("Admin review path continued."),
+            bash_tool_response("clear-review-bash", "printf clear-review-ok"),
+            text_response("Clear review path continued."),
+            bash_tool_response("deny-review-bash", "printf deny-review-should-not-run"),
+            text_response("Deny review path continued."),
+            bash_tool_response("member-denied-bash", "printf member-denied-should-not-run"),
+            text_response("Member denial path continued.")
         ]
+    })
+}
+
+fn bash_tool_response(provider_tool_id: &str, cmd: &str) -> serde_json::Value {
+    json!({
+        "completion": {
+            "content": "",
+            "tool_calls": [{
+                "name": "bash",
+                "id": provider_tool_id,
+                "input": { "cmd": cmd }
+            }]
+        }
+    })
+}
+
+fn text_response(text: &str) -> serde_json::Value {
+    json!({
+        "completion": {
+            "content": text,
+            "tool_calls": []
+        }
     })
 }
 

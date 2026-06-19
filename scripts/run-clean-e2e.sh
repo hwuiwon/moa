@@ -64,21 +64,49 @@ require_cmd() {
   fi
 }
 
+elapsed_since() {
+  local start="$1"
+  local elapsed=$((SECONDS - start))
+  printf '%02d:%02d' $((elapsed / 60)) $((elapsed % 60))
+}
+
 run() {
   echo
   echo ">> $*"
+  local start=$SECONDS
+  local status=0
+  set +e
   "$@"
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    echo "<< completed in $(elapsed_since "${start}"): $*"
+  else
+    echo "<< failed after $(elapsed_since "${start}"): $*" >&2
+  fi
+  return "${status}"
 }
 
 run_without_provider_keys() {
   echo
   echo ">> env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY -u COHERE_API_KEY $*"
+  local start=$SECONDS
+  local status=0
+  set +e
   env \
     -u ANTHROPIC_API_KEY \
     -u OPENAI_API_KEY \
     -u GOOGLE_API_KEY \
     -u COHERE_API_KEY \
     "$@"
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    echo "<< completed in $(elapsed_since "${start}"): env -u provider keys $*"
+  else
+    echo "<< failed after $(elapsed_since "${start}"): env -u provider keys $*" >&2
+  fi
+  return "${status}"
 }
 
 wait_for_http() {
@@ -157,6 +185,7 @@ fi
 
 cd "${REPO_ROOT}"
 
+RUNNER_STARTED_AT=$SECONDS
 RUN_ID="${MOA_CLEAN_E2E_RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
 RUN_SAFE_ID="$(printf '%s' "${RUN_ID}" | tr -c 'A-Za-z0-9_' '_')"
 RUN_SHORT_ID="$(printf '%s' "${RUN_SAFE_ID}" | cut -c1-20)"
@@ -251,7 +280,9 @@ export MOA_RESTATE_DEPLOYMENT_HOST="127.0.0.1"
 export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
 
 run cargo test -p moa-orchestrator --tests --locked -- --test-threads=1
-run cargo test -p moa-orchestrator --locked --features provider-overrides,skill-learning skill_learning -- --test-threads=1
+run cargo test -p moa-orchestrator --lib --locked --features provider-overrides,skill-learning runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
+run cargo test -p moa-orchestrator --test skill_learning_review --locked --features provider-overrides,skill-learning -- --test-threads=1
+run cargo test -p moa-orchestrator --test skill_learning_workflow --locked --features provider-overrides,skill-learning -- --test-threads=1
 run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
 run cargo test -p moa-eval --test golden_eval --locked
 
@@ -308,3 +339,4 @@ fi
 
 echo
 echo "clean E2E run completed"
+echo "clean E2E elapsed: $(elapsed_since "${RUNNER_STARTED_AT}")"

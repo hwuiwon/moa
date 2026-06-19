@@ -33,7 +33,7 @@ use tempfile::TempDir;
 use testcontainers::core::{Host, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use tokio::sync::{Mutex, MutexGuard, OnceCell};
+use tokio::sync::{Mutex, OnceCell};
 use uuid::Uuid;
 
 const POSTGRES_IMAGE: &str = "moa-postgres-age";
@@ -62,14 +62,11 @@ pub struct OrchestratorTestFixture {
     pub fga_client: Option<FgaClient>,
     /// Shared workspace/user prefix for this fixture process.
     pub workspace_prefix: String,
-    /// Scripted provider fixture path passed to the orchestrator.
-    pub script_path: PathBuf,
     _script_dir: Option<TempDir>,
     _postgres: Option<ContainerAsync<GenericImage>>,
     _restate: Option<ContainerAsync<GenericImage>>,
     _openfga: Option<ContainerAsync<GenericImage>>,
     orchestrator: Mutex<Option<Child>>,
-    serial_lock: Mutex<()>,
 }
 
 impl OrchestratorTestFixture {
@@ -97,16 +94,6 @@ impl OrchestratorTestFixture {
         }
     }
 
-    /// Acquires an exclusive fixture namespace for tests that mutate shared orchestrator state.
-    pub async fn serialized(&self) -> SerializedTest<'_> {
-        let guard = self.serial_lock.lock().await;
-        let isolated = self.isolated().await;
-        SerializedTest {
-            isolated,
-            _guard: guard,
-        }
-    }
-
     async fn build() -> Result<Self> {
         if let Ok(ingress_url) = std::env::var("MOA_TEST_EXTERNAL_INGRESS_URL") {
             return Self::external(ingress_url);
@@ -115,9 +102,6 @@ impl OrchestratorTestFixture {
     }
 
     /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
-    ///
-    /// This bypasses the shared fixture because `MOA_PROVIDERS_OVERRIDE=scripted`
-    /// is loaded when the orchestrator starts.
     pub async fn with_script(script: serde_json::Value) -> Result<Self> {
         if std::env::var("MOA_TEST_EXTERNAL_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
@@ -148,13 +132,11 @@ impl OrchestratorTestFixture {
             postgres_url,
             fga_client,
             workspace_prefix: format!("external-{}", Uuid::now_v7().simple()),
-            script_path: PathBuf::new(),
             _script_dir: None,
             _postgres: None,
             _restate: None,
             _openfga: None,
             orchestrator: Mutex::new(None),
-            serial_lock: Mutex::new(()),
         })
     }
 
@@ -228,13 +210,11 @@ impl OrchestratorTestFixture {
             postgres_url,
             fga_client: Some(fga_client),
             workspace_prefix: format!("fixture-{}", Uuid::now_v7().simple()),
-            script_path,
             _script_dir: Some(script_dir),
             _postgres: Some(postgres),
             _restate: Some(restate),
             _openfga: Some(openfga),
             orchestrator: Mutex::new(Some(orchestrator)),
-            serial_lock: Mutex::new(()),
         })
     }
 
@@ -435,24 +415,6 @@ impl IsolatedTest<'_> {
             .await
             .context("initialize Session VO through orchestrator client")?;
         Ok(session_id)
-    }
-
-    /// Writes a new scripted provider fixture.
-    ///
-    /// This mutates the shared orchestrator script path. Tests needing custom
-    /// scripts should call [`OrchestratorTestFixture::serialized`] or route
-    /// within one shared script by session/workspace identifiers.
-    pub async fn install_script(&self, script: serde_json::Value) -> Result<()> {
-        if self.fixture.script_path.as_os_str().is_empty() {
-            bail!("external orchestrator fixtures cannot install local provider scripts");
-        }
-        let bytes = serde_json::to_vec(&script).context("serialize scripted provider fixture")?;
-        std::fs::write(&self.fixture.script_path, bytes).with_context(|| {
-            format!(
-                "write scripted provider fixture {}",
-                self.fixture.script_path.display()
-            )
-        })
     }
 }
 
@@ -708,20 +670,6 @@ async fn response_json_or_error(
         bail!("OpenFGA {operation} returned {status}: {body}");
     }
     serde_json::from_str(&body).with_context(|| format!("decode OpenFGA {operation} response"))
-}
-
-/// Serialized isolated namespace for tests that need exclusive fixture access.
-pub struct SerializedTest<'a> {
-    isolated: IsolatedTest<'a>,
-    _guard: MutexGuard<'a, ()>,
-}
-
-impl<'a> std::ops::Deref for SerializedTest<'a> {
-    type Target = IsolatedTest<'a>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.isolated
-    }
 }
 
 async fn start_postgres_container() -> Result<ContainerAsync<GenericImage>> {
