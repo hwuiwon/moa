@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 /// Current schema version for memory evaluation corpus files.
 pub const CORPUS_SCHEMA_VERSION: u32 = 1;

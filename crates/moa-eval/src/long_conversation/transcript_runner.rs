@@ -22,6 +22,11 @@ use moa_core::{
     SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, TaskSegment,
     deterministic_segment_id,
 };
+use moa_eval_core::{
+    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus, LongConversationMode,
+    LongSessionInterleaving, LongTestCase, Result, ScoreValue, TestCase,
+};
+use moa_lineage_core::LineageEvent;
 use serde_json::Value;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -36,11 +41,6 @@ use super::score_card::{
 use super::scripted_user::{ScriptedUserScript, ScriptedUserTurn};
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
-use crate::{
-    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus, LongConversationMode,
-    LongSessionInterleaving, LongTestCase, Result, ScoreValue, TestCase,
-};
-use moa_lineage_core::LineageEvent;
 
 const MAX_LONG_CONVERSATION_AGENT_TURNS: usize = 32;
 
@@ -1425,7 +1425,7 @@ mod tests {
     use moa_core::{CacheReport, EventType, ModelId};
 
     use super::*;
-    use crate::EvalMetrics;
+    use moa_eval_core::EvalMetrics;
 
     fn cache_report_record(
         session_id: SessionId,

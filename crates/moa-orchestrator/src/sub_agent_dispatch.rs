@@ -1,8 +1,6 @@
-//! Pure helpers for sub-agent dispatch limits, budgets, paths, and model-visible outputs.
+//! Pure helpers for sub-agent limits, budgets, and paths.
 
-use std::time::Duration;
-
-use moa_core::{SubAgentChildRef, SubAgentId, SubAgentResult, ToolOutput};
+use moa_core::SubAgentChildRef;
 use restate_sdk::prelude::*;
 
 /// Maximum nested sub-agent depth allowed for one tree.
@@ -10,15 +8,6 @@ pub const MAX_SUB_AGENT_DEPTH: u32 = 3;
 
 /// Maximum number of active child sub-agents owned by one parent at a time.
 pub const MAX_SUB_AGENT_FAN_OUT: usize = 4;
-
-/// Durable dispatch result returned to the parent turn loop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DispatchedSubAgent {
-    /// Child object key allocated for the dispatched task.
-    pub id: SubAgentId,
-    /// Final child result payload resolved from the awakeable.
-    pub result: SubAgentResult,
-}
 
 /// Computes a stable hash used for duplicate child-task detection.
 pub fn task_hash(task: &str, tool_subset: &[String]) -> String {
@@ -155,55 +144,13 @@ fn sanitize_path_segment(value: &str) -> String {
         .to_string()
 }
 
-/// Converts a completed child result into the synthetic tool output returned to the parent LLM.
-#[must_use]
-pub fn sub_agent_result_tool_output(result: &SubAgentResult) -> ToolOutput {
-    if result.success {
-        return ToolOutput::text(
-            format!(
-                "Sub-agent {} completed successfully.\n{}",
-                result.sub_agent_id,
-                truncate_result_text(&result.output)
-            ),
-            Duration::ZERO,
-        );
-    }
-
-    let detail = result
-        .error
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(result.output.as_str());
-    ToolOutput::error(
-        format!(
-            "Sub-agent {} failed: {}",
-            result.sub_agent_id,
-            truncate_result_text(detail)
-        ),
-        Duration::ZERO,
-    )
-}
-
-const MAX_SUB_AGENT_RESULT_CHARS: usize = 12_000;
-
-fn truncate_result_text(value: &str) -> String {
-    let Some((cutoff, _)) = value.char_indices().nth(MAX_SUB_AGENT_RESULT_CHARS) else {
-        return value.to_string();
-    };
-
-    let mut truncated = value[..cutoff].to_string();
-    truncated.push_str("\n\n[truncated sub-agent result]");
-    truncated
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::SubAgentChildRef;
 
     use super::{
-        MAX_SUB_AGENT_DEPTH, MAX_SUB_AGENT_FAN_OUT, MAX_SUB_AGENT_RESULT_CHARS,
-        refund_child_budget, reserve_child_budget, sub_agent_result_tool_output, task_hash,
-        validate_dispatch_budget, validate_dispatch_limits,
+        MAX_SUB_AGENT_DEPTH, MAX_SUB_AGENT_FAN_OUT, refund_child_budget, reserve_child_budget,
+        task_hash, validate_dispatch_budget, validate_dispatch_limits,
     };
 
     #[test]
@@ -320,32 +267,6 @@ mod tests {
 
         assert_eq!(after_reserve, 600);
         assert_eq!(after_refund, 875);
-    }
-
-    #[test]
-    fn sub_agent_result_tool_output_truncates_oversized_success_payloads() {
-        // Pins: child results cannot return unbounded synthetic tool output to the parent turn.
-        let result = moa_core::SubAgentResult {
-            sub_agent_id: "child-1".to_string(),
-            success: true,
-            output: "a".repeat(MAX_SUB_AGENT_RESULT_CHARS + 10),
-            tokens_used: 42,
-            tools_invoked: 1,
-            error: None,
-        };
-
-        let output = sub_agent_result_tool_output(&result);
-        let rendered = output.to_text();
-
-        assert!(!output.is_error);
-        let payload = rendered
-            .strip_prefix("Sub-agent child-1 completed successfully.\n")
-            .expect("successful output should include the sub-agent result header");
-        let (visible_payload, marker) = payload
-            .split_once("\n\n[truncated sub-agent result]")
-            .expect("oversized output should include the truncation marker");
-        assert_eq!(visible_payload.len(), MAX_SUB_AGENT_RESULT_CHARS);
-        assert_eq!(marker, "");
     }
 
     #[test]

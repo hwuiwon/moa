@@ -14,6 +14,11 @@ use moa_core::{
     WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
+use moa_test_support::postgres::{
+    test_action_policy_rules, test_create_and_get_session, test_emit_and_get_events,
+    test_event_search, test_list_sessions_with_filter, test_session_status_update,
+    test_workspace_cost_since,
+};
 use sqlx::PgPool;
 use sqlx::types::Json;
 use uuid::Uuid;
@@ -102,31 +107,31 @@ async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
 #[ignore]
 async fn postgres_shared_session_store_contract() {
     with_test_store(|store| async move {
-        shared::test_create_and_get_session(&store).await;
+        test_create_and_get_session(&store).await;
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_emit_and_get_events(&store).await;
+        test_emit_and_get_events(&store).await;
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_event_search(&store).await;
+        test_event_search(&store).await;
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_list_sessions_with_filter(&store).await;
+        test_list_sessions_with_filter(&store).await;
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_workspace_cost_since(&store).await;
+        test_workspace_cost_since(&store).await;
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_session_status_update(&store).await;
+        test_session_status_update(&store).await;
     })
     .await;
     with_test_store(|store| async move {
-        shared::test_action_policy_rules(&store).await;
+        test_action_policy_rules(&store).await;
     })
     .await;
 }

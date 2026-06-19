@@ -1,9 +1,9 @@
 //! Integration tests for built-in evaluators.
 
-use moa_eval::{
-    EvalMetrics, EvalResult, EvalScore, ExpectedOutput, OutputMatchEvaluator, ScoreValue, TestCase,
-    ThresholdEvaluator, ToolSuccessEvaluator, TrajectoryMatchEvaluator, TrajectoryStep,
-    score_is_failure,
+use moa_eval_core::{
+    EvalMetrics, EvalResult, EvalScore, Evaluator, ExpectedOutput, OutputMatchEvaluator,
+    ScoreValue, TestCase, ThresholdEvaluator, ToolSuccessEvaluator, TrajectoryMatchEvaluator,
+    TrajectoryStep, score_is_failure,
 };
 
 #[tokio::test]
@@ -27,7 +27,7 @@ async fn trajectory_exact_match_scores_one() {
         ..EvalResult::default()
     };
 
-    let scores = moa_eval::Evaluator::evaluate(&evaluator, &case, &result)
+    let scores = Evaluator::evaluate(&evaluator, &case, &result)
         .await
         .expect("score");
     assert_eq!(scores[0].value, ScoreValue::Numeric(1.0));
@@ -48,7 +48,7 @@ async fn output_match_contains_passes() {
         ..EvalResult::default()
     };
 
-    let scores = moa_eval::Evaluator::evaluate(&evaluator, &case, &result)
+    let scores = Evaluator::evaluate(&evaluator, &case, &result)
         .await
         .expect("score");
     assert_eq!(scores[0].value, ScoreValue::Numeric(1.0));
@@ -68,7 +68,7 @@ async fn threshold_cost_over_budget_fails() {
         ..EvalResult::default()
     };
 
-    let scores = moa_eval::Evaluator::evaluate(&evaluator, &TestCase::default(), &result)
+    let scores = Evaluator::evaluate(&evaluator, &TestCase::default(), &result)
         .await
         .expect("score");
     assert_eq!(scores[0].value, ScoreValue::Boolean(false));
@@ -93,7 +93,7 @@ async fn tool_success_reports_rate() {
         ..EvalResult::default()
     };
 
-    let scores = moa_eval::Evaluator::evaluate(&evaluator, &TestCase::default(), &result)
+    let scores = Evaluator::evaluate(&evaluator, &TestCase::default(), &result)
         .await
         .expect("score");
     assert_eq!(scores[0].value, ScoreValue::Numeric(0.5));

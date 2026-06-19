@@ -92,7 +92,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `PlatformAdapter` | Messaging inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |
-| `CredentialVault` | Secret storage and retrieval | local encrypted vault; environment-backed MCP vault |
+| `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
 Runtime entrypoints share these seams through the Restate-backed orchestrator.
@@ -211,9 +211,7 @@ Local deployments use the zero-dependency provider bundle by default:
 `BuiltinAsyncAuthzProvider`. Builtin approvals are documented in
 [`docs/operations/builtin-approvals.md`](operations/builtin-approvals.md).
 Auth0 setup is documented in
-[`docs/operations/auth0-setup.md`](operations/auth0-setup.md), and optional
-OIDC group-to-FGA tuple naming is documented in
-[`docs/operations/oidc-group-mapping.md`](operations/oidc-group-mapping.md).
+[`docs/operations/auth0-setup.md`](operations/auth0-setup.md).
 Agent lifecycle operations are documented in
 [`docs/operations/agent-lifecycle.md`](operations/agent-lifecycle.md), and the
 Auth0 Token Vault setup is documented in

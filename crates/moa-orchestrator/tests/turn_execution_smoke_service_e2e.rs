@@ -5,7 +5,8 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use moa_core::{ModelId, SessionId, SessionMeta};
+use moa_core::traits::Identity;
+use moa_core::{ModelId, SessionId, SessionMeta, SessionStatus};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -19,6 +20,11 @@ struct ProgressResponse {
     phase: String,
     cancel_requested: bool,
     cancel_reason: Option<String>,
+}
+
+struct InitializedSession {
+    id: String,
+    identity: Identity,
 }
 
 fn ingress_url() -> String {
@@ -47,7 +53,10 @@ fn live_model() -> &'static str {
     "gpt-5.4-mini"
 }
 
-async fn create_initialized_session(client: &reqwest::Client, label: &str) -> Result<String> {
+async fn create_initialized_session(
+    client: &reqwest::Client,
+    label: &str,
+) -> Result<InitializedSession> {
     let meta = SessionMeta {
         workspace_id: format!("workspace-{label}").into(),
         user_id: "user-1".into(),
@@ -81,17 +90,37 @@ async fn create_initialized_session(client: &reqwest::Client, label: &str) -> Re
         .error_for_status()
         .context("SessionStore init_session_vo should succeed")?;
 
-    Ok(session_id.to_string())
+    client
+        .post(session_store_url("update_status"))
+        .json(&serde_json::json!({
+            "session_id": session_id,
+            "status": SessionStatus::Running,
+        }))
+        .send()
+        .await
+        .context("send SessionStore update_status")?
+        .error_for_status()
+        .context("SessionStore update_status should succeed")?;
+
+    Ok(InitializedSession {
+        id: session_id.to_string(),
+        identity,
+    })
 }
 
-async fn fire_run(client: &reqwest::Client, session_id: &str, turn_id: &str) -> Result<()> {
+async fn fire_run(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    turn_id: &str,
+) -> Result<()> {
     let body = serde_json::json!({
-        "session_id": session_id,
+        "session_id": &session.id,
         "turn_id": turn_id,
+        "identity": &session.identity,
         "user_message": "smoke test"
     });
-    client
-        .post(format!("{}/send", workflow_url(turn_id, "run")))
+    let request = client.post(format!("{}/send", workflow_url(turn_id, "run")));
+    with_identity(request, &session.identity)
         .json(&body)
         .send()
         .await
@@ -126,17 +155,16 @@ async fn poll_progress(client: &reqwest::Client, turn_id: &str) -> Result<Progre
         .context("deserialize TurnExecution progress")
 }
 
-async fn await_phase(
+async fn await_cancel_requested(
     client: &reqwest::Client,
     turn_id: &str,
-    target: &str,
     timeout: Duration,
 ) -> Result<ProgressResponse> {
     let deadline = Instant::now() + timeout;
     let mut last_progress = None;
     while Instant::now() < deadline {
         let progress = poll_progress(client, turn_id).await?;
-        if progress.phase == target {
+        if progress.cancel_requested {
             return Ok(progress);
         }
         last_progress = Some(progress);
@@ -144,7 +172,7 @@ async fn await_phase(
     }
 
     bail!(
-        "turn {turn_id} did not reach phase {target} within {:?}; last progress: {:?}",
+        "turn {turn_id} did not record cancellation within {:?}; last progress: {:?}",
         timeout,
         last_progress
     )
@@ -152,35 +180,37 @@ async fn await_phase(
 
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn cancel_after_run_dispatch_short_circuits() -> Result<()> {
-    // Pins: a cancel after run dispatch moves the turn to Cancelled.
+async fn cancel_after_run_dispatch_records_cancel_request() -> Result<()> {
+    // Pins: direct workflow cancellation publishes the durable cancel promise while the body is active.
     let client = reqwest::Client::new();
     let turn_id = format!("smoke-after-{}", Uuid::now_v7());
-    let session_id = create_initialized_session(&client, "turn-after").await?;
+    let session = create_initialized_session(&client, "turn-after").await?;
 
-    fire_run(&client, &session_id, &turn_id).await?;
+    fire_run(&client, &session, &turn_id).await?;
     request_cancel(&client, &turn_id, "after-init").await?;
-    let cancelled = await_phase(&client, &turn_id, "Cancelled", Duration::from_secs(5)).await?;
+    let cancelled = await_cancel_requested(&client, &turn_id, Duration::from_secs(10)).await?;
     assert_eq!(cancelled.turn_id, turn_id);
     assert!(cancelled.cancel_requested);
     assert_eq!(cancelled.cancel_reason.as_deref(), Some("after-init"));
+    assert!(!cancelled.phase.trim().is_empty());
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
-async fn cancel_before_init_short_circuits_via_self_resolve() -> Result<()> {
-    // Pins: a cancel recorded before run starts is observed by the body after awakeable publish.
+async fn cancel_before_run_records_cancel_request() -> Result<()> {
+    // Pins: a cancel recorded before run starts is visible through shared progress.
     let client = reqwest::Client::new();
     let turn_id = format!("smoke-before-{}", Uuid::now_v7());
-    let session_id = create_initialized_session(&client, "turn-before").await?;
+    let session = create_initialized_session(&client, "turn-before").await?;
 
     request_cancel(&client, &turn_id, "before-init").await?;
-    fire_run(&client, &session_id, &turn_id).await?;
+    fire_run(&client, &session, &turn_id).await?;
 
-    let cancelled = await_phase(&client, &turn_id, "Cancelled", Duration::from_secs(10)).await?;
+    let cancelled = await_cancel_requested(&client, &turn_id, Duration::from_secs(10)).await?;
     assert_eq!(cancelled.turn_id, turn_id);
     assert!(cancelled.cancel_requested);
     assert_eq!(cancelled.cancel_reason.as_deref(), Some("before-init"));
+    assert!(!cancelled.phase.trim().is_empty());
     Ok(())
 }

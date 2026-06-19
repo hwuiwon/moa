@@ -1,7 +1,6 @@
 //! SCIM v2 HTTP endpoints for enterprise provisioning.
 
 pub mod auth;
-pub mod deactivation;
 pub mod groups;
 pub mod meta;
 pub mod patch;

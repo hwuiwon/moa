@@ -6,7 +6,6 @@ use std::time::Duration;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Result, SessionId,
     StopReason, ToolCallContent, ToolCallId, ToolOutput, TurnOutcome, delegation_tool_schemas,
-    dispatch_sub_agent_tool_schema,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use uuid::Uuid;
@@ -68,11 +67,6 @@ pub(crate) fn summarize_response_text(response: &CompletionResponse) -> Option<S
 
     const MAX_SUMMARY_CHARS: usize = 240;
     Some(trimmed.chars().take(MAX_SUMMARY_CHARS).collect())
-}
-
-/// Ensures the shared `dispatch_sub_agent` schema is available on the request.
-pub(crate) fn ensure_dispatch_tool_schema(request: &mut CompletionRequest) {
-    ensure_tool_schema(request, dispatch_sub_agent_tool_schema());
 }
 
 /// Ensures the v2 delegation tool schemas are available on the request.
@@ -224,9 +218,8 @@ mod tests {
 
     use super::{
         allowed_tool_names, disallowed_tool_output, ensure_delegation_tool_schemas,
-        ensure_dispatch_tool_schema, meaningful_cancel_reason, stable_tool_call_id,
-        summarize_response_text, tool_call_is_allowed, tool_input_leaks_canary,
-        turn_outcome_for_response,
+        meaningful_cancel_reason, stable_tool_call_id, summarize_response_text,
+        tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
     };
 
     fn completion_response(
@@ -335,17 +328,13 @@ mod tests {
         let mut request = CompletionRequest::new("use tools carefully");
         request.tools = vec![
             json!({"name": "file_read", "input_schema": {"type": "object"}}),
-            json!({"name": "dispatch_sub_agent", "input_schema": {"type": "object"}}),
             json!({"input_schema": {"type": "object"}}),
             json!({"name": 42, "input_schema": {"type": "object"}}),
         ];
 
         let allowed = allowed_tool_names(&request);
 
-        assert_eq!(
-            allowed,
-            BTreeSet::from(["dispatch_sub_agent".to_string(), "file_read".to_string()])
-        );
+        assert_eq!(allowed, BTreeSet::from(["file_read".to_string()]));
         assert!(tool_call_is_allowed(&allowed, "file_read"));
         assert!(!tool_call_is_allowed(&allowed, "bash"));
     }
@@ -364,16 +353,14 @@ mod tests {
 
     #[test]
     fn delegation_tool_schema_injection_is_idempotent() {
-        // Pins: v2 delegation tools are injected once and recognized as runner-handled tools.
+        // Pins: delegation tools are injected once and recognized as runner-handled tools.
         let mut request = CompletionRequest::new("delegate");
 
-        ensure_dispatch_tool_schema(&mut request);
         ensure_delegation_tool_schemas(&mut request);
         ensure_delegation_tool_schemas(&mut request);
 
         let names = allowed_tool_names(&request);
-        assert_eq!(names.len(), 6);
-        assert!(moa_core::is_delegation_tool_name("dispatch_sub_agent"));
+        assert_eq!(names.len(), 5);
         assert!(moa_core::is_delegation_tool_name("spawn_sub_agent"));
         assert!(moa_core::is_delegation_tool_name("wait_sub_agent"));
         assert!(moa_core::is_delegation_tool_name("message_sub_agent"));

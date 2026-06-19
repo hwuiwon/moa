@@ -8,7 +8,9 @@ mod terminal;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use crate::{EvalError, Reporter, Result};
+use moa_eval_core::{EvalError, Result};
+
+use crate::Reporter;
 
 pub use json::JsonReporter;
 #[cfg(feature = "langfuse")]

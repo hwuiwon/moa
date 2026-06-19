@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{CompletionRequest, JsonResponseFormat, LLMProvider};
+use moa_eval_core::{EvalError, Result};
 use serde_json::{Value, json};
-
-use crate::{EvalError, Result};
 
 use super::ProbeType;
 

@@ -10,7 +10,7 @@ use super::{
     AsyncAuthzKind, Auth0AuthConfig, AuthHeaderTrustKind, AuthProviderKind, AuthzEngine,
     MemoryRerankerMode, OidcAuthConfig, OpenFgaConfig, OtlpProtocol, TokenVaultKind,
 };
-use super::{CloudFlyioConfig, CloudHandsConfig, MoaConfig};
+use super::{CloudHandsConfig, MoaConfig};
 
 const OPENFGA_DEFAULT_TIMEOUT_MS: u64 = 5000;
 
@@ -163,18 +163,6 @@ pub struct MoaEnvOverlay {
     pub cloud_enabled: Option<bool>,
     /// `MOA_CLOUD_MEMORY_DIR`.
     pub cloud_memory_dir: Option<String>,
-    /// `MOA_CLOUD_FLYIO_API_TOKEN_ENV`.
-    pub cloud_flyio_api_token_env: Option<String>,
-    /// `MOA_CLOUD_FLYIO_APP_NAME`.
-    pub cloud_flyio_app_name: Option<String>,
-    /// `MOA_CLOUD_FLYIO_REGION`.
-    pub cloud_flyio_region: Option<String>,
-    /// `MOA_CLOUD_FLYIO_INTERNAL_PORT`.
-    pub cloud_flyio_internal_port: Option<u16>,
-    /// `MOA_CLOUD_FLYIO_HEALTH_BIND`.
-    pub cloud_flyio_health_bind: Option<String>,
-    /// `MOA_CLOUD_FLYIO_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`.
-    pub cloud_flyio_graceful_shutdown_timeout_secs: Option<u64>,
     /// `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`.
     pub cloud_hands_default_provider: Option<String>,
     /// `MOA_CLOUD_HANDS_DAYTONA_API_KEY_ENV`.
@@ -778,29 +766,6 @@ impl MoaEnvOverlay {
     }
 
     fn apply_cloud(&self, config: &mut MoaConfig) {
-        if any_present(&[
-            self.cloud_flyio_api_token_env.is_some(),
-            self.cloud_flyio_app_name.is_some(),
-            self.cloud_flyio_region.is_some(),
-            self.cloud_flyio_internal_port.is_some(),
-            self.cloud_flyio_health_bind.is_some(),
-            self.cloud_flyio_graceful_shutdown_timeout_secs.is_some(),
-        ]) {
-            let flyio = config
-                .cloud
-                .flyio
-                .get_or_insert_with(CloudFlyioConfig::default);
-            set_option_if_some(&mut flyio.api_token_env, &self.cloud_flyio_api_token_env);
-            set_option_if_some(&mut flyio.app_name, &self.cloud_flyio_app_name);
-            set_if_some(&mut flyio.region, &self.cloud_flyio_region);
-            set_copy_if_some(&mut flyio.internal_port, self.cloud_flyio_internal_port);
-            set_if_some(&mut flyio.health_bind, &self.cloud_flyio_health_bind);
-            set_copy_if_some(
-                &mut flyio.graceful_shutdown_timeout_secs,
-                self.cloud_flyio_graceful_shutdown_timeout_secs,
-            );
-        }
-
         if any_present(&[
             self.cloud_hands_default_provider.is_some(),
             self.cloud_hands_daytona_api_key_env.is_some(),

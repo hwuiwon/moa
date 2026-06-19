@@ -58,12 +58,6 @@ These caveats are deliberate security trade-offs where the current implementatio
 - Remote MCP servers receive credentials without exposing them to the brain or to serialized tool arguments. Session-scoped auth is enforced at the router/proxy seam.
 - Stdio MCP auth is still process/env based; the proxy does not inject credentials into subprocess transports. The credential flow is strongest for HTTP/SSE MCP servers and weaker for stdio servers that need secrets at startup.
 
-### Local encrypted vault uses a generated local passphrase file
-
-- `crates/moa-security/src/vault.rs` stores credentials in `vault.enc` as an age-encrypted JSON document. The local passphrase is generated automatically on first use and stored beside the vault as `vault.key` with `0600` permissions on Unix.
-- This keeps credentials encrypted at rest without requiring user setup before the first run.
-- This is stronger than plaintext-at-rest, but weaker than OS keychain or external secret-manager storage because the decryption material still lives on the same machine. The swap point is the `CredentialVault` trait.
-
 ### Local Docker hardening disables container network access entirely
 
 - `crates/moa-hands/src/local.rs` starts Docker sandboxes with read-only root filesystem, tmpfs scratch mounts, `cap-drop=ALL`, `no-new-privileges:true`, `pids-limit=256`, and Docker seccomp active. The implementation uses `--network none` to block the cloud metadata endpoint.

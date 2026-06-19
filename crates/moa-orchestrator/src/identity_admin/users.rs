@@ -80,8 +80,6 @@ pub(crate) struct UserPatch {
 /// Summary of a deactivation cascade.
 #[derive(Debug, Clone, Default)]
 pub struct CascadeSummary {
-    /// Whether this call changed an active user to inactive.
-    pub deactivated: bool,
     /// Number of sessions cancelled.
     pub sessions_cancelled: u64,
     /// Number of API keys revoked.
@@ -416,10 +414,7 @@ pub async fn cascade_deactivate_user(
     }
 
     let user_wire = format!("user:{user_id}");
-    let mut summary = CascadeSummary {
-        deactivated: true,
-        ..CascadeSummary::default()
-    };
+    let mut summary = CascadeSummary::default();
 
     let active_sessions: Vec<(Uuid,)> = sqlx::query_as(
         r#"

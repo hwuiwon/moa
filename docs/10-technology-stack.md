@@ -33,7 +33,7 @@ The root workspace currently contains:
 | `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
 | `moa-orchestrator` | One production binary with Restate services, virtual objects, workflows, and in-process application/repository boundaries |
 | `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
-| `moa-security` | Credential vault, policies, MCP proxy, prompt-injection controls |
+| `moa-security` | Action policies, MCP credential proxy, prompt-injection controls |
 | `moa-skills` | Skill parser, DB-backed active package registry, draft proposal generation, and regression suite source generation |
 | `moa-eval` | Evaluation harness used by CI and optional orchestrator-owned internal eval execution |
 | `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
@@ -54,7 +54,7 @@ The root workspace currently contains:
 | Database | `sqlx` with Postgres for runtime queries; `refinery` for all Postgres schema migrations |
 | Orchestration | `restate-sdk` |
 | Scheduling | Restate `CronJob` virtual object |
-| Security | `age`, `secrecy`, `shell-words` |
+| Security | `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
 

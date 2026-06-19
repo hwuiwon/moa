@@ -6,7 +6,11 @@ use moa_core::{MoaError, Result};
 use moa_session::{PostgresSessionStore, testing};
 use uuid::Uuid;
 
-pub use contracts::*;
+pub use contracts::{
+    test_action_policy_rules, test_create_and_get_session, test_emit_and_get_events,
+    test_event_search, test_list_sessions_with_filter, test_session_status_update,
+    test_workspace_cost_since,
+};
 
 /// Default Docker Compose Postgres URL used by local MOA tests.
 pub const DEFAULT_TEST_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
@@ -51,18 +55,6 @@ impl TestDb {
     pub fn schema_name(&self) -> &str {
         &self.schema_name
     }
-
-    /// Consumes the wrapper and returns the store plus cleanup coordinates.
-    ///
-    /// This exists for legacy tests that still perform explicit cleanup.
-    #[must_use]
-    pub fn into_parts(mut self) -> (PostgresSessionStore, String, String) {
-        let store = match self.store.take() {
-            Some(store) => store,
-            None => panic!("TestDb store is only absent while Drop is running"),
-        };
-        (store, self.database_url.clone(), self.schema_name.clone())
-    }
 }
 
 impl Drop for TestDb {
@@ -105,11 +97,6 @@ pub async fn bootstrap_test_db() -> Result<TestDb> {
         database_url,
         schema_name,
     })
-}
-
-/// Creates an isolated store and returns legacy cleanup coordinates.
-pub async fn create_isolated_test_store() -> Result<(PostgresSessionStore, String, String)> {
-    Ok(bootstrap_test_db().await?.into_parts())
 }
 
 /// Drops one isolated Postgres schema created by [`bootstrap_test_db`].

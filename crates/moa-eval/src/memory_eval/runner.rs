@@ -51,7 +51,7 @@ use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
     FixtureStore, ProviderProvenance, SharedCostLedger,
 };
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 /// Number of fused candidates collected for each probe before metric truncation.
 pub const RETRIEVAL_EVAL_CANDIDATE_K: usize = 25;

@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use moa_core::MoaConfig;
-use moa_eval::{AgentConfig, EngineOptions, EvalEngine, EvalStatus, TestCase, ToolOverride};
+use moa_eval::EvalEngine;
+use moa_eval_core::{AgentConfig, EngineOptions, EvalStatus, TestCase, ToolOverride};
 use moa_test_support::postgres::test_database_url;
 use tempfile::tempdir;
 

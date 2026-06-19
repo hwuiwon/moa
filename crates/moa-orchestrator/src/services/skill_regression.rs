@@ -12,10 +12,13 @@ use moa_artifacts::registry::ArtifactFile;
 use moa_core::{LLMProvider, MoaError, ModelTask};
 use moa_core::{LearningCandidate, MemoryScope, MoaConfig, Result};
 #[cfg(feature = "internal-eval-runner")]
-use moa_eval::{
-    ActionPolicyOverride, AgentConfig, EngineOptions, EvalEngine, EvalResult, EvalRun, EvalStatus,
-    Evaluator, EvaluatorOptions, ScoreValue, SkillOverride, TestSuite, build_evaluators,
-    evaluate_run,
+use moa_eval::EvalEngine;
+#[cfg(feature = "internal-eval-runner")]
+use moa_eval_core::engine::EvalRun;
+#[cfg(feature = "internal-eval-runner")]
+use moa_eval_core::{
+    ActionPolicyOverride, AgentConfig, EngineOptions, EvalResult, EvalStatus, Evaluator,
+    EvaluatorOptions, ScoreValue, SkillOverride, TestSuite, build_evaluators, evaluate_run,
 };
 #[cfg(feature = "internal-eval-runner")]
 use moa_providers::ProviderRegistry;

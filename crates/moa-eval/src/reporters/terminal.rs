@@ -3,13 +3,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use tokio::io::AsyncWriteExt;
-
-use crate::engine::EvalRun;
-use crate::{
-    AgentConfig, EvalError, EvalResult, EvalScore, EvalStatus, Reporter, Result, TestCase,
+use moa_eval_core::engine::EvalRun;
+use moa_eval_core::{
+    AgentConfig, EvalError, EvalResult, EvalScore, EvalStatus, Result, ScoreValue, TestCase,
     TestSuite,
 };
+use tokio::io::AsyncWriteExt;
+
+use crate::Reporter;
 
 /// Renders a completed run to stdout.
 pub struct TerminalReporter {
@@ -208,9 +209,9 @@ fn format_scores(scores: &[EvalScore]) -> String {
         .iter()
         .map(|score| {
             let value = match &score.value {
-                crate::ScoreValue::Numeric(value) => format!("{value:.2}"),
-                crate::ScoreValue::Boolean(value) => value.to_string(),
-                crate::ScoreValue::Categorical(value) => value.clone(),
+                ScoreValue::Numeric(value) => format!("{value:.2}"),
+                ScoreValue::Boolean(value) => value.to_string(),
+                ScoreValue::Categorical(value) => value.clone(),
             };
             format!("{}={value}", score.name)
         })
@@ -266,8 +267,9 @@ fn truncate(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::TerminalReporter;
-    use crate::{
-        AgentConfig, EvalMetrics, EvalResult, EvalRun, EvalScore, EvalStatus, ScoreValue, TestCase,
+    use moa_eval_core::engine::{EvalRun, RunSummary};
+    use moa_eval_core::{
+        AgentConfig, EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TestCase,
         TestSuite,
     };
 
@@ -311,10 +313,10 @@ mod tests {
                 },
                 ..EvalResult::default()
             }],
-            summary: crate::RunSummary {
+            summary: RunSummary {
                 total_cases: 1,
                 passed: 1,
-                ..crate::RunSummary::default()
+                ..RunSummary::default()
             },
         };
 

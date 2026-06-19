@@ -7,10 +7,10 @@ use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
     MoaError, ModelCapabilities, ModelId, Result as MoaResult, StopReason, TokenUsage,
 };
-use moa_eval::EvalError;
 use moa_eval::memory_eval::{
     AnswerJudge, DeterministicJudge, JudgeInput, PairwiseLlmJudge, PairwiseWinner, ProbeType,
 };
+use moa_eval_core::EvalError;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 

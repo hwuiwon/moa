@@ -137,7 +137,7 @@ pub enum CostError {
     },
 }
 
-impl From<CostError> for crate::EvalError {
+impl From<CostError> for moa_eval_core::EvalError {
     fn from(error: CostError) -> Self {
         Self::InvalidConfig(error.to_string())
     }

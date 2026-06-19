@@ -8,7 +8,7 @@ use moa_core::{
     ToolCallContent, ToolCallFormat, ToolInvocation,
 };
 use moa_eval::long_conversation::{ScriptedUserScript, run_scenario_with_provider};
-use moa_eval::{
+use moa_eval_core::{
     ActionPolicyOverride, AgentConfig, EngineOptions, EvalStatus, LongConversationMode,
     LongTestCase, TestCase, TestCaseKind, TestSuite,
 };

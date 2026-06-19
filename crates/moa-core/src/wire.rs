@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::traits::Identity;
 use crate::{
     ActionClass, Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, EventType,
     ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
@@ -23,6 +24,8 @@ pub struct RunTurnRequest {
     pub session_id: String,
     /// Stable turn identifier and workflow key.
     pub turn_id: String,
+    /// Trusted identity admitted by the Session VO for this turn.
+    pub identity: Identity,
     /// User message that initiated the turn.
     pub user_message: String,
     /// User message attachments that initiated the turn.
@@ -157,6 +160,8 @@ pub struct CancelResponse {
 pub struct PendingMessage {
     /// Durable time the message was accepted by the Session VO.
     pub queued_at: DateTime<Utc>,
+    /// Trusted identity admitted by the Session VO for this queued turn.
+    pub identity: Identity,
     /// User message text to run later.
     pub user_message: String,
     /// Attachments included with the queued message.

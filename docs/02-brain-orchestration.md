@@ -146,12 +146,11 @@ Workspace action reviews are decided by workspace admins through `ActionReviews`
 - budget remaining and tokens used
 - task and tool subset
 - pending messages and local history
-- direct-dispatch result awakeable ID
 - child refs, cached terminal child results, result waiters, and cancellation reason
 
 `SubAgent` admits conversational messages and starts at most one `SubAgentTurnExecution` workflow per active child turn. Workflow callbacks carry the admitted `turn_id`; stale responses, tool results, approval clears, and outcomes are ignored rather than mutating a newer turn.
 
-Dispatch is bounded by depth, active fan-out, repeated active task detection, and inherited token budgets. Legacy `dispatch_sub_agent` still waits on the child's direct result awakeable. Detached `spawn_sub_agent` returns immediately, and `wait_sub_agent` first consumes any cached terminal child result; otherwise it registers a child-owned result waiter awakeable and removes that waiter on timeout. Terminal child results are cached on the parent until consumed so finished detached children free active fan-out without losing the final result.
+Delegation is bounded by depth, active fan-out, repeated active task detection, and inherited token budgets. `spawn_sub_agent` returns immediately, and `wait_sub_agent` first consumes any cached terminal child result; otherwise it registers a child-owned result waiter awakeable and removes that waiter on timeout. Terminal child results are cached on the parent until consumed so finished detached children free active fan-out without losing the final result.
 
 ## Workflows
 

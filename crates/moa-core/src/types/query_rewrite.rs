@@ -83,13 +83,24 @@ impl QueryRewriteResult {
                             "type": "array",
                             "items": { "type": "string" }
                         }
-                    }
+                    },
+                    "required": [
+                        "domain",
+                        "action",
+                        "artifact_kind",
+                        "language_or_framework",
+                        "verification_style",
+                        "risk_class",
+                        "tool_pattern",
+                        "skill_pattern"
+                    ]
                 }
             },
             "required": [
                 "retrieval_query",
                 "is_new_task",
-                "task_summary"
+                "task_summary",
+                "task_facets"
             ]
         })
     }
@@ -117,4 +128,37 @@ pub enum RewriteSource {
     Original,
     /// The query was rewritten by the rewriter model.
     Rewritten,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueryRewriteResult;
+
+    #[test]
+    fn response_schema_requires_nullable_fields_for_strict_providers() {
+        // Pins: strict structured-output providers require every declared object property.
+        let schema = QueryRewriteResult::response_schema();
+        assert_eq!(
+            schema["required"],
+            serde_json::json!([
+                "retrieval_query",
+                "is_new_task",
+                "task_summary",
+                "task_facets"
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["task_facets"]["required"],
+            serde_json::json!([
+                "domain",
+                "action",
+                "artifact_kind",
+                "language_or_framework",
+                "verification_style",
+                "risk_class",
+                "tool_pattern",
+                "skill_pattern"
+            ])
+        );
+    }
 }

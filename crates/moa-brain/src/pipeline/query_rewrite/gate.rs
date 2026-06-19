@@ -86,6 +86,10 @@ pub(super) fn decide(input: RewriteGateInput<'_>) -> RewriteDecision {
         return RewriteDecision::Skip(SkipReason::ExactAnchors);
     }
 
+    if classify_strategy(query) == Strategy::VectorFirst && is_semantic_memory_query(query) {
+        return RewriteDecision::Rewrite(RewriteReason::VectorFirstSemantic);
+    }
+
     if input.config.skip_single_turn
         && input.user_message_count <= 1
         && approximate_query_tokens(query) < input.config.min_query_tokens
@@ -96,10 +100,6 @@ pub(super) fn decide(input: RewriteGateInput<'_>) -> RewriteDecision {
 
     if has_history && is_short_followup_without_anchor(query) {
         return RewriteDecision::Rewrite(RewriteReason::VagueFollowup);
-    }
-
-    if classify_strategy(query) == Strategy::VectorFirst && is_semantic_memory_query(query) {
-        return RewriteDecision::Rewrite(RewriteReason::VectorFirstSemantic);
     }
 
     if has_multihop_relation(query) && !has_standalone_anchor(query) {
@@ -312,6 +312,18 @@ mod tests {
                 circuit_open: false,
             }),
             RewriteDecision::Skip(SkipReason::NoVectorRetrieval)
+        );
+    }
+
+    #[test]
+    fn rewrites_first_turn_vector_semantic_queries_before_single_turn_skip() {
+        // Pins: semantic memory questions are worth rewriting even when short and first-turn.
+        assert_eq!(
+            gate(
+                "How often do deploy incidents look similar to policy releases?",
+                Vec::new(),
+            ),
+            RewriteDecision::Rewrite(RewriteReason::VectorFirstSemantic)
         );
     }
 }

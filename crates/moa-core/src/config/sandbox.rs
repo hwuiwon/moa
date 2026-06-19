@@ -32,8 +32,6 @@ pub struct CloudConfig {
     pub enabled: bool,
     /// Optional alternate memory root for cloud deployments.
     pub memory_dir: Option<String>,
-    /// Optional Fly.io configuration.
-    pub flyio: Option<CloudFlyioConfig>,
     /// Optional hands configuration.
     pub hands: Option<CloudHandsConfig>,
 }
@@ -43,39 +41,7 @@ impl Default for CloudConfig {
         Self {
             enabled: false,
             memory_dir: None,
-            flyio: Some(CloudFlyioConfig::default()),
             hands: Some(CloudHandsConfig::default()),
-        }
-    }
-}
-
-/// Fly.io configuration for cloud mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CloudFlyioConfig {
-    /// Environment variable containing the Fly.io API token.
-    pub api_token_env: Option<String>,
-    /// Fly application name.
-    pub app_name: Option<String>,
-    /// Primary region.
-    pub region: String,
-    /// Internal HTTP port used for Fly health checks.
-    pub internal_port: u16,
-    /// Interface used by the cloud health endpoint.
-    pub health_bind: String,
-    /// Grace period for active turns to complete after SIGTERM.
-    pub graceful_shutdown_timeout_secs: u64,
-}
-
-impl Default for CloudFlyioConfig {
-    fn default() -> Self {
-        Self {
-            api_token_env: Some("FLY_API_TOKEN".to_string()),
-            app_name: None,
-            region: "iad".to_string(),
-            internal_port: 8080,
-            health_bind: "0.0.0.0".to_string(),
-            graceful_shutdown_timeout_secs: 30,
         }
     }
 }

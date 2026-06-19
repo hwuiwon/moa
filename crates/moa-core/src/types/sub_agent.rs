@@ -33,8 +33,6 @@ pub enum SubAgentMessage {
         parent_sub_agent: Option<SubAgentId>,
         /// Current depth in the sub-agent tree.
         depth: u32,
-        /// Awakeable id the child resolves on terminal completion.
-        result_awakeable_id: String,
         /// Workspace scope inherited from the parent.
         workspace_id: WorkspaceId,
         /// User scope inherited from the parent.
@@ -46,13 +44,6 @@ pub enum SubAgentMessage {
     FollowUp {
         /// Follow-up text.
         text: String,
-    },
-    /// Synthetic child-result message reserved for nested fan-out flows.
-    ChildResult {
-        /// Child that completed.
-        sub_agent_id: SubAgentId,
-        /// Final child result payload.
-        result: SubAgentResult,
     },
 }
 
@@ -128,20 +119,20 @@ pub struct SubAgentTerminalResult {
     pub result: SubAgentResult,
 }
 
-/// Synthetic dispatch-tool input parsed from provider tool-call JSON.
+/// Child sub-agent request stored during parent reservation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DispatchSubAgentInput {
+pub struct SubAgentChildRequest {
     /// Task delegated to the child.
     pub task: String,
     /// Tool names exposed to the child.
     #[serde(default)]
     pub tool_subset: Vec<String>,
     /// Token budget allocated to the child.
-    #[serde(default = "default_dispatch_budget_tokens")]
+    #[serde(default = "default_sub_agent_budget_tokens")]
     pub budget_tokens: u64,
 }
 
-/// Detached v2 spawn-tool input.
+/// Spawn-tool input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnSubAgentInput {
     /// Task delegated to the child.
@@ -153,21 +144,11 @@ pub struct SpawnSubAgentInput {
     #[serde(default)]
     pub tool_subset: Vec<String>,
     /// Token budget allocated to the child.
-    #[serde(default = "default_dispatch_budget_tokens")]
+    #[serde(default = "default_sub_agent_budget_tokens")]
     pub budget_tokens: u64,
 }
 
-impl From<SpawnSubAgentInput> for DispatchSubAgentInput {
-    fn from(value: SpawnSubAgentInput) -> Self {
-        Self {
-            task: value.task,
-            tool_subset: value.tool_subset,
-            budget_tokens: value.budget_tokens,
-        }
-    }
-}
-
-/// Detached v2 wait-tool input.
+/// Wait-tool input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitSubAgentInput {
     /// Child sub-agent id returned by `spawn_sub_agent`.
@@ -177,7 +158,7 @@ pub struct WaitSubAgentInput {
     pub timeout_ms: u64,
 }
 
-/// Detached v2 message/follow-up input.
+/// Message/follow-up input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageSubAgentInput {
     /// Child sub-agent id returned by `spawn_sub_agent`.
@@ -186,7 +167,7 @@ pub struct MessageSubAgentInput {
     pub text: String,
 }
 
-/// Detached v2 cancellation input.
+/// Cancellation input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelSubAgentInput {
     /// Child sub-agent id returned by `spawn_sub_agent`.
@@ -196,11 +177,11 @@ pub struct CancelSubAgentInput {
     pub reason: String,
 }
 
-/// Detached v2 list-tool input.
+/// List-tool input.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListSubAgentsInput {}
 
-/// Spawn result returned by the v2 detached tool.
+/// Spawn result returned by `spawn_sub_agent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnSubAgentOutput {
     /// Child sub-agent id.
@@ -349,14 +330,11 @@ pub struct SubAgentTurnOutcomeRecord {
 /// Request to reserve a child sub-agent under another sub-agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReserveSubAgentInput {
-    /// Dispatch-shaped child request.
-    pub request: DispatchSubAgentInput,
+    /// Child request to reserve.
+    pub request: SubAgentChildRequest,
     /// Optional model-visible child task name for path generation.
     #[serde(default)]
     pub task_name: Option<String>,
-    /// Awakeable id to resolve when the child finishes, or empty for detached children.
-    #[serde(default)]
-    pub result_awakeable_id: String,
 }
 
 /// Child reservation returned after a parent sub-agent admits a child.
@@ -386,11 +364,9 @@ pub struct CompleteSubAgentChildInput {
 /// Stable kind for one built-in sub-agent delegation tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DelegationToolKind {
-    /// Legacy synchronous child dispatch tool.
-    Dispatch,
-    /// Detached child spawn tool.
+    /// Child spawn tool.
     Spawn,
-    /// Detached child wait tool.
+    /// Child wait tool.
     Wait,
     /// Follow-up message tool.
     Message,
@@ -405,7 +381,6 @@ impl DelegationToolKind {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
-            Self::Dispatch => "dispatch_sub_agent",
             Self::Spawn => "spawn_sub_agent",
             Self::Wait => "wait_sub_agent",
             Self::Message => "message_sub_agent",
@@ -418,7 +393,6 @@ impl DelegationToolKind {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "dispatch_sub_agent" => Some(Self::Dispatch),
             "spawn_sub_agent" => Some(Self::Spawn),
             "wait_sub_agent" => Some(Self::Wait),
             "message_sub_agent" => Some(Self::Message),
@@ -432,7 +406,6 @@ impl DelegationToolKind {
     #[must_use]
     pub fn schema(self) -> serde_json::Value {
         match self {
-            Self::Dispatch => dispatch_sub_agent_tool_schema(),
             Self::Spawn => spawn_sub_agent_tool_schema(),
             Self::Wait => wait_sub_agent_tool_schema(),
             Self::Message => message_sub_agent_tool_schema(),
@@ -440,22 +413,14 @@ impl DelegationToolKind {
             Self::Cancel => cancel_sub_agent_tool_schema(),
         }
     }
-
-    /// Returns whether this kind belongs to the v2 detached schema set.
-    #[must_use]
-    pub fn is_v2_detached(self) -> bool {
-        !matches!(self, Self::Dispatch)
-    }
 }
 
 /// Parsed payload for one built-in sub-agent delegation tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DelegationTool {
-    /// Legacy synchronous child dispatch payload.
-    Dispatch(DispatchSubAgentInput),
-    /// Detached child spawn payload.
+    /// Child spawn payload.
     Spawn(SpawnSubAgentInput),
-    /// Detached child wait payload.
+    /// Child wait payload.
     Wait(WaitSubAgentInput),
     /// Follow-up message payload.
     Message(MessageSubAgentInput),
@@ -473,9 +438,6 @@ impl DelegationTool {
         };
 
         Ok(Some(match kind {
-            DelegationToolKind::Dispatch => {
-                Self::Dispatch(parse_delegation_tool_input(invocation)?)
-            }
             DelegationToolKind::Spawn => Self::Spawn(parse_delegation_tool_input(invocation)?),
             DelegationToolKind::Wait => Self::Wait(parse_delegation_tool_input(invocation)?),
             DelegationToolKind::Message => Self::Message(parse_delegation_tool_input(invocation)?),
@@ -488,7 +450,6 @@ impl DelegationTool {
     #[must_use]
     pub fn kind(&self) -> DelegationToolKind {
         match self {
-            Self::Dispatch(_) => DelegationToolKind::Dispatch,
             Self::Spawn(_) => DelegationToolKind::Spawn,
             Self::Wait(_) => DelegationToolKind::Wait,
             Self::Message(_) => DelegationToolKind::Message,
@@ -504,15 +465,14 @@ impl DelegationTool {
     }
 }
 
-impl DispatchSubAgentInput {
-    /// Converts the dispatch request into the initial child message payload.
+impl SubAgentChildRequest {
+    /// Converts the child request into the initial child message payload.
     #[allow(clippy::too_many_arguments)]
     pub fn into_initial_message(
         self,
         parent_session: SessionId,
         parent_sub_agent: Option<SubAgentId>,
         depth: u32,
-        result_awakeable_id: String,
         workspace_id: WorkspaceId,
         user_id: UserId,
         model: ModelId,
@@ -524,41 +484,11 @@ impl DispatchSubAgentInput {
             parent_session,
             parent_sub_agent,
             depth,
-            result_awakeable_id,
             workspace_id,
             user_id,
             model,
         }
     }
-}
-
-/// Stable dispatch-tool schema exposed to provider tool calling.
-pub fn dispatch_sub_agent_tool_schema() -> serde_json::Value {
-    serde_json::json!({
-        "name": "dispatch_sub_agent",
-        "description": "Delegate a focused task to a conversational specialist sub-agent and wait for its final result.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": "Clear delegated task for the child agent."
-                },
-                "tool_subset": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Subset of tool names the child may use."
-                },
-                "budget_tokens": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Token budget reserved for the child agent."
-                }
-            },
-            "required": ["task"],
-            "additionalProperties": false
-        }
-    })
 }
 
 /// Stable `spawn_sub_agent` tool schema.
@@ -678,7 +608,7 @@ pub fn cancel_sub_agent_tool_schema() -> serde_json::Value {
     })
 }
 
-/// Returns all v2 delegation tool schemas.
+/// Returns all delegation tool schemas.
 pub fn delegation_tool_schemas() -> Vec<serde_json::Value> {
     vec![
         DelegationToolKind::Spawn.schema(),
@@ -689,11 +619,9 @@ pub fn delegation_tool_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-/// Returns one v2 delegation tool schema by name.
+/// Returns one delegation tool schema by name.
 pub fn delegation_tool_schema(name: &str) -> Option<serde_json::Value> {
-    DelegationToolKind::from_name(name)
-        .filter(|kind| kind.is_v2_detached())
-        .map(DelegationToolKind::schema)
+    DelegationToolKind::from_name(name).map(DelegationToolKind::schema)
 }
 
 /// Returns whether `name` is one of MOA's built-in delegation tools.
@@ -714,12 +642,12 @@ where
     })
 }
 
-/// Default token budget reserved for one dispatched child when the model omits it.
-pub fn default_dispatch_budget_tokens() -> u64 {
+/// Default token budget reserved for one child when the model omits it.
+pub fn default_sub_agent_budget_tokens() -> u64 {
     8_192
 }
 
-/// Default bounded wait for the v2 wait tool.
+/// Default bounded wait for the wait tool.
 pub fn default_wait_timeout_ms() -> u64 {
     5_000
 }
@@ -733,8 +661,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v2_delegation_schema_names_are_stable() {
-        // Pins: the model-facing v2 delegation tool names remain stable.
+    fn delegation_schema_names_are_stable() {
+        // Pins: the model-facing delegation tool names remain stable.
         let names = delegation_tool_schemas()
             .into_iter()
             .map(|schema| {
@@ -762,7 +690,6 @@ mod tests {
     fn stable_delegation_names_map_to_expected_kind() {
         // Pins: each stable tool name remains classified under the intended delegation kind.
         let expected = [
-            ("dispatch_sub_agent", DelegationToolKind::Dispatch),
             ("spawn_sub_agent", DelegationToolKind::Spawn),
             ("wait_sub_agent", DelegationToolKind::Wait),
             ("message_sub_agent", DelegationToolKind::Message),
@@ -782,40 +709,6 @@ mod tests {
 
         assert!(!is_delegation_tool_name("unknown_sub_agent"));
         assert!(delegation_tool_schema("unknown_sub_agent").is_none());
-    }
-
-    #[test]
-    fn legacy_dispatch_is_not_exposed_in_v2_delegation_schema_set() {
-        // Pins: legacy synchronous dispatch remains recognized without being advertised as a v2 detached tool.
-        assert!(is_delegation_tool_name("dispatch_sub_agent"));
-        assert_eq!(
-            dispatch_sub_agent_tool_schema()
-                .get("name")
-                .and_then(serde_json::Value::as_str),
-            Some("dispatch_sub_agent")
-        );
-        assert!(delegation_tool_schema("dispatch_sub_agent").is_none());
-
-        let names = delegation_tool_schemas()
-            .into_iter()
-            .map(|schema| {
-                schema
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .expect("delegation schema should have a string name")
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "spawn_sub_agent",
-                "wait_sub_agent",
-                "message_sub_agent",
-                "list_sub_agents",
-                "cancel_sub_agent",
-            ]
-        );
     }
 
     #[test]
@@ -845,15 +738,6 @@ mod tests {
     fn typed_delegation_parser_covers_every_builtin_tool() {
         // Pins: every built-in delegation tool has exactly one typed payload branch.
         let cases = [
-            (
-                "dispatch_sub_agent",
-                serde_json::json!({
-                    "task": "research",
-                    "tool_subset": ["web_fetch"],
-                    "budget_tokens": 123
-                }),
-                DelegationToolKind::Dispatch,
-            ),
             (
                 "spawn_sub_agent",
                 serde_json::json!({
@@ -922,28 +806,6 @@ mod tests {
         assert_eq!(
             DelegationTool::from_invocation(&invocation).expect("unknown tool should not fail"),
             None
-        );
-    }
-
-    #[test]
-    fn spawn_input_converts_to_legacy_dispatch_input() {
-        // Pins: the compatibility path preserves task, tools, and budget when v2 spawn wraps v1 dispatch state.
-        let spawn = SpawnSubAgentInput {
-            task: "inspect docs".to_string(),
-            task_name: Some("docs".to_string()),
-            tool_subset: vec!["file_read".to_string()],
-            budget_tokens: 512,
-        };
-
-        let dispatch = DispatchSubAgentInput::from(spawn);
-
-        assert_eq!(
-            dispatch,
-            DispatchSubAgentInput {
-                task: "inspect docs".to_string(),
-                tool_subset: vec!["file_read".to_string()],
-                budget_tokens: 512,
-            }
         );
     }
 }

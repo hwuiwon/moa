@@ -11,7 +11,6 @@ pub(super) const K_PARENT_SUB_AGENT: &str = "parent_sub_agent";
 pub(super) const K_DEPTH: &str = "depth";
 pub(super) const K_BUDGET_REMAINING: &str = "budget_remaining";
 pub(super) const K_TOKENS_USED: &str = "tokens_used";
-pub(super) const K_RESULT_AWAKEABLE_ID: &str = "result_awakeable_id";
 pub(super) const K_TASK: &str = "task";
 pub(super) const K_TOOL_SUBSET: &str = "tool_subset";
 pub(super) const K_WORKSPACE_ID: &str = "workspace_id";
@@ -41,8 +40,6 @@ pub struct SubAgentVoState {
     pub budget_remaining: u64,
     /// Aggregate tokens consumed so far.
     pub tokens_used: u64,
-    /// Awakeable identifier resolved on terminal completion.
-    pub result_awakeable_id: Option<String>,
     /// Original delegated task.
     pub task: Option<String>,
     /// Tool names the child may invoke.
@@ -76,7 +73,7 @@ pub struct SubAgentVoState {
 }
 
 impl SubAgentVoState {
-    /// Bootstraps state from the initial parent-dispatch payload.
+    /// Bootstraps state from the initial child-task payload.
     pub fn initialize(&mut self, msg: &SubAgentMessage) -> moa_core::Result<()> {
         let SubAgentMessage::InitialTask {
             task,
@@ -85,7 +82,6 @@ impl SubAgentVoState {
             parent_session,
             parent_sub_agent,
             depth,
-            result_awakeable_id,
             workspace_id,
             user_id,
             model,
@@ -102,11 +98,6 @@ impl SubAgentVoState {
         self.depth = *depth;
         self.budget_remaining = *budget_tokens;
         self.tokens_used = 0;
-        self.result_awakeable_id = if result_awakeable_id.trim().is_empty() {
-            None
-        } else {
-            Some(result_awakeable_id.clone())
-        };
         self.task = Some(task.clone());
         self.tool_subset = tool_subset.clone();
         self.workspace_id = Some(workspace_id.clone());
@@ -287,7 +278,6 @@ impl VoState for SubAgentVoState {
                 .await?
                 .unwrap_or_default(),
             tokens_used: reader.get_json(K_TOKENS_USED).await?.unwrap_or_default(),
-            result_awakeable_id: reader.get_json(K_RESULT_AWAKEABLE_ID).await?,
             task: reader.get_json(K_TASK).await?,
             tool_subset: reader.get_json(K_TOOL_SUBSET).await?.unwrap_or_default(),
             workspace_id: reader.get_json(K_WORKSPACE_ID).await?,
@@ -316,11 +306,6 @@ impl VoState for SubAgentVoState {
         set_or_clear_scalar(ctx, K_DEPTH, self.depth, 0);
         set_or_clear_scalar(ctx, K_BUDGET_REMAINING, self.budget_remaining, 0);
         set_or_clear_scalar(ctx, K_TOKENS_USED, self.tokens_used, 0);
-        set_or_clear_opt(
-            ctx,
-            K_RESULT_AWAKEABLE_ID,
-            self.result_awakeable_id.as_ref(),
-        );
         set_or_clear_opt(ctx, K_TASK, self.task.as_ref());
         set_or_clear_vec(ctx, K_TOOL_SUBSET, &self.tool_subset);
         set_or_clear_opt(ctx, K_WORKSPACE_ID, self.workspace_id.as_ref());
@@ -433,7 +418,6 @@ mod tests {
             parent_session: SessionId::new(),
             parent_sub_agent: None,
             depth: 1,
-            result_awakeable_id: "awake-1".to_string(),
             workspace_id: WorkspaceId::new("workspace-1"),
             user_id: UserId::new("user-1"),
             model: ModelId::new("test-model"),

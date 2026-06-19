@@ -51,6 +51,7 @@ use tracing::Instrument;
 use crate::OrchestratorCtx;
 use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_turn_request};
 use crate::objects::session::SessionClient;
+use crate::restate_identity::with_identity_headers;
 use crate::services::{
     action_reviews::{ActionReviewsClient, RequestActionReview},
     llm_gateway::LLMGatewayClient,
@@ -60,9 +61,9 @@ use crate::services::{
 };
 use crate::turn::util::{
     allowed_tool_names, blocked_canary_tool_output, denied_tool_output, disallowed_tool_output,
-    ensure_delegation_tool_schemas, ensure_dispatch_tool_schema, meaningful_cancel_reason,
-    response_tool_calls, stable_tool_call_id, summarize_response_text, tool_call_is_allowed,
-    tool_input_leaks_canary, turn_outcome_for_response,
+    ensure_delegation_tool_schemas, meaningful_cancel_reason, response_tool_calls,
+    stable_tool_call_id, summarize_response_text, tool_call_is_allowed, tool_input_leaks_canary,
+    turn_outcome_for_response,
 };
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
@@ -162,7 +163,7 @@ impl TurnExecution for TurnExecutionImpl {
             ModelTier::Main,
             workflow_started.elapsed(),
         );
-        notify_session_of_outcome(&ctx, &request.session_id, &outcome);
+        notify_session_of_outcome(&ctx, &request.session_id, &request.identity, &outcome);
         Ok(Json::from(outcome))
     }
 
@@ -263,9 +264,15 @@ async fn execute_turn_inside_workflow(
             let turn_latency_counters = Arc::new(TurnLatencyCounters::new(turn_root_span.clone()));
             let turn_started = Instant::now();
             let turn_result = scope_turn_latency_counters(turn_latency_counters.clone(), async {
-                run_once_inside_workflow(ctx, session_id, turn_id, &mut last_summary)
-                    .instrument(turn_root_span.clone())
-                    .await
+                run_once_inside_workflow(
+                    ctx,
+                    session_id,
+                    turn_id,
+                    &request.identity,
+                    &mut last_summary,
+                )
+                .instrument(turn_root_span.clone())
+                .await
             })
             .await;
 
@@ -323,6 +330,7 @@ async fn run_once_inside_workflow(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     turn_id: TurnId,
+    identity: &moa_core::traits::Identity,
     last_summary: &mut Option<String>,
 ) -> Result<CoreTurnOutcome, HandlerError> {
     if let Some(reason) = cancel_requested(ctx).await? {
@@ -360,7 +368,6 @@ async fn run_once_inside_workflow(
             serde_json::json!(segment.segment_index),
         );
     }
-    ensure_dispatch_tool_schema(&mut request);
     ensure_delegation_tool_schemas(&mut request);
     let allowed_tools = allowed_tool_names(&request);
     let request_model = request
@@ -394,7 +401,8 @@ async fn run_once_inside_workflow(
     let response_usage = response.token_usage();
     let response_cost_cents =
         crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), response_usage);
-    let response_event = latest_matching_brain_response_event(ctx, session_id, &response).await?;
+    let response_event =
+        latest_matching_brain_response_event(ctx, session_id, identity, &response).await?;
     let lineage = OrchestratorCtx::current_lineage();
     emit_generation_lineage(
         lineage.as_ref(),
@@ -498,11 +506,6 @@ async fn handle_tool_call(
         return Ok(());
     }
 
-    if invocation.name == "dispatch_sub_agent" {
-        handle_dispatch(ctx, meta, session_id, tool_id, tool_call).await?;
-        return Ok(());
-    }
-
     if is_delegation_tool_name(&invocation.name) {
         handle_delegation_tool(ctx, meta, session_id, tool_id, tool_call).await?;
         return Ok(());
@@ -601,16 +604,6 @@ async fn handle_tool_call(
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
     Ok(())
-}
-
-async fn handle_dispatch(
-    ctx: &WorkflowContext<'_>,
-    meta: &SessionMeta,
-    session_id: SessionId,
-    tool_id: ToolCallId,
-    tool_call: &ToolCallContent,
-) -> Result<(), HandlerError> {
-    handle_delegation_tool(ctx, meta, session_id, tool_id, tool_call).await
 }
 
 async fn handle_delegation_tool(
@@ -1438,14 +1431,16 @@ async fn record_response(
 async fn latest_matching_brain_response_event(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    identity: &moa_core::traits::Identity,
     response: &CompletionResponse,
 ) -> Result<Option<EventRecord>, HandlerError> {
-    let events = ctx
+    let request = ctx
         .service_client::<RestateSessionStoreClient>()
         .get_events(Json(GetEventsRequest {
             session_id,
             range: EventRange::recent(8),
-        }))
+        }));
+    let events = with_identity_headers(request, identity)
         .call()
         .await?
         .into_inner();
@@ -1634,10 +1629,16 @@ fn to_handler_error(error: MoaError) -> HandlerError {
     HandlerError::from(error)
 }
 
-fn notify_session_of_outcome(ctx: &WorkflowContext<'_>, session_id: &str, outcome: &TurnOutcome) {
-    ctx.object_client::<SessionClient>(session_id.to_string())
-        .record_turn_outcome(Json::from(outcome.clone()))
-        .send();
+fn notify_session_of_outcome(
+    ctx: &WorkflowContext<'_>,
+    session_id: &str,
+    identity: &moa_core::traits::Identity,
+    outcome: &TurnOutcome,
+) {
+    let request = ctx
+        .object_client::<SessionClient>(session_id.to_string())
+        .record_turn_outcome(Json::from(outcome.clone()));
+    with_identity_headers(request, identity).send();
     tracing::info!(
         session_id = %session_id,
         turn_id = %outcome.turn_id,

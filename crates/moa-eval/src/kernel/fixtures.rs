@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 /// Record contract required by [`FixtureStore`].
 pub trait FixtureRecord {

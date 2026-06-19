@@ -8,6 +8,12 @@ use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
 use moa_brain::{StreamedTurnResult, run_streamed_turn_with_lineage};
 use moa_core::{Event, EventRange, LLMProvider, MoaConfig, RuntimeEvent};
+use moa_eval_core::engine::{EngineOptions, EvalRun, RunSummary};
+use moa_eval_core::plan::{EvalPlan, build_eval_plan};
+use moa_eval_core::{
+    AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
+    TestSuite,
+};
 use opentelemetry::trace::TraceContextExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -16,13 +22,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::long_conversation::run_scenario_with_provider;
-use crate::plan::{EvalPlan, build_eval_plan};
 use crate::setup::{build_agent_environment, build_agent_environment_with_provider};
-use crate::{
-    AgentConfig, EvalError, EvalMetrics, EvalResult, EvalStatus, Result, TestCase, TestCaseKind,
-    TestSuite,
-};
-pub use moa_eval_core::engine::{EngineOptions, EvalRun, RunSummary};
 
 const DEFAULT_SINGLE_TIMEOUT_SECONDS: u64 = 300;
 const MAX_AGENT_TURNS: usize = 32;
@@ -420,7 +420,7 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
     if fs_try_exists(path).await? {
         tokio::fs::remove_dir_all(path)
             .await
-            .map_err(|source| crate::EvalError::Io {
+            .map_err(|source| EvalError::Io {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -431,7 +431,7 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
 async fn fs_try_exists(path: &Path) -> Result<bool> {
     tokio::fs::try_exists(path)
         .await
-        .map_err(|source| crate::EvalError::Io {
+        .map_err(|source| EvalError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -481,10 +481,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::run_environment;
-    use crate::{
-        AgentConfig, EngineOptions, EvalEngine, EvalStatus, TestCase, TestSuite,
-        setup::build_agent_environment_with_provider,
-    };
+    use crate::{EvalEngine, setup::build_agent_environment_with_provider};
+    use moa_eval_core::{AgentConfig, EngineOptions, EvalStatus, TestCase, TestSuite};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
         TokenUsage {

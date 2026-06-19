@@ -121,6 +121,7 @@ impl Session for SessionImpl {
             dispatch_turn_execution(
                 &ctx,
                 next_turn_id,
+                next.identity,
                 next.user_message,
                 next.attachments,
                 next.model,
@@ -292,7 +293,7 @@ async fn start_turn_inner(
     ctx: &mut ObjectContext<'_>,
     request: StartTurnRequest,
 ) -> Result<StartTurnResponse, HandlerError> {
-    require_session_participant(ctx).await?;
+    let identity = require_session_participant(ctx).await?;
     let session_id = parse_session_key(ctx.key())?;
     let mut state = SessionVoState::load_from(ctx).await?;
     state.ensure_initialized().map_err(to_handler_error)?;
@@ -301,6 +302,7 @@ async fn start_turn_inner(
     if pending_state.active_turn_id.is_some() {
         pending_state.pending_messages.push_back(PendingMessage {
             queued_at: durable_utc_now(ctx).await?,
+            identity,
             user_message: request.user_message,
             attachments: request.attachments,
             model: request.model,
@@ -322,6 +324,7 @@ async fn start_turn_inner(
     dispatch_turn_execution(
         ctx,
         turn_id.clone(),
+        identity,
         request.user_message,
         request.attachments,
         request.model,
@@ -333,7 +336,9 @@ async fn start_turn_inner(
     })
 }
 
-async fn require_session_participant(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
+async fn require_session_participant(
+    ctx: &ObjectContext<'_>,
+) -> Result<moa_core::traits::Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     let session_id = parse_session_key(ctx.key())?;
@@ -345,5 +350,6 @@ async fn require_session_participant(ctx: &ObjectContext<'_>) -> Result<(), Hand
         Relation::Participant,
     )
     .await
-    .map_err(translate_authz_error)
+    .map_err(translate_authz_error)?;
+    Ok(identity)
 }

@@ -11,7 +11,6 @@ use moa_brain::retrieval::{LegSources, RetrievalHit};
 use moa_core::{
     MoaError, ScopeContext, ScopeTier, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
 };
-use moa_eval::EvalError;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
 use moa_eval::memory_eval::{
@@ -32,6 +31,7 @@ use moa_eval::memory_eval::{
     write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus, write_probes_jsonl,
     write_sessions_jsonl,
 };
+use moa_eval_core::EvalError;
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,

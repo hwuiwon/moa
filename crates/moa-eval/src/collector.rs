@@ -1,9 +1,8 @@
 //! Event-log collection helpers for eval trajectories, responses, and aggregate metrics.
 
 use moa_core::{Event, EventRecord, TokenPricing, ToolCallId};
+use moa_eval_core::{EvalMetrics, TrajectoryStep};
 use std::collections::HashMap;
-
-use crate::{EvalMetrics, TrajectoryStep};
 
 /// Collected response, trajectory, and metrics extracted from persisted session events.
 #[derive(Debug, Clone, PartialEq, Default)]

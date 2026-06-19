@@ -45,10 +45,9 @@ Supported patterns:
 | Token Vault provider | User OAuth tokens | Provider retrieves user-approved tokens for trusted host-side calls. |
 | Environment-backed provider keys | LLMs, embeddings, hand providers | Runtime constructs providers from env var names, not prompt-visible values. |
 
-Local encrypted vault storage is stronger than plaintext at rest but weaker
-than OS keychain or cloud KMS because encrypted data and local key material
-live on the same machine. Cloud deployments should replace the local vault
-behind the `CredentialVault` trait.
+Local encrypted vault storage is no longer part of the active runtime. New
+credential sources should implement `CredentialVault` or a typed provider vault
+trait and stay behind the host-side credential boundary.
 
 ## Sandbox Tiers
 

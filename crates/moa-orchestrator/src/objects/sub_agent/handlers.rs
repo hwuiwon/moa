@@ -25,17 +25,6 @@ impl SubAgent for SubAgentImpl {
                     .enqueue_follow_up(text.clone())
                     .map_err(to_handler_error)?;
             }
-            SubAgentMessage::ChildResult {
-                sub_agent_id,
-                result,
-            } => {
-                state
-                    .enqueue_follow_up(format!(
-                        "Child sub-agent {sub_agent_id} completed.\n{}",
-                        result.output
-                    ))
-                    .map_err(to_handler_error)?;
-            }
         }
         let turn_id = if state.active_turn_id.is_none() {
             let turn_id = generate_turn_id(&mut ctx);
@@ -47,7 +36,7 @@ impl SubAgent for SubAgentImpl {
         state.persist_into(&ctx);
 
         if let Some(turn_id) = turn_id {
-            dispatch_sub_agent_turn_execution(&ctx, turn_id);
+            start_sub_agent_turn_execution(&ctx, turn_id);
         }
         Ok(())
     }
@@ -335,7 +324,7 @@ impl SubAgent for SubAgentImpl {
         state.persist_into(&ctx);
 
         if let Some(turn_id) = next_turn_id {
-            dispatch_sub_agent_turn_execution(&ctx, turn_id);
+            start_sub_agent_turn_execution(&ctx, turn_id);
             return Ok(());
         }
         maybe_resolve_parent_awakeable(&ctx).await
@@ -538,7 +527,6 @@ async fn reserve_child_inner(
         parent_session,
         Some(parent_key),
         state.depth + 1,
-        input.result_awakeable_id,
         workspace_id,
         user_id,
         model,
@@ -582,7 +570,7 @@ async fn complete_child_inner(
     Ok(())
 }
 
-fn dispatch_sub_agent_turn_execution(ctx: &ObjectContext<'_>, turn_id: String) {
+fn start_sub_agent_turn_execution(ctx: &ObjectContext<'_>, turn_id: String) {
     ctx.workflow_client::<SubAgentTurnExecutionClient>(turn_id.clone())
         .run(Json::from(RunSubAgentTurnRequest {
             sub_agent_id: ctx.key().to_string(),
@@ -614,15 +602,7 @@ async fn maybe_resolve_parent_awakeable(ctx: &ObjectContext<'_>) -> Result<(), H
         }
     }
 
-    if let Some(awakeable_id) = state.result_awakeable_id.clone() {
-        let payload = serde_json::to_string(&terminal.result).map_err(|error| {
-            TerminalError::new(format!("failed to serialize sub-agent result: {error}"))
-        })?;
-        ctx.resolve_awakeable(&awakeable_id, payload);
-        state.result_awakeable_id = None;
-    }
-
-    if delivered || !state.result_waiters.is_empty() || state.result_awakeable_id.is_none() {
+    if delivered || waiter_payload.is_some() {
         state.persist_into(ctx);
     }
     Ok(())

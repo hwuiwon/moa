@@ -25,7 +25,7 @@ use super::{
     read_ledger_jsonl, read_manifest_json, read_probes_jsonl, read_sessions_jsonl, validate_corpus,
 };
 use crate::kernel::FixtureStore;
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;

@@ -20,6 +20,7 @@ struct CapturingProvider {
     inner: Arc<dyn LLMProvider>,
     calls: AtomicUsize,
     responses: Mutex<Vec<String>>,
+    errors: Mutex<Vec<String>>,
 }
 
 impl CapturingProvider {
@@ -28,6 +29,7 @@ impl CapturingProvider {
             inner,
             calls: AtomicUsize::new(0),
             responses: Mutex::new(Vec::new()),
+            errors: Mutex::new(Vec::new()),
         }
     }
 }
@@ -44,8 +46,20 @@ impl LLMProvider for CapturingProvider {
 
     async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let stream = self.inner.complete(request).await?;
-        let response: CompletionResponse = stream.collect().await?;
+        let stream = match self.inner.complete(request).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.errors.lock().await.push(error.to_string());
+                return Err(error);
+            }
+        };
+        let response: CompletionResponse = match stream.collect().await {
+            Ok(response) => response,
+            Err(error) => {
+                self.errors.lock().await.push(error.to_string());
+                return Err(error);
+            }
+        };
         self.responses.lock().await.push(response.text.clone());
         Ok(CompletionStream::from_response(response))
     }
@@ -121,7 +135,14 @@ async fn live_query_rewrite_gate_matrix() -> moa_core::Result<()> {
         true,
     )
     .await?;
-    assert_eq!(coreference.source, RewriteSource::Rewritten);
+    assert_eq!(
+        coreference.source,
+        RewriteSource::Rewritten,
+        "coreference rewrite should use history; result={coreference:?} calls={} responses={:?} errors={:?}",
+        provider.calls.load(Ordering::SeqCst),
+        provider.responses.lock().await,
+        provider.errors.lock().await
+    );
     assert_eq!(
         coreference.reason,
         Some(RewriteReason::CoreferenceWithHistory)
@@ -170,7 +191,14 @@ async fn live_query_rewrite_gate_matrix() -> moa_core::Result<()> {
         true,
     )
     .await?;
-    assert_eq!(vector_with_embedder.source, RewriteSource::Rewritten);
+    assert_eq!(
+        vector_with_embedder.source,
+        RewriteSource::Rewritten,
+        "vector-first rewrite should use semantic query; result={vector_with_embedder:?} calls={} responses={:?} errors={:?}",
+        provider.calls.load(Ordering::SeqCst),
+        provider.responses.lock().await,
+        provider.errors.lock().await
+    );
     assert_eq!(
         vector_with_embedder.reason,
         Some(RewriteReason::VectorFirstSemantic)

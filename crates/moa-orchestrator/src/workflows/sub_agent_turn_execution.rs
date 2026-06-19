@@ -367,19 +367,6 @@ async fn handle_tool_call(
         return Ok(());
     }
 
-    if invocation.name == "dispatch_sub_agent" {
-        handle_dispatch(
-            ctx,
-            tool_context.turn_id,
-            sub_agent_id,
-            session_id,
-            tool_id,
-            tool_call,
-        )
-        .await?;
-        return Ok(());
-    }
-
     if is_delegation_tool_name(&invocation.name) {
         handle_delegation_tool(
             ctx,
@@ -526,25 +513,6 @@ async fn handle_tool_call(
     Ok(())
 }
 
-async fn handle_dispatch(
-    ctx: &WorkflowContext<'_>,
-    turn_id: &str,
-    parent_sub_agent_id: &str,
-    session_id: SessionId,
-    tool_id: ToolCallId,
-    tool_call: &ToolCallContent,
-) -> Result<(), HandlerError> {
-    handle_delegation_tool(
-        ctx,
-        turn_id,
-        parent_sub_agent_id,
-        session_id,
-        tool_id,
-        tool_call,
-    )
-    .await
-}
-
 async fn handle_delegation_tool(
     ctx: &WorkflowContext<'_>,
     turn_id: &str,
@@ -599,8 +567,7 @@ fn parent_session_from_initial_message(
 ) -> Result<SessionId, HandlerError> {
     match message {
         moa_core::SubAgentMessage::InitialTask { parent_session, .. } => Ok(*parent_session),
-        moa_core::SubAgentMessage::FollowUp { .. }
-        | moa_core::SubAgentMessage::ChildResult { .. } => {
+        moa_core::SubAgentMessage::FollowUp { .. } => {
             Err(TerminalError::new("reserved child did not include an initial task message").into())
         }
     }
@@ -834,7 +801,6 @@ mod tests {
             parent_session: session_id,
             parent_sub_agent: Some("parent".to_string()),
             depth: 2,
-            result_awakeable_id: String::new(),
             workspace_id: moa_core::WorkspaceId::new("workspace"),
             user_id: moa_core::UserId::new("user"),
             model: moa_core::ModelId::new("model"),

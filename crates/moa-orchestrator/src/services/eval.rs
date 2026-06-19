@@ -22,11 +22,10 @@ use moa_core::wire::{
 use moa_core::{MemoryScope, ScopeContext, ScopedConn};
 use moa_core::{MoaConfig, WorkspaceId};
 #[cfg(feature = "internal-eval-runner")]
-use moa_eval::{
-    EngineOptions, EvalEngine, EvaluatorOptions, ReporterOptions, build_evaluators,
-    build_reporters, evaluate_run,
-};
+use moa_eval::{EvalEngine, ReporterOptions, build_reporters};
 use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite, build_eval_plan};
+#[cfg(feature = "internal-eval-runner")]
+use moa_eval_core::{EngineOptions, EvaluatorOptions, build_evaluators, evaluate_run};
 #[cfg(any(feature = "internal-eval-runner", test))]
 use moa_eval_core::{EvalResult, ReplayConfig, token_f1};
 #[cfg(feature = "internal-eval-runner")]

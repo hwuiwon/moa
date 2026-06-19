@@ -10,6 +10,7 @@ pub mod handlers;
 pub(crate) mod identity_admin;
 pub mod lineage;
 pub mod objects;
+pub(crate) mod restate_identity;
 pub mod runtime;
 pub mod services;
 mod sub_agent_dispatch;

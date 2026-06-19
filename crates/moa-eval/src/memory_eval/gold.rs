@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 use super::{LedgerFact, SyntheticSession, SyntheticTurn, validate_ledger, validate_sessions};
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;

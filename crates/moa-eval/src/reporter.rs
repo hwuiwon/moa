@@ -1,10 +1,8 @@
 //! Reporter traits for emitting evaluation summaries to different sinks.
 
 use async_trait::async_trait;
-
-use crate::engine::EvalRun;
-use crate::error::Result;
-use crate::types::{AgentConfig, TestSuite};
+use moa_eval_core::engine::EvalRun;
+use moa_eval_core::{AgentConfig, Result, TestSuite};
 
 /// Consumes the results of a completed suite execution.
 #[async_trait]

@@ -4,9 +4,9 @@ mod support;
 
 use moa_core::{
     AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
-    ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, DispatchSubAgentInput,
-    ListSubAgentsInput, ReserveSubAgentInput, SpawnSubAgentInput, SubAgentChildRef, SubAgentResult,
-    SubAgentState, SubAgentStatus, SubAgentTerminalResult, WaitSubAgentInput,
+    ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, ListSubAgentsInput,
+    ReserveSubAgentInput, SpawnSubAgentInput, SubAgentChildRef, SubAgentChildRequest,
+    SubAgentResult, SubAgentState, SubAgentStatus, SubAgentTerminalResult, WaitSubAgentInput,
     delegation_tool_schema, is_delegation_tool_name,
 };
 use serde::Serialize;
@@ -216,9 +216,12 @@ fn spawn_input(task_name: &str) -> SpawnSubAgentInput {
 
 fn reserve_input(spawn: &SpawnSubAgentInput) -> ReserveSubAgentInput {
     ReserveSubAgentInput {
-        request: DispatchSubAgentInput::from(spawn.clone()),
+        request: SubAgentChildRequest {
+            task: spawn.task.clone(),
+            tool_subset: spawn.tool_subset.clone(),
+            budget_tokens: spawn.budget_tokens,
+        },
         task_name: spawn.task_name.clone(),
-        result_awakeable_id: String::new(),
     }
 }
 

@@ -21,6 +21,7 @@ use moa_core::{
     ActionPolicyEffect, ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionMeta,
     SessionStore, UserId, WorkspaceId,
 };
+use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
 use moa_hands::ToolRouter;
 use moa_providers::{
     build_provider_from_selection, resolve_provider_selection, resolve_rewriter_provider,
@@ -30,8 +31,6 @@ use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use tokio::fs;
 use uuid::Uuid;
-
-use crate::{ActionPolicyOverride, AgentConfig, EvalError, Result};
 
 const DEFAULT_EVAL_WORKSPACE: &str = "eval";
 const DEFAULT_EVAL_USER: &str = "eval-runner";
@@ -283,7 +282,7 @@ fn resolve_eval_rewriter_provider(
 
 async fn load_workspace_instructions(
     base_config: &MoaConfig,
-    instructions: &crate::InstructionOverride,
+    instructions: &InstructionOverride,
 ) -> Result<Option<String>> {
     if let Some(path) = &instructions.workspace_instructions_path {
         let resolved = resolve_path(path)?;
@@ -299,7 +298,7 @@ async fn load_workspace_instructions(
     Ok(base_config.general.workspace_instructions.clone())
 }
 
-fn compose_identity_prompt(instructions: &crate::InstructionOverride) -> String {
+fn compose_identity_prompt(instructions: &InstructionOverride) -> String {
     let mut prompt = instructions
         .system_prompt_override
         .clone()
@@ -433,7 +432,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{build_agent_environment_with_provider, slugify_name};
-    use crate::{ActionPolicyOverride, AgentConfig, ToolOverride};
+    use moa_eval_core::{ActionPolicyOverride, AgentConfig, ToolOverride};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
         TokenUsage {

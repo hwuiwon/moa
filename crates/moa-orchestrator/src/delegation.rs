@@ -4,13 +4,12 @@ use std::time::Duration;
 
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
-    AttachSubAgentResultWaiterInput, CancelSubAgentInput, CompleteSubAgentChildInput,
-    ConsumeSubAgentChildResultInput, DelegationTool, DispatchSubAgentInput, Event,
-    ListSubAgentsInput, ListSubAgentsOutput, ListedSubAgent, MessageSubAgentInput,
-    RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent, SessionId,
-    SessionMeta, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef, SubAgentId,
-    SubAgentMessage, SubAgentResult, SubAgentState, SubAgentStatus, SubAgentTerminalResult,
-    ToolOutput, WaitSubAgentInput, WaitSubAgentOutput,
+    AttachSubAgentResultWaiterInput, CancelSubAgentInput, ConsumeSubAgentChildResultInput,
+    DelegationTool, Event, ListSubAgentsInput, ListSubAgentsOutput, ListedSubAgent,
+    MessageSubAgentInput, RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent,
+    SessionId, SessionMeta, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef,
+    SubAgentChildRequest, SubAgentId, SubAgentMessage, SubAgentState, SubAgentStatus,
+    SubAgentTerminalResult, ToolOutput, WaitSubAgentInput, WaitSubAgentOutput,
 };
 use restate_sdk::prelude::*;
 use serde::Serialize;
@@ -20,8 +19,7 @@ use crate::objects::session::SessionClient;
 use crate::objects::sub_agent::SubAgentClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::sub_agent_dispatch::{
-    DispatchedSubAgent, child_agent_path, child_is_owned, sub_agent_result_tool_output,
-    validate_dispatch_budget, validate_dispatch_limits,
+    child_agent_path, child_is_owned, validate_dispatch_budget, validate_dispatch_limits,
 };
 
 /// Maximum wait accepted by the v2 wait tool.
@@ -68,10 +66,6 @@ pub(crate) async fn execute_delegation_tool(
     tool: DelegationTool,
 ) -> Result<ToolOutput, HandlerError> {
     let output = match tool {
-        DelegationTool::Dispatch(input) => {
-            let dispatched = dispatch_child(ctx, parent, input).await?;
-            sub_agent_result_tool_output(&dispatched.result)
-        }
         DelegationTool::Spawn(input) => {
             spawn_output(spawn_child_detached(ctx, parent, input).await?)
         }
@@ -167,47 +161,20 @@ pub(crate) fn cancel_output(sub_agent_id: &str) -> ToolOutput {
     )
 }
 
-async fn dispatch_child(
-    ctx: &WorkflowContext<'_>,
-    parent: DelegationParent<'_>,
-    request: DispatchSubAgentInput,
-) -> Result<DispatchedSubAgent, HandlerError> {
-    let (awakeable_id, result_future) = ctx.awakeable::<String>();
-    let reservation = reserve_and_start_child(
-        ctx,
-        parent,
-        request,
-        None,
-        awakeable_id,
-        "dispatch_sub_agent_id",
-    )
-    .await?;
-
-    let result = parse_sub_agent_result(&result_future.await?)?;
-    complete_parent_child_after_direct_result(ctx, parent, &reservation.child_ref.id, &result)
-        .await?;
-
-    Ok(DispatchedSubAgent {
-        id: reservation.child_ref.id,
-        result,
-    })
-}
-
 async fn spawn_child_detached(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
     request: SpawnSubAgentInput,
 ) -> Result<SpawnSubAgentOutput, HandlerError> {
     let task_name = request.task_name.clone();
-    let reservation = reserve_and_start_child(
-        ctx,
-        parent,
-        DispatchSubAgentInput::from(request),
-        task_name,
-        String::new(),
-        "spawn_sub_agent_id",
-    )
-    .await?;
+    let child_request = SubAgentChildRequest {
+        task: request.task,
+        tool_subset: request.tool_subset,
+        budget_tokens: request.budget_tokens,
+    };
+    let reservation =
+        reserve_and_start_child(ctx, parent, child_request, task_name, "spawn_sub_agent_id")
+            .await?;
 
     Ok(SpawnSubAgentOutput {
         sub_agent_id: reservation.child_ref.id,
@@ -219,9 +186,8 @@ async fn spawn_child_detached(
 async fn reserve_and_start_child(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
-    request: DispatchSubAgentInput,
+    request: SubAgentChildRequest,
     task_name: Option<String>,
-    result_awakeable_id: String,
     idempotency_step: &'static str,
 ) -> Result<ReservedSubAgent, HandlerError> {
     let task = request.task.clone();
@@ -234,7 +200,6 @@ async fn reserve_and_start_child(
                 meta,
                 request,
                 task_name.clone(),
-                result_awakeable_id,
                 idempotency_step,
             )
             .await?
@@ -244,7 +209,6 @@ async fn reserve_and_start_child(
             .reserve_child(Json::from(ReserveSubAgentInput {
                 request,
                 task_name: task_name.clone(),
-                result_awakeable_id,
             }))
             .call()
             .await?
@@ -263,9 +227,8 @@ async fn reserve_root_child(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     meta: &SessionMeta,
-    request: DispatchSubAgentInput,
+    request: SubAgentChildRequest,
     task_name: Option<String>,
-    result_awakeable_id: String,
     idempotency_step: &'static str,
 ) -> Result<ReservedSubAgent, HandlerError> {
     let children = session_child_refs(ctx, session_id).await?;
@@ -292,7 +255,6 @@ async fn reserve_root_child(
         session_id,
         None,
         1,
-        result_awakeable_id,
         meta.workspace_id.clone(),
         meta.user_id.clone(),
         meta.model.clone(),
@@ -464,42 +426,6 @@ async fn cancel_child(
     Ok(())
 }
 
-async fn complete_parent_child_after_direct_result(
-    ctx: &WorkflowContext<'_>,
-    parent: DelegationParent<'_>,
-    sub_agent_id: &str,
-    result: &SubAgentResult,
-) -> Result<(), HandlerError> {
-    if consume_parent_cached_terminal(ctx, parent, sub_agent_id)
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    match parent {
-        DelegationParent::RootSession { session_id, .. } => {
-            ctx.object_client::<SessionClient>(session_id.to_string())
-                .remove_child(sub_agent_id.to_string())
-                .call()
-                .await?;
-        }
-        DelegationParent::SubAgent {
-            sub_agent_id: parent_id,
-            ..
-        } => {
-            ctx.object_client::<SubAgentClient>(parent_id.to_string())
-                .complete_child(Json::from(CompleteSubAgentChildInput {
-                    sub_agent_id: sub_agent_id.to_string(),
-                    tokens_used: result.tokens_used,
-                }))
-                .call()
-                .await?;
-        }
-    }
-    Ok(())
-}
-
 async fn consume_parent_cached_terminal(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
@@ -620,15 +546,6 @@ async fn append_session_event(
         .instrument(persist_span)
         .await?;
     Ok(sequence_num)
-}
-
-fn parse_sub_agent_result(raw: &str) -> Result<SubAgentResult, HandlerError> {
-    serde_json::from_str(raw).map_err(|error| {
-        TerminalError::new(format!(
-            "failed to deserialize sub-agent result from awakeable: {error}"
-        ))
-        .into()
-    })
 }
 
 fn parse_terminal_result(raw: &str) -> Result<SubAgentTerminalResult, HandlerError> {

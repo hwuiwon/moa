@@ -12,7 +12,7 @@ use moa_core::{
     ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId, ToolInvocation,
 };
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
-use moa_eval::{
+use moa_eval_core::{
     ActionPolicyOverride, AgentConfig, EngineOptions, LongConversationMode,
     LongSessionInterleaving, LongTestCase, SecondaryLongSession, TestCase, TestCaseKind, TestSuite,
     load_suite,
@@ -227,7 +227,7 @@ fn write_report_artifacts(
 fn single_case<'a>(
     suite: &'a TestSuite,
     scenario_name: &str,
-) -> Result<&'a moa_eval::TestCase, Box<dyn Error>> {
+) -> Result<&'a TestCase, Box<dyn Error>> {
     match suite.cases.as_slice() {
         [case] => Ok(case),
         cases => Err(format!(

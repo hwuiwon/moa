@@ -49,9 +49,6 @@ pub(super) fn filtered_tool_schemas(
         })
         .cloned()
         .collect::<Vec<_>>();
-    if allowed.contains("dispatch_sub_agent") {
-        tools.push(dispatch_sub_agent_tool_schema());
-    }
     for schema in delegation_tool_schemas() {
         if let Some(name) = schema.get("name").and_then(serde_json::Value::as_str)
             && allowed.contains(name)

@@ -1,8 +1,9 @@
 //! Integration tests for eval reporters.
 
-use moa_eval::{
-    AgentConfig, EvalMetrics, EvalResult, EvalRun, EvalScore, EvalStatus, JsonReporter, Reporter,
-    ScoreValue, TestCase, TestSuite,
+use moa_eval::{JsonReporter, Reporter};
+use moa_eval_core::engine::{EvalRun, RunSummary};
+use moa_eval_core::{
+    AgentConfig, EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TestCase, TestSuite,
 };
 use tempfile::tempdir;
 
@@ -47,11 +48,11 @@ async fn json_reporter_writes_valid_json() {
             },
             ..EvalResult::default()
         }],
-        summary: moa_eval::RunSummary {
+        summary: RunSummary {
             total_cases: 1,
             passed: 1,
             total_tokens: 15,
-            ..moa_eval::RunSummary::default()
+            ..RunSummary::default()
         },
     };
 

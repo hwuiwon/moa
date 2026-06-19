@@ -19,6 +19,7 @@ use restate_sdk::prelude::*;
 use tracing::Instrument;
 
 use crate::objects::sub_agent::SubAgentClient;
+use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_vec};
 use crate::workflows::turn_execution::TurnExecutionClient;
@@ -125,17 +126,20 @@ fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
 fn dispatch_turn_execution(
     ctx: &ObjectContext<'_>,
     turn_id: String,
+    identity: moa_core::traits::Identity,
     user_message: String,
     attachments: Vec<moa_core::Attachment>,
     model: Option<String>,
 ) {
-    ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
+    let request = ctx
+        .workflow_client::<TurnExecutionClient>(turn_id.clone())
         .run(Json::from(RunTurnRequest {
             session_id: ctx.key().to_string(),
             turn_id,
+            identity: identity.clone(),
             user_message,
             attachments,
             model,
-        }))
-        .send();
+        }));
+    with_identity_headers(request, &identity).send();
 }

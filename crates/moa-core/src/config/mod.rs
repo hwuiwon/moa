@@ -45,8 +45,8 @@ pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
 pub use sandbox::{
-    CloudConfig, CloudFlyioConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig,
-    McpServerConfig, McpTransportConfig,
+    CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
+    McpTransportConfig,
 };
 pub use security::PermissionsConfig;
 pub use session::SessionConfig;

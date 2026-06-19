@@ -30,10 +30,6 @@ pub struct CompactRequest {
 pub struct CompactReport {
     /// Human-readable compaction summary.
     pub summary: String,
-    /// Legacy compatibility field; tenant scanning is not available yet.
-    pub tenants_scanned: u64,
-    /// Legacy compatibility field; graph maintenance queues workspace workflows.
-    pub sessions_compacted: u64,
     /// Logical UTC date used for queued consolidation workflows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_date: Option<NaiveDate>,
@@ -188,8 +184,6 @@ fn compact_report(target_date: NaiveDate, workflows_started: u64) -> CompactRepo
             "queued {workflows_started} workspace consolidation workflow{}",
             plural_suffix(workflows_started)
         ),
-        tenants_scanned: 0,
-        sessions_compacted: 0,
         target_date: Some(target_date),
         workspaces_scanned: workflows_started,
         workflows_started,
@@ -247,14 +241,12 @@ mod tests {
     }
 
     #[test]
-    fn compact_report_pins_empty_boundary_counts() {
-        // Pins: an empty graph-memory maintenance pass reports zero queued workflows without claiming tenant/session work.
+    fn compact_report_pins_queued_workspace_counts() {
+        // Pins: graph-memory maintenance reports queued workspace workflows without synthetic compatibility counters.
         assert_eq!(
             compact_report(target_date(), 0),
             CompactReport {
                 summary: "queued 0 workspace consolidation workflows".to_string(),
-                tenants_scanned: 0,
-                sessions_compacted: 0,
                 target_date: Some(target_date()),
                 workspaces_scanned: 0,
                 workflows_started: 0,

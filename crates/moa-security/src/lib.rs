@@ -3,7 +3,6 @@
 pub mod injection;
 pub mod mcp_proxy;
 pub mod policies;
-pub mod vault;
 
 pub use injection::{
     InputClassification, InputInspection, ToolInputCanaryLeak, ToolInputCanaryScreening,
@@ -15,4 +14,3 @@ pub use policies::{
     ActionPolicies, ActionPolicyCheck, ActionPolicyContext, ActionPolicyRuleStore,
     GLOBAL_ACTION_POLICY_WORKSPACE_ID, glob_match, parse_and_match_command,
 };
-pub use vault::FileVault;

@@ -17,7 +17,7 @@ use super::corpus::{
     SyntheticSession, SyntheticTurn, TranscriptStyle, validate_corpus, write_ledger_jsonl,
     write_manifest_json, write_probes_jsonl, write_sessions_jsonl,
 };
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 const REQUIRED_SEED_COUNT: usize = 3;
 const PR_USER_COUNT: usize = 5;

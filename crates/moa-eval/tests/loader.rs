@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use moa_eval::{discover_configs, discover_suites, load_agent_config, load_suite};
+use moa_eval_core::{Result, discover_configs, discover_suites, load_agent_config, load_suite};
 
 #[test]
 fn parse_example_suite() {
@@ -33,11 +33,11 @@ fn discover_eval_inputs_finds_toml_files() {
     for (label, discover) in [
         (
             "suite",
-            discover_suites as fn(&Path) -> moa_eval::Result<Vec<std::path::PathBuf>>,
+            discover_suites as fn(&Path) -> Result<Vec<std::path::PathBuf>>,
         ),
         (
             "config",
-            discover_configs as fn(&Path) -> moa_eval::Result<Vec<std::path::PathBuf>>,
+            discover_configs as fn(&Path) -> Result<Vec<std::path::PathBuf>>,
         ),
     ] {
         let paths = discover(&dir).unwrap_or_else(|error| {

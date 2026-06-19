@@ -7,9 +7,6 @@ pub mod disabled;
 pub mod local;
 pub mod null_vault;
 
-#[cfg(feature = "auth0")]
-pub use moa_auth_providers_auth0 as auth0;
-
 pub use api_keys::{
     ApiKeyError, CreateApiKeyRequest, CreateApiKeyResponse, Env, IssuedKey, KeyListItem, KeyOwner,
     NewApiKey, ResolvedKey, create, generate, parse_parts, prefix_of, revoke, validate,

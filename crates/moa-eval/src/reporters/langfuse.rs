@@ -3,8 +3,10 @@
 use serde_json::json;
 
 use super::required_env_var;
-use crate::engine::EvalRun;
-use crate::{AgentConfig, Reporter, Result, ScoreValue, TestSuite};
+use moa_eval_core::engine::EvalRun;
+use moa_eval_core::{AgentConfig, Result, ScoreValue, TestSuite};
+
+use crate::Reporter;
 
 /// Posts evaluator scores to Langfuse so they appear alongside eval traces.
 pub struct LangfuseReporter {

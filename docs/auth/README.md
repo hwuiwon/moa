@@ -79,7 +79,7 @@ deletes in the same transaction so stale FGA grants do not survive.
 | `crates/moa-auth/authz-schema` | `moa-authz-schema` | OpenFGA object, relation, tuple, and model constants |
 | `crates/moa-auth/authz` | `moa-authz` | FGA client, `require_authz`, transactional outbox, poller |
 | `crates/moa-auth/providers` | `moa-auth-providers` | Local API keys, disabled auth, builtin approvals, null token vault |
-| `crates/moa-auth/auth0` | `moa-auth-providers-auth0` | Optional Auth0/OIDC, Token Vault, CIBA, JWKS, group sync |
+| `crates/moa-auth/auth0` | `moa-auth-providers-auth0` | Optional Auth0/OIDC, Token Vault, CIBA, and JWKS |
 | `crates/moa-auth/fga-bootstrap` | `moa-fga-bootstrap` | Idempotent OpenFGA store/model bootstrap |
 | `crates/moa-edge` | `moa-edge` | Public authn/proxy edge and identity header injection |
 | `crates/moa-ocsf` | `moa-ocsf` | OCSF security events, signing, verification, persistence |
@@ -95,7 +95,6 @@ contracts without pulling in provider implementations.
 | Builtin approval flow | [operations/builtin-approvals.md](../operations/builtin-approvals.md) |
 | Agent identity and deactivation | [operations/agent-lifecycle.md](../operations/agent-lifecycle.md) |
 | Auth0/OIDC setup | [operations/auth0-setup.md](../operations/auth0-setup.md) |
-| OIDC group mapping | [operations/oidc-group-mapping.md](../operations/oidc-group-mapping.md) |
 | Token Vault setup | [operations/token-vault-setup.md](../operations/token-vault-setup.md) |
 | SCIM provisioning | [scim.md](scim.md) |
 | OCSF security audit | [operations/ocsf-audit.md](../operations/ocsf-audit.md) |

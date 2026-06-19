@@ -13,7 +13,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::generator::EmbeddingInput;
-use crate::{EvalError, Result};
+use moa_eval_core::{EvalError, Result};
 
 /// Deterministic fixture model name used by generated PR memory-eval corpora.
 pub const CACHED_EMBEDDING_MODEL: &str = "memory-eval-deterministic-sha256-v1";
