@@ -141,7 +141,7 @@ Core types:
 - `ActionEnvelope`: durable policy-facing description of one tool invocation.
 - `ActionReviewPreview`: human-readable fields and file diffs for workspace admins.
 - `ActionReviewDecision`: `Cleared` or `Denied { reason }`.
-- `ActionReviewStatus`: `Pending`, `Cleared`, `Denied`, `Expired`.
+- `ActionReviewStatus`: `Pending`, `Cleared`, `Denied`.
 
 Runtime behavior:
 
@@ -337,12 +337,11 @@ CREATE TABLE IF NOT EXISTS workspace_action_reviews (
     preview JSONB NOT NULL,
     tool_request JSONB NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'cleared', 'denied', 'expired')),
+        CHECK (status IN ('pending', 'cleared', 'denied')),
     requested_by TEXT NOT NULL,
     decided_by TEXT,
     deny_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ,
     decided_at TIMESTAMPTZ
 );
 

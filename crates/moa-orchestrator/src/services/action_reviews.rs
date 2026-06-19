@@ -58,8 +58,6 @@ pub struct ActionReviewSummary {
     pub deny_reason: Option<String>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
-    /// Expiration timestamp reserved for a future reaper; current reviews do not set it.
-    pub expires_at: Option<DateTime<Utc>>,
     /// Decision timestamp, when present.
     pub decided_at: Option<DateTime<Utc>>,
 }
@@ -384,7 +382,7 @@ async fn list_pending_reviews(
         r#"
         SELECT id, workspace_id, session_id, sub_agent_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
-               requested_by, decided_by, deny_reason, created_at, expires_at, decided_at
+               requested_by, decided_by, deny_reason, created_at, decided_at
         FROM workspace_action_reviews
         WHERE workspace_id = $1 AND status = 'pending'
         ORDER BY created_at DESC
@@ -409,7 +407,7 @@ async fn load_review_state(
         SELECT id, workspace_id, session_id, sub_agent_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
                requested_by, requested_event_recorded_at, decided_by, deny_reason,
-               created_at, expires_at, decided_at
+               created_at, decided_at
         FROM workspace_action_reviews
         WHERE workspace_id = $1 AND id = $2
         "#,
@@ -614,7 +612,6 @@ fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, 
         decided_by: row.try_get("decided_by").map_err(db_error)?,
         deny_reason: row.try_get("deny_reason").map_err(db_error)?,
         created_at: row.try_get("created_at").map_err(db_error)?,
-        expires_at: row.try_get("expires_at").map_err(db_error)?,
         decided_at: row.try_get("decided_at").map_err(db_error)?,
     })
 }

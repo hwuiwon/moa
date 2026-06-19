@@ -287,8 +287,6 @@ pub enum ActionReviewStatus {
     Cleared,
     /// Review was denied.
     Denied,
-    /// Review expired before a decision. Reserved until the action-review reaper sets expirations.
-    Expired,
 }
 
 impl ActionReviewStatus {
