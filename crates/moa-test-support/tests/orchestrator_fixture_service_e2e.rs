@@ -22,6 +22,7 @@ async fn fixture_round_trips_session_turn_through_restate() -> anyhow::Result<()
                 user_message: "ping".to_string(),
                 attachments: Vec::new(),
                 model: Some("scripted-loadtest".to_string()),
+                contact: None,
             },
             Some("fixture-round-trip"),
         )

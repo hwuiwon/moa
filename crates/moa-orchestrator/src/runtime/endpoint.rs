@@ -30,6 +30,7 @@ use crate::{
         audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
         authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
+        contacts::{Contacts, ContactsImpl},
         experiments::{Experiments, ExperimentsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
@@ -67,6 +68,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Authz",
     "AuthzChallenges",
     "Consolidate",
+    "Contacts",
     "CronJob",
     "Experiments",
     "ExperimentRun",
@@ -139,7 +141,8 @@ pub fn build_endpoint(
         .bind(ApiKeysImpl.serve())
         .bind(AuditImpl.serve())
         .bind(AuthzImpl.serve())
-        .bind(AuthzChallengesImpl.serve());
+        .bind(AuthzChallengesImpl.serve())
+        .bind(ContactsImpl.serve());
     #[cfg(feature = "internal-eval-runner")]
     let endpoint = endpoint.bind(EvalImpl.serve());
     let endpoint = endpoint

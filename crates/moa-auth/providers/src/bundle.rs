@@ -21,6 +21,8 @@ pub struct Providers {
     pub token_vault: Arc<dyn TokenVaultProvider>,
     /// Async human approval provider.
     pub async_authz: Arc<dyn AsyncAuthzProvider>,
+    /// Optional MOA contact-token issuer and verifier.
+    pub contact_tokens: Option<Arc<crate::ContactTokenIssuer>>,
 }
 
 /// Provider bundle construction failures.
@@ -168,11 +170,13 @@ pub fn build_providers_with_resolver(
             }
         }
     };
+    let contact_tokens = build_optional_contact_issuer(cfg)?;
 
     tracing::info!(
         auth = auth.name(),
         vault = token_vault.name(),
         async_authz = async_authz.name(),
+        contact_tokens = contact_tokens.is_some(),
         "providers bundle constructed"
     );
 
@@ -180,7 +184,39 @@ pub fn build_providers_with_resolver(
         auth,
         token_vault,
         async_authz,
+        contact_tokens,
     })
+}
+
+fn build_optional_contact_issuer(
+    cfg: &MoaConfig,
+) -> Result<Option<Arc<crate::ContactTokenIssuer>>, BuildError> {
+    let private_key = optional_env_value(&cfg.auth.contact_tokens.private_key_pem_env);
+    let public_key = optional_env_value(&cfg.auth.contact_tokens.public_key_pem_env);
+    match (private_key, public_key) {
+        (None, None) => Ok(None),
+        (Some(private_key), Some(public_key)) => crate::ContactTokenIssuer::from_key_pems(
+            &cfg.auth.contact_tokens,
+            private_key.as_bytes(),
+            public_key.as_bytes(),
+        )
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|error| BuildError::Provider(error.to_string())),
+        (None, Some(_)) => Err(BuildError::MissingEnv(
+            cfg.auth.contact_tokens.private_key_pem_env.clone(),
+        )),
+        (Some(_), None) => Err(BuildError::MissingEnv(
+            cfg.auth.contact_tokens.public_key_pem_env.clone(),
+        )),
+    }
+}
+
+fn optional_env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(feature = "auth0")]

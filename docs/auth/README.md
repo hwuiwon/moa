@@ -87,6 +87,12 @@ deletes in the same transaction so stale FGA grants do not survive.
 Shared traits live in `moa-core::traits`; downstream crates depend on the
 contracts without pulling in provider implementations.
 
+Agent-facing contacts are separate from authenticated MOA users. SSO, OIDC,
+API keys, SCIM, and OpenFGA protect workspace-admin-or-higher control-plane
+access; contacts use MOA-issued bounded contact JWTs for agent sessions and are
+managed through the contact/privacy APIs unless a future product flow promotes a
+contact into an operator identity.
+
 ## Operational Docs
 
 | Topic | Document |

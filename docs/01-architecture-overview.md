@@ -220,6 +220,22 @@ SCIM v2 provisioning is documented in
 [`docs/auth/scim.md`](auth/scim.md). OCSF security-event audit setup is
 documented in [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
+### Caller Identity Vs Contact
+
+MOA identity is the authenticated control-plane caller: workspace admins,
+tenant admins, API keys, service users, and future SSO/OIDC users. These
+principals are authorized through OpenFGA before protected admin and operator
+reads or writes.
+
+Contacts are agent-facing people or anonymous browser/device handles that
+interact with an agent inside one workspace. Contacts are not OpenFGA
+principals by default and are not provisioned through SCIM. A workspace admin
+or authorized integration issues a bounded MOA contact JWT; unverified contacts
+can create/send agent-session messages with low-assurance scopes, and
+verification workflows can promote the session to a verified contact. Sessions,
+memory, analytics, traces, and privacy workflows carry the session id and
+contact id for observability.
+
 ### Authorization
 
 OpenFGA, backed by Postgres, is the default authorization engine. The v1

@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use crate::traits::Identity;
 use crate::{
-    ActionClass, Attachment, CheckpointHandle, CheckpointInfo, Event, EventRange, EventType,
-    ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
+    ActionClass, Attachment, CheckpointHandle, CheckpointInfo, ContactRef, Event, EventRange,
+    EventType, ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType,
     LearningRiskClass, MemoryScope, RiskLevel, SegmentAssessment, SegmentCompletion, SegmentId,
     SessionFilter, SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate,
@@ -26,6 +26,9 @@ pub struct RunTurnRequest {
     pub turn_id: String,
     /// Trusted identity admitted by the Session VO for this turn.
     pub identity: Identity,
+    /// Agent-facing contact admitted by the Session VO for this turn.
+    #[serde(default)]
+    pub contact: Option<ContactRef>,
     /// User message that initiated the turn.
     pub user_message: String,
     /// User message attachments that initiated the turn.
@@ -113,6 +116,9 @@ pub struct StartTurnRequest {
     /// Optional per-turn model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Agent-facing contact for this message, defaulting to the session contact.
+    #[serde(default)]
+    pub contact: Option<ContactRef>,
 }
 
 /// Response returned by `Session/start_turn`.
@@ -135,6 +141,9 @@ pub struct QueueMessageRequest {
     /// Optional per-turn model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Agent-facing contact for this message, defaulting to the session contact.
+    #[serde(default)]
+    pub contact: Option<ContactRef>,
 }
 
 /// Response returned by `Session/queue_message`.
@@ -162,6 +171,9 @@ pub struct PendingMessage {
     pub queued_at: DateTime<Utc>,
     /// Trusted identity admitted by the Session VO for this queued turn.
     pub identity: Identity,
+    /// Agent-facing contact admitted by the Session VO for this queued turn.
+    #[serde(default)]
+    pub contact: Option<ContactRef>,
     /// User message text to run later.
     pub user_message: String,
     /// Attachments included with the queued message.
@@ -1155,8 +1167,21 @@ pub struct PrivacyEraseRequest {
     /// Whether to list candidates without writing graph or changelog rows.
     #[serde(default)]
     pub dry_run: bool,
+    /// Explicit contact erasure boundary when the subject is a contact.
+    #[serde(default)]
+    pub contact_erasure_scope: Option<ContactErasureScope>,
     /// Signed platform-admin approval token.
     pub approval_token: String,
+}
+
+/// Erasure boundary for contact privacy requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactErasureScope {
+    /// Erase only the requested contact subject.
+    SpecifiedContact,
+    /// Erase the requested contact and linked unverified contacts.
+    SpecifiedAndLinkedContacts,
 }
 
 /// Response payload for a privacy erase request.

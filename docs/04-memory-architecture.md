@@ -22,6 +22,15 @@ The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa
 
 Graph writes set scope context before touching Postgres. Row-level security, changelog rows, sidecar projections, and vector records all use the same scope boundary.
 
+Agent-facing contacts use the user scope without becoming admin users.
+Contact-bound sessions store contact memory under `contact:<contact-uuid>`.
+Anonymous and unverified contacts read and write only their current contact
+subject. After contact-point verification, session promotion moves the session
+to the verified contact and keeps linked anonymous or unverified contacts as
+readable linked subjects by default. Linked retrieval is same-workspace only
+and bounded; unverified sessions do not read verified contact memory before
+promotion.
+
 ## Graph Model
 
 Memory is stored as typed graph nodes:
@@ -88,6 +97,12 @@ The standing digest processor runs after query rewriting and before graph-memory
 The memory processor runs after query rewriting and before history compilation. It reads the effective `retrieval_query` metadata when present. If the rewrite source is `original` or metadata is absent, it uses the latest user message unchanged as the retrieval query. Rewrite gating stays in `QueryRewriter`; graph memory retrieval does not run rewrite logic.
 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
+
+For verified contact sessions, retrieval queries the primary verified contact
+scope and a small bounded set of linked contact scopes. Storage lineage is
+emitted for the primary scope; linked hits remain attributable through the
+session/contact metadata and privacy provenance fields instead of pretending
+the linked contact initiated the turn.
 
 When `memory.retrieval.lineage_enabled` is true, retrieval records best-effort
 lineage rows after ranking: workspace, user, session, turn sequence, durable

@@ -12,10 +12,12 @@ use flate2::write::GzEncoder;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_core::traits::Identity;
 use moa_core::wire::{
-    PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest, PrivacyExportResponse,
+    ContactErasureScope, PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest,
+    PrivacyExportResponse,
 };
-use moa_core::{UserId, WorkspaceId};
+use moa_core::{ContactId, UserId, WorkspaceId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
 use moa_memory_pii::erasure::{
@@ -25,7 +27,7 @@ use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tar::Builder;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -69,7 +71,7 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyExportResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "export");
         let request = request.into_inner();
-        authorize_privacy_export(&ctx, request.workspace_id.as_ref()).await?;
+        let identity = authorize_privacy_export(&ctx, request.workspace_id.as_ref()).await?;
         let subject_user_id = request.subject_user_id.to_string();
         let workspace = request.workspace_id.as_ref().map(WorkspaceId::as_str);
         let claims = ApprovalTokenVerifier::from_env()?.verify(
@@ -82,7 +84,7 @@ impl Privacy for PrivacyImpl {
 
         Ok(ctx
             .run(|| async move {
-                execute_privacy_export(pool, request, claims)
+                execute_privacy_export(pool, identity.tenant_id, request, claims)
                     .await
                     .map(Json::from)
             })
@@ -98,7 +100,7 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyEraseResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "erase");
         let request = request.into_inner();
-        authorize_workspace_admin(&ctx, &request.workspace_id).await?;
+        let identity = authorize_workspace_admin(&ctx, &request.workspace_id).await?;
         let subject_user_id = request.subject_user_id.to_string();
         let workspace = Some(request.workspace_id.as_str());
         let claims = ApprovalTokenVerifier::from_env()?.verify(
@@ -108,7 +110,8 @@ impl Privacy for PrivacyImpl {
             workspace,
         )?;
         let pool = OrchestratorCtx::current_graph_pool();
-        let erase_ctx = PrivacyEraseContext::from_request(pool, request, claims)?;
+        let erase_ctx =
+            PrivacyEraseContext::from_request(pool, identity.tenant_id, request, claims)?;
 
         Ok(ctx
             .run(|| async move { run_privacy_erase(erase_ctx).await.map(Json::from) })
@@ -286,6 +289,8 @@ pub struct PrivacyExportContext {
     pub subject_user: Uuid,
     /// Subject user id as stored in text columns.
     pub subject_user_id: String,
+    /// Effective subject ids included in export collection.
+    pub subjects: Vec<PrivacySubject>,
     /// Administrative reason for the export.
     pub reason: String,
     /// Verified approval-token claims.
@@ -297,6 +302,8 @@ pub struct PrivacyExportContext {
 pub struct PrivacyEraseContext {
     /// Postgres pool used for graph and PII-vault erasure.
     pub pool: PgPool,
+    /// Tenant that authorized the privacy operation.
+    pub tenant_id: Uuid,
     /// Workspace containing subject data.
     pub workspace_id: String,
     /// Subject user UUID.
@@ -307,6 +314,8 @@ pub struct PrivacyEraseContext {
     pub reason: String,
     /// Whether to enumerate candidates without writing erasures.
     pub dry_run: bool,
+    /// Explicit contact erasure boundary, required for contact subjects.
+    pub contact_erasure_scope: Option<ContactErasureScope>,
     /// Verified approval-token claims.
     pub claims: ApprovalClaims,
     /// Optional PII vault secret used to compute subject pseudonyms.
@@ -317,27 +326,92 @@ impl PrivacyEraseContext {
     /// Builds an erase context from the public wire request and verified claims.
     pub fn from_request(
         pool: PgPool,
+        tenant_id: Uuid,
         request: PrivacyEraseRequest,
         claims: ApprovalClaims,
     ) -> Result<Self, HandlerError> {
         let subject_user = parse_subject_uuid(&request.subject_user_id)?;
         Ok(Self {
             pool,
+            tenant_id,
             workspace_id: request.workspace_id.to_string(),
             subject_user,
             subject_user_id: request.subject_user_id.to_string(),
             reason: request.reason,
             dry_run: request.dry_run,
+            contact_erasure_scope: request.contact_erasure_scope,
             claims,
             pii_vault_secret: pii_vault_secret_from_env()?,
         })
     }
 }
 
+/// Privacy export or erasure subject included in a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacySubject {
+    /// User id string as stored in memory tables.
+    pub user_id: String,
+    /// Stable UUID target used by privacy audit rows.
+    pub target_uid: Uuid,
+    /// Why this subject is included in the request.
+    pub provenance: PrivacySubjectProvenance,
+}
+
+impl PrivacySubject {
+    /// Builds the primary subject requested by the caller.
+    #[must_use]
+    pub fn primary(user_id: String, target_uid: Uuid) -> Self {
+        Self {
+            user_id,
+            target_uid,
+            provenance: PrivacySubjectProvenance::Primary,
+        }
+    }
+
+    fn linked_contact(contact_id: Uuid) -> Self {
+        Self {
+            user_id: ContactId(contact_id).as_user_id().to_string(),
+            target_uid: contact_id,
+            provenance: PrivacySubjectProvenance::LinkedContact,
+        }
+    }
+}
+
+/// Subject provenance included in privacy artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacySubjectProvenance {
+    /// Subject was the one explicitly requested.
+    Primary,
+    /// Subject is a linked contact included through verified contact promotion.
+    LinkedContact,
+}
+
+impl PrivacySubjectProvenance {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::LinkedContact => "linked_contact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivacySubjectKind {
+    User,
+    Contact,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPrivacySubjects {
+    kind: PrivacySubjectKind,
+    effective_workspace: Option<String>,
+    subjects: Vec<PrivacySubject>,
+}
+
 async fn authorize_privacy_export(
     ctx: &impl RequestHeaders,
     workspace_id: Option<&WorkspaceId>,
-) -> Result<(), HandlerError> {
+) -> Result<Identity, HandlerError> {
     match workspace_id {
         Some(workspace_id) => authorize_workspace_admin(ctx, workspace_id).await,
         None => {
@@ -351,7 +425,8 @@ async fn authorize_privacy_export(
                 Relation::Admin,
             )
             .await
-            .map_err(translate_authz_error)
+            .map_err(translate_authz_error)?;
+            Ok(identity)
         }
     }
 }
@@ -359,7 +434,7 @@ async fn authorize_privacy_export(
 async fn authorize_workspace_admin(
     ctx: &impl RequestHeaders,
     workspace_id: &WorkspaceId,
-) -> Result<(), HandlerError> {
+) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
@@ -370,11 +445,13 @@ async fn authorize_workspace_admin(
         Relation::Admin,
     )
     .await
-    .map_err(translate_authz_error)
+    .map_err(translate_authz_error)?;
+    Ok(identity)
 }
 
 async fn execute_privacy_export(
     pool: PgPool,
+    tenant_id: Uuid,
     request: PrivacyExportRequest,
     claims: ApprovalClaims,
 ) -> Result<PrivacyExportResponse, HandlerError> {
@@ -382,8 +459,20 @@ async fn execute_privacy_export(
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
     consume_approval_jti(&pool, &claims).await?;
-    let subject_user = parse_subject_uuid(&request.subject_user_id)?;
-    let workspace = request.workspace_id.as_ref().map(ToString::to_string);
+    let resolved = resolve_privacy_subjects(
+        &pool,
+        tenant_id,
+        request.workspace_id.as_ref(),
+        &request.subject_user_id,
+        ContactLinkedSubjectPolicy::IncludeVerifiedLinks,
+    )
+    .await?;
+    let subject_user = resolved
+        .subjects
+        .first()
+        .map(|subject| subject.target_uid)
+        .ok_or_else(|| TerminalError::new("privacy subject resolution returned no subjects"))?;
+    let workspace = resolved.effective_workspace.clone();
     let signer = Ed25519ManifestSigner::from_env()?;
     let base_dir = create_temp_dir("moa-privacy-export").await?;
     let export_dir = base_dir.join("export");
@@ -395,24 +484,13 @@ async fn execute_privacy_export(
         workspace,
         subject_user,
         subject_user_id: request.subject_user_id.to_string(),
+        subjects: resolved.subjects,
         reason: request.reason,
         claims,
     };
 
     let result = async {
-        let mut counts = BTreeMap::new();
-        counts.insert("facts", collect_facts(&ctx, &export_dir).await?);
-        counts.insert("entities", collect_entities(&ctx, &export_dir).await?);
-        counts.insert(
-            "relationships",
-            collect_relationships(&ctx, &export_dir).await?,
-        );
-        counts.insert("embeddings", collect_embeddings(&ctx, &export_dir).await?);
-        counts.insert("skills", collect_skills(&ctx, &export_dir).await?);
-        counts.insert(
-            "skill_addenda",
-            collect_skill_addenda(&ctx, &export_dir).await?,
-        );
+        let mut counts = collect_privacy_export_data_sections(&ctx, &export_dir).await?;
         write_export_readme(&ctx, &counts, &export_dir).await?;
         emit_export_audit(&ctx, &counts).await?;
         counts.insert("changelog", collect_changelog(&ctx, &export_dir).await?);
@@ -427,7 +505,10 @@ async fn execute_privacy_export(
     let (counts, manifest, archive) = result?;
     Ok(PrivacyExportResponse {
         subject_user_id: request.subject_user_id,
-        workspace_id: request.workspace_id,
+        workspace_id: ctx
+            .workspace
+            .as_ref()
+            .map(|workspace| WorkspaceId::new(workspace.clone())),
         archive_uri: "inline:privacy-export.tgz".to_string(),
         file_count: usize_to_u64(counts.len().saturating_add(3)),
         counts: counts
@@ -446,25 +527,53 @@ pub async fn run_privacy_erase(
     if ctx.reason.trim().is_empty() {
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
-    consume_approval_jti(&ctx.pool, &ctx.claims).await?;
-    let candidates = enumerate_erase_candidates(&ctx.pool, &ctx.workspace_id, &ctx.subject_user_id)
-        .await
-        .map_err(handler_error)?;
+    let linked_policy = match ctx
+        .contact_erasure_scope
+        .unwrap_or(ContactErasureScope::SpecifiedContact)
+    {
+        ContactErasureScope::SpecifiedContact => ContactLinkedSubjectPolicy::SpecifiedOnly,
+        ContactErasureScope::SpecifiedAndLinkedContacts => {
+            ContactLinkedSubjectPolicy::IncludeVerifiedLinks
+        }
+    };
+    let resolved = resolve_privacy_subjects(
+        &ctx.pool,
+        ctx.tenant_id,
+        Some(&WorkspaceId::new(ctx.workspace_id.clone())),
+        &UserId::new(ctx.subject_user_id.clone()),
+        linked_policy,
+    )
+    .await?;
+    validate_contact_erasure_scope(&ctx, resolved.kind)?;
+    let candidate_groups = enumerate_subject_erase_candidates(&ctx, &resolved.subjects).await?;
+    let candidates = flatten_erase_candidates(&candidate_groups);
 
     if ctx.dry_run {
         return Ok(erase_response(&ctx, &candidates, 0, 0));
     }
 
-    let pii_vault_erased = erase_pii_vault_subject(&ctx).await?;
+    consume_approval_jti(&ctx.pool, &ctx.claims).await?;
+    let pii_vault_erased = erase_pii_vault_subjects(&ctx, &resolved.subjects).await?;
 
     if candidates.is_empty() {
         return Ok(erase_response(&ctx, &candidates, 0, pii_vault_erased));
     }
 
-    let erased_count =
-        hard_purge_erase_candidates(&ctx.pool, &graph_erasure_audit(&ctx), &candidates)
+    let mut erased_count = 0usize;
+    for (subject, subject_candidates) in candidate_groups {
+        if subject_candidates.is_empty() {
+            continue;
+        }
+        erased_count = erased_count.saturating_add(
+            hard_purge_erase_candidates(
+                &ctx.pool,
+                &graph_erasure_audit(&ctx, &subject),
+                &subject_candidates,
+            )
             .await
-            .map_err(handler_error)?;
+            .map_err(handler_error)?,
+        );
+    }
 
     Ok(erase_response(
         &ctx,
@@ -597,7 +706,215 @@ fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
         })
         .transpose()
 }
-async fn erase_pii_vault_subject(ctx: &PrivacyEraseContext) -> Result<u64, HandlerError> {
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContactLinkedSubjectPolicy {
+    SpecifiedOnly,
+    IncludeVerifiedLinks,
+}
+
+async fn resolve_privacy_subjects(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    workspace_id: Option<&WorkspaceId>,
+    requested_subject_user_id: &UserId,
+    linked_policy: ContactLinkedSubjectPolicy,
+) -> Result<ResolvedPrivacySubjects, HandlerError> {
+    let parsed = parse_privacy_subject_id(requested_subject_user_id)?;
+    let contact_row = load_privacy_contact_row(pool, tenant_id, workspace_id, parsed.uuid).await?;
+    let Some(contact_row) = contact_row else {
+        if parsed.is_contact_prefixed {
+            return Err(TerminalError::new_with_code(404, "contact not found").into());
+        }
+        return Ok(ResolvedPrivacySubjects {
+            kind: PrivacySubjectKind::User,
+            effective_workspace: workspace_id.map(ToString::to_string),
+            subjects: vec![PrivacySubject::primary(
+                requested_subject_user_id.to_string(),
+                parsed.uuid,
+            )],
+        });
+    };
+
+    let mut subjects = vec![PrivacySubject::primary(
+        ContactId(contact_row.id).as_user_id().to_string(),
+        contact_row.id,
+    )];
+    if contact_row.state == "verified"
+        && linked_policy == ContactLinkedSubjectPolicy::IncludeVerifiedLinks
+    {
+        let linked =
+            load_linked_contact_ids(pool, tenant_id, &contact_row.workspace_id, contact_row.id)
+                .await?;
+        subjects.extend(linked.into_iter().map(PrivacySubject::linked_contact));
+    }
+
+    Ok(ResolvedPrivacySubjects {
+        kind: PrivacySubjectKind::Contact,
+        effective_workspace: Some(contact_row.workspace_id),
+        subjects,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedPrivacySubjectId {
+    uuid: Uuid,
+    is_contact_prefixed: bool,
+}
+
+fn parse_privacy_subject_id(
+    subject_user_id: &UserId,
+) -> Result<ParsedPrivacySubjectId, HandlerError> {
+    let raw = subject_user_id.as_str();
+    let parsed_contact = ContactId::from_user_id(subject_user_id);
+    let (value, is_contact_prefixed) = parsed_contact.map_or((raw, false), |_| {
+        (
+            raw.strip_prefix(moa_core::CONTACT_USER_ID_PREFIX)
+                .unwrap_or(raw),
+            true,
+        )
+    });
+    let uuid = Uuid::parse_str(value).map_err(|error| {
+        TerminalError::new_with_code(
+            400,
+            format!("subject_user_id must be a UUID-backed user id: {error}"),
+        )
+    })?;
+    Ok(ParsedPrivacySubjectId {
+        uuid,
+        is_contact_prefixed,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct PrivacyContactRow {
+    id: Uuid,
+    workspace_id: String,
+    state: String,
+}
+
+async fn load_privacy_contact_row(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    workspace_id: Option<&WorkspaceId>,
+    contact_id: Uuid,
+) -> Result<Option<PrivacyContactRow>, HandlerError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, workspace_id, state
+        FROM contacts
+        WHERE id = $1
+          AND tenant_id = $2
+          AND ($3::text IS NULL OR workspace_id = $3)
+        "#,
+    )
+    .bind(contact_id)
+    .bind(tenant_id)
+    .bind(workspace_id.map(WorkspaceId::as_str))
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_handler_error("load privacy contact subject", error))?;
+    row.map(|row| {
+        Ok(PrivacyContactRow {
+            id: row
+                .try_get::<Uuid, _>("id")
+                .map_err(|error| db_handler_error("read privacy contact id", error))?,
+            workspace_id: row
+                .try_get::<String, _>("workspace_id")
+                .map_err(|error| db_handler_error("read privacy contact workspace", error))?,
+            state: row
+                .try_get::<String, _>("state")
+                .map_err(|error| db_handler_error("read privacy contact state", error))?,
+        })
+    })
+    .transpose()
+}
+
+async fn load_linked_contact_ids(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    workspace_id: &str,
+    contact_id: Uuid,
+) -> Result<Vec<Uuid>, HandlerError> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM contacts
+        WHERE canonical_contact_id = $1
+          AND tenant_id = $2
+          AND workspace_id = $3
+        ORDER BY merged_at NULLS LAST, updated_at DESC, id
+        "#,
+    )
+    .bind(contact_id)
+    .bind(tenant_id)
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| db_handler_error("load linked privacy contacts", error))
+}
+
+fn validate_contact_erasure_scope(
+    ctx: &PrivacyEraseContext,
+    kind: PrivacySubjectKind,
+) -> Result<(), HandlerError> {
+    match (kind, ctx.contact_erasure_scope) {
+        (PrivacySubjectKind::Contact, Some(_)) => Ok(()),
+        (PrivacySubjectKind::Contact, None) => Err(TerminalError::new_with_code(
+            400,
+            "contact_erasure_scope is required for contact erasure",
+        )
+        .into()),
+        (PrivacySubjectKind::User, None) => Ok(()),
+        (PrivacySubjectKind::User, Some(_)) => Err(TerminalError::new_with_code(
+            400,
+            "contact_erasure_scope only applies to contact subjects",
+        )
+        .into()),
+    }
+}
+
+async fn enumerate_subject_erase_candidates(
+    ctx: &PrivacyEraseContext,
+    subjects: &[PrivacySubject],
+) -> Result<Vec<(PrivacySubject, Vec<EraseCandidate>)>, HandlerError> {
+    let mut groups = Vec::with_capacity(subjects.len());
+    for subject in subjects {
+        let candidates = enumerate_erase_candidates(&ctx.pool, &ctx.workspace_id, &subject.user_id)
+            .await
+            .map_err(handler_error)?;
+        groups.push((subject.clone(), candidates));
+    }
+    Ok(groups)
+}
+
+#[derive(Debug, Clone)]
+struct SubjectEraseCandidate {
+    subject: PrivacySubject,
+    candidate: EraseCandidate,
+}
+
+fn flatten_erase_candidates(
+    groups: &[(PrivacySubject, Vec<EraseCandidate>)],
+) -> Vec<SubjectEraseCandidate> {
+    groups
+        .iter()
+        .flat_map(|(subject, candidates)| {
+            candidates
+                .iter()
+                .cloned()
+                .map(|candidate| SubjectEraseCandidate {
+                    subject: subject.clone(),
+                    candidate,
+                })
+        })
+        .collect()
+}
+
+async fn erase_pii_vault_subjects(
+    ctx: &PrivacyEraseContext,
+    subjects: &[PrivacySubject],
+) -> Result<u64, HandlerError> {
     let Some(secret) = ctx.pii_vault_secret.clone() else {
         tracing::warn!(
             workspace_id = %ctx.workspace_id,
@@ -608,20 +925,26 @@ async fn erase_pii_vault_subject(ctx: &PrivacyEraseContext) -> Result<u64, Handl
     };
 
     let vault = PiiVault::with_pool(ctx.pool.clone(), secret, "privacy-erase");
-    let subject_pseudonym = vault
-        .subject_pseudonym(&ctx.subject_user_id)
-        .map_err(handler_error)?;
-    vault
-        .erase_subject(&ctx.workspace_id, &subject_pseudonym)
-        .await
-        .map_err(handler_error)
+    let mut erased = 0u64;
+    for subject in subjects {
+        let subject_pseudonym = vault
+            .subject_pseudonym(&subject.user_id)
+            .map_err(handler_error)?;
+        erased = erased.saturating_add(
+            vault
+                .erase_subject(&ctx.workspace_id, &subject_pseudonym)
+                .await
+                .map_err(handler_error)?,
+        );
+    }
+    Ok(erased)
 }
 
-fn graph_erasure_audit(ctx: &PrivacyEraseContext) -> GraphErasureAudit {
+fn graph_erasure_audit(ctx: &PrivacyEraseContext, subject: &PrivacySubject) -> GraphErasureAudit {
     GraphErasureAudit {
         workspace_id: ctx.workspace_id.clone(),
-        subject_user: ctx.subject_user,
-        subject_user_id: ctx.subject_user_id.clone(),
+        subject_user: subject.target_uid,
+        subject_user_id: subject.user_id.clone(),
         reason: ctx.reason.clone(),
         approver_id: ctx.claims.sub.clone(),
         approval_token_jti: ctx.claims.jti.clone(),
@@ -630,7 +953,7 @@ fn graph_erasure_audit(ctx: &PrivacyEraseContext) -> GraphErasureAudit {
 
 fn erase_response(
     ctx: &PrivacyEraseContext,
-    candidates: &[EraseCandidate],
+    candidates: &[SubjectEraseCandidate],
     erased_count: usize,
     pii_vault_erased: u64,
 ) -> PrivacyEraseResponse {
@@ -646,14 +969,37 @@ fn erase_response(
             .take(ERASE_SAMPLE_LIMIT)
             .map(|candidate| {
                 json!({
-                    "uid": candidate.uid,
-                    "label": candidate.label,
-                    "name": candidate.name,
-                    "pii_class": candidate.pii_class,
+                    "uid": candidate.candidate.uid,
+                    "label": candidate.candidate.label,
+                    "name": candidate.candidate.name,
+                    "pii_class": candidate.candidate.pii_class,
+                    "privacy_subject_user_id": candidate.subject.user_id.as_str(),
+                    "privacy_subject_provenance": candidate.subject.provenance.as_str(),
                 })
             })
             .collect(),
     }
+}
+
+/// Collects privacy export data sections before README, audit, changelog, and manifest generation.
+pub async fn collect_privacy_export_data_sections(
+    ctx: &PrivacyExportContext,
+    export_dir: &Path,
+) -> Result<BTreeMap<&'static str, usize>, HandlerError> {
+    let mut counts = BTreeMap::new();
+    counts.insert("facts", collect_facts(ctx, export_dir).await?);
+    counts.insert("entities", collect_entities(ctx, export_dir).await?);
+    counts.insert(
+        "relationships",
+        collect_relationships(ctx, export_dir).await?,
+    );
+    counts.insert("embeddings", collect_embeddings(ctx, export_dir).await?);
+    counts.insert("skills", collect_skills(ctx, export_dir).await?);
+    counts.insert(
+        "skill_addenda",
+        collect_skill_addenda(ctx, export_dir).await?,
+    );
+    Ok(counts)
 }
 
 async fn collect_facts(
@@ -690,41 +1036,49 @@ async fn collect_nodes(
         .map(|label| (*label).to_string())
         .collect::<Vec<_>>();
     let mut tx = begin_audited_read(&ctx.pool).await?;
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'uid', uid,
-            'label', label,
-            'workspace_id', workspace_id,
-            'user_id', user_id,
-            'scope', scope,
-            'name', name,
-            'properties_summary', properties_summary,
-            'pii_class', pii_class,
-            'confidence', confidence,
-            'valid_from', valid_from,
-            'valid_to', valid_to,
-            'created_at', created_at,
-            'last_accessed_at', last_accessed_at
-        )
-        FROM moa.node_index
-        WHERE valid_to IS NULL
-          AND label = ANY($3)
-          AND ($1::text IS NULL OR workspace_id = $1)
-          AND (
-              user_id = $2
-              OR properties_summary->>'user_id' = $2
-              OR properties_summary::text LIKE ('%' || $2 || '%')
-          )
-        ORDER BY workspace_id NULLS FIRST, label, name, uid
-        "#,
-    )
-    .bind(ctx.workspace.as_deref())
-    .bind(&ctx.subject_user_id)
-    .bind(label_filter)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(handler_error)?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'uid', uid,
+                    'label', label,
+                    'workspace_id', workspace_id,
+                    'user_id', user_id,
+                    'scope', scope,
+                    'name', name,
+                    'properties_summary', properties_summary,
+                    'pii_class', pii_class,
+                    'confidence', confidence,
+                    'valid_from', valid_from,
+                    'valid_to', valid_to,
+                    'created_at', created_at,
+                    'last_accessed_at', last_accessed_at,
+                    'privacy_subject_user_id', $2,
+                    'privacy_subject_provenance', $4
+                )
+                FROM moa.node_index
+                WHERE valid_to IS NULL
+                  AND label = ANY($3)
+                  AND ($1::text IS NULL OR workspace_id = $1)
+                  AND (
+                      user_id = $2
+                      OR properties_summary->>'user_id' = $2
+                      OR properties_summary::text LIKE ('%' || $2 || '%')
+                  )
+                ORDER BY workspace_id NULLS FIRST, label, name, uid
+                "#,
+            )
+            .bind(ctx.workspace.as_deref())
+            .bind(&subject.user_id)
+            .bind(label_filter.clone())
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(path, &rows).await
 }
@@ -734,42 +1088,50 @@ async fn collect_relationships(
     export_dir: &Path,
 ) -> Result<usize, HandlerError> {
     let mut tx = begin_audited_read(&ctx.pool).await?;
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'change_id', change_id,
-            'workspace_id', workspace_id,
-            'user_id', user_id,
-            'scope', scope,
-            'actor_id', actor_id,
-            'actor_kind', actor_kind,
-            'op', op,
-            'target_kind', target_kind,
-            'target_label', target_label,
-            'target_uid', target_uid,
-            'payload', payload,
-            'pii_class', pii_class,
-            'audit_metadata', audit_metadata,
-            'cause_change_id', cause_change_id,
-            'created_at', created_at
-        )
-        FROM moa.graph_changelog
-        WHERE target_kind = 'edge'
-          AND ($1::text IS NULL OR workspace_id = $1)
-          AND (
-              user_id = $2
-              OR actor_id = $2
-              OR payload::text LIKE ('%' || $2 || '%')
-              OR audit_metadata->>'subject_user_id' = $2
-          )
-        ORDER BY created_at, change_id
-        "#,
-    )
-    .bind(ctx.workspace.as_deref())
-    .bind(&ctx.subject_user_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(handler_error)?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'change_id', change_id,
+                    'workspace_id', workspace_id,
+                    'user_id', user_id,
+                    'scope', scope,
+                    'actor_id', actor_id,
+                    'actor_kind', actor_kind,
+                    'op', op,
+                    'target_kind', target_kind,
+                    'target_label', target_label,
+                    'target_uid', target_uid,
+                    'payload', payload,
+                    'pii_class', pii_class,
+                    'audit_metadata', audit_metadata,
+                    'cause_change_id', cause_change_id,
+                    'created_at', created_at,
+                    'privacy_subject_user_id', $2,
+                    'privacy_subject_provenance', $3
+                )
+                FROM moa.graph_changelog
+                WHERE target_kind = 'edge'
+                  AND ($1::text IS NULL OR workspace_id = $1)
+                  AND (
+                      user_id = $2
+                      OR actor_id = $2
+                      OR payload::text LIKE ('%' || $2 || '%')
+                      OR audit_metadata->>'subject_user_id' = $2
+                  )
+                ORDER BY created_at, change_id
+                "#,
+            )
+            .bind(ctx.workspace.as_deref())
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(export_dir.join("relationships.jsonl"), &rows).await
 }
@@ -779,40 +1141,48 @@ async fn collect_embeddings(
     export_dir: &Path,
 ) -> Result<usize, HandlerError> {
     let mut tx = begin_audited_read(&ctx.pool).await?;
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'uid', e.uid,
-            'workspace_id', e.workspace_id,
-            'user_id', e.user_id,
-            'scope', e.scope,
-            'label', e.label,
-            'pii_class', e.pii_class,
-            'embedding_model', e.embedding_model,
-            'embedding_model_version', e.embedding_model_version,
-            'embedding', (e.embedding::text)::jsonb,
-            'valid_to', e.valid_to,
-            'created_at', e.created_at
-        )
-        FROM moa.embeddings e
-        JOIN moa.node_index n ON n.uid = e.uid
-        WHERE e.valid_to IS NULL
-          AND n.valid_to IS NULL
-          AND ($1::text IS NULL OR e.workspace_id = $1)
-          AND (
-              e.user_id = $2
-              OR n.user_id = $2
-              OR n.properties_summary->>'user_id' = $2
-              OR n.properties_summary::text LIKE ('%' || $2 || '%')
-          )
-        ORDER BY e.workspace_id NULLS FIRST, e.label, e.uid
-        "#,
-    )
-    .bind(ctx.workspace.as_deref())
-    .bind(&ctx.subject_user_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(handler_error)?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'uid', e.uid,
+                    'workspace_id', e.workspace_id,
+                    'user_id', e.user_id,
+                    'scope', e.scope,
+                    'label', e.label,
+                    'pii_class', e.pii_class,
+                    'embedding_model', e.embedding_model,
+                    'embedding_model_version', e.embedding_model_version,
+                    'embedding', (e.embedding::text)::jsonb,
+                    'valid_to', e.valid_to,
+                    'created_at', e.created_at,
+                    'privacy_subject_user_id', $2,
+                    'privacy_subject_provenance', $3
+                )
+                FROM moa.embeddings e
+                JOIN moa.node_index n ON n.uid = e.uid
+                WHERE e.valid_to IS NULL
+                  AND n.valid_to IS NULL
+                  AND ($1::text IS NULL OR e.workspace_id = $1)
+                  AND (
+                      e.user_id = $2
+                      OR n.user_id = $2
+                      OR n.properties_summary->>'user_id' = $2
+                      OR n.properties_summary::text LIKE ('%' || $2 || '%')
+                  )
+                ORDER BY e.workspace_id NULLS FIRST, e.label, e.uid
+                "#,
+            )
+            .bind(ctx.workspace.as_deref())
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(export_dir.join("embeddings.jsonl"), &rows).await
 }
@@ -822,60 +1192,68 @@ async fn collect_skills(
     export_dir: &Path,
 ) -> Result<usize, HandlerError> {
     let mut tx = begin_audited_read(&ctx.pool).await?;
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'skill_uid', s.skill_uid,
-            'workspace_id', s.workspace_id,
-            'user_id', s.user_id,
-            'scope', s.scope,
-            'name', s.name,
-            'description', s.description,
-            'package_hash_hex', encode(s.package_hash, 'hex'),
-            'skill_md_hash_hex', encode(s.skill_md_hash, 'hex'),
-            'file_count', s.file_count,
-            'total_size_bytes', s.total_size_bytes,
-            'manifest', s.manifest,
-            'version', s.version,
-            'previous_skill_uid', s.previous_skill_uid,
-            'tags', s.tags,
-            'valid_to', s.valid_to,
-            'created_at', s.created_at,
-            'updated_at', s.updated_at,
-            'files', COALESCE((
-                SELECT jsonb_agg(jsonb_build_object(
-                    'path', f.path,
-                    'content_base64', encode(f.content, 'base64'),
-                    'content_sha256_hex', encode(f.content_sha256, 'hex'),
-                    'content_type', f.content_type,
-                    'executable', f.executable,
-                    'file_size_bytes', f.file_size_bytes
-                ) ORDER BY f.path)
-                FROM moa.skill_file f
-                WHERE f.skill_uid = s.skill_uid
-            ), '[]'::jsonb)
-        )
-        FROM moa.skill s
-        WHERE valid_to IS NULL
-          AND ($1::text IS NULL OR s.workspace_id = $1)
-          AND (
-              s.user_id = $2
-              OR s.description LIKE ('%' || $2 || '%')
-              OR EXISTS (
-                  SELECT 1
-                  FROM moa.skill_file f
-                  WHERE f.skill_uid = s.skill_uid
-                    AND encode(f.content, 'escape') LIKE ('%' || $2 || '%')
-              )
-          )
-        ORDER BY s.workspace_id NULLS FIRST, s.scope, s.name, s.version
-        "#,
-    )
-    .bind(ctx.workspace.as_deref())
-    .bind(&ctx.subject_user_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(handler_error)?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'skill_uid', s.skill_uid,
+                    'workspace_id', s.workspace_id,
+                    'user_id', s.user_id,
+                    'scope', s.scope,
+                    'name', s.name,
+                    'description', s.description,
+                    'package_hash_hex', encode(s.package_hash, 'hex'),
+                    'skill_md_hash_hex', encode(s.skill_md_hash, 'hex'),
+                    'file_count', s.file_count,
+                    'total_size_bytes', s.total_size_bytes,
+                    'manifest', s.manifest,
+                    'version', s.version,
+                    'previous_skill_uid', s.previous_skill_uid,
+                    'tags', s.tags,
+                    'valid_to', s.valid_to,
+                    'created_at', s.created_at,
+                    'updated_at', s.updated_at,
+                    'privacy_subject_user_id', $2,
+                    'privacy_subject_provenance', $3,
+                    'files', COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'path', f.path,
+                            'content_base64', encode(f.content, 'base64'),
+                            'content_sha256_hex', encode(f.content_sha256, 'hex'),
+                            'content_type', f.content_type,
+                            'executable', f.executable,
+                            'file_size_bytes', f.file_size_bytes
+                        ) ORDER BY f.path)
+                        FROM moa.skill_file f
+                        WHERE f.skill_uid = s.skill_uid
+                    ), '[]'::jsonb)
+                )
+                FROM moa.skill s
+                WHERE valid_to IS NULL
+                  AND ($1::text IS NULL OR s.workspace_id = $1)
+                  AND (
+                      s.user_id = $2
+                      OR s.description LIKE ('%' || $2 || '%')
+                      OR EXISTS (
+                          SELECT 1
+                          FROM moa.skill_file f
+                          WHERE f.skill_uid = s.skill_uid
+                            AND encode(f.content, 'escape') LIKE ('%' || $2 || '%')
+                      )
+                  )
+                ORDER BY s.workspace_id NULLS FIRST, s.scope, s.name, s.version
+                "#,
+            )
+            .bind(ctx.workspace.as_deref())
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(export_dir.join("skills.jsonl"), &rows).await
 }
@@ -885,38 +1263,46 @@ async fn collect_skill_addenda(
     export_dir: &Path,
 ) -> Result<usize, HandlerError> {
     let mut tx = begin_audited_read(&ctx.pool).await?;
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'addendum_uid', a.addendum_uid,
-            'skill_uid', a.skill_uid,
-            'linked_lesson_uid', a.linked_lesson_uid,
-            'workspace_id', a.workspace_id,
-            'user_id', a.user_id,
-            'scope', a.scope,
-            'summary', a.summary,
-            'created_at', a.created_at,
-            'valid_to', a.valid_to
-        )
-        FROM moa.skill_addendum a
-        LEFT JOIN moa.node_index n ON n.uid = a.linked_lesson_uid
-        WHERE a.valid_to IS NULL
-          AND ($1::text IS NULL OR a.workspace_id = $1)
-          AND (
-              a.user_id = $2
-              OR a.summary LIKE ('%' || $2 || '%')
-              OR n.user_id = $2
-              OR n.properties_summary->>'user_id' = $2
-              OR n.properties_summary::text LIKE ('%' || $2 || '%')
-          )
-        ORDER BY a.workspace_id NULLS FIRST, a.created_at, a.addendum_uid
-        "#,
-    )
-    .bind(ctx.workspace.as_deref())
-    .bind(&ctx.subject_user_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(handler_error)?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'addendum_uid', a.addendum_uid,
+                    'skill_uid', a.skill_uid,
+                    'linked_lesson_uid', a.linked_lesson_uid,
+                    'workspace_id', a.workspace_id,
+                    'user_id', a.user_id,
+                    'scope', a.scope,
+                    'summary', a.summary,
+                    'created_at', a.created_at,
+                    'valid_to', a.valid_to,
+                    'privacy_subject_user_id', $2,
+                    'privacy_subject_provenance', $3
+                )
+                FROM moa.skill_addendum a
+                LEFT JOIN moa.node_index n ON n.uid = a.linked_lesson_uid
+                WHERE a.valid_to IS NULL
+                  AND ($1::text IS NULL OR a.workspace_id = $1)
+                  AND (
+                      a.user_id = $2
+                      OR a.summary LIKE ('%' || $2 || '%')
+                      OR n.user_id = $2
+                      OR n.properties_summary->>'user_id' = $2
+                      OR n.properties_summary::text LIKE ('%' || $2 || '%')
+                  )
+                ORDER BY a.workspace_id NULLS FIRST, a.created_at, a.addendum_uid
+                "#,
+            )
+            .bind(ctx.workspace.as_deref())
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(export_dir.join("skill_addenda.jsonl"), &rows).await
 }
@@ -926,43 +1312,51 @@ async fn collect_changelog(
     export_dir: &Path,
 ) -> Result<usize, HandlerError> {
     let mut tx = begin_audited_read(&ctx.pool).await?;
-    let rows = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT jsonb_build_object(
-            'change_id', change_id,
-            'workspace_id', workspace_id,
-            'user_id', user_id,
-            'scope', scope,
-            'actor_id', actor_id,
-            'actor_kind', actor_kind,
-            'op', op,
-            'target_kind', target_kind,
-            'target_label', target_label,
-            'target_uid', target_uid,
-            'payload', payload,
-            'redaction_marker', redaction_marker,
-            'pii_class', pii_class,
-            'audit_metadata', audit_metadata,
-            'cause_change_id', cause_change_id,
-            'created_at', created_at
-        )
-        FROM moa.graph_changelog
-        WHERE ($1::text IS NULL OR workspace_id = $1)
-          AND (
-              user_id = $2
-              OR actor_id = $2
-              OR target_uid::text = $2
-              OR payload::text LIKE ('%' || $2 || '%')
-              OR audit_metadata->>'subject_user_id' = $2
-          )
-        ORDER BY created_at, change_id
-        "#,
-    )
-    .bind(ctx.workspace.as_deref())
-    .bind(&ctx.subject_user_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(handler_error)?;
+    let mut rows = Vec::new();
+    for subject in &ctx.subjects {
+        rows.extend(
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'change_id', change_id,
+                    'workspace_id', workspace_id,
+                    'user_id', user_id,
+                    'scope', scope,
+                    'actor_id', actor_id,
+                    'actor_kind', actor_kind,
+                    'op', op,
+                    'target_kind', target_kind,
+                    'target_label', target_label,
+                    'target_uid', target_uid,
+                    'payload', payload,
+                    'redaction_marker', redaction_marker,
+                    'pii_class', pii_class,
+                    'audit_metadata', audit_metadata,
+                    'cause_change_id', cause_change_id,
+                    'created_at', created_at,
+                    'privacy_subject_user_id', $2,
+                    'privacy_subject_provenance', $3
+                )
+                FROM moa.graph_changelog
+                WHERE ($1::text IS NULL OR workspace_id = $1)
+                  AND (
+                      user_id = $2
+                      OR actor_id = $2
+                      OR target_uid::text = $2
+                      OR payload::text LIKE ('%' || $2 || '%')
+                      OR audit_metadata->>'subject_user_id' = $2
+                  )
+                ORDER BY created_at, change_id
+                "#,
+            )
+            .bind(ctx.workspace.as_deref())
+            .bind(&subject.user_id)
+            .bind(subject.provenance.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(handler_error)?,
+        );
+    }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(export_dir.join("changelog.jsonl"), &rows).await
 }
@@ -1011,6 +1405,14 @@ pub async fn write_export_readme(
         "Workspace: {}",
         ctx.workspace.as_deref().unwrap_or("all")
     ));
+    lines.push("Included subjects:".to_string());
+    for subject in &ctx.subjects {
+        lines.push(format!(
+            "- {} ({})",
+            subject.user_id,
+            subject.provenance.as_str()
+        ));
+    }
     lines.push(format!("Reason: {}", ctx.reason));
     lines.push(String::new());
     lines.push("This archive contains MOA graph memory, skills, addenda, embeddings, and audit rows attributable to the subject user for a GDPR Article 15 subject access request.".to_string());
@@ -1063,6 +1465,7 @@ async fn emit_export_audit(
             payload: json!({
                 "reason": ctx.reason,
                 "subject_user_id": ctx.subject_user_id,
+                "subjects": privacy_subjects_json(&ctx.subjects),
                 "workspace": ctx.workspace.as_deref(),
                 "artifact_counts": counts,
                 "files": file_count,
@@ -1073,6 +1476,7 @@ async fn emit_export_audit(
                 "approval_token_jti": ctx.claims.jti.as_str(),
                 "approval_token_sub": ctx.claims.sub.as_str(),
                 "subject_user_id": ctx.subject_user_id,
+                "subjects": privacy_subjects_json(&ctx.subjects),
                 "op": "export",
             })),
             cause_change_id: None,
@@ -1084,16 +1488,38 @@ async fn emit_export_audit(
     Ok(())
 }
 
+fn privacy_subjects_json(subjects: &[PrivacySubject]) -> Value {
+    Value::Array(
+        subjects
+            .iter()
+            .map(|subject| {
+                json!({
+                    "user_id": subject.user_id.as_str(),
+                    "target_uid": subject.target_uid,
+                    "provenance": subject.provenance.as_str(),
+                })
+            })
+            .collect(),
+    )
+}
+
 #[derive(Debug, Serialize)]
 struct Manifest<'a> {
     version: u8,
     created_at: String,
     subject_user_id: &'a str,
+    subjects: Vec<ManifestSubject<'a>>,
     workspace: Option<&'a str>,
     encryption: &'static str,
     signature: ManifestSignature<'a>,
     files: Vec<ManifestFile>,
     counts: BTreeMap<&'static str, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestSubject<'a> {
+    user_id: &'a str,
+    provenance: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1148,6 +1574,14 @@ pub async fn write_manifest(
         version: 1,
         created_at: Utc::now().to_rfc3339(),
         subject_user_id: &ctx.subject_user_id,
+        subjects: ctx
+            .subjects
+            .iter()
+            .map(|subject| ManifestSubject {
+                user_id: subject.user_id.as_str(),
+                provenance: subject.provenance.as_str(),
+            })
+            .collect(),
         workspace: ctx.workspace.as_deref(),
         encryption: "none",
         signature: ManifestSignature {
@@ -1243,13 +1677,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn parse_subject_uuid(subject_user_id: &UserId) -> Result<Uuid, HandlerError> {
-    Uuid::parse_str(subject_user_id.as_str()).map_err(|error| {
-        TerminalError::new_with_code(
-            400,
-            format!("subject_user_id must be a UUID-backed user id: {error}"),
-        )
-        .into()
-    })
+    parse_privacy_subject_id(subject_user_id).map(|parsed| parsed.uuid)
 }
 
 async fn create_temp_dir(prefix: &str) -> Result<PathBuf, HandlerError> {
@@ -1272,4 +1700,8 @@ fn usize_to_u64(value: usize) -> u64 {
 
 fn handler_error(error: impl std::fmt::Display) -> HandlerError {
     TerminalError::new(error.to_string()).into()
+}
+
+fn db_handler_error(context: &'static str, error: sqlx::Error) -> HandlerError {
+    TerminalError::new(format!("{context}: {error}")).into()
 }

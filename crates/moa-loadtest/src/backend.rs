@@ -54,6 +54,9 @@ impl SessionTarget for RemoteTarget {
             updated_at: now,
             completed_at: None,
             parent_session_id: None,
+            contact: None,
+            created_by: None,
+            contact_promoted_from_id: None,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,
@@ -102,6 +105,7 @@ impl SessionTarget for RemoteTarget {
                     user_message: prompt.to_string(),
                     attachments: Vec::new(),
                     model: Some(self.model.to_string()),
+                    contact: None,
                 },
                 Some(&format!("loadtest-turn-{session_id}-{}", Uuid::now_v7())),
             )

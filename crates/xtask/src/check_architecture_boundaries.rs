@@ -221,6 +221,55 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        "OrchestratorCtx::current_graph_pool",
+        7,
+        "Contact service constructs the initial in-process contact repository operations"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        "OrchestratorCtx::current_session_store",
+        4,
+        "Contact service validates and updates session contact bindings through the session-store seam"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        "OrchestratorCtx::current_config",
+        2,
+        "Contact verification TTL and contact-point hash key env name are read from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        "OrchestratorCtx::current()",
+        1,
+        "Contact token issuer is read from the process provider bundle"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        ".auth_providers()",
+        1,
+        "Contact token issuer is stored on the auth provider bundle"
+    ),
+    allow!(
+        DirectSql,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        "sqlx::query(",
+        13,
+        "Initial contact repository SQL remains local to the Contacts service before repository extraction"
+    ),
+    allow!(
+        DirectSql,
+        "crates/moa-orchestrator/src/services/contacts.rs",
+        "sqlx::query_scalar",
+        4,
+        "Initial contact lookup SQL remains local to the Contacts service before repository extraction"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/services/eval.rs",
         "OrchestratorCtx::current()",
         1,
@@ -412,15 +461,15 @@ const ALLOWANCES: &[Allowance] = &[
         DirectSql,
         "crates/moa-orchestrator/src/services/privacy.rs",
         "sqlx::query(",
-        1,
-        "Privacy export sets the auditor role locally before controlled export reads"
+        2,
+        "Privacy export sets the auditor role locally and resolves contact subjects before controlled export reads"
     ),
     allow!(
         DirectSql,
         "crates/moa-orchestrator/src/services/privacy.rs",
         "sqlx::query_scalar",
-        7,
-        "Privacy DSAR export read-model SQL remains in the adapter pending an export repository"
+        8,
+        "Privacy DSAR export read-model and linked-contact SQL remains in the adapter pending an export repository"
     ),
     allow!(
         RuntimeContext,
@@ -617,6 +666,13 @@ const ALLOWANCES: &[Allowance] = &[
         "OrchestratorCtx::current_tool_router",
         1,
         "TurnExecution still invokes the in-process tool router"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
+        "OrchestratorCtx::current_lineage",
+        1,
+        "TurnExecution still obtains the lineage handle while generation lineage is emitted inline"
     ),
     allow!(
         RuntimeContext,

@@ -163,6 +163,20 @@ pub(crate) async fn prepare_turn_request(
         "_moa.workspace_id",
         serde_json::json!(session.workspace_id.to_string()),
     );
+    if let Some(contact) = session.contact.as_ref() {
+        context.insert_metadata(
+            "_moa.contact.id",
+            serde_json::json!(contact.contact_id.to_string()),
+        );
+        context.insert_metadata(
+            "_moa.contact.verification_state",
+            serde_json::json!(contact.state.as_str()),
+        );
+        context.insert_metadata(
+            "_moa.contact.verified",
+            serde_json::json!(contact.state.is_verified()),
+        );
+    }
     context.insert_metadata("_moa.model", serde_json::json!(session.model.as_str()));
 
     let query_rewrite_cache = query_rewrite_cache_from_context(active_user_sequence_num, &context);

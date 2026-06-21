@@ -52,6 +52,7 @@ moa-memory-graph = { workspace = true }
 moa-memory-pii = { workspace = true }
 moa-memory-lifecycle = { workspace = true }
 moa-memory-vector = { workspace = true }
+moa-messaging.workspace = true
 moa-ocsf.workspace = true
 moa-security = { workspace = true }
 moa-scoring = { workspace = true }
@@ -61,6 +62,7 @@ moa-providers = { workspace = true }
 moa-session = { workspace = true }
 moa-skills = { workspace = true }
 moa-workflows.workspace = true
+rand.workspace = true
 restate-sdk.workspace = true
 reqwest.workspace = true
 regex.workspace = true

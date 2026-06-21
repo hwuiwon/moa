@@ -91,6 +91,7 @@ pub(super) async fn run_agent_loop_trial(
                     user_message: simulator_message.clone(),
                     attachments: Vec::new(),
                     model: target_model.as_ref().map(ToString::to_string),
+                    contact: None,
                 })),
             &request.identity,
         )

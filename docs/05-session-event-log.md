@@ -50,7 +50,16 @@ CREATE TABLE sessions (
     event_count BIGINT DEFAULT 0,
     turn_count BIGINT DEFAULT 0,
     cache_hit_rate DOUBLE PRECISION GENERATED ALWAYS AS (...) STORED,
-    last_checkpoint_seq BIGINT
+    last_checkpoint_seq BIGINT,
+    contact_id UUID,
+    contact_tenant_id UUID,
+    contact_state TEXT,
+    contact_canonical_id UUID,
+    contact_linked_ids UUID[] NOT NULL DEFAULT '{}',
+    contact_scopes TEXT[] NOT NULL DEFAULT '{}',
+    created_by_actor_type TEXT,
+    created_by_actor_id UUID,
+    contact_promoted_from_id UUID
 );
 
 CREATE TABLE events (
@@ -96,6 +105,13 @@ Context compilation preserves event provenance in-memory when replaying session
 history. Compiled context messages can carry the source event id, event sequence
 number, and tool id; context lineage copies those references so citations can be
 joined back to the durable event rows without parsing rendered prompt text.
+
+Contact-bound sessions persist contact metadata on the `sessions` row. The
+session id is the observability anchor for turns and tool calls; the contact id
+is derived from the session metadata when needed. A contact may exist without a
+session, but a contact session always carries the contact binding. Promotion
+updates the session to the verified contact and records the prior contact in
+`contact_promoted_from_id` while preserving linked contact ids for replay.
 
 ## Event Types
 
@@ -207,6 +223,10 @@ Replay is history-first:
 4. Attach to live runtime streams when available.
 
 The orchestrator publishes live runtime events during turn execution. Cloud runtime state is queryable through Restate and recoverable from the durable event log.
+
+Replay uses persisted session contact metadata; clients cannot provide a new
+contact per message to change historical attribution. Tool-call records only
+need the session id because the session store can recover the contact binding.
 
 ## Compaction
 

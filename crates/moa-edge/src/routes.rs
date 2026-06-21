@@ -3,7 +3,7 @@
 use crate::proxy::OrchestratorProxy;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
@@ -42,6 +42,30 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/webhooks/auth0/connection-linked",
             post(handle_auth0_connection_webhook),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/contacts/verification/start",
+            post(handle_public_contact_verification_start),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/contacts/verification/complete",
+            post(handle_public_contact_verification_complete),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/contacts/verification/start",
+            post(handle_public_session_contact_verification_start),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/contacts/verification/complete",
+            post(handle_public_session_contact_verification_complete),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/agent-sessions",
+            post(handle_public_agent_session_init),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/promote",
+            post(handle_public_agent_session_promote),
         )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
@@ -188,6 +212,141 @@ async fn handle_github_secret_scan() -> axum::response::Response {
         "GitHub secret scanning partner endpoint is not implemented until registration is complete",
     )
         .into_response()
+}
+
+async fn handle_public_contact_verification_start(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/start_verification",
+        [("workspace_id", serde_json::json!(workspace_id))],
+    )
+    .await
+}
+
+async fn handle_public_contact_verification_complete(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/complete_verification",
+        [("workspace_id", serde_json::json!(workspace_id))],
+    )
+    .await
+}
+
+async fn handle_public_session_contact_verification_start(
+    State(state): State<AppState>,
+    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/start_verification",
+        [
+            ("workspace_id", serde_json::json!(workspace_id)),
+            ("session_id", serde_json::json!(session_id)),
+        ],
+    )
+    .await
+}
+
+async fn handle_public_session_contact_verification_complete(
+    State(state): State<AppState>,
+    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/complete_verification",
+        [
+            ("workspace_id", serde_json::json!(workspace_id)),
+            ("session_id", serde_json::json!(session_id)),
+        ],
+    )
+    .await
+}
+
+async fn handle_public_agent_session_init(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/init_session",
+        [("workspace_id", serde_json::json!(workspace_id))],
+    )
+    .await
+}
+
+async fn handle_public_agent_session_promote(
+    State(state): State<AppState>,
+    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/promote_session",
+        [
+            ("workspace_id", serde_json::json!(workspace_id)),
+            ("session_id", serde_json::json!(session_id)),
+        ],
+    )
+    .await
+}
+
+async fn forward_public_contact_route<const N: usize>(
+    state: AppState,
+    headers: HeaderMap,
+    body: Bytes,
+    target: &str,
+    fields: [(&str, serde_json::Value); N],
+) -> axum::response::Response {
+    let RouteTranslation::Forward { method, path, body } = translate_json_object_with_fields(
+        &body,
+        target,
+        "bad contact body",
+        "contact body must be object",
+        "serialize contact body failed",
+        fields,
+    ) else {
+        return (StatusCode::BAD_REQUEST, "bad contact body").into_response();
+    };
+    match state
+        .proxy
+        .forward_public(method, &path, body, &headers)
+        .await
+    {
+        Ok(response) => response_to_axum(response).await,
+        Err(error) => {
+            tracing::error!(error = %error, "public contact proxy forward failed");
+            (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
+        }
+    }
 }
 
 #[cfg(feature = "auth0")]
@@ -482,6 +641,25 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                 ("workspace_id", serde_json::json!(workspace_id)),
                 ("review_id", serde_json::json!(review_id)),
             ],
+        );
+    }
+    if *method == Method::POST
+        && let Some(rest) = uri
+            .path()
+            .strip_prefix("/v1/workspaces/")
+            .and_then(|rest| rest.strip_suffix("/contacts/tokens"))
+    {
+        let workspace_id = rest.trim_matches('/');
+        if workspace_id.is_empty() || workspace_id.contains('/') {
+            return RouteTranslation::BadRequest("bad workspace id");
+        }
+        return translate_json_object_with_fields(
+            body,
+            "/Contacts/issue_token",
+            "bad contact token body",
+            "contact token body must be object",
+            "serialize contact token body failed",
+            [("workspace_id", serde_json::json!(workspace_id))],
         );
     }
     if *method == Method::POST {
@@ -1050,6 +1228,39 @@ mod tests {
             RouteTranslation::NoChange => panic!("whoami should translate to Whoami service"),
             RouteTranslation::BadRequest(message) => {
                 panic!("whoami should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn contact_token_route_translates_to_contacts_service() {
+        // Pins: contact token issuance stays on the authenticated proxy and injects the path workspace id.
+        let uri = "/v1/workspaces/workspace-a/contacts/tokens"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(br#"{"display_name":"Ada"}"#);
+
+        let translation = translate_public_route(&Method::POST, &uri, &body);
+
+        match translation {
+            RouteTranslation::Forward { method, path, body } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/Contacts/issue_token");
+                let value: serde_json::Value =
+                    serde_json::from_slice(&body).expect("translated body should be json");
+                assert_eq!(
+                    value,
+                    serde_json::json!({
+                        "display_name": "Ada",
+                        "workspace_id": "workspace-a"
+                    })
+                );
+            }
+            RouteTranslation::NoChange => {
+                panic!("contact token route should translate to Contacts service")
+            }
+            RouteTranslation::BadRequest(message) => {
+                panic!("contact token route should not fail translation: {message}")
             }
         }
     }

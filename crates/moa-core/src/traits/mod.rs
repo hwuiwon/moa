@@ -88,6 +88,18 @@ pub trait SessionStore: Send + Sync {
     /// Updates the status of an existing session.
     async fn update_status(&self, session_id: SessionId, status: SessionStatus) -> Result<()>;
 
+    /// Updates the agent-facing contact metadata attached to an existing session.
+    async fn update_session_contact(
+        &self,
+        _session_id: SessionId,
+        _contact: crate::ContactRef,
+        _promoted_from: Option<crate::ContactId>,
+    ) -> Result<()> {
+        Err(MoaError::Unsupported(
+            "session contact promotion is not supported by this session store".to_string(),
+        ))
+    }
+
     /// Transitions a session to a new status and persists the matching
     /// `SessionStatusChanged` event when the status actually changes.
     async fn transition_status(

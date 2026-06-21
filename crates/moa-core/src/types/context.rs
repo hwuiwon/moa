@@ -8,8 +8,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    CompletionRequest, EventRecord, ModelCapabilities, SandboxFile, SessionId, SessionMeta,
-    ToolCallId, ToolContent, ToolInvocation, UserId, WorkspaceId,
+    CompletionRequest, ContactRef, EventRecord, ModelCapabilities, SandboxFile, SessionId,
+    SessionMeta, ToolCallId, ToolContent, ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -302,6 +302,9 @@ pub struct WorkingContext {
     pub user_id: UserId,
     /// Workspace identifier.
     pub workspace_id: WorkspaceId,
+    /// Agent-facing contact snapshot attached to this session, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactRef>,
     /// Active tool schemas compiled for the request.
     tool_schemas: Vec<Value>,
     /// Arbitrary processor metadata.
@@ -327,6 +330,7 @@ impl WorkingContext {
             session_id: session.id,
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
+            contact: session.contact.clone(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
             trusted_sandbox_files: Vec::new(),

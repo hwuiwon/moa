@@ -5,6 +5,7 @@ mod macros;
 
 mod action_policy;
 mod completion;
+mod contact;
 mod context;
 mod events_stream;
 mod experience;
@@ -33,6 +34,15 @@ pub use action_policy::{
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, JsonResponseFormat,
     ProviderToolCallMetadata, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
+};
+pub use contact::{
+    CONTACT_USER_ID_PREFIX, ContactDeliveryChannel, ContactId, ContactPointId, ContactPointInput,
+    ContactPointKind, ContactPointRef, ContactRef, ContactSessionInitRequest,
+    ContactSessionInitResponse, ContactSessionPromotionRequest, ContactSessionPromotionResponse,
+    ContactTokenClaims, ContactTokenIssueRequest, ContactTokenIssueResponse,
+    ContactVerificationChallengeId, ContactVerificationCompleteRequest,
+    ContactVerificationCompleteResponse, ContactVerificationStartRequest,
+    ContactVerificationStartResponse, ContactVerificationState, SessionActorRef,
 };
 pub use context::{
     ContextMessage, ContextSourceKind, ContextSourceRef, ExcludedItem, MessageRole,

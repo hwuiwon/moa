@@ -16,9 +16,35 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         .map_err(map_sqlx_error)?;
     let model = row.try_get::<String, _>("model").map_err(map_sqlx_error)?;
 
+    let contact_id = row
+        .try_get::<Option<Uuid>, _>("contact_id")
+        .map_err(map_sqlx_error)?;
+    let contact_tenant_id = row
+        .try_get::<Option<Uuid>, _>("contact_tenant_id")
+        .map_err(map_sqlx_error)?;
+    let contact_state = row
+        .try_get::<Option<String>, _>("contact_state")
+        .map_err(map_sqlx_error)?;
+    let contact_canonical_id = row
+        .try_get::<Option<Uuid>, _>("contact_canonical_id")
+        .map_err(map_sqlx_error)?;
+    let contact_linked_ids = row
+        .try_get::<Vec<Uuid>, _>("contact_linked_ids")
+        .map_err(map_sqlx_error)?;
+    let contact_scopes = row
+        .try_get::<Vec<String>, _>("contact_scopes")
+        .map_err(map_sqlx_error)?;
+    let created_by_actor_type = row
+        .try_get::<Option<String>, _>("created_by_actor_type")
+        .map_err(map_sqlx_error)?;
+    let created_by_actor_id = row
+        .try_get::<Option<Uuid>, _>("created_by_actor_id")
+        .map_err(map_sqlx_error)?;
+
+    let workspace = WorkspaceId(workspace_id.clone());
     Ok(SessionMeta {
         id: moa_core::SessionId(id),
-        workspace_id: WorkspaceId(workspace_id),
+        workspace_id: workspace.clone(),
         user_id: moa_core::UserId(user_id),
         title: row
             .try_get::<Option<String>, _>("title")
@@ -42,6 +68,20 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
             .try_get::<Option<Uuid>, _>("parent_session_id")
             .map_err(map_sqlx_error)?
             .map(moa_core::SessionId),
+        contact: contact_from_columns(
+            contact_id,
+            contact_tenant_id,
+            workspace.as_str(),
+            contact_state.as_deref(),
+            contact_canonical_id,
+            contact_linked_ids,
+            contact_scopes,
+        )?,
+        created_by: actor_from_columns(created_by_actor_type.as_deref(), created_by_actor_id)?,
+        contact_promoted_from_id: row
+            .try_get::<Option<Uuid>, _>("contact_promoted_from_id")
+            .map_err(map_sqlx_error)?
+            .map(ContactId),
         total_input_tokens: row
             .try_get::<i64, _>("total_input_tokens")
             .map_err(map_sqlx_error)? as usize,
@@ -68,6 +108,55 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
             .map_err(map_sqlx_error)?
             .map(|value| value as u64),
     })
+}
+
+fn contact_from_columns(
+    contact_id: Option<Uuid>,
+    tenant_id: Option<Uuid>,
+    workspace_id: &str,
+    state: Option<&str>,
+    canonical_contact_id: Option<Uuid>,
+    linked_contact_ids: Vec<Uuid>,
+    scopes: Vec<String>,
+) -> Result<Option<ContactRef>> {
+    let Some(contact_id) = contact_id else {
+        return Ok(None);
+    };
+    let tenant_id = tenant_id.ok_or_else(|| {
+        MoaError::StorageError("session contact missing contact_tenant_id".to_string())
+    })?;
+    let state = match state {
+        Some(value) => from_db::<ContactVerificationState>("contact state", value)?,
+        None => ContactVerificationState::Anonymous,
+    };
+    Ok(Some(ContactRef {
+        contact_id: ContactId(contact_id),
+        tenant_id,
+        workspace_id: WorkspaceId(workspace_id.to_string()),
+        state,
+        canonical_contact_id: canonical_contact_id.map(ContactId),
+        linked_contact_ids: linked_contact_ids.into_iter().map(ContactId).collect(),
+        scopes,
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }))
+}
+
+fn actor_from_columns(
+    actor_type: Option<&str>,
+    actor_id: Option<Uuid>,
+) -> Result<Option<SessionActorRef>> {
+    match (actor_type, actor_id) {
+        (None, _) => Ok(None),
+        (Some("anonymous"), _) => Ok(Some(SessionActorRef::Anonymous)),
+        (Some("identity"), Some(id)) => Ok(Some(SessionActorRef::Identity { id })),
+        (Some("contact"), Some(id)) => Ok(Some(SessionActorRef::Contact { id: ContactId(id) })),
+        (Some(value), _) => Err(MoaError::StorageError(format!(
+            "invalid session actor columns `{value}`"
+        ))),
+    }
 }
 
 /// Maps a `sessions` row into a `SessionSummary`.

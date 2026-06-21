@@ -5,6 +5,8 @@ use moa_core::{ChannelRef, InboundMessage, trace_name_from_message};
 
 pub mod action_review;
 pub mod control;
+#[cfg(any(feature = "postmark", feature = "twilio"))]
+pub mod delivery;
 pub mod edit_window;
 #[cfg(feature = "postmark")]
 pub mod postmark;
@@ -18,6 +20,11 @@ pub mod slack;
 
 pub use action_review::prepare_outbound_message;
 pub use control::{MessagingControlAction, control_action_for_inbound};
+#[cfg(any(feature = "postmark", feature = "twilio"))]
+pub use delivery::{
+    DeliveryMessage, DeliveryPurpose, DeliveryReceipt, DeliverySink,
+    EnvironmentDeliveryCredentialVault, ProviderDeliverySink,
+};
 pub use edit_window::{
     MessagingEditOutcome, MessagingEditResponse, edit_with_followup_fallback,
     is_fallback_edit_error,

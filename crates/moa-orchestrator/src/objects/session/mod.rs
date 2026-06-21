@@ -11,8 +11,8 @@ use moa_core::wire::{
 };
 use moa_core::{
     ActiveSegment, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
-    MarkSubAgentChildTerminalInput, MoaError, Result as MoaResult, SessionId, SessionMeta,
-    SessionStatus, SubAgentChildRef, SubAgentTerminalResult, UserMessage,
+    ContactRef, MarkSubAgentChildTerminalInput, MoaError, Result as MoaResult, SessionId,
+    SessionMeta, SessionStatus, SubAgentChildRef, SubAgentTerminalResult, UserMessage,
     record_turn_event_persist_duration,
 };
 use restate_sdk::prelude::*;
@@ -127,6 +127,7 @@ fn dispatch_turn_execution(
     ctx: &ObjectContext<'_>,
     turn_id: String,
     identity: moa_core::traits::Identity,
+    contact: Option<ContactRef>,
     user_message: String,
     attachments: Vec<moa_core::Attachment>,
     model: Option<String>,
@@ -137,6 +138,7 @@ fn dispatch_turn_execution(
             session_id: ctx.key().to_string(),
             turn_id,
             identity: identity.clone(),
+            contact,
             user_message,
             attachments,
             model,

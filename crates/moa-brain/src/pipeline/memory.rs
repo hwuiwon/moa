@@ -1,6 +1,6 @@
 //! Stage 7: graph memory retrieval and prompt injection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -25,6 +25,7 @@ use uuid::Uuid;
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
+const MAX_LINKED_CONTACT_MEMORY_SCOPES: usize = 8;
 pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
 /// Injects graph-memory retrieval hits into the active turn context.
@@ -131,12 +132,42 @@ impl GraphMemoryRetriever {
         ctx: &WorkingContext,
         query: String,
     ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
-        let scope = memory_scope_from_context(ctx);
-        let runtime = self.runtime_for_scope(&scope)?;
+        let scopes = memory_scopes_from_context(ctx);
+        let mut merged = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, scope) in scopes.iter().enumerate() {
+            let hits = self
+                .retrieve_hits_for_scope(ctx, &query, scope, index == 0)
+                .await?;
+            for hit in hits {
+                if seen.insert(hit.uid) {
+                    merged.push(hit);
+                }
+            }
+        }
+        merged.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.uid.cmp(&right.uid))
+        });
+        merged.truncate(self.result_limit);
+        Ok(merged)
+    }
+
+    async fn retrieve_hits_for_scope(
+        &self,
+        ctx: &WorkingContext,
+        query: &str,
+        scope: &MemoryScope,
+        emit_storage_lineage: bool,
+    ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
+        let runtime = self.runtime_for_scope(scope)?;
         let planning = crate::planning::PlanningCtx::new(scope.clone(), runtime.graph.clone());
 
         let hits = if let Some(embedder) = self.embedder.as_deref() {
-            let query_ctx = crate::planning::QueryRetrievalCtx::new(
+            let mut query_ctx = crate::planning::QueryRetrievalCtx::new(
                 &self.planner,
                 &planning,
                 embedder,
@@ -144,9 +175,11 @@ impl GraphMemoryRetriever {
                 PiiClass::Restricted,
             )
             .with_k_final(self.result_limit)
-            .with_reranker(self.reranker_enabled())
-            .with_lineage_context(lineage_context_from_context(ctx));
-            crate::planning::retrieve_for_query(&query, &query_ctx)
+            .with_reranker(self.reranker_enabled());
+            if emit_storage_lineage {
+                query_ctx = query_ctx.with_lineage_context(lineage_context_from_context(ctx));
+            }
+            crate::planning::retrieve_for_query(query, &query_ctx)
                 .await
                 .map_err(|error| {
                     moa_core::MoaError::StorageError(format!(
@@ -154,24 +187,20 @@ impl GraphMemoryRetriever {
                     ))
                 })?
         } else {
-            let planned = self
-                .planner
-                .plan(&query, &planning)
-                .await
-                .map_err(|error| {
-                    moa_core::MoaError::StorageError(format!(
-                        "graph memory planning failed: {error}"
-                    ))
-                })?;
+            let planned = self.planner.plan(query, &planning).await.map_err(|error| {
+                moa_core::MoaError::StorageError(format!("graph memory planning failed: {error}"))
+            })?;
             let request = planned.clone().into_retrieval_request(
-                query,
+                query.to_string(),
                 Vec::new(),
                 PiiClass::Restricted,
                 self.result_limit,
                 self.reranker_enabled(),
             );
             let mut request = request;
-            request.lineage = Some(lineage_context_from_context(ctx));
+            if emit_storage_lineage {
+                request.lineage = Some(lineage_context_from_context(ctx));
+            }
             runtime
                 .hybrid
                 .retrieve(&planned, request)
@@ -445,6 +474,38 @@ fn memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
     }
 }
 
+fn memory_scopes_from_context(ctx: &WorkingContext) -> Vec<MemoryScope> {
+    let primary = memory_scope_from_context(ctx);
+    let Some(contact) = ctx.contact.as_ref() else {
+        return vec![primary];
+    };
+    if !contact.state.is_verified() {
+        return vec![primary];
+    }
+
+    let mut scopes = Vec::with_capacity(1 + contact.linked_contact_ids.len());
+    let mut seen_user_ids = HashSet::new();
+    scopes.push(primary);
+    seen_user_ids.insert(ctx.user_id.clone());
+
+    let mut linked_scope_count = 0;
+    for linked_contact_id in &contact.linked_contact_ids {
+        let linked_user_id = linked_contact_id.as_user_id();
+        if !seen_user_ids.insert(linked_user_id.clone()) {
+            continue;
+        }
+        scopes.push(MemoryScope::User {
+            workspace_id: ctx.workspace_id.clone(),
+            user_id: linked_user_id,
+        });
+        linked_scope_count += 1;
+        if linked_scope_count >= MAX_LINKED_CONTACT_MEMORY_SCOPES {
+            break;
+        }
+    }
+    scopes
+}
+
 fn turn_id_from_context(ctx: &WorkingContext) -> Option<TurnId> {
     let value = ctx.metadata().get("_moa.turn_id")?.as_str()?;
     Uuid::parse_str(value).ok().map(TurnId)
@@ -587,15 +648,16 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContextProcessor, MemoryScope, ModelCapabilities, ModelId, Platform, QueryRewriteResult,
-        SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        ContactId, ContactRef, ContactVerificationState, ContextProcessor, MemoryScope,
+        ModelCapabilities, ModelId, Platform, QueryRewriteResult, SessionId, SessionMeta,
+        TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
     };
     use moa_lineage_core::TurnId;
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
         GraphMemoryRetriever, SharedGraphMemoryRetriever, extract_search_keywords,
-        extract_search_query,
+        extract_search_query, memory_scopes_from_context,
     };
 
     #[tokio::test]
@@ -747,6 +809,83 @@ mod tests {
         assert_eq!(lineage.session_id, session.id);
         assert_eq!(lineage.turn_id, Some(turn_id));
         assert_eq!(lineage.turn_seq, 42);
+    }
+
+    #[test]
+    fn unverified_contact_memory_uses_only_session_scope() {
+        // Pins: low-assurance contacts cannot fan out into linked memory scopes.
+        let contact_id = ContactId::new();
+        let linked_contact_id = ContactId::new();
+        let session = contact_session(
+            contact_id,
+            ContactVerificationState::Unverified,
+            vec![linked_contact_id],
+        );
+        let ctx = WorkingContext::new(&session, capabilities());
+
+        assert_eq!(
+            memory_scopes_from_context(&ctx),
+            vec![MemoryScope::User {
+                workspace_id: session.workspace_id,
+                user_id: contact_id.as_user_id(),
+            }]
+        );
+    }
+
+    #[test]
+    fn verified_contact_memory_includes_linked_contact_scopes_once() {
+        // Pins: verified contacts retrieve linked unverified memory by user-scope fanout.
+        let contact_id = ContactId::new();
+        let linked_contact_id = ContactId::new();
+        let session = contact_session(
+            contact_id,
+            ContactVerificationState::Verified,
+            vec![contact_id, linked_contact_id, linked_contact_id],
+        );
+        let ctx = WorkingContext::new(&session, capabilities());
+
+        assert_eq!(
+            memory_scopes_from_context(&ctx),
+            vec![
+                MemoryScope::User {
+                    workspace_id: session.workspace_id.clone(),
+                    user_id: contact_id.as_user_id(),
+                },
+                MemoryScope::User {
+                    workspace_id: session.workspace_id,
+                    user_id: linked_contact_id.as_user_id(),
+                },
+            ]
+        );
+    }
+
+    fn contact_session(
+        contact_id: ContactId,
+        state: ContactVerificationState,
+        linked_contact_ids: Vec<ContactId>,
+    ) -> SessionMeta {
+        let workspace_id = WorkspaceId::new("workspace");
+        SessionMeta {
+            id: SessionId::new(),
+            workspace_id: workspace_id.clone(),
+            user_id: contact_id.as_user_id(),
+            platform: Platform::Api,
+            model: ModelId::new("mock"),
+            contact: Some(ContactRef {
+                contact_id,
+                tenant_id: uuid::Uuid::now_v7(),
+                workspace_id,
+                state,
+                canonical_contact_id: None,
+                linked_contact_ids,
+                scopes: Vec::new(),
+                permissions: serde_json::Value::Null,
+                agent_ids: Vec::new(),
+                session_ids: Vec::new(),
+                verified_contact_point_ids: Vec::new(),
+            }),
+            ..SessionMeta::default()
+        }
     }
 
     fn capabilities() -> ModelCapabilities {

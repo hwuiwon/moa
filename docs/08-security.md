@@ -32,6 +32,21 @@ deployments must keep the Restate handler port internal-only. See
 [Auth Architecture](auth/README.md) and
 [Architecture Policy](15-architecture-policy.md).
 
+Agent-facing contacts use MOA-issued contact JWTs, not trusted edge identity
+headers. Contact JWTs are bounded route/data credentials with explicit scopes,
+structured permissions, workspace id, contact id, and optional agent/session
+allowlists. Issuing a contact token is an admin/integration operation protected
+by normal caller authz; presenting a contact JWT cannot call admin/operator
+APIs or become an OpenFGA principal.
+
+Identity verification can be initiated by workflows or skills, but the platform
+contact service enforces challenge creation, OTP-style completion, token
+upgrade, and session promotion. Low-assurance contact scopes can perform only
+the operations explicitly granted before verification.
+Contact-point lookup hashes use a separate 32-byte key from
+`MOA_CONTACT_POINT_HASH_KEY_HEX`; raw emails and phone numbers must not be
+stored in contact lookup columns.
+
 ## Credential Isolation
 
 Credentials never enter the sandbox where generated code runs.

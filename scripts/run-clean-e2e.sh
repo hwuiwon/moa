@@ -109,6 +109,28 @@ run_without_provider_keys() {
   return "${status}"
 }
 
+run_without_external_orchestrator() {
+  echo
+  echo ">> env -u MOA_RESTATE_INGRESS_URL -u MOA_RESTATE_ADMIN_URL -u MOA_RESTATE_DEPLOYMENT_URI -u MOA_DATABASE_URL $*"
+  local start=$SECONDS
+  local status=0
+  set +e
+  env \
+    -u MOA_RESTATE_INGRESS_URL \
+    -u MOA_RESTATE_ADMIN_URL \
+    -u MOA_RESTATE_DEPLOYMENT_URI \
+    -u MOA_DATABASE_URL \
+    "$@"
+  status=$?
+  set -e
+  if [[ "${status}" -eq 0 ]]; then
+    echo "<< completed in $(elapsed_since "${start}"): env -u external orchestrator $*"
+  else
+    echo "<< failed after $(elapsed_since "${start}"): env -u external orchestrator $*" >&2
+  fi
+  return "${status}"
+}
+
 wait_for_http() {
   local url="$1"
   local label="$2"
@@ -287,6 +309,7 @@ run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
   run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile restate-service-e2e --run-ignored ignored-only
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile fixture-service-e2e --run-ignored ignored-only
 
   run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides,skill-learning --locked
 

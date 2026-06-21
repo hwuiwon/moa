@@ -299,6 +299,7 @@ async fn run_scripted_turn(
                 user_message: message.to_string(),
                 attachments: Vec::new(),
                 model: None,
+                contact: None,
             },
             None,
         )

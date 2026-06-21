@@ -43,6 +43,30 @@ readers = ["moa-session", "moa-auth/auth0"]
 notes = "Auth0 may provision rows through the orchestrator-owned shape; it does not own users DDL."
 
 [[table]]
+name = "contacts"
+schema = "public"
+owner = "moa-orchestrator"
+readers = ["moa-session", "moa-auth/providers"]
+
+[[table]]
+name = "contact_points"
+schema = "public"
+owner = "moa-orchestrator"
+readers = ["moa-auth/providers"]
+
+[[table]]
+name = "contact_verification_challenges"
+schema = "public"
+owner = "moa-orchestrator"
+readers = ["moa-auth/providers"]
+
+[[table]]
+name = "contact_token_grants"
+schema = "public"
+owner = "moa-orchestrator"
+readers = ["moa-auth/providers"]
+
+[[table]]
 name = "api_keys"
 schema = "public"
 owner = "moa-auth/providers"

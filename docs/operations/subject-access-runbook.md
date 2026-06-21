@@ -19,6 +19,12 @@ Set `"workspace_id": "<workspace-id>"` to restrict the export to one workspace.
 With `"workspace_id": null`, the API exports every workspace row attributable
 to the subject user.
 
+For agent-facing contacts, set `subject_user_id` to either the contact UUID or
+`contact:<contact-uuid>`. Contact exports are resolved inside the authenticated
+tenant. Verified contact exports include linked unverified contact memory by
+default, and every exported JSONL row includes `privacy_subject_user_id` and
+`privacy_subject_provenance` so linked rows are visible in the archive.
+
 ## Authorization
 
 The request requires an Ed25519-signed approval JWT with:
@@ -27,7 +33,7 @@ The request requires an Ed25519-signed approval JWT with:
 - `jti`: unique token id
 - `exp`: expiration timestamp
 - `op`: `export`
-- `subject_user_id`: the exported user UUID
+- `subject_user_id`: the exported user UUID, contact UUID, or `contact:<uuid>`
 - `role` or `roles`: includes `platform_admin`
 - optional `workspace_id`: limits the token to one workspace
 
@@ -47,7 +53,8 @@ The archive includes `export/manifest.json` and `export/manifest.sig`.
 `manifest.sig` is the raw Ed25519 signature over the exact bytes of
 `manifest.json`. The manifest records the export public key and declares
 `"encryption": "none"` because ADR 0001 defers envelope encryption and MOA stores
-redacted graph-memory text at ingestion time.
+redacted graph-memory text at ingestion time. The manifest also records the
+resolved subject list and provenance for contact exports.
 
 ## Contents
 
@@ -70,7 +77,8 @@ though the memory text is already redacted.
 ## Audit trail
 
 Each successful export writes `op='export'` to `moa.graph_changelog` with the
-reason, subject user id, artifact counts, approver id, and approval token JTI.
+reason, subject user id, resolved subject list, artifact counts, approver id,
+and approval token JTI.
 M22 pgaudit captures the underlying reads and changelog insert in the Postgres
 audit log stream.
 

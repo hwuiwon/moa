@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CompletionRequest, MessageRole, ModelId, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
-    estimate_text_tokens,
+    CompletionRequest, ContactId, MessageRole, ModelId, Platform, SessionId, SessionMeta, UserId,
+    WorkspaceId, estimate_text_tokens,
 };
 
 /// Durable summary of one provider request's cache plan and observed cache usage.
@@ -222,6 +222,10 @@ pub struct TraceContext {
     pub user_id: UserId,
     /// Workspace identifier for filterable metadata.
     pub workspace_id: WorkspaceId,
+    /// Contact identifier for agent-facing contact sessions.
+    pub contact_id: Option<ContactId>,
+    /// Contact verification state for agent-facing contact sessions.
+    pub contact_state: Option<String>,
     /// Optional originating platform.
     pub platform: Option<Platform>,
     /// Active model identifier.
@@ -241,6 +245,11 @@ impl TraceContext {
             session_id: session.id,
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
+            contact_id: session.contact.as_ref().map(|contact| contact.contact_id),
+            contact_state: session
+                .contact
+                .as_ref()
+                .map(|contact| contact.state.as_str().to_string()),
             platform: Some(session.platform.clone()),
             model: session.model.clone(),
             trace_name: prompt.map(trace_name_from_message),
@@ -279,6 +288,17 @@ impl TraceContext {
         span.set_attribute("moa.user.id", self.user_id.to_string());
         span.set_attribute("moa.workspace.id", self.workspace_id.to_string());
         span.set_attribute("moa.model", model);
+        if let Some(contact_id) = self.contact_id {
+            span.set_attribute("moa.contact.id", contact_id.to_string());
+            span.set_attribute("langfuse.trace.metadata.contact_id", contact_id.to_string());
+        }
+        if let Some(contact_state) = self.contact_state.as_ref() {
+            span.set_attribute("moa.contact.state", contact_state.clone());
+            span.set_attribute(
+                "langfuse.trace.metadata.contact_state",
+                contact_state.clone(),
+            );
+        }
 
         if let Some(platform) = self.platform.as_ref() {
             let value = platform.to_string();

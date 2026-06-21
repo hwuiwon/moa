@@ -176,9 +176,11 @@ cargo test -p moa-messaging --test postmark_provider_e2e --all-features -- --ign
 
 The Postmark offline suite covers payload shape, provider status errors,
 bounded HTTP 429 retries, exhausted rate-limit failures, and nonzero
-`ErrorCode` classification. Live Postmark coverage should remain a single
-happy-path acceptance check because reproducing account, suppression, or rate
-limit failures against the real service is brittle.
+`ErrorCode` classification. Contact OTP delivery additionally requires
+`MOA_MESSAGING_EMAIL_FROM` to contain a verified sender address. Live Postmark
+coverage should remain a single happy-path acceptance check because reproducing
+account, suppression, or rate limit failures against the real service is
+brittle.
 
 Twilio SMS e2e coverage is also ignored by default and reads local `.env`
 values directly. It requires `TWILIO_ACCOUNT_SID` or `TWILIO_SID`, either

@@ -18,7 +18,7 @@ impl PostgresSessionStore {
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_INSERT_COLUMNS}) VALUES \
-             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)"
         ))
         .bind(session_id.0)
         .bind(meta.workspace_id.to_string())
@@ -32,6 +32,35 @@ impl PostgresSessionStore {
         .bind(meta.updated_at)
         .bind(meta.completed_at)
         .bind(meta.parent_session_id.map(|value| value.0))
+        .bind(meta.contact.as_ref().map(|contact| contact.contact_id.0))
+        .bind(meta.contact.as_ref().map(|contact| contact.tenant_id))
+        .bind(meta.contact.as_ref().map(|contact| contact.state.as_str()))
+        .bind(
+            meta.contact
+                .as_ref()
+                .and_then(|contact| contact.canonical_contact_id.map(|id| id.0)),
+        )
+        .bind(
+            meta.contact
+                .as_ref()
+                .map(|contact| {
+                    contact
+                        .linked_contact_ids
+                        .iter()
+                        .map(|id| id.0)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+        .bind(
+            meta.contact
+                .as_ref()
+                .map(|contact| contact.scopes.clone())
+                .unwrap_or_default(),
+        )
+        .bind(meta.created_by.as_ref().map(session_actor_type))
+        .bind(meta.created_by.as_ref().and_then(session_actor_id))
+        .bind(meta.contact_promoted_from_id.map(|id| id.0))
         .bind(meta.total_input_tokens_uncached as i64)
         .bind(meta.total_input_tokens_cache_write as i64)
         .bind(meta.total_input_tokens_cache_read as i64)
@@ -46,6 +75,55 @@ impl PostgresSessionStore {
         record_session_created(&meta.workspace_id, &meta.status);
 
         Ok(session_id)
+    }
+
+    /// Updates contact metadata attached to an existing session.
+    pub async fn update_session_contact(
+        &self,
+        session_id: moa_core::SessionId,
+        contact: moa_core::ContactRef,
+        promoted_from: Option<moa_core::ContactId>,
+    ) -> Result<()> {
+        let sessions = self.table_name("sessions");
+        let affected = sqlx::query(&format!(
+            "UPDATE {sessions} SET \
+                 contact_id = $1, \
+                 contact_tenant_id = $2, \
+                 contact_state = $3, \
+                 contact_canonical_id = $4, \
+                 contact_linked_ids = $5, \
+                 contact_scopes = $6, \
+                 contact_promoted_from_id = $7, \
+                 user_id = $8, \
+                 updated_at = $9 \
+             WHERE id = $10"
+        ))
+        .bind(contact.contact_id.0)
+        .bind(contact.tenant_id)
+        .bind(contact.state.as_str())
+        .bind(contact.canonical_contact_id.map(|id| id.0))
+        .bind(
+            contact
+                .linked_contact_ids
+                .iter()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
+        )
+        .bind(contact.scopes)
+        .bind(promoted_from.map(|id| id.0))
+        .bind(contact.contact_id.as_user_id().to_string())
+        .bind(Utc::now())
+        .bind(session_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(MoaError::SessionNotFound(session_id));
+        }
+
+        Ok(())
     }
 
     /// Returns whether a persisted tool event exists without decoding matching payloads.
@@ -104,6 +182,22 @@ impl PostgresSessionStore {
         .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)
+    }
+}
+
+fn session_actor_type(actor: &moa_core::SessionActorRef) -> &'static str {
+    match actor {
+        moa_core::SessionActorRef::Identity { .. } => "identity",
+        moa_core::SessionActorRef::Contact { .. } => "contact",
+        moa_core::SessionActorRef::Anonymous => "anonymous",
+    }
+}
+
+fn session_actor_id(actor: &moa_core::SessionActorRef) -> Option<Uuid> {
+    match actor {
+        moa_core::SessionActorRef::Identity { id } => Some(*id),
+        moa_core::SessionActorRef::Contact { id } => Some(id.0),
+        moa_core::SessionActorRef::Anonymous => None,
     }
 }
 
@@ -363,6 +457,15 @@ impl SessionStore for PostgresSessionStore {
         self.refresh_active_session_metric().await?;
 
         Ok(())
+    }
+
+    async fn update_session_contact(
+        &self,
+        session_id: moa_core::SessionId,
+        contact: moa_core::ContactRef,
+        promoted_from: Option<moa_core::ContactId>,
+    ) -> Result<()> {
+        PostgresSessionStore::update_session_contact(self, session_id, contact, promoted_from).await
     }
 
     /// Stores the latest context snapshot for a session.

@@ -3,7 +3,9 @@
 /// Canonical column list for selecting session rows.
 pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
     "id, workspace_id, user_id, title, status, platform, platform_channel, model, ",
-    "created_at, updated_at, completed_at, parent_session_id, total_input_tokens, ",
+    "created_at, updated_at, completed_at, parent_session_id, contact_id, contact_tenant_id, ",
+    "contact_state, contact_canonical_id, contact_linked_ids, contact_scopes, ",
+    "created_by_actor_type, created_by_actor_id, contact_promoted_from_id, total_input_tokens, ",
     "total_input_tokens_uncached, total_input_tokens_cache_write, total_input_tokens_cache_read, ",
     "total_output_tokens, total_cost_cents, event_count, last_checkpoint_seq"
 );
@@ -11,7 +13,9 @@ pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
 /// Canonical column list for inserting session rows.
 pub(crate) const SESSION_INSERT_COLUMNS: &str = concat!(
     "id, workspace_id, user_id, title, status, platform, platform_channel, model, ",
-    "created_at, updated_at, completed_at, parent_session_id, total_input_tokens_uncached, ",
+    "created_at, updated_at, completed_at, parent_session_id, contact_id, contact_tenant_id, ",
+    "contact_state, contact_canonical_id, contact_linked_ids, contact_scopes, ",
+    "created_by_actor_type, created_by_actor_id, contact_promoted_from_id, total_input_tokens_uncached, ",
     "total_input_tokens_cache_write, total_input_tokens_cache_read, total_output_tokens, ",
     "total_cost_cents, event_count, turn_count, last_checkpoint_seq"
 );

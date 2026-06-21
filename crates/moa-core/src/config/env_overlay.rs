@@ -8,7 +8,8 @@ use crate::error::{MoaError, Result};
 
 use super::{
     AsyncAuthzKind, Auth0AuthConfig, AuthHeaderTrustKind, AuthProviderKind, AuthzEngine,
-    MemoryRerankerMode, OidcAuthConfig, OpenFgaConfig, OtlpProtocol, TokenVaultKind,
+    ContactTokenConfig, MemoryRerankerMode, OidcAuthConfig, OpenFgaConfig, OtlpProtocol,
+    TokenVaultKind,
 };
 use super::{CloudHandsConfig, MoaConfig};
 
@@ -87,6 +88,24 @@ pub struct MoaEnvOverlay {
     pub auth_oidc_audience: Option<String>,
     /// `MOA_AUTH_OIDC_JWKS_URL`.
     pub auth_oidc_jwks_url: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_ISSUER`.
+    pub auth_contact_tokens_issuer: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_AUDIENCE`.
+    pub auth_contact_tokens_audience: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_KEY_ID`.
+    pub auth_contact_tokens_key_id: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM_ENV`.
+    pub auth_contact_tokens_private_key_pem_env: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM_ENV`.
+    pub auth_contact_tokens_public_key_pem_env: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_ENV`.
+    pub auth_contact_tokens_contact_point_hash_key_env: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_UNVERIFIED_TTL_SECONDS`.
+    pub auth_contact_tokens_unverified_ttl_seconds: Option<i64>,
+    /// `MOA_AUTH_CONTACT_TOKENS_VERIFIED_TTL_SECONDS`.
+    pub auth_contact_tokens_verified_ttl_seconds: Option<i64>,
+    /// `MOA_AUTH_CONTACT_TOKENS_VERIFICATION_TTL_SECONDS`.
+    pub auth_contact_tokens_verification_ttl_seconds: Option<i64>,
     /// `MOA_AUTHZ_ENGINE`.
     pub authz_engine: Option<AuthzEngine>,
     /// `MOA_AUTHZ_OPENFGA_URL`.
@@ -187,6 +206,10 @@ pub struct MoaEnvOverlay {
     pub messaging_postmark_base_url: Option<String>,
     /// `MOA_MESSAGING_POSTMARK_MESSAGE_STREAM`.
     pub messaging_postmark_message_stream: Option<String>,
+    /// `MOA_MESSAGING_EMAIL_FROM`.
+    pub messaging_email_from: Option<String>,
+    /// `MOA_MESSAGING_EMAIL_REPLY_TO`.
+    pub messaging_email_reply_to: Option<String>,
     /// `MOA_MESSAGING_TWILIO_BASE_URL`.
     pub messaging_twilio_base_url: Option<String>,
     /// `MOA_PERMISSIONS_DEFAULT_EFFECT`.
@@ -474,6 +497,7 @@ impl MoaEnvOverlay {
         set_copy_if_some(&mut config.auth.header_trust, self.auth_header_trust);
         self.apply_auth0(config)?;
         self.apply_oidc(config)?;
+        self.apply_contact_tokens(config)?;
         set_copy_if_some(&mut config.authz.engine, self.authz_engine);
         self.apply_openfga(config)?;
         set_copy_if_some(&mut config.token_vault.provider, self.token_vault_provider);
@@ -596,6 +620,11 @@ impl MoaEnvOverlay {
         set_if_some(
             &mut config.messaging.postmark_message_stream,
             &self.messaging_postmark_message_stream,
+        );
+        set_if_some(&mut config.messaging.email_from, &self.messaging_email_from);
+        set_option_if_some(
+            &mut config.messaging.email_reply_to,
+            &self.messaging_email_reply_to,
         );
         set_if_some(
             &mut config.messaging.twilio_base_url,
@@ -724,6 +753,72 @@ impl MoaEnvOverlay {
         require_non_empty("MOA_AUTH_OIDC_AUDIENCE", &oidc.audience)?;
         require_non_empty("MOA_AUTH_OIDC_JWKS_URL", &oidc.jwks_url)?;
         config.auth.oidc = Some(oidc);
+        Ok(())
+    }
+
+    fn apply_contact_tokens(&self, config: &mut MoaConfig) -> Result<()> {
+        if !any_present(&[
+            self.auth_contact_tokens_issuer.is_some(),
+            self.auth_contact_tokens_audience.is_some(),
+            self.auth_contact_tokens_key_id.is_some(),
+            self.auth_contact_tokens_private_key_pem_env.is_some(),
+            self.auth_contact_tokens_public_key_pem_env.is_some(),
+            self.auth_contact_tokens_contact_point_hash_key_env
+                .is_some(),
+            self.auth_contact_tokens_unverified_ttl_seconds.is_some(),
+            self.auth_contact_tokens_verified_ttl_seconds.is_some(),
+            self.auth_contact_tokens_verification_ttl_seconds.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let mut contact_tokens: ContactTokenConfig = config.auth.contact_tokens.clone();
+        set_if_some(&mut contact_tokens.issuer, &self.auth_contact_tokens_issuer);
+        set_if_some(
+            &mut contact_tokens.audience,
+            &self.auth_contact_tokens_audience,
+        );
+        set_if_some(&mut contact_tokens.key_id, &self.auth_contact_tokens_key_id);
+        set_if_some(
+            &mut contact_tokens.private_key_pem_env,
+            &self.auth_contact_tokens_private_key_pem_env,
+        );
+        set_if_some(
+            &mut contact_tokens.public_key_pem_env,
+            &self.auth_contact_tokens_public_key_pem_env,
+        );
+        set_if_some(
+            &mut contact_tokens.contact_point_hash_key_env,
+            &self.auth_contact_tokens_contact_point_hash_key_env,
+        );
+        set_copy_if_some(
+            &mut contact_tokens.unverified_ttl_seconds,
+            self.auth_contact_tokens_unverified_ttl_seconds,
+        );
+        set_copy_if_some(
+            &mut contact_tokens.verified_ttl_seconds,
+            self.auth_contact_tokens_verified_ttl_seconds,
+        );
+        set_copy_if_some(
+            &mut contact_tokens.verification_ttl_seconds,
+            self.auth_contact_tokens_verification_ttl_seconds,
+        );
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_ISSUER", &contact_tokens.issuer)?;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_AUDIENCE", &contact_tokens.audience)?;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_KEY_ID", &contact_tokens.key_id)?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM_ENV",
+            &contact_tokens.private_key_pem_env,
+        )?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM_ENV",
+            &contact_tokens.public_key_pem_env,
+        )?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_ENV",
+            &contact_tokens.contact_point_hash_key_env,
+        )?;
+        config.auth.contact_tokens = contact_tokens;
         Ok(())
     }
 
@@ -1193,6 +1288,8 @@ mod tests {
                 "https://postmark.example",
             ),
             ("MOA_MESSAGING_POSTMARK_MESSAGE_STREAM", "alerts"),
+            ("MOA_MESSAGING_EMAIL_FROM", "MOA <moa@example.com>"),
+            ("MOA_MESSAGING_EMAIL_REPLY_TO", "support@example.com"),
             ("MOA_MESSAGING_TWILIO_BASE_URL", "https://twilio.example"),
             ("MOA_PROVIDERS_OPENAI_API_KEY_ENV", "CUSTOM_OPENAI_KEY"),
             ("MOA_RESTATE_INGRESS_URL", "http://restate.example:8080"),
@@ -1274,6 +1371,11 @@ mod tests {
             "https://postmark.example"
         );
         assert_eq!(config.messaging.postmark_message_stream, "alerts");
+        assert_eq!(config.messaging.email_from, "MOA <moa@example.com>");
+        assert_eq!(
+            config.messaging.email_reply_to.as_deref(),
+            Some("support@example.com")
+        );
         assert_eq!(config.messaging.twilio_base_url, "https://twilio.example");
         assert_eq!(config.providers.openai.api_key_env, "CUSTOM_OPENAI_KEY");
         assert_eq!(

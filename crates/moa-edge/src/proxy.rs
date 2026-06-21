@@ -62,6 +62,34 @@ impl OrchestratorProxy {
 
         Ok(request.send().await?)
     }
+
+    /// Forward a token-verified public contact request without MOA identity headers.
+    pub async fn forward_public(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Vec<u8>,
+        request_headers: &axum::http::HeaderMap,
+    ) -> Result<reqwest::Response, anyhow::Error> {
+        let url = format!("{}{}", self.upstream_base, path);
+        let mut request = self.http.request(method, url);
+
+        for (name, value) in request_headers {
+            let lowercase_name = name.as_str().to_ascii_lowercase();
+            if headers::is_moa_header(&lowercase_name)
+                || lowercase_name == "authorization"
+                || is_hop_by_hop_header(&lowercase_name)
+            {
+                continue;
+            }
+            request = request.header(name.clone(), value.clone());
+        }
+        if !body.is_empty() {
+            request = request.body(body);
+        }
+
+        Ok(request.send().await?)
+    }
 }
 
 fn identity_type_str(identity_type: IdentityType) -> &'static str {

@@ -20,6 +20,9 @@ pub struct AuthConfig {
     /// Generic OIDC provider settings.
     #[serde(default)]
     pub oidc: Option<OidcAuthConfig>,
+    /// MOA-issued contact token settings.
+    #[serde(default)]
+    pub contact_tokens: ContactTokenConfig,
 }
 
 /// Trusted identity header handling mode.
@@ -97,4 +100,43 @@ pub struct OidcAuthConfig {
     pub audience: String,
     /// JWKS endpoint URL.
     pub jwks_url: String,
+}
+
+/// MOA-issued contact JWT settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactTokenConfig {
+    /// Expected issuer for contact JWTs.
+    pub issuer: String,
+    /// Expected audience for contact JWTs.
+    pub audience: String,
+    /// JWT key id placed in the token header.
+    pub key_id: String,
+    /// Environment variable containing the RSA private key PEM for issuance.
+    pub private_key_pem_env: String,
+    /// Environment variable containing the RSA public key PEM for verification.
+    pub public_key_pem_env: String,
+    /// Environment variable containing the 32-byte hex key used for contact point lookup hashes.
+    pub contact_point_hash_key_env: String,
+    /// TTL for unverified contact tokens.
+    pub unverified_ttl_seconds: i64,
+    /// TTL for verified contact tokens.
+    pub verified_ttl_seconds: i64,
+    /// TTL for one-time verification challenges.
+    pub verification_ttl_seconds: i64,
+}
+
+impl Default for ContactTokenConfig {
+    fn default() -> Self {
+        Self {
+            issuer: "https://moa.local/contacts".to_string(),
+            audience: "moa-agent-contact".to_string(),
+            key_id: "moa-contact-rs256".to_string(),
+            private_key_pem_env: "MOA_CONTACT_JWT_PRIVATE_KEY_PEM".to_string(),
+            public_key_pem_env: "MOA_CONTACT_JWT_PUBLIC_KEY_PEM".to_string(),
+            contact_point_hash_key_env: "MOA_CONTACT_POINT_HASH_KEY_HEX".to_string(),
+            unverified_ttl_seconds: 3600,
+            verified_ttl_seconds: 86_400,
+            verification_ttl_seconds: 600,
+        }
+    }
 }

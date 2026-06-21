@@ -3,6 +3,7 @@
 pub mod api_keys;
 pub mod builtin_authz;
 pub mod bundle;
+pub mod contact_tokens;
 pub mod disabled;
 pub mod local;
 pub mod null_vault;
@@ -13,6 +14,7 @@ pub use api_keys::{
 };
 pub use builtin_authz::BuiltinAsyncAuthzProvider;
 pub use bundle::{BuildError, Providers, build_providers, build_providers_with_resolver};
+pub use contact_tokens::{ContactTokenError, ContactTokenIssuer, ContactTokenVerifier};
 pub use disabled::DisabledAuthProvider;
 pub use local::LocalAuthProvider;
 pub use null_vault::NullTokenVaultProvider;

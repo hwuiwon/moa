@@ -27,6 +27,13 @@ curl -X POST http://localhost:10080/v1/authz/tuple-write \
 Configure the IdP SCIM base URL as `https://<edge-or-orchestrator>/scim/v2`
 and present the SCIM API key as `Authorization: Bearer <key>`.
 
+SCIM users are MOA operator/admin identities: workspace admins, tenant admins,
+and service users that need authenticated access to MOA control-plane APIs.
+Agent-facing contacts are not SCIM users and are not OpenFGA principals by
+default. Contacts are created, verified, linked, exported, and erased through
+the contact and privacy APIs; deleting or deactivating a SCIM user does not
+silently delete unrelated contacts.
+
 ## Supported operations
 
 - `GET/POST /scim/v2/Users`
@@ -63,6 +70,8 @@ Postgres transaction:
 - enqueues OpenFGA tuple deletes for tenant, session, API-key, workspace, and
   agent-operator edges
 - removes SCIM group memberships
+- leaves agent-facing contacts unchanged unless a separate privacy erasure
+  request explicitly targets those contacts
 
 Repeating the same `active=false` PATCH is a no-op; the cascade only runs for
 users that are still active.

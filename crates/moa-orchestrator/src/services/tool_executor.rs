@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::services::session_store::RestateSessionStoreClient;
 use moa_core::restate_observability::annotate_restate_handler_span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Restate service surface for durable tool execution.
 #[restate_sdk::service]
@@ -95,6 +96,7 @@ impl ToolExecutor for ToolExecutorImpl {
         annotate_restate_handler_span("ToolExecutor", "execute");
         let request = request.into_inner();
         let session = resolve_session(&ctx, &request).await?;
+        annotate_tool_execution_span(&session, &request);
 
         let serialized_input = serde_json::to_string(&request.input)
             .map_err(|error| to_handler_error(error.into()))?;
@@ -279,6 +281,18 @@ fn validate_request(
     }
 
     Ok(())
+}
+
+fn annotate_tool_execution_span(session: &SessionMeta, request: &ToolCallRequest) {
+    let span = tracing::Span::current();
+    span.set_attribute("moa.session.id", session.id.to_string());
+    span.set_attribute("moa.workspace.id", session.workspace_id.to_string());
+    span.set_attribute("moa.user.id", session.user_id.to_string());
+    span.set_attribute("moa.tool.name", request.tool_name.clone());
+    if let Some(contact) = session.contact.as_ref() {
+        span.set_attribute("moa.contact.id", contact.contact_id.to_string());
+        span.set_attribute("moa.contact.state", contact.state.as_str().to_string());
+    }
 }
 
 async fn resolve_session(

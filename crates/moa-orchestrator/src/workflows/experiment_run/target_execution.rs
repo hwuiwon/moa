@@ -57,6 +57,7 @@ pub(super) async fn run_agent_loop_target(
                 user_message: prompt,
                 attachments,
                 model: Some(model.to_string()),
+                contact: None,
             })),
         &request.identity,
     )

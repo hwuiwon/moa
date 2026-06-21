@@ -3,7 +3,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Attachment, ModelId, Platform, SequenceNum, SessionId, UserId, WorkspaceId};
+use super::{
+    Attachment, ContactId, ContactRef, ModelId, Platform, SequenceNum, SessionActorRef, SessionId,
+    UserId, WorkspaceId,
+};
 
 /// Session lifecycle status.
 #[derive(
@@ -138,6 +141,15 @@ pub struct SessionMeta {
     pub completed_at: Option<DateTime<Utc>>,
     /// Parent session identifier for child sessions.
     pub parent_session_id: Option<SessionId>,
+    /// Agent-facing contact attached to this session.
+    #[serde(default)]
+    pub contact: Option<ContactRef>,
+    /// Boundary actor that created this session.
+    #[serde(default)]
+    pub created_by: Option<SessionActorRef>,
+    /// Previous anonymous or unverified contact promoted into the current contact.
+    #[serde(default)]
+    pub contact_promoted_from_id: Option<ContactId>,
     /// Aggregate input token usage across all cache states.
     pub total_input_tokens: usize,
     /// Aggregate uncached input token usage.
@@ -186,6 +198,9 @@ impl Default for SessionMeta {
             updated_at: now,
             completed_at: None,
             parent_session_id: None,
+            contact: None,
+            created_by: None,
+            contact_promoted_from_id: None,
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

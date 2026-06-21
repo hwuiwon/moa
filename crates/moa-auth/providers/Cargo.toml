@@ -15,6 +15,7 @@ async-trait.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 crc32fast.workspace = true
+jsonwebtoken.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers-auth0 = { workspace = true, optional = true }

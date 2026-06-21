@@ -23,8 +23,8 @@ mod token_vault;
 pub use async_authz::{AsyncAuthzConfig, AsyncAuthzKind};
 pub use audit_security::AuditSecurityConfig;
 pub use auth::{
-    Auth0AuthConfig, AuthConfig, AuthHeaderTrustKind, AuthProviderKind, LocalAuthConfig,
-    OidcAuthConfig,
+    Auth0AuthConfig, AuthConfig, AuthHeaderTrustKind, AuthProviderKind, ContactTokenConfig,
+    LocalAuthConfig, OidcAuthConfig,
 };
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
 pub use context::{

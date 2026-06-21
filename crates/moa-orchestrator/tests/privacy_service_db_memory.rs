@@ -5,15 +5,17 @@ use std::{collections::BTreeMap, io::Read, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
-use moa_core::{ScopeContext, UserId, WorkspaceId};
+use moa_core::wire::ContactErasureScope;
+use moa_core::{ContactId, ScopeContext, UserId, WorkspaceId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
 use moa_memory_vector::PgvectorStore;
 use moa_orchestrator::services::privacy::{
     ApprovalClaims, ApprovalTokenVerifier, Ed25519ManifestSigner, PrivacyEraseContext,
-    PrivacyExportContext, ensure_jti_inserted, finalize_archive_to_bytes, run_privacy_erase,
-    write_export_readme, write_manifest,
+    PrivacyExportContext, PrivacySubject, PrivacySubjectProvenance,
+    collect_privacy_export_data_sections, ensure_jti_inserted, finalize_archive_to_bytes,
+    run_privacy_erase, write_export_readme, write_manifest,
 };
 use moa_session::testing;
 use serde_json::json;
@@ -41,12 +43,16 @@ fn valid_claims(subject: Uuid) -> ApprovalClaims {
 }
 
 fn valid_claims_for(subject: Uuid, workspace: &str, op: &str) -> ApprovalClaims {
+    valid_claims_for_user_id(&subject.to_string(), workspace, op)
+}
+
+fn valid_claims_for_user_id(subject_user_id: &str, workspace: &str, op: &str) -> ApprovalClaims {
     ApprovalClaims {
         sub: "ops-admin".to_string(),
         jti: Uuid::now_v7().to_string(),
         exp: Utc::now().timestamp() + 300,
         op: op.to_string(),
-        subject_user_id: subject.to_string(),
+        subject_user_id: subject_user_id.to_string(),
         workspace_id: Some(workspace.to_string()),
         role: None,
         roles: vec!["platform_admin".to_string()],
@@ -61,6 +67,10 @@ fn basis_vector() -> Vec<f32> {
 
 fn pii_vault_secret() -> Vec<u8> {
     b"privacy-erase-test-secret".to_vec()
+}
+
+fn contact_user_id(contact_id: Uuid) -> String {
+    ContactId(contact_id).as_user_id().to_string()
 }
 
 fn erase_test_graph(pool: &PgPool, workspace_id: &str, user_id: &str) -> AgeGraphStore {
@@ -103,6 +113,50 @@ async fn create_erase_test_node(
         .await
         .expect("create erase fixture");
     uid
+}
+
+async fn seed_contact(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    workspace_id: &str,
+    contact_id: Uuid,
+    state: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO contacts (id, tenant_id, workspace_id, state)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(contact_id)
+    .bind(tenant_id)
+    .bind(workspace_id)
+    .bind(state)
+    .execute(pool)
+    .await
+    .expect("seed contact");
+}
+
+async fn seed_merged_contact(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    workspace_id: &str,
+    merged_contact_id: Uuid,
+    canonical_contact_id: Uuid,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO contacts (id, tenant_id, workspace_id, state, canonical_contact_id, merged_at)
+        VALUES ($1, $2, $3, 'merged', $4, NOW())
+        "#,
+    )
+    .bind(merged_contact_id)
+    .bind(tenant_id)
+    .bind(workspace_id)
+    .bind(canonical_contact_id)
+    .execute(pool)
+    .await
+    .expect("seed merged contact");
 }
 
 async fn node_count(pool: &PgPool, uid: Uuid) -> i64 {
@@ -253,11 +307,13 @@ async fn privacy_erase_dry_run() {
     let before_changelog = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        tenant_id: Uuid::nil(),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "dry run".to_string(),
         dry_run: true,
+        contact_erasure_scope: None,
         claims: valid_claims_for(subject, &workspace_id, "erase"),
         pii_vault_secret: None,
     };
@@ -300,11 +356,13 @@ async fn privacy_erase_basic() {
     assert_eq!(embedding_count(store.pool(), uid).await, 1);
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        tenant_id: Uuid::nil(),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "GDPR Art.17 request".to_string(),
         dry_run: false,
+        contact_erasure_scope: None,
         claims: valid_claims_for(subject, &workspace_id, "erase"),
         pii_vault_secret: Some(pii_vault_secret()),
     };
@@ -352,11 +410,13 @@ async fn privacy_erase_idempotent() {
     .await;
     let first = PrivacyEraseContext {
         pool: store.pool().clone(),
+        tenant_id: Uuid::nil(),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "first erase".to_string(),
         dry_run: false,
+        contact_erasure_scope: None,
         claims: valid_claims_for(subject, &workspace_id, "erase"),
         pii_vault_secret: None,
     };
@@ -364,11 +424,13 @@ async fn privacy_erase_idempotent() {
     let after_first = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let second = PrivacyEraseContext {
         pool: store.pool().clone(),
+        tenant_id: Uuid::nil(),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "second erase".to_string(),
         dry_run: false,
+        contact_erasure_scope: None,
         claims: valid_claims_for(subject, &workspace_id, "erase"),
         pii_vault_secret: None,
     };
@@ -407,11 +469,13 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
+        tenant_id: Uuid::nil(),
         workspace_id: workspace_a.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "wrong workspace erase".to_string(),
         dry_run: false,
+        contact_erasure_scope: None,
         claims: valid_claims_for(subject, &workspace_a, "erase"),
         pii_vault_secret: None,
     };
@@ -425,6 +489,269 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     assert_eq!(
         total_erase_changelog_count(store.pool(), &workspace_a).await,
         0
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_contact_requires_explicit_scope() {
+    // Pins: destructive contact erasure requires an explicit contact erasure boundary.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let tenant_id = Uuid::now_v7();
+    let workspace_id = format!("privacy-contact-scope-{}", Uuid::now_v7().simple());
+    let contact_id = Uuid::now_v7();
+    seed_contact(
+        store.pool(),
+        tenant_id,
+        &workspace_id,
+        contact_id,
+        "unverified",
+    )
+    .await;
+    create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(contact_id),
+        "contact scope fact",
+    )
+    .await;
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id,
+        workspace_id: workspace_id.clone(),
+        subject_user: contact_id,
+        subject_user_id: contact_id.to_string(),
+        reason: "contact erase".to_string(),
+        dry_run: true,
+        contact_erasure_scope: None,
+        claims: valid_claims_for(contact_id, &workspace_id, "erase"),
+        pii_vault_secret: None,
+    };
+
+    let error = run_privacy_erase(ctx)
+        .await
+        .expect_err("contact erasure without scope should fail");
+
+    assert!(format!("{error:?}").contains("contact_erasure_scope is required"));
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_unverified_contact_only() {
+    // Pins: specified-contact erasure deletes only the requested contact subject.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let tenant_id = Uuid::now_v7();
+    let workspace_id = format!("privacy-contact-only-{}", Uuid::now_v7().simple());
+    let contact_id = Uuid::now_v7();
+    let other_contact_id = Uuid::now_v7();
+    seed_contact(
+        store.pool(),
+        tenant_id,
+        &workspace_id,
+        contact_id,
+        "unverified",
+    )
+    .await;
+    seed_contact(
+        store.pool(),
+        tenant_id,
+        &workspace_id,
+        other_contact_id,
+        "unverified",
+    )
+    .await;
+    let contact_uid = create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(contact_id),
+        "contact-only fact",
+    )
+    .await;
+    let other_uid = create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(other_contact_id),
+        "other contact fact",
+    )
+    .await;
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id,
+        workspace_id: workspace_id.clone(),
+        subject_user: contact_id,
+        subject_user_id: contact_id.to_string(),
+        reason: "contact erase".to_string(),
+        dry_run: false,
+        contact_erasure_scope: Some(ContactErasureScope::SpecifiedContact),
+        claims: valid_claims_for(contact_id, &workspace_id, "erase"),
+        pii_vault_secret: None,
+    };
+
+    let response = run_privacy_erase(ctx).await.expect("erase contact");
+
+    assert_eq!(response.candidate_count, 1);
+    assert_eq!(response.erased_count, 1);
+    assert_eq!(node_count(store.pool(), contact_uid).await, 0);
+    assert_eq!(node_count(store.pool(), other_uid).await, 1);
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
+    // Pins: verified contact erasure includes linked unverified contacts only when explicitly requested.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let tenant_id = Uuid::now_v7();
+    let workspace_id = format!("privacy-contact-linked-{}", Uuid::now_v7().simple());
+    let contact_id = Uuid::now_v7();
+    let linked_contact_id = Uuid::now_v7();
+    seed_contact(
+        store.pool(),
+        tenant_id,
+        &workspace_id,
+        contact_id,
+        "verified",
+    )
+    .await;
+    seed_merged_contact(
+        store.pool(),
+        tenant_id,
+        &workspace_id,
+        linked_contact_id,
+        contact_id,
+    )
+    .await;
+    let contact_uid = create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(contact_id),
+        "verified contact fact",
+    )
+    .await;
+    let linked_uid = create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(linked_contact_id),
+        "linked contact fact",
+    )
+    .await;
+    let subject_user_id = contact_user_id(contact_id);
+    let ctx = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id,
+        workspace_id: workspace_id.clone(),
+        subject_user: contact_id,
+        subject_user_id: subject_user_id.clone(),
+        reason: "verified contact erase".to_string(),
+        dry_run: false,
+        contact_erasure_scope: Some(ContactErasureScope::SpecifiedAndLinkedContacts),
+        claims: valid_claims_for_user_id(&subject_user_id, &workspace_id, "erase"),
+        pii_vault_secret: None,
+    };
+
+    let response = run_privacy_erase(ctx)
+        .await
+        .expect("erase linked contact subjects");
+
+    assert_eq!(response.candidate_count, 2);
+    assert_eq!(response.erased_count, 2);
+    assert_eq!(node_count(store.pool(), contact_uid).await, 0);
+    assert_eq!(node_count(store.pool(), linked_uid).await, 0);
+    assert!(
+        response
+            .sample
+            .iter()
+            .any(|entry| entry["privacy_subject_provenance"] == "linked_contact")
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn privacy_export_contact_data_sections_label_linked_provenance() {
+    // Pins: contact subject-access export labels rows from linked contact memory.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let workspace_id = format!("privacy-contact-export-{}", Uuid::now_v7().simple());
+    let contact_id = Uuid::now_v7();
+    let linked_contact_id = Uuid::now_v7();
+    create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(contact_id),
+        "export primary fact",
+    )
+    .await;
+    create_erase_test_node(
+        store.pool(),
+        &workspace_id,
+        &contact_user_id(linked_contact_id),
+        "export linked fact",
+    )
+    .await;
+    let export_dir = tempdir().expect("tempdir");
+    let subject_user_id = contact_user_id(contact_id);
+    let ctx = PrivacyExportContext {
+        pool: store.pool().clone(),
+        workspace: Some(workspace_id.clone()),
+        subject_user: contact_id,
+        subject_user_id: subject_user_id.clone(),
+        subjects: vec![
+            PrivacySubject::primary(subject_user_id.clone(), contact_id),
+            PrivacySubject {
+                user_id: contact_user_id(linked_contact_id),
+                target_uid: linked_contact_id,
+                provenance: PrivacySubjectProvenance::LinkedContact,
+            },
+        ],
+        reason: "GDPR Art.15 contact request".to_string(),
+        claims: valid_claims_for_user_id(&subject_user_id, &workspace_id, "export"),
+    };
+
+    let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
+        .await
+        .expect("collect export sections");
+    let facts = tokio::fs::read_to_string(export_dir.path().join("facts.jsonl"))
+        .await
+        .expect("read facts export");
+    let rows = facts
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse fact row"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(counts["facts"], 2);
+    assert!(
+        rows.iter()
+            .any(|row| row["privacy_subject_provenance"] == "primary")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row["privacy_subject_provenance"] == "linked_contact")
     );
 
     drop(store);
@@ -505,6 +832,7 @@ async fn privacy_export_archive_round_trip() {
         workspace: Some("workspace-a".to_string()),
         subject_user: subject,
         subject_user_id: subject.to_string(),
+        subjects: vec![PrivacySubject::primary(subject.to_string(), subject)],
         reason: "GDPR Art.15 request".to_string(),
         claims,
     };

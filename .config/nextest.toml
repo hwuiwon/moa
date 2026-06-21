@@ -52,7 +52,7 @@ inherits = "default"
 test-threads = 1
 default-filter = '''
 binary(/^ingestion_service_e2e$/)
-  | (binary(/^integration_service_e2e$/) & test(/^(action_policy_flow_e2e|agent_artifacts_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/))
+  | (binary(/^integration_service_e2e$/) & test(/^(agent_artifacts_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/))
 '''
 
 [profile.orchestrator-service-e2e]
@@ -65,14 +65,17 @@ inherits = "default"
 test-threads = 1
 default-filter = '''
 binary(/^ingestion_service_e2e$/)
-  | (binary(/^integration_service_e2e$/) & test(/^(action_policy_flow_e2e|agent_artifacts_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/))
+  | (binary(/^integration_service_e2e$/) & test(/^(agent_artifacts_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/))
   | binary(/^(session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e)$/)
 '''
 
 [profile.fixture-service-e2e]
 inherits = "default"
 test-threads = 1
-default-filter = 'binary(/^orchestrator_fixture_service_e2e$/)'
+default-filter = '''
+binary(/^orchestrator_fixture_service_e2e$/)
+  | (binary(/^integration_service_e2e$/) & test(/^action_policy_flow_e2e::/))
+'''
 
 [profile.loadtest-service-e2e]
 inherits = "default"
