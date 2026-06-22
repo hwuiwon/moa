@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     ActionPolicyRule, ContactId, ContactRef, ContactVerificationState, ExperienceAttribution,
     ExperienceRecord, LearningCandidate, LearningEntry, MoaError, ModelId, Result,
-    SegmentAssessment, SegmentId, SessionActorRef, SessionId, SessionMeta, SessionSummary,
-    TaskFingerprint, TaskSegment, TaskStrategySuccessRate, UserId, WorkspaceId,
+    SegmentAssessment, SegmentId, SessionActorRef, SessionChannelBindingId, SessionId, SessionMeta,
+    SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, UserId, WorkspaceId,
 };
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;

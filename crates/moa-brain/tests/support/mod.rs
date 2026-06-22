@@ -7,8 +7,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ContextMessage, Event, EventFilter, EventRange, EventRecord, ModelCapabilities, ModelId,
-    Platform, Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    Channel, ContextMessage, Event, EventFilter, EventRange, EventRecord, ModelCapabilities,
+    ModelId, Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus,
     SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId, WorkingContext,
     WorkspaceId,
 };
@@ -115,8 +115,8 @@ impl WorkingContextFixture {
             user_id: UserId::new(self.user_id.clone()),
             title: None,
             status: SessionStatus::Created,
-            platform: Platform::Api,
-            platform_channel: None,
+            channel: Channel::Chat,
+            active_channel_binding_id: None,
             model: ModelId::new(self.model_id.clone()),
             created_at: self.clock_at,
             updated_at: self.clock_at,

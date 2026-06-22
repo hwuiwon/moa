@@ -13,9 +13,9 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_brain::learning::attribution::attributions_for_experience;
 use moa_brain::learning::experience::experience_from_assessment;
 use moa_core::{
-    AssessmentPhase, Attachment, CompletionContent, CompletionRequest, CompletionResponse,
+    AssessmentPhase, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
     CompletionStream, Event, LLMProvider, MemoryScope, MoaConfig, MoaError, ModelCapabilities,
-    ModelId, ModelTier, Platform, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
+    ModelId, ModelTier, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
     SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionId, SessionMeta, SessionStatus,
     SessionStore as _, StopReason, TaskSegment, TokenPricing, TokenUsage, ToolCallFormat,
     ToolCallId, ToolOutput, UserId, WorkspaceId,
@@ -201,7 +201,7 @@ async fn seed_experience_fixture(
         user_id: UserId::new("user-skill-learning"),
         title: Some("Distill a reusable Rust workflow".to_string()),
         status: SessionStatus::Completed,
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model: ModelId::new("scripted-skill-model"),
         ..SessionMeta::default()
     };

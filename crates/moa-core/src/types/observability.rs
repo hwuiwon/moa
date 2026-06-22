@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    CompletionRequest, ContactId, MessageRole, ModelId, Platform, SessionId, SessionMeta, UserId,
+    Channel, CompletionRequest, ContactId, MessageRole, ModelId, SessionId, SessionMeta, UserId,
     WorkspaceId, estimate_text_tokens,
 };
 
@@ -226,8 +226,8 @@ pub struct TraceContext {
     pub contact_id: Option<ContactId>,
     /// Contact verification state for agent-facing contact sessions.
     pub contact_state: Option<String>,
-    /// Optional originating platform.
-    pub platform: Option<Platform>,
+    /// Optional originating channel.
+    pub channel: Option<Channel>,
     /// Active model identifier.
     pub model: ModelId,
     /// Human-readable trace name derived from the user prompt.
@@ -250,10 +250,10 @@ impl TraceContext {
                 .contact
                 .as_ref()
                 .map(|contact| contact.state.as_str().to_string()),
-            platform: Some(session.platform.clone()),
+            channel: Some(session.channel),
             model: session.model.clone(),
             trace_name: prompt.map(trace_name_from_message),
-            tags: generate_trace_tags(Some(&session.platform), &session.workspace_id),
+            tags: generate_trace_tags(Some(&session.channel), &session.workspace_id),
             environment: None,
         }
     }
@@ -300,10 +300,10 @@ impl TraceContext {
             );
         }
 
-        if let Some(platform) = self.platform.as_ref() {
-            let value = platform.to_string();
-            span.set_attribute("langfuse.trace.metadata.platform", value.clone());
-            span.set_attribute("moa.platform", value);
+        if let Some(channel) = self.channel.as_ref() {
+            let value = channel.to_string();
+            span.set_attribute("langfuse.trace.metadata.channel", value.clone());
+            span.set_attribute("moa.channel", value);
         }
 
         if let Some(trace_name) = self.trace_name.as_ref() {
@@ -332,11 +332,11 @@ pub fn trace_name_from_message(message: &str) -> String {
     truncate_with_ellipsis(trimmed.lines().next().unwrap_or(trimmed), 200)
 }
 
-/// Derives Langfuse tags from platform and workspace identifiers.
-pub fn generate_trace_tags(platform: Option<&Platform>, workspace_id: &WorkspaceId) -> Vec<String> {
+/// Derives Langfuse tags from channel and workspace identifiers.
+pub fn generate_trace_tags(channel: Option<&Channel>, workspace_id: &WorkspaceId) -> Vec<String> {
     let mut tags = Vec::new();
-    if let Some(platform) = platform {
-        tags.push(truncate_with_ellipsis(&platform.to_string(), 200));
+    if let Some(channel) = channel {
+        tags.push(truncate_with_ellipsis(&channel.to_string(), 200));
     }
     tags.push(truncate_with_ellipsis(
         &format!("workspace:{workspace_id}"),
@@ -391,7 +391,7 @@ mod tests {
         trace_name_from_message,
     };
     use crate::types::{
-        CompletionRequest, ContextMessage, Platform, SessionId, SessionMeta, UserId, WorkspaceId,
+        Channel, CompletionRequest, ContextMessage, SessionId, SessionMeta, UserId, WorkspaceId,
     };
     use serde_json::json;
 
@@ -403,8 +403,8 @@ mod tests {
     }
 
     #[test]
-    fn tags_include_platform_and_workspace() {
-        let tags = generate_trace_tags(Some(&Platform::Slack), &WorkspaceId::new("myproject"));
+    fn tags_include_channel_and_workspace() {
+        let tags = generate_trace_tags(Some(&Channel::Slack), &WorkspaceId::new("myproject"));
         assert!(tags.contains(&"slack".to_string()));
         assert!(tags.contains(&"workspace:myproject".to_string()));
     }
@@ -415,7 +415,7 @@ mod tests {
             id: SessionId::new(),
             user_id: UserId::new("user-456"),
             workspace_id: WorkspaceId::new("webapp"),
-            platform: Platform::Slack,
+            channel: Channel::Slack,
             model: "claude-sonnet-4-20250514".into(),
             ..SessionMeta::default()
         };

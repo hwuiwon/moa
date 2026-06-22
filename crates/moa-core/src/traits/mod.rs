@@ -12,14 +12,14 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
-    CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream,
-    ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange, EventRecord,
-    ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus, InboundMessage,
-    LearningCandidate, LearningCandidateStatusUpdate, MessageId, ModelCapabilities,
-    OutboundMessage, Platform, PlatformCapabilities, ProcessorOutput, SandboxFile,
-    SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionFilter,
-    SessionId, SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment,
-    TaskStrategySuccessRate, ToolOutput, WorkingContext, WorkspaceId,
+    Channel, ChannelCapabilities, CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest,
+    CompletionStream, ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange,
+    EventRecord, ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus,
+    InboundMessage, LearningCandidate, LearningCandidateStatusUpdate, MessageId, ModelCapabilities,
+    OutboundMessage, ProcessorOutput, SandboxFile, SegmentAssessment, SegmentBaseline,
+    SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionId, SessionMeta,
+    SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
+    ToolOutput, WorkingContext, WorkspaceId,
 };
 
 pub use auth::*;
@@ -433,14 +433,14 @@ pub trait LLMProvider: Send + Sync {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream>;
 }
 
-/// Platform-specific messaging adapter.
+/// Channel-specific messaging adapter.
 #[async_trait]
-pub trait PlatformAdapter: Send + Sync {
-    /// Returns the platform handled by this adapter.
-    fn platform(&self) -> Platform;
+pub trait ChannelAdapter: Send + Sync {
+    /// Returns the channel handled by this adapter.
+    fn channel(&self) -> Channel;
 
     /// Returns adapter capabilities.
-    fn capabilities(&self) -> PlatformCapabilities;
+    fn capabilities(&self) -> ChannelCapabilities;
 
     /// Starts receiving inbound messages.
     async fn start(&self, event_tx: mpsc::Sender<InboundMessage>) -> Result<()>;

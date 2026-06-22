@@ -6,12 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    BrainId, CONTEXT_SNAPSHOT_FORMAT_VERSION, CompactionConfig, CompletionContent,
+    BrainId, CONTEXT_SNAPSHOT_FORMAT_VERSION, Channel, CompactionConfig, CompletionContent,
     CompletionRequest, CompletionResponse, CompletionStream, ContextSnapshot,
     ContextSnapshotConfig, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelId,
-    Platform, Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    SessionStore, SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId,
-    ToolOutput, ToolOutputConfig, UserId, WorkspaceId,
+    Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
+    ToolOutputConfig, UserId, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -210,7 +210,7 @@ pub(crate) fn session() -> SessionMeta {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }

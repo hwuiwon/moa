@@ -5,14 +5,14 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moa_core::{MoaError, Platform, Result};
+use moa_core::{Channel, MoaError, Result};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
 /// Normalized response metadata needed by the messaging rate-limit policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagingSendResponse {
-    /// HTTP status returned by the platform API.
+    /// HTTP status returned by the channel provider API.
     pub status: u16,
     /// Header values used by retry policies.
     pub headers: Vec<(String, String)>,
@@ -37,18 +37,18 @@ impl MessagingSendResponse {
         self
     }
 
-    /// Returns true when this response represents a platform rate-limit response.
+    /// Returns true when this response represents a channel-provider rate-limit response.
     pub fn is_rate_limited(&self) -> bool {
         self.status == 429
     }
 
-    /// Returns normalized failure metadata for non-success platform responses.
-    pub fn failure_for_platform(&self, platform: Platform) -> Option<MessagingSendFailure> {
+    /// Returns normalized failure metadata for non-success channel-provider responses.
+    pub fn failure_for_channel(&self, channel: Channel) -> Option<MessagingSendFailure> {
         if self.status < 400 {
             return None;
         }
 
-        let retry_after = self.retry_after_for_platform_opt(platform.clone());
+        let retry_after = self.retry_after_for_channel_opt(channel);
         let class = if is_retryable_status(self.status) {
             MessagingFailureClass::Retryable
         } else {
@@ -58,16 +58,16 @@ impl MessagingSendResponse {
             status: self.status,
             class,
             retry_after,
-            reason: format!("{platform} send returned HTTP status {}", self.status),
+            reason: format!("{channel} send returned HTTP status {}", self.status),
         })
     }
 
-    fn retry_after_for_platform(&self, _platform: Platform) -> Duration {
-        self.retry_after_for_platform_opt(_platform)
+    fn retry_after_for_channel(&self, channel: Channel) -> Duration {
+        self.retry_after_for_channel_opt(channel)
             .unwrap_or_else(|| Duration::from_secs(1))
     }
 
-    fn retry_after_for_platform_opt(&self, _platform: Platform) -> Option<Duration> {
+    fn retry_after_for_channel_opt(&self, _channel: Channel) -> Option<Duration> {
         let retry_after = self.header("retry-after");
         retry_after
             .and_then(|value| value.parse::<f64>().ok())
@@ -106,11 +106,11 @@ impl MessagingFailureClass {
 /// Structured metadata for a failed messaging send response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagingSendFailure {
-    /// HTTP status returned by the platform API.
+    /// HTTP status returned by the channel provider API.
     pub status: u16,
     /// Retry classification for this response.
     pub class: MessagingFailureClass,
-    /// Parsed `Retry-After` hint when the platform provided one.
+    /// Parsed `Retry-After` hint when the provider supplied one.
     pub retry_after: Option<Duration>,
     /// Human-readable reason safe for logs and operator UI.
     pub reason: String,
@@ -131,21 +131,21 @@ pub struct MessagingRateLimitMetrics {
 }
 
 impl MessagingRateLimitMetrics {
-    /// Increments one named counter with platform and outcome dimensions encoded in the key.
-    pub async fn increment(&self, name: &str, platform: Platform, outcome: Option<&str>) {
+    /// Increments one named counter with channel and outcome dimensions encoded in the key.
+    pub async fn increment(&self, name: &str, channel: Channel, outcome: Option<&str>) {
         let key = match outcome {
-            Some(outcome) => format!("{name}|platform={platform}|outcome={outcome}"),
-            None => format!("{name}|platform={platform}"),
+            Some(outcome) => format!("{name}|channel={channel}|outcome={outcome}"),
+            None => format!("{name}|channel={channel}"),
         };
         let mut counters = self.counters.lock().await;
         *counters.entry(key).or_insert(0) += 1;
     }
 
     /// Returns one counter value.
-    pub async fn counter(&self, name: &str, platform: Platform, outcome: Option<&str>) -> u64 {
+    pub async fn counter(&self, name: &str, channel: Channel, outcome: Option<&str>) -> u64 {
         let key = match outcome {
-            Some(outcome) => format!("{name}|platform={platform}|outcome={outcome}"),
-            None => format!("{name}|platform={platform}"),
+            Some(outcome) => format!("{name}|channel={channel}|outcome={outcome}"),
+            None => format!("{name}|channel={channel}"),
         };
         self.counters.lock().await.get(&key).copied().unwrap_or(0)
     }
@@ -154,7 +154,7 @@ impl MessagingRateLimitMetrics {
 /// Rate-limit retry policy and per-channel pacing state.
 #[derive(Debug, Clone)]
 pub struct MessagingRateLimiter {
-    platform: Platform,
+    channel: Channel,
     max_retries: usize,
     per_channel_interval: Duration,
     delay_first_send: bool,
@@ -163,14 +163,14 @@ pub struct MessagingRateLimiter {
 }
 
 impl MessagingRateLimiter {
-    /// Creates a rate limiter with conservative defaults for a platform.
-    pub fn for_platform(platform: Platform) -> Self {
-        let per_channel_interval = match platform {
-            Platform::Slack => Duration::from_secs(1),
+    /// Creates a rate limiter with conservative defaults for a channel.
+    pub fn for_channel(channel: Channel) -> Self {
+        let per_channel_interval = match channel {
+            Channel::Slack => Duration::from_secs(1),
             _ => Duration::ZERO,
         };
         Self {
-            platform,
+            channel,
             max_retries: 3,
             per_channel_interval,
             delay_first_send: true,
@@ -205,7 +205,7 @@ impl MessagingRateLimiter {
         self.metrics.clone()
     }
 
-    /// Runs one platform send operation with retry/backoff and channel pacing.
+    /// Runs one channel-provider send operation with retry/backoff and channel pacing.
     pub async fn send_with_retry<F, Fut>(
         &self,
         channel_key: &str,
@@ -220,21 +220,21 @@ impl MessagingRateLimiter {
             self.wait_for_channel_slot(channel_key).await;
             let response = operation().await?;
             if !response.is_rate_limited() {
-                if let Some(failure) = response.failure_for_platform(self.platform.clone()) {
+                if let Some(failure) = response.failure_for_channel(self.channel) {
                     self.metrics
                         .increment(
                             "messaging_send_failures_total",
-                            self.platform.clone(),
+                            self.channel,
                             Some(failure.class.label()),
                         )
                         .await;
                     tracing::warn!(
-                        messaging.system = %self.platform,
+                        messaging.channel = %self.channel,
                         http.status_code = failure.status,
                         retryable = failure.is_retryable(),
                         failure_class = failure.class.label(),
                         error = %failure.reason,
-                        "messaging platform send returned a non-success status"
+                        "messaging channel send returned a non-success status"
                     );
                     return Err(MoaError::HttpStatus {
                         status: failure.status,
@@ -246,7 +246,7 @@ impl MessagingRateLimiter {
                     self.metrics
                         .increment(
                             "messaging_send_retries_total",
-                            self.platform.clone(),
+                            self.channel,
                             Some("success"),
                         )
                         .await;
@@ -255,18 +255,14 @@ impl MessagingRateLimiter {
             }
 
             self.metrics
-                .increment(
-                    "messaging_send_429_received_total",
-                    self.platform.clone(),
-                    None,
-                )
+                .increment("messaging_send_429_received_total", self.channel, None)
                 .await;
 
             if retries >= self.max_retries {
                 self.metrics
                     .increment(
                         "messaging_send_retries_total",
-                        self.platform.clone(),
+                        self.channel,
                         Some("exhausted"),
                     )
                     .await;
@@ -274,20 +270,20 @@ impl MessagingRateLimiter {
                     retries,
                     message: format!(
                         "{} send remained rate limited after {retries} retries: {}",
-                        self.platform, response.body
+                        self.channel, response.body
                     ),
                 });
             }
 
             retries += 1;
-            let retry_after = response.retry_after_for_platform(self.platform.clone());
+            let retry_after = response.retry_after_for_channel(self.channel);
             tracing::warn!(
-                messaging.system = %self.platform,
+                messaging.channel = %self.channel,
                 http.status_code = response.status,
                 retry_after_ms = retry_after.as_millis() as u64,
                 attempt = retries,
                 max_retries = self.max_retries,
-                "messaging platform send was rate limited; retrying"
+                "messaging channel send was rate limited; retrying"
             );
             sleep(retry_after).await;
         }

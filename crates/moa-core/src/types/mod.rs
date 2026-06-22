@@ -4,6 +4,7 @@
 mod macros;
 
 mod action_policy;
+mod channel;
 mod completion;
 mod contact;
 mod context;
@@ -15,7 +16,6 @@ mod learning;
 mod memory;
 mod model;
 mod observability;
-mod platform;
 mod provider;
 mod query_rewrite;
 mod runtime_events;
@@ -31,13 +31,19 @@ pub use action_policy::{
     ActionReviewDecision, ActionReviewField, ActionReviewFileDiff, ActionReviewPreview,
     ActionReviewStatus, ActionRuleScope, RiskLevel,
 };
+pub use channel::{
+    ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,
+    ChannelActor, ChannelCapabilities, ChannelRef, DiffHunk, InboundMessage, MessageContent,
+    MessageId, OutboundMessage, SessionChannelBindingId, ToolStatus,
+};
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, JsonResponseFormat,
     ProviderToolCallMetadata, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
 };
 pub use contact::{
-    CONTACT_USER_ID_PREFIX, ContactDeliveryChannel, ContactId, ContactPointId, ContactPointInput,
-    ContactPointKind, ContactPointRef, ContactRef, ContactSessionInitRequest,
+    CONTACT_USER_ID_PREFIX, ContactId, ContactPointId, ContactPointInput, ContactPointKind,
+    ContactPointRef, ContactRef, ContactSessionChannelChangeRequest,
+    ContactSessionChannelChangeResponse, ContactSessionChannelRequest, ContactSessionInitRequest,
     ContactSessionInitResponse, ContactSessionPromotionRequest, ContactSessionPromotionResponse,
     ContactTokenClaims, ContactTokenIssueRequest, ContactTokenIssueResponse,
     ContactVerificationChallengeId, ContactVerificationCompleteRequest,
@@ -67,10 +73,6 @@ pub use observability::{
     CacheReport, TraceContext, full_request_fingerprint, generate_trace_tags,
     normalize_environment, sanitize_langfuse_id, stable_prefix_fingerprint,
     trace_name_from_message, truncate_with_ellipsis,
-};
-pub use platform::{
-    ActionButton, Attachment, ButtonStyle, ChannelRef, DiffHunk, InboundMessage, MessageContent,
-    MessageId, OutboundMessage, Platform, PlatformCapabilities, PlatformUser, ToolStatus,
 };
 pub use provider::{ModelTask, ModelTier};
 pub use query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};

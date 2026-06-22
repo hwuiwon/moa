@@ -2,7 +2,7 @@
 
 mod support;
 
-use moa_core::{MessageId, Platform};
+use moa_core::{Channel, MessageId};
 use moa_messaging::{MessagingEditOutcome, MessagingEditResponse, edit_with_followup_fallback};
 use support::message_id;
 use wiremock::matchers::{method, path};
@@ -29,7 +29,7 @@ async fn slack_edit_failure_with_message_not_found_falls_back_to_thread_reply() 
         .await;
 
     let outcome = edit_with_followup_fallback(
-        Platform::Slack,
+        Channel::Slack,
         message_id("1700000000.000100"),
         "replacement slack text".to_string(),
         |content| {
@@ -71,7 +71,7 @@ async fn slack_edit_fallback_preserves_message_content_byte_for_byte() {
     let content = "exact `markdown` bytes\nwith emoji 👨‍👩‍👧".to_string();
 
     let outcome = edit_with_followup_fallback(
-        Platform::Slack,
+        Channel::Slack,
         message_id("1700000000.000100"),
         content.clone(),
         |content| {

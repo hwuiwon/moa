@@ -2,14 +2,14 @@
 
 mod support;
 
-use moa_core::{Platform, SessionSignal};
+use moa_core::{Channel, SessionSignal};
 use moa_messaging::control_action_for_inbound;
 use support::{fixed_session_id, inbound_message, outbound_text};
 
 #[test]
 fn slack_slash_stop_command_emits_softcancel_signal_with_ephemeral_ack() {
-    let inbound = inbound_message(Platform::Slack, "/stop");
-    let action = control_action_for_inbound(Platform::Slack, &fixed_session_id(), &inbound, true)
+    let inbound = inbound_message(Channel::Slack, "/stop");
+    let action = control_action_for_inbound(Channel::Slack, &fixed_session_id(), &inbound, true)
         .expect("slack /stop should produce a control action");
 
     assert_eq!(action.signal, Some(SessionSignal::SoftCancel));
@@ -20,9 +20,9 @@ fn slack_slash_stop_command_emits_softcancel_signal_with_ephemeral_ack() {
 #[test]
 fn slack_slash_stop_with_force_flag_emits_hardcancel_signal_instead() {
     for text in ["/stop --force", "/stop force"] {
-        let inbound = inbound_message(Platform::Slack, text);
+        let inbound = inbound_message(Channel::Slack, text);
         let action =
-            control_action_for_inbound(Platform::Slack, &fixed_session_id(), &inbound, true)
+            control_action_for_inbound(Channel::Slack, &fixed_session_id(), &inbound, true)
                 .expect("force stop should produce a control action");
 
         assert_eq!(action.signal, Some(SessionSignal::HardCancel));
@@ -36,8 +36,8 @@ fn slack_slash_stop_with_force_flag_emits_hardcancel_signal_instead() {
 
 #[test]
 fn slack_message_arriving_during_active_session_emits_queuemessage_signal() {
-    let inbound = inbound_message(Platform::Slack, "please also run cargo test");
-    let action = control_action_for_inbound(Platform::Slack, &fixed_session_id(), &inbound, true)
+    let inbound = inbound_message(Channel::Slack, "please also run cargo test");
+    let action = control_action_for_inbound(Channel::Slack, &fixed_session_id(), &inbound, true)
         .expect("message during active session should queue");
 
     match action.signal {
@@ -55,8 +55,8 @@ fn slack_message_arriving_during_active_session_emits_queuemessage_signal() {
 
 #[test]
 fn slack_slash_command_with_unknown_verb_returns_help_text_and_does_not_emit_signal() {
-    let inbound = inbound_message(Platform::Slack, "/wat");
-    let action = control_action_for_inbound(Platform::Slack, &fixed_session_id(), &inbound, true)
+    let inbound = inbound_message(Channel::Slack, "/wat");
+    let action = control_action_for_inbound(Channel::Slack, &fixed_session_id(), &inbound, true)
         .expect("unknown slash command should produce a help acknowledgement");
 
     assert_eq!(action.signal, None);

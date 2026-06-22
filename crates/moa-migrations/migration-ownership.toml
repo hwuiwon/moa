@@ -67,6 +67,18 @@ owner = "moa-orchestrator"
 readers = ["moa-auth/providers"]
 
 [[table]]
+name = "contact_channel_accounts"
+schema = "public"
+owner = "moa-orchestrator"
+readers = ["moa-session", "moa-messaging"]
+
+[[table]]
+name = "session_channel_bindings"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-orchestrator", "moa-messaging"]
+
+[[table]]
 name = "api_keys"
 schema = "public"
 owner = "moa-auth/providers"

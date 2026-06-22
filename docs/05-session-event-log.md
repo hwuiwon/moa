@@ -30,8 +30,8 @@ CREATE TABLE sessions (
     user_id TEXT NOT NULL,
     title TEXT,
     status TEXT NOT NULL DEFAULT 'created',
-    platform TEXT NOT NULL,
-    platform_channel TEXT,
+    channel TEXT NOT NULL DEFAULT 'chat',
+    active_channel_binding_id UUID,
     model TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -61,6 +61,9 @@ CREATE TABLE sessions (
     created_by_actor_id UUID,
     contact_promoted_from_id UUID
 );
+
+CREATE TABLE contact_channel_accounts (...);
+CREATE TABLE session_channel_bindings (...);
 
 CREATE TABLE events (
     id UUID PRIMARY KEY,
@@ -98,6 +101,14 @@ CREATE TABLE task_segments (
     UNIQUE(session_id, segment_index)
 );
 ```
+
+`contact_channel_accounts` stores provider-native identities or delivery
+accounts for a contact. Email and SMS accounts reference a `contact_point_id`
+rather than duplicating raw addresses or phone numbers. `session_channel_bindings`
+stores the active and historical route for a session with normalized lookup
+columns such as channel, external tenant key, external conversation key, and
+external thread key. The current active binding is also referenced from
+`sessions.active_channel_binding_id`.
 
 The event table uses a generated `tsvector` column and a GIN index for cross-session search. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
 

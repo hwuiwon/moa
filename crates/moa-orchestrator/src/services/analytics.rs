@@ -643,9 +643,20 @@ pub fn redacted_event_snippet(event: &Event) -> String {
             workspace_id,
             user_id,
             model,
-        } => format!("session created in workspace {workspace_id} by {user_id} using {model}"),
+            channel,
+        } => format!(
+            "session created in workspace {workspace_id} by {user_id} using {model} over {channel}"
+        ),
         Event::SessionStatusChanged { from, to } => {
             format!("session status changed from {from:?} to {to:?}")
+        }
+        Event::SessionChannelChanged {
+            from, to, reason, ..
+        } => {
+            format!(
+                "session channel changed from {from} to {to}: {}",
+                reason.as_deref().unwrap_or("")
+            )
         }
         Event::SessionCompleted {
             summary,

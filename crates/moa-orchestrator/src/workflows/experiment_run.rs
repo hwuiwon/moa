@@ -12,7 +12,7 @@ use moa_core::wire::{
     ExperimentRunStatusRequest, ExperimentRunStatusResponse, QueueMessageRequest,
 };
 use moa_core::{
-    MemoryScope, MoaError, ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore,
+    Channel, MemoryScope, MoaError, ModelId, SessionId, SessionMeta, SessionStatus, SessionStore,
     UserId, WorkspaceId, record_experiment_run,
 };
 use moa_experiments::model::{
@@ -295,7 +295,7 @@ fn new_session_meta(
         user_id: session_user_id(identity)?,
         title: Some("Experiment agent-loop run".to_string()),
         status: SessionStatus::Created,
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model,
         created_at: now,
         updated_at: now,

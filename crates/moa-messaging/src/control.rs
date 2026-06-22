@@ -1,29 +1,29 @@
 //! Slash-command and active-session control-signal translation.
 
 use moa_core::{
-    Attachment, InboundMessage, MessageContent, OutboundMessage, Platform, SessionId,
-    SessionSignal, UserMessage,
+    Attachment, Channel, InboundMessage, MessageContent, OutboundMessage, SessionId, SessionSignal,
+    UserMessage,
 };
 
-/// Messaging interpretation of one inbound platform message.
+/// Messaging interpretation of one inbound channel message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessagingControlAction {
     /// Signal to deliver to the orchestrator session, when this message controls a session.
     pub signal: Option<SessionSignal>,
-    /// User-visible acknowledgement rendered by the platform adapter.
+    /// User-visible acknowledgement rendered by the channel adapter.
     pub acknowledgement: OutboundMessage,
 }
 
 /// Translates an inbound message into a session control signal or queue acknowledgement.
 pub fn control_action_for_inbound(
-    platform: Platform,
+    channel: Channel,
     session_id: &SessionId,
     inbound: &InboundMessage,
     session_running: bool,
 ) -> Option<MessagingControlAction> {
     let text = inbound.text.trim();
     if text.starts_with('/') {
-        return Some(command_action(platform, text));
+        return Some(command_action(channel, text));
     }
 
     if session_running {
@@ -33,7 +33,7 @@ pub fn control_action_for_inbound(
                 attachments: inbound.attachments.clone(),
             })),
             acknowledgement: acknowledgement(
-                &platform,
+                &channel,
                 "Queued - will be picked up after current task",
                 false,
             ),
@@ -44,7 +44,7 @@ pub fn control_action_for_inbound(
     None
 }
 
-fn command_action(platform: Platform, text: &str) -> MessagingControlAction {
+fn command_action(channel: Channel, text: &str) -> MessagingControlAction {
     let mut parts = text.split_whitespace();
     let command = parts.next().unwrap_or_default();
     match command {
@@ -57,13 +57,13 @@ fn command_action(platform: Platform, text: &str) -> MessagingControlAction {
                     SessionSignal::SoftCancel
                 }),
                 acknowledgement: acknowledgement(
-                    &platform,
+                    &channel,
                     if force {
                         "Stopping immediately..."
                     } else {
                         "Stopping..."
                     },
-                    platform == Platform::Slack,
+                    channel == Channel::Slack,
                 ),
             }
         }
@@ -73,23 +73,23 @@ fn command_action(platform: Platform, text: &str) -> MessagingControlAction {
                 attachments: Vec::<Attachment>::new(),
             })),
             acknowledgement: acknowledgement(
-                &platform,
+                &channel,
                 "Queued - will be picked up after current task",
-                platform == Platform::Slack,
+                channel == Channel::Slack,
             ),
         },
         _ => MessagingControlAction {
             signal: None,
             acknowledgement: acknowledgement(
-                &platform,
+                &channel,
                 "Unknown command. Valid commands: /stop, /stop --force, /queue <message>",
-                platform == Platform::Slack,
+                channel == Channel::Slack,
             ),
         },
     }
 }
 
-fn acknowledgement(_platform: &Platform, text: &str, ephemeral: bool) -> OutboundMessage {
+fn acknowledgement(_channel: &Channel, text: &str, ephemeral: bool) -> OutboundMessage {
     OutboundMessage {
         content: MessageContent::Text(text.to_string()),
         buttons: Vec::new(),

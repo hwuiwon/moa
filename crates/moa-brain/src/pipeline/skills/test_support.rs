@@ -2,7 +2,7 @@
 
 use chrono::{TimeZone, Utc};
 use moa_core::{
-    ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, SkillMetadata, TokenPricing,
+    Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, SkillMetadata, TokenPricing,
     ToolCallFormat, UserId, WorkspaceId,
 };
 
@@ -44,7 +44,7 @@ pub(super) fn session() -> SessionMeta {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: UserId::new("user"),
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }

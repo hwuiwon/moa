@@ -104,7 +104,7 @@ impl ContextProcessor for InstructionProcessor {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        GeneralConfig, ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, TokenPricing,
+        Channel, GeneralConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing,
         ToolCallFormat, UserId, WorkspaceId,
     };
 
@@ -116,7 +116,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -166,7 +166,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };

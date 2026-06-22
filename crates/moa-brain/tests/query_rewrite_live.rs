@@ -9,8 +9,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, ContextProcessor,
-    LLMProvider, MoaConfig, ModelCapabilities, Platform, QueryRewriteResult, RewriteReason,
+    Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+    ContextProcessor, LLMProvider, MoaConfig, ModelCapabilities, QueryRewriteResult, RewriteReason,
     RewriteSource, SessionMeta, UserId, WorkspaceId,
 };
 use moa_providers::resolve_rewriter_provider;
@@ -225,7 +225,7 @@ async fn process_case(
         &SessionMeta {
             workspace_id: WorkspaceId::new("live-query-rewrite"),
             user_id: UserId::new("live-query-rewrite-user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: provider.capabilities().model_id.clone(),
             ..SessionMeta::default()
         },

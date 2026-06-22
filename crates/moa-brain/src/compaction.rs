@@ -304,13 +304,21 @@ fn event_summary_line(record: &EventRecord) -> String {
             workspace_id,
             user_id,
             model,
+            channel,
         } => format!(
-            "#{} session_created workspace={workspace_id} user={user_id} model={model}",
+            "#{} session_created workspace={workspace_id} user={user_id} model={model} channel={channel}",
             record.sequence_num
         ),
         Event::SessionStatusChanged { from, to } => {
             format!("#{} session_status {from:?} -> {to:?}", record.sequence_num)
         }
+        Event::SessionChannelChanged {
+            from, to, reason, ..
+        } => format!(
+            "#{} session_channel {from} -> {to}: {}",
+            record.sequence_num,
+            truncate(reason.as_deref().unwrap_or(""))
+        ),
         Event::SessionCompleted { summary, .. } => format!(
             "#{} session_completed: {}",
             record.sequence_num,

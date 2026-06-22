@@ -6,14 +6,14 @@ Caveats are grouped by root cause / architectural boundary, not by the crate whe
 
 ---
 
-## Messaging: platform callbacks are not first-class typed events
+## Messaging: channel callbacks are not first-class typed events
 
-Messaging adapters normalize platform-specific callback payloads into text control messages instead of typed messaging events. The fix is the same everywhere: widen `PlatformAdapter` to emit structured callback events alongside `InboundMessage`.
+Messaging adapters normalize channel-specific callback payloads into text control messages instead of typed messaging events. The fix is the same everywhere: widen `ChannelAdapter` to emit structured callback events alongside `InboundMessage`.
 
 ### Slack interactive actions are normalized back into control messages
 
 - `crates/moa-messaging/src/slack.rs` receives Block Kit button actions over Socket Mode.
-- The core `PlatformAdapter` trait still only emits `InboundMessage`.
+- The core `ChannelAdapter` trait still only emits `InboundMessage`.
 - The adapter converts current interactive actions into normalized text commands.
 - If adapters need richer structured callbacks later, `InboundMessage.text`
   should stop carrying control commands. Workspace action review decisions and
@@ -37,7 +37,7 @@ The Slack adapter resolves outbound destinations from `reply_to` and cannot proa
 
 ## Messaging: conservative rendering
 
-Slack rendering is intentionally minimal. Upgrading it requires a proper platform-safe formatting layer with escaping and richer markup.
+Slack rendering is intentionally minimal. Upgrading it requires a proper channel-safe formatting layer with escaping and richer markup.
 
 ### Slack rendering is intentionally minimal Block Kit
 

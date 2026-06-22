@@ -70,7 +70,7 @@ pub use telemetry::{TelemetryConfig, TelemetryGuard, default_log_path, init_obse
 pub use traits::{
     BlobStore, BranchManager, BuiltInTool, ContextProcessor, CredentialVault, EmbeddingProvider,
     HandProvider, LLMProvider, LineageHandle, MemoryToolExecutor, NULL_LINEAGE_HANDLE,
-    NullLineageHandle, PlatformAdapter, SessionStore, ToolContext,
+    NullLineageHandle, SessionStore, ToolContext,
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
 pub use turn_latency::{

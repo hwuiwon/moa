@@ -168,7 +168,7 @@ struct DigestRow {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId, Platform, SessionId,
+        Channel, ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId, SessionId,
         SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
     };
     use sqlx::postgres::PgPoolOptions;
@@ -228,7 +228,7 @@ mod tests {
                 id: SessionId::new(),
                 workspace_id: WorkspaceId::new("workspace-a"),
                 user_id: UserId::new("user-a"),
-                platform: Platform::Api,
+                channel: Channel::Chat,
                 model: ModelId::new("mock"),
                 ..SessionMeta::default()
             },

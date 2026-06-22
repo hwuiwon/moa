@@ -11,10 +11,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    Attachment, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event,
-    EventRecord, LLMProvider, MemoryScope, MoaConfig, MoaError, ModelCapabilities, ModelId,
-    ModelTier, Platform, SessionId, SessionMeta, SessionStatus, StopReason, TokenPricing,
-    TokenUsage, ToolCallFormat, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
+    CompletionStream, Event, EventRecord, LLMProvider, MemoryScope, MoaConfig, MoaError,
+    ModelCapabilities, ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason,
+    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use moa_providers::ModelRouter;
@@ -111,7 +111,7 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
         user_id: user_id.clone(),
         title: Some(fixture.task.clone()),
         status: SessionStatus::Completed,
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model: ModelId::new("scripted-skill-model"),
         ..SessionMeta::default()
     };

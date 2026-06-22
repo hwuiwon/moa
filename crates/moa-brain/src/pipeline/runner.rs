@@ -234,7 +234,7 @@ fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
 mod tests {
     use async_trait::async_trait;
     use moa_core::{
-        ContextMessage, ContextProcessor, MoaError, ModelCapabilities, ModelId, Platform,
+        Channel, ContextMessage, ContextProcessor, MoaError, ModelCapabilities, ModelId,
         ProcessorOutput, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
         WorkingContext, WorkspaceId,
     };
@@ -291,7 +291,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -328,7 +328,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };

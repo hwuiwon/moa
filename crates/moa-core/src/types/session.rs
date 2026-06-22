@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Attachment, ContactId, ContactRef, ModelId, Platform, SequenceNum, SessionActorRef, SessionId,
-    UserId, WorkspaceId,
+    Attachment, Channel, ContactId, ContactRef, ModelId, SequenceNum, SessionActorRef,
+    SessionChannelBindingId, SessionId, UserId, WorkspaceId,
 };
 
 /// Session lifecycle status.
@@ -127,10 +127,11 @@ pub struct SessionMeta {
     pub title: Option<String>,
     /// Current session status.
     pub status: SessionStatus,
-    /// Source platform.
-    pub platform: Platform,
-    /// Platform-specific channel identifier.
-    pub platform_channel: Option<String>,
+    /// Active delivery channel.
+    pub channel: Channel,
+    /// Active session channel binding, when persisted.
+    #[serde(default)]
+    pub active_channel_binding_id: Option<SessionChannelBindingId>,
     /// Model identifier.
     pub model: ModelId,
     /// Creation timestamp.
@@ -191,8 +192,8 @@ impl Default for SessionMeta {
             user_id: UserId::new(""),
             title: None,
             status: SessionStatus::Created,
-            platform: Platform::Api,
-            platform_channel: None,
+            channel: Channel::Chat,
+            active_channel_binding_id: None,
             model: ModelId::new(""),
             created_at: now,
             updated_at: now,
@@ -226,8 +227,8 @@ pub struct SessionSummary {
     pub title: Option<String>,
     /// Current status.
     pub status: SessionStatus,
-    /// Source platform.
-    pub platform: Platform,
+    /// Active delivery channel.
+    pub channel: Channel,
     /// Model identifier.
     pub model: ModelId,
     /// Last update timestamp.
@@ -243,8 +244,8 @@ pub struct SessionFilter {
     pub user_id: Option<UserId>,
     /// Restrict to a single status.
     pub status: Option<SessionStatus>,
-    /// Restrict to a single platform.
-    pub platform: Option<Platform>,
+    /// Restrict to a single communication channel.
+    pub channel: Option<Channel>,
     /// Maximum number of results.
     pub limit: Option<usize>,
 }

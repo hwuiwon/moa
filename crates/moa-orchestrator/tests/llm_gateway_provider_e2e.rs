@@ -107,7 +107,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
             json!(meta.workspace_id.to_string()),
         );
         metadata.insert("_moa.user_id".to_string(), json!(meta.user_id.to_string()));
-        metadata.insert("_moa.platform".to_string(), json!(meta.platform.as_str()));
+        metadata.insert("_moa.channel".to_string(), json!(meta.channel.as_str()));
 
         let request = CompletionRequest {
             model: Some(model.into()),

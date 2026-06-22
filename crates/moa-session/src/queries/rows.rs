@@ -11,8 +11,8 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         .try_get::<String, _>("user_id")
         .map_err(map_sqlx_error)?;
     let status_text = row.try_get::<String, _>("status").map_err(map_sqlx_error)?;
-    let platform_text = row
-        .try_get::<String, _>("platform")
+    let channel_text = row
+        .try_get::<String, _>("channel")
         .map_err(map_sqlx_error)?;
     let model = row.try_get::<String, _>("model").map_err(map_sqlx_error)?;
 
@@ -50,10 +50,11 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
             .try_get::<Option<String>, _>("title")
             .map_err(map_sqlx_error)?,
         status: from_db("session status", &status_text)?,
-        platform: from_db("platform", &platform_text)?,
-        platform_channel: row
-            .try_get::<Option<String>, _>("platform_channel")
-            .map_err(map_sqlx_error)?,
+        channel: from_db("channel", &channel_text)?,
+        active_channel_binding_id: row
+            .try_get::<Option<Uuid>, _>("active_channel_binding_id")
+            .map_err(map_sqlx_error)?
+            .map(SessionChannelBindingId),
         model: ModelId::new(model),
         created_at: row
             .try_get::<DateTime<Utc>, _>("created_at")
@@ -178,9 +179,9 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
             "session status",
             &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
         )?,
-        platform: from_db(
-            "platform",
-            &row.try_get::<String, _>("platform")
+        channel: from_db(
+            "channel",
+            &row.try_get::<String, _>("channel")
                 .map_err(map_sqlx_error)?,
         )?,
         model: ModelId::new(row.try_get::<String, _>("model").map_err(map_sqlx_error)?),

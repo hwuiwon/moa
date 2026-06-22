@@ -377,8 +377,7 @@ async fn require_session_participant(
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, ModelId, Platform, SessionMeta,
-        WorkspaceId,
+        Channel, ContactId, ContactRef, ContactVerificationState, ModelId, SessionMeta, WorkspaceId,
     };
 
     use super::admitted_contact_for_turn;
@@ -412,7 +411,7 @@ mod tests {
         SessionMeta {
             workspace_id: contact.workspace_id.clone(),
             user_id: contact.contact_id.as_user_id(),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("mock"),
             contact: Some(contact),
             ..SessionMeta::default()

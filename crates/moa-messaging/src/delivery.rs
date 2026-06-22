@@ -6,8 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ContactDeliveryChannel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError,
-    Result, WorkspaceId,
+    Channel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError, Result, WorkspaceId,
 };
 use tracing::Instrument;
 use uuid::Uuid;
@@ -55,7 +54,7 @@ pub struct DeliveryMessage {
     /// Delivery use case.
     pub purpose: DeliveryPurpose,
     /// Selected delivery channel.
-    pub channel: ContactDeliveryChannel,
+    pub channel: Channel,
     /// Normalized destination address or phone number.
     pub to: String,
     /// Email subject. Ignored for SMS.
@@ -75,7 +74,7 @@ impl DeliveryMessage {
         tenant_id: Uuid,
         workspace_id: WorkspaceId,
         contact_id: ContactId,
-        channel: ContactDeliveryChannel,
+        channel: Channel,
         to: impl Into<String>,
         code: impl AsRef<str>,
         expires_at: DateTime<Utc>,
@@ -112,7 +111,7 @@ impl DeliveryMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryReceipt {
     /// Channel used for the send.
-    pub channel: ContactDeliveryChannel,
+    pub channel: Channel,
     /// Provider that accepted the message.
     pub provider: String,
     /// Provider message identifier when available.
@@ -230,7 +229,7 @@ impl ProviderDeliverySink {
         }
         let result = client.send_email(&email).await?;
         Ok(DeliveryReceipt {
-            channel: ContactDeliveryChannel::Email,
+            channel: Channel::Email,
             provider: "postmark".to_string(),
             provider_message_id: Some(result.message_id),
             provider_status: Some(result.message),
@@ -246,7 +245,7 @@ impl ProviderDeliverySink {
         let sms = TwilioSmsMessage::new(message.to, message.text_body);
         let result = client.send_sms(&sms).await?;
         Ok(DeliveryReceipt {
-            channel: ContactDeliveryChannel::Sms,
+            channel: Channel::Sms,
             provider: "twilio".to_string(),
             provider_message_id: Some(result.sid),
             provider_status: Some(result.status),
@@ -260,7 +259,7 @@ impl DeliverySink for ProviderDeliverySink {
         let span = delivery_span(&message);
         async move {
             match message.channel {
-                ContactDeliveryChannel::Email => {
+                Channel::Email => {
                     #[cfg(feature = "postmark")]
                     {
                         self.deliver_email(message).await
@@ -273,7 +272,7 @@ impl DeliverySink for ProviderDeliverySink {
                         ))
                     }
                 }
-                ContactDeliveryChannel::Sms => {
+                Channel::Sms => {
                     #[cfg(feature = "twilio")]
                     {
                         self.deliver_sms(message).await
@@ -286,6 +285,10 @@ impl DeliverySink for ProviderDeliverySink {
                         ))
                     }
                 }
+                Channel::Chat | Channel::Slack => Err(MoaError::ValidationError(format!(
+                    "{} is not supported for contact delivery",
+                    message.channel
+                ))),
             }
         }
         .instrument(span)
@@ -429,7 +432,7 @@ fn delivery_span(message: &DeliveryMessage) -> tracing::Span {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{ContactDeliveryChannel, ContactId, WorkspaceId};
+    use moa_core::{Channel, ContactId, WorkspaceId};
     use uuid::Uuid;
 
     use super::{DeliveryMessage, DeliveryPurpose};
@@ -449,7 +452,7 @@ mod tests {
             tenant_id,
             workspace_id.clone(),
             contact_id,
-            ContactDeliveryChannel::Sms,
+            Channel::Sms,
             "+15005550006",
             "123456",
             expires_at,
@@ -459,7 +462,7 @@ mod tests {
         assert_eq!(message.workspace_id, workspace_id);
         assert_eq!(message.contact_id, contact_id);
         assert_eq!(message.purpose, DeliveryPurpose::ContactVerification);
-        assert_eq!(message.channel, ContactDeliveryChannel::Sms);
+        assert_eq!(message.channel, Channel::Sms);
         assert_eq!(message.to, "+15005550006");
         assert!(message.text_body.contains("123456"));
         assert_eq!(

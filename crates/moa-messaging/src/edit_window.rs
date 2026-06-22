@@ -2,16 +2,16 @@
 
 use std::future::Future;
 
-use moa_core::{MessageId, MoaError, Platform, Result};
+use moa_core::{Channel, MessageId, MoaError, Result};
 
-/// Normalized edit response returned by a platform adapter.
+/// Normalized edit response returned by a channel adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagingEditResponse {
-    /// HTTP or platform status code.
+    /// HTTP or channel-provider status code.
     pub status: u16,
-    /// Platform response body.
+    /// Channel response body.
     pub body: String,
-    /// Edited platform message id when the edit succeeded.
+    /// Edited channel message id when the edit succeeded.
     pub message_id: Option<MessageId>,
 }
 
@@ -38,25 +38,25 @@ impl MessagingEditResponse {
 /// Result of one edit operation after fallback handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessagingEditOutcome {
-    /// The original platform message was edited.
+    /// The original channel message was edited.
     Edited {
-        /// Edited platform message id.
+        /// Edited channel message id.
         message_id: MessageId,
     },
     /// The edit failed with a stale-window error and a follow-up message was sent instead.
     FollowUp {
-        /// New follow-up platform message id.
+        /// New follow-up channel message id.
         message_id: MessageId,
-        /// Original platform message id used as the reply reference.
+        /// Original channel message id used as the reply reference.
         reply_to: MessageId,
         /// Byte-for-byte fallback message content.
         content: String,
     },
 }
 
-/// Runs an edit and falls back to a threaded or replied follow-up when the platform rejects it.
+/// Runs an edit and falls back to a threaded or replied follow-up when the channel rejects it.
 pub async fn edit_with_followup_fallback<EditFn, EditFut, FollowFn, FollowFut>(
-    platform: Platform,
+    channel: Channel,
     original_message_id: MessageId,
     content: String,
     edit: EditFn,
@@ -69,7 +69,7 @@ where
     FollowFut: Future<Output = Result<MessageId>>,
 {
     let edit_response = edit(content.clone()).await?;
-    if is_fallback_edit_error(&platform, &edit_response) {
+    if is_fallback_edit_error(&channel, &edit_response) {
         let message_id = followup(original_message_id.clone(), content.clone()).await?;
         return Ok(MessagingEditOutcome::FollowUp {
             message_id,
@@ -87,15 +87,15 @@ where
 
     Err(MoaError::ProviderError(format!(
         "{} edit failed with status {}: {}",
-        platform, edit_response.status, edit_response.body
+        channel, edit_response.status, edit_response.body
     )))
 }
 
 /// Returns true when an edit error should be converted into a follow-up message.
-pub fn is_fallback_edit_error(platform: &Platform, response: &MessagingEditResponse) -> bool {
+pub fn is_fallback_edit_error(channel: &Channel, response: &MessagingEditResponse) -> bool {
     let body = response.body.to_ascii_lowercase();
-    match platform {
-        Platform::Slack => {
+    match channel {
+        Channel::Slack => {
             body.contains("message_not_found") || body.contains("cant_update_message")
         }
         _ => false,

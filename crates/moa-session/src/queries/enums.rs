@@ -22,8 +22,8 @@ pub(crate) fn from_db<E: FromStr>(kind: &str, value: &str) -> Result<E> {
 mod tests {
     use super::*;
     use moa_core::{
-        ActionPolicyEffect, ActionRuleScope, AttributionEffect, AttributionSubjectType, EventType,
-        LearningCandidateStatus, LearningCandidateType, LearningRiskClass, Platform,
+        ActionPolicyEffect, ActionRuleScope, AttributionEffect, AttributionSubjectType, Channel,
+        EventType, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
         SegmentOutcome, SessionStatus,
     };
 
@@ -47,10 +47,10 @@ mod tests {
             );
         }
 
-        let platforms = [(Platform::Slack, "slack"), (Platform::Api, "api")];
-        for (value, label) in platforms {
+        let channels = [(Channel::Slack, "slack"), (Channel::Chat, "chat")];
+        for (value, label) in channels {
             assert_eq!(value.as_str(), label);
-            assert_eq!(from_db::<Platform>("platform", label).unwrap(), value);
+            assert_eq!(from_db::<Channel>("channel", label).unwrap(), value);
         }
 
         // Event types persist as verbatim PascalCase (distinct from the snake_case

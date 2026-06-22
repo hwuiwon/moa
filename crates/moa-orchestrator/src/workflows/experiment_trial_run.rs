@@ -9,8 +9,8 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
-    CompletionRequest, ContextMessage, Event, EventRange, EventRecord, EventType, MemoryScope,
-    MoaError, ModelId, Platform, SessionId, SessionMeta, SessionStatus, SessionStore, UserId,
+    Channel, CompletionRequest, ContextMessage, Event, EventRange, EventRecord, EventType,
+    MemoryScope, MoaError, ModelId, SessionId, SessionMeta, SessionStatus, SessionStore, UserId,
     WorkspaceId, current_trace_id, record_experiment_trial, record_experiment_trial_duration,
     record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
 };
@@ -249,7 +249,7 @@ fn new_session_meta(
         user_id: session_user_id(identity)?,
         title: Some("Experiment trial agent-loop run".to_string()),
         status: SessionStatus::Created,
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model,
         created_at: now,
         updated_at: now,

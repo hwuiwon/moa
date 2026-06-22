@@ -25,8 +25,8 @@ impl PostgresSessionStore {
         .bind(meta.user_id.to_string())
         .bind(meta.title)
         .bind(meta.status.as_str())
-        .bind(meta.platform.as_str())
-        .bind(meta.platform_channel)
+        .bind(meta.channel.as_str())
+        .bind(meta.active_channel_binding_id.map(|id| id.0))
         .bind(meta.model.to_string())
         .bind(meta.created_at)
         .bind(meta.updated_at)
@@ -75,6 +75,74 @@ impl PostgresSessionStore {
         record_session_created(&meta.workspace_id, &meta.status);
 
         Ok(session_id)
+    }
+
+    /// Replaces a session's active channel binding and current channel metadata.
+    pub async fn replace_session_channel_binding(
+        &self,
+        replacement: SessionChannelBindingReplacement<'_>,
+    ) -> Result<moa_core::SessionChannelBindingId> {
+        let binding_id = moa_core::SessionChannelBindingId::new();
+        let route = serde_json::to_value(replacement.channel_ref)
+            .map_err(|error| MoaError::SerializationError(error.to_string()))?;
+        let route_keys = channel_route_keys(replacement.channel_ref);
+        let sessions = self.table_name("sessions");
+        let bindings = self.table_name("session_channel_bindings");
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+
+        sqlx::query(&format!(
+            "UPDATE {bindings} \
+             SET ended_at = NOW(), last_used_at = NOW() \
+             WHERE session_id = $1 AND ended_at IS NULL"
+        ))
+        .bind(replacement.session_id.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(&format!(
+            "INSERT INTO {bindings} \
+                 (id, tenant_id, workspace_id, session_id, contact_id, channel_account_id, \
+                  contact_point_id, channel, external_tenant_key, external_conversation_key, \
+                  external_thread_key, route, reason) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+        ))
+        .bind(binding_id.0)
+        .bind(replacement.tenant_id)
+        .bind(replacement.workspace_id.as_str())
+        .bind(replacement.session_id.0)
+        .bind(replacement.contact_id.0)
+        .bind(replacement.channel_account_id.map(|id| id.0))
+        .bind(replacement.contact_point_id.map(|id| id.0))
+        .bind(replacement.channel_ref.channel().as_str())
+        .bind(route_keys.external_tenant_key)
+        .bind(route_keys.external_conversation_key)
+        .bind(route_keys.external_thread_key)
+        .bind(route)
+        .bind(replacement.reason)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let affected = sqlx::query(&format!(
+            "UPDATE {sessions} \
+             SET channel = $1, active_channel_binding_id = $2, updated_at = NOW() \
+             WHERE id = $3 AND workspace_id = $4"
+        ))
+        .bind(replacement.channel_ref.channel().as_str())
+        .bind(binding_id.0)
+        .bind(replacement.session_id.0)
+        .bind(replacement.workspace_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(MoaError::SessionNotFound(replacement.session_id));
+        }
+
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(binding_id)
     }
 
     /// Updates contact metadata attached to an existing session.
@@ -182,6 +250,42 @@ impl PostgresSessionStore {
         .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)
+    }
+}
+
+struct ChannelRouteKeys {
+    external_tenant_key: Option<String>,
+    external_conversation_key: Option<String>,
+    external_thread_key: Option<String>,
+}
+
+fn channel_route_keys(channel_ref: &moa_core::ChannelRef) -> ChannelRouteKeys {
+    match channel_ref {
+        moa_core::ChannelRef::Chat {
+            conversation_id,
+            client_session_id,
+            ..
+        } => ChannelRouteKeys {
+            external_tenant_key: None,
+            external_conversation_key: Some(conversation_id.clone()),
+            external_thread_key: client_session_id.clone(),
+        },
+        moa_core::ChannelRef::Slack {
+            team_id,
+            slack_channel_id,
+            thread_ts,
+            user_id,
+        } => ChannelRouteKeys {
+            external_tenant_key: team_id.clone(),
+            external_conversation_key: slack_channel_id.clone().or_else(|| user_id.clone()),
+            external_thread_key: thread_ts.clone(),
+        },
+        moa_core::ChannelRef::Email { channel_account_id }
+        | moa_core::ChannelRef::Sms { channel_account_id } => ChannelRouteKeys {
+            external_tenant_key: None,
+            external_conversation_key: Some(channel_account_id.to_string()),
+            external_thread_key: None,
+        },
     }
 }
 
@@ -619,7 +723,7 @@ impl SessionStore for PostgresSessionStore {
         Ok(events)
     }
 
-    /// Lists sessions filtered by workspace, user, status, or platform.
+    /// Lists sessions filtered by workspace, user, status, or channel.
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
         let sessions = self.table_name("sessions");
         let mut query = QueryBuilder::<Postgres>::new(format!(
@@ -638,9 +742,9 @@ impl SessionStore for PostgresSessionStore {
             query.push(" AND status = ");
             query.push_bind(status.as_str());
         }
-        if let Some(platform) = filter.platform {
-            query.push(" AND platform = ");
-            query.push_bind(platform.as_str());
+        if let Some(channel) = filter.channel {
+            query.push(" AND channel = ");
+            query.push_bind(channel.as_str());
         }
 
         query.push(" ORDER BY updated_at DESC");
@@ -870,5 +974,47 @@ impl SessionStore for PostgresSessionStore {
         token_cost: u64,
     ) -> Result<()> {
         PostgresSessionStore::record_active_segment_turn_usage(self, session_id, token_cost).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{ChannelAccountId, ChannelRef};
+
+    use super::channel_route_keys;
+
+    #[test]
+    fn channel_route_keys_use_slack_conversation_and_thread_columns() {
+        // Pins: inbound Slack lookup remains indexable without JSONB predicates.
+        let keys = channel_route_keys(&ChannelRef::Slack {
+            team_id: Some("T123".to_string()),
+            slack_channel_id: Some("C123".to_string()),
+            thread_ts: Some("1700000000.000100".to_string()),
+            user_id: Some("U123".to_string()),
+        });
+
+        assert_eq!(keys.external_tenant_key.as_deref(), Some("T123"));
+        assert_eq!(keys.external_conversation_key.as_deref(), Some("C123"));
+        assert_eq!(
+            keys.external_thread_key.as_deref(),
+            Some("1700000000.000100")
+        );
+    }
+
+    #[test]
+    fn channel_route_keys_use_account_id_for_email_and_sms() {
+        // Pins: email/SMS inbound lookup keys do not duplicate raw addresses or phone numbers.
+        let account_id = ChannelAccountId::new();
+        let account_id_text = account_id.to_string();
+        let keys = channel_route_keys(&ChannelRef::Email {
+            channel_account_id: account_id,
+        });
+
+        assert_eq!(keys.external_tenant_key, None);
+        assert_eq!(
+            keys.external_conversation_key.as_deref(),
+            Some(account_id_text.as_str())
+        );
+        assert_eq!(keys.external_thread_key, None);
     }
 }

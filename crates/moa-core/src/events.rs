@@ -6,9 +6,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::types::{
-    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, EventType,
-    ModelId, ModelTier, SegmentId, SessionStatus, SubAgentId, SubAgentState, ToolCallId,
-    ToolOutput, UserId, WorkspaceId,
+    ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, Channel,
+    ContactId, EventType, ModelId, ModelTier, SegmentId, SessionActorRef, SessionChannelBindingId,
+    SessionStatus, SubAgentId, SubAgentState, ToolCallId, ToolOutput, UserId, WorkspaceId,
 };
 
 /// Append-only session event payload.
@@ -23,6 +23,9 @@ pub enum Event {
         user_id: UserId,
         /// Model identifier.
         model: ModelId,
+        /// Initial delivery channel.
+        #[serde(default)]
+        channel: Channel,
     },
     /// Session status changed.
     SessionStatusChanged {
@@ -30,6 +33,28 @@ pub enum Event {
         from: SessionStatus,
         /// New status.
         to: SessionStatus,
+    },
+    /// Session communication route changed.
+    SessionChannelChanged {
+        /// Previous delivery channel.
+        from: Channel,
+        /// New delivery channel.
+        to: Channel,
+        /// Contact associated with the session route, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contact_id: Option<ContactId>,
+        /// Previous active route binding, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_binding_id: Option<SessionChannelBindingId>,
+        /// New active route binding, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_binding_id: Option<SessionChannelBindingId>,
+        /// Actor that requested or applied the change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed_by: Option<SessionActorRef>,
+        /// Optional reason supplied by caller or workflow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Session completed successfully.
     SessionCompleted {
@@ -321,6 +346,7 @@ impl Event {
         match self {
             Self::SessionCreated { .. } => EventType::SessionCreated,
             Self::SessionStatusChanged { .. } => EventType::SessionStatusChanged,
+            Self::SessionChannelChanged { .. } => EventType::SessionChannelChanged,
             Self::SessionCompleted { .. } => EventType::SessionCompleted,
             Self::SegmentStarted { .. } => EventType::SegmentStarted,
             Self::SegmentCompleted { .. } => EventType::SegmentCompleted,
@@ -355,6 +381,7 @@ impl Event {
         match self {
             Self::SessionCreated { .. } => "SessionCreated",
             Self::SessionStatusChanged { .. } => "SessionStatusChanged",
+            Self::SessionChannelChanged { .. } => "SessionChannelChanged",
             Self::SessionCompleted { .. } => "SessionCompleted",
             Self::SegmentStarted { .. } => "SegmentStarted",
             Self::SegmentCompleted { .. } => "SegmentCompleted",

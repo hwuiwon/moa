@@ -3,7 +3,7 @@
 use chrono::{TimeZone, Utc};
 use moa_brain::pipeline::digest::DigestProcessor;
 use moa_core::{
-    ContextMessage, ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId, Platform,
+    Channel, ContextMessage, ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId,
     SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
 };
 use moa_memory_lifecycle::digest::rebuild_digests;
@@ -283,7 +283,7 @@ fn working_context(workspace_id: &str, user_id: &str) -> WorkingContext {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new(workspace_id),
             user_id: UserId::new(user_id),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()
         },

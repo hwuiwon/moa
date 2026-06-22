@@ -22,7 +22,7 @@ use moa_core::wire::{
     StartTurnResponse, TurnOutcome,
 };
 use moa_core::{
-    Event, EventRange, EventRecord, ModelId, Platform, SessionId, SessionMeta, SessionStatus,
+    Channel, Event, EventRange, EventRecord, ModelId, SessionId, SessionMeta, SessionStatus,
     UserId, WorkspaceId,
 };
 use reqwest::StatusCode;
@@ -373,8 +373,8 @@ impl IsolatedTest<'_> {
             user_id: user_id.clone(),
             title: Some(format!("{}-{suffix}", self.prefix)),
             status: SessionStatus::Created,
-            platform: Platform::Api,
-            platform_channel: None,
+            channel: Channel::Chat,
+            active_channel_binding_id: None,
             model: ModelId::new("scripted-loadtest"),
             created_at: now,
             updated_at: now,
@@ -406,6 +406,7 @@ impl IsolatedTest<'_> {
                     workspace_id,
                     user_id,
                     model: ModelId::new("scripted-loadtest"),
+                    channel: Channel::Chat,
                 },
             )
             .await

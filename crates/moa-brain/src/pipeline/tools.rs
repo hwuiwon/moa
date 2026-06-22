@@ -67,7 +67,7 @@ fn tool_name(schema: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
+        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
         UserId, WorkspaceId,
     };
     use serde_json::json;
@@ -101,7 +101,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -132,7 +132,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };

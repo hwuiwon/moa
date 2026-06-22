@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::{
-    ContextMessage, ContextProcessor, LLMProvider, MoaConfig, Platform, QueryRewriteResult,
+    Channel, ContextMessage, ContextProcessor, LLMProvider, MoaConfig, QueryRewriteResult,
     RewriteSource, SessionMeta, UserId, WorkspaceId,
 };
 use moa_providers::OpenAIProvider;
@@ -40,7 +40,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         &SessionMeta {
             workspace_id: WorkspaceId::new("offline-query-rewrite"),
             user_id: UserId::new("offline-query-rewrite-user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: provider.capabilities().model_id.clone(),
             ..SessionMeta::default()
         },

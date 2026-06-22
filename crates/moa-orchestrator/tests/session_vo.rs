@@ -1,14 +1,14 @@
 //! Unit coverage for the Session virtual object's state projection helpers.
 
 use chrono::Utc;
-use moa_core::{CancelMode, ModelId, Platform, SessionMeta, SessionStatus, UserId, WorkspaceId};
+use moa_core::{CancelMode, Channel, ModelId, SessionMeta, SessionStatus, UserId, WorkspaceId};
 use moa_orchestrator::objects::session::SessionVoState;
 
 fn test_meta() -> SessionMeta {
     SessionMeta {
         workspace_id: WorkspaceId::new("workspace-1"),
         user_id: UserId::new("user-1"),
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }

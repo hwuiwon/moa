@@ -47,8 +47,8 @@ impl SessionTarget for RemoteTarget {
             user_id: self.user_id.clone(),
             title: Some(plan.title.clone()),
             status: SessionStatus::Created,
-            platform: Platform::Api,
-            platform_channel: None,
+            channel: Channel::Chat,
+            active_channel_binding_id: None,
             model: self.model.clone(),
             created_at: now,
             updated_at: now,
@@ -79,6 +79,7 @@ impl SessionTarget for RemoteTarget {
                     workspace_id: self.workspace_id.clone(),
                     user_id: self.user_id.clone(),
                     model: self.model.clone(),
+                    channel: Channel::Chat,
                 },
             )
             .await

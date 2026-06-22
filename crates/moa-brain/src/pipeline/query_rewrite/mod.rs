@@ -257,8 +257,8 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, ContextProcessor,
-        Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier, Platform,
+        Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
+        ContextProcessor, Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier,
         QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason, RewriteSource, SessionId,
         SessionMeta, StopReason, TokenPricing, TokenUsage, ToolCallFormat, UserId, WorkingContext,
         WorkspaceId,
@@ -333,7 +333,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()
         };

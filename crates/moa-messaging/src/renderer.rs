@@ -1,7 +1,7 @@
-//! Shared rendering helpers for messaging platform adapters.
+//! Shared rendering helpers for messaging channel adapters.
 
 use moa_core::{
-    MessageContent, OutboundMessage, Platform, SessionStatus, ToolStatus, types::DiffHunk,
+    Channel, MessageContent, OutboundMessage, SessionStatus, ToolStatus, types::DiffHunk,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,7 +29,7 @@ pub struct SlackRenderChunk {
     pub blocks: Option<Vec<SlackBlock>>,
 }
 
-/// Platform-adaptive renderer for Slack output.
+/// Channel-adaptive renderer for Slack output.
 #[cfg(feature = "slack")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SlackRenderer;
@@ -102,9 +102,9 @@ impl SlackRenderer {
             .collect()
     }
 
-    /// Returns Slack's platform capabilities.
-    pub fn capabilities(&self) -> moa_core::PlatformCapabilities {
-        moa_core::PlatformCapabilities {
+    /// Returns Slack's channel capabilities.
+    pub fn capabilities(&self) -> moa_core::ChannelCapabilities {
+        moa_core::ChannelCapabilities {
             max_message_length: SLACK_MAX_MESSAGE_LENGTH,
             supports_inline_buttons: true,
             supports_modals: true,
@@ -117,9 +117,9 @@ impl SlackRenderer {
         }
     }
 
-    /// Returns the platform handled by this renderer.
-    pub fn platform(&self) -> Platform {
-        Platform::Slack
+    /// Returns the channel handled by this renderer.
+    pub fn channel(&self) -> Channel {
+        Channel::Slack
     }
 }
 

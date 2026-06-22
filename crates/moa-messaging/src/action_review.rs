@@ -1,13 +1,13 @@
-//! Unified action-review rendering across platform adapters.
+//! Unified action-review rendering across channel adapters.
 
-use moa_core::{MessageContent, OutboundMessage, Platform, PlatformCapabilities};
+use moa_core::{Channel, ChannelCapabilities, MessageContent, OutboundMessage};
 
 use crate::renderer::render_action_review_request;
 
-/// Adds platform-native action-review affordances to an outbound message when possible.
+/// Adds channel-native action-review affordances to an outbound message when possible.
 pub fn prepare_outbound_message(
-    _platform: Platform,
-    capabilities: &PlatformCapabilities,
+    _channel: Channel,
+    capabilities: &ChannelCapabilities,
     mut message: OutboundMessage,
 ) -> OutboundMessage {
     let MessageContent::ActionReviewRequest { envelope, preview } = &message.content else {
@@ -25,8 +25,8 @@ pub fn prepare_outbound_message(
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, MessageContent,
-        OutboundMessage, Platform, PlatformCapabilities, RiskLevel, ToolCallId, UserId,
+        ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, Channel,
+        ChannelCapabilities, MessageContent, OutboundMessage, RiskLevel, ToolCallId, UserId,
         WorkspaceId,
     };
     use uuid::Uuid;
@@ -68,8 +68,8 @@ mod tests {
         }
     }
 
-    fn capabilities(supports_inline_buttons: bool) -> PlatformCapabilities {
-        PlatformCapabilities {
+    fn capabilities(supports_inline_buttons: bool) -> ChannelCapabilities {
+        ChannelCapabilities {
             max_message_length: 2_000,
             supports_inline_buttons,
             supports_modals: supports_inline_buttons,
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn prepare_outbound_message_keeps_review_card_when_buttons_are_available() {
         let prepared =
-            prepare_outbound_message(Platform::Slack, &capabilities(true), review_message());
+            prepare_outbound_message(Channel::Slack, &capabilities(true), review_message());
 
         assert!(matches!(
             prepared.content,
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn prepare_outbound_message_degrades_review_card_to_text() {
         let prepared =
-            prepare_outbound_message(Platform::Api, &capabilities(false), review_message());
+            prepare_outbound_message(Channel::Chat, &capabilities(false), review_message());
 
         match prepared.content {
             MessageContent::Markdown(text) => {

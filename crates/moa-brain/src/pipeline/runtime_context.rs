@@ -182,7 +182,7 @@ async fn detect_git_branch(workspace_root: &Path) -> Option<String> {
 mod tests {
     use chrono::TimeZone;
     use moa_core::{
-        ContextMessage, ModelCapabilities, ModelId, Platform, SessionId, SessionMeta, TokenPricing,
+        Channel, ContextMessage, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing,
         ToolCallFormat, UserId, WorkspaceId,
     };
 
@@ -214,7 +214,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         }

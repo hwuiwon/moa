@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{SessionId, UserId, WorkspaceId};
+use super::{Channel, ChannelAccountRef, ChannelRef, SessionId, UserId, WorkspaceId};
 
 /// Prefix used for contact-backed user-scope memory subjects.
 pub const CONTACT_USER_ID_PREFIX: &str = "contact:";
@@ -111,36 +111,6 @@ pub enum ContactPointKind {
 
 impl ContactPointKind {
     /// Returns the stable database representation.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        self.into()
-    }
-}
-
-/// Supported delivery channel for contact-owned messages.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    strum::IntoStaticStr,
-    strum::EnumString,
-)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum ContactDeliveryChannel {
-    /// Email delivery through the configured email provider.
-    Email,
-    /// SMS delivery through the configured SMS provider.
-    Sms,
-}
-
-impl ContactDeliveryChannel {
-    /// Returns the stable API representation.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         self.into()
@@ -331,7 +301,7 @@ pub struct ContactVerificationStartRequest {
     pub contact_token: String,
     /// Optional explicit delivery channel. Defaults to email for email points and SMS for phone points.
     #[serde(default)]
-    pub delivery_channel: Option<ContactDeliveryChannel>,
+    pub delivery_channel: Option<Channel>,
     /// Contact point to verify.
     pub contact_point: ContactPointInput,
 }
@@ -344,7 +314,7 @@ pub struct ContactVerificationStartResponse {
     /// Contact point being verified.
     pub contact_point: ContactPointRef,
     /// Delivery channel used for the verification code.
-    pub delivery_channel: ContactDeliveryChannel,
+    pub delivery_channel: Channel,
     /// Challenge expiration timestamp.
     pub expires_at: DateTime<Utc>,
 }
@@ -376,6 +346,16 @@ pub struct ContactVerificationCompleteResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Requested channel route for a contact session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionChannelRequest {
+    /// Route reference for the active channel.
+    pub channel_ref: ChannelRef,
+    /// Optional caller-supplied reason for choosing this route.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// Request to initialize an agent session for a contact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactSessionInitRequest {
@@ -386,9 +366,8 @@ pub struct ContactSessionInitRequest {
     /// Optional session title.
     #[serde(default)]
     pub title: Option<String>,
-    /// Optional platform channel.
-    #[serde(default)]
-    pub platform_channel: Option<String>,
+    /// Initial delivery channel and route.
+    pub channel: ContactSessionChannelRequest,
     /// Model identifier for the session.
     pub model: String,
 }
@@ -400,6 +379,36 @@ pub struct ContactSessionInitResponse {
     pub session_id: SessionId,
     /// Contact attached to the session.
     pub contact: ContactRef,
+}
+
+/// Request to change a contact session's active communication channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionChannelChangeRequest {
+    /// Workspace asserted by the public route.
+    pub workspace_id: WorkspaceId,
+    /// Session whose active channel should change.
+    pub session_id: SessionId,
+    /// Current contact token.
+    pub contact_token: String,
+    /// New active route reference.
+    pub channel_ref: ChannelRef,
+    /// Optional caller-supplied reason for the route change.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Response returned after changing a contact session's active channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionChannelChangeResponse {
+    /// Session whose channel changed.
+    pub session_id: SessionId,
+    /// Contact attached to the session.
+    pub contact: ContactRef,
+    /// Active route reference after the change.
+    pub channel_ref: ChannelRef,
+    /// Channel account used by the route, when applicable.
+    #[serde(default)]
+    pub channel_account: Option<ChannelAccountRef>,
 }
 
 /// Request to promote an active session after contact verification.
@@ -420,4 +429,24 @@ pub struct ContactSessionPromotionResponse {
     pub session_id: SessionId,
     /// Contact now attached to the session.
     pub contact: ContactRef,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChannelRef, ContactSessionChannelRequest};
+
+    #[test]
+    fn contact_session_channel_request_supports_chat_delivery_channel() {
+        // Pins: API ingress must carry a real delivery channel, not an API channel.
+        let request = ContactSessionChannelRequest {
+            channel_ref: ChannelRef::Chat {
+                conversation_id: "chat-123".to_string(),
+                user_id: Some("user-123".to_string()),
+                client_session_id: Some("client-123".to_string()),
+            },
+            reason: None,
+        };
+
+        assert_eq!(request.channel_ref.channel(), super::Channel::Chat);
+    }
 }

@@ -93,8 +93,8 @@ pub(super) async fn build_turn_context(
         "_moa.model",
         serde_json::json!(options.trace_context.model.clone()),
     );
-    if let Some(platform) = options.trace_context.platform.as_ref() {
-        ctx.insert_metadata("_moa.platform", serde_json::json!(platform.to_string()));
+    if let Some(platform) = options.trace_context.channel.as_ref() {
+        ctx.insert_metadata("_moa.channel", serde_json::json!(platform.to_string()));
     }
     if let Some(trace_name) = options.trace_context.trace_name.as_ref() {
         ctx.insert_metadata("_moa.trace_name", serde_json::json!(trace_name));

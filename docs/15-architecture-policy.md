@@ -18,7 +18,7 @@ and trait surfaces. It does not depend on the memory subsystem.
 - Session and event DTOs: `SessionMeta`, `SessionStatus`, `Event`,
   `EventRecord`, `EventStream`, `EventRange`, `EventFilter`
 - Trait surfaces: `BrainOrchestrator`, `SessionStore`, `BlobStore`,
-  `BranchManager`, `HandProvider`, `LLMProvider`, `PlatformAdapter`,
+  `BranchManager`, `HandProvider`, `LLMProvider`, `ChannelAdapter`,
   `BuiltInTool`, `ContextProcessor`, `CredentialVault`
 - Tool execution context: `ToolContext`
 

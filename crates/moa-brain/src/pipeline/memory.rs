@@ -648,9 +648,9 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContactId, ContactRef, ContactVerificationState, ContextProcessor, MemoryScope,
-        ModelCapabilities, ModelId, Platform, QueryRewriteResult, SessionId, SessionMeta,
-        TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        Channel, ContactId, ContactRef, ContactVerificationState, ContextProcessor, MemoryScope,
+        ModelCapabilities, ModelId, QueryRewriteResult, SessionId, SessionMeta, TokenPricing,
+        ToolCallFormat, UserId, WorkingContext, WorkspaceId,
     };
     use moa_lineage_core::TurnId;
     use sqlx::postgres::PgPoolOptions;
@@ -744,7 +744,7 @@ mod tests {
                 id: SessionId::new(),
                 workspace_id: WorkspaceId::new("workspace"),
                 user_id: UserId::new("user"),
-                platform: Platform::Api,
+                channel: Channel::Chat,
                 model: ModelId::new("mock"),
                 ..SessionMeta::default()
             },
@@ -772,7 +772,7 @@ mod tests {
                 id: SessionId::new(),
                 workspace_id: WorkspaceId::new("workspace"),
                 user_id: UserId::new("user"),
-                platform: Platform::Api,
+                channel: Channel::Chat,
                 model: ModelId::new("mock"),
                 ..SessionMeta::default()
             },
@@ -795,7 +795,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()
         };
@@ -869,7 +869,7 @@ mod tests {
             id: SessionId::new(),
             workspace_id: workspace_id.clone(),
             user_id: contact_id.as_user_id(),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("mock"),
             contact: Some(ContactRef {
                 contact_id,

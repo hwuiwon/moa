@@ -33,6 +33,8 @@ pub enum EventType {
     SessionCreated,
     /// `SessionStatusChanged`.
     SessionStatusChanged,
+    /// `SessionChannelChanged`.
+    SessionChannelChanged,
     /// `SessionCompleted`.
     SessionCompleted,
     /// `SegmentStarted`.

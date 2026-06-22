@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use clap::ValueEnum;
 use moa_core::{
-    Event, EventRecord, MoaConfig, MoaError, ModelId, ModelTask, Platform, Result, SessionId,
+    Channel, Event, EventRecord, MoaConfig, MoaError, ModelId, ModelTask, Result, SessionId,
     SessionMeta, SessionStatus, UserId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};

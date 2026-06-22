@@ -6,7 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, patch, post};
 use moa_core::traits::{AuthProvider, Credential};
 #[cfg(feature = "auth0")]
 use serde::Deserialize;
@@ -66,6 +66,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/promote",
             post(handle_public_agent_session_promote),
+        )
+        .route(
+            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/channel",
+            patch(handle_public_agent_session_channel_change),
         )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
@@ -311,6 +315,25 @@ async fn handle_public_agent_session_promote(
         headers,
         body,
         "/Contacts/promote_session",
+        [
+            ("workspace_id", serde_json::json!(workspace_id)),
+            ("session_id", serde_json::json!(session_id)),
+        ],
+    )
+    .await
+}
+
+async fn handle_public_agent_session_channel_change(
+    State(state): State<AppState>,
+    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_public_contact_route(
+        state,
+        headers,
+        body,
+        "/Contacts/change_session_channel",
         [
             ("workspace_id", serde_json::json!(workspace_id)),
             ("session_id", serde_json::json!(session_id)),

@@ -52,8 +52,8 @@ pub(crate) struct LLMSpanAttributes {
     pub user_id: Option<String>,
     /// Workspace identifier for filterable metadata.
     pub workspace_id: Option<String>,
-    /// Originating platform name.
-    pub platform: Option<String>,
+    /// Originating communication channel name.
+    pub channel: Option<String>,
     /// Human-readable trace name.
     pub trace_name: Option<String>,
     /// Total compiled context tokens for the request.
@@ -108,7 +108,7 @@ impl LLMSpanRecorder {
                 session_id: metadata_string(request, "_moa.session_id"),
                 user_id: metadata_string(request, "_moa.user_id"),
                 workspace_id: metadata_string(request, "_moa.workspace_id"),
-                platform: metadata_string(request, "_moa.platform"),
+                channel: metadata_string(request, "_moa.channel"),
                 trace_name: metadata_string(request, "_moa.trace_name"),
                 context_tokens: metadata_usize(request, "_moa.context_tokens"),
                 cache_hit_ratio: metadata_f64(request, "_moa.cache_ratio"),
@@ -340,8 +340,8 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
     if let Some(workspace_id) = attrs.workspace_id.as_ref() {
         span.set_attribute("langfuse.trace.metadata.workspace_id", workspace_id.clone());
     }
-    if let Some(platform) = attrs.platform.as_ref() {
-        span.set_attribute("langfuse.trace.metadata.platform", platform.clone());
+    if let Some(platform) = attrs.channel.as_ref() {
+        span.set_attribute("langfuse.trace.metadata.channel", platform.clone());
     }
     if let Some(trace_name) = attrs.trace_name.as_ref() {
         span.set_attribute("langfuse.trace.name", trace_name.clone());

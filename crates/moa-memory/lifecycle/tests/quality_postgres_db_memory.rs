@@ -1,7 +1,7 @@
 //! Postgres-backed checks for memory quality scoring and cache freshness.
 
 use chrono::Utc;
-use moa_core::{ModelId, Platform, SessionId, SessionMeta, SessionStore as _, UserId, WorkspaceId};
+use moa_core::{Channel, ModelId, SessionId, SessionMeta, SessionStore as _, UserId, WorkspaceId};
 use moa_memory_lifecycle::compute_quality_scores;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
@@ -36,7 +36,7 @@ async fn quality_scores_use_task_segment_outcomes_and_bump_workspace_version_onc
             id: session_id,
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            platform: Platform::Api,
+            channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()
         })

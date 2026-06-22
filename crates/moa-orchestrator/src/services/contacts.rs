@@ -6,16 +6,19 @@ use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::{
-    ContactDeliveryChannel, ContactId, ContactPointId, ContactPointInput, ContactPointKind,
-    ContactPointRef, ContactRef, ContactSessionInitRequest, ContactSessionInitResponse,
-    ContactSessionPromotionRequest, ContactSessionPromotionResponse, ContactTokenClaims,
-    ContactTokenIssueRequest, ContactTokenIssueResponse, ContactVerificationChallengeId,
-    ContactVerificationCompleteRequest, ContactVerificationCompleteResponse,
-    ContactVerificationStartRequest, ContactVerificationStartResponse, ContactVerificationState,
-    ModelId, Platform, SessionActorRef, SessionMeta, SessionStatus, WorkspaceId,
+    Channel, ChannelAccountId, ChannelAccountRef, ChannelRef, ContactId, ContactPointId,
+    ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
+    ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
+    ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionPromotionRequest,
+    ContactSessionPromotionResponse, ContactTokenClaims, ContactTokenIssueRequest,
+    ContactTokenIssueResponse, ContactVerificationChallengeId, ContactVerificationCompleteRequest,
+    ContactVerificationCompleteResponse, ContactVerificationStartRequest,
+    ContactVerificationStartResponse, ContactVerificationState, Event, ModelId, SessionActorRef,
+    SessionMeta, SessionStatus, WorkspaceId,
 };
 use moa_core::{MoaError, SessionStore};
 use moa_messaging::{DeliveryMessage, DeliverySink, ProviderDeliverySink};
+use moa_session::store::SessionChannelBindingReplacement;
 use rand::Rng;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -29,6 +32,7 @@ use crate::objects::session::SessionClient;
 
 const LOW_ASSURANCE_SCOPES: &[&str] = &[
     "agent:session:create",
+    "contact:session:channel:update",
     "contact:verify:start",
     "contact:verify:complete",
     "memory:session:read",
@@ -36,6 +40,7 @@ const LOW_ASSURANCE_SCOPES: &[&str] = &[
 ];
 const VERIFIED_SCOPES: &[&str] = &[
     "agent:session:create",
+    "contact:session:channel:update",
     "contact:verify:start",
     "contact:verify:complete",
     "contact:self:update",
@@ -71,6 +76,11 @@ pub trait Contacts {
     async fn init_session(
         request: Json<ContactSessionInitRequest>,
     ) -> Result<Json<ContactSessionInitResponse>, HandlerError>;
+
+    /// Changes the active communication channel for a contact-owned session.
+    async fn change_session_channel(
+        request: Json<ContactSessionChannelChangeRequest>,
+    ) -> Result<Json<ContactSessionChannelChangeResponse>, HandlerError>;
 
     /// Promotes an existing session to the verified canonical contact.
     async fn promote_session(
@@ -292,15 +302,31 @@ impl Contacts for ContactsImpl {
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
         let workspace_id = request.workspace_id.clone();
+        let model = ModelId::new(request.model);
+        let channel_request = request.channel;
+        let initial_channel_ref = channel_request.channel_ref;
+        let channel_reason = channel_request.reason;
 
-        let contact = ctx
+        let SessionChannelPreparation {
+            contact,
+            channel_ref,
+            channel_account,
+            contact_point_id,
+        } = ctx
             .run(|| async move {
                 ensure_contact_token_grant_active(&pool, &claims, contact_id).await?;
-                load_contact_ref(pool, &workspace_id, tenant_id, contact_id)
-                    .await
-                    .map(Json::from)
+                let contact =
+                    load_contact_ref(pool.clone(), &workspace_id, tenant_id, contact_id).await?;
+                let resolved =
+                    resolve_contact_session_channel(&pool, &contact, initial_channel_ref).await?;
+                Ok::<_, HandlerError>(Json::from(SessionChannelPreparation {
+                    contact,
+                    channel_ref: resolved.channel_ref,
+                    channel_account: resolved.channel_account,
+                    contact_point_id: resolved.contact_point_id,
+                }))
             })
-            .name("contacts_load_session_contact")
+            .name("contacts_prepare_session_channel")
             .await?
             .into_inner();
         let meta = SessionMeta {
@@ -308,23 +334,56 @@ impl Contacts for ContactsImpl {
             user_id: contact.contact_id.as_user_id(),
             title: request.title,
             status: SessionStatus::Created,
-            platform: Platform::Api,
-            platform_channel: request.platform_channel,
-            model: ModelId::new(request.model),
+            channel: channel_ref.channel(),
+            active_channel_binding_id: None,
+            model: model.clone(),
             contact: Some(contact.clone()),
             created_by: Some(SessionActorRef::Contact {
                 id: contact.contact_id,
             }),
             ..SessionMeta::default()
         };
-        let meta_for_vo = meta.clone();
-        let session_id = ctx
+        let response_contact = contact.clone();
+        let event_channel = meta.channel;
+        let workspace_id_for_create = request.workspace_id.clone();
+        let (session_id, meta_for_vo) = ctx
             .run(|| async move {
-                store
+                let session_id = store
                     .create_session(meta)
                     .await
-                    .map_err(session_store_handler_error)
-                    .map(Json::from)
+                    .map_err(session_store_handler_error)?;
+                store
+                    .replace_session_channel_binding(SessionChannelBindingReplacement {
+                        tenant_id,
+                        workspace_id: &workspace_id_for_create,
+                        session_id,
+                        contact_id: contact.contact_id,
+                        channel_account_id: channel_account
+                            .as_ref()
+                            .map(|account| account.channel_account_id),
+                        contact_point_id,
+                        channel_ref: &channel_ref,
+                        reason: channel_reason.as_deref(),
+                    })
+                    .await
+                    .map_err(session_store_handler_error)?;
+                store
+                    .emit_event(
+                        session_id,
+                        Event::SessionCreated {
+                            workspace_id: workspace_id_for_create,
+                            user_id: contact.contact_id.as_user_id(),
+                            model,
+                            channel: event_channel,
+                        },
+                    )
+                    .await
+                    .map_err(session_store_handler_error)?;
+                let meta_for_vo = store
+                    .get_session(session_id)
+                    .await
+                    .map_err(session_store_handler_error)?;
+                Ok::<_, HandlerError>(Json::from((session_id, meta_for_vo)))
             })
             .name("contacts_create_session")
             .await?
@@ -333,11 +392,111 @@ impl Contacts for ContactsImpl {
             .set_meta(Json::from(meta_for_vo))
             .call()
             .await?;
-        annotate_contact_operation_span(&contact, Some(session_id));
+        annotate_contact_operation_span(&response_contact, Some(session_id));
 
         Ok(Json::from(ContactSessionInitResponse {
             session_id,
+            contact: response_contact,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: contact JWT verification, scope checks, and session ownership validation bind this mutation to one contact session.
+    async fn change_session_channel(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ContactSessionChannelChangeRequest>,
+    ) -> Result<Json<ContactSessionChannelChangeResponse>, HandlerError> {
+        annotate_restate_handler_span("Contacts", "change_session_channel");
+        let request = request.into_inner();
+        let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
+        require_contact_scope(&claims, "contact:session:channel:update")?;
+        require_contact_session_permission(&claims, Some(request.session_id))?;
+        let contact_id = contact_id_from_claims(&claims)?;
+        annotate_claim_contact_span(&claims, Some(request.session_id));
+        let session_id = request.session_id;
+        let tenant_id = claims.tenant_id;
+        let pool = OrchestratorCtx::current_graph_pool();
+        let store = OrchestratorCtx::current_session_store();
+
+        let ChannelChangeResult {
             contact,
+            channel_ref,
+            channel_account,
+            meta,
+        } = ctx
+            .run(|| async move {
+                ensure_contact_token_grant_active(&pool, &claims, contact_id).await?;
+                let existing_meta = validate_contact_session(
+                    store.as_ref(),
+                    session_id,
+                    &request.workspace_id,
+                    contact_id,
+                )
+                .await?;
+                let contact =
+                    load_contact_ref(pool.clone(), &request.workspace_id, tenant_id, contact_id)
+                        .await?;
+                let resolved =
+                    resolve_contact_session_channel(&pool, &contact, request.channel_ref).await?;
+                let binding_id = store
+                    .replace_session_channel_binding(SessionChannelBindingReplacement {
+                        tenant_id,
+                        workspace_id: &request.workspace_id,
+                        session_id,
+                        contact_id: contact.contact_id,
+                        channel_account_id: resolved
+                            .channel_account
+                            .as_ref()
+                            .map(|account| account.channel_account_id),
+                        contact_point_id: resolved.contact_point_id,
+                        channel_ref: &resolved.channel_ref,
+                        reason: request.reason.as_deref(),
+                    })
+                    .await
+                    .map_err(session_store_handler_error)?;
+                store
+                    .emit_event(
+                        session_id,
+                        Event::SessionChannelChanged {
+                            from: existing_meta.channel,
+                            to: resolved.channel_ref.channel(),
+                            contact_id: Some(contact.contact_id),
+                            from_binding_id: existing_meta.active_channel_binding_id,
+                            to_binding_id: Some(binding_id),
+                            changed_by: Some(SessionActorRef::Contact {
+                                id: contact.contact_id,
+                            }),
+                            reason: request.reason,
+                        },
+                    )
+                    .await
+                    .map_err(session_store_handler_error)?;
+                let meta = store
+                    .get_session(session_id)
+                    .await
+                    .map_err(session_store_handler_error)?;
+                Ok::<_, HandlerError>(Json::from(ChannelChangeResult {
+                    contact,
+                    channel_ref: resolved.channel_ref,
+                    channel_account: resolved.channel_account,
+                    meta,
+                }))
+            })
+            .name("contacts_change_session_channel")
+            .await?
+            .into_inner();
+        ctx.object_client::<SessionClient>(session_id.to_string())
+            .set_meta(Json::from(meta))
+            .call()
+            .await?;
+        annotate_contact_operation_span(&contact, Some(session_id));
+
+        Ok(Json::from(ContactSessionChannelChangeResponse {
+            session_id,
+            contact,
+            channel_ref,
+            channel_account,
         }))
     }
 
@@ -416,6 +575,29 @@ impl Contacts for ContactsImpl {
 struct SessionPromotionResult {
     contact: ContactRef,
     promoted_from: Option<ContactId>,
+    meta: SessionMeta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionChannelPreparation {
+    contact: ContactRef,
+    channel_ref: ChannelRef,
+    channel_account: Option<ChannelAccountRef>,
+    contact_point_id: Option<ContactPointId>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSessionChannel {
+    channel_ref: ChannelRef,
+    channel_account: Option<ChannelAccountRef>,
+    contact_point_id: Option<ContactPointId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChannelChangeResult {
+    contact: ContactRef,
+    channel_ref: ChannelRef,
+    channel_account: Option<ChannelAccountRef>,
     meta: SessionMeta,
 }
 
@@ -505,7 +687,7 @@ struct ContactVerificationStartCommand {
     workspace_id: WorkspaceId,
     contact_id: ContactId,
     contact_point: ContactPointInput,
-    requested_channel: Option<ContactDeliveryChannel>,
+    requested_channel: Option<Channel>,
     ttl_seconds: i64,
     messaging_config: moa_core::MessagingConfig,
 }
@@ -649,17 +831,17 @@ async fn start_contact_verification(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContactPointDelivery {
-    channel: ContactDeliveryChannel,
+    channel: Channel,
     destination: String,
 }
 
 fn contact_point_delivery(
     point: &ContactPointInput,
-    requested_channel: Option<ContactDeliveryChannel>,
+    requested_channel: Option<Channel>,
 ) -> Result<ContactPointDelivery, HandlerError> {
     let channel = match point.kind {
-        ContactPointKind::Email => ContactDeliveryChannel::Email,
-        ContactPointKind::Phone => ContactDeliveryChannel::Sms,
+        ContactPointKind::Email => Channel::Email,
+        ContactPointKind::Phone => Channel::Sms,
         ContactPointKind::ExternalId | ContactPointKind::AnonymousHandle => {
             return Err(TerminalError::new_with_code(
                 400,
@@ -787,14 +969,18 @@ async fn complete_contact_verification(
     let kind = challenge
         .try_get::<String, _>("kind")
         .map_err(|error| db_handler_error("read contact point kind", error))?;
+    let point_kind = parse_contact_point_kind(&kind)?;
     let normalized_hash = challenge
         .try_get::<String, _>("normalized_hash")
         .map_err(|error| db_handler_error("read contact point hash", error))?;
+    let display_value = challenge
+        .try_get::<Option<String>, _>("display_value")
+        .map_err(|error| db_handler_error("read contact point display value", error))?;
     let canonical_id = existing_verified_contact(
         &mut transaction,
         tenant_id,
         &workspace_id,
-        &kind,
+        point_kind.as_str(),
         &normalized_hash,
         contact_id,
     )
@@ -836,6 +1022,16 @@ async fn complete_contact_verification(
         .execute(&mut *transaction)
         .await
         .map_err(|error| db_handler_error("mark contact verified", error))?;
+        upsert_verified_contact_point_channel_account(
+            &mut transaction,
+            tenant_id,
+            &workspace_id,
+            contact_id,
+            point_id,
+            point_kind,
+            display_value.as_deref(),
+        )
+        .await?;
     }
 
     sqlx::query(
@@ -934,6 +1130,292 @@ async fn load_contact_ref(
     })
 }
 
+async fn resolve_contact_session_channel(
+    pool: &sqlx::PgPool,
+    contact: &ContactRef,
+    channel_ref: ChannelRef,
+) -> Result<ResolvedSessionChannel, HandlerError> {
+    match channel_ref {
+        ChannelRef::Chat {
+            conversation_id,
+            user_id,
+            client_session_id,
+        } => {
+            if conversation_id.trim().is_empty() {
+                return Err(
+                    TerminalError::new_with_code(400, "chat conversation_id is required").into(),
+                );
+            }
+            let display_name = Some(
+                user_id
+                    .clone()
+                    .unwrap_or_else(|| format!("chat:{conversation_id}")),
+            );
+            let account = upsert_external_channel_account(
+                pool,
+                contact,
+                Channel::Chat,
+                None,
+                user_id.as_deref().unwrap_or(conversation_id.as_str()),
+                display_name,
+            )
+            .await?;
+            Ok(ResolvedSessionChannel {
+                channel_ref: ChannelRef::Chat {
+                    conversation_id,
+                    user_id,
+                    client_session_id,
+                },
+                channel_account: Some(account),
+                contact_point_id: None,
+            })
+        }
+        ChannelRef::Slack {
+            team_id,
+            slack_channel_id,
+            thread_ts,
+            user_id,
+        } => {
+            let user_id = user_id.ok_or_else(|| {
+                TerminalError::new_with_code(400, "slack channel route requires user_id")
+            })?;
+            let account = upsert_external_channel_account(
+                pool,
+                contact,
+                Channel::Slack,
+                team_id.as_deref(),
+                &user_id,
+                Some(format!("<@{user_id}>")),
+            )
+            .await?;
+            Ok(ResolvedSessionChannel {
+                channel_ref: ChannelRef::Slack {
+                    team_id,
+                    slack_channel_id,
+                    thread_ts,
+                    user_id: Some(user_id),
+                },
+                channel_account: Some(account),
+                contact_point_id: None,
+            })
+        }
+        ChannelRef::Email { channel_account_id } => {
+            resolve_contact_point_channel_account(
+                pool,
+                contact,
+                channel_account_id,
+                Channel::Email,
+                ContactPointKind::Email,
+            )
+            .await
+        }
+        ChannelRef::Sms { channel_account_id } => {
+            resolve_contact_point_channel_account(
+                pool,
+                contact,
+                channel_account_id,
+                Channel::Sms,
+                ContactPointKind::Phone,
+            )
+            .await
+        }
+    }
+}
+
+async fn upsert_external_channel_account(
+    pool: &sqlx::PgPool,
+    contact: &ContactRef,
+    channel: Channel,
+    external_tenant_key: Option<&str>,
+    external_user_key: &str,
+    display_name: Option<String>,
+) -> Result<ChannelAccountRef, HandlerError> {
+    if external_user_key.trim().is_empty() {
+        return Err(TerminalError::new_with_code(400, "channel user id is required").into());
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT id, contact_id, display_name
+        FROM contact_channel_accounts
+        WHERE tenant_id = $1
+          AND workspace_id = $2
+          AND channel = $3
+          AND COALESCE(external_tenant_key, '') = COALESCE($4, '')
+          AND external_user_key = $5
+          AND merged_into_id IS NULL
+        "#,
+    )
+    .bind(contact.tenant_id)
+    .bind(contact.workspace_id.as_str())
+    .bind(channel.as_str())
+    .bind(external_tenant_key)
+    .bind(external_user_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_handler_error("load channel account", error))?;
+
+    if let Some(row) = row {
+        let account_contact_id = ContactId(
+            row.try_get::<Uuid, _>("contact_id")
+                .map_err(|error| db_handler_error("read channel account contact", error))?,
+        );
+        if !contact_allows_channel_contact(contact, account_contact_id) {
+            return Err(TerminalError::new_with_code(
+                403,
+                "channel account belongs to another contact",
+            )
+            .into());
+        }
+        let account_id = ChannelAccountId(
+            row.try_get::<Uuid, _>("id")
+                .map_err(|error| db_handler_error("read channel account id", error))?,
+        );
+        sqlx::query(
+            r#"
+            UPDATE contact_channel_accounts
+            SET last_seen_at = NOW(), display_name = COALESCE($1, display_name)
+            WHERE id = $2
+            "#,
+        )
+        .bind(display_name.as_deref())
+        .bind(account_id.0)
+        .execute(pool)
+        .await
+        .map_err(|error| db_handler_error("touch channel account", error))?;
+        return Ok(ChannelAccountRef {
+            channel_account_id: account_id,
+            contact_point_id: None,
+            channel,
+            display_name: display_name.or_else(|| {
+                row.try_get::<Option<String>, _>("display_name")
+                    .ok()
+                    .flatten()
+            }),
+        });
+    }
+
+    let account_id = ChannelAccountId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO contact_channel_accounts
+            (id, tenant_id, workspace_id, contact_id, channel, external_tenant_key,
+             external_user_key, display_name, assurance, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'provider_asserted', $9)
+        "#,
+    )
+    .bind(account_id.0)
+    .bind(contact.tenant_id)
+    .bind(contact.workspace_id.as_str())
+    .bind(contact.contact_id.0)
+    .bind(channel.as_str())
+    .bind(external_tenant_key)
+    .bind(external_user_key)
+    .bind(display_name.as_deref())
+    .bind(serde_json::json!({ "source": "session_channel" }))
+    .execute(pool)
+    .await
+    .map_err(|error| db_handler_error("insert channel account", error))?;
+    Ok(ChannelAccountRef {
+        channel_account_id: account_id,
+        contact_point_id: None,
+        channel,
+        display_name,
+    })
+}
+
+async fn resolve_contact_point_channel_account(
+    pool: &sqlx::PgPool,
+    contact: &ContactRef,
+    channel_account_id: ChannelAccountId,
+    channel: Channel,
+    expected_kind: ContactPointKind,
+) -> Result<ResolvedSessionChannel, HandlerError> {
+    let row = sqlx::query(
+        r#"
+        SELECT a.id, a.contact_id, a.contact_point_id, a.display_name,
+               p.kind, p.verified
+        FROM contact_channel_accounts a
+        JOIN contact_points p ON p.id = a.contact_point_id
+        WHERE a.id = $1
+          AND a.tenant_id = $2
+          AND a.workspace_id = $3
+          AND a.channel = $4
+          AND a.merged_into_id IS NULL
+        "#,
+    )
+    .bind(channel_account_id.0)
+    .bind(contact.tenant_id)
+    .bind(contact.workspace_id.as_str())
+    .bind(channel.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| db_handler_error("load contact channel account", error))?
+    .ok_or_else(|| TerminalError::new_with_code(404, "channel account not found"))?;
+
+    let account_contact_id = ContactId(
+        row.try_get::<Uuid, _>("contact_id")
+            .map_err(|error| db_handler_error("read channel account contact", error))?,
+    );
+    if !contact_allows_channel_contact(contact, account_contact_id) {
+        return Err(TerminalError::new_with_code(
+            403,
+            "channel account belongs to another contact",
+        )
+        .into());
+    }
+    let point_id = ContactPointId(
+        row.try_get::<Uuid, _>("contact_point_id")
+            .map_err(|error| db_handler_error("read channel account contact point", error))?,
+    );
+    let kind = row
+        .try_get::<String, _>("kind")
+        .map_err(|error| db_handler_error("read channel account contact point kind", error))?;
+    if parse_contact_point_kind(&kind)? != expected_kind {
+        return Err(TerminalError::new_with_code(
+            400,
+            "channel account contact point kind mismatch",
+        )
+        .into());
+    }
+    let verified = row
+        .try_get::<bool, _>("verified")
+        .map_err(|error| db_handler_error("read channel account verification", error))?;
+    if !verified {
+        return Err(TerminalError::new_with_code(
+            403,
+            "channel account contact point is not verified",
+        )
+        .into());
+    }
+    let channel_ref = match channel {
+        Channel::Email => ChannelRef::Email { channel_account_id },
+        Channel::Sms => ChannelRef::Sms { channel_account_id },
+        Channel::Chat | Channel::Slack => {
+            return Err(
+                TerminalError::new_with_code(400, "unsupported contact point channel").into(),
+            );
+        }
+    };
+    Ok(ResolvedSessionChannel {
+        channel_ref,
+        channel_account: Some(ChannelAccountRef {
+            channel_account_id,
+            contact_point_id: Some(point_id),
+            channel,
+            display_name: row
+                .try_get::<Option<String>, _>("display_name")
+                .map_err(|error| db_handler_error("read channel account display name", error))?,
+        }),
+        contact_point_id: Some(point_id),
+    })
+}
+
+fn contact_allows_channel_contact(contact: &ContactRef, account_contact_id: ContactId) -> bool {
+    contact.contact_id == account_contact_id
+        || contact.canonical_contact_id == Some(account_contact_id)
+        || contact.linked_contact_ids.contains(&account_contact_id)
+}
+
 async fn insert_contact_point(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
@@ -988,6 +1470,89 @@ async fn insert_contact_point(
             .try_get::<Option<DateTime<Utc>>, _>("verified_at")
             .map_err(|error| db_handler_error("read contact point verified_at", error))?,
     })
+}
+
+async fn upsert_verified_contact_point_channel_account(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    workspace_id: &WorkspaceId,
+    contact_id: ContactId,
+    point_id: ContactPointId,
+    kind: ContactPointKind,
+    display_name: Option<&str>,
+) -> Result<Option<ChannelAccountRef>, HandlerError> {
+    let channel = match kind {
+        ContactPointKind::Email => Channel::Email,
+        ContactPointKind::Phone => Channel::Sms,
+        ContactPointKind::ExternalId | ContactPointKind::AnonymousHandle => return Ok(None),
+    };
+    let updated = sqlx::query(
+        r#"
+        UPDATE contact_channel_accounts
+        SET assurance = 'otp_verified',
+            display_name = COALESCE($1, display_name),
+            last_seen_at = NOW()
+        WHERE tenant_id = $2
+          AND workspace_id = $3
+          AND contact_point_id = $4
+          AND channel = $5
+          AND merged_into_id IS NULL
+        RETURNING id, display_name
+        "#,
+    )
+    .bind(display_name)
+    .bind(tenant_id)
+    .bind(workspace_id.as_str())
+    .bind(point_id.0)
+    .bind(channel.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| db_handler_error("update verified channel account", error))?;
+
+    if let Some(row) = updated {
+        return Ok(Some(ChannelAccountRef {
+            channel_account_id: ChannelAccountId(
+                row.try_get::<Uuid, _>("id")
+                    .map_err(|error| db_handler_error("read verified channel account id", error))?,
+            ),
+            contact_point_id: Some(point_id),
+            channel,
+            display_name: row
+                .try_get::<Option<String>, _>("display_name")
+                .map_err(|error| {
+                    db_handler_error("read verified channel account display", error)
+                })?,
+        }));
+    }
+
+    let account_id = ChannelAccountId::new();
+    sqlx::query(
+        r#"
+        INSERT INTO contact_channel_accounts
+            (id, tenant_id, workspace_id, contact_id, contact_point_id, channel,
+             external_user_key, display_name, assurance, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'otp_verified', $9)
+        "#,
+    )
+    .bind(account_id.0)
+    .bind(tenant_id)
+    .bind(workspace_id.as_str())
+    .bind(contact_id.0)
+    .bind(point_id.0)
+    .bind(channel.as_str())
+    .bind(point_id.to_string())
+    .bind(display_name)
+    .bind(serde_json::json!({ "source": "contact_verification" }))
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| db_handler_error("insert verified channel account", error))?;
+
+    Ok(Some(ChannelAccountRef {
+        channel_account_id: account_id,
+        contact_point_id: Some(point_id),
+        channel,
+        display_name: display_name.map(ToOwned::to_owned),
+    }))
 }
 
 async fn ensure_contact_in_workspace(
@@ -1368,6 +1933,12 @@ fn parse_contact_state(value: &str) -> Result<ContactVerificationState, HandlerE
         .map_err(|_| TerminalError::new_with_code(500, "invalid stored contact state").into())
 }
 
+fn parse_contact_point_kind(value: &str) -> Result<ContactPointKind, HandlerError> {
+    value
+        .parse::<ContactPointKind>()
+        .map_err(|_| TerminalError::new_with_code(500, "invalid stored contact point kind").into())
+}
+
 fn contact_token_handler_error(error: moa_auth_providers::ContactTokenError) -> HandlerError {
     match error {
         moa_auth_providers::ContactTokenError::Expired => {
@@ -1432,11 +2003,11 @@ fn db_handler_error(context: &'static str, error: sqlx::Error) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        ContactDeliveryChannel, ContactId, ContactPointInput, ContactPointKind, ContactRef,
+        Channel, ContactId, ContactPointInput, ContactPointKind, ContactRef,
         ContactVerificationState, SessionMeta, WorkspaceId,
     };
 
-    use super::{contact_point_delivery, promoted_from_contact};
+    use super::{contact_allows_channel_contact, contact_point_delivery, promoted_from_contact};
 
     #[test]
     fn promoted_from_contact_allows_linked_session_contact() {
@@ -1537,7 +2108,7 @@ mod tests {
             None,
         )
         .expect("email contact point should support delivery");
-        assert_eq!(email.channel, ContactDeliveryChannel::Email);
+        assert_eq!(email.channel, Channel::Email);
         assert_eq!(email.destination, "user@example.com");
 
         let phone = contact_point_delivery(
@@ -1546,10 +2117,10 @@ mod tests {
                 value: "(500) 555-0006".to_string(),
                 display_value: None,
             },
-            Some(ContactDeliveryChannel::Sms),
+            Some(Channel::Sms),
         )
         .expect("phone contact point should support SMS delivery");
-        assert_eq!(phone.channel, ContactDeliveryChannel::Sms);
+        assert_eq!(phone.channel, Channel::Sms);
         assert_eq!(phone.destination, "+5005550006");
 
         let mismatch = contact_point_delivery(
@@ -1558,7 +2129,7 @@ mod tests {
                 value: "user@example.com".to_string(),
                 display_value: None,
             },
-            Some(ContactDeliveryChannel::Sms),
+            Some(Channel::Sms),
         )
         .expect_err("email contact point should reject SMS delivery");
         let mismatch = format!("{mismatch:?}");
@@ -1581,5 +2152,23 @@ mod tests {
             external.contains("email and phone"),
             "unexpected external-id error: {external}"
         );
+    }
+
+    #[test]
+    fn contact_allows_channel_accounts_for_self_canonical_and_linked_contacts() {
+        // Pins: channel-account validation may follow verified promotion links but rejects unrelated contacts.
+        let tenant_id = uuid::Uuid::now_v7();
+        let workspace_id = WorkspaceId::new("workspace");
+        let contact_id = ContactId::new();
+        let canonical_id = ContactId::new();
+        let linked_id = ContactId::new();
+        let unrelated_id = ContactId::new();
+        let mut contact = contact(tenant_id, workspace_id, contact_id, vec![linked_id]);
+        contact.canonical_contact_id = Some(canonical_id);
+
+        assert!(contact_allows_channel_contact(&contact, contact_id));
+        assert!(contact_allows_channel_contact(&contact, canonical_id));
+        assert!(contact_allows_channel_contact(&contact, linked_id));
+        assert!(!contact_allows_channel_contact(&contact, unrelated_id));
     }
 }

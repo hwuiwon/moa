@@ -6,15 +6,16 @@ use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActionPolicyRule, BlobStore, CacheDailyMetric, ClaimCheck, ContextSnapshot, Event, EventFilter,
-    EventRange, EventRecord, EventType, ExperienceAttribution, ExperienceRecord, LearningCandidate,
-    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError,
-    Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
-    SessionAnalyticsSummary, SessionFilter, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
-    ToolCallId, ToolCallSummary, WorkspaceAnalyticsSummary, WorkspaceId, record_session_created,
-    record_session_event_append, record_session_event_decoded_bytes, record_session_event_load,
-    record_session_event_replay, record_sessions_active, record_turn_completed,
+    ActionPolicyRule, BlobStore, CacheDailyMetric, ChannelAccountId, ChannelRef, ClaimCheck,
+    ContactId, ContactPointId, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
+    EventType, ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateStatus,
+    LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError, Result, SegmentAssessment,
+    SegmentBaseline, SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter,
+    SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, ToolCallId, ToolCallSummary,
+    WorkspaceAnalyticsSummary, WorkspaceId, record_session_created, record_session_event_append,
+    record_session_event_decoded_bytes, record_session_event_load, record_session_event_replay,
+    record_sessions_active, record_turn_completed,
 };
 use moa_security::ActionPolicyRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -50,6 +51,26 @@ pub struct PostgresSessionStore {
     schema_name: Option<String>,
     blob_store: Arc<dyn BlobStore>,
     blob_threshold_bytes: usize,
+}
+
+/// Request to replace a session's active channel route binding.
+pub struct SessionChannelBindingReplacement<'a> {
+    /// Tenant that owns the contact and session.
+    pub tenant_id: Uuid,
+    /// Workspace that owns the session.
+    pub workspace_id: &'a WorkspaceId,
+    /// Session whose active channel is changing.
+    pub session_id: SessionId,
+    /// Contact associated with the route.
+    pub contact_id: ContactId,
+    /// Channel account used by the route, when applicable.
+    pub channel_account_id: Option<ChannelAccountId>,
+    /// Contact point backing email or SMS routes, when applicable.
+    pub contact_point_id: Option<ContactPointId>,
+    /// Concrete channel route.
+    pub channel_ref: &'a ChannelRef,
+    /// Optional caller-supplied reason.
+    pub reason: Option<&'a str>,
 }
 
 impl PostgresSessionStore {

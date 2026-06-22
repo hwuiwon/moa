@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use moa_core::{
-    ChannelRef, InboundMessage, MessageContent, MessageId, MoaError, OutboundMessage, Platform,
-    PlatformUser, SessionId, types::Attachment,
+    Channel, ChannelActor, ChannelRef, InboundMessage, MessageContent, MessageId, MoaError,
+    OutboundMessage, SessionId, types::Attachment,
 };
 use moa_messaging::MessagingSendResponse;
 use unicode_segmentation::UnicodeSegmentation;
@@ -52,17 +52,21 @@ pub fn fixed_session_id() -> SessionId {
 }
 
 /// Builds a canonical inbound message for control-signal tests.
-pub fn inbound_message(platform: Platform, text: impl Into<String>) -> InboundMessage {
+pub fn inbound_message(channel: Channel, text: impl Into<String>) -> InboundMessage {
     InboundMessage {
-        platform,
-        platform_msg_id: "msg-001".to_string(),
-        user: PlatformUser {
-            platform_id: "user-001".to_string(),
+        channel,
+        channel_msg_id: "msg-001".to_string(),
+        actor: ChannelActor {
+            external_id: "user-001".to_string(),
             display_name: "Test User".to_string(),
+            channel_account_id: None,
             moa_user_id: None,
         },
-        channel: ChannelRef::Group {
-            channel_id: "channel-001".to_string(),
+        channel_ref: ChannelRef::Slack {
+            team_id: None,
+            slack_channel_id: Some("channel-001".to_string()),
+            thread_ts: None,
+            user_id: None,
         },
         text: text.into(),
         attachments: Vec::<Attachment>::new(),
@@ -129,9 +133,9 @@ pub fn assert_typed_messaging_error(result: moa_core::Result<InboundMessage>) {
     );
 }
 
-/// Starts a local mock endpoint suitable for platform HTTP tests.
+/// Starts a local mock endpoint suitable for channel HTTP tests.
 #[allow(dead_code)]
-pub async fn mock_platform_api() -> wiremock::MockServer {
+pub async fn mock_channel_api() -> wiremock::MockServer {
     wiremock::MockServer::start().await
 }
 
@@ -182,7 +186,7 @@ pub async fn mock_always_200() -> Arc<MockServer> {
     server
 }
 
-/// Posts one synthetic platform send request to a mock server.
+/// Posts one synthetic channel send request to a mock server.
 pub async fn post_send(server: Arc<MockServer>) -> moa_core::Result<MessagingSendResponse> {
     let response = reqwest::Client::new()
         .post(format!("{}/send", server.uri()))

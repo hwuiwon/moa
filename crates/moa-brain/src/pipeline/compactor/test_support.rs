@@ -6,9 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    BrainId, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+    BrainId, Channel, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ContextSnapshot, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelCapabilities,
-    ModelId, Platform, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+    ModelId, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
     SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, WorkspaceId,
 };
 use tokio::sync::Mutex;
@@ -176,7 +176,7 @@ pub(super) fn session() -> SessionMeta {
         id: SessionId::new(),
         workspace_id: WorkspaceId::new("workspace"),
         user_id: moa_core::UserId::new("user"),
-        platform: Platform::Api,
+        channel: Channel::Chat,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }

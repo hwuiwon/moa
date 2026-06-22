@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moa_core::{ContactDeliveryChannel, ContactId, WorkspaceId};
+use moa_core::{Channel, ContactId, WorkspaceId};
 use moa_messaging::{DeliveryMessage, DeliveryPurpose, DeliverySink, ProviderDeliverySink};
 use serde_json::json;
 use uuid::Uuid;
@@ -40,7 +40,7 @@ async fn delivery_offline_dispatches_email_through_postmark() {
         .await;
     let sink = ProviderDeliverySink::empty("MOA <moa@example.com>")
         .with_email_client(PostmarkEmailClient::new("test-token").with_base_url(server.uri()));
-    let message = delivery_message(ContactDeliveryChannel::Email, "user@example.com")
+    let message = delivery_message(Channel::Email, "user@example.com")
         .with_subject("Verify")
         .with_metadata("session_id", "session-123");
 
@@ -49,7 +49,7 @@ async fn delivery_offline_dispatches_email_through_postmark() {
         .await
         .expect("delivery sink should send email through Postmark");
 
-    assert_eq!(receipt.channel, ContactDeliveryChannel::Email);
+    assert_eq!(receipt.channel, Channel::Email);
     assert_eq!(receipt.provider, "postmark");
     assert_eq!(
         receipt.provider_message_id.as_deref(),
@@ -94,14 +94,11 @@ async fn delivery_offline_dispatches_sms_through_twilio() {
     );
 
     let receipt = sink
-        .deliver(delivery_message(
-            ContactDeliveryChannel::Sms,
-            "+15005550006",
-        ))
+        .deliver(delivery_message(Channel::Sms, "+15005550006"))
         .await
         .expect("delivery sink should send SMS through Twilio");
 
-    assert_eq!(receipt.channel, ContactDeliveryChannel::Sms);
+    assert_eq!(receipt.channel, Channel::Sms);
     assert_eq!(receipt.provider, "twilio");
     assert_eq!(receipt.provider_message_id.as_deref(), Some(MESSAGE_SID));
     let request = only_request(&server).await;
@@ -116,7 +113,7 @@ async fn delivery_offline_dispatches_sms_through_twilio() {
     );
 }
 
-fn delivery_message(channel: ContactDeliveryChannel, to: &str) -> DeliveryMessage {
+fn delivery_message(channel: Channel, to: &str) -> DeliveryMessage {
     DeliveryMessage {
         tenant_id: Uuid::now_v7(),
         workspace_id: WorkspaceId::new("workspace"),

@@ -59,28 +59,47 @@ pub use slack::{SlackAdapter, SlackApiFailure, SlackApiFailureClass};
 #[cfg(feature = "slack")]
 pub(crate) fn messaging_receive_span(message: &InboundMessage) -> tracing::Span {
     let trace_name = trace_name_from_message(&message.text);
-    let platform = message.platform.as_str();
-    let channel = messaging_channel_label(&message.channel);
-    let tags = format!("[\"{platform}\"]");
+    let channel = message.channel.as_str();
+    let route = messaging_channel_label(&message.channel_ref);
+    let tags = format!("[\"{channel}\"]");
     tracing::info_span!(
         "messaging_receive",
         otel.name = %trace_name,
         langfuse.trace.name = %trace_name,
         langfuse.trace.tags = %tags,
-        langfuse.trace.metadata.platform = %platform,
         langfuse.trace.metadata.channel = %channel,
-        langfuse.trace.metadata.platform_user_id = %message.user.platform_id,
+        langfuse.trace.metadata.channel_route = %route,
+        langfuse.trace.metadata.channel_actor_id = %message.actor.external_id,
     )
 }
 
 #[cfg(feature = "slack")]
-fn messaging_channel_label(channel: &ChannelRef) -> String {
-    match channel {
-        ChannelRef::DirectMessage { user_id } => format!("dm:{user_id}"),
-        ChannelRef::Group { channel_id } => format!("group:{channel_id}"),
-        ChannelRef::Thread {
-            channel_id,
-            thread_id,
-        } => format!("thread:{channel_id}:{thread_id}"),
+fn messaging_channel_label(channel_ref: &ChannelRef) -> String {
+    match channel_ref {
+        ChannelRef::Chat {
+            conversation_id,
+            client_session_id,
+            ..
+        } => client_session_id
+            .as_ref()
+            .map(|id| format!("chat:{conversation_id}:{id}"))
+            .unwrap_or_else(|| format!("chat:{conversation_id}")),
+        ChannelRef::Slack {
+            slack_channel_id,
+            thread_ts,
+            user_id,
+            ..
+        } => match (slack_channel_id, thread_ts, user_id) {
+            (Some(channel_id), Some(thread_ts), _) => {
+                format!("slack_thread:{channel_id}:{thread_ts}")
+            }
+            (Some(channel_id), None, Some(user_id)) if channel_id.starts_with('D') => {
+                format!("slack_dm:{user_id}")
+            }
+            (Some(channel_id), None, _) => format!("slack_channel:{channel_id}"),
+            _ => "slack".to_string(),
+        },
+        ChannelRef::Email { channel_account_id } => format!("email:{channel_account_id}"),
+        ChannelRef::Sms { channel_account_id } => format!("sms:{channel_account_id}"),
     }
 }

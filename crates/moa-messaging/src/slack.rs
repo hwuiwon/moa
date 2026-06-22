@@ -1,12 +1,13 @@
-//! Slack platform adapter built on top of `slack-morphism` Socket Mode.
+//! Slack channel adapter built on top of `slack-morphism` Socket Mode.
 
 use std::{collections::HashMap, env, sync::Arc, time::Duration, time::Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::traits::ChannelAdapter;
 use moa_core::{
-    ChannelRef, InboundMessage, MessageId, MoaConfig, MoaError, OutboundMessage, Platform,
-    PlatformAdapter, PlatformCapabilities, PlatformUser, Result,
+    Channel, ChannelActor, ChannelCapabilities, ChannelRef, InboundMessage, MessageId, MoaConfig,
+    MoaError, OutboundMessage, Result,
 };
 use slack_morphism::errors::SlackClientError;
 use slack_morphism::prelude::*;
@@ -31,7 +32,7 @@ struct SlackListenerState {
     inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
 }
 
-/// Slack adapter implementing the generic platform abstraction.
+/// Slack adapter implementing the generic channel abstraction.
 #[derive(Clone)]
 pub struct SlackAdapter {
     client: Arc<SlackClient<SlackClientHyperHttpsConnector>>,
@@ -206,14 +207,14 @@ pub fn normalize_push_event(event: &SlackPushEventCallback) -> Result<InboundMes
 }
 
 #[async_trait]
-impl PlatformAdapter for SlackAdapter {
-    /// Returns the adapter platform identifier.
-    fn platform(&self) -> Platform {
-        self.renderer.platform()
+impl ChannelAdapter for SlackAdapter {
+    /// Returns the adapter channel identifier.
+    fn channel(&self) -> Channel {
+        self.renderer.channel()
     }
 
     /// Returns Slack transport capabilities.
-    fn capabilities(&self) -> PlatformCapabilities {
+    fn capabilities(&self) -> ChannelCapabilities {
         self.renderer.capabilities()
     }
 
@@ -254,7 +255,7 @@ impl PlatformAdapter for SlackAdapter {
 
     /// Sends a new outbound Slack message, splitting at Slack's length limit.
     async fn send(&self, msg: OutboundMessage) -> Result<MessageId> {
-        let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
+        let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
         let target = self.resolve_target(msg.reply_to.as_deref()).await?;
         let rendered = self.renderer.render(&msg);
         let synthetic_id = MessageId::new(Uuid::now_v7().to_string());
@@ -273,7 +274,7 @@ impl PlatformAdapter for SlackAdapter {
     /// Edits an existing outbound Slack message in place.
     async fn edit(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
         self.wait_for_edit_window(msg_id).await;
-        let msg = prepare_outbound_message(self.platform(), &self.capabilities(), msg);
+        let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
 
         let existing = self
             .outbound_messages
@@ -584,7 +585,7 @@ async fn handle_push_event(
                     .inbound_contexts
                     .write()
                     .await
-                    .insert(inbound.platform_msg_id.clone(), origin);
+                    .insert(inbound.channel_msg_id.clone(), origin);
             }
             if shared.event_tx.send(inbound).await.is_err() {
                 warn!("slack inbound receiver dropped");
@@ -623,9 +624,10 @@ impl SlackMessageRef {
 }
 
 fn inbound_from_push_event(event: &SlackPushEventCallback) -> Option<InboundMessage> {
+    let team_id = Some(event.team_id.as_ref());
     match &event.event {
-        SlackEventCallbackBody::AppMention(message) => inbound_from_app_mention(message),
-        SlackEventCallbackBody::Message(message) => inbound_from_message_event(message),
+        SlackEventCallbackBody::AppMention(message) => inbound_from_app_mention(message, team_id),
+        SlackEventCallbackBody::Message(message) => inbound_from_message_event(message, team_id),
         _ => None,
     }
 }
@@ -646,19 +648,24 @@ fn push_event_origin(event: &SlackPushEventCallback) -> Option<SlackMessageRef> 
     }
 }
 
-fn inbound_from_app_mention(message: &SlackAppMentionEvent) -> Option<InboundMessage> {
+fn inbound_from_app_mention(
+    message: &SlackAppMentionEvent,
+    team_id: Option<&str>,
+) -> Option<InboundMessage> {
     let text = message.content.text.clone()?;
-    let platform_msg_id = message.origin.ts.0.clone();
+    let channel_msg_id = message.origin.ts.0.clone();
     let user_id = message.user.0.clone();
     Some(InboundMessage {
-        platform: Platform::Slack,
-        platform_msg_id,
-        user: PlatformUser {
-            platform_id: user_id.clone(),
+        channel: Channel::Slack,
+        channel_msg_id,
+        actor: ChannelActor {
+            external_id: user_id.clone(),
             display_name: format!("<@{}>", message.user.0),
+            channel_account_id: None,
             moa_user_id: None,
         },
-        channel: slack_channel_ref(
+        channel_ref: slack_channel_ref(
+            team_id,
             &message.channel.0,
             message.origin.thread_ts.as_ref().map(|ts| ts.0.as_str()),
             &user_id,
@@ -670,7 +677,10 @@ fn inbound_from_app_mention(message: &SlackAppMentionEvent) -> Option<InboundMes
     })
 }
 
-fn inbound_from_message_event(message: &SlackMessageEvent) -> Option<InboundMessage> {
+fn inbound_from_message_event(
+    message: &SlackMessageEvent,
+    team_id: Option<&str>,
+) -> Option<InboundMessage> {
     if message.subtype.is_some() {
         return None;
     }
@@ -680,14 +690,16 @@ fn inbound_from_message_event(message: &SlackMessageEvent) -> Option<InboundMess
     let channel_id = message.origin.channel.as_ref()?.0.clone();
 
     Some(InboundMessage {
-        platform: Platform::Slack,
-        platform_msg_id: message.origin.ts.0.clone(),
-        user: PlatformUser {
-            platform_id: user_id.clone(),
+        channel: Channel::Slack,
+        channel_msg_id: message.origin.ts.0.clone(),
+        actor: ChannelActor {
+            external_id: user_id.clone(),
             display_name: slack_sender_name(&message.sender),
+            channel_account_id: None,
             moa_user_id: None,
         },
-        channel: slack_channel_ref(
+        channel_ref: slack_channel_ref(
+            team_id,
             &channel_id,
             message.origin.thread_ts.as_ref().map(|ts| ts.0.as_str()),
             &user_id,
@@ -699,22 +711,35 @@ fn inbound_from_message_event(message: &SlackMessageEvent) -> Option<InboundMess
     })
 }
 
-fn slack_channel_ref(channel_id: &str, thread_ts: Option<&str>, user_id: &str) -> ChannelRef {
+fn slack_channel_ref(
+    team_id: Option<&str>,
+    channel_id: &str,
+    thread_ts: Option<&str>,
+    user_id: &str,
+) -> ChannelRef {
     if channel_id.starts_with('D') {
-        return ChannelRef::DirectMessage {
-            user_id: user_id.to_string(),
+        return ChannelRef::Slack {
+            team_id: team_id.map(ToOwned::to_owned),
+            slack_channel_id: Some(channel_id.to_string()),
+            thread_ts: None,
+            user_id: Some(user_id.to_string()),
         };
     }
 
     if let Some(thread_ts) = thread_ts {
-        return ChannelRef::Thread {
-            channel_id: channel_id.to_string(),
-            thread_id: thread_ts.to_string(),
+        return ChannelRef::Slack {
+            team_id: team_id.map(ToOwned::to_owned),
+            slack_channel_id: Some(channel_id.to_string()),
+            thread_ts: Some(thread_ts.to_string()),
+            user_id: Some(user_id.to_string()),
         };
     }
 
-    ChannelRef::Group {
-        channel_id: channel_id.to_string(),
+    ChannelRef::Slack {
+        team_id: team_id.map(ToOwned::to_owned),
+        slack_channel_id: Some(channel_id.to_string()),
+        thread_ts: None,
+        user_id: Some(user_id.to_string()),
     }
 }
 
@@ -772,13 +797,16 @@ mod tests {
         .expect("slack push event should deserialize");
 
         let inbound = inbound_from_push_event(&event).expect("normalized slack event");
-        assert_eq!(inbound.platform, Platform::Slack);
-        assert_eq!(inbound.platform_msg_id, "1712668800.000100");
+        assert_eq!(inbound.channel, Channel::Slack);
+        assert_eq!(inbound.channel_msg_id, "1712668800.000100");
         assert_eq!(inbound.text, "hello slack");
         assert_eq!(
-            inbound.channel,
-            ChannelRef::DirectMessage {
-                user_id: "U123".to_string()
+            inbound.channel_ref,
+            ChannelRef::Slack {
+                team_id: Some("T123".to_string()),
+                slack_channel_id: Some("D123".to_string()),
+                thread_ts: None,
+                user_id: Some("U123".to_string())
             }
         );
     }
