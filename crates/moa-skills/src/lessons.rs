@@ -1,4 +1,4 @@
-//! Skill lesson dual-write helpers.
+//! Skill lesson graph helpers.
 
 use chrono::Utc;
 use moa_core::{MemoryScope, MoaError, Result, ScopeContext, ScopedConn};
@@ -7,7 +7,7 @@ use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-/// Context needed to write a learned lesson into the graph and skill addendum table.
+/// Context needed to write a learned lesson into the graph.
 #[derive(Clone)]
 pub struct LessonContext {
     graph: AgeGraphStore,
@@ -39,7 +39,7 @@ impl LessonContext {
     }
 }
 
-/// Creates a graph `Lesson` node and links it to a skill addendum in one transaction.
+/// Creates a graph `Lesson` node linked to a skill artifact revision.
 pub async fn learn_lesson(
     skill_uid: Uuid,
     lesson_text: String,
@@ -47,7 +47,7 @@ pub async fn learn_lesson(
     scope: MemoryScope,
     actor: Uuid,
     ctx: &LessonContext,
-) -> Result<(Uuid, Uuid)> {
+) -> Result<Uuid> {
     if lesson_text.trim().is_empty() {
         return Err(MoaError::ValidationError(
             "lesson text must not be empty".to_string(),
@@ -97,49 +97,8 @@ pub async fn learn_lesson(
         .await
         .map_err(map_graph_error)?;
 
-    let addendum_uid = Uuid::now_v7();
-    insert_addendum(
-        conn.as_mut(),
-        addendum_uid,
-        skill_uid,
-        lesson_uid,
-        workspace_id.as_deref(),
-        user_id.as_deref(),
-        &summary,
-    )
-    .await?;
-
     conn.commit().await?;
-    Ok((lesson_uid, addendum_uid))
-}
-
-async fn insert_addendum(
-    conn: &mut PgConnection,
-    addendum_uid: Uuid,
-    skill_uid: Uuid,
-    lesson_uid: Uuid,
-    workspace_id: Option<&str>,
-    user_id: Option<&str>,
-    summary: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO moa.skill_addendum (
-            addendum_uid, skill_uid, linked_lesson_uid, workspace_id, user_id, summary
-        )
-        VALUES ($1, $2, $3, $4, $5, $6)
-        "#,
-    )
-    .bind(addendum_uid)
-    .bind(skill_uid)
-    .bind(lesson_uid)
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(summary)
-    .execute(conn)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(())
+    Ok(lesson_uid)
 }
 
 async fn set_app_role(conn: &mut PgConnection) -> Result<()> {

@@ -685,6 +685,9 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             [("workspace_id", serde_json::json!(workspace_id))],
         );
     }
+    if let Some(translation) = translate_workspace_agent_route(method, uri, body) {
+        return translation;
+    }
     if *method == Method::POST {
         match uri.path() {
             "/v1/analytics/session-stats" => {
@@ -803,6 +806,27 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                 return RouteTranslation::Forward {
                     method: Method::POST,
                     path: "/Experiments/compare".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/agent-revision-simulations" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/run_agent_revision_simulation".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/experiments/agent-revision-simulations/compare" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Experiments/compare_agent_revision_simulation".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/sessions/create-agent" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/SessionStore/create_agent_session".to_string(),
                     body: body.to_vec(),
                 };
             }
@@ -1084,6 +1108,116 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
     RouteTranslation::NoChange
 }
 
+fn translate_workspace_agent_route(
+    method: &Method,
+    uri: &Uri,
+    body: &Bytes,
+) -> Option<RouteTranslation> {
+    let rest = uri.path().strip_prefix("/v1/workspaces/")?;
+    let mut segments = rest.split('/');
+    let workspace_id = segments.next()?;
+    if workspace_id.is_empty() {
+        return Some(RouteTranslation::BadRequest("bad workspace id"));
+    }
+
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("agent-definitions"), None, None, None) if *method == Method::GET => {
+            Some(translate_empty_json_body_with_fields(
+                "/AgentDefinitions/list_definitions",
+                "bad agent definitions list body",
+                [("workspace_id", serde_json::json!(workspace_id))],
+            ))
+        }
+        (Some("agent-installations"), None, None, None) if *method == Method::GET => {
+            Some(translate_empty_json_body_with_fields(
+                "/AgentDefinitions/list_installations",
+                "bad agent installations list body",
+                [("workspace_id", serde_json::json!(workspace_id))],
+            ))
+        }
+        (Some("agent-installations"), None, None, None) if *method == Method::POST => {
+            Some(translate_json_object_with_fields(
+                body,
+                "/AgentDefinitions/install",
+                "bad agent install body",
+                "agent install body must be object",
+                "serialize agent install body failed",
+                [("workspace_id", serde_json::json!(workspace_id))],
+            ))
+        }
+        (Some("agent-installations"), Some(installation_uid), Some("deployments"), None)
+            if *method == Method::GET =>
+        {
+            let installation_uid = match Uuid::parse_str(installation_uid) {
+                Ok(value) => value,
+                Err(_) => return Some(RouteTranslation::BadRequest("bad agent installation id")),
+            };
+            Some(translate_empty_json_body_with_fields(
+                "/AgentDefinitions/list_deployments",
+                "bad agent deployments list body",
+                [
+                    ("workspace_id", serde_json::json!(workspace_id)),
+                    ("installation_uid", serde_json::json!(installation_uid)),
+                ],
+            ))
+        }
+        (Some("agent-installations"), Some(installation_uid), Some("deployments"), None)
+            if *method == Method::POST =>
+        {
+            let installation_uid = match Uuid::parse_str(installation_uid) {
+                Ok(value) => value,
+                Err(_) => return Some(RouteTranslation::BadRequest("bad agent installation id")),
+            };
+            Some(translate_json_object_with_fields(
+                body,
+                "/AgentDefinitions/deploy",
+                "bad agent deploy body",
+                "agent deploy body must be object",
+                "serialize agent deploy body failed",
+                [
+                    ("workspace_id", serde_json::json!(workspace_id)),
+                    ("installation_uid", serde_json::json!(installation_uid)),
+                ],
+            ))
+        }
+        (Some("agent-simulations"), None, None, None) if *method == Method::POST => {
+            Some(translate_json_object_with_fields(
+                body,
+                "/Experiments/run_agent_revision_simulation",
+                "bad agent simulation body",
+                "agent simulation body must be object",
+                "serialize agent simulation body failed",
+                [("workspace_id", serde_json::json!(workspace_id))],
+            ))
+        }
+        (Some("agent-simulations"), Some(run_uid), Some("compare"), None)
+            if *method == Method::POST =>
+        {
+            let run_uid = match Uuid::parse_str(run_uid) {
+                Ok(value) => value,
+                Err(_) => return Some(RouteTranslation::BadRequest("bad agent simulation run id")),
+            };
+            Some(translate_json_object_with_fields(
+                body,
+                "/Experiments/compare_agent_revision_simulation",
+                "bad agent simulation compare body",
+                "agent simulation compare body must be object",
+                "serialize agent simulation compare body failed",
+                [
+                    ("workspace_id", serde_json::json!(workspace_id)),
+                    ("run_uid", serde_json::json!(run_uid)),
+                ],
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn translate_uuid_path(id: &str, target: &str) -> RouteTranslation {
     let value = match Uuid::parse_str(id) {
         Ok(value) => value,
@@ -1116,6 +1250,29 @@ fn translate_agent_act_as(agent_id: &str, body: &Bytes, target: &str) -> RouteTr
         "serialize agent act-as body failed",
         [("agent_id", serde_json::json!(agent_id))],
     )
+}
+
+fn translate_empty_json_body_with_fields<const N: usize>(
+    target: &str,
+    bad_body_message: &'static str,
+    fields: [(&str, serde_json::Value); N],
+) -> RouteTranslation {
+    let value = fields
+        .into_iter()
+        .map(|(name, field_value)| (name.to_string(), field_value))
+        .collect::<serde_json::Map<_, _>>();
+    let bytes = match serde_json::to_vec(&serde_json::Value::Object(value)) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "serialize synthetic route body failed");
+            return RouteTranslation::BadRequest(bad_body_message);
+        }
+    };
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: target.to_string(),
+        body: bytes,
+    }
 }
 
 fn translate_json_object_with_fields<const N: usize>(
@@ -1528,6 +1685,14 @@ mod tests {
             ),
             ("/v1/experiments/scores", "/Experiments/scores"),
             ("/v1/experiments/compare", "/Experiments/compare"),
+            (
+                "/v1/experiments/agent-revision-simulations",
+                "/Experiments/run_agent_revision_simulation",
+            ),
+            (
+                "/v1/experiments/agent-revision-simulations/compare",
+                "/Experiments/compare_agent_revision_simulation",
+            ),
         ];
 
         for (public_path, internal_path) in cases {
@@ -1556,6 +1721,159 @@ mod tests {
                 RouteTranslation::BadRequest(message) => {
                     panic!("{public_path} should not fail translation: {message}")
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_agent_public_routes_translate_to_restate_handlers() {
+        // Pins: tenant-configurable agent product routes reach AgentDefinitions and simulation handlers.
+        let installation_uid = "11111111-1111-1111-1111-111111111111";
+        let revision_uid = "22222222-2222-2222-2222-222222222222";
+        let run_uid = "33333333-3333-3333-3333-333333333333";
+        let cases = vec![
+            (
+                Method::GET,
+                "/v1/workspaces/workspace-a/agent-definitions".to_string(),
+                Bytes::new(),
+                "/AgentDefinitions/list_definitions",
+                serde_json::json!({ "workspace_id": "workspace-a" }),
+            ),
+            (
+                Method::GET,
+                "/v1/workspaces/workspace-a/agent-installations".to_string(),
+                Bytes::new(),
+                "/AgentDefinitions/list_installations",
+                serde_json::json!({ "workspace_id": "workspace-a" }),
+            ),
+            (
+                Method::POST,
+                "/v1/workspaces/workspace-a/agent-installations".to_string(),
+                Bytes::from(format!(
+                    r#"{{"revision_uid":"{revision_uid}","metadata":{{"tier":"gold"}}}}"#
+                )),
+                "/AgentDefinitions/install",
+                serde_json::json!({
+                    "workspace_id": "workspace-a",
+                    "revision_uid": revision_uid,
+                    "metadata": { "tier": "gold" }
+                }),
+            ),
+            (
+                Method::GET,
+                format!(
+                    "/v1/workspaces/workspace-a/agent-installations/{installation_uid}/deployments"
+                ),
+                Bytes::new(),
+                "/AgentDefinitions/list_deployments",
+                serde_json::json!({
+                    "workspace_id": "workspace-a",
+                    "installation_uid": installation_uid
+                }),
+            ),
+            (
+                Method::POST,
+                format!(
+                    "/v1/workspaces/workspace-a/agent-installations/{installation_uid}/deployments"
+                ),
+                Bytes::from(format!(
+                    r#"{{"revision_uid":"{revision_uid}","reason":"candidate passed"}}"#
+                )),
+                "/AgentDefinitions/deploy",
+                serde_json::json!({
+                    "workspace_id": "workspace-a",
+                    "installation_uid": installation_uid,
+                    "revision_uid": revision_uid,
+                    "reason": "candidate passed"
+                }),
+            ),
+            (
+                Method::POST,
+                "/v1/workspaces/workspace-a/agent-simulations".to_string(),
+                Bytes::from(format!(
+                    r#"{{"name":"compare support","plan_revision_uid":"{revision_uid}","base":{{"variant_key":"base","revision_uid":"{revision_uid}"}}}}"#
+                )),
+                "/Experiments/run_agent_revision_simulation",
+                serde_json::json!({
+                    "workspace_id": "workspace-a",
+                    "name": "compare support",
+                    "plan_revision_uid": revision_uid,
+                    "base": {
+                        "variant_key": "base",
+                        "revision_uid": revision_uid
+                    }
+                }),
+            ),
+            (
+                Method::POST,
+                format!("/v1/workspaces/workspace-a/agent-simulations/{run_uid}/compare"),
+                Bytes::from_static(
+                    br#"{"base_variant_key":"base","candidate_variant_keys":["candidate"]}"#,
+                ),
+                "/Experiments/compare_agent_revision_simulation",
+                serde_json::json!({
+                    "workspace_id": "workspace-a",
+                    "run_uid": run_uid,
+                    "base_variant_key": "base",
+                    "candidate_variant_keys": ["candidate"]
+                }),
+            ),
+        ];
+
+        for (method, public_path, body, internal_path, expected_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+
+            let translation = translate_public_route(&method, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method: forwarded_method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(
+                        forwarded_method,
+                        Method::POST,
+                        "{public_path} must use POST"
+                    );
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn authenticated_agent_session_route_translates_to_session_store() {
+        // Pins: authenticated configured-agent sessions use SessionStore, not the contact session route.
+        let uri = "/v1/sessions/create-agent"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(br#"{"meta":{"workspace_id":"workspace-a"},"agent":{}}"#);
+
+        let translation = translate_public_route(&Method::POST, &uri, &body);
+
+        match translation {
+            RouteTranslation::Forward {
+                method,
+                path,
+                body: forwarded_body,
+            } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(path, "/SessionStore/create_agent_session");
+                assert_eq!(forwarded_body, body.as_ref());
+            }
+            RouteTranslation::NoChange => panic!("agent session route should translate"),
+            RouteTranslation::BadRequest(message) => {
+                panic!("agent session route should not fail translation: {message}")
             }
         }
     }

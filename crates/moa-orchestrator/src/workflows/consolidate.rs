@@ -1,4 +1,4 @@
-//! Restate workflow that runs one workspace memory-consolidation pass.
+//! Restate workflow that runs one tenant-visible memory-consolidation pass.
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -519,7 +519,7 @@ async fn record_memory_learning(
                 tenant_id: report.workspace_id.to_string(),
                 learning_type: "memory_updated".to_string(),
                 target_id: report.workspace_id.to_string(),
-                target_label: Some("workspace_memory".to_string()),
+                target_label: Some("tenant_memory".to_string()),
                 payload: serde_json::json!({
                     "target_date": report.target_date,
                     "records_updated": report.records_updated,

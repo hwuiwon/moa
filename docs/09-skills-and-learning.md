@@ -30,13 +30,15 @@ package to a minimal skill artifact that points at `SKILL.md`.
 
 Postgres is the only durable skill package store:
 
-- `moa.skill` stores package metadata, scope, versioning, hashes, file counts,
-  total size, tags, and a JSONB manifest derived from `SKILL.md`.
-- `moa.skill_file` stores each package file as `BYTEA`, keyed by skill revision
-  and normalized package path.
-- `moa.artifact` and `moa.artifact_revision` store the canonical skill artifact
-  document. `moa.skill` remains the materialized skill lookup for turn
-  context injection.
+- `moa.artifact` stores the stable skill artifact identity, scope, name,
+  description, and tags.
+- `moa.artifact_revision` stores each immutable skill revision, status,
+  canonical hash, source text, validation report, and artifact-local version.
+- `moa.artifact_file` stores package files such as `SKILL.md`, scripts,
+  references, assets, and optional `skill.moa.yaml`, keyed by artifact revision.
+
+The context pipeline reads published skill artifact revisions directly. There is
+no separate active skill mirror for turn context injection.
 
 Skill packages are scoped with the same `MemoryScope` tiers used by memory:
 
@@ -115,8 +117,7 @@ imported explicitly. Current generation flow:
 
 Skill improvement builds an updated `SKILL.md`, preserves supporting package
 files from the previous revision, and stores the result as a draft artifact.
-It does not write `moa.skill`, publish the artifact, or append
-`skill_improved` during generation.
+It does not publish the artifact or append `skill_improved` during generation.
 
 Current review flow:
 
@@ -128,11 +129,9 @@ Current review flow:
    `"regression_execution": "unavailable"` while still requiring human review
    and artifact validation.
 4. Accept publishes the existing draft artifact revision.
-5. Accept materializes that published revision into active `moa.skill` and
-   `moa.skill_file` rows.
-6. Accept marks the candidate `Promoted` and appends `skill_created` or
+5. Accept marks the candidate `Promoted` and appends `skill_created` or
    `skill_improved` to `learning_log`.
-7. `LearningReview/reject` marks the candidate `Rejected`, preserves draft
+6. `LearningReview/reject` marks the candidate `Rejected`, preserves draft
    artifacts for audit, and never mutates active skill rows.
 
 The experience-native path uses `ExperienceRecord` as the learning unit. It

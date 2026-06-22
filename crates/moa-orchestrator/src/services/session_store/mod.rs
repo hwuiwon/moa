@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use moa_core::wire::{
     AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
-    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
+    AppendLearningCandidateRequest, CompleteSegmentRequest, CreateAgentSessionRequest,
+    CreateAgentSessionResponse, CreateSegmentRequest, GetEventsRequest,
     GetLearningCandidateRequest, GetSegmentBaselineRequest, InitSessionVoRequest,
     ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListLearningCandidatesRequest,
     ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
@@ -38,6 +39,11 @@ mod tests;
 pub trait RestateSessionStore {
     /// Persists a session metadata row.
     async fn create_session(meta: Json<SessionMeta>) -> Result<Json<SessionId>, HandlerError>;
+
+    /// Resolves an installed or exact agent revision and persists a pinned session row.
+    async fn create_agent_session(
+        request: Json<CreateAgentSessionRequest>,
+    ) -> Result<Json<CreateAgentSessionResponse>, HandlerError>;
 
     /// Appends one event to the durable session log.
     async fn append_event(request: Json<AppendEventRequest>) -> Result<u64, HandlerError>;

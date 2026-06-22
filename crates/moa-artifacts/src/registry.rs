@@ -396,7 +396,7 @@ impl ArtifactRegistry {
         load_revision_by_uid(conn, revision_uid).await
     }
 
-    /// Marks a draft revision as published and supersedes older published revisions.
+    /// Marks a draft revision as published without invalidating older published revisions.
     pub async fn publish_revision(
         &self,
         scope: &MemoryScope,
@@ -429,22 +429,6 @@ impl ArtifactRegistry {
         )
         .bind(revision_uid)
         .fetch_one(&mut *conn)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        sqlx::query(
-            r#"
-            UPDATE moa.artifact_revision
-            SET valid_to = now(), updated_at = now()
-            WHERE artifact_uid = $1
-              AND revision_uid <> $2
-              AND status = 'published'
-              AND valid_to IS NULL
-            "#,
-        )
-        .bind(artifact_uid)
-        .bind(revision_uid)
-        .execute(&mut *conn)
         .await
         .map_err(map_sqlx_error)?;
 
@@ -752,19 +736,6 @@ pub async fn insert_published_revision(
 ) -> Result<Uuid> {
     validate_source_format(revision.source_format)?;
     let artifact_uid = ensure_artifact(conn, parts, revision.document).await?;
-    sqlx::query(
-        r#"
-        UPDATE moa.artifact_revision
-        SET valid_to = now(), updated_at = now()
-        WHERE artifact_uid = $1
-          AND status = 'published'
-          AND valid_to IS NULL
-        "#,
-    )
-    .bind(artifact_uid)
-    .execute(&mut *conn)
-    .await
-    .map_err(map_sqlx_error)?;
 
     let version = match revision.version {
         Some(version) => version,

@@ -117,18 +117,6 @@ owner = "moa-session"
 readers = ["moa-memory/graph", "moa-memory/lifecycle", "moa-memory/vector"]
 
 [[table]]
-name = "moa.skill"
-schema = "moa"
-owner = "moa-session"
-readers = ["moa-skills"]
-
-[[table]]
-name = "moa.skill_file"
-schema = "moa"
-owner = "moa-session"
-readers = ["moa-skills"]
-
-[[table]]
 name = "analytics.turn_lineage"
 schema = "analytics"
 owner = "moa-session"

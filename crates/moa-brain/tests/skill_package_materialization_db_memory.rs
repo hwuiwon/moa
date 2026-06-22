@@ -2,22 +2,26 @@
 
 use std::sync::Arc;
 
+use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
+use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
+use moa_artifacts::validation::validate_for_status;
 use moa_brain::{
     GraphMemoryPipelineOptions, TurnResult,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    Event, EventRange, MemoryScope, ModelCapabilities, Result, SessionMeta, SessionStore,
+    AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
+    AgentToolPolicy, AgentToolPolicyMode, Event, EventRange, LockedToolRef, MemoryScope,
+    ModelCapabilities, ResolvedArtifactRevisionRef, Result, SessionMeta, SessionStore,
     TokenPricing, ToolCallFormat, ToolOutput, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
 use moa_security::ActionPolicies;
 use moa_session::testing;
-use moa_skills::package::{SkillPackage, SkillPackageFile};
-use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde_json::json;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call() -> Result<()> {
@@ -29,12 +33,17 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let mut config = moa_core::MoaConfig::default();
     config.models.main = "claude-sonnet-4-6".to_string();
     config.memory.auto_bootstrap = false;
+    config.skill_budget.max_manifest_chars = Some(512);
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
-    let workspace_id = WorkspaceId::new("skill-package-materialization");
+    let workspace_id = WorkspaceId::new(format!(
+        "skill-package-materialization-{}",
+        Uuid::now_v7().simple()
+    ));
     let user_id = UserId::new("skill-package-user");
+    let skill_name = format!("db-backed-package-{}", Uuid::now_v7().simple());
     let session_id = session_store
         .create_session(SessionMeta {
             workspace_id: workspace_id.clone(),
@@ -44,13 +53,30 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         })
         .await?;
 
-    SkillRegistry::new(graph_pool.clone())
-        .upsert_by_name(NewSkill::from_package(
-            MemoryScope::Workspace {
+    let skill_document = skill_artifact_document(&skill_name);
+    let skill_source = skill_document.to_yaml().expect("serialize skill artifact");
+    let skill_files = skill_files();
+    let skill_draft = ArtifactRegistry::new(graph_pool.clone())
+        .create_draft(
+            &MemoryScope::Workspace {
                 workspace_id: workspace_id.clone(),
             },
-            skill_package(),
-        ))
+            NewArtifactDraft {
+                document: &skill_document,
+                source_format: "yaml",
+                source_text: skill_source.as_bytes(),
+                files: &skill_files,
+            },
+        )
+        .await?;
+    ArtifactRegistry::new(graph_pool.clone())
+        .publish_revision(
+            &MemoryScope::Workspace {
+                workspace_id: workspace_id.clone(),
+            },
+            skill_draft.revision_uid,
+            &validate_for_status(&skill_document, ArtifactStatus::Published),
+        )
         .await?;
 
     let router = Arc::new(
@@ -62,7 +88,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         .remember_workspace_root(workspace_id.clone(), workspace.clone())
         .await;
 
-    let provider = Arc::new(scripted_provider());
+    let provider = Arc::new(scripted_provider(&skill_name));
     let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
         &config,
         session_store.clone(),
@@ -82,7 +108,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         .emit_event(
             session_id,
             Event::UserMessage {
-                text: "Use the package skill helper and checklist".to_string(),
+                text: format!("Use the {skill_name} package skill helper and checklist"),
                 attachments: Vec::new(),
             },
         )
@@ -142,19 +168,295 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     testing::cleanup_test_schema(&database_url, &schema_name).await
 }
 
-fn skill_package() -> SkillPackage {
-    SkillPackage::new(vec![
-        SkillPackageFile::new("SKILL.md", skill_markdown().as_bytes().to_vec())
-            .with_content_type("text/markdown; charset=utf-8"),
-        SkillPackageFile::new(
-            "references/checklist.md",
-            b"Checklist item: verify package materialization.\n".to_vec(),
+#[tokio::test]
+async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publish() -> Result<()> {
+    // Pins: configured-agent sessions install the skill revision locked by the agent, not latest.
+    let root = TempDir::new()?;
+    let workspace = root.path().join("workspace");
+    tokio::fs::create_dir_all(&workspace).await?;
+
+    let mut config = moa_core::MoaConfig::default();
+    config.models.main = "claude-sonnet-4-6".to_string();
+    config.memory.auto_bootstrap = false;
+    config.skill_budget.max_manifest_chars = Some(512);
+
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
+    let graph_pool = session_store.pool().clone();
+    let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
+    let workspace_id = WorkspaceId::new(format!("agent-locked-skill-{}", Uuid::now_v7().simple()));
+    let user_id = UserId::new("agent-locked-skill-user");
+    let skill_name = format!("agent-locked-skill-{}", Uuid::now_v7().simple());
+    let scope = MemoryScope::Workspace {
+        workspace_id: workspace_id.clone(),
+    };
+    let registry = ArtifactRegistry::new(graph_pool.clone());
+
+    let skill_document = skill_artifact_document(&skill_name);
+    let skill_source = skill_document.to_yaml().expect("serialize skill artifact");
+    let first_draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &skill_document,
+                source_format: "yaml",
+                source_text: skill_source.as_bytes(),
+                files: &skill_files_with_checklist("Pinned v1 checklist.\n"),
+            },
         )
-        .with_content_type("text/markdown; charset=utf-8"),
-        SkillPackageFile::new("scripts/run.sh", b"printf 'helper-script-ok\n'".to_vec())
-            .with_content_type("text/x-shellscript")
-            .with_executable(true),
-    ])
+        .await?;
+    let first_revision = registry
+        .publish_revision(
+            &scope,
+            first_draft.revision_uid,
+            &validate_for_status(&skill_document, ArtifactStatus::Published),
+        )
+        .await?;
+    let second_draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &skill_document,
+                source_format: "yaml",
+                source_text: skill_source.as_bytes(),
+                files: &skill_files_with_checklist("Latest v2 checklist.\n"),
+            },
+        )
+        .await?;
+    registry
+        .publish_revision(
+            &scope,
+            second_draft.revision_uid,
+            &validate_for_status(&skill_document, ArtifactStatus::Published),
+        )
+        .await?;
+    let agent_document = agent_artifact_document(
+        &format!("locked-agent-{}", Uuid::now_v7().simple()),
+        &skill_name,
+    );
+    let agent_source = agent_document.to_yaml().expect("serialize agent artifact");
+    let agent_draft = registry
+        .create_draft(
+            &scope,
+            NewArtifactDraft {
+                document: &agent_document,
+                source_format: "yaml",
+                source_text: agent_source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    let agent_revision = registry
+        .publish_revision(
+            &scope,
+            agent_draft.revision_uid,
+            &validate_for_status(&agent_document, ArtifactStatus::Published),
+        )
+        .await?;
+
+    let session_id = session_store
+        .create_session(SessionMeta {
+            workspace_id: workspace_id.clone(),
+            user_id,
+            model: config.models.main.clone().into(),
+            agent_context: Some(agent_context_with_skill_revision(
+                &skill_name,
+                &first_revision,
+                agent_revision.revision_uid,
+            )),
+            ..SessionMeta::default()
+        })
+        .await?;
+
+    let router = Arc::new(
+        ToolRouter::new_local(&workspace)
+            .await?
+            .with_policies(ActionPolicies::from_config(&config)),
+    );
+    router
+        .remember_workspace_root(workspace_id.clone(), workspace.clone())
+        .await;
+
+    let provider = Arc::new(scripted_provider_read_checklist(&skill_name));
+    let pipeline = build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+        &config,
+        session_store.clone(),
+        GraphMemoryPipelineOptions {
+            graph_pool,
+            shared_graph_memory_retriever: None,
+            retrieval_embedder: None,
+            shared_skill_injector: None,
+            compaction_llm_provider: None,
+            query_rewrite_llm_provider: None,
+            discovered_workspace_instructions: None,
+            tool_schemas: router.tool_schemas(),
+            lineage: Arc::new(moa_core::NullLineageHandle),
+        },
+    );
+    session_store
+        .emit_event(
+            session_id,
+            Event::UserMessage {
+                text: format!("Use the {skill_name} package checklist"),
+                attachments: Vec::new(),
+            },
+        )
+        .await?;
+
+    let result = run_brain_turn(
+        session_id,
+        session_store.clone(),
+        provider.clone(),
+        &pipeline,
+        Some(router),
+    )
+    .await?;
+    assert_eq!(result, TurnResult::Complete);
+
+    let events = session_store
+        .get_events(session_id, EventRange::all())
+        .await?;
+    let tool_results = tool_results_by_provider_id(&events);
+    assert_eq!(tool_results.len(), 1);
+    assert_eq!(tool_results[0].0.as_deref(), Some("read_checklist"));
+    assert_eq!(tool_results[0].1.to_text(), "Pinned v1 checklist.");
+
+    testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
+fn skill_files() -> Vec<NewArtifactFile> {
+    skill_files_with_checklist("Checklist item: verify package materialization.\n")
+}
+
+fn skill_files_with_checklist(checklist: &str) -> Vec<NewArtifactFile> {
+    vec![
+        NewArtifactFile {
+            path: "SKILL.md".to_string(),
+            content: skill_markdown().as_bytes().to_vec(),
+            content_type: Some("text/markdown; charset=utf-8".to_string()),
+            executable: false,
+        },
+        NewArtifactFile {
+            path: "references/checklist.md".to_string(),
+            content: checklist.as_bytes().to_vec(),
+            content_type: Some("text/markdown; charset=utf-8".to_string()),
+            executable: false,
+        },
+        NewArtifactFile {
+            path: "scripts/run.sh".to_string(),
+            content: b"printf 'helper-script-ok\n'".to_vec(),
+            content_type: Some("text/x-shellscript".to_string()),
+            executable: true,
+        },
+    ]
+}
+
+fn agent_context_with_skill_revision(
+    skill_name: &str,
+    revision: &moa_artifacts::registry::StoredArtifactRevision,
+    agent_revision_uid: Uuid,
+) -> AgentContext {
+    let dependency = ResolvedArtifactRevisionRef {
+        reference: format!("skill://{skill_name}"),
+        kind: "skill".to_string(),
+        name: skill_name.to_string(),
+        artifact_uid: revision.artifact_uid,
+        revision_uid: revision.revision_uid,
+        version: revision.version,
+    };
+    let lock = AgentRevisionLock {
+        agent_revision_uid,
+        artifact_dependencies: vec![dependency.clone()],
+        tool_dependencies: vec![LockedToolRef {
+            name: "file_read".to_string(),
+            schema_hash: "file-read-schema".to_string(),
+            provider: None,
+        }],
+        canonical_policy_hash: "locked-skill-policy".to_string(),
+    };
+    let snapshot = AgentPolicySnapshot {
+        instructions: vec![format!("Use only {skill_name} for package guidance.")],
+        skill_policy: AgentSkillPolicy {
+            mode: AgentSkillPolicyMode::Pinned,
+            refs: vec![format!("skill://{skill_name}")],
+            max_visible: None,
+        },
+        tool_policy: AgentToolPolicy {
+            mode: AgentToolPolicyMode::Allowlist,
+            tools: vec!["file_read".to_string()],
+            denied_tools: Vec::new(),
+        },
+        revision_lock: Some(lock),
+        ..AgentPolicySnapshot::default()
+    };
+    AgentContext {
+        agent_id: None,
+        installation_uid: None,
+        deployment_uid: None,
+        definition_ref: "agent://locked-skill-test".to_string(),
+        revision_uid: agent_revision_uid,
+        policy_hash: "locked-skill-policy".to_string(),
+        display_name: "Locked Skill Test".to_string(),
+        artifact_dependencies: vec![dependency],
+        tool_dependencies: vec![LockedToolRef {
+            name: "file_read".to_string(),
+            schema_hash: "file-read-schema".to_string(),
+            provider: None,
+        }],
+        policy_snapshot: serde_json::to_value(snapshot).expect("serialize policy snapshot"),
+    }
+}
+
+fn skill_artifact_document(skill_name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "skill",
+        "metadata": {
+            "name": skill_name,
+            "description": "DB-backed package materialization fixture",
+            "tags": ["package", "materialization"]
+        },
+        "definition": {
+            "type": "skill",
+            "spec": {
+                "instructions": { "path": "SKILL.md" },
+                "allowed_tools": ["file_read", "bash"]
+            }
+        }
+    }))
+    .expect("skill artifact fixture is valid")
+}
+
+fn agent_artifact_document(agent_name: &str, skill_name: &str) -> ArtifactDocument {
+    serde_json::from_value(json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "agent",
+        "metadata": {
+            "name": agent_name,
+            "description": "Locked skill test agent"
+        },
+        "definition": {
+            "type": "agent",
+            "spec": {
+                "display_name": "Locked Skill Test",
+                "purpose": {
+                    "summary": "Exercise pinned skill materialization.",
+                    "expected_outputs": ["checklist"]
+                },
+                "instruction_policy": {
+                    "instructions": ["Use the pinned skill package."]
+                },
+                "skill_policy": {
+                    "mode": "pinned",
+                    "refs": [format!("skill://{skill_name}")]
+                },
+                "tool_policy": {
+                    "mode": "allowlist",
+                    "tools": ["file_read"]
+                }
+            }
+        }
+    }))
+    .expect("agent artifact fixture is valid")
 }
 
 fn skill_markdown() -> &'static str {
@@ -174,26 +476,57 @@ Run the helper script and read the checklist when package materialization is req
 "#
 }
 
-fn scripted_provider() -> ScriptedProvider {
+fn scripted_provider(skill_name: &str) -> ScriptedProvider {
+    let skill_base = format!(".moa/skills/{}", slugify_skill_name(skill_name));
     ScriptedProvider::new(capabilities())
         .push_response(ScriptedResponse::from_blocks(vec![
             ScriptedBlock::tool_call(
                 "file_read",
-                json!({ "path": ".moa/skills/db-backed-package/SKILL.md" }),
+                json!({ "path": format!("{skill_base}/SKILL.md") }),
                 "read_skill_md",
             ),
             ScriptedBlock::tool_call(
                 "file_read",
-                json!({ "path": ".moa/skills/db-backed-package/references/checklist.md" }),
+                json!({ "path": format!("{skill_base}/references/checklist.md") }),
                 "read_checklist",
             ),
             ScriptedBlock::tool_call(
                 "bash",
-                json!({ "cmd": ".moa/skills/db-backed-package/scripts/run.sh" }),
+                json!({ "cmd": format!("{skill_base}/scripts/run.sh") }),
                 "run_script",
             ),
         ]))
         .push_response(ScriptedResponse::text("Package materialized."))
+}
+
+fn scripted_provider_read_checklist(skill_name: &str) -> ScriptedProvider {
+    let skill_base = format!(".moa/skills/{}", slugify_skill_name(skill_name));
+    ScriptedProvider::new(capabilities())
+        .push_response(ScriptedResponse::from_blocks(vec![
+            ScriptedBlock::tool_call(
+                "file_read",
+                json!({ "path": format!("{skill_base}/references/checklist.md") }),
+                "read_checklist",
+            ),
+        ]))
+        .push_response(ScriptedResponse::text("Pinned package materialized."))
+}
+
+fn slugify_skill_name(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !slug.is_empty() {
+            slug.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
 }
 
 fn capabilities() -> ModelCapabilities {

@@ -268,8 +268,8 @@ pub struct SkillOverride {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MemoryOverride {
-    /// Workspace memory snapshot path.
-    pub workspace_memory_path: Option<PathBuf>,
+    /// Tenant knowledge snapshot path.
+    pub tenant_memory_path: Option<PathBuf>,
     /// User memory snapshot path.
     pub user_memory_path: Option<PathBuf>,
     /// When true, start from empty memory instead of defaults.

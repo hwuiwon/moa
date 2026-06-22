@@ -92,16 +92,16 @@ Platform
        -> Sessions
        -> Task segments
        -> Learning log
-       -> Workspace memory
-       -> Workspace skills
+       -> Tenant knowledge
+       -> Workspace-administered skills
        -> Lineage, analytics, and audit evidence
 ```
 
 Enterprise behavior is tenant-controlled:
 
 - Learning is append-only and invalidated by `valid_to`, not silently rewritten.
-- Workspace memory and skills remain scoped; ranking signals aggregate at tenant
-  level where the work pattern is team-level.
+- Knowledge and learning are tenant-scoped; workspace administration controls
+  which tenant resources are available in each workspace.
 - Compliance audit is an opt-in tier with explicit attestation caveats until
   external cryptographic review is complete.
 

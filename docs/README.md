@@ -65,6 +65,6 @@ before diving into the numbered specs.
 
 - Do not introduce new durable orchestration primitives outside Restate without updating `02` and `12`.
 - Do not add a second application database. New product state belongs in Postgres unless a doc explicitly records an exception.
-- Tenant-level learning state belongs at tenant scope; workspace memory and skills remain workspace-scoped unless intentionally promoted.
+- Tenant-level learning and knowledge belong at tenant scope; workspace is an administration/control boundary, not a new knowledge scope for agent-facing policy.
 - Any new learned behavior should write a `learning_log` entry with source references and actor identity.
 - Any new enterprise-facing action should define its audit, lineage, and rollback story before becoming a default workflow.

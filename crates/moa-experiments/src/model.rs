@@ -1,7 +1,7 @@
 //! Typed experiment definitions and run records.
 
 use chrono::{DateTime, Utc};
-use moa_core::{Attachment, MemoryScope, ModelId, SessionId};
+use moa_core::{AgentSessionSelection, Attachment, MemoryScope, ModelId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -204,6 +204,9 @@ pub enum ExperimentTarget {
         prompt: String,
         /// Existing session to continue, or `None` for a new session.
         session_id: Option<SessionId>,
+        /// Installed deployment or exact agent revision to pin when creating a new session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentSessionSelection>,
         /// Model requested for the agent loop.
         model: ModelId,
         /// Input attachments supplied with the prompt.

@@ -13,6 +13,7 @@ async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 metrics.workspace = true
+moa-artifacts = { workspace = true }
 moa-core = { workspace = true }
 moa-hands = { workspace = true }
 moa-lineage-citation = { workspace = true }
@@ -43,7 +44,6 @@ moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-pii = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-session = { workspace = true }
-moa-skills = { workspace = true }
 proptest.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true

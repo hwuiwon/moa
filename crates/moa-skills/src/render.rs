@@ -8,7 +8,7 @@ use crate::registry::Skill;
 
 const DEFAULT_ADDENDUM_LIMIT: i64 = 5;
 
-/// Context for rendering skills with visible learned lesson addenda.
+/// Context for rendering skills with visible learned lessons.
 #[derive(Clone)]
 pub struct SkillRenderContext {
     pool: PgPool,
@@ -35,7 +35,7 @@ impl SkillRenderContext {
         }
     }
 
-    /// Sets the maximum number of lesson addenda to prepend.
+    /// Sets the maximum number of graph lessons to prepend.
     pub fn with_addendum_limit(mut self, limit: i64) -> Self {
         self.addendum_limit = limit.max(0);
         self
@@ -47,7 +47,7 @@ impl SkillRenderContext {
     }
 }
 
-/// Renders skill markdown with visible learned lesson addenda prepended.
+/// Renders skill markdown with visible learned graph lessons prepended.
 pub async fn render(
     skill: &Skill,
     skill_md: &str,
@@ -90,18 +90,18 @@ async fn load_addenda(
 
     let rows = sqlx::query(
         r#"
-        SELECT addendum.summary, addendum.linked_lesson_uid
-        FROM moa.skill_addendum addendum
-        JOIN moa.node_index lesson
-          ON lesson.uid = addendum.linked_lesson_uid
-        WHERE addendum.skill_uid = $1
-          AND addendum.valid_to IS NULL
+        SELECT
+            COALESCE(lesson.properties_summary->>'summary', lesson.name) AS summary,
+            lesson.uid AS linked_lesson_uid
+        FROM moa.node_index lesson
+        WHERE lesson.label = 'Lesson'
           AND lesson.valid_to IS NULL
-        ORDER BY addendum.created_at DESC
+          AND lesson.properties_summary->>'skill_uid' = $1
+        ORDER BY lesson.valid_from DESC
         LIMIT $2
         "#,
     )
-    .bind(skill_uid)
+    .bind(skill_uid.to_string())
     .bind(limit)
     .fetch_all(conn)
     .await

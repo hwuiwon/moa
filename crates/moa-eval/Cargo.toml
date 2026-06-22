@@ -43,5 +43,6 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-skills = { workspace = true }
 moa-test-support = { workspace = true }
 tempfile.workspace = true

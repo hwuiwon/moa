@@ -12,6 +12,7 @@ pub(super) async fn run_agent_loop_target(
     request: ExperimentRunWorkflowRequest,
     prompt: String,
     session_id: Option<SessionId>,
+    agent: Option<AgentSessionSelection>,
     model: ModelId,
     attachments: Vec<moa_core::Attachment>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
@@ -31,9 +32,17 @@ pub(super) async fn run_agent_loop_target(
     let session_id = match session_id {
         Some(session_id) => session_id,
         None => {
-            let (session_id, meta) =
-                create_new_session(ctx, request.workspace_id.clone(), model.clone(), &request)
-                    .await?;
+            let agent = agent.ok_or_else(|| {
+                bad_request("agent-loop experiment target requires an agent selector")
+            })?;
+            let (session_id, meta) = create_new_session(
+                ctx,
+                request.workspace_id.clone(),
+                model.clone(),
+                &request,
+                agent,
+            )
+            .await?;
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
                     .set_meta(Json::from(meta)),
@@ -124,12 +133,17 @@ async fn create_new_session(
     workspace_id: WorkspaceId,
     model: ModelId,
     request: &ExperimentRunWorkflowRequest,
+    agent: AgentSessionSelection,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
     let store = OrchestratorCtx::current_session_store();
     let identity = request.identity.clone();
     Ok(ctx
         .run(|| async move {
-            let meta = new_session_meta(workspace_id, model, &identity)?;
+            let mut meta = new_session_meta(workspace_id, model, &identity)?;
+            let agent_context =
+                resolve_agent_context_for_session(store.as_ref(), &meta, &agent).await?;
+            apply_agent_model_policy(&mut meta, &agent_context)?;
+            meta.agent_context = Some(agent_context);
             let session_id = create_session_for_identity(store.as_ref(), meta.clone(), identity)
                 .await
                 .map_err(non_retryable_handler_error)?;

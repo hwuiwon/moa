@@ -536,6 +536,7 @@ async fn run_plan_experiment(
         scorecard: json!({}),
         score_run_id: None,
         idempotency_key: Some(format!("{name}-{}", Uuid::now_v7())),
+        agent_revision_variants: Vec::new(),
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
         .await?

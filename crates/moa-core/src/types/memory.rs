@@ -5,18 +5,18 @@ use serde::{Deserialize, Serialize};
 
 use super::{UserId, WorkspaceId};
 
-/// Three-tier memory scope walked from global to workspace to user during retrieval.
+/// Three-tier memory scope walked from global shared knowledge to tenant-visible context to user context during retrieval.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryScope {
     /// Cross-workspace knowledge read by every workspace.
     Global,
-    /// Workspace-tenant knowledge.
+    /// Tenant-visible shared knowledge for the current workspace context.
     Workspace {
         /// Workspace owning this memory scope.
         workspace_id: WorkspaceId,
     },
-    /// User-personal knowledge inside a workspace.
+    /// User-personal knowledge inside a workspace context.
     User {
         /// Workspace containing this user scope.
         workspace_id: WorkspaceId,
@@ -31,7 +31,7 @@ pub enum MemoryScope {
 pub enum ScopeTier {
     /// Cross-workspace global memory tier.
     Global,
-    /// Workspace memory tier.
+    /// Tenant-visible shared tier.
     Workspace,
     /// User memory tier within a workspace.
     User,
@@ -109,7 +109,7 @@ impl ScopeContext {
         Self { scope }
     }
 
-    /// Creates a workspace-tier scope context.
+    /// Creates a tenant-visible shared scope context for a workspace.
     pub fn workspace(workspace_id: WorkspaceId) -> Self {
         Self::new(MemoryScope::Workspace { workspace_id })
     }
@@ -161,6 +161,9 @@ impl From<MemoryScope> for ScopeContext {
 /// Tier-1 skill metadata injected into the context pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillMetadata {
+    /// Exact artifact revision backing this skill metadata, when loaded from artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_revision_uid: Option<uuid::Uuid>,
     /// Canonical skill document path.
     pub path: String,
     /// Stable skill name from `SKILL.md`.

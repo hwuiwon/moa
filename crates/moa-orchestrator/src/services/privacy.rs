@@ -995,10 +995,6 @@ pub async fn collect_privacy_export_data_sections(
     );
     counts.insert("embeddings", collect_embeddings(ctx, export_dir).await?);
     counts.insert("skills", collect_skills(ctx, export_dir).await?);
-    counts.insert(
-        "skill_addenda",
-        collect_skill_addenda(ctx, export_dir).await?,
-    );
     Ok(counts)
 }
 
@@ -1198,23 +1194,24 @@ async fn collect_skills(
             sqlx::query_scalar::<_, Value>(
                 r#"
                 SELECT jsonb_build_object(
-                    'skill_uid', s.skill_uid,
-                    'workspace_id', s.workspace_id,
-                    'user_id', s.user_id,
-                    'scope', s.scope,
-                    'name', s.name,
-                    'description', s.description,
-                    'package_hash_hex', encode(s.package_hash, 'hex'),
-                    'skill_md_hash_hex', encode(s.skill_md_hash, 'hex'),
-                    'file_count', s.file_count,
-                    'total_size_bytes', s.total_size_bytes,
-                    'manifest', s.manifest,
-                    'version', s.version,
-                    'previous_skill_uid', s.previous_skill_uid,
-                    'tags', s.tags,
-                    'valid_to', s.valid_to,
-                    'created_at', s.created_at,
-                    'updated_at', s.updated_at,
+                    'artifact_uid', a.artifact_uid,
+                    'revision_uid', r.revision_uid,
+                    'workspace_id', a.workspace_id,
+                    'user_id', a.user_id,
+                    'scope', a.scope,
+                    'name', a.name,
+                    'description', a.description,
+                    'tags', a.tags,
+                    'definition', r.definition,
+                    'canonical_hash_hex', encode(r.canonical_hash, 'hex'),
+                    'source_format', r.source_format,
+                    'source_text_base64', encode(r.source_text, 'base64'),
+                    'status', r.status,
+                    'version', r.version,
+                    'published_at', r.published_at,
+                    'valid_to', r.valid_to,
+                    'created_at', r.created_at,
+                    'updated_at', r.updated_at,
                     'privacy_subject_user_id', $2,
                     'privacy_subject_provenance', $3,
                     'files', COALESCE((
@@ -1226,24 +1223,30 @@ async fn collect_skills(
                             'executable', f.executable,
                             'file_size_bytes', f.file_size_bytes
                         ) ORDER BY f.path)
-                        FROM moa.skill_file f
-                        WHERE f.skill_uid = s.skill_uid
+                        FROM moa.artifact_file f
+                        WHERE f.revision_uid = r.revision_uid
                     ), '[]'::jsonb)
                 )
-                FROM moa.skill s
-                WHERE valid_to IS NULL
-                  AND ($1::text IS NULL OR s.workspace_id = $1)
+                FROM moa.artifact a
+                JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid
+                WHERE a.valid_to IS NULL
+                  AND r.valid_to IS NULL
+                  AND a.kind = 'skill'
+                  AND r.status = 'published'
+                  AND ($1::text IS NULL OR a.workspace_id = $1)
                   AND (
-                      s.user_id = $2
-                      OR s.description LIKE ('%' || $2 || '%')
+                      a.user_id = $2
+                      OR a.description LIKE ('%' || $2 || '%')
+                      OR r.definition::text LIKE ('%' || $2 || '%')
+                      OR encode(r.source_text, 'escape') LIKE ('%' || $2 || '%')
                       OR EXISTS (
                           SELECT 1
-                          FROM moa.skill_file f
-                          WHERE f.skill_uid = s.skill_uid
+                          FROM moa.artifact_file f
+                          WHERE f.revision_uid = r.revision_uid
                             AND encode(f.content, 'escape') LIKE ('%' || $2 || '%')
                       )
                   )
-                ORDER BY s.workspace_id NULLS FIRST, s.scope, s.name, s.version
+                ORDER BY a.workspace_id NULLS FIRST, a.scope, a.name, r.version
                 "#,
             )
             .bind(ctx.workspace.as_deref())
@@ -1256,55 +1259,6 @@ async fn collect_skills(
     }
     tx.commit().await.map_err(handler_error)?;
     write_jsonl(export_dir.join("skills.jsonl"), &rows).await
-}
-
-async fn collect_skill_addenda(
-    ctx: &PrivacyExportContext,
-    export_dir: &Path,
-) -> Result<usize, HandlerError> {
-    let mut tx = begin_audited_read(&ctx.pool).await?;
-    let mut rows = Vec::new();
-    for subject in &ctx.subjects {
-        rows.extend(
-            sqlx::query_scalar::<_, Value>(
-                r#"
-                SELECT jsonb_build_object(
-                    'addendum_uid', a.addendum_uid,
-                    'skill_uid', a.skill_uid,
-                    'linked_lesson_uid', a.linked_lesson_uid,
-                    'workspace_id', a.workspace_id,
-                    'user_id', a.user_id,
-                    'scope', a.scope,
-                    'summary', a.summary,
-                    'created_at', a.created_at,
-                    'valid_to', a.valid_to,
-                    'privacy_subject_user_id', $2,
-                    'privacy_subject_provenance', $3
-                )
-                FROM moa.skill_addendum a
-                LEFT JOIN moa.node_index n ON n.uid = a.linked_lesson_uid
-                WHERE a.valid_to IS NULL
-                  AND ($1::text IS NULL OR a.workspace_id = $1)
-                  AND (
-                      a.user_id = $2
-                      OR a.summary LIKE ('%' || $2 || '%')
-                      OR n.user_id = $2
-                      OR n.properties_summary->>'user_id' = $2
-                      OR n.properties_summary::text LIKE ('%' || $2 || '%')
-                  )
-                ORDER BY a.workspace_id NULLS FIRST, a.created_at, a.addendum_uid
-                "#,
-            )
-            .bind(ctx.workspace.as_deref())
-            .bind(&subject.user_id)
-            .bind(subject.provenance.as_str())
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(handler_error)?,
-        );
-    }
-    tx.commit().await.map_err(handler_error)?;
-    write_jsonl(export_dir.join("skill_addenda.jsonl"), &rows).await
 }
 
 async fn collect_changelog(

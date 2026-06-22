@@ -175,7 +175,7 @@ async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Res
         let _ = default_root;
     }
     let _ = &agent_config.memory.user_memory_path;
-    let _ = &agent_config.memory.workspace_memory_path;
+    let _ = &agent_config.memory.tenant_memory_path;
     Ok(())
 }
 

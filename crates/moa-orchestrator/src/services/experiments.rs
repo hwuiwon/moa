@@ -1,27 +1,38 @@
 //! Restate service for authorized live behavior experiment run metadata.
 
+use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::wire::{
-    ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest,
-    ExperimentCompareResponse, ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse,
-    ExperimentListRequest, ExperimentListResponse, ExperimentProposeImprovementsRequest,
+    AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
+    AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
+    AgentRevisionSimulationCompareResponse, AgentRevisionSimulationRunRequest,
+    AgentRevisionSimulationRunResponse, AgentRevisionSimulationVariant,
+    AgentRevisionSimulationVariantResult, AgentToolDependencyDelta, ExperimentCancelRequest,
+    ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse,
+    ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
+    ExperimentListResponse, ExperimentProposeImprovementsRequest,
     ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
     ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentScoresRequest,
     ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
-    ExperimentTrialsRequest, ExperimentTrialsResponse,
+    ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{MoaError, WorkspaceId, record_experiment_learning_candidates};
+use moa_core::{MemoryScope, MoaError, WorkspaceId, record_experiment_learning_candidates};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
     trial_status,
 };
+use moa_experiments::model::{ExperimentTrialStatus, ExperimentVariant};
+use moa_experiments::store::ExperimentStore;
 use moa_scoring::ScoringError;
+use moa_scoring::{ExperimentRunScoreRef, experiment_score_breakdown_for_workspace};
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::OrchestratorCtx;
@@ -83,6 +94,21 @@ pub trait Experiments {
     async fn compare(
         request: Json<ExperimentCompareRequest>,
     ) -> Result<Json<ExperimentCompareResponse>, HandlerError>;
+
+    /// Runs a plan-backed simulation across exact agent revisions.
+    async fn run_agent_revision_simulation(
+        request: Json<AgentRevisionSimulationRunRequest>,
+    ) -> Result<Json<AgentRevisionSimulationRunResponse>, HandlerError>;
+
+    /// Compares agent revision variants inside one simulation run.
+    async fn compare_agent_revision_simulation(
+        request: Json<AgentRevisionSimulationCompareRequest>,
+    ) -> Result<Json<AgentRevisionSimulationCompareResponse>, HandlerError>;
+
+    /// Compares resolved runtime policies for two published agent revisions.
+    async fn compare_agent_revisions(
+        request: Json<AgentRevisionCompareRequest>,
+    ) -> Result<Json<AgentRevisionCompareResponse>, HandlerError>;
 }
 
 /// Concrete live behavior experiment service implementation.
@@ -137,6 +163,7 @@ impl Experiments for ExperimentsImpl {
             plan_revision_uid: accepted.plan_revision_uid,
             identity: accepted.identity,
             score_run_id: accepted.score_run_id,
+            agent_revision_variants: accepted.agent_revision_variants,
         };
         ctx.workflow_client::<ExperimentRunClient>(workflow_request.run_uid.to_string())
             .run(Json::from(workflow_request))
@@ -286,6 +313,83 @@ impl Experiments for ExperimentsImpl {
             .name("experiments_compare")
             .await?)
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn run_agent_revision_simulation(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AgentRevisionSimulationRunRequest>,
+    ) -> Result<Json<AgentRevisionSimulationRunResponse>, HandlerError> {
+        annotate_restate_handler_span("Experiments", "run_agent_revision_simulation");
+        let request = request.into_inner();
+        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        let pool = OrchestratorCtx::current_graph_pool();
+
+        let accepted = ctx
+            .run(|| async move {
+                run_agent_revision_simulation_inner(pool, request, identity)
+                    .await
+                    .map(Json::from)
+            })
+            .name("experiments_run_agent_revision_simulation")
+            .await?
+            .into_inner();
+        ctx.workflow_client::<ExperimentRunClient>(accepted.run_uid.to_string())
+            .run(Json::from(ExperimentRunWorkflowRequest {
+                workspace_id: accepted.workspace_id.clone(),
+                run_uid: accepted.run_uid,
+                target: serde_json::json!({}),
+                variant: serde_json::json!({}),
+                plan_revision_uid: Some(accepted.plan_revision_uid),
+                identity: accepted.identity,
+                score_run_id: accepted.score_run_id,
+                agent_revision_variants: accepted.variants.clone(),
+            }))
+            .send();
+        Ok(Json::from(accepted.response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn compare_agent_revision_simulation(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AgentRevisionSimulationCompareRequest>,
+    ) -> Result<Json<AgentRevisionSimulationCompareResponse>, HandlerError> {
+        annotate_restate_handler_span("Experiments", "compare_agent_revision_simulation");
+        let request = request.into_inner();
+        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        let pool = OrchestratorCtx::current_graph_pool();
+
+        Ok(ctx
+            .run(|| async move {
+                compare_agent_revision_simulation_inner(pool, request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("experiments_compare_agent_revision_simulation")
+            .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn compare_agent_revisions(
+        &self,
+        ctx: Context<'_>,
+        request: Json<AgentRevisionCompareRequest>,
+    ) -> Result<Json<AgentRevisionCompareResponse>, HandlerError> {
+        annotate_restate_handler_span("Experiments", "compare_agent_revisions");
+        let request = request.into_inner();
+        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        let pool = OrchestratorCtx::current_graph_pool();
+
+        Ok(ctx
+            .run(|| async move {
+                compare_agent_revisions_inner(pool, request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("experiments_compare_agent_revisions")
+            .await?)
+    }
 }
 
 async fn generate_plan_inner(
@@ -387,6 +491,472 @@ async fn compare_inner(
         .map_err(experiment_app_error_to_handler_error)
 }
 
+/// Internal accepted-run payload for an agent-revision simulation admission.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentRevisionSimulationAccepted {
+    /// Workspace that owns the accepted run.
+    workspace_id: WorkspaceId,
+    /// Durable experiment run identifier.
+    run_uid: uuid::Uuid,
+    /// Experiment-plan revision expanded by the run.
+    plan_revision_uid: uuid::Uuid,
+    /// Identity that admitted the run.
+    identity: Identity,
+    /// Run-level score run identifier.
+    score_run_id: uuid::Uuid,
+    /// Exact agent revision variants accepted for the run.
+    variants: Vec<AgentRevisionSimulationVariant>,
+    /// Public response payload returned by the Restate handler.
+    response: AgentRevisionSimulationRunResponse,
+}
+
+/// Admits an agent-revision simulation run after caller authorization has passed.
+pub async fn run_agent_revision_simulation_inner(
+    pool: sqlx::PgPool,
+    request: AgentRevisionSimulationRunRequest,
+    identity: Identity,
+) -> Result<AgentRevisionSimulationAccepted, HandlerError> {
+    let variants = simulation_variants(request.base, request.candidates)?;
+    let admitted = run_inner(
+        pool,
+        ExperimentRunRequest {
+            workspace_id: request.workspace_id.clone(),
+            name: request.name,
+            plan_revision_uid: Some(request.plan_revision_uid),
+            target: None,
+            variant: None,
+            scorecard: serde_json::json!({}),
+            score_run_id: None,
+            idempotency_key: request.idempotency_key,
+            agent_revision_variants: variants.clone(),
+        },
+        identity.clone(),
+    )
+    .await?;
+    Ok(AgentRevisionSimulationAccepted {
+        workspace_id: request.workspace_id.clone(),
+        run_uid: admitted.run_uid,
+        plan_revision_uid: request.plan_revision_uid,
+        identity,
+        score_run_id: admitted.score_run_id,
+        variants: variants.clone(),
+        response: AgentRevisionSimulationRunResponse {
+            workspace_id: request.workspace_id,
+            run_uid: admitted.run_uid,
+            status: admitted.response.status,
+            score_run_id: admitted.score_run_id,
+            plan_revision_uid: request.plan_revision_uid,
+            variants,
+        },
+    })
+}
+
+/// Compares agent-revision simulation variants after caller authorization has passed.
+pub async fn compare_agent_revision_simulation_inner(
+    pool: sqlx::PgPool,
+    request: AgentRevisionSimulationCompareRequest,
+) -> Result<AgentRevisionSimulationCompareResponse, HandlerError> {
+    let scope = MemoryScope::Workspace {
+        workspace_id: request.workspace_id.clone(),
+    };
+    let store = ExperimentStore::new(pool.clone());
+    let run = store
+        .load_run(&scope, request.run_uid)
+        .await
+        .map_err(moa_error_to_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "simulation run not found"))?;
+    let variants = variants_from_run_metadata(&run.variant)?;
+    let candidate_keys = if request.candidate_variant_keys.is_empty() {
+        variants
+            .iter()
+            .filter(|variant| variant.variant_key != request.base_variant_key)
+            .map(|variant| variant.variant_key.clone())
+            .collect::<Vec<_>>()
+    } else {
+        request.candidate_variant_keys.clone()
+    };
+    let mut wanted = BTreeSet::from([request.base_variant_key.clone()]);
+    wanted.extend(candidate_keys.iter().cloned());
+    let variant_revisions = variants
+        .into_iter()
+        .map(|variant| (variant.variant_key, variant.revision_uid))
+        .collect::<BTreeMap<_, _>>();
+    for key in &wanted {
+        if !variant_revisions.contains_key(key) {
+            return Err(TerminalError::new_with_code(
+                400,
+                format!("simulation variant `{key}` was not part of the run"),
+            )
+            .into());
+        }
+    }
+
+    let trials = store
+        .list_trials(&scope, request.run_uid, None, 100_000)
+        .await
+        .map_err(moa_error_to_handler_error)?;
+    let mut summaries = wanted
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                MutableSimulationVariantResult::new(
+                    key.clone(),
+                    *variant_revisions.get(key).expect("checked above"),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for trial in &trials {
+        let Some(summary) = summaries.get_mut(&trial.variant_key) else {
+            continue;
+        };
+        summary.record_trial(trial);
+    }
+
+    let breakdown = experiment_score_breakdown_for_workspace(
+        &pool,
+        ExperimentRunScoreRef {
+            workspace_id: request.workspace_id.clone(),
+            run_uid: request.run_uid,
+        },
+    )
+    .await
+    .map_err(score_error_to_handler_error)?;
+    let variant_deltas = simulation_variant_deltas(
+        &breakdown.trials,
+        &request.base_variant_key,
+        &candidate_keys,
+    );
+
+    Ok(AgentRevisionSimulationCompareResponse {
+        workspace_id: request.workspace_id,
+        run_uid: request.run_uid,
+        base_variant_key: request.base_variant_key,
+        variants: summaries.into_values().map(Into::into).collect(),
+        variant_deltas,
+    })
+}
+
+fn simulation_variants(
+    base: AgentRevisionSimulationVariant,
+    candidates: Vec<AgentRevisionSimulationVariant>,
+) -> Result<Vec<AgentRevisionSimulationVariant>, HandlerError> {
+    let mut variants = vec![base];
+    variants.extend(candidates);
+    if variants.len() < 2 {
+        return Err(TerminalError::new_with_code(
+            400,
+            "agent revision simulation requires at least one candidate",
+        )
+        .into());
+    }
+    let mut keys = BTreeSet::new();
+    for variant in &variants {
+        if variant.variant_key.trim().is_empty() {
+            return Err(
+                TerminalError::new_with_code(400, "simulation variant_key is required").into(),
+            );
+        }
+        if !keys.insert(variant.variant_key.clone()) {
+            return Err(TerminalError::new_with_code(
+                400,
+                format!("duplicate simulation variant_key `{}`", variant.variant_key),
+            )
+            .into());
+        }
+    }
+    Ok(variants)
+}
+
+fn variants_from_run_metadata(
+    variant: &ExperimentVariant,
+) -> Result<Vec<AgentRevisionSimulationVariant>, HandlerError> {
+    let value = variant
+        .metadata
+        .get("agent_revision_variants")
+        .ok_or_else(|| {
+            TerminalError::new_with_code(
+                400,
+                "experiment run does not contain agent revision simulation variants",
+            )
+        })?;
+    serde_json::from_value(value.clone())
+        .map_err(|error| TerminalError::new_with_code(400, error.to_string()).into())
+}
+
+#[derive(Debug, Clone)]
+struct MutableSimulationVariantResult {
+    variant_key: String,
+    revision_uid: uuid::Uuid,
+    trial_count: u64,
+    completed_count: u64,
+    failed_count: u64,
+    cancelled_count: u64,
+    score_run_ids: BTreeSet<uuid::Uuid>,
+    session_ids: Vec<moa_core::SessionId>,
+    stop_reason_counts: BTreeMap<String, u64>,
+    errors: BTreeSet<String>,
+}
+
+impl MutableSimulationVariantResult {
+    fn new(variant_key: String, revision_uid: uuid::Uuid) -> Self {
+        Self {
+            variant_key,
+            revision_uid,
+            trial_count: 0,
+            completed_count: 0,
+            failed_count: 0,
+            cancelled_count: 0,
+            score_run_ids: BTreeSet::new(),
+            session_ids: Vec::new(),
+            stop_reason_counts: BTreeMap::new(),
+            errors: BTreeSet::new(),
+        }
+    }
+
+    fn record_trial(&mut self, trial: &moa_experiments::model::ExperimentTrialRecord) {
+        self.trial_count = self.trial_count.saturating_add(1);
+        match trial.status {
+            ExperimentTrialStatus::Completed => {
+                self.completed_count = self.completed_count.saturating_add(1);
+            }
+            ExperimentTrialStatus::Failed => {
+                self.failed_count = self.failed_count.saturating_add(1);
+            }
+            ExperimentTrialStatus::Cancelled => {
+                self.cancelled_count = self.cancelled_count.saturating_add(1);
+            }
+            ExperimentTrialStatus::Accepted
+            | ExperimentTrialStatus::Dispatched
+            | ExperimentTrialStatus::Running => {}
+        }
+        self.score_run_ids.insert(trial.score_run_id);
+        if let Some(session_id) = trial.session_id
+            && !self.session_ids.contains(&session_id)
+        {
+            self.session_ids.push(session_id);
+        }
+        if let Some(stop_reason) = trial.stop_reason {
+            *self
+                .stop_reason_counts
+                .entry(stop_reason.as_str().to_string())
+                .or_default() += 1;
+        }
+        if let Some(error) = trial.error.as_ref().filter(|error| !error.is_empty()) {
+            self.errors.insert(error.clone());
+        }
+    }
+}
+
+impl From<MutableSimulationVariantResult> for AgentRevisionSimulationVariantResult {
+    fn from(value: MutableSimulationVariantResult) -> Self {
+        Self {
+            variant_key: value.variant_key,
+            revision_uid: value.revision_uid,
+            trial_count: value.trial_count,
+            completed_count: value.completed_count,
+            failed_count: value.failed_count,
+            cancelled_count: value.cancelled_count,
+            score_run_ids: value.score_run_ids.into_iter().collect(),
+            session_ids: value.session_ids,
+            stop_reason_counts: value.stop_reason_counts,
+            errors: value.errors.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScoreAccumulator {
+    weighted_sum: f64,
+    count: u64,
+}
+
+impl ScoreAccumulator {
+    fn add(&mut self, mean: Option<f64>, count: u64) {
+        let Some(mean) = mean else {
+            return;
+        };
+        self.weighted_sum += mean * count as f64;
+        self.count = self.count.saturating_add(count);
+    }
+
+    fn mean(&self) -> Option<f64> {
+        (self.count > 0).then_some(self.weighted_sum / self.count as f64)
+    }
+}
+
+fn simulation_variant_deltas(
+    trials: &[moa_scoring::TrialScoreSummary],
+    base_variant_key: &str,
+    candidate_variant_keys: &[String],
+) -> Vec<ExperimentVariantScoreDeltaRow> {
+    let candidate_keys = candidate_variant_keys
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut aggregates: BTreeMap<String, BTreeMap<String, ScoreAccumulator>> = BTreeMap::new();
+    for trial in trials {
+        if trial.variant_key != base_variant_key && !candidate_keys.contains(&trial.variant_key) {
+            continue;
+        }
+        let by_score = aggregates.entry(trial.variant_key.clone()).or_default();
+        for row in &trial.rows {
+            by_score
+                .entry(row.name.clone())
+                .or_default()
+                .add(row.mean_or_rate, row.n);
+        }
+    }
+    let base = aggregates
+        .get(base_variant_key)
+        .cloned()
+        .unwrap_or_default();
+    let mut deltas = Vec::new();
+    for candidate_key in candidate_variant_keys {
+        let Some(candidate) = aggregates.get(candidate_key) else {
+            continue;
+        };
+        let score_names = base
+            .keys()
+            .chain(candidate.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for name in score_names {
+            let base_mean = base.get(&name).and_then(ScoreAccumulator::mean);
+            let new_mean = candidate.get(&name).and_then(ScoreAccumulator::mean);
+            deltas.push(ExperimentVariantScoreDeltaRow {
+                variant_key: candidate_key.clone(),
+                name,
+                base_mean,
+                new_mean,
+                delta: new_mean.zip(base_mean).map(|(new, base)| new - base),
+            });
+        }
+    }
+    deltas
+}
+
+async fn compare_agent_revisions_inner(
+    pool: sqlx::PgPool,
+    request: AgentRevisionCompareRequest,
+) -> Result<AgentRevisionCompareResponse, HandlerError> {
+    let resolver = AgentResolver::new(pool);
+    let scope = MemoryScope::Workspace {
+        workspace_id: request.workspace_id.clone(),
+    };
+    let (base, new) = tokio::try_join!(
+        resolver.resolve_exact_revision(&scope, request.base_revision_uid),
+        resolver.resolve_exact_revision(&scope, request.new_revision_uid),
+    )
+    .map_err(moa_error_to_handler_error)?;
+    Ok(compare_agent_revision_policies(request, &base, &new))
+}
+
+fn compare_agent_revision_policies(
+    request: AgentRevisionCompareRequest,
+    base: &AgentRuntimePolicy,
+    new: &AgentRuntimePolicy,
+) -> AgentRevisionCompareResponse {
+    let artifact_dependency_deltas =
+        compare_artifact_dependencies(&base.revision_lock, &new.revision_lock);
+    let tool_dependency_deltas = compare_tool_dependencies(&base.revision_lock, &new.revision_lock);
+    let instructions_changed = base.instructions != new.instructions;
+    let tool_policy_changed = base.tool_policy != new.tool_policy;
+    let changed = base.revision_lock.canonical_policy_hash
+        != new.revision_lock.canonical_policy_hash
+        || instructions_changed
+        || tool_policy_changed
+        || !artifact_dependency_deltas.is_empty()
+        || !tool_dependency_deltas.is_empty();
+
+    AgentRevisionCompareResponse {
+        workspace_id: request.workspace_id,
+        base_revision_uid: request.base_revision_uid,
+        new_revision_uid: request.new_revision_uid,
+        base_policy_hash: base.revision_lock.canonical_policy_hash.clone(),
+        new_policy_hash: new.revision_lock.canonical_policy_hash.clone(),
+        changed,
+        instructions_changed,
+        tool_policy_changed,
+        artifact_dependency_deltas,
+        tool_dependency_deltas,
+    }
+}
+
+fn compare_artifact_dependencies(
+    base: &moa_core::AgentRevisionLock,
+    new: &moa_core::AgentRevisionLock,
+) -> Vec<AgentArtifactDependencyDelta> {
+    let mut references = BTreeMap::new();
+    for dependency in &base.artifact_dependencies {
+        references
+            .entry(dependency.reference.clone())
+            .or_insert((None, None))
+            .0 = Some(dependency.revision_uid);
+    }
+    for dependency in &new.artifact_dependencies {
+        references
+            .entry(dependency.reference.clone())
+            .or_insert((None, None))
+            .1 = Some(dependency.revision_uid);
+    }
+    references
+        .into_iter()
+        .filter_map(|(reference, (base_revision_uid, new_revision_uid))| {
+            dependency_change(base_revision_uid, new_revision_uid).map(|change| {
+                AgentArtifactDependencyDelta {
+                    reference,
+                    base_revision_uid,
+                    new_revision_uid,
+                    change,
+                }
+            })
+        })
+        .collect()
+}
+
+fn compare_tool_dependencies(
+    base: &moa_core::AgentRevisionLock,
+    new: &moa_core::AgentRevisionLock,
+) -> Vec<AgentToolDependencyDelta> {
+    let mut tools = BTreeMap::new();
+    for dependency in &base.tool_dependencies {
+        tools
+            .entry(dependency.name.clone())
+            .or_insert((None, None))
+            .0 = Some(dependency.schema_hash.clone());
+    }
+    for dependency in &new.tool_dependencies {
+        tools
+            .entry(dependency.name.clone())
+            .or_insert((None, None))
+            .1 = Some(dependency.schema_hash.clone());
+    }
+    tools
+        .into_iter()
+        .filter_map(|(name, (base_schema_hash, new_schema_hash))| {
+            dependency_change(base_schema_hash.as_deref(), new_schema_hash.as_deref()).map(
+                |change| AgentToolDependencyDelta {
+                    name,
+                    base_schema_hash,
+                    new_schema_hash,
+                    change,
+                },
+            )
+        })
+        .collect()
+}
+
+fn dependency_change<T: Eq>(base: Option<T>, new: Option<T>) -> Option<AgentDependencyChange> {
+    match (base, new) {
+        (None, Some(_)) => Some(AgentDependencyChange::Added),
+        (Some(_), None) => Some(AgentDependencyChange::Removed),
+        (Some(base), Some(new)) if base != new => Some(AgentDependencyChange::Changed),
+        _ => None,
+    }
+}
+
 async fn authorize_workspace(
     ctx: &impl RequestHeaders,
     workspace_id: &WorkspaceId,
@@ -433,6 +1003,80 @@ fn score_error_to_handler_error(error: ScoringError) -> HandlerError {
         }
         ScoringError::Sql(_) | ScoringError::ScoreRunMismatch { .. } => {
             TerminalError::new(error.to_string()).into()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::wire::AgentDependencyChange;
+    use moa_core::{AgentRevisionLock, LockedToolRef, ResolvedArtifactRevisionRef};
+    use uuid::Uuid;
+
+    use super::{compare_artifact_dependencies, compare_tool_dependencies};
+
+    #[test]
+    fn agent_revision_compare_reports_exact_dependency_deltas() {
+        // Pins: revision comparison reports exact artifact and tool lock changes for simulation review.
+        let base_skill = Uuid::now_v7();
+        let new_skill = Uuid::now_v7();
+        let base = AgentRevisionLock {
+            agent_revision_uid: Uuid::now_v7(),
+            artifact_dependencies: vec![artifact_dependency("skill://support", base_skill)],
+            tool_dependencies: vec![tool_dependency("file_read", "hash-a")],
+            canonical_policy_hash: "base-hash".to_string(),
+        };
+        let new = AgentRevisionLock {
+            agent_revision_uid: Uuid::now_v7(),
+            artifact_dependencies: vec![
+                artifact_dependency("skill://support", new_skill),
+                artifact_dependency("workflow://refund", Uuid::now_v7()),
+            ],
+            tool_dependencies: vec![tool_dependency("file_read", "hash-b")],
+            canonical_policy_hash: "new-hash".to_string(),
+        };
+
+        let artifact_deltas = compare_artifact_dependencies(&base, &new);
+        assert_eq!(artifact_deltas.len(), 2);
+        assert_eq!(artifact_deltas[0].reference, "skill://support");
+        assert_eq!(artifact_deltas[0].base_revision_uid, Some(base_skill));
+        assert_eq!(artifact_deltas[0].new_revision_uid, Some(new_skill));
+        assert_eq!(artifact_deltas[0].change, AgentDependencyChange::Changed);
+        assert_eq!(artifact_deltas[1].reference, "workflow://refund");
+        assert_eq!(artifact_deltas[1].change, AgentDependencyChange::Added);
+
+        let tool_deltas = compare_tool_dependencies(&base, &new);
+        assert_eq!(tool_deltas.len(), 1);
+        assert_eq!(tool_deltas[0].name, "file_read");
+        assert_eq!(tool_deltas[0].base_schema_hash.as_deref(), Some("hash-a"));
+        assert_eq!(tool_deltas[0].new_schema_hash.as_deref(), Some("hash-b"));
+        assert_eq!(tool_deltas[0].change, AgentDependencyChange::Changed);
+    }
+
+    fn artifact_dependency(reference: &str, revision_uid: Uuid) -> ResolvedArtifactRevisionRef {
+        ResolvedArtifactRevisionRef {
+            reference: reference.to_string(),
+            kind: reference
+                .split_once("://")
+                .map(|(kind, _)| kind)
+                .unwrap_or("skill")
+                .to_string(),
+            name: reference
+                .split_once("://")
+                .map(|(_, name)| name)
+                .unwrap_or(reference)
+                .to_string(),
+            artifact_uid: Uuid::now_v7(),
+            revision_uid,
+            version: 1,
+        }
+    }
+
+    fn tool_dependency(name: &str, schema_hash: &str) -> LockedToolRef {
+        LockedToolRef {
+            name: name.to_string(),
+            schema_hash: schema_hash.to_string(),
+            provider: None,
         }
     }
 }

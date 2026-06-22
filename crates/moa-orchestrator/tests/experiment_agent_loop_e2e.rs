@@ -191,6 +191,7 @@ async fn run_agent_loop_experiment(
         }),
         score_run_id: None,
         idempotency_key: Some(format!("agent-loop-{}", Uuid::now_v7())),
+        agent_revision_variants: Vec::new(),
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
         .await?

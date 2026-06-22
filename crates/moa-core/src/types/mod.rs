@@ -4,6 +4,7 @@
 mod macros;
 
 mod action_policy;
+mod agent;
 mod channel;
 mod completion;
 mod contact;
@@ -30,6 +31,14 @@ pub use action_policy::{
     ActionClass, ActionEnvelope, ActionPolicyDecision, ActionPolicyEffect, ActionPolicyRule,
     ActionReviewDecision, ActionReviewField, ActionReviewFileDiff, ActionReviewPreview,
     ActionReviewStatus, ActionRuleScope, RiskLevel,
+};
+pub use agent::{
+    AgentActionPolicy, AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode,
+    AgentModelPolicy, AgentPolicySnapshot, AgentRevisionLock, AgentSessionSelection,
+    AgentSkillPolicy, AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode,
+    AgentWorkflowPolicy, LockedToolRef, ResolvedArtifactRevisionRef,
+    SYSTEM_DEFAULT_AGENT_ARTIFACT_UID, SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF,
+    SYSTEM_DEFAULT_AGENT_REVISION_UID,
 };
 pub use channel::{
     ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,

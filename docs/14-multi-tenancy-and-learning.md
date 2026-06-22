@@ -4,7 +4,7 @@ _Tenant model, skills-first learning, learning log, and rollback._
 
 ## Tenant Model
 
-MOA's tenant is a team. Users and workspaces belong to tenants; learning state is scoped to the tenant unless it is explicitly workspace-local.
+MOA's tenant is a team. Users and workspaces belong to tenants. Learning state and graph knowledge are tenant-scoped; workspaces are an administration and access-control layer over tenant resources.
 
 ```text
 Platform
@@ -16,7 +16,7 @@ Platform
        -> Memory consolidation signals
 ```
 
-Workspace memory and skill files remain workspace-scoped. Learning entries and resolution aggregates are tenant-scoped because a team's recurring work patterns usually span projects.
+Knowledge and memory remain tenant-oriented. Workspace administrators may control which tenant resources are available in a workspace, but MOA does not model workspace-specific memory as a separate product concept. Learning entries and resolution aggregates are tenant-scoped because a team's recurring work patterns usually span projects.
 
 ## Skills-First Learning
 

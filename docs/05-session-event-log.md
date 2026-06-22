@@ -28,6 +28,7 @@ CREATE TABLE sessions (
     id UUID PRIMARY KEY,
     workspace_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    CONSTRAINT sessions_user_id_nonempty CHECK (btrim(user_id) <> ''),
     title TEXT,
     status TEXT NOT NULL DEFAULT 'created',
     channel TEXT NOT NULL DEFAULT 'chat',
@@ -60,6 +61,22 @@ CREATE TABLE sessions (
     created_by_actor_type TEXT,
     created_by_actor_id UUID,
     contact_promoted_from_id UUID
+);
+
+CREATE TABLE session_agent_context (
+    session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    agent_id UUID,
+    installation_uid UUID,
+    deployment_uid UUID,
+    agent_definition_ref TEXT NOT NULL,
+    agent_revision_uid UUID NOT NULL REFERENCES moa.artifact_revision(revision_uid),
+    policy_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    policy_snapshot JSONB NOT NULL,
+    artifact_dependencies JSONB NOT NULL DEFAULT '[]'::JSONB,
+    tool_dependencies JSONB NOT NULL DEFAULT '[]'::JSONB
 );
 
 CREATE TABLE contact_channel_accounts (...);
@@ -109,6 +126,15 @@ stores the active and historical route for a session with normalized lookup
 columns such as channel, external tenant key, external conversation key, and
 external thread key. The current active binding is also referenced from
 `sessions.active_channel_binding_id`.
+
+Every committed session must have one `session_agent_context` row and a
+non-empty `sessions.user_id`. `PostgresSessionStore::create_session` enforces
+this before insert, and the database also has a deferred constraint trigger so
+raw SQL or future transaction paths cannot commit a session without the agent
+sidecar. Existing valid sessions are backfilled to the built-in
+`agent://system-default` revision during the tenant-configurable agents
+migration; tenant-authored sessions should use an installed or explicitly
+selected agent revision instead.
 
 The event table uses a generated `tsvector` column and a GIN index for cross-session search. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
 

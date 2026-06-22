@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Attachment, Channel, ContactId, ContactRef, ModelId, SequenceNum, SessionActorRef,
-    SessionChannelBindingId, SessionId, UserId, WorkspaceId,
+    AgentContext, Attachment, Channel, ContactId, ContactRef, ModelId, SequenceNum,
+    SessionActorRef, SessionChannelBindingId, SessionId, UserId, WorkspaceId,
 };
 
 /// Session lifecycle status.
@@ -151,6 +151,9 @@ pub struct SessionMeta {
     /// Previous anonymous or unverified contact promoted into the current contact.
     #[serde(default)]
     pub contact_promoted_from_id: Option<ContactId>,
+    /// Configured agent revision and policy snapshot pinned to this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<AgentContext>,
     /// Aggregate input token usage across all cache states.
     pub total_input_tokens: usize,
     /// Aggregate uncached input token usage.
@@ -202,6 +205,7 @@ impl Default for SessionMeta {
             contact: None,
             created_by: None,
             contact_promoted_from_id: None,
+            agent_context: Some(AgentContext::system_default()),
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

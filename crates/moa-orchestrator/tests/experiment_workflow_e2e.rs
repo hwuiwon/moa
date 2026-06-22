@@ -215,6 +215,7 @@ async fn run_workflow_experiment(
         }),
         score_run_id: None,
         idempotency_key: Some(format!("experiment-workflow-{}", Uuid::now_v7())),
+        agent_revision_variants: Vec::new(),
     };
     post_json_with_identity(client, ingress, "Experiments", "run", identity, &request)
         .await?

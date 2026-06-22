@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{Channel, ChannelAccountRef, ChannelRef, SessionId, UserId, WorkspaceId};
+use super::{
+    AgentSessionSelection, Channel, ChannelAccountRef, ChannelRef, SessionId, UserId, WorkspaceId,
+};
 
 /// Prefix used for contact-backed user-scope memory subjects.
 pub const CONTACT_USER_ID_PREFIX: &str = "contact:";
@@ -370,6 +372,8 @@ pub struct ContactSessionInitRequest {
     pub channel: ContactSessionChannelRequest,
     /// Model identifier for the session.
     pub model: String,
+    /// Installed deployment or exact revision to pin onto the created session.
+    pub agent: AgentSessionSelection,
 }
 
 /// Response returned after initializing a contact session.

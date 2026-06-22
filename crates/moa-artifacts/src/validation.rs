@@ -5,6 +5,11 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::action::ActionDefinition;
+use crate::agent::{
+    ActionPolicy, AgentDefinition, InstructionPolicy, ModelPolicy, SkillPolicy, SkillPolicyMode,
+    ToolPolicy, ToolPolicyMode, WorkflowPolicy,
+};
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::reference::{ArtifactRef, ReferenceResolution, ReferenceState};
@@ -67,9 +72,11 @@ pub fn validate_for_status(
 
     validate_envelope(document, &mut report);
     match &document.definition {
+        ArtifactDefinition::Agent(definition) => validate_agent(definition, &mut report),
         ArtifactDefinition::Skill(definition) => validate_skill(definition, &mut report),
         ArtifactDefinition::Connector(definition) => validate_connector(definition, &mut report),
         ArtifactDefinition::Workflow(definition) => validate_workflow(definition, &mut report),
+        ArtifactDefinition::Action(definition) => validate_action(definition, &mut report),
         ArtifactDefinition::ExperimentPlan(definition) => {
             validate_experiment_plan(definition, &mut report);
         }
@@ -111,11 +118,135 @@ fn validate_envelope(document: &ArtifactDocument, report: &mut ValidationReport)
             ),
         );
     }
+}
 
-    if document.kind == ArtifactKind::Action {
+fn validate_agent(definition: &AgentDefinition, report: &mut ValidationReport) {
+    require_non_empty(
+        "definition.spec.display_name",
+        &definition.display_name,
+        "agent display_name",
+        report,
+    );
+    require_non_empty(
+        "definition.spec.purpose.summary",
+        &definition.purpose.summary,
+        "agent purpose summary",
+        report,
+    );
+    validate_model_policy(&definition.model_policy, report);
+    validate_instruction_policy(&definition.instruction_policy, report);
+    validate_skill_policy(&definition.skill_policy, report);
+    validate_workflow_policy(&definition.workflow_policy, report);
+    validate_action_policy(&definition.action_policy, report);
+    validate_tool_policy(&definition.tool_policy, report);
+}
+
+fn validate_model_policy(definition: &ModelPolicy, report: &mut ValidationReport) {
+    if option_is_trim_empty(definition.default_model.as_deref()) {
         report.push_error(
-            "kind",
-            "standalone action documents are reserved for a later schema version",
+            "definition.spec.model_policy.default_model",
+            "agent default_model must not be empty",
+        );
+    }
+    if option_is_trim_empty(definition.fallback_model.as_deref()) {
+        report.push_error(
+            "definition.spec.model_policy.fallback_model",
+            "agent fallback_model must not be empty",
+        );
+    }
+    validate_non_empty_unique_strings(
+        "definition.spec.model_policy.allowed_models",
+        &definition.allowed_models,
+        "agent allowed model must not be empty",
+        "duplicate allowed model",
+        report,
+    );
+}
+
+fn validate_instruction_policy(definition: &InstructionPolicy, report: &mut ValidationReport) {
+    validate_non_empty_unique_refs(
+        "definition.spec.instruction_policy.instruction_refs",
+        &definition.instruction_refs,
+        None,
+        report,
+    );
+}
+
+fn validate_skill_policy(definition: &SkillPolicy, report: &mut ValidationReport) {
+    validate_dependency_refs(
+        "definition.spec.skill_policy.refs",
+        &definition.mode,
+        &definition.refs,
+        ArtifactKind::Skill,
+        report,
+    );
+}
+
+fn validate_workflow_policy(definition: &WorkflowPolicy, report: &mut ValidationReport) {
+    validate_non_empty_unique_refs(
+        "definition.spec.workflow_policy.allowed",
+        &definition.allowed,
+        Some(ArtifactKind::Workflow),
+        report,
+    );
+}
+
+fn validate_action_policy(definition: &ActionPolicy, report: &mut ValidationReport) {
+    validate_action_refs(
+        "definition.spec.action_policy.allowed",
+        &definition.allowed,
+        report,
+    );
+    validate_action_refs(
+        "definition.spec.action_policy.require_admin_review",
+        &definition.require_admin_review,
+        report,
+    );
+}
+
+fn validate_tool_policy(definition: &ToolPolicy, report: &mut ValidationReport) {
+    if definition.mode != ToolPolicyMode::Auto && definition.tools.is_empty() {
+        report.push_error(
+            "definition.spec.tool_policy.tools",
+            "non-auto tool policy must include at least one tool",
+        );
+    }
+    validate_non_empty_unique_strings(
+        "definition.spec.tool_policy.tools",
+        &definition.tools,
+        "tool name must not be empty",
+        "duplicate tool name",
+        report,
+    );
+    validate_non_empty_unique_strings(
+        "definition.spec.tool_policy.denied_tools",
+        &definition.denied_tools,
+        "denied tool name must not be empty",
+        "duplicate denied tool name",
+        report,
+    );
+}
+
+fn validate_action(definition: &ActionDefinition, report: &mut ValidationReport) {
+    require_non_empty("definition.spec.id", &definition.id, "action id", report);
+    if let Some(connector_ref) = &definition.connector_ref {
+        validate_ref_kind(
+            "definition.spec.connector_ref",
+            connector_ref,
+            ArtifactKind::Connector,
+            report,
+        );
+    }
+    if option_is_trim_empty(definition.tool_name.as_deref()) {
+        report.push_error(
+            "definition.spec.tool_name",
+            "action tool_name must not be empty",
+        );
+    }
+    if definition.connector_ref.is_none() && definition.tool_name.is_none() {
+        report.push_error(
+            "definition.spec",
+            "action must reference a connector artifact or tool name",
         );
     }
 }
@@ -580,6 +711,92 @@ fn validate_ref_kind(
     if artifact_ref.artifact_kind() != Some(&expected) {
         report.push_error(path, format!("reference must use {}://", expected.as_str()));
     }
+}
+
+fn validate_dependency_refs(
+    path: &str,
+    mode: &SkillPolicyMode,
+    refs: &[ArtifactRef],
+    expected: ArtifactKind,
+    report: &mut ValidationReport,
+) {
+    if *mode != SkillPolicyMode::Auto && refs.is_empty() {
+        report.push_error(
+            path,
+            "non-auto skill policy must include at least one reference",
+        );
+    }
+    validate_non_empty_unique_refs(path, refs, Some(expected), report);
+}
+
+fn validate_non_empty_unique_refs(
+    path: &str,
+    refs: &[ArtifactRef],
+    expected: Option<ArtifactKind>,
+    report: &mut ValidationReport,
+) {
+    let mut seen = HashSet::new();
+    for (index, artifact_ref) in refs.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        if artifact_ref.target_name().trim().is_empty() {
+            report.push_error(item_path.clone(), "reference target must not be empty");
+        }
+        if !seen.insert(artifact_ref.to_string()) {
+            report.push_error(item_path.clone(), "duplicate reference");
+        }
+        if let Some(expected) = expected.clone() {
+            validate_ref_kind(&item_path, artifact_ref, expected, report);
+        }
+    }
+}
+
+fn validate_action_refs(path: &str, refs: &[ArtifactRef], report: &mut ValidationReport) {
+    let mut seen = HashSet::new();
+    for (index, artifact_ref) in refs.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        if artifact_ref.target_name().trim().is_empty() {
+            report.push_error(
+                item_path.clone(),
+                "action reference target must not be empty",
+            );
+        }
+        if !seen.insert(artifact_ref.to_string()) {
+            report.push_error(item_path.clone(), "duplicate action reference");
+        }
+        match artifact_ref {
+            ArtifactRef::Artifact {
+                kind: ArtifactKind::Action,
+                ..
+            }
+            | ArtifactRef::Action { .. } => {}
+            _ => report.push_error(
+                item_path,
+                "action reference must use action:// or connector.action action syntax",
+            ),
+        }
+    }
+}
+
+fn validate_non_empty_unique_strings(
+    path: &str,
+    values: &[String],
+    empty_message: &str,
+    duplicate_message: &str,
+    report: &mut ValidationReport,
+) {
+    let mut seen = HashSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        if value.trim().is_empty() {
+            report.push_error(item_path.clone(), empty_message);
+        } else if !seen.insert(value.as_str()) {
+            report.push_error(item_path, duplicate_message);
+        }
+    }
+}
+
+fn option_is_trim_empty(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().is_empty())
 }
 
 fn validate_non_empty_ids<'a>(

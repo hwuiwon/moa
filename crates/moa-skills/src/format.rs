@@ -264,6 +264,7 @@ pub fn render_skill_markdown(skill: &SkillDocument) -> Result<String> {
 /// Builds pipeline metadata for a parsed skill document.
 pub fn skill_metadata_from_document(path: String, skill: &SkillDocument) -> SkillMetadata {
     SkillMetadata {
+        artifact_revision_uid: None,
         path,
         name: skill.frontmatter.name.clone(),
         description: skill.frontmatter.description.clone(),

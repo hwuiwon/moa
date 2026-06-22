@@ -383,6 +383,7 @@ impl IsolatedTest<'_> {
             contact: None,
             created_by: None,
             contact_promoted_from_id: None,
+            agent_context: Some(moa_core::AgentContext::system_default()),
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

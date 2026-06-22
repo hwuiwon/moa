@@ -196,7 +196,6 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
             files: Vec::new(),
         },
         version: 2,
-        previous_skill_uid: None,
         tags: vec!["oauth".to_string(), "auth".to_string()],
         valid_to: None,
         created_at: now,

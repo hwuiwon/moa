@@ -11,7 +11,7 @@ use sqlx::Row;
 
 const DIGEST_REMINDER_PREFIX: &str = "<memory_digest>";
 
-/// Injects standing user and workspace memory digests into context.
+/// Injects standing user and tenant-visible memory digests into context.
 pub struct DigestProcessor {
     pool: sqlx::PgPool,
     config: MemoryDigestConfig,

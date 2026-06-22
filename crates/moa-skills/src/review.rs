@@ -17,8 +17,6 @@ use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::registry::SkillRegistry;
-
 /// Boxed store operation future used to keep transaction-borrow lifetimes explicit.
 pub type LearningReviewStoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, MoaError>> + Send + 'a>>;
@@ -86,7 +84,7 @@ pub enum SkillReviewAction {
 /// Skill candidate and draft artifact state prepared for acceptance.
 #[derive(Debug, Clone)]
 pub struct PreparedSkillAcceptance {
-    /// Workspace scope used for artifact and skill materialization.
+    /// Workspace scope used for artifact publication and regression checks.
     pub scope: MemoryScope,
     /// Candidate being accepted.
     pub candidate: LearningCandidate,
@@ -94,7 +92,7 @@ pub struct PreparedSkillAcceptance {
     pub draft: StoredArtifactRevision,
     /// Draft skill artifact revision identifier.
     pub draft_artifact_revision_uid: Uuid,
-    /// Draft package files used for regression checks and materialization.
+    /// Draft package files used for regression checks.
     pub draft_files: Vec<ArtifactFile>,
     /// Validation report proving the draft is publishable.
     pub publish_report: ValidationReport,
@@ -113,7 +111,7 @@ pub struct SkillReviewOutcome {
     pub draft_artifact_revision_uid: Option<Uuid>,
     /// Published artifact revision created by acceptance, when any.
     pub published_artifact_revision_uid: Option<Uuid>,
-    /// Materialized active skill row created by acceptance, when any.
+    /// Deprecated legacy materialized skill row. Canonical promotions leave this empty.
     pub skill_uid: Option<Uuid>,
 }
 
@@ -235,7 +233,7 @@ pub async fn reject_claimed_skill_candidate(
     })
 }
 
-/// Publishes a claimed skill candidate, materializes it, and records promoted learning.
+/// Publishes a claimed skill candidate and records promoted learning.
 pub async fn promote_claimed_skill_candidate(
     store: &(dyn LearningReviewStore + Send + Sync),
     pool: sqlx::PgPool,
@@ -250,14 +248,6 @@ pub async fn promote_claimed_skill_candidate(
         &prepared.publish_report,
     )
     .await?;
-    let skill_uid = SkillRegistry::new(pool.clone())
-        .materialize_published_artifact_revision_in_tx(
-            conn.as_mut(),
-            &prepared.scope,
-            &published,
-            prepared.draft_files,
-        )
-        .await?;
     let artifact_uid = Some(published.artifact_uid);
     let evaluation_payload = review_evaluation_payload(ReviewEvaluationPayload {
         request,
@@ -265,7 +255,7 @@ pub async fn promote_claimed_skill_candidate(
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
-        skill_uid: Some(skill_uid),
+        skill_uid: None,
         regression_report: Some(regression_report),
     });
 
@@ -286,13 +276,8 @@ pub async fn promote_claimed_skill_candidate(
         },
     )
     .await?;
-    let learning_entry = accepted_learning_entry(
-        &prepared.candidate,
-        request,
-        skill_uid,
-        &published,
-        evaluation_payload,
-    )?;
+    let learning_entry =
+        accepted_learning_entry(&prepared.candidate, request, &published, evaluation_payload)?;
     store
         .append_learning_in_tx(conn.as_mut(), &learning_entry)
         .await?;
@@ -304,7 +289,7 @@ pub async fn promote_claimed_skill_candidate(
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
-        skill_uid: Some(skill_uid),
+        skill_uid: None,
     })
 }
 
@@ -535,7 +520,6 @@ fn review_evaluation_payload(input: ReviewEvaluationPayload<'_>) -> Value {
 fn accepted_learning_entry(
     candidate: &LearningCandidate,
     request: &SkillReviewRequest,
-    skill_uid: Uuid,
     published: &StoredArtifactRevision,
     evaluation_payload: Value,
 ) -> Result<LearningEntry> {
@@ -544,7 +528,7 @@ fn accepted_learning_entry(
         id: Uuid::now_v7(),
         tenant_id: candidate.tenant_id.clone(),
         learning_type,
-        target_id: target_id(candidate, skill_uid),
+        target_id: target_id(candidate, published),
         target_label: target_label(candidate),
         payload: json!({
             "candidate_id": candidate.id,
@@ -552,7 +536,6 @@ fn accepted_learning_entry(
             "reason": request.reason,
             "artifact_uid": published.artifact_uid,
             "published_artifact_revision_uid": published.revision_uid,
-            "skill_uid": skill_uid,
             "review": evaluation_payload,
         }),
         confidence: candidate.confidence,
@@ -576,7 +559,7 @@ fn accepted_learning_type(candidate: &LearningCandidate) -> Result<String> {
     }
 }
 
-fn target_id(candidate: &LearningCandidate, skill_uid: Uuid) -> String {
+fn target_id(candidate: &LearningCandidate, published: &StoredArtifactRevision) -> String {
     candidate
         .target_id
         .clone()
@@ -587,7 +570,7 @@ fn target_id(candidate: &LearningCandidate, skill_uid: Uuid) -> String {
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
         })
-        .unwrap_or_else(|| format!("skill:{skill_uid}"))
+        .unwrap_or_else(|| format!("artifact_revision:{}", published.revision_uid))
 }
 
 fn target_label(candidate: &LearningCandidate) -> Option<String> {

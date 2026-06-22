@@ -83,6 +83,7 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
             .try_get::<Option<Uuid>, _>("contact_promoted_from_id")
             .map_err(map_sqlx_error)?
             .map(ContactId),
+        agent_context: None,
         total_input_tokens: row
             .try_get::<i64, _>("total_input_tokens")
             .map_err(map_sqlx_error)? as usize,

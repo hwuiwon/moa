@@ -8,7 +8,7 @@ exclude = ["skills/incident-triage"]
 exclusive = false
 
 [agent.memory]
-workspace_memory_path = "tests/fixtures/memory/webapp-v2"
+tenant_memory_path = "tests/fixtures/memory/webapp-v2"
 user_memory_path = "tests/fixtures/memory/users/default"
 clear_defaults = true
 

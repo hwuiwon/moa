@@ -1,6 +1,7 @@
 //! Plan expansion and child-trial dispatch for behavior-lab experiment runs.
 
 use super::*;
+use serde_json::json;
 
 pub(super) async fn run_experiment_plan(
     ctx: &WorkflowContext<'_>,
@@ -21,6 +22,7 @@ pub(super) async fn run_experiment_plan(
         request.workspace_id.clone(),
         request.run_uid,
         plan_revision_uid,
+        request.agent_revision_variants.clone(),
     )
     .await?;
     let trials =
@@ -170,14 +172,21 @@ async fn load_plan_expansion(
     workspace_id: WorkspaceId,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
+    agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 ) -> Result<PlanExpansion, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
     let scope = workspace_scope(workspace_id);
     Ok(ctx
         .run(|| async move {
-            expand_plan(pool, scope, run_uid, plan_revision_uid)
-                .await
-                .map(Json::from)
+            expand_plan(
+                pool,
+                scope,
+                run_uid,
+                plan_revision_uid,
+                agent_revision_variants,
+            )
+            .await
+            .map(Json::from)
         })
         .name("experiment_plan_expand")
         .await?
@@ -189,6 +198,7 @@ async fn expand_plan(
     scope: MemoryScope,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
+    agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 ) -> Result<PlanExpansion, HandlerError> {
     let registry = ArtifactRegistry::new(pool);
     let plan_revision = load_required_published_revision(
@@ -203,13 +213,61 @@ async fn expand_plan(
             "plan revision must contain an experiment_plan definition",
         ));
     };
-    let trials = expand_plan_trials(run_uid, plan_revision_uid, definition)
+    let definition = definition_with_agent_revision_variants(definition, &agent_revision_variants)?;
+    let trials = expand_plan_trials(run_uid, plan_revision_uid, &definition)
         .map_err(plan_expansion_error_to_handler_error)?;
     Ok(PlanExpansion {
         parallelism: usize::try_from(definition.parallelism.max(1))
             .map_err(|_| bad_request("experiment plan parallelism is too large"))?,
         trials,
     })
+}
+
+fn definition_with_agent_revision_variants(
+    definition: &moa_artifacts::simulation::ExperimentPlanDefinition,
+    variants: &[AgentRevisionSimulationVariant],
+) -> Result<moa_artifacts::simulation::ExperimentPlanDefinition, HandlerError> {
+    if variants.is_empty() {
+        return Ok(definition.clone());
+    }
+    let template = definition
+        .target_variants
+        .iter()
+        .find(|variant| {
+            matches!(
+                variant.kind,
+                moa_artifacts::simulation::ExperimentTargetKind::AgentLoop
+            )
+        })
+        .ok_or_else(|| bad_request("agent revision simulation requires an agent-loop variant"))?;
+    let mut overridden = definition.clone();
+    overridden.target_variants = variants
+        .iter()
+        .map(|variant| {
+            if variant.variant_key.trim().is_empty() {
+                return Err(bad_request(
+                    "agent revision simulation variant_key is required",
+                ));
+            }
+            let mut config = template.config.clone();
+            if let Some(object) = config.as_object_mut() {
+                object.insert(
+                    "agent_revision_uid".to_string(),
+                    json!(variant.revision_uid),
+                );
+            } else {
+                config = json!({ "agent_revision_uid": variant.revision_uid });
+            }
+            Ok(moa_artifacts::simulation::ExperimentTargetVariant {
+                key: variant.variant_key.clone(),
+                kind: moa_artifacts::simulation::ExperimentTargetKind::AgentLoop,
+                workflow_ref: None,
+                config,
+                ui: template.ui.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(overridden)
 }
 
 async fn load_required_published_revision(

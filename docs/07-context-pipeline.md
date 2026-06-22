@@ -20,12 +20,13 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | Stage | Processor | Cache role | Purpose |
 |---|---|---|---|
 | 1 | `IdentityProcessor` | Stable prefix | MOA identity and high-level behavior |
+| 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and workflow affordances |
 | 2 | `InstructionProcessor` | Stable prefix | user/workspace instructions |
-| 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 |
+| 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 and filtered by pinned agent tool policy |
 | 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
-| 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked for the task |
-| 6 | `DigestProcessor` | Dynamic tail | standing user/workspace memory digests |
-| 7 | `MemoryRetriever` | Dynamic tail | user/workspace indexes and relevant memory pages |
+| 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
+| 6 | `DigestProcessor` | Dynamic tail | standing user and tenant-visible memory digests |
+| 7 | `MemoryRetriever` | Dynamic tail | tenant-visible indexes and relevant memory pages filtered by pinned agent knowledge policy |
 | 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
 | 9 | `RuntimeContextProcessor` | Dynamic tail | current date, workspace, working directory, branch, user |
 | 10 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
@@ -54,9 +55,25 @@ The rewriter produces:
 
 The query rewrite result is not an intent router. The old advisory tool, freshness, repository, memory-action, clarification, and promptlet fields are not part of the response contract. `is_new_task` and `task_summary` feed the segment tracker. `retrieval_query` feeds memory retrieval. When rewriting is skipped or fails, memory retrieval uses the full original user query rather than reducing it to keyword-only text.
 
+## Configured-Agent Policy
+
+Configured-agent sessions pin an `AgentContext` at session creation. Context
+compilation reads only that pinned snapshot, so new deployments do not change
+running sessions. The pinned snapshot can:
+
+- inject agent-specific stable-prefix instructions
+- filter prompt-visible tool schemas
+- constrain skill selection by `auto`, `allowlist`, `pinned`, or `denylist`
+- constrain graph-memory retrieval mode, filters, budget, and PII floor
+- expose allowed workflow affordances without starting workflows implicitly
+
+Durable execution still enforces policy again in the orchestrator tool/action
+paths; prompt filtering is not treated as a security boundary.
+
 ## Skill Injection
 
-`SkillInjector` loads visible global, workspace, and user skill metadata from Postgres and ranks skills with:
+`SkillInjector` loads visible global, workspace, and user skill metadata from
+Postgres artifact revisions and ranks skills with:
 
 - keyword overlap against the current query
 - tenant-level skill resolution rates from `skill_resolution_rates`
@@ -64,9 +81,16 @@ The query rewrite result is not an intent router. The old advisory tool, freshne
 - recency
 
 When multiple visible skills share a name, the most specific scope wins: user
-scope overrides workspace scope, and workspace scope overrides global scope.
-Global skills are the deployment-wide fallback; workspace and user skills let a
-tenant or person specialize behavior without mutating the shared package.
+scope overrides tenant-visible shared scope, and tenant-visible shared scope
+overrides global scope. Global skills are the deployment-wide fallback; shared
+tenant-visible and user skills let a tenant or person specialize behavior
+without mutating the shared package.
+
+When a configured-agent policy is pinned to the session, selection first applies
+that policy. Pinned skills are included before ranked fill, allowlists bound the
+eligible set, denylists exclude matching refs, and `max_visible` caps the final
+manifest. Selected package files load by exact locked artifact revision when the
+agent dependency lock provides one.
 
 It emits only a compact dynamic manifest. Full skill bodies and supporting package files
 are materialized in the active hand under `.moa/skills/<skill>/...` when a hand

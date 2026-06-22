@@ -5,7 +5,7 @@ use moa_artifacts::simulation::{
     SimulationDataBundleDefinition, SimulationPersonaDefinition, SimulationProfileDefinition,
     SimulationScenarioDefinition,
 };
-use moa_core::ModelId;
+use moa_core::{AgentSessionSelection, ModelId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -40,6 +40,12 @@ pub enum PlanExpansionError {
     /// Workflow variants require a workflow reference.
     #[error("workflow target variants require workflow_ref")]
     MissingWorkflowRef,
+    /// A target variant has an invalid agent selector.
+    #[error("target variant agent selector is invalid: {message}")]
+    InvalidAgentSelector {
+        /// Validation error message.
+        message: String,
+    },
     /// A persisted trial row did not name the selected simulation block.
     #[error("experiment trial missing selected {field} id")]
     MissingSelectionId {
@@ -295,6 +301,7 @@ pub fn target_for_plan_variant(
                 .unwrap_or("Start behavior-lab simulation.")
                 .to_string(),
             session_id: None,
+            agent: agent_selection_for_variant(variant)?,
             model: definition
                 .target_model
                 .as_ref()
@@ -317,6 +324,45 @@ pub fn target_for_plan_variant(
             idempotency_key: None,
         }),
     }
+}
+
+fn agent_selection_for_variant(
+    variant: &ExperimentTargetVariant,
+) -> Result<Option<AgentSessionSelection>, PlanExpansionError> {
+    if let Some(agent) = variant.config.get("agent") {
+        if agent.is_null() {
+            return Ok(None);
+        }
+        return serde_json::from_value(agent.clone())
+            .map(Some)
+            .map_err(|error| PlanExpansionError::InvalidAgentSelector {
+                message: error.to_string(),
+            });
+    }
+
+    let installation_uid = optional_uuid_config(&variant.config, "agent_installation_uid")?;
+    let revision_uid = optional_uuid_config(&variant.config, "agent_revision_uid")?;
+    if installation_uid.is_none() && revision_uid.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(AgentSessionSelection {
+        installation_uid,
+        revision_uid,
+    }))
+}
+
+fn optional_uuid_config(config: &Value, key: &str) -> Result<Option<Uuid>, PlanExpansionError> {
+    let Some(value) = config.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| PlanExpansionError::InvalidAgentSelector {
+            message: format!("{key}: {error}"),
+        })
 }
 
 fn variant_payload_for_plan(
@@ -545,6 +591,26 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn target_for_plan_variant_preserves_agent_revision_selector_offline() {
+        // Pins: behavior-lab plans can run the same simulation matrix against exact agent revisions.
+        let mut definition = fixture_plan();
+        let revision_uid = fixture_uuid(99);
+        definition.target_variants[0].config =
+            json!({"prompt": "start", "agent_revision_uid": revision_uid});
+
+        let target = target_for_plan_variant(&definition, &definition.target_variants[0])
+            .expect("agent selector should parse");
+
+        let ExperimentTarget::AgentLoop { agent, .. } = target else {
+            panic!("fixture target should be an agent loop");
+        };
+        assert_eq!(
+            agent.expect("agent selector should be set").revision_uid,
+            Some(revision_uid)
+        );
     }
 
     fn fixture_plan() -> ExperimentPlanDefinition {

@@ -221,7 +221,9 @@ fn rule_visible_to_context(rule: &ActionPolicyRule, ctx: &ActionPolicyContext) -
         .is_none_or(|user_id| user_id == &ctx.user_id)
 }
 
-fn stricter_effect(left: ActionPolicyEffect, right: ActionPolicyEffect) -> ActionPolicyEffect {
+/// Returns the strictest outcome from two action-policy effects.
+#[must_use]
+pub fn stricter_effect(left: ActionPolicyEffect, right: ActionPolicyEffect) -> ActionPolicyEffect {
     match (left, right) {
         (ActionPolicyEffect::Deny, _) | (_, ActionPolicyEffect::Deny) => ActionPolicyEffect::Deny,
         (ActionPolicyEffect::AdminReview, _) | (_, ActionPolicyEffect::AdminReview) => {

@@ -8,7 +8,7 @@ exclude = []
 exclusive = false
 
 [agent.memory]
-workspace_memory_path = "tests/fixtures/memory/webapp-v1"
+tenant_memory_path = "tests/fixtures/memory/webapp-v1"
 clear_defaults = false
 
 [agent.instructions]

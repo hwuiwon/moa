@@ -311,18 +311,13 @@ pub async fn active_semantic_version(
         .version()
 }
 
-/// Counts active and historical workspace rows for one skill name.
+/// Counts artifact revisions for one workspace skill name.
 pub async fn skill_row_count(
     test_db: &TestDb,
     workspace_id: &WorkspaceId,
     skill_name: &str,
 ) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM moa.skill WHERE workspace_id = $1 AND name = $2")
-        .bind(workspace_id.as_str())
-        .bind(skill_name)
-        .fetch_one(test_db.store().pool())
-        .await
-        .expect("count skill rows")
+    artifact_revision_count(test_db, workspace_id, skill_name).await
 }
 
 /// Counts artifact revisions for one workspace skill artifact.
@@ -344,13 +339,8 @@ pub async fn artifact_revision_count(
     .expect("count skill artifact revisions")
 }
 
-/// Removes all active, historical, and mirrored artifact rows for one test skill name.
+/// Removes all artifact rows for one test skill name.
 pub async fn purge_skill_name(test_db: &TestDb, skill_name: &str) {
-    sqlx::query("DELETE FROM moa.skill WHERE name = $1")
-        .bind(skill_name)
-        .execute(test_db.store().pool())
-        .await
-        .expect("purge test skill rows");
     sqlx::query("DELETE FROM moa.artifact WHERE kind = 'skill' AND name = $1")
         .bind(skill_name)
         .execute(test_db.store().pool())

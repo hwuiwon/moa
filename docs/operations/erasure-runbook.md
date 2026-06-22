@@ -54,7 +54,6 @@ hard-purge path. That path deletes:
 - the AGE vertex and attached edges
 - the `moa.node_index` sidecar row
 - associated `moa.embeddings` rows
-- dependent `moa.skill_addendum` rows through the node foreign key
 
 The operation does not decrypt data and has no crypto-shred mode. ADR 0001
 deferred envelope encryption; erasure is hard-purge only.

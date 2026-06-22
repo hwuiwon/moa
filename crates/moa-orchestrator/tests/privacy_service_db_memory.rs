@@ -819,9 +819,6 @@ async fn privacy_export_archive_round_trip() {
     tokio::fs::write(export_dir.join("skills.jsonl"), "")
         .await
         .expect("write skills");
-    tokio::fs::write(export_dir.join("skill_addenda.jsonl"), "")
-        .await
-        .expect("write addenda");
     tokio::fs::write(export_dir.join("changelog.jsonl"), "")
         .await
         .expect("write changelog");
@@ -842,7 +839,6 @@ async fn privacy_export_archive_round_trip() {
         ("relationships", 0),
         ("embeddings", 0),
         ("skills", 0),
-        ("skill_addenda", 0),
         ("changelog", 0),
     ]);
     write_export_readme(&ctx, &counts, &export_dir)

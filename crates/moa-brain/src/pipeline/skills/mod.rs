@@ -6,20 +6,20 @@ mod registry;
 mod test_support;
 mod tier1_metadata;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use moa_core::{
-    ContextMessage, ContextProcessor, ProcessorOutput, Result, SessionStore, SkillBudgetConfig,
-    SkillMetadata, WorkingContext,
+    AgentSkillPolicy, AgentSkillPolicyMode, ContextMessage, ContextProcessor, ExcludedItem,
+    ProcessorOutput, Result, SessionStore, SkillBudgetConfig, SkillMetadata, WorkingContext,
 };
 use serde_json::json;
 use sqlx::PgPool;
 
 use self::tier1_metadata::{
     DEFAULT_MANIFEST_WINDOW_RATIO, DEFAULT_MIN_MANIFEST_CHARS, ResolvedSkillBudget,
-    format_skill_manifest, rank_skills, select_skills_within_budget,
+    format_skill_manifest, rank_skills, select_skills_within_budget_and_limit,
 };
 
 const RECENT_EVENT_LIMIT: usize = 32;
@@ -151,14 +151,23 @@ impl ContextProcessor for SkillInjector {
         let resolution_rates = self.skill_resolution_rates(ctx).await?;
         let task_strategy_rates = self.task_strategy_success_rates(ctx).await?;
         let budget = self.compute_budget(ctx.model_capabilities.context_window);
+        let policy = agent_skill_policy(ctx)?;
+        let policy_filtered = filter_skills_by_agent_policy(skills, &policy);
         let ranked = rank_skills(
-            &skills,
+            &policy_filtered.skills,
             &query_keywords,
             &budget,
             &resolution_rates,
             &task_strategy_rates,
         );
-        let selection = select_skills_within_budget(&ranked, budget.max_manifest_chars);
+        let selection = select_skills_within_budget_and_limit(
+            &ranked,
+            budget.max_manifest_chars,
+            policy
+                .max_visible
+                .and_then(|limit| usize::try_from(limit).ok()),
+            &pinned_skill_names(&policy),
+        );
         let manifest = format_skill_manifest(&selection.selected);
         let selected_metadata = selection
             .selected
@@ -183,8 +192,9 @@ impl ContextProcessor for SkillInjector {
             .iter()
             .map(|skill| skill.metadata.name.clone())
             .collect::<Vec<_>>();
-        let items_excluded = selection
-            .excluded
+        let mut excluded_items = policy_filtered.excluded;
+        excluded_items.extend(selection.excluded.clone());
+        let items_excluded = excluded_items
             .iter()
             .map(|item| item.item.clone())
             .collect::<Vec<_>>();
@@ -216,7 +226,7 @@ impl ContextProcessor for SkillInjector {
             ),
             (
                 EXCLUDED_ITEMS_METADATA_KEY.to_string(),
-                json!(selection.excluded.clone()),
+                json!(excluded_items.clone()),
             ),
             (
                 SELECTED_SKILL_NAMES_METADATA_KEY.to_string(),
@@ -232,16 +242,108 @@ impl ContextProcessor for SkillInjector {
             tokens_added: ctx.token_count.saturating_sub(tokens_before),
             items_included,
             items_excluded,
-            excluded_items: selection.excluded.clone(),
+            excluded_items,
             metadata: output_metadata,
             ..ProcessorOutput::default()
         })
     }
 }
 
+struct PolicyFilteredSkills {
+    skills: Vec<SkillMetadata>,
+    excluded: Vec<ExcludedItem>,
+}
+
+fn agent_skill_policy(ctx: &WorkingContext) -> Result<AgentSkillPolicy> {
+    Ok(ctx
+        .agent_policy_snapshot()?
+        .map(|snapshot| snapshot.skill_policy)
+        .unwrap_or_default())
+}
+
+fn filter_skills_by_agent_policy(
+    skills: Vec<SkillMetadata>,
+    policy: &AgentSkillPolicy,
+) -> PolicyFilteredSkills {
+    let refs = policy
+        .refs
+        .iter()
+        .filter_map(|reference| skill_name_from_ref(reference))
+        .collect::<HashSet<_>>();
+    if refs.is_empty()
+        || matches!(
+            policy.mode,
+            AgentSkillPolicyMode::Auto | AgentSkillPolicyMode::Pinned
+        )
+    {
+        return PolicyFilteredSkills {
+            skills,
+            excluded: Vec::new(),
+        };
+    }
+
+    let mut allowed = Vec::new();
+    let mut excluded = Vec::new();
+    for skill in skills {
+        let referenced = refs.contains(skill.name.as_str());
+        let include = match policy.mode {
+            AgentSkillPolicyMode::Allowlist => referenced,
+            AgentSkillPolicyMode::Denylist => !referenced,
+            AgentSkillPolicyMode::Auto | AgentSkillPolicyMode::Pinned => true,
+        };
+        if include {
+            allowed.push(skill);
+        } else {
+            excluded.push(ExcludedItem {
+                item: skill.name,
+                reason: match policy.mode {
+                    AgentSkillPolicyMode::Allowlist => {
+                        "excluded by agent skill allowlist".to_string()
+                    }
+                    AgentSkillPolicyMode::Denylist => {
+                        "excluded by agent skill denylist".to_string()
+                    }
+                    AgentSkillPolicyMode::Auto | AgentSkillPolicyMode::Pinned => {
+                        "excluded by agent skill policy".to_string()
+                    }
+                },
+            });
+        }
+    }
+
+    PolicyFilteredSkills {
+        skills: allowed,
+        excluded,
+    }
+}
+
+fn skill_name_from_ref(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix("skill://")
+        .filter(|name| !name.trim().is_empty())
+}
+
+fn pinned_skill_names(policy: &AgentSkillPolicy) -> Vec<String> {
+    if policy.mode != AgentSkillPolicyMode::Pinned {
+        return Vec::new();
+    }
+    let mut names = policy
+        .refs
+        .iter()
+        .filter_map(|reference| skill_name_from_ref(reference).map(ToString::to_string))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 #[cfg(test)]
 mod tests {
-    use moa_core::{ContextMessage, ContextProcessor, SkillBudgetConfig};
+    use moa_core::{
+        AgentContext, AgentPolicySnapshot, AgentSkillPolicy, AgentSkillPolicyMode, ContextMessage,
+        ContextProcessor, SYSTEM_DEFAULT_AGENT_POLICY_HASH, SYSTEM_DEFAULT_AGENT_REF,
+        SYSTEM_DEFAULT_AGENT_REVISION_UID, SkillBudgetConfig,
+    };
     use serde_json::json;
 
     use super::test_support::{capabilities, session, skills};
@@ -403,6 +505,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pinned_skill_policy_selects_pinned_skill_before_higher_ranked_skill() {
+        // Pins: configured-agent pinned skills reserve slots before relevance ranking fills budget.
+        let static_skills = skills(vec![
+            ("popular", "Popular workflow", 100, 0),
+            ("pinned", "Pinned workflow", 0, 1),
+        ]);
+        let mut session = session();
+        session.agent_context = Some(agent_context_with_skill_policy(AgentSkillPolicy {
+            mode: AgentSkillPolicyMode::Pinned,
+            refs: vec!["skill://pinned".to_string()],
+            max_visible: Some(1),
+        }));
+        let mut ctx = moa_core::WorkingContext::new(&session, capabilities(200_000));
+
+        let output = SkillInjector::from_skills(static_skills)
+            .process(&mut ctx)
+            .await
+            .expect("skill injection should succeed");
+
+        assert_eq!(output.items_included, vec!["pinned"]);
+        assert_eq!(output.items_excluded, vec!["popular"]);
+    }
+
     #[test]
     fn compute_budget_uses_context_window_percentage_or_default_floor() {
         let injector = SkillInjector::from_skills(Vec::new());
@@ -422,5 +548,24 @@ mod tests {
 
         assert_eq!(shared.name(), "skills");
         assert_eq!(shared.stage(), 5);
+    }
+
+    fn agent_context_with_skill_policy(skill_policy: AgentSkillPolicy) -> AgentContext {
+        let snapshot = AgentPolicySnapshot {
+            skill_policy,
+            ..AgentPolicySnapshot::default()
+        };
+        AgentContext {
+            agent_id: None,
+            installation_uid: None,
+            deployment_uid: None,
+            definition_ref: SYSTEM_DEFAULT_AGENT_REF.to_string(),
+            revision_uid: SYSTEM_DEFAULT_AGENT_REVISION_UID,
+            policy_hash: SYSTEM_DEFAULT_AGENT_POLICY_HASH.to_string(),
+            display_name: "Test Agent".to_string(),
+            artifact_dependencies: Vec::new(),
+            tool_dependencies: Vec::new(),
+            policy_snapshot: serde_json::to_value(snapshot).expect("serialize policy snapshot"),
+        }
     }
 }

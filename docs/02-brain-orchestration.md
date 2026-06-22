@@ -32,7 +32,7 @@ Default production Restate bindings:
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
 | Workflow | `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Feature-gated Restate bindings:
@@ -222,8 +222,8 @@ The orchestrator is responsible for connecting task work to learning:
 - Attribution writes `experience_attributions` for skills, tools, memory, policy, and verification evidence.
 - Candidate generation writes proposed `learning_candidates`; automatic promotion is gated by explicit status transitions.
 - `SkillLearning` writes only draft skill artifacts and proposed skill candidates.
-- `LearningReview` is the only runtime service that publishes accepted skill drafts, materializes active `moa.skill` rows, appends `skill_created` or `skill_improved`, and marks the candidate promoted.
+- `LearningReview` is the only runtime service that publishes accepted skill drafts, appends `skill_created` or `skill_improved`, and marks the candidate promoted.
 - Memory consolidation writes `memory_updated`.
-- Rejected skill candidates preserve draft artifacts for audit and never update active skills.
+- Rejected skill candidates preserve draft artifacts for audit and never publish skill revisions.
 
 This makes the learning pipeline event-sourced enough to audit and rollback without hiding updates inside model prompts.

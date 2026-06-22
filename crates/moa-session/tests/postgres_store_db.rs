@@ -138,6 +138,85 @@ async fn postgres_shared_session_store_contract() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_create_session_requires_non_empty_user_and_agent_context() {
+    with_test_store(|store| async move {
+        let missing_user = store
+            .create_session(SessionMeta {
+                workspace_id: WorkspaceId::new("pg-session-user-required"),
+                user_id: UserId::new(""),
+                model: ModelId::new("test-model"),
+                ..SessionMeta::default()
+            })
+            .await
+            .expect_err("empty user_id must be rejected");
+        assert!(
+            matches!(missing_user, MoaError::ValidationError(ref message) if message.contains("user_id")),
+            "expected user_id validation error, got {missing_user}"
+        );
+
+        let mut missing_agent = SessionMeta {
+            workspace_id: WorkspaceId::new("pg-session-agent-required"),
+            user_id: UserId::new("user"),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        };
+        missing_agent.agent_context = None;
+        let missing_agent = store
+            .create_session(missing_agent)
+            .await
+            .expect_err("missing agent_context must be rejected");
+        assert!(
+            matches!(missing_agent, MoaError::ValidationError(ref message) if message.contains("agent_context")),
+            "expected agent_context validation error, got {missing_agent}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_direct_session_insert_requires_agent_context_sidecar() {
+    let (store, database_url, schema_name) = create_test_store().await;
+    let sessions = qualified(&schema_name, "sessions");
+    let mut tx = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin direct insert transaction");
+    sqlx::query(&format!(
+        "INSERT INTO {sessions} \
+         (id, workspace_id, user_id, status, channel, model, created_at, updated_at) \
+         VALUES ($1, $2, $3, 'created', 'chat', 'test-model', NOW(), NOW())"
+    ))
+    .bind(Uuid::now_v7())
+    .bind("pg-session-db-agent-required")
+    .bind("user")
+    .execute(&mut *tx)
+    .await
+    .expect("direct session insert should be accepted until deferred commit check");
+
+    let error = tx
+        .commit()
+        .await
+        .expect_err("commit without session_agent_context must fail");
+    let database_error = error
+        .as_database_error()
+        .expect("expected database constraint error");
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
+    assert!(
+        database_error
+            .message()
+            .contains("missing required agent context"),
+        "unexpected constraint message: {}",
+        database_error.message()
+    );
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn postgres_event_payloads_round_trip_as_jsonb() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store

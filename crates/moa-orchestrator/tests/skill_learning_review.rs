@@ -22,7 +22,6 @@ use moa_orchestrator::services::learning_review::{
 use moa_session::PostgresSessionStore;
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, ValidatedSkillPackage};
-use moa_skills::registry::SkillRegistry;
 use moa_skills::review::{
     LearningReviewStore, LearningReviewStoreFuture, SkillReviewAction, SkillReviewRequest,
     prepare_skill_acceptance, promote_claimed_skill_candidate,
@@ -35,8 +34,8 @@ mod skill_learning_review {
     use super::*;
 
     #[tokio::test]
-    async fn accept_skill_candidate_publishes_draft_and_materializes_active_skill() {
-        // Pins: accepting a skill candidate publishes its draft artifact and materializes the active skill row.
+    async fn accept_skill_candidate_publishes_draft_for_artifact_backed_registry() {
+        // Pins: accepting a skill candidate publishes its draft artifact for artifact-backed skill loading.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let workspace_id = unique_workspace("review-accept");
         let scope = workspace_scope(&workspace_id);
@@ -94,7 +93,7 @@ mod skill_learning_review {
             response.published_artifact_revision_uid,
             Some(draft.revision_uid)
         );
-        assert!(response.skill_uid.is_some());
+        assert_eq!(response.skill_uid, None);
 
         let published = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
@@ -103,13 +102,6 @@ mod skill_learning_review {
             .expect("published artifact exists");
         assert_eq!(published.kind, ArtifactKind::Skill);
         assert_eq!(published.status, ArtifactStatus::Published);
-
-        let active_skill = SkillRegistry::new(test_db.store().pool().clone())
-            .load_by_name(&scope, &skill_name)
-            .await
-            .expect("load active skill")
-            .expect("active skill should be materialized");
-        assert_eq!(Some(active_skill.skill_uid), response.skill_uid);
 
         let promoted = test_db
             .store()
@@ -128,13 +120,7 @@ mod skill_learning_review {
             evaluation["published_artifact_revision_uid"],
             draft.revision_uid.to_string()
         );
-        assert_eq!(
-            evaluation["skill_uid"],
-            response
-                .skill_uid
-                .expect("accepted response includes skill uid")
-                .to_string()
-        );
+        assert_eq!(evaluation["skill_uid"], serde_json::Value::Null);
         #[cfg(feature = "internal-eval-runner")]
         {
             assert_eq!(evaluation["regression_execution"], "skipped");
@@ -174,7 +160,7 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn reject_skill_candidate_preserves_draft_without_active_skill() {
+    async fn reject_skill_candidate_preserves_draft_without_publishing() {
         // Pins: rejecting a skill candidate marks it rejected but keeps the draft artifact for audit.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let workspace_id = unique_workspace("review-reject");
@@ -221,14 +207,6 @@ mod skill_learning_review {
             .expect("load preserved draft")
             .expect("draft artifact remains visible");
         assert_eq!(preserved.status, ArtifactStatus::Draft);
-        assert!(
-            SkillRegistry::new(test_db.store().pool().clone())
-                .load_by_name(&scope, &skill_name)
-                .await
-                .expect("load optional active skill")
-                .is_none(),
-            "reject must not materialize an active skill"
-        );
 
         let rejected = test_db
             .store()
@@ -256,8 +234,8 @@ mod skill_learning_review {
     }
 
     #[tokio::test]
-    async fn promotion_rolls_back_materialized_skill_when_learning_append_fails() {
-        // Pins: accept promotion publishes, materializes, promotes, and appends learning in one transaction.
+    async fn promotion_rolls_back_artifact_publish_when_learning_append_fails() {
+        // Pins: accept promotion publishes, promotes, and appends learning in one transaction.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
         let workspace_id = unique_workspace("review-rollback");
         let scope = workspace_scope(&workspace_id);
@@ -305,14 +283,6 @@ mod skill_learning_review {
             "error should preserve the append failure: {error}"
         );
 
-        let active_skill = SkillRegistry::new(test_db.store().pool().clone())
-            .load_by_name(&scope, &skill_name)
-            .await
-            .expect("load optional active skill");
-        assert!(
-            active_skill.is_none(),
-            "failed promotion must roll back active skill materialization"
-        );
         let artifact = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
             .await

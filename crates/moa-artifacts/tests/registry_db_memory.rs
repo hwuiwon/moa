@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn registry_preserves_scope_precedence_and_published_supersession() -> Result<()> {
+async fn registry_preserves_scope_precedence_and_published_revision_history() -> Result<()> {
     // Pins: artifact visibility uses the same user > workspace > global tiers as skills.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
@@ -109,6 +109,13 @@ async fn registry_preserves_scope_precedence_and_published_supersession() -> Res
         .expect("workspace artifact v2 visible");
     assert_eq!(visible_workspace_v2.version, 2);
     assert_eq!(visible_workspace_v2.description, "workspace-v2");
+    let loaded_workspace_v1 = registry
+        .load_revision(&workspace_scope, workspace_v1.revision_uid)
+        .await?
+        .expect("workspace v1 remains loadable by exact revision id");
+    assert_eq!(loaded_workspace_v1.version, 1);
+    assert_eq!(loaded_workspace_v1.status, ArtifactStatus::Published);
+    assert_eq!(loaded_workspace_v1.valid_to, None);
 
     let user_doc = skill_doc(&name, "user");
     let user_source = user_doc.to_yaml().expect("serialize user doc");

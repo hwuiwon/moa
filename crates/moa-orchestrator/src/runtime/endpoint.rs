@@ -23,6 +23,7 @@ use crate::{
     services::{
         action_reviews::{ActionReviews, ActionReviewsImpl},
         admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
+        agent_definitions::{AgentDefinitions, AgentDefinitionsImpl},
         agents::{Agents, AgentsImpl},
         analytics::{Analytics, AnalyticsImpl},
         api_keys::{ApiKeys, ApiKeysImpl},
@@ -62,6 +63,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "AdminMaintenance",
     "Analytics",
     "ActionReviews",
+    "AgentDefinitions",
     "Artifacts",
     "ApiKeys",
     "Audit",
@@ -133,6 +135,7 @@ pub fn build_endpoint(
         .bind(HealthImpl.serve())
         .bind(SessionStoreImpl::new(session_store.clone()).serve())
         .bind(LLMGatewayImpl::new(providers).serve())
+        .bind(AgentDefinitionsImpl.serve())
         .bind(AgentsImpl.serve())
         .bind(AdminMaintenanceImpl.serve())
         .bind(AnalyticsImpl.serve())

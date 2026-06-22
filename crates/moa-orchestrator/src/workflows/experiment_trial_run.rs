@@ -9,10 +9,11 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
-    Channel, CompletionRequest, ContextMessage, Event, EventRange, EventRecord, EventType,
-    MemoryScope, MoaError, ModelId, SessionId, SessionMeta, SessionStatus, SessionStore, UserId,
-    WorkspaceId, current_trace_id, record_experiment_trial, record_experiment_trial_duration,
-    record_simulation_cost_cents, record_simulation_tokens, record_simulation_turn,
+    AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event, EventRange,
+    EventRecord, EventType, MemoryScope, MoaError, ModelId, SessionId, SessionMeta, SessionStatus,
+    SessionStore, UserId, WorkspaceId, current_trace_id, record_experiment_trial,
+    record_experiment_trial_duration, record_simulation_cost_cents, record_simulation_tokens,
+    record_simulation_turn,
 };
 use moa_experiments::model::{
     ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
@@ -32,7 +33,9 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::objects::session::SessionClient;
 use crate::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
-use crate::services::session_store::inner::create_session_for_identity;
+use crate::services::session_store::inner::{
+    apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
+};
 
 mod status;
 mod target_execution;

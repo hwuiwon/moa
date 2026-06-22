@@ -18,7 +18,7 @@ Platform
        -> Experience records and learning candidates
        -> Learning log
        -> Lineage and audit evidence
-       -> Workspace memory and skills
+       -> Tenant knowledge and skills
 ```
 
 MOA is not a personal assistant or chat wrapper. It is an execution platform with durable orchestration, an auditable event log, graph memory, evidence-backed task segment assessment, and a tenant-scoped learning pipeline.
@@ -31,7 +31,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
 - **Learning log:** every learned pattern, segment assessment, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
-- **Workspace memory:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval.
+- **Tenant knowledge:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval. Workspace administration controls access to tenant resources; it is not a separate memory product layer.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
 - **Multiple interfaces:** REST/gateway, API automation, and messaging adapters all talk to the same session model.

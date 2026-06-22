@@ -6,8 +6,8 @@ use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::{
-    Channel, ChannelAccountId, ChannelAccountRef, ChannelRef, ContactId, ContactPointId,
-    ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
+    AgentSessionSelection, Channel, ChannelAccountId, ChannelAccountRef, ChannelRef, ContactId,
+    ContactPointId, ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
     ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
     ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionPromotionRequest,
     ContactSessionPromotionResponse, ContactTokenClaims, ContactTokenIssueRequest,
@@ -29,6 +29,7 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::objects::session::SessionClient;
+use crate::services::session_store::inner::resolve_agent_context_for_session;
 
 const LOW_ASSURANCE_SCOPES: &[&str] = &[
     "agent:session:create",
@@ -296,6 +297,7 @@ impl Contacts for ContactsImpl {
         let request = request.into_inner();
         let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
         require_contact_scope(&claims, "agent:session:create")?;
+        require_contact_agent_permission(&claims, &request.agent)?;
         let contact_id = contact_id_from_claims(&claims)?;
         annotate_claim_contact_span(&claims, None);
         let tenant_id = claims.tenant_id;
@@ -306,6 +308,13 @@ impl Contacts for ContactsImpl {
         let channel_request = request.channel;
         let initial_channel_ref = channel_request.channel_ref;
         let channel_reason = channel_request.reason;
+        let agent_selection = request.agent.clone();
+        let token_scopes = claims.scopes.clone();
+        let token_permissions = claims.permissions.clone();
+        let token_agent_ids = claims.agent_ids.clone();
+        let token_session_ids = claims.session_ids.clone();
+        let token_verified_contact_point_ids = claims.verified_contact_point_ids.clone();
+        let token_linked_contact_ids = claims.linked_contact_ids.clone();
 
         let SessionChannelPreparation {
             contact,
@@ -315,8 +324,14 @@ impl Contacts for ContactsImpl {
         } = ctx
             .run(|| async move {
                 ensure_contact_token_grant_active(&pool, &claims, contact_id).await?;
-                let contact =
+                let mut contact =
                     load_contact_ref(pool.clone(), &workspace_id, tenant_id, contact_id).await?;
+                contact.scopes = token_scopes;
+                contact.permissions = token_permissions;
+                contact.agent_ids = token_agent_ids;
+                contact.session_ids = token_session_ids;
+                contact.verified_contact_point_ids = token_verified_contact_point_ids;
+                contact.linked_contact_ids = token_linked_contact_ids;
                 let resolved =
                     resolve_contact_session_channel(&pool, &contact, initial_channel_ref).await?;
                 Ok::<_, HandlerError>(Json::from(SessionChannelPreparation {
@@ -348,6 +363,11 @@ impl Contacts for ContactsImpl {
         let workspace_id_for_create = request.workspace_id.clone();
         let (session_id, meta_for_vo) = ctx
             .run(|| async move {
+                let agent_context =
+                    resolve_agent_context_for_session(store.as_ref(), &meta, &agent_selection)
+                        .await?;
+                let mut meta = meta;
+                meta.agent_context = Some(agent_context);
                 let session_id = store
                     .create_session(meta)
                     .await
@@ -1825,6 +1845,38 @@ fn require_contact_session_permission(
     }
 }
 
+fn require_contact_agent_permission(
+    claims: &ContactTokenClaims,
+    agent: &AgentSessionSelection,
+) -> Result<(), HandlerError> {
+    if claims.agent_ids.is_empty() {
+        validate_contact_agent_selection(agent).map(|_| ())
+    } else {
+        let selected_agent = validate_contact_agent_selection(agent)?;
+        if claims
+            .agent_ids
+            .iter()
+            .any(|agent_id| agent_id == &selected_agent)
+        {
+            Ok(())
+        } else {
+            Err(TerminalError::new_with_code(403, "contact token agent denied").into())
+        }
+    }
+}
+
+fn validate_contact_agent_selection(agent: &AgentSessionSelection) -> Result<String, HandlerError> {
+    match (agent.installation_uid, agent.revision_uid) {
+        (Some(installation_uid), None) => Ok(installation_uid.to_string()),
+        (None, Some(revision_uid)) => Ok(revision_uid.to_string()),
+        _ => Err(TerminalError::new_with_code(
+            400,
+            "contact session requires exactly one agent installation_uid or revision_uid",
+        )
+        .into()),
+    }
+}
+
 fn contact_id_from_claims(claims: &ContactTokenClaims) -> Result<ContactId, HandlerError> {
     Uuid::parse_str(&claims.sub)
         .map(ContactId)
@@ -2003,11 +2055,14 @@ fn db_handler_error(context: &'static str, error: sqlx::Error) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ContactId, ContactPointInput, ContactPointKind, ContactRef,
-        ContactVerificationState, SessionMeta, WorkspaceId,
+        AgentSessionSelection, Channel, ContactId, ContactPointInput, ContactPointKind, ContactRef,
+        ContactTokenClaims, ContactVerificationState, SessionMeta, WorkspaceId,
     };
 
-    use super::{contact_allows_channel_contact, contact_point_delivery, promoted_from_contact};
+    use super::{
+        contact_allows_channel_contact, contact_point_delivery, promoted_from_contact,
+        require_contact_agent_permission,
+    };
 
     #[test]
     fn promoted_from_contact_allows_linked_session_contact() {
@@ -2066,6 +2121,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn contact_agent_permission_allows_unbounded_token_with_single_selector() {
+        // Pins: unbounded contact tokens may create sessions only when exactly one agent selector is provided.
+        let installation_uid = uuid::Uuid::now_v7();
+        let claims = contact_claims(Vec::new());
+        let selection = AgentSessionSelection {
+            installation_uid: Some(installation_uid),
+            revision_uid: None,
+        };
+
+        require_contact_agent_permission(&claims, &selection)
+            .expect("unbounded token should allow a single selected agent");
+    }
+
+    #[test]
+    fn contact_agent_permission_rejects_token_agent_allowlist_miss() {
+        // Pins: bounded contact tokens cannot create sessions for agents outside their allowlist.
+        let allowed_installation_uid = uuid::Uuid::now_v7();
+        let denied_installation_uid = uuid::Uuid::now_v7();
+        let claims = contact_claims(vec![allowed_installation_uid.to_string()]);
+        let selection = AgentSessionSelection {
+            installation_uid: Some(denied_installation_uid),
+            revision_uid: None,
+        };
+
+        let error = require_contact_agent_permission(&claims, &selection)
+            .expect_err("unlisted agent should be denied");
+
+        assert!(
+            format!("{error:?}").contains("contact token agent denied"),
+            "unexpected error: {error:?}"
+        );
+    }
+
     fn session_meta(contact: ContactRef) -> SessionMeta {
         SessionMeta {
             workspace_id: contact.workspace_id.clone(),
@@ -2093,6 +2182,27 @@ mod tests {
             agent_ids: Vec::new(),
             session_ids: Vec::new(),
             verified_contact_point_ids: Vec::new(),
+        }
+    }
+
+    fn contact_claims(agent_ids: Vec<String>) -> ContactTokenClaims {
+        ContactTokenClaims {
+            iss: "moa-test".to_string(),
+            aud: "moa-contact".to_string(),
+            sub: ContactId::new().to_string(),
+            exp: 1,
+            iat: 0,
+            nbf: 0,
+            jti: uuid::Uuid::now_v7().to_string(),
+            tenant_id: uuid::Uuid::now_v7(),
+            workspace_id: WorkspaceId::new("workspace"),
+            state: ContactVerificationState::Unverified,
+            scopes: vec!["agent:session:create".to_string()],
+            permissions: serde_json::Value::Null,
+            agent_ids,
+            session_ids: Vec::new(),
+            verified_contact_point_ids: Vec::new(),
+            linked_contact_ids: Vec::new(),
         }
     }
 

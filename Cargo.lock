@@ -3014,6 +3014,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-agents"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "moa-artifacts",
+ "moa-core",
+ "moa-session",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tokio",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-artifacts"
 version = "0.1.0"
 dependencies = [
@@ -3130,6 +3147,7 @@ dependencies = [
  "chrono",
  "insta",
  "metrics",
+ "moa-artifacts",
  "moa-core",
  "moa-hands",
  "moa-lineage-citation",
@@ -3141,7 +3159,6 @@ dependencies = [
  "moa-providers",
  "moa-security",
  "moa-session",
- "moa-skills",
  "moka",
  "proptest",
  "reqwest 0.13.2",
@@ -3241,6 +3258,7 @@ dependencies = [
  "moa-providers",
  "moa-security",
  "moa-session",
+ "moa-skills",
  "moa-test-support",
  "opentelemetry",
  "regex",
@@ -3670,6 +3688,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "moa-agents",
  "moa-artifacts",
  "moa-auth-providers",
  "moa-authz",

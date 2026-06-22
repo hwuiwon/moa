@@ -1,6 +1,7 @@
 //! Stage 7: graph memory retrieval and prompt injection.
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -8,9 +9,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ContextMessage, ContextProcessor, ContextSourceRef, LineageHandle, MemoryRerankerMode,
-    MemoryScope, NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, RewriteSource,
-    ScopeContext, ScopeTier, WorkingContext, traits::EmbeddingProvider,
+    AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContextMessage, ContextProcessor,
+    ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MemoryScope, MoaError,
+    NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext,
+    ScopeTier, WorkingContext, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -132,15 +134,28 @@ impl GraphMemoryRetriever {
         ctx: &WorkingContext,
         query: String,
     ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
-        let scopes = memory_scopes_from_context(ctx);
+        let policy = agent_knowledge_policy(ctx)?;
+        if policy.mode == AgentKnowledgeScopeMode::Disabled {
+            return Ok(Vec::new());
+        }
+        let result_limit = effective_result_limit(&policy, self.result_limit);
+        let max_pii_class = effective_max_pii_class(&policy)?;
+        let scopes = memory_scopes_from_context(ctx, &policy);
         let mut merged = Vec::new();
         let mut seen = HashSet::new();
         for (index, scope) in scopes.iter().enumerate() {
             let hits = self
-                .retrieve_hits_for_scope(ctx, &query, scope, index == 0)
+                .retrieve_hits_for_scope(
+                    ctx,
+                    &query,
+                    scope,
+                    index == 0,
+                    result_limit,
+                    max_pii_class,
+                )
                 .await?;
             for hit in hits {
-                if seen.insert(hit.uid) {
+                if hit_matches_knowledge_policy(&hit, &policy) && seen.insert(hit.uid) {
                     merged.push(hit);
                 }
             }
@@ -152,7 +167,7 @@ impl GraphMemoryRetriever {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.uid.cmp(&right.uid))
         });
-        merged.truncate(self.result_limit);
+        merged.truncate(result_limit);
         Ok(merged)
     }
 
@@ -162,6 +177,8 @@ impl GraphMemoryRetriever {
         query: &str,
         scope: &MemoryScope,
         emit_storage_lineage: bool,
+        result_limit: usize,
+        max_pii_class: PiiClass,
     ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
         let runtime = self.runtime_for_scope(scope)?;
         let planning = crate::planning::PlanningCtx::new(scope.clone(), runtime.graph.clone());
@@ -172,9 +189,9 @@ impl GraphMemoryRetriever {
                 &planning,
                 embedder,
                 &runtime.hybrid,
-                PiiClass::Restricted,
+                max_pii_class,
             )
-            .with_k_final(self.result_limit)
+            .with_k_final(result_limit)
             .with_reranker(self.reranker_enabled());
             if emit_storage_lineage {
                 query_ctx = query_ctx.with_lineage_context(lineage_context_from_context(ctx));
@@ -193,8 +210,8 @@ impl GraphMemoryRetriever {
             let request = planned.clone().into_retrieval_request(
                 query.to_string(),
                 Vec::new(),
-                PiiClass::Restricted,
-                self.result_limit,
+                max_pii_class,
+                result_limit,
                 self.reranker_enabled(),
             );
             let mut request = request;
@@ -285,6 +302,16 @@ impl ContextProcessor for GraphMemoryRetriever {
     }
 
     async fn process(&self, ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+        if agent_knowledge_policy(ctx)?.mode == AgentKnowledgeScopeMode::Disabled {
+            return Ok(ProcessorOutput {
+                items_excluded: vec!["graph_memory".to_string()],
+                excluded_items: vec![ExcludedItem {
+                    item: "graph_memory".to_string(),
+                    reason: "disabled by pinned agent knowledge policy".to_string(),
+                }],
+                ..ProcessorOutput::default()
+            });
+        }
         let Some(query) = extract_search_query(ctx) else {
             return Ok(ProcessorOutput::default());
         };
@@ -355,7 +382,7 @@ impl GraphMemoryRetriever {
             session_id: ctx.session_id,
             workspace_id: ctx.workspace_id.clone(),
             user_id: ctx.user_id.clone(),
-            scope: memory_scope_from_context(ctx),
+            scope: lineage_memory_scope_from_context(ctx),
             ts: Utc::now(),
             query_original: query.to_string(),
             query_expansions: query_expansions_from_context(ctx),
@@ -467,15 +494,56 @@ fn duration_ms_u32(duration: std::time::Duration) -> u32 {
     duration.as_millis().min(u128::from(u32::MAX)) as u32
 }
 
-fn memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
-    MemoryScope::User {
-        workspace_id: ctx.workspace_id.clone(),
-        user_id: ctx.user_id.clone(),
+fn agent_knowledge_policy(ctx: &WorkingContext) -> Result<AgentKnowledgePolicy> {
+    Ok(ctx
+        .agent_policy_snapshot()?
+        .map(|snapshot| snapshot.knowledge_policy)
+        .unwrap_or_default())
+}
+
+fn effective_result_limit(policy: &AgentKnowledgePolicy, default_limit: usize) -> usize {
+    policy
+        .retrieval_budget
+        .and_then(|limit| usize::try_from(limit).ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(default_limit)
+}
+
+fn effective_max_pii_class(policy: &AgentKnowledgePolicy) -> Result<PiiClass> {
+    let Some(value) = policy
+        .pii_floor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(PiiClass::Restricted);
+    };
+    PiiClass::from_str(value)
+        .map_err(|error| MoaError::ValidationError(format!("invalid agent pii_floor: {error}")))
+}
+
+fn lineage_memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
+    let policy = agent_knowledge_policy(ctx).unwrap_or_default();
+    memory_scope_from_context_with_policy(ctx, &policy)
+}
+
+fn memory_scope_from_context_with_policy(
+    ctx: &WorkingContext,
+    policy: &AgentKnowledgePolicy,
+) -> MemoryScope {
+    match policy.mode {
+        AgentKnowledgeScopeMode::Tenant | AgentKnowledgeScopeMode::Disabled => MemoryScope::User {
+            workspace_id: ctx.workspace_id.clone(),
+            user_id: ctx.user_id.clone(),
+        },
     }
 }
 
-fn memory_scopes_from_context(ctx: &WorkingContext) -> Vec<MemoryScope> {
-    let primary = memory_scope_from_context(ctx);
+fn memory_scopes_from_context(
+    ctx: &WorkingContext,
+    policy: &AgentKnowledgePolicy,
+) -> Vec<MemoryScope> {
+    let primary = memory_scope_from_context_with_policy(ctx, policy);
     let Some(contact) = ctx.contact.as_ref() else {
         return vec![primary];
     };
@@ -504,6 +572,46 @@ fn memory_scopes_from_context(ctx: &WorkingContext) -> Vec<MemoryScope> {
         }
     }
     scopes
+}
+
+fn hit_matches_knowledge_policy(
+    hit: &crate::retrieval::RetrievalHit,
+    policy: &AgentKnowledgePolicy,
+) -> bool {
+    let filters = &policy.filters;
+    matches_string_filter(filters, "labels", hit.node.label.as_str())
+        && matches_string_filter(filters, "names", &hit.node.name)
+        && matches_string_filter(filters, "scopes", &hit.node.scope)
+        && matches_string_filter(filters, "pii_classes", hit.node.pii_class.as_str())
+        && policy
+            .pii_floor
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| PiiClass::from_str(value).ok())
+            .is_none_or(|max_pii_class| pii_rank(hit.node.pii_class) <= pii_rank(max_pii_class))
+}
+
+fn pii_rank(class: PiiClass) -> i32 {
+    match class {
+        PiiClass::None => 0,
+        PiiClass::Pii => 1,
+        PiiClass::Phi => 2,
+        PiiClass::Restricted => 3,
+    }
+}
+
+fn matches_string_filter(filters: &serde_json::Value, key: &str, candidate: &str) -> bool {
+    let Some(values) = filters.get(key).and_then(serde_json::Value::as_array) else {
+        return true;
+    };
+    if values.is_empty() {
+        return true;
+    }
+    values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|value| value == candidate)
 }
 
 fn turn_id_from_context(ctx: &WorkingContext) -> Option<TurnId> {
@@ -648,9 +756,9 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ContactId, ContactRef, ContactVerificationState, ContextProcessor, MemoryScope,
-        ModelCapabilities, ModelId, QueryRewriteResult, SessionId, SessionMeta, TokenPricing,
-        ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        AgentKnowledgePolicy, Channel, ContactId, ContactRef, ContactVerificationState,
+        ContextProcessor, MemoryScope, ModelCapabilities, ModelId, QueryRewriteResult, SessionId,
+        SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
     };
     use moa_lineage_core::TurnId;
     use sqlx::postgres::PgPoolOptions;
@@ -824,7 +932,7 @@ mod tests {
         let ctx = WorkingContext::new(&session, capabilities());
 
         assert_eq!(
-            memory_scopes_from_context(&ctx),
+            memory_scopes_from_context(&ctx, &AgentKnowledgePolicy::default()),
             vec![MemoryScope::User {
                 workspace_id: session.workspace_id,
                 user_id: contact_id.as_user_id(),
@@ -845,7 +953,7 @@ mod tests {
         let ctx = WorkingContext::new(&session, capabilities());
 
         assert_eq!(
-            memory_scopes_from_context(&ctx),
+            memory_scopes_from_context(&ctx, &AgentKnowledgePolicy::default()),
             vec![
                 MemoryScope::User {
                     workspace_id: session.workspace_id.clone(),

@@ -1,9 +1,13 @@
-//! Canonical artifact definitions for MOA skills, connectors, workflows, and experiment plans.
+//! Canonical artifact definitions for MOA agents, skills, connectors, actions, workflows, and experiment plans.
 //!
 //! The crate owns the code-addressable document model used by API imports,
 //! Postgres storage, and future visual builders. Runtime crates should depend
 //! on these types instead of duplicating ad hoc JSON shapes.
 
+/// Standalone action artifact definitions.
+pub mod action;
+/// Tenant-configurable agent artifact definitions.
+pub mod agent;
 /// Canonical JSON serialization and hashing helpers.
 pub mod canonical;
 /// Connector artifact definitions.

@@ -65,6 +65,7 @@ pub(super) fn test_skill(
     last_used_days_ago: i64,
 ) -> SkillMetadata {
     SkillMetadata {
+        artifact_revision_uid: None,
         path: format!(".moa/skills/{name}/SKILL.md"),
         name: name.to_string(),
         description: description.to_string(),

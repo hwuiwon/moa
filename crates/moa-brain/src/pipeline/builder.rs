@@ -10,6 +10,7 @@ use moa_core::{
 };
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 
+use super::agent_instructions::AgentInstructionProcessor;
 use super::compactor::Compactor;
 use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
@@ -49,6 +50,7 @@ pub fn build_default_pipeline_with_tools(
     );
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::default()),
+        Box::new(AgentInstructionProcessor::new()),
         Box::new(InstructionProcessor::new(
             config.general.workspace_instructions.clone(),
             config.general.user_instructions.clone(),
@@ -209,6 +211,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
 
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
         Box::new(IdentityProcessor::default()),
+        Box::new(AgentInstructionProcessor::new()),
         Box::new(InstructionProcessor::new(
             config.general.workspace_instructions.clone(),
             config.general.user_instructions.clone(),

@@ -126,15 +126,54 @@ fn task_rate_weight(rate: &TaskStrategySuccessRate) -> f64 {
     sample_weight * rate.avg_confidence.clamp(0.0, 1.0)
 }
 
+#[cfg(test)]
 pub(super) fn select_skills_within_budget(
     ranked: &[RankedSkill],
     max_manifest_chars: usize,
+) -> SkillSelection {
+    select_skills_within_budget_and_limit(ranked, max_manifest_chars, None, &[])
+}
+
+pub(super) fn select_skills_within_budget_and_limit(
+    ranked: &[RankedSkill],
+    max_manifest_chars: usize,
+    max_selected: Option<usize>,
+    pinned_names: &[String],
 ) -> SkillSelection {
     let mut selected = Vec::new();
     let mut selected_names = HashSet::new();
     let mut chars_used = MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count();
 
+    for pinned_name in pinned_names {
+        if max_selected.is_some_and(|limit| selected.len() >= limit) {
+            break;
+        }
+        let Some(skill) = ranked
+            .iter()
+            .find(|skill| skill.metadata.name == *pinned_name)
+        else {
+            continue;
+        };
+        if selected_names.contains(&skill.metadata.name) {
+            continue;
+        }
+        let entry_cost = skill.manifest_entry.chars().count() + 1;
+        if chars_used + entry_cost > max_manifest_chars {
+            break;
+        }
+
+        chars_used += entry_cost;
+        selected_names.insert(skill.metadata.name.clone());
+        selected.push(skill.clone());
+    }
+
     for skill in ranked {
+        if max_selected.is_some_and(|limit| selected.len() >= limit) {
+            break;
+        }
+        if selected_names.contains(&skill.metadata.name) {
+            continue;
+        }
         let entry_cost = skill.manifest_entry.chars().count() + 1;
         if chars_used + entry_cost > max_manifest_chars {
             break;
@@ -153,7 +192,11 @@ pub(super) fn select_skills_within_budget(
         .filter(|skill| !selected_names.contains(&skill.metadata.name))
         .map(|skill| ExcludedItem {
             item: skill.metadata.name.clone(),
-            reason: "excluded by manifest budget after relevance ranking".to_string(),
+            reason: if max_selected.is_some_and(|limit| selected_names.len() >= limit) {
+                "excluded by agent skill policy max_visible after relevance ranking".to_string()
+            } else {
+                "excluded by manifest budget after relevance ranking".to_string()
+            },
         })
         .collect::<Vec<_>>();
 

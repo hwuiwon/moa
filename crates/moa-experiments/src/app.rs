@@ -7,15 +7,15 @@ use moa_artifacts::simulation::experiment_plan_response_schema;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::traits::Identity;
 use moa_core::wire::{
-    ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest,
-    ExperimentCompareResponse, ExperimentCompareRow, ExperimentGeneratePlanRequest,
-    ExperimentGeneratePlanResponse, ExperimentListRequest, ExperimentListResponse,
-    ExperimentProposeImprovementsRequest, ExperimentProposeImprovementsResponse,
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentScenarioScoreDeltaRow,
-    ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow, ExperimentScoresRequest,
-    ExperimentScoresResponse, ExperimentTrialScoreSummary, ExperimentTrialStatusRequest,
-    ExperimentTrialStatusResponse, ExperimentTrialSummary, ExperimentTrialsRequest,
-    ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
+    AgentRevisionSimulationVariant, ExperimentCancelRequest, ExperimentCancelResponse,
+    ExperimentCompareRequest, ExperimentCompareResponse, ExperimentCompareRow,
+    ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,
+    ExperimentListResponse, ExperimentProposeImprovementsRequest,
+    ExperimentProposeImprovementsResponse, ExperimentRunRequest, ExperimentRunResponse,
+    ExperimentScenarioScoreDeltaRow, ExperimentScenarioScoreSummary, ExperimentScoreSummaryRow,
+    ExperimentScoresRequest, ExperimentScoresResponse, ExperimentTrialScoreSummary,
+    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
+    ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{
     CompletionRequest, ContextMessage, JsonResponseFormat, LearningCandidate,
@@ -85,6 +85,9 @@ pub struct AdmittedExperimentRun {
     pub identity: Identity,
     /// Score run identifier used for analytics joins.
     pub score_run_id: Uuid,
+    /// Exact agent revision variants selected for plan-backed simulation, when present.
+    #[serde(default)]
+    pub agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 }
 
 /// Proposed experiment-derived learning candidate plus API response metadata.
@@ -164,7 +167,14 @@ pub async fn admit_run(
     let scope = workspace_scope(request.workspace_id.clone());
     let run_inputs = match request.plan_revision_uid {
         Some(plan_revision_uid) => {
-            plan_run_inputs(pool.clone(), &scope, plan_revision_uid, &request.name).await?
+            plan_run_inputs(
+                pool.clone(),
+                &scope,
+                plan_revision_uid,
+                &request.name,
+                &request.agent_revision_variants,
+            )
+            .await?
         }
         None => single_target_run_inputs(request.target, request.variant, request.scorecard)?,
     };
@@ -196,6 +206,7 @@ pub async fn admit_run(
         plan_revision_uid: run_inputs.plan_revision_uid,
         identity,
         score_run_id: run.score_run_id,
+        agent_revision_variants: request.agent_revision_variants,
     })
 }
 
@@ -593,7 +604,7 @@ pub fn build_experiment_learning_candidate(
     }
 }
 
-/// Returns the workspace memory scope used by behavior-lab runs.
+/// Returns the tenant-visible memory scope used by behavior-lab runs.
 #[must_use]
 pub fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
     MemoryScope::Workspace { workspace_id }
@@ -636,6 +647,7 @@ async fn plan_run_inputs(
     scope: &MemoryScope,
     plan_revision_uid: Uuid,
     run_name: &str,
+    agent_revision_variants: &[AgentRevisionSimulationVariant],
 ) -> Result<ExperimentRunInputs> {
     let plan = load_published_plan_revision(pool, scope, plan_revision_uid).await?;
     let ArtifactDefinition::ExperimentPlan(definition) = &plan.document.definition else {
@@ -643,8 +655,22 @@ async fn plan_run_inputs(
             "plan revision must contain an experiment_plan definition",
         ));
     };
-    let projection = project_plan_run(definition, plan_revision_uid, &plan.name, run_name)
+    let mut projection = project_plan_run(definition, plan_revision_uid, &plan.name, run_name)
         .map_err(plan_expansion_error)?;
+    if !agent_revision_variants.is_empty() {
+        let variants = serde_json::to_value(agent_revision_variants)
+            .map_err(|error| serialization_error(error.to_string()))?;
+        if let Some(metadata) = projection.variant.metadata.as_object_mut() {
+            metadata.insert("agent_revision_variants".to_string(), variants);
+        }
+        projection.artifact_revision_uids.extend(
+            agent_revision_variants
+                .iter()
+                .map(|variant| variant.revision_uid),
+        );
+        projection.artifact_revision_uids.sort_unstable();
+        projection.artifact_revision_uids.dedup();
+    }
     Ok(ExperimentRunInputs {
         target: projection.target,
         variant: projection.variant,
@@ -1270,6 +1296,7 @@ mod tests {
             target: ExperimentTarget::AgentLoop {
                 prompt: "Handle the damaged order.".to_string(),
                 session_id: Some(SessionId(fixture_uuid(2))),
+                agent: None,
                 model: ModelId::new("gpt-fixture"),
                 attachments: Vec::new(),
             },

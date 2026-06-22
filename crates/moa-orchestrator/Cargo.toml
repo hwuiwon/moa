@@ -37,6 +37,7 @@ hex.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
+moa-agents.workspace = true
 moa-artifacts.workspace = true
 moa-brain = { workspace = true }
 moa-core = { workspace = true }

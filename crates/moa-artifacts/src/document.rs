@@ -5,6 +5,8 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::action::ActionDefinition;
+use crate::agent::AgentDefinition;
 use crate::connector::ConnectorDefinition;
 use crate::reference::{ArtifactRef, ReferenceResolution};
 use crate::simulation::ExperimentPlanDefinition;
@@ -16,6 +18,8 @@ use crate::{Error, Result};
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
+    /// Tenant-configurable agent behavior policy.
+    Agent,
     /// Reusable instructions, resources, and optional callable actions.
     Skill,
     /// Connector and action declaration.
@@ -33,6 +37,7 @@ impl ArtifactKind {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Agent => "agent",
             Self::Skill => "skill",
             Self::Connector => "connector",
             Self::Workflow => "workflow",
@@ -53,6 +58,7 @@ impl FromStr for ArtifactKind {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
+            "agent" => Ok(Self::Agent),
             "skill" => Ok(Self::Skill),
             "connector" => Ok(Self::Connector),
             "workflow" => Ok(Self::Workflow),
@@ -157,12 +163,16 @@ impl Default for ArtifactUi {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", content = "spec", rename_all = "snake_case")]
 pub enum ArtifactDefinition {
+    /// Tenant-configurable agent artifact body.
+    Agent(Box<AgentDefinition>),
     /// Skill artifact body.
     Skill(SkillDefinition),
     /// Connector artifact body.
     Connector(ConnectorDefinition),
     /// Workflow artifact body.
     Workflow(WorkflowDefinition),
+    /// Standalone action artifact body.
+    Action(ActionDefinition),
     /// Behavior-lab experiment plan body.
     ExperimentPlan(ExperimentPlanDefinition),
 }
@@ -172,9 +182,11 @@ impl ArtifactDefinition {
     #[must_use]
     pub fn kind(&self) -> ArtifactKind {
         match self {
+            Self::Agent(_) => ArtifactKind::Agent,
             Self::Skill(_) => ArtifactKind::Skill,
             Self::Connector(_) => ArtifactKind::Connector,
             Self::Workflow(_) => ArtifactKind::Workflow,
+            Self::Action(_) => ArtifactKind::Action,
             Self::ExperimentPlan(_) => ArtifactKind::ExperimentPlan,
         }
     }
@@ -192,6 +204,7 @@ impl ArtifactDefinition {
     #[must_use]
     pub fn reference_paths(&self) -> Vec<(String, ArtifactRef)> {
         match self {
+            Self::Agent(definition) => definition.reference_paths(),
             Self::Skill(definition) => {
                 let mut refs = definition
                     .connectors
@@ -233,6 +246,7 @@ impl ArtifactDefinition {
                 refs
             }
             Self::Connector(_) => Vec::new(),
+            Self::Action(definition) => definition.reference_paths(),
             Self::ExperimentPlan(definition) => definition.reference_paths(),
             Self::Workflow(definition) => {
                 let mut refs = Vec::new();

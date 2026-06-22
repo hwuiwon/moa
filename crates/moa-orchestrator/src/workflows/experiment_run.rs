@@ -9,11 +9,12 @@ use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus, StoredArtifac
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
-    ExperimentRunStatusRequest, ExperimentRunStatusResponse, QueueMessageRequest,
+    AgentRevisionSimulationVariant, ExperimentRunStatusRequest, ExperimentRunStatusResponse,
+    QueueMessageRequest,
 };
 use moa_core::{
-    Channel, MemoryScope, MoaError, ModelId, SessionId, SessionMeta, SessionStatus, SessionStore,
-    UserId, WorkspaceId, record_experiment_run,
+    AgentSessionSelection, Channel, MemoryScope, MoaError, ModelId, SessionId, SessionMeta,
+    SessionStatus, SessionStore, UserId, WorkspaceId, record_experiment_run,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTargetKind,
@@ -32,7 +33,9 @@ use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::objects::session::SessionClient;
-use crate::services::session_store::inner::create_session_for_identity;
+use crate::services::session_store::inner::{
+    apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
+};
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
@@ -72,6 +75,9 @@ pub struct ExperimentRunWorkflowRequest {
     pub identity: Identity,
     /// Score run identifier associated with this experiment.
     pub score_run_id: Uuid,
+    /// Exact agent revision variants used to override plan target variants.
+    #[serde(default)]
+    pub agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 }
 
 /// Restate workflow surface for one live behavior experiment run.
@@ -171,11 +177,12 @@ async fn run_experiment_target(
         ExperimentTarget::AgentLoop {
             prompt,
             session_id,
+            agent,
             model,
             attachments,
         } => {
             annotate_run_span(&request, Some(ExperimentTargetKind::AgentLoop));
-            run_agent_loop_target(ctx, request, prompt, session_id, model, attachments).await
+            run_agent_loop_target(ctx, request, prompt, session_id, agent, model, attachments).await
         }
         ExperimentTarget::Workflow {
             workflow_ref,

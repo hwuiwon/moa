@@ -46,6 +46,18 @@ impl ArtifactRef {
         Self::artifact(ArtifactKind::Skill, name)
     }
 
+    /// Builds an agent reference.
+    #[must_use]
+    pub fn agent(name: impl Into<String>) -> Self {
+        Self::artifact(ArtifactKind::Agent, name)
+    }
+
+    /// Builds a standalone action artifact reference.
+    #[must_use]
+    pub fn action_artifact(name: impl Into<String>) -> Self {
+        Self::artifact(ArtifactKind::Action, name)
+    }
+
     /// Builds a connector-action reference.
     #[must_use]
     pub fn action(connector: impl Into<String>, action: impl Into<String>) -> Self {
@@ -142,9 +154,9 @@ impl FromStr for ArtifactRef {
 
         match scheme {
             "action" => {
-                let (connector, action) = rest.split_once('.').ok_or_else(|| {
-                    invalid_ref(value, "action references must be connector.action")
-                })?;
+                let Some((connector, action)) = rest.split_once('.') else {
+                    return Ok(Self::action_artifact(rest));
+                };
                 if connector.is_empty() || action.is_empty() {
                     return Err(invalid_ref(
                         value,

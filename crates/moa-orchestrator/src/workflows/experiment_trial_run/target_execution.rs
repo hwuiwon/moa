@@ -133,14 +133,16 @@ async fn ensure_agent_loop_session(
     target: ExperimentTarget,
     variant: ExperimentVariant,
 ) -> Result<(SessionId, Option<ModelId>), HandlerError> {
-    let (target_session_id, target_model, attachments_empty) = match target {
+    let (target_session_id, target_agent, target_model, attachments_empty) = match target {
         ExperimentTarget::AgentLoop {
             session_id,
+            agent,
             model,
             attachments,
             ..
         } => (
             session_id,
+            agent,
             trial.target_model.clone().or(variant.model).or(Some(model)),
             attachments.is_empty(),
         ),
@@ -163,9 +165,17 @@ async fn ensure_agent_loop_session(
             let model = target_model
                 .clone()
                 .ok_or_else(|| bad_request("agent-loop trial requires a target model"))?;
-            let (session_id, meta) =
-                create_new_session(ctx, request.workspace_id.clone(), model, &request.identity)
-                    .await?;
+            let agent = target_agent.ok_or_else(|| {
+                bad_request("agent-loop simulator target requires an agent selector")
+            })?;
+            let (session_id, meta) = create_new_session(
+                ctx,
+                request.workspace_id.clone(),
+                model,
+                &request.identity,
+                agent,
+            )
+            .await?;
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
                     .set_meta(Json::from(meta)),
@@ -234,12 +244,17 @@ async fn create_new_session(
     workspace_id: WorkspaceId,
     model: ModelId,
     identity: &Identity,
+    agent: AgentSessionSelection,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
     let store = OrchestratorCtx::current_session_store();
     let identity = identity.clone();
     Ok(ctx
         .run(|| async move {
-            let meta = new_session_meta(workspace_id, model, &identity)?;
+            let mut meta = new_session_meta(workspace_id, model, &identity)?;
+            let agent_context =
+                resolve_agent_context_for_session(store.as_ref(), &meta, &agent).await?;
+            apply_agent_model_policy(&mut meta, &agent_context)?;
+            meta.agent_context = Some(agent_context);
             let session_id = create_session_for_identity(store.as_ref(), meta.clone(), identity)
                 .await
                 .map_err(non_retryable_handler_error)?;

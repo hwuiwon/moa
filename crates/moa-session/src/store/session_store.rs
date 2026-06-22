@@ -2,6 +2,20 @@
 
 use super::*;
 
+fn validate_session_create_meta(meta: &SessionMeta) -> Result<()> {
+    if meta.user_id.as_str().trim().is_empty() {
+        return Err(MoaError::ValidationError(
+            "session creation requires a non-empty user_id".to_string(),
+        ));
+    }
+    if meta.agent_context.is_none() {
+        return Err(MoaError::ValidationError(
+            "session creation requires a pinned agent_context".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl PostgresSessionStore {
     /// Insert a session metadata row using a caller-owned transaction.
     ///
@@ -14,7 +28,12 @@ impl PostgresSessionStore {
         tx: &mut sqlx::Transaction<'_, Postgres>,
         meta: SessionMeta,
     ) -> Result<moa_core::SessionId> {
+        validate_session_create_meta(&meta)?;
         let session_id = meta.id;
+        let workspace_id = meta.workspace_id.clone();
+        let user_id = meta.user_id.clone();
+        let status = meta.status.clone();
+        let agent_context = meta.agent_context.clone();
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_INSERT_COLUMNS}) VALUES \
@@ -72,9 +91,58 @@ impl PostgresSessionStore {
         .execute(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
-        record_session_created(&meta.workspace_id, &meta.status);
+        if let Some(agent_context) = agent_context.as_ref() {
+            self.insert_session_agent_context_in_tx(
+                tx,
+                session_id,
+                &workspace_id,
+                &user_id,
+                agent_context,
+            )
+            .await?;
+        }
+        record_session_created(&workspace_id, &status);
 
         Ok(session_id)
+    }
+
+    async fn insert_session_agent_context_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        session_id: moa_core::SessionId,
+        workspace_id: &WorkspaceId,
+        user_id: &moa_core::UserId,
+        context: &moa_core::AgentContext,
+    ) -> Result<()> {
+        let table = self.table_name("session_agent_context");
+        sqlx::query(&format!(
+            r#"
+            INSERT INTO {table} (
+                session_id, workspace_id, user_id, agent_id, installation_uid,
+                deployment_uid, agent_definition_ref, agent_revision_uid,
+                policy_hash, display_name, policy_snapshot, artifact_dependencies,
+                tool_dependencies
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            "#
+        ))
+        .bind(session_id.0)
+        .bind(workspace_id.as_str())
+        .bind(user_id.as_str())
+        .bind(context.agent_id)
+        .bind(context.installation_uid)
+        .bind(context.deployment_uid)
+        .bind(&context.definition_ref)
+        .bind(context.revision_uid)
+        .bind(&context.policy_hash)
+        .bind(&context.display_name)
+        .bind(&context.policy_snapshot)
+        .bind(Json(&context.artifact_dependencies))
+        .bind(Json(&context.tool_dependencies))
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
     }
 
     /// Replaces a session's active channel binding and current channel metadata.
@@ -251,6 +319,51 @@ impl PostgresSessionStore {
         .await
         .map_err(map_sqlx_error)
     }
+}
+
+fn agent_context_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<moa_core::AgentContext>> {
+    let Some(revision_uid) = row
+        .try_get::<Option<Uuid>, _>("agent_revision_uid")
+        .map_err(map_sqlx_error)?
+    else {
+        return Ok(None);
+    };
+
+    let artifact_dependencies = row
+        .try_get::<Json<Vec<moa_core::ResolvedArtifactRevisionRef>>, _>("artifact_dependencies")
+        .map_err(map_sqlx_error)?
+        .0;
+    let tool_dependencies = row
+        .try_get::<Json<Vec<moa_core::LockedToolRef>>, _>("tool_dependencies")
+        .map_err(map_sqlx_error)?
+        .0;
+
+    Ok(Some(moa_core::AgentContext {
+        agent_id: row
+            .try_get::<Option<Uuid>, _>("agent_id")
+            .map_err(map_sqlx_error)?,
+        installation_uid: row
+            .try_get::<Option<Uuid>, _>("installation_uid")
+            .map_err(map_sqlx_error)?,
+        deployment_uid: row
+            .try_get::<Option<Uuid>, _>("deployment_uid")
+            .map_err(map_sqlx_error)?,
+        definition_ref: row
+            .try_get::<String, _>("agent_definition_ref")
+            .map_err(map_sqlx_error)?,
+        revision_uid,
+        policy_hash: row
+            .try_get::<String, _>("policy_hash")
+            .map_err(map_sqlx_error)?,
+        display_name: row
+            .try_get::<String, _>("display_name")
+            .map_err(map_sqlx_error)?,
+        artifact_dependencies,
+        tool_dependencies,
+        policy_snapshot: row
+            .try_get::<serde_json::Value, _>("policy_snapshot")
+            .map_err(map_sqlx_error)?,
+    }))
 }
 
 struct ChannelRouteKeys {
@@ -515,15 +628,39 @@ impl SessionStore for PostgresSessionStore {
     /// Loads a persisted session metadata record.
     async fn get_session(&self, session_id: moa_core::SessionId) -> Result<SessionMeta> {
         let sessions = self.table_name("sessions");
-        let query =
-            format!("SELECT {SESSION_SELECT_COLUMNS} FROM {sessions} WHERE id = $1 LIMIT 1");
+        let agent_contexts = self.table_name("session_agent_context");
+        let session_columns = SESSION_SELECT_COLUMNS
+            .split(", ")
+            .map(|column| format!("s.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            r#"
+            SELECT {session_columns},
+                   ac.agent_id, ac.installation_uid, ac.deployment_uid,
+                   ac.agent_definition_ref, ac.agent_revision_uid, ac.policy_hash,
+                   ac.display_name, ac.policy_snapshot, ac.artifact_dependencies,
+                   ac.tool_dependencies
+            FROM {sessions} AS s
+            LEFT JOIN {agent_contexts} AS ac ON ac.session_id = s.id
+            WHERE s.id = $1
+            LIMIT 1
+            "#
+        );
         let row = sqlx::query(&query)
             .bind(session_id.0)
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)?
             .ok_or(MoaError::SessionNotFound(session_id))?;
-        session_meta_from_row(&row)
+        let mut meta = session_meta_from_row(&row)?;
+        let agent_context = agent_context_from_row(&row)?.ok_or_else(|| {
+            MoaError::StorageError(format!(
+                "session {session_id} is missing required agent context"
+            ))
+        })?;
+        meta.agent_context = Some(agent_context);
+        Ok(meta)
     }
 
     /// Updates the status of an existing session.

@@ -115,6 +115,11 @@ impl ToolExecutor for ToolExecutorImpl {
             append_tool_call_event(&ctx, &request).await?;
         }
 
+        if let Some(output) = agent_tool_policy_denied_output(&session, &request) {
+            append_agent_tool_policy_denied_event(&ctx, &request, &output).await?;
+            return Ok(Json::from(output));
+        }
+
         let definition = match self.router.tool_definition(&request.tool_name) {
             Some(definition) => definition,
             None => {
@@ -281,6 +286,30 @@ fn validate_request(
     }
 
     Ok(())
+}
+
+fn agent_tool_policy_denied_output(
+    session: &SessionMeta,
+    request: &ToolCallRequest,
+) -> Option<ToolOutput> {
+    let agent_context = session.agent_context.as_ref()?;
+    match agent_context.allows_tool(&request.tool_name) {
+        Ok(true) => None,
+        Ok(false) => Some(ToolOutput::error(
+            format!(
+                "tool {} denied by agent policy {} for {}",
+                request.tool_name, agent_context.policy_hash, agent_context.definition_ref
+            ),
+            Duration::ZERO,
+        )),
+        Err(error) => Some(ToolOutput::error(
+            format!(
+                "tool {} denied because agent policy {} for {} could not be parsed: {error}",
+                request.tool_name, agent_context.policy_hash, agent_context.definition_ref
+            ),
+            Duration::ZERO,
+        )),
+    }
 }
 
 fn annotate_tool_execution_span(session: &SessionMeta, request: &ToolCallRequest) {
@@ -524,6 +553,32 @@ async fn append_tool_canary_block_events(
     Ok(())
 }
 
+async fn append_agent_tool_policy_denied_event(
+    ctx: &Context<'_>,
+    request: &ToolCallRequest,
+    output: &ToolOutput,
+) -> Result<(), HandlerError> {
+    let Some(session_id) = request.session_id else {
+        return Ok(());
+    };
+
+    ctx.service_client::<RestateSessionStoreClient>()
+        .append_event(Json(AppendEventRequest {
+            session_id,
+            event: Event::ToolError {
+                tool_id: request.tool_call_id,
+                provider_tool_use_id: request.provider_tool_use_id.clone(),
+                tool_name: request.tool_name.clone(),
+                error: output.to_text(),
+                retryable: false,
+            },
+        }))
+        .call()
+        .await?;
+
+    Ok(())
+}
+
 fn blocked_canary_output(tool_name: &str) -> ToolOutput {
     ToolOutput::error(blocked_canary_message(tool_name), Duration::ZERO)
 }
@@ -560,10 +615,16 @@ fn to_handler_error(error: MoaError) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{Event, EventRecord, EventType, ToolCallId, WorkspaceId};
+    use moa_core::{
+        AgentContext, AgentPolicySnapshot, AgentToolPolicy, AgentToolPolicyMode, Event,
+        EventRecord, EventType, SessionMeta, ToolCallId, ToolCallRequest, UserId, WorkspaceId,
+    };
     use uuid::Uuid;
 
-    use super::{blocked_canary_output, has_prior_tool_call_event, synthetic_session_id};
+    use super::{
+        agent_tool_policy_denied_output, blocked_canary_output, has_prior_tool_call_event,
+        synthetic_session_id,
+    };
 
     fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
         EventRecord {
@@ -618,5 +679,62 @@ mod tests {
             "tool bash blocked because it leaked a protected canary token"
         );
         assert_eq!(output.duration, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn agent_tool_policy_denies_unlisted_tools() {
+        // Pins: persisted agent policy snapshots are enforced before router execution.
+        let session = SessionMeta {
+            agent_context: Some(agent_context_with_allowlist(&["file_read"])),
+            ..SessionMeta::default()
+        };
+        let denied = agent_tool_policy_denied_output(&session, &tool_request("bash"))
+            .expect("bash should be denied by allowlist policy");
+        assert!(denied.is_error);
+        assert_eq!(
+            denied.to_text(),
+            "tool bash denied by agent policy policy-hash for agent://support"
+        );
+
+        assert!(agent_tool_policy_denied_output(&session, &tool_request("file_read")).is_none());
+    }
+
+    fn agent_context_with_allowlist(tools: &[&str]) -> AgentContext {
+        let snapshot = AgentPolicySnapshot {
+            instructions: vec!["stay in scope".to_string()],
+            tool_policy: AgentToolPolicy {
+                mode: AgentToolPolicyMode::Allowlist,
+                tools: tools.iter().map(|tool| (*tool).to_string()).collect(),
+                denied_tools: Vec::new(),
+            },
+            revision_lock: None,
+            ..AgentPolicySnapshot::default()
+        };
+        AgentContext {
+            agent_id: None,
+            installation_uid: Some(Uuid::now_v7()),
+            deployment_uid: Some(Uuid::now_v7()),
+            definition_ref: "agent://support".to_string(),
+            revision_uid: Uuid::now_v7(),
+            policy_hash: "policy-hash".to_string(),
+            display_name: "Support".to_string(),
+            artifact_dependencies: Vec::new(),
+            tool_dependencies: Vec::new(),
+            policy_snapshot: serde_json::to_value(snapshot).expect("serialize policy snapshot"),
+        }
+    }
+
+    fn tool_request(tool_name: &str) -> ToolCallRequest {
+        ToolCallRequest {
+            tool_call_id: ToolCallId::new(),
+            provider_tool_use_id: Some("toolu_policy".to_string()),
+            tool_name: tool_name.to_string(),
+            input: serde_json::json!({}),
+            active_canary: None,
+            session_id: None,
+            workspace_id: WorkspaceId::new("workspace-1"),
+            user_id: UserId::new("user-1"),
+            idempotency_key: None,
+        }
     }
 }

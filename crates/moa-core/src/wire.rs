@@ -9,12 +9,12 @@ use uuid::Uuid;
 
 use crate::traits::Identity;
 use crate::{
-    ActionClass, Attachment, CheckpointHandle, CheckpointInfo, ContactRef, Event, EventRange,
-    EventType, ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
-    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType,
-    LearningRiskClass, MemoryScope, RiskLevel, SegmentAssessment, SegmentCompletion, SegmentId,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate,
-    ToolDefinition, UserId, WorkspaceId,
+    ActionClass, AgentContext, AgentSessionSelection, Attachment, CheckpointHandle, CheckpointInfo,
+    ContactRef, Event, EventRange, EventType, ExperienceAttribution, ExperienceRecord,
+    IdempotencyClass, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    LearningCandidateType, LearningRiskClass, MemoryScope, RiskLevel, SegmentAssessment,
+    SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    TaskSegment, TaskStrategySuccessRate, ToolDefinition, UserId, WorkspaceId,
 };
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -213,6 +213,24 @@ pub struct GetEventsRequest {
     pub session_id: SessionId,
     /// Range and filter options for the event query.
     pub range: EventRange,
+}
+
+/// Request payload for `SessionStore/create_agent_session`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAgentSessionRequest {
+    /// Base session metadata to persist after agent resolution.
+    pub meta: SessionMeta,
+    /// Installed deployment or exact revision to pin onto the session.
+    pub agent: AgentSessionSelection,
+}
+
+/// Response payload returned by `SessionStore/create_agent_session`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateAgentSessionResponse {
+    /// Created durable session identifier.
+    pub session_id: SessionId,
+    /// Exact agent context pinned to the session.
+    pub agent_context: AgentContext,
 }
 
 /// Request payload for `SessionStore/update_status`.
@@ -1461,6 +1479,212 @@ pub struct ArtifactSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Request payload for listing visible published agent definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDefinitionListRequest {
+    /// Workspace used for authorization and artifact visibility.
+    pub workspace_id: WorkspaceId,
+    /// Optional artifact status filter, defaulting to `published`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// Response payload containing tenant-configurable agent definitions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentDefinitionListResponse {
+    /// Workspace used for artifact visibility.
+    pub workspace_id: WorkspaceId,
+    /// Visible agent definitions ordered for display.
+    #[serde(default)]
+    pub agents: Vec<AgentDefinitionSummary>,
+}
+
+/// Summary of one visible agent artifact revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentDefinitionSummary {
+    /// Artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Exact revision row identifier.
+    pub revision_uid: Uuid,
+    /// Generated scope tier label.
+    pub scope: String,
+    /// Stable artifact name.
+    pub name: String,
+    /// Stable agent reference such as `agent://support`.
+    pub definition_ref: String,
+    /// Human-readable artifact description.
+    pub description: String,
+    /// Human-readable configured-agent display name.
+    pub display_name: String,
+    /// Artifact tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Revision status.
+    pub status: String,
+    /// Artifact-local revision version.
+    pub version: i32,
+    /// Timestamp when this revision was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request payload for installing a published agent revision into a workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentInstallRequest {
+    /// Workspace that receives the installation.
+    pub workspace_id: WorkspaceId,
+    /// Exact published agent revision to install and deploy.
+    pub revision_uid: Uuid,
+    /// Optional agent principal bound to the installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<Uuid>,
+    /// Optional display-name override for this installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Optional deployment reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Installation metadata owned by product/admin UI.
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+/// Response payload returned after installing an agent revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInstallResponse {
+    /// Workspace that owns the installation.
+    pub workspace_id: WorkspaceId,
+    /// Stable installation pointer.
+    pub installation_uid: Uuid,
+    /// Stable deployment row selected by the installation.
+    pub deployment_uid: Uuid,
+    /// Exact published agent revision deployed.
+    pub revision_uid: Uuid,
+    /// Runtime policy hash selected by the deployment lock.
+    pub policy_hash: String,
+}
+
+/// Request payload for listing installed agents in a workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInstallationListRequest {
+    /// Workspace used for authorization and installation visibility.
+    pub workspace_id: WorkspaceId,
+}
+
+/// Response payload containing installed-agent summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentInstallationListResponse {
+    /// Workspace used for installation visibility.
+    pub workspace_id: WorkspaceId,
+    /// Installed agents ordered by latest update.
+    #[serde(default)]
+    pub installations: Vec<AgentInstallationSummary>,
+}
+
+/// Summary of one installed configurable agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentInstallationSummary {
+    /// Stable installation pointer.
+    pub installation_uid: Uuid,
+    /// Optional bound agent principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<Uuid>,
+    /// Stable artifact row identifier.
+    pub artifact_uid: Uuid,
+    /// Stable agent artifact reference.
+    pub definition_ref: String,
+    /// Human-readable configured-agent display name.
+    pub display_name: String,
+    /// Installation lifecycle status.
+    pub status: String,
+    /// Current deployed revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_revision_uid: Option<Uuid>,
+    /// Current deployment pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deployment_uid: Option<Uuid>,
+    /// Last deployment time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deployed_at: Option<DateTime<Utc>>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// Last update time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request payload for deploying a new exact revision to an installed agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDeployRequest {
+    /// Workspace that owns the installation.
+    pub workspace_id: WorkspaceId,
+    /// Installed-agent pointer to move.
+    pub installation_uid: Uuid,
+    /// Exact published agent revision to deploy.
+    pub revision_uid: Uuid,
+    /// Optional deployment reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Response payload returned after deploying an agent revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDeployResponse {
+    /// Workspace that owns the deployment.
+    pub workspace_id: WorkspaceId,
+    /// Installed-agent pointer moved by the deployment.
+    pub installation_uid: Uuid,
+    /// Stable deployment row.
+    pub deployment_uid: Uuid,
+    /// Exact published agent revision deployed.
+    pub revision_uid: Uuid,
+    /// Runtime policy hash selected by the deployment lock.
+    pub policy_hash: String,
+}
+
+/// Request payload for listing deployment history for an installed agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDeploymentListRequest {
+    /// Workspace that owns the installation.
+    pub workspace_id: WorkspaceId,
+    /// Installed-agent pointer whose history should be listed.
+    pub installation_uid: Uuid,
+    /// Optional maximum number of deployments to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+/// Response payload containing installed-agent deployment history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentDeploymentListResponse {
+    /// Workspace that owns the deployment history.
+    pub workspace_id: WorkspaceId,
+    /// Installed-agent pointer whose history was listed.
+    pub installation_uid: Uuid,
+    /// Deployments ordered newest first.
+    #[serde(default)]
+    pub deployments: Vec<AgentDeploymentSummary>,
+}
+
+/// Summary of one installed-agent deployment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentDeploymentSummary {
+    /// Stable deployment row.
+    pub deployment_uid: Uuid,
+    /// Exact deployed agent revision.
+    pub revision_uid: Uuid,
+    /// Deployment lifecycle status.
+    pub status: String,
+    /// Caller who created the deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployed_by: Option<String>,
+    /// Deployment reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Runtime policy hash selected by the deployment lock.
+    pub dependency_lock_hash: String,
+    /// Deployment creation time.
+    pub deployed_at: DateTime<Utc>,
+}
+
 /// Request payload for validating an artifact document without writing it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactValidateRequest {
@@ -1977,6 +2201,9 @@ pub struct ExperimentRunRequest {
     pub score_run_id: Option<Uuid>,
     /// Optional idempotency key for scoped run admission.
     pub idempotency_key: Option<String>,
+    /// Optional exact agent revision variants used when executing an agent-loop plan.
+    #[serde(default)]
+    pub agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 }
 
 /// Request payload for generating a draft experiment plan artifact.
@@ -2395,6 +2622,188 @@ pub struct ExperimentCompareResponse {
     /// Numeric variant deltas ordered for API display.
     #[serde(default)]
     pub variant_deltas: Vec<ExperimentVariantScoreDeltaRow>,
+}
+
+/// One exact agent revision variant used by simulation runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionSimulationVariant {
+    /// Stable variant key used in trial rows and score comparisons.
+    pub variant_key: String,
+    /// Exact published agent revision to select for the variant.
+    pub revision_uid: Uuid,
+}
+
+/// Request payload for running one plan-backed simulation across agent revisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionSimulationRunRequest {
+    /// Workspace scope used for authorization and artifact visibility.
+    pub workspace_id: WorkspaceId,
+    /// Human-readable simulation run name.
+    pub name: String,
+    /// Published experiment_plan revision that defines scenarios/personas/profiles.
+    pub plan_revision_uid: Uuid,
+    /// Baseline agent revision variant.
+    pub base: AgentRevisionSimulationVariant,
+    /// Candidate agent revision variants.
+    #[serde(default)]
+    pub candidates: Vec<AgentRevisionSimulationVariant>,
+    /// Optional idempotency key for scoped run admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// Response payload returned after admitting an agent-revision simulation run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionSimulationRunResponse {
+    /// Workspace that owns the simulation run.
+    pub workspace_id: WorkspaceId,
+    /// Created experiment run identifier.
+    pub run_uid: Uuid,
+    /// Initial experiment run status.
+    pub status: String,
+    /// Score run identifier used for run-level analytics.
+    pub score_run_id: Uuid,
+    /// Published experiment_plan revision used by this simulation.
+    pub plan_revision_uid: Uuid,
+    /// Exact agent revision variants accepted for this simulation.
+    #[serde(default)]
+    pub variants: Vec<AgentRevisionSimulationVariant>,
+}
+
+/// Request payload for comparing variants inside one agent-revision simulation run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionSimulationCompareRequest {
+    /// Workspace that owns the simulation run.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run to compare.
+    pub run_uid: Uuid,
+    /// Baseline variant key.
+    pub base_variant_key: String,
+    /// Candidate variant keys. When empty, every non-baseline variant is compared.
+    #[serde(default)]
+    pub candidate_variant_keys: Vec<String>,
+}
+
+/// Per-variant execution summary for an agent-revision simulation run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionSimulationVariantResult {
+    /// Stable target variant key.
+    pub variant_key: String,
+    /// Exact agent revision selected by this variant.
+    pub revision_uid: Uuid,
+    /// Number of trial rows for this variant.
+    pub trial_count: u64,
+    /// Number of completed trials.
+    pub completed_count: u64,
+    /// Number of failed trials.
+    pub failed_count: u64,
+    /// Number of cancelled trials.
+    pub cancelled_count: u64,
+    /// Trial score run identifiers.
+    #[serde(default)]
+    pub score_run_ids: Vec<Uuid>,
+    /// Sessions created for this variant.
+    #[serde(default)]
+    pub session_ids: Vec<SessionId>,
+    /// Stop reason counts keyed by persisted stop-reason label.
+    #[serde(default)]
+    pub stop_reason_counts: BTreeMap<String, u64>,
+    /// Terminal errors observed for this variant.
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+/// Response payload comparing variants inside one agent-revision simulation run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRevisionSimulationCompareResponse {
+    /// Workspace that owns the simulation run.
+    pub workspace_id: WorkspaceId,
+    /// Experiment run that was compared.
+    pub run_uid: Uuid,
+    /// Baseline variant key.
+    pub base_variant_key: String,
+    /// Variant execution summaries.
+    #[serde(default)]
+    pub variants: Vec<AgentRevisionSimulationVariantResult>,
+    /// Numeric score deltas from baseline to candidates.
+    #[serde(default)]
+    pub variant_deltas: Vec<ExperimentVariantScoreDeltaRow>,
+}
+
+/// Request payload for comparing two resolved agent revision policies before simulation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionCompareRequest {
+    /// Workspace scope used for authorization and artifact visibility.
+    pub workspace_id: WorkspaceId,
+    /// Baseline published agent revision.
+    pub base_revision_uid: Uuid,
+    /// Candidate published agent revision.
+    pub new_revision_uid: Uuid,
+}
+
+/// Change category for dependency differences between two resolved agent revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDependencyChange {
+    /// Dependency exists only on the candidate revision.
+    Added,
+    /// Dependency exists only on the baseline revision.
+    Removed,
+    /// Dependency exists on both revisions with different pinned content.
+    Changed,
+}
+
+/// Artifact dependency delta between two resolved agent revision policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactDependencyDelta {
+    /// Stable dependency reference being compared.
+    pub reference: String,
+    /// Baseline dependency revision, when present.
+    pub base_revision_uid: Option<Uuid>,
+    /// Candidate dependency revision, when present.
+    pub new_revision_uid: Option<Uuid>,
+    /// Change category.
+    pub change: AgentDependencyChange,
+}
+
+/// Tool dependency delta between two resolved agent revision policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentToolDependencyDelta {
+    /// Stable tool name being compared.
+    pub name: String,
+    /// Baseline schema/catalog hash, when present.
+    pub base_schema_hash: Option<String>,
+    /// Candidate schema/catalog hash, when present.
+    pub new_schema_hash: Option<String>,
+    /// Change category.
+    pub change: AgentDependencyChange,
+}
+
+/// Response payload for comparing two resolved agent revision policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRevisionCompareResponse {
+    /// Workspace scope used for artifact visibility.
+    pub workspace_id: WorkspaceId,
+    /// Baseline published agent revision.
+    pub base_revision_uid: Uuid,
+    /// Candidate published agent revision.
+    pub new_revision_uid: Uuid,
+    /// Stable baseline policy hash.
+    pub base_policy_hash: String,
+    /// Stable candidate policy hash.
+    pub new_policy_hash: String,
+    /// Whether the resolved runtime policies differ.
+    pub changed: bool,
+    /// Whether resolved instruction text changed.
+    pub instructions_changed: bool,
+    /// Whether resolved tool selection policy changed.
+    pub tool_policy_changed: bool,
+    /// Exact artifact dependency deltas.
+    #[serde(default)]
+    pub artifact_dependency_deltas: Vec<AgentArtifactDependencyDelta>,
+    /// Exact tool dependency deltas.
+    #[serde(default)]
+    pub tool_dependency_deltas: Vec<AgentToolDependencyDelta>,
 }
 
 /// Request payload for promoting a workspace vector backend.

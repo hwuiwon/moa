@@ -8,8 +8,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    CompletionRequest, ContactRef, EventRecord, ModelCapabilities, SandboxFile, SessionId,
-    SessionMeta, ToolCallId, ToolContent, ToolInvocation, UserId, WorkspaceId,
+    AgentContext, AgentPolicySnapshot, CompletionRequest, ContactRef, EventRecord,
+    ModelCapabilities, SandboxFile, SessionId, SessionMeta, ToolCallId, ToolContent,
+    ToolInvocation, UserId, WorkspaceId,
 };
 
 /// Role of a context message passed to the LLM.
@@ -305,6 +306,9 @@ pub struct WorkingContext {
     /// Agent-facing contact snapshot attached to this session, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<ContactRef>,
+    /// Configured agent policy pinned to this session, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<AgentContext>,
     /// Active tool schemas compiled for the request.
     tool_schemas: Vec<Value>,
     /// Arbitrary processor metadata.
@@ -331,6 +335,7 @@ impl WorkingContext {
             user_id: session.user_id.clone(),
             workspace_id: session.workspace_id.clone(),
             contact: session.contact.clone(),
+            agent_context: session.agent_context.clone(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),
             trusted_sandbox_files: Vec::new(),
@@ -374,6 +379,14 @@ impl WorkingContext {
     /// Returns the active tool schemas for the request.
     pub fn tools(&self) -> &[Value] {
         &self.tool_schemas
+    }
+
+    /// Parses the configured-agent policy snapshot pinned to this context, when one exists.
+    pub fn agent_policy_snapshot(&self) -> crate::Result<Option<AgentPolicySnapshot>> {
+        self.agent_context
+            .as_ref()
+            .map(AgentContext::parsed_policy_snapshot)
+            .transpose()
     }
 
     /// Returns mutable access to the active tool schemas for the request.

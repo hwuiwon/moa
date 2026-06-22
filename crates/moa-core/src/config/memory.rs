@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
-    /// Automatically bootstrap workspace memory when it is empty.
+    /// Automatically bootstrap tenant-visible memory when it is empty.
     pub auto_bootstrap: bool,
     /// Optional HTTP base URL for the PII classification sidecar.
     pub pii_service_url: Option<String>,

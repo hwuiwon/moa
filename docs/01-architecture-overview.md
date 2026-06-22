@@ -46,13 +46,13 @@ MOA supports two user-facing execution shapes:
 - Agent loop: the existing `Session` and `TurnExecution` path gives an agent tools, skills, memory, approvals, and sub-agents so it can handle an open-ended task autonomously.
 - Agent workflow: an artifact-backed `WorkflowDefinition` stores a typed node/edge graph for cases that need explicit conditions, approval gates, connector actions, checkpoints, and run history.
 
-Skills, connectors, actions, workflows, and behavior-lab experiment plans are canonical artifacts. `moa-artifacts` owns the persisted document model, validation, stable references, and Postgres registry; `moa-skills` owns skill parsing, ranking, draft proposal generation, and the live `SkillInjector` path; `moa-workflows` owns durable workflow run lifecycle and the future node interpreter/improvement loop. JSON is the canonical persisted shape in Postgres, while YAML is a human authoring/import/export format. Visual builders must round-trip through the same artifact structs instead of owning a separate canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
+Agents, skills, connectors, actions, workflows, and behavior-lab experiment plans are canonical artifacts. `moa-artifacts` owns the persisted document model, validation, stable references, revision history, and Postgres registry; `moa-skills` owns skill package parsing, draft proposal generation, and artifact-backed package helpers; `moa-workflows` owns durable workflow run lifecycle and the future node interpreter/improvement loop. JSON is the canonical persisted shape in Postgres, while YAML is a human authoring/import/export format. Visual builders must round-trip through the same artifact structs instead of owning a separate canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
 
 Behavior Lab uses a single `experiment_plan` artifact. Personas, profiles, data bundles, and scenarios are typed embedded blocks under `definition.spec.simulation`, each with stable IDs for UI round trips, trial fanout, scoring, and analytics. Their product boundary, UI expectations, and verification lanes are documented in [`docs/product/behavior-lab.md`](product/behavior-lab.md).
 
-At runtime today, agent-loop choice is skill-driven: the context pipeline ranks visible skills and materializes selected skill files for the tool router. Artifact-backed workflows are explicit product operations through the `Workflows` API; a run may be associated with a session for UI/history, but the open-ended agent loop does not yet select or interpret workflow nodes automatically.
+Every durable session is created for a concrete user and a pinned agent revision. The session row owns the user/workspace identity, while the `session_agent_context` sidecar stores the selected agent artifact revision, deployment pointers when present, policy hash, locked artifact/tool dependencies, and serialized runtime policy snapshot. The context pipeline still ranks visible published skill artifact revisions and materializes selected artifact files for the tool router, but that selection now runs inside the configured agent policy for the session. Artifact-backed workflows are explicit product operations through the `Workflows` API; a run may be associated with a session for UI/history, but the open-ended agent loop does not yet select or interpret workflow nodes automatically.
 
-Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. Existing `moa.skill` and `moa.skill_file` rows remain the materialized skill lookup used by `SkillInjector`. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact -> moa.skill materialization`; generation never rewrites active skill rows directly.
+Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
 
 MOA's enterprise boundary is the tenant. Runtime operators can run local mode for
 development and incident response, but the product model assumes organizations
@@ -67,12 +67,12 @@ Platform
        -> Users
        -> Workspaces
        -> Tenant learning log
-       -> Workspace memory
+       -> Tenant knowledge and memory
        -> Global, workspace, and user skills ranked by tenant-level outcomes
        -> Lineage, analytics, and optional compliance evidence
 ```
 
-Learning entries and outcome aggregates are tenant-scoped because teams tend to repeat work patterns across projects. Skill packages use the same three-tier scope model as durable memory: global skills are visible to every workspace, workspace skills are visible inside one workspace, and user skills are visible only to that workspace-bound user. Ranking signals aggregate at tenant level.
+Learning entries and outcome aggregates are tenant-scoped because teams tend to repeat work patterns across projects. Workspace administration controls which tenant resources users can access, but configured-agent knowledge policy is tenant-oriented rather than a separate memory product concept. Skill packages remain visible through global, workspace, and user scopes so admins can stage package availability while ranking signals aggregate at tenant level.
 
 ## Core Traits
 
@@ -181,7 +181,7 @@ If query rewriting is disabled, stage 5 is omitted and the remaining processors 
 | Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
-| Skill packages | Postgres | `moa.skill` metadata and `moa.skill_file` package bytes for active global, workspace, and user scopes; generated updates first land as draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
+| Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store canonical skill documents and package bytes for global, workspace, and user scopes; generated updates first land as draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
@@ -313,8 +313,8 @@ Skill-derived improvements use the same boundary. `TurnExecution` may dispatch a
 detached `SkillLearning` workflow after experience persistence, but that
 workflow can only create workspace-scoped draft skill artifacts and proposed
 `LearningCandidateType::Skill` rows. `LearningReview` is the only runtime path
-that publishes those drafts, materializes `moa.skill`, records
-`skill_created`/`skill_improved`, and marks the candidate promoted.
+that publishes those drafts, records `skill_created`/`skill_improved`, and marks
+the candidate promoted.
 
 Future MCP support is a transport adapter over product/default services such as
 `Experiments`, `Analytics`, `LineageAdmin`, `Workflows`, and other typed

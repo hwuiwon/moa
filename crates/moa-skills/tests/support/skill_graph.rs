@@ -28,7 +28,7 @@ pub(crate) async fn purge_test_skill_name(
     store: &moa_session::PostgresSessionStore,
     skill_name: &str,
 ) -> Result<()> {
-    sqlx::query("DELETE FROM moa.skill WHERE name = $1")
+    sqlx::query("DELETE FROM moa.artifact WHERE kind = 'skill' AND name = $1")
         .bind(skill_name)
         .execute(store.pool())
         .await

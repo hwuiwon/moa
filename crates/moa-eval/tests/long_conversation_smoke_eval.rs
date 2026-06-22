@@ -8,8 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider, MoaError,
-    ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId, ToolInvocation,
+    CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider, MemoryScope,
+    MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId,
+    ToolInvocation, WorkspaceId,
 };
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
 use moa_eval_core::{
@@ -17,11 +18,11 @@ use moa_eval_core::{
     LongSessionInterleaving, LongTestCase, SecondaryLongSession, TestCase, TestCaseKind, TestSuite,
     load_suite,
 };
+use moa_skills::package::SkillPackage;
+use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use tempfile::tempdir;
-use uuid::Uuid;
 
 const SCENARIO_ROOT: &str = "scenarios/long_conversation";
 const EXPERIENCE_LEARNING_SCENARIO: &str = "experience_learning_task_conditioned_strategy_reuse";
@@ -644,11 +645,13 @@ async fn seed_experience_learning_skills(database_url: &str, workspace_id: &str)
         "api-contract-repair".to_string(),
         "generic-debugger".to_string(),
     ];
-    sqlx::query("DELETE FROM moa.skill WHERE workspace_id = $1 AND name = ANY($2)")
-        .bind(workspace_id)
-        .bind(&names)
-        .execute(&pool)
-        .await?;
+    sqlx::query(
+        "DELETE FROM moa.artifact WHERE workspace_id = $1 AND kind = 'skill' AND name = ANY($2)",
+    )
+    .bind(workspace_id)
+    .bind(&names)
+    .execute(&pool)
+    .await?;
     insert_eval_skill(
         &pool,
         workspace_id,
@@ -682,11 +685,13 @@ async fn seed_learning_matrix_skills(
         "general-troubleshooting-runbook".to_string(),
         category_decoy.clone(),
     ];
-    sqlx::query("DELETE FROM moa.skill WHERE workspace_id = $1 AND name = ANY($2)")
-        .bind(workspace_id)
-        .bind(&names)
-        .execute(&pool)
-        .await?;
+    sqlx::query(
+        "DELETE FROM moa.artifact WHERE workspace_id = $1 AND kind = 'skill' AND name = ANY($2)",
+    )
+    .bind(workspace_id)
+    .bind(&names)
+    .execute(&pool)
+    .await?;
     insert_eval_skill(
         &pool,
         workspace_id,
@@ -728,79 +733,29 @@ async fn insert_eval_skill<T: AsRef<str>>(
     tags: &[T],
     use_count: u32,
 ) -> TestResult {
-    let skill_uid = Uuid::now_v7();
-    let file_uid = Uuid::now_v7();
-    let skill_md =
-        format!("---\nname: {name}\ndescription: \"{description}\"\n---\n\n{description}\n")
-            .into_bytes();
-    let hash = Sha256::digest(&skill_md).to_vec();
-    let size = i64::try_from(skill_md.len())?;
     let tag_values = tags
         .iter()
         .map(|tag| tag.as_ref().to_string())
         .collect::<Vec<_>>();
-    let manifest = json!({
-        "schema_version": 1,
-        "skill_md_path": "SKILL.md",
-        "skill_md_estimated_tokens": 24,
-        "allowed_tools": ["file_write"],
-        "use_count": use_count,
-        "last_used": null,
-        "success_rate": 1.0,
-        "auto_generated": false,
-        "files": [{
-            "path": "SKILL.md",
-            "size_bytes": size,
-            "sha256": hex_string(&hash),
-            "content_type": "text/markdown; charset=utf-8",
-            "executable": false
-        }]
-    });
-
-    sqlx::query(
-        r#"
-        INSERT INTO moa.skill (
-            skill_uid, workspace_id, name, description, package_hash,
-            skill_md_hash, file_count, total_size_bytes, manifest, tags
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9)
-        "#,
-    )
-    .bind(skill_uid)
-    .bind(workspace_id)
-    .bind(name)
-    .bind(description)
-    .bind(&hash)
-    .bind(&hash)
-    .bind(size)
-    .bind(manifest)
-    .bind(&tag_values)
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO moa.skill_file (
-            file_uid, skill_uid, workspace_id, path, content,
-            content_sha256, content_type, executable, file_size_bytes
-        )
-        VALUES ($1, $2, $3, 'SKILL.md', $4, $5, 'text/markdown; charset=utf-8', false, $6)
-        "#,
-    )
-    .bind(file_uid)
-    .bind(skill_uid)
-    .bind(workspace_id)
-    .bind(&skill_md)
-    .bind(&hash)
-    .bind(size)
-    .execute(pool)
-    .await?;
-
+    let skill_md = format!(
+        "---\nname: {name}\ndescription: >-\n  {}\nallowed-tools:\n  - file_write\nmetadata:\n  moa-tags: \"{}\"\n  moa-use-count: \"{use_count}\"\n  moa-success-rate: \"1.0\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
+        indent_frontmatter_block(description),
+        tag_values.join(", ")
+    );
+    let registry = SkillRegistry::new(pool.clone());
+    registry
+        .upsert_by_name(NewSkill::from_package(
+            MemoryScope::Workspace {
+                workspace_id: WorkspaceId::new(workspace_id.to_string()),
+            },
+            SkillPackage::from_skill_markdown(skill_md),
+        ))
+        .await?;
     Ok(())
 }
 
-fn hex_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+fn indent_frontmatter_block(value: &str) -> String {
+    value.replace('\n', "\n  ")
 }
 
 fn eval_workspace_id_for_agent(agent_name: &str) -> String {

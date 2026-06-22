@@ -2,6 +2,7 @@
 
 pub mod action_reviews;
 pub mod admin_maintenance;
+pub mod agent_definitions;
 pub mod agents;
 pub mod analytics;
 pub mod api_keys;

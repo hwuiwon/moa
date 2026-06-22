@@ -61,6 +61,7 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
         scorecard: json!({"score_names": ["task.completed"]}),
         score_run_id: None,
         idempotency_key: Some("run-key".to_string()),
+        agent_revision_variants: Vec::new(),
     });
     assert_has_workspace_id(ExperimentGeneratePlanRequest {
         workspace_id: WorkspaceId::new("workspace-a"),
@@ -418,15 +419,21 @@ fn experiments_service_declares_required_workspace_relations() {
     let source = include_str!("../src/services/experiments.rs");
     assert_eq!(
         source.matches("Relation::Editor").count(),
-        4,
-        "generate_plan, run, cancel, and propose_improvements should require workspace editor"
+        5,
+        "generate_plan, run, cancel, propose_improvements, and run_agent_revision_simulation should require workspace editor"
     );
     assert_eq!(
         source.matches("Relation::Member").count(),
-        6,
-        "status, list, trials, trial_status, scores, and compare should require workspace member"
+        8,
+        "status, list, trials, trial_status, scores, compare, compare_agent_revisions, and compare_agent_revision_simulation should require workspace member"
     );
-    for method in ["generate_plan", "run", "cancel", "propose_improvements"] {
+    for method in [
+        "generate_plan",
+        "run",
+        "cancel",
+        "propose_improvements",
+        "run_agent_revision_simulation",
+    ] {
         assert_method_requires_relation(source, method, "Relation::Editor");
     }
     for method in [
@@ -436,6 +443,8 @@ fn experiments_service_declares_required_workspace_relations() {
         "trial_status",
         "scores",
         "compare",
+        "compare_agent_revisions",
+        "compare_agent_revision_simulation",
     ] {
         assert_method_requires_relation(source, method, "Relation::Member");
     }
@@ -1190,6 +1199,7 @@ fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
         target: ExperimentTarget::AgentLoop {
             prompt: "Improve support behavior.".to_string(),
             session_id: Some(SessionId(fixture_uuid(2))),
+            agent: None,
             model: ModelId::new("gpt-5.4"),
             attachments: Vec::new(),
         },
