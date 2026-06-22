@@ -29,14 +29,14 @@ pub fn qualified(schema_name: &str, table_name: &str) -> String {
 pub async fn assert_events_append_only_for_app_role(
     test_db: &TestDb,
     event_id: Uuid,
-    workspace_id: &str,
-    user_id: &str,
+    tenant_id: &str,
+    contact_id: &str,
 ) {
     let events = qualified(test_db.schema_name(), "events");
     let update_error = execute_app_role_event_mutation(
         test_db,
-        workspace_id,
-        user_id,
+        tenant_id,
+        contact_id,
         &format!("UPDATE {events} SET payload = jsonb_set(payload, '{{blocked}}', 'true'::jsonb) WHERE id = $1"),
         event_id,
     )
@@ -46,8 +46,8 @@ pub async fn assert_events_append_only_for_app_role(
 
     let delete_error = execute_app_role_event_mutation(
         test_db,
-        workspace_id,
-        user_id,
+        tenant_id,
+        contact_id,
         &format!("DELETE FROM {events} WHERE id = $1"),
         event_id,
     )
@@ -59,8 +59,8 @@ pub async fn assert_events_append_only_for_app_role(
 /// Executes a single event-row mutation in a transaction after assuming `moa_app`.
 pub async fn execute_app_role_event_mutation(
     test_db: &TestDb,
-    workspace_id: &str,
-    user_id: &str,
+    tenant_id: &str,
+    contact_id: &str,
     sql: &str,
     event_id: Uuid,
 ) -> Result<PgQueryResult, sqlx::Error> {
@@ -72,7 +72,7 @@ pub async fn execute_app_role_event_mutation(
         .begin()
         .await
         .expect("begin app-role mutation transaction");
-    assume_app_role(&mut tx, test_db.schema_name(), workspace_id, user_id).await;
+    assume_app_role(&mut tx, test_db.schema_name(), tenant_id, contact_id).await;
 
     let result = sqlx::query(sql).bind(event_id).execute(&mut *tx).await;
     let _ = tx.rollback().await;
@@ -83,8 +83,8 @@ pub async fn execute_app_role_event_mutation(
 /// Executes a no-bind statement in a transaction after assuming `moa_app`.
 pub async fn execute_app_role_statement(
     test_db: &TestDb,
-    workspace_id: &str,
-    user_id: &str,
+    tenant_id: &str,
+    contact_id: &str,
     sql: &str,
 ) -> Result<PgQueryResult, sqlx::Error> {
     let pool = PgPool::connect(test_db.database_url())
@@ -95,7 +95,7 @@ pub async fn execute_app_role_statement(
         .begin()
         .await
         .expect("begin app-role statement transaction");
-    assume_app_role(&mut tx, test_db.schema_name(), workspace_id, user_id).await;
+    assume_app_role(&mut tx, test_db.schema_name(), tenant_id, contact_id).await;
 
     let result = sqlx::query(sql).execute(&mut *tx).await;
     let _ = tx.rollback().await;
@@ -128,8 +128,8 @@ async fn grant_app_role_schema_usage(pool: &PgPool, schema_name: &str) {
 async fn assume_app_role(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     schema_name: &str,
-    workspace_id: &str,
-    user_id: &str,
+    tenant_id: &str,
+    contact_id: &str,
 ) {
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(&mut **tx)
@@ -140,18 +140,18 @@ async fn assume_app_role(
         .execute(&mut **tx)
         .await
         .expect("set search path");
-    sqlx::query("SELECT pg_catalog.set_config('moa.workspace_id', $1, true)")
-        .bind(workspace_id)
+    sqlx::query("SELECT pg_catalog.set_config('moa.tenant_id', $1, true)")
+        .bind(tenant_id)
         .execute(&mut **tx)
         .await
-        .expect("set workspace GUC");
-    sqlx::query("SELECT pg_catalog.set_config('moa.user_id', $1, true)")
-        .bind(user_id)
+        .expect("set tenant GUC");
+    sqlx::query("SELECT pg_catalog.set_config('moa.contact_id', $1, true)")
+        .bind(contact_id)
         .execute(&mut **tx)
         .await
-        .expect("set user GUC");
-    sqlx::query("SELECT pg_catalog.set_config('moa.scope_tier', 'user', true)")
+        .expect("set contact GUC");
+    sqlx::query("SELECT pg_catalog.set_config('moa.control_plane', 'false', true)")
         .execute(&mut **tx)
         .await
-        .expect("set scope tier GUC");
+        .expect("set control-plane GUC");
 }

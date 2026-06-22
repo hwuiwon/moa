@@ -5,35 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{
-    AgentSessionSelection, Channel, ChannelAccountRef, ChannelRef, SessionId, UserId, WorkspaceId,
-};
-
-/// Prefix used for contact-backed user-scope memory subjects.
-pub const CONTACT_USER_ID_PREFIX: &str = "contact:";
+use super::{AgentSessionSelection, Channel, ChannelAccountRef, ChannelRef, SessionId, TenantId};
 
 uuid_id!(
     /// Identifier for an agent-facing contact.
     pub struct ContactId
 );
-
-impl ContactId {
-    /// Returns the user-scope memory id for this contact.
-    #[must_use]
-    pub fn as_user_id(self) -> UserId {
-        UserId::new(format!("{CONTACT_USER_ID_PREFIX}{}", self.0))
-    }
-
-    /// Parses a user-scope memory id that was created from a contact id.
-    #[must_use]
-    pub fn from_user_id(user_id: &UserId) -> Option<Self> {
-        user_id
-            .as_str()
-            .strip_prefix(CONTACT_USER_ID_PREFIX)
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .map(Self)
-    }
-}
 
 uuid_id!(
     /// Identifier for one normalized contact point.
@@ -154,15 +131,13 @@ pub struct ContactRef {
     /// Contact identifier used by the agent runtime.
     pub contact_id: ContactId,
     /// Tenant/account boundary that owns the contact.
-    pub tenant_id: Uuid,
-    /// Workspace the contact belongs to.
-    pub workspace_id: WorkspaceId,
+    pub tenant_id: TenantId,
     /// Assurance state for this contact.
     pub state: ContactVerificationState,
     /// Canonical verified contact when this contact was promoted.
     #[serde(default)]
     pub canonical_contact_id: Option<ContactId>,
-    /// Linked anonymous or unverified contacts whose memory may be read.
+    /// Linked anonymous or unverified contacts available to explicit promotion operations.
     #[serde(default)]
     pub linked_contact_ids: Vec<ContactId>,
     /// Bounded scopes granted to this contact token or session.
@@ -218,9 +193,7 @@ pub struct ContactTokenClaims {
     /// Token id for audit and future revocation.
     pub jti: String,
     /// Tenant/account boundary the token is bounded to.
-    pub tenant_id: Uuid,
-    /// Workspace the token is bounded to.
-    pub workspace_id: WorkspaceId,
+    pub tenant_id: TenantId,
     /// Contact assurance state at issuance.
     pub state: ContactVerificationState,
     /// Bounded contact scopes.
@@ -238,7 +211,7 @@ pub struct ContactTokenClaims {
     /// Verified contact points covered by this token.
     #[serde(default)]
     pub verified_contact_point_ids: Vec<ContactPointId>,
-    /// Linked contact ids included for default promoted-memory retrieval.
+    /// Linked contact ids included for explicit promotion metadata, not memory inheritance.
     #[serde(default)]
     pub linked_contact_ids: Vec<ContactId>,
 }
@@ -246,8 +219,8 @@ pub struct ContactTokenClaims {
 /// Request to issue an unverified or anonymous contact token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactTokenIssueRequest {
-    /// Workspace in which the contact may interact with agents.
-    pub workspace_id: WorkspaceId,
+    /// Tenant in which the contact may interact with agents.
+    pub tenant_id: TenantId,
     /// Optional contact points to attach in an unverified state.
     #[serde(default)]
     pub contact_points: Vec<ContactPointInput>,
@@ -294,8 +267,8 @@ pub struct ContactTokenIssueResponse {
 /// Request to start ownership verification for a contact point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactVerificationStartRequest {
-    /// Workspace asserted by the public route.
-    pub workspace_id: WorkspaceId,
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
     /// Optional session that triggered the verification workflow.
     #[serde(default)]
     pub session_id: Option<SessionId>,
@@ -324,8 +297,8 @@ pub struct ContactVerificationStartResponse {
 /// Request to complete a contact verification challenge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactVerificationCompleteRequest {
-    /// Workspace asserted by the public route.
-    pub workspace_id: WorkspaceId,
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
     /// Optional session that triggered the verification completion.
     #[serde(default)]
     pub session_id: Option<SessionId>,
@@ -361,8 +334,8 @@ pub struct ContactSessionChannelRequest {
 /// Request to initialize an agent session for a contact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactSessionInitRequest {
-    /// Workspace asserted by the public route.
-    pub workspace_id: WorkspaceId,
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
     /// Current contact token.
     pub contact_token: String,
     /// Optional session title.
@@ -388,8 +361,8 @@ pub struct ContactSessionInitResponse {
 /// Request to change a contact session's active communication channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactSessionChannelChangeRequest {
-    /// Workspace asserted by the public route.
-    pub workspace_id: WorkspaceId,
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
     /// Session whose active channel should change.
     pub session_id: SessionId,
     /// Current contact token.
@@ -418,8 +391,8 @@ pub struct ContactSessionChannelChangeResponse {
 /// Request to promote an active session after contact verification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactSessionPromotionRequest {
-    /// Workspace asserted by the public route.
-    pub workspace_id: WorkspaceId,
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
     /// Session to promote.
     pub session_id: SessionId,
     /// Upgraded verified contact token.

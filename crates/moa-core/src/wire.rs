@@ -9,12 +9,13 @@ use uuid::Uuid;
 
 use crate::traits::Identity;
 use crate::{
-    ActionClass, AgentContext, AgentSessionSelection, Attachment, CheckpointHandle, CheckpointInfo,
-    ContactRef, Event, EventRange, EventType, ExperienceAttribution, ExperienceRecord,
-    IdempotencyClass, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningRiskClass, MemoryScope, RiskLevel, SegmentAssessment,
-    SegmentCompletion, SegmentId, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    TaskSegment, TaskStrategySuccessRate, ToolDefinition, UserId, WorkspaceId,
+    ActionClass, ActionRuleScope, AgentContext, AgentSessionSelection, Attachment,
+    CheckpointHandle, CheckpointInfo, ContactId, ContactRef, Event, EventRange, EventType,
+    ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
+    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType,
+    LearningRiskClass, RiskLevel, SegmentAssessment, SegmentCompletion, SegmentId, SessionFilter,
+    SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate, TenantId,
+    ToolDefinition, UserId,
 };
 
 /// Input accepted by one `TurnExecution` workflow run.
@@ -288,22 +289,22 @@ pub struct UpdateSegmentAssessmentRequest {
 /// Request payload for `SessionStore/get_segment_baseline`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetSegmentBaselineRequest {
-    /// Tenant/workspace identifier.
-    pub tenant_id: String,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
 }
 
 /// Request payload for `SessionStore/list_skill_resolution_rates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListSkillResolutionRatesRequest {
-    /// Tenant/workspace identifier.
-    pub tenant_id: String,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
 }
 
 /// Request payload for `SessionStore/list_task_strategy_success_rates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListTaskStrategySuccessRatesRequest {
-    /// Tenant/workspace identifier.
-    pub tenant_id: String,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// Task fingerprint hash to aggregate against.
     pub task_fingerprint: String,
 }
@@ -355,8 +356,8 @@ pub struct AppendLearningCandidateRequest {
 /// Request payload for `SessionStore/get_learning_candidate`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetLearningCandidateRequest {
-    /// Workspace that owns the candidate.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the candidate.
+    pub tenant_id: TenantId,
     /// Candidate identifier to load.
     pub candidate_id: Uuid,
 }
@@ -364,8 +365,8 @@ pub struct GetLearningCandidateRequest {
 /// Request payload for `SessionStore/list_learning_candidates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListLearningCandidatesRequest {
-    /// Tenant/workspace identifier.
-    pub tenant_id: String,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// Optional candidate status filter.
     pub status: Option<LearningCandidateStatus>,
     /// Maximum rows to return.
@@ -392,8 +393,8 @@ pub enum LearningCandidateReviewAction {
 /// Request payload for reviewing one learning candidate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearningCandidateReviewRequest {
-    /// Workspace that owns the candidate.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the candidate.
+    pub tenant_id: TenantId,
     /// Candidate identifier to review.
     pub candidate_id: Uuid,
     /// Review decision to apply.
@@ -455,11 +456,11 @@ pub struct ListSessionsRequest {
     pub filter: SessionFilter,
 }
 
-/// Request payload for `SessionStore/workspace_cost_since`.
+/// Request payload for `SessionStore/tenant_cost_since`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceCostSinceRequest {
-    /// Workspace whose spend should be aggregated.
-    pub workspace_id: WorkspaceId,
+pub struct TenantCostSinceRequest {
+    /// Tenant whose spend should be aggregated.
+    pub tenant_id: TenantId,
     /// Inclusive lower-bound timestamp for the spend query.
     pub since: DateTime<Utc>,
 }
@@ -476,10 +477,11 @@ pub struct SessionStatsRequest {
 pub struct SessionStatsResponse {
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace that owns the session.
-    pub workspace_id: WorkspaceId,
-    /// User that owns the session.
-    pub user_id: UserId,
+    /// Tenant that owns the session.
+    pub tenant_id: TenantId,
+    /// Contact attached to the session, when any.
+    #[serde(default)]
+    pub contact_id: Option<ContactId>,
     /// Current persisted session status.
     pub status: SessionStatus,
     /// Number of completed assistant turns.
@@ -506,20 +508,20 @@ pub struct SessionStatsResponse {
     pub error_count: u64,
 }
 
-/// Request payload for reading workspace analytics over a recent window.
+/// Request payload for reading tenant analytics over a recent window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkspaceStatsRequest {
-    /// Workspace whose rollup should be read.
-    pub workspace_id: WorkspaceId,
+pub struct TenantStatsRequest {
+    /// Tenant whose rollup should be read.
+    pub tenant_id: TenantId,
     /// Number of whole days included in the rollup window.
     pub days: u32,
 }
 
-/// Response payload containing workspace analytics over a recent window.
+/// Response payload containing tenant analytics over a recent window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkspaceStatsResponse {
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+pub struct TenantStatsResponse {
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// Number of whole days included in the rollup window.
     pub days: u32,
     /// Session count across the window.
@@ -541,15 +543,15 @@ pub struct WorkspaceStatsResponse {
 /// Request payload for reading per-tool analytics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolStatsRequest {
-    /// Optional workspace filter for the per-tool rollup.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Optional tenant filter for the per-tool rollup.
+    pub tenant_id: Option<TenantId>,
 }
 
 /// Response payload containing per-tool analytics rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolStatsResponse {
-    /// Workspace filter used for this response, if one was requested.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant filter used for this response, if one was requested.
+    pub tenant_id: Option<TenantId>,
     /// Per-tool analytics rows ordered for API display.
     #[serde(default)]
     pub rows: Vec<ToolStatsRow>,
@@ -572,20 +574,20 @@ pub struct ToolStatsRow {
     pub p95_ms: f64,
 }
 
-/// Request payload for reading workspace cache analytics.
+/// Request payload for reading tenant cache analytics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheStatsRequest {
-    /// Workspace whose cache rollup should be read.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose cache rollup should be read.
+    pub tenant_id: TenantId,
     /// Number of whole days included in the cache window.
     pub days: u32,
 }
 
-/// Response payload containing workspace cache analytics.
+/// Response payload containing tenant cache analytics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheStatsResponse {
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// Number of whole days included in the cache window.
     pub days: u32,
     /// Weighted cache-hit rate for the window.
@@ -605,11 +607,11 @@ pub struct CacheStatsResponse {
     pub daily: Vec<CacheDailyMetricRow>,
 }
 
-/// One daily workspace cache trend point.
+/// One daily tenant cache trend point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheDailyMetricRow {
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// UTC day bucket.
     pub day: DateTime<Utc>,
     /// Session count on the day.
@@ -628,11 +630,11 @@ pub struct CacheDailyMetricRow {
     pub avg_cache_hit_rate: f64,
 }
 
-/// Request payload for workspace-scoped live experiment analytics.
+/// Request payload for tenant-scoped live experiment analytics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentAnalyticsRequest {
-    /// Workspace whose experiment runs should be summarized.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose experiment runs should be summarized.
+    pub tenant_id: TenantId,
     /// Optional lower bound on experiment creation time.
     pub from_time: Option<DateTime<Utc>>,
     /// Optional upper bound on experiment creation time.
@@ -641,11 +643,11 @@ pub struct ExperimentAnalyticsRequest {
     pub limit: u32,
 }
 
-/// Response payload containing workspace-scoped experiment analytics.
+/// Response payload containing tenant-scoped experiment analytics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentAnalyticsResponse {
-    /// Workspace whose experiment runs were summarized.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose experiment runs were summarized.
+    pub tenant_id: TenantId,
     /// Total experiment runs in the requested window.
     pub total_runs: u64,
     /// Per-status run counts ordered by status.
@@ -715,8 +717,8 @@ pub struct ExperimentTrialTrendPoint {
 /// Request payload for listing curated learning-candidate summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearningCandidateListRequest {
-    /// Optional workspace scope. When absent, the caller must be a tenant admin.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant whose candidates should be listed.
+    pub tenant_id: TenantId,
     /// Optional candidate status filter.
     pub status: Option<LearningCandidateStatus>,
     /// Maximum number of candidates to return.
@@ -726,10 +728,8 @@ pub struct LearningCandidateListRequest {
 /// Response payload containing curated learning-candidate summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LearningCandidateListResponse {
-    /// Tenant scope inferred from the authenticated caller.
-    pub tenant_id: String,
-    /// Workspace filter used for this response, if any.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant scope used for this response.
+    pub tenant_id: TenantId,
     /// Candidate summaries ordered by newest update first.
     #[serde(default)]
     pub candidates: Vec<LearningCandidateSummary>,
@@ -741,11 +741,9 @@ pub struct LearningCandidateSummary {
     /// Stable candidate identifier.
     pub id: Uuid,
     /// Tenant scope for the candidate.
-    pub tenant_id: String,
-    /// Workspace scope for the candidate.
-    pub workspace_id: WorkspaceId,
-    /// Optional user scope for user-personal candidates.
-    pub user_id: Option<UserId>,
+    pub tenant_id: TenantId,
+    /// Optional contact scope for contact-local candidates.
+    pub contact_id: Option<ContactId>,
     /// Candidate target type.
     pub candidate_type: LearningCandidateType,
     /// Current promotion status.
@@ -771,8 +769,8 @@ pub struct LearningCandidateSummary {
 /// Request payload for workspace-scoped session event search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSearchRequest {
-    /// Workspace whose sessions should be searched.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose sessions should be searched.
+    pub tenant_id: TenantId,
     /// Full-text event search query.
     pub query: String,
     /// Optional lower timestamp bound.
@@ -788,8 +786,8 @@ pub struct SessionSearchRequest {
 /// Response payload containing redacted session event snippets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSearchResponse {
-    /// Workspace whose sessions were searched.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose sessions were searched.
+    pub tenant_id: TenantId,
     /// Query text that produced the results.
     pub query: String,
     /// Redacted event snippets ordered by search rank.
@@ -817,10 +815,10 @@ pub struct SessionSearchResult {
 /// Request payload for graph-memory search.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemorySearchRequest {
-    /// Workspace whose memory should be searched.
-    pub workspace_id: WorkspaceId,
-    /// Optional user scope for user-personal memory reads.
-    pub user_id: Option<UserId>,
+    /// Tenant whose memory should be searched.
+    pub tenant_id: TenantId,
+    /// Optional contact scope for contact-local memory reads.
+    pub contact_id: Option<ContactId>,
     /// Search query text.
     pub query: String,
     /// Maximum number of hits to return.
@@ -869,8 +867,8 @@ pub struct MemoryHit {
 /// Request payload for showing one graph-memory node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryShowRequest {
-    /// Workspace used to authorize and scope the node lookup.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used to authorize and scope the node lookup.
+    pub tenant_id: TenantId,
     /// Stable graph node UID.
     pub uid: Uuid,
     /// Neighbor traversal depth requested by the caller.
@@ -930,10 +928,10 @@ pub struct MemoryIngestDocument {
 /// Request payload for graph-memory ingestion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryIngestRequest {
-    /// Workspace receiving the ingested documents.
-    pub workspace_id: WorkspaceId,
-    /// User associated with the ingestion request, if any.
-    pub user_id: Option<UserId>,
+    /// Tenant receiving the ingested documents.
+    pub tenant_id: TenantId,
+    /// Contact associated with the ingestion request, if any.
+    pub contact_id: Option<ContactId>,
     /// Documents to ingest.
     #[serde(default)]
     pub documents: Vec<MemoryIngestDocument>,
@@ -942,8 +940,8 @@ pub struct MemoryIngestRequest {
 /// Response payload containing graph-memory ingestion results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryIngestResponse {
-    /// Workspace that received the ingested documents.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that received the ingested documents.
+    pub tenant_id: TenantId,
     /// Per-document ingestion results.
     #[serde(default)]
     pub results: Vec<MemoryIngestResult>,
@@ -973,10 +971,10 @@ pub struct MemoryIngestResult {
 /// Request payload for detailed memory retrieval debugging.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRetrieveDebugRequest {
-    /// Workspace whose memory should be searched.
-    pub workspace_id: WorkspaceId,
-    /// Optional user scope for user-personal memory reads.
-    pub user_id: Option<UserId>,
+    /// Tenant whose memory should be searched.
+    pub tenant_id: TenantId,
+    /// Optional contact scope for contact-local memory reads.
+    pub contact_id: Option<ContactId>,
     /// Search query text.
     pub query: String,
     /// Maximum number of hits to return.
@@ -1011,8 +1009,8 @@ pub struct MemoryRetrieveDebugResponse {
 /// Request payload for explaining lineage for one session or turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageExplainRequest {
-    /// Workspace containing the session or turn to explain.
-    pub workspace_id: WorkspaceId,
+    /// Tenant containing the session or turn to explain.
+    pub tenant_id: TenantId,
     /// Session or turn identifier to explain.
     pub id: Uuid,
 }
@@ -1034,8 +1032,8 @@ pub struct LineageRecordView {
     pub turn_id: Uuid,
     /// Session identifier associated with the lineage record, when available.
     pub session_id: Option<SessionId>,
-    /// Workspace associated with the lineage record, when available.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant associated with the lineage record, when available.
+    pub tenant_id: Option<TenantId>,
     /// User associated with the lineage record, when available.
     pub user_id: Option<UserId>,
     /// Timestamp when the lineage record was captured.
@@ -1058,8 +1056,8 @@ pub struct LineageQueryRequest {
     pub cold: bool,
     /// Postgres interval for hot-tier time filtering.
     pub since: String,
-    /// Workspace filter for authorization and query scoping.
-    pub workspace_id: WorkspaceId,
+    /// Tenant filter for authorization and query scoping.
+    pub tenant_id: TenantId,
 }
 
 /// Response payload containing dynamic lineage query rows.
@@ -1072,8 +1070,8 @@ pub struct LineageQueryResponse {
 /// Request payload for exporting a lineage DSAR bundle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageExportRequest {
-    /// Workspace whose lineage records should be exported.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose lineage records should be exported.
+    pub tenant_id: TenantId,
     /// Subject pseudonym or natural identifier to search for.
     pub subject: String,
 }
@@ -1094,8 +1092,8 @@ pub struct LineageExportResponse {
 /// Request payload for verifying lineage integrity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageVerifyRequest {
-    /// Workspace whose lineage window should be verified.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose lineage window should be verified.
+    pub tenant_id: TenantId,
     /// `hot`, an audit root UUID, or an audit root object URI.
     pub window: String,
     /// Postgres interval for hot-window verification.
@@ -1105,8 +1103,8 @@ pub struct LineageVerifyRequest {
 /// Response payload describing lineage verification results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageVerifyResponse {
-    /// Workspace whose lineage window was verified.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose lineage window was verified.
+    pub tenant_id: TenantId,
     /// Number of records verified.
     pub records: u64,
     /// Whether the verification checked an audit root.
@@ -1120,8 +1118,8 @@ pub struct LineageVerifyResponse {
 /// Request payload for erasing lineage subject keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageEraseRequest {
-    /// Workspace containing the subject pseudonym.
-    pub workspace_id: WorkspaceId,
+    /// Tenant containing the subject pseudonym.
+    pub tenant_id: TenantId,
     /// Hex-encoded subject pseudonym.
     pub subject: String,
 }
@@ -1129,8 +1127,8 @@ pub struct LineageEraseRequest {
 /// Response payload for a lineage erase request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageEraseResponse {
-    /// Workspace containing the erased subject pseudonym.
-    pub workspace_id: WorkspaceId,
+    /// Tenant containing the erased subject pseudonym.
+    pub tenant_id: TenantId,
     /// Number of matching subjects scheduled for erasure.
     pub subjects: u64,
     /// Erasure status label.
@@ -1140,8 +1138,8 @@ pub struct LineageEraseResponse {
 /// Request payload for exporting privacy data for one subject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrivacyExportRequest {
-    /// Optional workspace filter for the export.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant containing the subject data to export.
+    pub tenant_id: TenantId,
     /// Subject user identifier for the data export.
     pub subject_user_id: UserId,
     /// Administrative reason recorded in the audit trail.
@@ -1157,8 +1155,8 @@ pub struct PrivacyExportRequest {
 pub struct PrivacyExportResponse {
     /// Subject user identifier exported.
     pub subject_user_id: UserId,
-    /// Workspace filter applied to the export.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant containing the exported subject data.
+    pub tenant_id: TenantId,
     /// URI where the archive can be fetched.
     pub archive_uri: String,
     /// Number of files included in the archive.
@@ -1176,8 +1174,8 @@ pub struct PrivacyExportResponse {
 /// Request payload for erasing privacy data for one subject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrivacyEraseRequest {
-    /// Workspace containing the subject data to erase.
-    pub workspace_id: WorkspaceId,
+    /// Tenant containing the subject data to erase.
+    pub tenant_id: TenantId,
     /// Subject user identifier for the erasure request.
     pub subject_user_id: UserId,
     /// Administrative reason recorded in the audit trail.
@@ -1205,8 +1203,8 @@ pub enum ContactErasureScope {
 /// Response payload for a privacy erase request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrivacyEraseResponse {
-    /// Workspace containing the subject data.
-    pub workspace_id: WorkspaceId,
+    /// Tenant containing the erased subject data.
+    pub tenant_id: TenantId,
     /// Subject user identifier erased.
     pub subject_user_id: UserId,
     /// Number of candidate memory nodes found.
@@ -1222,18 +1220,18 @@ pub struct PrivacyEraseResponse {
     pub sample: Vec<Value>,
 }
 
-/// Request payload for exporting workspace skills.
+/// Request payload for exporting tenant-visible skills.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillExportRequest {
-    /// Workspace whose visible skills should be exported.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose visible skills should be exported.
+    pub tenant_id: TenantId,
 }
 
 /// Response payload containing exported skill packages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillExportResponse {
-    /// Workspace whose skills were exported.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose skills were exported.
+    pub tenant_id: TenantId,
     /// Exported skill packages.
     #[serde(default)]
     pub packages: Vec<SkillPackageDocument>,
@@ -1273,10 +1271,8 @@ pub struct SkillPackageDocumentFile {
 /// Request payload for importing skill packages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillImportRequest {
-    /// Workspace used for authorization and workspace/user scoped imports.
-    pub workspace_id: WorkspaceId,
     /// Scope where imported skills should be written.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Skill packages to import.
     #[serde(default)]
     pub packages: Vec<SkillPackageDocument>,
@@ -1286,7 +1282,7 @@ pub struct SkillImportRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillImportResponse {
     /// Scope where skills were imported.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Number of skill packages imported.
     pub imported: u64,
 }
@@ -1294,8 +1290,8 @@ pub struct SkillImportResponse {
 /// Request payload for listing skills.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillListRequest {
-    /// Workspace whose visible skills should be listed.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose visible skills should be listed.
+    pub tenant_id: TenantId,
 }
 
 /// Response payload containing listed skills.
@@ -1312,7 +1308,7 @@ pub struct SkillSummary {
     /// Stable row identifier for this skill version.
     pub skill_uid: Uuid,
     /// Scope where this skill is visible.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Integer row-level skill version.
     pub version: i32,
     /// Skill name.
@@ -1368,10 +1364,8 @@ pub struct ArtifactFileDocument {
 /// Request payload for importing a draft artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactImportRequest {
-    /// Workspace used for authorization and workspace/user scoped imports.
-    pub workspace_id: WorkspaceId,
     /// Scope where the draft artifact should be written.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Source format, currently `json` or `yaml`.
     pub source_format: String,
     /// Raw JSON or YAML artifact document.
@@ -1397,11 +1391,11 @@ pub struct ArtifactImportResponse {
 /// Request payload for exporting a visible artifact revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactExportRequest {
-    /// Workspace used for authorization.
-    pub workspace_id: WorkspaceId,
-    /// Optional scope to read from, defaulting to the workspace tier.
+    /// Tenant whose visible artifacts should be exported when no explicit scope is supplied.
+    pub tenant_id: TenantId,
+    /// Optional scope to read from, defaulting to the tenant tier.
     #[serde(default)]
-    pub scope: Option<MemoryScope>,
+    pub scope: Option<ActionRuleScope>,
     /// Artifact kind such as `skill`, `workflow`, or `experiment_plan`.
     pub kind: String,
     /// Artifact name.
@@ -1432,11 +1426,11 @@ pub struct ArtifactExportResponse {
 /// Request payload for listing visible artifacts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactListRequest {
-    /// Workspace used for authorization.
-    pub workspace_id: WorkspaceId,
-    /// Optional scope to list from, defaulting to the workspace tier.
+    /// Tenant whose visible artifacts should be listed when no explicit scope is supplied.
+    pub tenant_id: TenantId,
+    /// Optional scope to list from, defaulting to the tenant tier.
     #[serde(default)]
-    pub scope: Option<MemoryScope>,
+    pub scope: Option<ActionRuleScope>,
     /// Optional artifact kind filter such as `skill`, `workflow`, or `experiment_plan`.
     #[serde(default)]
     pub kind: Option<String>,
@@ -1482,8 +1476,8 @@ pub struct ArtifactSummary {
 /// Request payload for listing visible published agent definitions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDefinitionListRequest {
-    /// Workspace used for authorization and artifact visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and artifact visibility.
+    pub tenant_id: TenantId,
     /// Optional artifact status filter, defaulting to `published`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -1492,8 +1486,8 @@ pub struct AgentDefinitionListRequest {
 /// Response payload containing tenant-configurable agent definitions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentDefinitionListResponse {
-    /// Workspace used for artifact visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for artifact visibility.
+    pub tenant_id: TenantId,
     /// Visible agent definitions ordered for display.
     #[serde(default)]
     pub agents: Vec<AgentDefinitionSummary>,
@@ -1527,11 +1521,11 @@ pub struct AgentDefinitionSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Request payload for installing a published agent revision into a workspace.
+/// Request payload for installing a published agent revision into a tenant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentInstallRequest {
-    /// Workspace that receives the installation.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that receives the installation.
+    pub tenant_id: TenantId,
     /// Exact published agent revision to install and deploy.
     pub revision_uid: Uuid,
     /// Optional agent principal bound to the installation.
@@ -1551,8 +1545,8 @@ pub struct AgentInstallRequest {
 /// Response payload returned after installing an agent revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInstallResponse {
-    /// Workspace that owns the installation.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the installation.
+    pub tenant_id: TenantId,
     /// Stable installation pointer.
     pub installation_uid: Uuid,
     /// Stable deployment row selected by the installation.
@@ -1563,18 +1557,18 @@ pub struct AgentInstallResponse {
     pub policy_hash: String,
 }
 
-/// Request payload for listing installed agents in a workspace.
+/// Request payload for listing installed agents in a tenant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInstallationListRequest {
-    /// Workspace used for authorization and installation visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and installation visibility.
+    pub tenant_id: TenantId,
 }
 
 /// Response payload containing installed-agent summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentInstallationListResponse {
-    /// Workspace used for installation visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for installation visibility.
+    pub tenant_id: TenantId,
     /// Installed agents ordered by latest update.
     #[serde(default)]
     pub installations: Vec<AgentInstallationSummary>,
@@ -1614,8 +1608,8 @@ pub struct AgentInstallationSummary {
 /// Request payload for deploying a new exact revision to an installed agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDeployRequest {
-    /// Workspace that owns the installation.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the installation.
+    pub tenant_id: TenantId,
     /// Installed-agent pointer to move.
     pub installation_uid: Uuid,
     /// Exact published agent revision to deploy.
@@ -1628,8 +1622,8 @@ pub struct AgentDeployRequest {
 /// Response payload returned after deploying an agent revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDeployResponse {
-    /// Workspace that owns the deployment.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the deployment.
+    pub tenant_id: TenantId,
     /// Installed-agent pointer moved by the deployment.
     pub installation_uid: Uuid,
     /// Stable deployment row.
@@ -1643,8 +1637,8 @@ pub struct AgentDeployResponse {
 /// Request payload for listing deployment history for an installed agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDeploymentListRequest {
-    /// Workspace that owns the installation.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the installation.
+    pub tenant_id: TenantId,
     /// Installed-agent pointer whose history should be listed.
     pub installation_uid: Uuid,
     /// Optional maximum number of deployments to return.
@@ -1655,8 +1649,8 @@ pub struct AgentDeploymentListRequest {
 /// Response payload containing installed-agent deployment history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentDeploymentListResponse {
-    /// Workspace that owns the deployment history.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the deployment history.
+    pub tenant_id: TenantId,
     /// Installed-agent pointer whose history was listed.
     pub installation_uid: Uuid,
     /// Deployments ordered newest first.
@@ -1688,8 +1682,8 @@ pub struct AgentDeploymentSummary {
 /// Request payload for validating an artifact document without writing it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactValidateRequest {
-    /// Workspace used for authorization.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
     /// Source format, currently `json` or `yaml`.
     pub source_format: String,
     /// Raw JSON or YAML artifact document.
@@ -1711,10 +1705,8 @@ pub struct ArtifactValidateResponse {
 /// Request payload for publishing a draft artifact revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactPublishRequest {
-    /// Workspace used for authorization.
-    pub workspace_id: WorkspaceId,
     /// Scope that owns the revision.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Draft revision to publish.
     pub revision_uid: Uuid,
 }
@@ -1735,8 +1727,8 @@ pub struct ArtifactPublishResponse {
 /// Request payload for starting an artifact-backed workflow run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowRunRequest {
-    /// Workspace used for authorization and execution.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and execution.
+    pub tenant_id: TenantId,
     /// Workflow artifact reference, for example `workflow://damaged-food-order`.
     pub workflow_ref: String,
     /// Initial workflow input.
@@ -1762,8 +1754,8 @@ pub struct WorkflowRunResponse {
 /// Request payload for loading workflow run status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowStatusRequest {
-    /// Workspace used for authorization.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
     /// Workflow run row identifier.
     pub run_id: Uuid,
 }
@@ -1808,8 +1800,8 @@ pub struct WorkflowNodeRunSummary {
 /// Request payload for cancelling a workflow run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowCancelRequest {
-    /// Workspace used for authorization.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
     /// Workflow run row identifier.
     pub run_id: Uuid,
     /// Optional cancellation reason.
@@ -1829,8 +1821,8 @@ pub struct WorkflowCancelResponse {
 /// Request payload for planning an eval suite run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalPlanRequest {
-    /// Workspace scope used for authorization and eval execution.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and eval execution.
+    pub tenant_id: TenantId,
     /// Raw suite document supplied by the API caller.
     pub suite_document: String,
     /// Logical suite source path or URI.
@@ -1874,8 +1866,8 @@ pub struct EvalSuiteListDocument {
 /// Request payload for listing eval suite summaries from supplied documents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalSuiteListRequest {
-    /// Workspace scope used for authorization.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
     /// Suite documents to parse and summarize.
     #[serde(default)]
     pub documents: Vec<EvalSuiteListDocument>,
@@ -1900,8 +1892,8 @@ pub struct EvalSuiteSummary {
 /// Response payload for listing eval suite summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalSuiteListResponse {
-    /// Workspace scope used for authorization.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
     /// Parsed suite summaries ordered like the request documents.
     #[serde(default)]
     pub suites: Vec<EvalSuiteSummary>,
@@ -1910,8 +1902,8 @@ pub struct EvalSuiteListResponse {
 /// Request payload for running an eval suite.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalRunRequest {
-    /// Workspace scope used for authorization and eval execution.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and eval execution.
+    pub tenant_id: TenantId,
     /// Raw suite document supplied by the API caller.
     pub suite_document: String,
     /// Logical suite source path or URI.
@@ -1951,8 +1943,8 @@ pub struct EvalRunRequest {
 /// Response payload for an eval suite run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalRunResponse {
-    /// Workspace scope used for authorization and eval execution.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and eval execution.
+    pub tenant_id: TenantId,
     /// Server-assigned eval run identifier.
     pub run_id: Uuid,
     /// Current run lifecycle status.
@@ -1988,8 +1980,8 @@ pub enum EvalRunStatus {
 /// Request payload for polling an eval run status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalRunStatusRequest {
-    /// Workspace scope used for authorization and run-result filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and run-result filtering.
+    pub tenant_id: TenantId,
     /// Server-assigned eval run identifier.
     pub run_id: Uuid,
 }
@@ -1997,8 +1989,8 @@ pub struct EvalRunStatusRequest {
 /// Response payload for polling an eval run status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalRunStatusResponse {
-    /// Workspace scope that owns this run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns this run.
+    pub tenant_id: TenantId,
     /// Server-assigned eval run identifier.
     pub run_id: Uuid,
     /// Current run lifecycle status.
@@ -2019,8 +2011,8 @@ pub struct EvalRunStatusResponse {
 /// Request payload for registering an eval dataset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalDatasetRegisterRequest {
-    /// Workspace scope used for authorization and dataset item ownership.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and dataset item ownership.
+    pub tenant_id: TenantId,
     /// Dataset name.
     pub name: String,
     /// Raw JSONL dataset content.
@@ -2032,8 +2024,8 @@ pub struct EvalDatasetRegisterRequest {
 /// Response payload for registering an eval dataset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalDatasetRegisterResponse {
-    /// Workspace scope that owns the registered dataset items.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the registered dataset items.
+    pub tenant_id: TenantId,
     /// Registered dataset identifier.
     pub dataset_id: Uuid,
     /// Dataset name.
@@ -2045,15 +2037,15 @@ pub struct EvalDatasetRegisterResponse {
 /// Request payload for listing eval datasets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalDatasetListRequest {
-    /// Workspace scope used for authorization and dataset filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and dataset filtering.
+    pub tenant_id: TenantId,
 }
 
-/// Workspace-scoped eval dataset summary.
+/// Tenant-scoped eval dataset summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalDatasetSummary {
-    /// Workspace that has items in this dataset.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that has items in this dataset.
+    pub tenant_id: TenantId,
     /// Dataset identifier.
     pub dataset_id: Uuid,
     /// Dataset name.
@@ -2067,8 +2059,8 @@ pub struct EvalDatasetSummary {
 /// Response payload for listing eval datasets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalDatasetListResponse {
-    /// Workspace scope used to filter dataset item counts.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used to filter dataset item counts.
+    pub tenant_id: TenantId,
     /// Dataset summaries ordered for API display.
     #[serde(default)]
     pub datasets: Vec<EvalDatasetSummary>,
@@ -2077,8 +2069,8 @@ pub struct EvalDatasetListResponse {
 /// Request payload for replaying an eval dataset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalReplayRequest {
-    /// Workspace scope used for authorization and dataset item filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and dataset item filtering.
+    pub tenant_id: TenantId,
     /// Dataset identifier.
     pub dataset_id: Uuid,
     /// Optional replay run identifier.
@@ -2094,8 +2086,8 @@ pub struct EvalReplayRequest {
 /// Response payload for replaying an eval dataset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalReplayResponse {
-    /// Workspace scope used for dataset item filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for dataset item filtering.
+    pub tenant_id: TenantId,
     /// Replay run identifier.
     pub run_id: Uuid,
     /// Dataset identifier.
@@ -2109,8 +2101,8 @@ pub struct EvalReplayResponse {
 /// Request payload for reading eval score summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalScoresRequest {
-    /// Workspace scope used for authorization and score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and score filtering.
+    pub tenant_id: TenantId,
     /// Replay run identifier.
     pub run_id: Uuid,
 }
@@ -2131,8 +2123,8 @@ pub struct EvalScoreSummaryRow {
 /// Response payload containing eval score summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalScoresResponse {
-    /// Workspace scope used for score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for score filtering.
+    pub tenant_id: TenantId,
     /// Replay run identifier.
     pub run_id: Uuid,
     /// Score summary rows ordered for API display.
@@ -2143,8 +2135,8 @@ pub struct EvalScoresResponse {
 /// Request payload for comparing two eval replay runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalCompareRequest {
-    /// Workspace scope used for authorization and score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and score filtering.
+    pub tenant_id: TenantId,
     /// Baseline replay run identifier.
     pub base_run: Uuid,
     /// New replay run identifier.
@@ -2167,8 +2159,8 @@ pub struct EvalCompareRow {
 /// Response payload containing eval run comparison rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalCompareResponse {
-    /// Workspace scope used for score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for score filtering.
+    pub tenant_id: TenantId,
     /// Baseline replay run identifier.
     pub base_run: Uuid,
     /// New replay run identifier.
@@ -2181,8 +2173,8 @@ pub struct EvalCompareResponse {
 /// Request payload for accepting a live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRunRequest {
-    /// Workspace scope used for authorization and run ownership.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and run ownership.
+    pub tenant_id: TenantId,
     /// Human-readable experiment run name.
     pub name: String,
     /// Published experiment_plan artifact revision to execute.
@@ -2209,8 +2201,8 @@ pub struct ExperimentRunRequest {
 /// Request payload for generating a draft experiment plan artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentGeneratePlanRequest {
-    /// Workspace scope used for authorization and draft ownership.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and draft ownership.
+    pub tenant_id: TenantId,
     /// Natural-language behavior-lab plan description.
     pub description: String,
     /// Optional model override for plan generation.
@@ -2224,8 +2216,8 @@ pub struct ExperimentGeneratePlanRequest {
 /// Response payload returned after generating a draft experiment plan artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentGeneratePlanResponse {
-    /// Workspace scope that owns the generated draft.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the generated draft.
+    pub tenant_id: TenantId,
     /// Stored artifact row identifier.
     pub artifact_uid: Uuid,
     /// Stored draft revision identifier.
@@ -2245,8 +2237,8 @@ pub struct ExperimentGeneratePlanResponse {
 /// Response payload returned after accepting a live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRunResponse {
-    /// Workspace scope that owns the experiment run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the experiment run.
+    pub tenant_id: TenantId,
     /// Stable experiment run identifier.
     pub run_uid: Uuid,
     /// Current run lifecycle status.
@@ -2262,8 +2254,8 @@ pub struct ExperimentRunResponse {
 /// Request payload for reading an experiment run status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentRunStatusRequest {
-    /// Workspace scope used for authorization and run-result filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and run-result filtering.
+    pub tenant_id: TenantId,
     /// Stable experiment run identifier.
     pub run_uid: Uuid,
 }
@@ -2271,8 +2263,8 @@ pub struct ExperimentRunStatusRequest {
 /// Response payload for reading an experiment run status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRunStatusResponse {
-    /// Workspace scope that owns the experiment run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the experiment run.
+    pub tenant_id: TenantId,
     /// Stable experiment run identifier.
     pub run_uid: Uuid,
     /// Current run lifecycle status.
@@ -2295,8 +2287,8 @@ pub struct ExperimentRunStatusResponse {
 /// Request payload for listing experiment runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentListRequest {
-    /// Workspace scope used for authorization and run filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and run filtering.
+    pub tenant_id: TenantId,
     /// Optional lifecycle status filter.
     pub status: Option<String>,
     /// Optional maximum number of runs to return.
@@ -2306,8 +2298,8 @@ pub struct ExperimentListRequest {
 /// Response payload containing experiment run summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentListResponse {
-    /// Workspace scope used for run filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for run filtering.
+    pub tenant_id: TenantId,
     /// Experiment run summaries ordered for API display.
     #[serde(default)]
     pub runs: Vec<Value>,
@@ -2316,8 +2308,8 @@ pub struct ExperimentListResponse {
 /// Request payload for listing experiment trials under a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentTrialsRequest {
-    /// Workspace scope used for authorization and trial filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and trial filtering.
+    pub tenant_id: TenantId,
     /// Experiment run whose trials should be listed.
     pub run_uid: Uuid,
     /// Optional lifecycle status filter.
@@ -2331,8 +2323,8 @@ pub struct ExperimentTrialsRequest {
 /// Typed summary for one experiment trial.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentTrialSummary {
-    /// Workspace scope that owns the trial.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the trial.
+    pub tenant_id: TenantId,
     /// Experiment run that owns the trial.
     pub run_uid: Uuid,
     /// Stable trial identifier.
@@ -2366,8 +2358,8 @@ pub struct ExperimentTrialSummary {
 /// Response payload containing experiment trial summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentTrialsResponse {
-    /// Workspace scope used for trial filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for trial filtering.
+    pub tenant_id: TenantId,
     /// Experiment run whose trials were listed.
     pub run_uid: Uuid,
     /// Trial summaries ordered for API display.
@@ -2378,8 +2370,8 @@ pub struct ExperimentTrialsResponse {
 /// Request payload for reading one experiment trial status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentTrialStatusRequest {
-    /// Workspace scope used for authorization and trial filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and trial filtering.
+    pub tenant_id: TenantId,
     /// Stable trial identifier.
     pub trial_uid: Uuid,
 }
@@ -2387,8 +2379,8 @@ pub struct ExperimentTrialStatusRequest {
 /// Response payload for reading one experiment trial status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentTrialStatusResponse {
-    /// Workspace scope that owns the trial.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the trial.
+    pub tenant_id: TenantId,
     /// Experiment run that owns the trial.
     pub run_uid: Uuid,
     /// Stable trial identifier.
@@ -2422,8 +2414,8 @@ pub struct ExperimentTrialStatusResponse {
 /// Request payload for cancelling an experiment run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentCancelRequest {
-    /// Workspace scope used for authorization and run filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and run filtering.
+    pub tenant_id: TenantId,
     /// Stable experiment run identifier.
     pub run_uid: Uuid,
     /// Optional cancellation reason.
@@ -2434,8 +2426,8 @@ pub struct ExperimentCancelRequest {
 /// Response payload returned after requesting experiment cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentCancelResponse {
-    /// Workspace scope that owns the experiment run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the experiment run.
+    pub tenant_id: TenantId,
     /// Stable experiment run identifier.
     pub run_uid: Uuid,
     /// Whether cancellation was accepted.
@@ -2449,8 +2441,8 @@ pub struct ExperimentCancelResponse {
 /// Request payload for proposing learning candidates from a completed experiment run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentProposeImprovementsRequest {
-    /// Workspace scope used for authorization and run filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and run filtering.
+    pub tenant_id: TenantId,
     /// Completed experiment run whose evidence should seed proposals.
     pub run_uid: Uuid,
     /// Optional idempotency key for stable candidate creation.
@@ -2461,8 +2453,8 @@ pub struct ExperimentProposeImprovementsRequest {
 /// Response payload returned after proposing learning candidates from an experiment run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentProposeImprovementsResponse {
-    /// Workspace scope that owns the proposal candidates.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the proposal candidates.
+    pub tenant_id: TenantId,
     /// Experiment run summarized by the proposal candidates.
     pub run_uid: Uuid,
     /// Learning candidate identifiers appended for review.
@@ -2476,8 +2468,8 @@ pub struct ExperimentProposeImprovementsResponse {
 /// Request payload for reading experiment score summaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentScoresRequest {
-    /// Workspace scope used for authorization and score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and score filtering.
+    pub tenant_id: TenantId,
     /// Experiment run identifier whose resolved score run should be summarized.
     pub run_uid: Uuid,
 }
@@ -2526,8 +2518,8 @@ pub struct ExperimentScenarioScoreSummary {
 /// Response payload containing experiment score summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentScoresResponse {
-    /// Workspace scope used for score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for score filtering.
+    pub tenant_id: TenantId,
     /// Experiment run identifier summarized by the response.
     pub run_uid: Uuid,
     /// Resolved score run identifier summarized by the response.
@@ -2549,8 +2541,8 @@ pub struct ExperimentScoresResponse {
 /// Request payload for comparing two experiment score runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentCompareRequest {
-    /// Workspace scope used for authorization and score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and score filtering.
+    pub tenant_id: TenantId,
     /// Baseline experiment run identifier.
     pub base_run_uid: Uuid,
     /// New experiment run identifier.
@@ -2603,8 +2595,8 @@ pub struct ExperimentVariantScoreDeltaRow {
 /// Response payload containing experiment score comparison rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentCompareResponse {
-    /// Workspace scope used for score filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for score filtering.
+    pub tenant_id: TenantId,
     /// Baseline experiment run identifier.
     pub base_run_uid: Uuid,
     /// New experiment run identifier.
@@ -2636,8 +2628,8 @@ pub struct AgentRevisionSimulationVariant {
 /// Request payload for running one plan-backed simulation across agent revisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRevisionSimulationRunRequest {
-    /// Workspace scope used for authorization and artifact visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and artifact visibility.
+    pub tenant_id: TenantId,
     /// Human-readable simulation run name.
     pub name: String,
     /// Published experiment_plan revision that defines scenarios/personas/profiles.
@@ -2655,8 +2647,8 @@ pub struct AgentRevisionSimulationRunRequest {
 /// Response payload returned after admitting an agent-revision simulation run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRevisionSimulationRunResponse {
-    /// Workspace that owns the simulation run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the simulation run.
+    pub tenant_id: TenantId,
     /// Created experiment run identifier.
     pub run_uid: Uuid,
     /// Initial experiment run status.
@@ -2673,8 +2665,8 @@ pub struct AgentRevisionSimulationRunResponse {
 /// Request payload for comparing variants inside one agent-revision simulation run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRevisionSimulationCompareRequest {
-    /// Workspace that owns the simulation run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the simulation run.
+    pub tenant_id: TenantId,
     /// Experiment run to compare.
     pub run_uid: Uuid,
     /// Baseline variant key.
@@ -2716,8 +2708,8 @@ pub struct AgentRevisionSimulationVariantResult {
 /// Response payload comparing variants inside one agent-revision simulation run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRevisionSimulationCompareResponse {
-    /// Workspace that owns the simulation run.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the simulation run.
+    pub tenant_id: TenantId,
     /// Experiment run that was compared.
     pub run_uid: Uuid,
     /// Baseline variant key.
@@ -2733,8 +2725,8 @@ pub struct AgentRevisionSimulationCompareResponse {
 /// Request payload for comparing two resolved agent revision policies before simulation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRevisionCompareRequest {
-    /// Workspace scope used for authorization and artifact visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for authorization and artifact visibility.
+    pub tenant_id: TenantId,
     /// Baseline published agent revision.
     pub base_revision_uid: Uuid,
     /// Candidate published agent revision.
@@ -2782,8 +2774,8 @@ pub struct AgentToolDependencyDelta {
 /// Response payload for comparing two resolved agent revision policies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRevisionCompareResponse {
-    /// Workspace scope used for artifact visibility.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for artifact visibility.
+    pub tenant_id: TenantId,
     /// Baseline published agent revision.
     pub base_revision_uid: Uuid,
     /// Candidate published agent revision.
@@ -2809,8 +2801,8 @@ pub struct AgentRevisionCompareResponse {
 /// Request payload for promoting a workspace vector backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorPromoteRequest {
-    /// Workspace to promote.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose vector backend should be promoted.
+    pub tenant_id: TenantId,
     /// Target vector backend.
     pub target_backend: String,
     /// Percentage of vectors to sample during validation.
@@ -2822,8 +2814,8 @@ pub struct VectorPromoteRequest {
 /// Response payload describing a vector promotion or update.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorPromotionResponse {
-    /// Workspace whose vector backend was updated.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose vector backend was updated.
+    pub tenant_id: TenantId,
     /// Number of vectors copied to the target backend.
     pub copied_vectors: u64,
     /// Average top-K overlap observed during validation.
@@ -2839,8 +2831,8 @@ pub struct VectorPromotionResponse {
 /// Request payload for rolling back or finalizing a vector promotion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorPromotionUpdateRequest {
-    /// Workspace whose promotion state should be updated.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose promotion state should be updated.
+    pub tenant_id: TenantId,
     /// Promotion update action such as `rollback` or `finalize`.
     pub action: String,
 }

@@ -717,8 +717,13 @@ async fn create_secondary_session(
     llm_provider: Arc<dyn LLMProvider>,
 ) -> Result<SessionId> {
     let session_meta = SessionMeta {
-        workspace_id: environment.workspace_id.clone(),
-        user_id: environment.user_id.clone(),
+        tenant_id: moa_core::TenantId::from(
+            uuid::Uuid::parse_str(environment.workspace_id.as_str())
+                .map_err(|error| EvalError::InvalidConfig(error.to_string()))?,
+        ),
+        created_by: Some(moa_core::SessionActorRef::Identity {
+            id: uuid::Uuid::now_v7(),
+        }),
         model: llm_provider.capabilities().model_id,
         title: Some("secondary long-conversation session".to_string()),
         ..SessionMeta::default()
@@ -793,7 +798,7 @@ async fn materialize_primary_learning_if_requested(
     let segment = TaskSegment {
         id: segment_id,
         session_id: primary.session_id,
-        tenant_id: meta.workspace_id.to_string(),
+        tenant_id: meta.tenant_id.to_string(),
         segment_index: 0,
         task_summary: Some(config.task_summary),
         started_at,

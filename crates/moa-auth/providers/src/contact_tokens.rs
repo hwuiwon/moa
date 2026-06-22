@@ -158,7 +158,6 @@ impl ContactTokenIssuer {
             nbf: now.timestamp(),
             jti: Uuid::now_v7().to_string(),
             tenant_id: contact.tenant_id,
-            workspace_id: contact.workspace_id.clone(),
             state: contact.state,
             scopes: contact.scopes.clone(),
             permissions: contact.permissions.clone(),

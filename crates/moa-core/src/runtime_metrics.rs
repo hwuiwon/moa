@@ -15,7 +15,7 @@ use crate::config::MetricsConfig;
 use crate::error::{MoaError, Result};
 use crate::types::{
     ActionClass, ActionPolicyEffect, ActionReviewStatus, ModelId, ModelTier, SessionStatus,
-    WorkspaceId,
+    TenantId,
 };
 
 const LATENCY_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
@@ -114,10 +114,10 @@ pub fn metrics_endpoint_url(config: &MetricsConfig) -> Option<String> {
 }
 
 /// Records one created session.
-pub fn record_session_created(workspace_id: &WorkspaceId, status: &SessionStatus) {
+pub fn record_session_created(tenant_id: &TenantId, status: &SessionStatus) {
     counter!(
         "moa_sessions_total",
-        "workspace" => workspace_id.to_string(),
+        "tenant" => tenant_id.to_string(),
         "status" => session_status_label(status).to_string()
     )
     .increment(1);

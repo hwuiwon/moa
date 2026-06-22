@@ -1,6 +1,6 @@
 //! Shared score-run storage and score summary queries.
 
-use moa_core::{MemoryScope, WorkspaceId};
+use moa_core::{ActionRuleScope, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -549,7 +549,7 @@ pub async fn compare_experiment_score_breakdown_for_workspace(
 /// Inserts a score-run parent or validates that the existing parent matches the requested scope.
 pub async fn ensure_score_run_parent(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
     source: &'static str,
 ) -> Result<(), ScoringError> {
@@ -719,25 +719,17 @@ struct ScopeParts {
 }
 
 impl ScopeParts {
-    fn from_scope(scope: &MemoryScope) -> Self {
+    fn from_scope(scope: &ActionRuleScope) -> Self {
         match scope {
-            MemoryScope::Global => Self {
+            ActionRuleScope::WorkspaceDefault => Self {
                 scope: "global",
                 workspace_id: None,
                 user_id: None,
             },
-            MemoryScope::Workspace { workspace_id } => Self {
+            ActionRuleScope::Tenant { tenant_id } => Self {
                 scope: "workspace",
-                workspace_id: Some(workspace_id.to_string()),
+                workspace_id: Some(tenant_id.to_string()),
                 user_id: None,
-            },
-            MemoryScope::User {
-                workspace_id,
-                user_id,
-            } => Self {
-                scope: "user",
-                workspace_id: Some(workspace_id.to_string()),
-                user_id: Some(user_id.to_string()),
             },
         }
     }

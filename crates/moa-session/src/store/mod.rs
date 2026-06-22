@@ -12,8 +12,8 @@ use moa_core::{
     LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError, Result, SegmentAssessment,
     SegmentBaseline, SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter,
     SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, ToolCallId, ToolCallSummary,
-    WorkspaceAnalyticsSummary, WorkspaceId, record_session_created, record_session_event_append,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, TenantAnalyticsSummary, ToolCallId,
+    ToolCallSummary, WorkspaceId, record_session_created, record_session_event_append,
     record_session_event_decoded_bytes, record_session_event_load, record_session_event_replay,
     record_sessions_active, record_turn_completed,
 };
@@ -56,7 +56,7 @@ pub struct PostgresSessionStore {
 /// Request to replace a session's active channel route binding.
 pub struct SessionChannelBindingReplacement<'a> {
     /// Tenant that owns the contact and session.
-    pub tenant_id: Uuid,
+    pub tenant_id: moa_core::TenantId,
     /// Workspace that owns the session.
     pub workspace_id: &'a WorkspaceId,
     /// Session whose active channel is changing.
@@ -178,12 +178,12 @@ impl PostgresSessionStore {
         moa_core::get_session_summary(&self.pool, self.schema_name(), session_id).await
     }
 
-    /// Lists per-tool analytics rows, optionally scoped to one workspace.
+    /// Lists per-tool analytics rows, optionally scoped to one tenant.
     pub async fn list_tool_call_summaries(
         &self,
-        workspace_id: Option<&WorkspaceId>,
+        tenant_id: Option<&moa_core::TenantId>,
     ) -> Result<Vec<ToolCallSummary>> {
-        moa_core::list_tool_call_summaries(&self.pool, self.schema_name(), workspace_id).await
+        moa_core::list_tool_call_summaries(&self.pool, self.schema_name(), tenant_id).await
     }
 
     /// Lists per-turn analytics rows for one session.
@@ -194,22 +194,22 @@ impl PostgresSessionStore {
         moa_core::list_session_turn_metrics(&self.pool, self.schema_name(), session_id).await
     }
 
-    /// Loads aggregated workspace analytics over a recent day window.
-    pub async fn get_workspace_stats(
+    /// Loads aggregated tenant analytics over a recent day window.
+    pub async fn get_tenant_stats(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &moa_core::TenantId,
         days: u32,
-    ) -> Result<WorkspaceAnalyticsSummary> {
-        moa_core::get_workspace_stats(&self.pool, self.schema_name(), workspace_id, days).await
+    ) -> Result<TenantAnalyticsSummary> {
+        moa_core::get_tenant_stats(&self.pool, self.schema_name(), tenant_id, days).await
     }
 
-    /// Lists daily cache trend rows for one workspace.
+    /// Lists daily cache trend rows for one tenant.
     pub async fn list_cache_daily_metrics(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &moa_core::TenantId,
         days: u32,
     ) -> Result<Vec<CacheDailyMetric>> {
-        moa_core::list_cache_daily_metrics(&self.pool, self.schema_name(), workspace_id, days).await
+        moa_core::list_cache_daily_metrics(&self.pool, self.schema_name(), tenant_id, days).await
     }
 
     /// Refreshes materialized analytics views using concurrent refreshes.

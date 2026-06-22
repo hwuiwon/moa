@@ -5,7 +5,8 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use moa_core::{
     Event, EventRecord, ExperienceRecord, ExperienceResource, QueryRewriteResult,
-    SegmentAssessment, SessionMeta, TaskFacetSet, TaskFingerprint, TaskSegment, WorkingContext,
+    SegmentAssessment, SessionMeta, TaskFacetSet, TaskFingerprint, TaskSegment, UserId,
+    WorkingContext, WorkspaceId,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -67,9 +68,9 @@ pub fn experience_from_assessment(
         id: Uuid::now_v7(),
         segment_id: segment.id,
         session_id: segment.session_id,
-        tenant_id: segment.tenant_id.clone(),
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
+        tenant_id: session.tenant_id,
+        workspace_id: experience_workspace_id(session),
+        user_id: experience_user_id(session),
         task_summary: Some(summary.to_string()),
         task_fingerprint: fingerprint,
         task_facets: facets,
@@ -87,6 +88,19 @@ pub fn experience_from_assessment(
         extraction_policy_version: EXPERIENCE_EXTRACTION_POLICY_VERSION.to_string(),
         created_at: now,
     }
+}
+
+fn experience_workspace_id(session: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(session.tenant_id.to_string())
+}
+
+fn experience_user_id(session: &SessionMeta) -> UserId {
+    let id = session
+        .contact
+        .as_ref()
+        .map(|contact| contact.contact_id.to_string())
+        .unwrap_or_else(|| format!("tenant:{}", session.tenant_id));
+    UserId::new(id)
 }
 
 /// Builds an experience record from a segment when the segment already carries an assessment.
@@ -468,7 +482,7 @@ fn normalized_list(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{SegmentId, SessionId};
+    use moa_core::{SegmentId, SessionId, TenantId};
 
     use super::*;
 
@@ -504,8 +518,7 @@ mod tests {
             .expect("fixed test timestamp should be valid");
         let session = SessionMeta {
             id: session_id,
-            workspace_id: "workspace".into(),
-            user_id: "user".into(),
+            tenant_id: TenantId::new(),
             ..SessionMeta::default()
         };
         let assessment = SegmentAssessment {

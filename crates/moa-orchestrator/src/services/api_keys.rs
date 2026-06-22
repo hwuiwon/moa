@@ -48,7 +48,8 @@ impl ApiKeys for ApiKeysImpl {
         let identity = require_identity(&ctx)?;
         require_tenant_member(&identity).await?;
         if let Some(agent_id) = request.for_agent_id {
-            require_agent_operator_or_tenant_admin(&identity, agent_id, identity.tenant_id).await?;
+            require_agent_operator_or_tenant_admin(&identity, agent_id, identity.tenant_id.0)
+                .await?;
         }
 
         let pool = OrchestratorCtx::current_graph_pool();
@@ -126,7 +127,7 @@ async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> 
         identity,
         ObjectType::Tenant,
         identity.tenant_id,
-        Relation::Member,
+        Relation::Operator,
     )
     .await
     .map_err(translate_authz_error)

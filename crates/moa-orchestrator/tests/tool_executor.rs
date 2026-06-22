@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::wire::ToolDescriptor;
 use moa_core::{
-    ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel,
+    ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel, TenantId,
     ToolCallId, ToolCallRequest, ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape,
-    ToolOutput, ToolPolicySpec, UserId, WorkspaceId, read_tool_policy, write_tool_policy,
+    ToolOutput, ToolPolicySpec, UserId, read_tool_policy, write_tool_policy,
 };
 use moa_hands::{ToolRegistry, ToolRouter};
 use moa_orchestrator::services::tool_executor::{
@@ -95,7 +95,7 @@ fn tool_request(
         input: json!({}),
         active_canary: None,
         session_id: None,
-        workspace_id: WorkspaceId::new("workspace-1"),
+        tenant_id: TenantId::from(Uuid::from_u128(1)),
         user_id: UserId::new("user-1"),
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
     }

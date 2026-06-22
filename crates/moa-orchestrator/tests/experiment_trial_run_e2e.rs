@@ -14,7 +14,7 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
-    Event, EventRange, EventRecord, MemoryScope, ModelId, SessionId, WorkspaceId, traits::Identity,
+    ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, TenantId, traits::Identity,
 };
 use moa_experiments::{
     model::{
@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use crate::support::{
     restate_runtime::{
-        OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_editor,
+        OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_tenant_admin,
         register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
         test_user_identity, with_identity,
     },
@@ -96,12 +96,11 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(format!("experiment-trial-run-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    grant_workspace_editor(&identity, &workspace_id).await?;
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
@@ -118,7 +117,7 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
         let trial = new_trial(run.run_uid, plan_revision_uid);
         let trial_key = trial.trial_key.clone();
         let workflow_request = ExperimentTrialRunWorkflowRequest {
-            workspace_id: workspace_id.clone(),
+            tenant_id,
             trial: trial.clone(),
             target: agent_loop_target(),
             variant: baseline_variant(),
@@ -374,7 +373,7 @@ fn new_parent_run(identity: &Identity) -> NewExperimentRun {
     }
 }
 
-async fn publish_trial_plan(pool: &PgPool, scope: &MemoryScope) -> Result<Uuid> {
+async fn publish_trial_plan(pool: &PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
     let source = r#"
 api_version: moa.artifact/v1
 kind: experiment_plan

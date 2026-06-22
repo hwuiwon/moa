@@ -301,13 +301,21 @@ fn event_summary_line(record: &EventRecord) -> String {
             truncate(error)
         ),
         Event::SessionCreated {
-            workspace_id,
-            user_id,
+            tenant_id,
+            contact_id,
+            created_by,
             model,
             channel,
         } => format!(
-            "#{} session_created workspace={workspace_id} user={user_id} model={model} channel={channel}",
-            record.sequence_num
+            "#{} session_created tenant={tenant_id} contact={} created_by={} model={model} channel={channel}",
+            record.sequence_num,
+            contact_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            created_by
+                .as_ref()
+                .map(|actor| format!("{actor:?}"))
+                .unwrap_or_else(|| "none".to_string()),
         ),
         Event::SessionStatusChanged { from, to } => {
             format!("#{} session_status {from:?} -> {to:?}", record.sequence_num)

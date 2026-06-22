@@ -10,11 +10,11 @@ pub(super) struct SimulatorContext {
 
 pub(super) async fn load_simulator_context(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial: ExperimentTrialRecord,
 ) -> Result<SimulatorContext, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             build_simulator_context(pool, scope, trial)
@@ -28,7 +28,7 @@ pub(super) async fn load_simulator_context(
 
 async fn build_simulator_context(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     trial: ExperimentTrialRecord,
 ) -> Result<SimulatorContext, HandlerError> {
     let registry = ArtifactRegistry::new(pool);

@@ -10,11 +10,10 @@ use uuid::Uuid;
 
 use crate::services::eval::{EvalServiceError, failed_eval_run_response};
 use crate::services::eval::{
-    execute_eval_run_request_isolated, status_response_from_run_response,
-    verify_run_status_workspace,
+    execute_eval_run_request_isolated, status_response_from_run_response, verify_run_status_tenant,
 };
 
-const K_WORKSPACE_ID: &str = "workspace_id";
+const K_TENANT_ID: &str = "tenant_id";
 const K_STATUS: &str = "status";
 const K_RESPONSE: &str = "response";
 
@@ -47,7 +46,7 @@ pub struct EvalRunImpl;
 
 impl EvalRun for EvalRunImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: called only from Eval/run after the workspace member check.
+    // SAFETY: called only from Eval/run after the tenant operator check.
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -55,16 +54,16 @@ impl EvalRun for EvalRunImpl {
     ) -> Result<Json<EvalRunResponse>, HandlerError> {
         annotate_restate_handler_span("EvalRun", "run");
         let request = request.into_inner();
-        ctx.set(K_WORKSPACE_ID, Json(request.request.workspace_id.clone()));
+        ctx.set(K_TENANT_ID, Json(request.request.tenant_id));
         ctx.set(K_STATUS, Json(EvalRunStatus::Running));
-        let workspace_id = request.request.workspace_id.clone();
+        let tenant_id = request.request.tenant_id;
         let run_id = request.run_id;
         let response = execute_eval_run_request_isolated(request.run_id, request.request).await;
         let response = if response.run_id == run_id {
             response
         } else {
             failed_eval_run_response(
-                workspace_id,
+                tenant_id,
                 run_id,
                 format!(
                     "eval workflow produced mismatched run id {}",
@@ -78,7 +77,7 @@ impl EvalRun for EvalRunImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: called only from Eval/run_status after the workspace member check.
+    // SAFETY: called only from Eval/run_status after the tenant operator check.
     async fn status(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -89,8 +88,8 @@ impl EvalRun for EvalRunImpl {
         if request.run_id.to_string() != ctx.key() {
             return Err(TerminalError::new_with_code(404, "eval run id mismatch").into());
         }
-        let workspace_id = ctx
-            .get::<Json<moa_core::WorkspaceId>>(K_WORKSPACE_ID)
+        let tenant_id = ctx
+            .get::<Json<moa_core::TenantId>>(K_TENANT_ID)
             .await?
             .map(Json::into_inner)
             .ok_or_else(|| TerminalError::new_with_code(404, "eval run not found"))?;
@@ -107,7 +106,7 @@ impl EvalRun for EvalRunImpl {
                 .map(Json::into_inner)
                 .unwrap_or(EvalRunStatus::Pending);
             EvalRunStatusResponse {
-                workspace_id,
+                tenant_id,
                 run_id: request.run_id,
                 status,
                 suite_name: None,
@@ -117,7 +116,7 @@ impl EvalRun for EvalRunImpl {
                 error: None,
             }
         };
-        verify_run_status_workspace(&request.workspace_id, &response)
+        verify_run_status_tenant(request.tenant_id, &response)
             .map_err(eval_error_to_handler_error)?;
         Ok(Json(response))
     }

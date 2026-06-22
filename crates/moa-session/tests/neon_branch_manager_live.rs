@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use moa_core::{
-    BranchManager, MoaConfig, ModelId, SessionFilter, SessionMeta, SessionStore, UserId,
-    WorkspaceId,
+    BranchManager, MoaConfig, ModelId, SessionActorRef, SessionFilter, SessionMeta, SessionStore,
+    TenantId,
 };
 use moa_session::{NeonBranchManager, PostgresSessionStore};
 use reqwest::Client;
@@ -99,15 +99,25 @@ fn require_neon_live_env() -> bool {
     true
 }
 
-async fn wait_for_workspace_session_count(
+fn tenant_id(label: &str) -> TenantId {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.bytes().enumerate() {
+        bytes[index % 16] = bytes[index % 16].wrapping_mul(31).wrapping_add(byte);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
+}
+
+async fn wait_for_tenant_session_count(
     store: &PostgresSessionStore,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     minimum: usize,
 ) -> Vec<moa_core::SessionSummary> {
     for _attempt in 0..20 {
         let sessions = store
             .list_sessions(SessionFilter {
-                workspace_id: Some(workspace_id.clone()),
+                tenant_id: Some(tenant_id),
                 ..SessionFilter::default()
             })
             .await
@@ -120,7 +130,7 @@ async fn wait_for_workspace_session_count(
 
     store
         .list_sessions(SessionFilter {
-            workspace_id: Some(workspace_id.clone()),
+            tenant_id: Some(tenant_id),
             ..SessionFilter::default()
         })
         .await
@@ -208,19 +218,20 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
         .expect("MOA_RUN_LIVE_NEON_TESTS=1 requires NEON_PARENT_BRANCH_ID or permission to list Neon branches");
     let manager = NeonBranchManager::from_config(&config).expect("manager");
     let main_store = live_session_store(&config.database.url).await;
-    let workspace_id = WorkspaceId::new(format!("neon-live-{}", Uuid::now_v7().simple()));
+    let seed_tenant_id = tenant_id(&format!("neon-live-{}", Uuid::now_v7().simple()));
     let seed_session_id = main_store
         .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("neon-live-user"),
+            tenant_id: seed_tenant_id,
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(1),
+            }),
             model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
         .await
         .expect("create seed session on main");
     let fresh_main_store = live_session_store(&config.database.url).await;
-    let visible_on_main =
-        wait_for_workspace_session_count(&fresh_main_store, &workspace_id, 1).await;
+    let visible_on_main = wait_for_tenant_session_count(&fresh_main_store, seed_tenant_id, 1).await;
     assert!(
         visible_on_main
             .iter()
@@ -233,19 +244,20 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
         .expect("create checkpoint");
     let branch_store = live_session_store(&checkpoint.connection_url).await;
 
-    let inherited = wait_for_workspace_session_count(&branch_store, &workspace_id, 1).await;
+    let inherited = wait_for_tenant_session_count(&branch_store, seed_tenant_id, 1).await;
     assert!(
         inherited
             .iter()
             .any(|session| session.session_id == seed_session_id)
     );
 
-    let branch_only_workspace =
-        WorkspaceId::new(format!("neon-branch-{}", Uuid::now_v7().simple()));
+    let branch_only_tenant_id = tenant_id(&format!("neon-branch-{}", Uuid::now_v7().simple()));
     let branch_only_session = branch_store
         .create_session(SessionMeta {
-            workspace_id: branch_only_workspace.clone(),
-            user_id: UserId::new("branch-only-user"),
+            tenant_id: branch_only_tenant_id,
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(1),
+            }),
             model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
@@ -253,7 +265,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
         .expect("create branch-only session");
 
     let branch_sessions =
-        wait_for_workspace_session_count(&branch_store, &branch_only_workspace, 1).await;
+        wait_for_tenant_session_count(&branch_store, branch_only_tenant_id, 1).await;
     assert!(
         branch_sessions
             .iter()
@@ -262,7 +274,7 @@ async fn neon_checkpoint_branch_connection_is_copy_on_write() {
 
     let main_sessions = main_store
         .list_sessions(SessionFilter {
-            workspace_id: Some(branch_only_workspace),
+            tenant_id: Some(branch_only_tenant_id),
             ..SessionFilter::default()
         })
         .await

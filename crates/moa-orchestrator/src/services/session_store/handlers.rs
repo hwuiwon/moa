@@ -29,9 +29,9 @@ impl RestateSessionStore for SessionStoreImpl {
         require_authz_with_delegation(
             &fga,
             &identity,
-            ObjectType::Workspace,
-            &meta.workspace_id,
-            Relation::Member,
+            ObjectType::Tenant,
+            meta.tenant_id,
+            Relation::Operator,
         )
         .await
         .map_err(translate_authz_error)?;
@@ -70,9 +70,9 @@ impl RestateSessionStore for SessionStoreImpl {
         require_authz_with_delegation(
             &fga,
             &identity,
-            ObjectType::Workspace,
-            &request.meta.workspace_id,
-            Relation::Member,
+            ObjectType::Tenant,
+            request.meta.tenant_id,
+            Relation::Operator,
         )
         .await
         .map_err(translate_authz_error)?;
@@ -208,19 +208,19 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn workspace_cost_since(
+    async fn tenant_cost_since(
         &self,
         ctx: Context<'_>,
-        request: Json<WorkspaceCostSinceRequest>,
+        request: Json<TenantCostSinceRequest>,
     ) -> Result<u32, HandlerError> {
-        annotate_restate_handler_span("SessionStore", "workspace_cost_since");
+        annotate_restate_handler_span("SessionStore", "tenant_cost_since");
         let store = self.store.clone();
         let request = request.into_inner();
         let service = Self { store };
 
         Ok(ctx
-            .run(|| async move { service.workspace_cost_since_inner(request).await })
-            .name("workspace_cost_since")
+            .run(|| async move { service.tenant_cost_since_inner(request).await })
+            .name("tenant_cost_since")
             .await?)
     }
 
@@ -505,7 +505,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_learning_candidate");
         let store = self.store.clone();
         let request = request.into_inner();
-        authorize_workspace_read(&ctx, &request.workspace_id).await?;
+        authorize_tenant_read(&ctx, request.tenant_id).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -647,18 +647,18 @@ async fn authorize_session_read(
     .map_err(translate_authz_error)
 }
 
-async fn authorize_workspace_read(
+async fn authorize_tenant_read(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: moa_core::TenantId,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        Relation::Member,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Operator,
     )
     .await
     .map_err(translate_authz_error)

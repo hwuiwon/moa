@@ -2,15 +2,22 @@
 
 use anyhow::Result;
 use moa_core::{
-    Event, EventFilter, EventRange, ModelId, SessionMeta, SessionStatus, SessionStore, UserId,
-    WorkspaceId,
+    Event, EventFilter, EventRange, ModelId, SessionActorRef, SessionMeta, SessionStatus,
+    SessionStore, TenantId,
 };
 use moa_session::{PostgresSessionStore, testing};
+use uuid::Uuid;
 
-fn test_session_meta(workspace_id: &str) -> SessionMeta {
+fn test_session_meta(_workspace_id: &str) -> SessionMeta {
     SessionMeta {
-        workspace_id: WorkspaceId::new(workspace_id),
-        user_id: UserId::new("user-1"),
+        tenant_id: TenantId::from(
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+                .expect("fixture tenant id parses"),
+        ),
+        created_by: Some(SessionActorRef::Identity {
+            id: Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+                .expect("fixture identity id parses"),
+        }),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }
@@ -38,8 +45,8 @@ async fn create_session_persists_requested_metadata() -> Result<()> {
     let persisted = store.get_session(session_id).await?;
 
     assert_eq!(persisted.id, meta.id);
-    assert_eq!(persisted.workspace_id, meta.workspace_id);
-    assert_eq!(persisted.user_id, meta.user_id);
+    assert_eq!(persisted.tenant_id, meta.tenant_id);
+    assert_eq!(persisted.created_by, meta.created_by);
     assert_eq!(persisted.model, meta.model);
     assert_eq!(persisted.status, meta.status);
 

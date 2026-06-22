@@ -7,6 +7,7 @@ use chrono::Utc;
 use httpmock::{Method::GET, MockServer};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use moa_auth_providers_auth0::Auth0AuthProvider;
+use moa_core::TenantId;
 use moa_core::traits::{AuthProvider, Credential, IdentityType};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
@@ -73,7 +74,7 @@ async fn jwt_validation_accepts_self_signed_auth0_token() {
         .expect("cached valid token should authenticate");
 
     assert_eq!(first.identity_type, IdentityType::User);
-    assert_eq!(first.tenant_id, tenant_id);
+    assert_eq!(first.tenant_id, TenantId::from(tenant_id));
     assert_eq!(first.api_key_id, None);
     assert_eq!(first.acting_on_behalf_of, None);
     assert_eq!(second.id, first.id);

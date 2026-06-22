@@ -64,13 +64,13 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     let registry = SkillRegistry::new(store.pool().clone());
     let first_uid = registry
         .upsert_by_name(NewSkill::from_skill_markdown(
-            scope.clone(),
+            scope,
             DISTILLED_SKILL.to_string(),
         ))
         .await?;
     let second_uid = registry
         .upsert_by_name(NewSkill::from_skill_markdown(
-            scope.clone(),
+            scope,
             DISTILLED_SKILL.to_string(),
         ))
         .await?;
@@ -179,13 +179,13 @@ async fn registry_versions_when_supporting_file_changes() -> Result<()> {
 
     let first_uid = registry
         .upsert_by_name(NewSkill::from_package(
-            scope.clone(),
+            scope,
             package_with_script(b"printf first\n".to_vec()),
         ))
         .await?;
     let second_uid = registry
         .upsert_by_name(NewSkill::from_package(
-            scope.clone(),
+            scope,
             package_with_script(b"printf first\n".to_vec()),
         ))
         .await?;
@@ -193,7 +193,7 @@ async fn registry_versions_when_supporting_file_changes() -> Result<()> {
 
     let third_uid = registry
         .upsert_by_name(NewSkill::from_package(
-            scope.clone(),
+            scope,
             package_with_script(b"printf second\n".to_vec()),
         ))
         .await?;

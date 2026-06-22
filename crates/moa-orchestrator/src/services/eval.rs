@@ -19,8 +19,8 @@ use moa_core::wire::{
     EvalSuiteListResponse, EvalSuiteSummary,
 };
 #[cfg(feature = "internal-eval-runner")]
-use moa_core::{MemoryScope, ScopeContext, ScopedConn};
-use moa_core::{MoaConfig, WorkspaceId};
+use moa_core::{ActionRuleScope, ScopeContext, ScopedConn};
+use moa_core::{MoaConfig, TenantId, WorkspaceId};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::{EvalEngine, ReporterOptions, build_reporters};
 use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite, build_eval_plan};
@@ -62,43 +62,43 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 #[restate_sdk::service]
 #[name = "Eval"]
 pub trait Eval {
-    /// Plans a hosted eval suite after a workspace member check.
+    /// Plans a hosted eval suite after a tenant operator check.
     async fn plan(request: Json<EvalPlanRequest>) -> Result<Json<EvalPlanResponse>, HandlerError>;
 
-    /// Lists supplied hosted eval suite documents after a workspace member check.
+    /// Lists supplied hosted eval suite documents after a tenant operator check.
     async fn suites_list(
         request: Json<EvalSuiteListRequest>,
     ) -> Result<Json<EvalSuiteListResponse>, HandlerError>;
 
-    /// Runs a hosted eval suite after a workspace member check.
+    /// Runs a hosted eval suite after a tenant operator check.
     async fn run(request: Json<EvalRunRequest>) -> Result<Json<EvalRunResponse>, HandlerError>;
 
-    /// Reads a hosted eval run status after a workspace member check.
+    /// Reads a hosted eval run status after a tenant operator check.
     async fn run_status(
         request: Json<EvalRunStatusRequest>,
     ) -> Result<Json<EvalRunStatusResponse>, HandlerError>;
 
-    /// Registers a hosted eval dataset after workspace member and editor checks.
+    /// Registers a hosted eval dataset after tenant operator checks.
     async fn datasets_register(
         request: Json<EvalDatasetRegisterRequest>,
     ) -> Result<Json<EvalDatasetRegisterResponse>, HandlerError>;
 
-    /// Lists hosted eval datasets after a workspace member check.
+    /// Lists hosted eval datasets after a tenant operator check.
     async fn datasets_list(
         request: Json<EvalDatasetListRequest>,
     ) -> Result<Json<EvalDatasetListResponse>, HandlerError>;
 
-    /// Replays a hosted eval dataset after a workspace member check.
+    /// Replays a hosted eval dataset after a tenant operator check.
     async fn replay(
         request: Json<EvalReplayRequest>,
     ) -> Result<Json<EvalReplayResponse>, HandlerError>;
 
-    /// Reads hosted eval score summaries after a workspace member check.
+    /// Reads hosted eval score summaries after a tenant operator check.
     async fn scores(
         request: Json<EvalScoresRequest>,
     ) -> Result<Json<EvalScoresResponse>, HandlerError>;
 
-    /// Compares hosted eval score summaries after a workspace member check.
+    /// Compares hosted eval score summaries after a tenant operator check.
     async fn compare(
         request: Json<EvalCompareRequest>,
     ) -> Result<Json<EvalCompareResponse>, HandlerError>;
@@ -117,7 +117,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalPlanResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "plan");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let config = OrchestratorCtx::current_config().as_ref().clone();
 
         Ok(ctx
@@ -138,7 +138,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalSuiteListResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "suites_list");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         Ok(ctx
             .run(|| async move {
@@ -158,7 +158,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalRunResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "run");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         #[cfg(not(feature = "internal-eval-runner"))]
         {
@@ -183,7 +183,7 @@ impl Eval for EvalImpl {
                     )
                     .map_err(eval_error_to_handler_error)?;
                     Ok::<_, HandlerError>(Json(accepted_eval_run_response(
-                        acceptance_request.workspace_id,
+                        acceptance_request.tenant_id,
                         Uuid::now_v7(),
                         suite.name,
                     )))
@@ -209,14 +209,14 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalRunStatusResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "run_status");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let response = ctx
             .workflow_client::<EvalRunClient>(request.run_id.to_string())
             .status(Json(request.clone()))
             .call()
             .await?
             .into_inner();
-        verify_run_status_workspace(&request.workspace_id, &response)
+        verify_run_status_tenant(request.tenant_id, &response)
             .map_err(eval_error_to_handler_error)?;
         Ok(Json(response))
     }
@@ -229,8 +229,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalDatasetRegisterResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "datasets_register");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -252,7 +251,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalDatasetListResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "datasets_list");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -274,7 +273,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalReplayResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "replay");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         #[cfg(not(feature = "internal-eval-runner"))]
         {
@@ -306,7 +305,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalScoresResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "scores");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -314,12 +313,12 @@ impl Eval for EvalImpl {
                 score_summaries_for_workspace(
                     &pool,
                     ScoreRunRef {
-                        workspace_id: request.workspace_id,
+                        workspace_id: workspace_id_for_tenant(request.tenant_id),
                         run_id: request.run_id,
                     },
                 )
                 .await
-                .map(eval_scores_response_from_summary)
+                .map(|summary| eval_scores_response_from_summary(request.tenant_id, summary))
                 .map_err(scoring_error_to_eval_error)
                 .map(Json::from)
                 .map_err(eval_error_to_handler_error)
@@ -336,7 +335,7 @@ impl Eval for EvalImpl {
     ) -> Result<Json<EvalCompareResponse>, HandlerError> {
         annotate_restate_handler_span("Eval", "compare");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -344,13 +343,13 @@ impl Eval for EvalImpl {
                 compare_score_runs_for_workspace(
                     &pool,
                     ScoreCompareRef {
-                        workspace_id: request.workspace_id,
+                        workspace_id: workspace_id_for_tenant(request.tenant_id),
                         base_run: request.base_run,
                         new_run: request.new_run,
                     },
                 )
                 .await
-                .map(eval_compare_response_from_scores)
+                .map(|compare| eval_compare_response_from_scores(request.tenant_id, compare))
                 .map_err(scoring_error_to_eval_error)
                 .map(Json::from)
                 .map_err(eval_error_to_handler_error)
@@ -506,15 +505,15 @@ pub fn parse_dataset_items_for_workspace(
         .collect()
 }
 
-/// Verifies that a workflow status response is scoped to the requested workspace.
-pub fn verify_run_status_workspace(
-    request_workspace_id: &WorkspaceId,
+/// Verifies that a workflow status response is scoped to the requested tenant.
+pub fn verify_run_status_tenant(
+    request_tenant_id: TenantId,
     response: &EvalRunStatusResponse,
 ) -> Result<(), EvalServiceError> {
-    if &response.workspace_id != request_workspace_id {
+    if response.tenant_id != request_tenant_id {
         return Err(EvalServiceError::RunWorkspaceMismatch {
             run_id: response.run_id,
-            request_workspace_id: request_workspace_id.clone(),
+            request_workspace_id: workspace_id_for_tenant(request_tenant_id),
         });
     }
     Ok(())
@@ -524,7 +523,7 @@ pub fn verify_run_status_workspace(
 #[must_use]
 pub fn status_response_from_run_response(response: &EvalRunResponse) -> EvalRunStatusResponse {
     EvalRunStatusResponse {
-        workspace_id: response.workspace_id.clone(),
+        tenant_id: response.tenant_id,
         run_id: response.run_id,
         status: response.status,
         suite_name: Some(response.suite_name.clone()),
@@ -538,12 +537,12 @@ pub fn status_response_from_run_response(response: &EvalRunResponse) -> EvalRunS
 /// Builds a non-terminal accepted run response after starting a hosted workflow.
 #[must_use]
 pub fn accepted_eval_run_response(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_id: Uuid,
     suite_name: String,
 ) -> EvalRunResponse {
     EvalRunResponse {
-        workspace_id,
+        tenant_id,
         run_id,
         status: EvalRunStatus::Running,
         suite_name,
@@ -557,12 +556,12 @@ pub fn accepted_eval_run_response(
 /// Builds a failed terminal run response for errors before case-level results exist.
 #[must_use]
 pub fn failed_eval_run_response(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_id: Uuid,
     error: impl Into<String>,
 ) -> EvalRunResponse {
     EvalRunResponse {
-        workspace_id,
+        tenant_id,
         run_id,
         status: EvalRunStatus::Failed,
         suite_name: String::new(),
@@ -587,7 +586,7 @@ pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> 
     #[cfg(not(feature = "internal-eval-runner"))]
     {
         failed_eval_run_response(
-            request.workspace_id,
+            request.tenant_id,
             run_id,
             "hosted eval execution requires the internal-eval-runner feature",
         )
@@ -595,10 +594,10 @@ pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> 
 
     #[cfg(feature = "internal-eval-runner")]
     {
-        let workspace_id = request.workspace_id.clone();
+        let tenant_id = request.tenant_id;
         match Box::pin(execute_eval_run_request_inner(run_id, request)).await {
             Ok(response) => response,
-            Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
+            Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
         }
     }
 }
@@ -611,7 +610,7 @@ pub async fn execute_eval_run_request_isolated(
     #[cfg(not(feature = "internal-eval-runner"))]
     {
         failed_eval_run_response(
-            request.workspace_id,
+            request.tenant_id,
             run_id,
             "hosted eval execution requires the internal-eval-runner feature",
         )
@@ -619,15 +618,15 @@ pub async fn execute_eval_run_request_isolated(
 
     #[cfg(feature = "internal-eval-runner")]
     {
-        let workspace_id = request.workspace_id.clone();
+        let tenant_id = request.tenant_id;
         let join = tokio::task::spawn_blocking(move || {
             block_on_current_thread(Box::pin(execute_eval_run_request(run_id, request)))
         })
         .await;
         match join {
             Ok(Ok(response)) => response,
-            Ok(Err(error)) => failed_eval_run_response(workspace_id, run_id, error),
-            Err(error) => failed_eval_run_response(workspace_id, run_id, error.to_string()),
+            Ok(Err(error)) => failed_eval_run_response(tenant_id, run_id, error),
+            Err(error) => failed_eval_run_response(tenant_id, run_id, error.to_string()),
         }
     }
 }
@@ -684,7 +683,7 @@ fn suite_list_response(
     request: EvalSuiteListRequest,
 ) -> Result<EvalSuiteListResponse, EvalServiceError> {
     Ok(EvalSuiteListResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         suites: suite_summaries_from_documents(request.documents)?,
     })
 }
@@ -728,7 +727,7 @@ async fn execute_eval_run_request_inner(
         attach_summary_field(&mut summary, "reports", report_artifacts);
     }
     Ok(EvalRunResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         run_id,
         status: EvalRunStatus::Completed,
         suite_name: run.suite_name,
@@ -847,8 +846,9 @@ async fn register_dataset_for_workspace(
     pool: &PgPool,
     request: EvalDatasetRegisterRequest,
 ) -> Result<EvalDatasetRegisterResponse, EvalServiceError> {
+    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let items = parse_dataset_items_for_workspace(
-        &request.workspace_id,
+        &workspace_id,
         request.source_uri.as_deref(),
         &request.jsonl,
     )?;
@@ -883,7 +883,7 @@ async fn register_dataset_for_workspace(
         "DELETE FROM analytics.eval_dataset_items WHERE dataset_id = $1 AND workspace_id = $2",
     )
     .bind(dataset_id)
-    .bind(request.workspace_id.as_str())
+    .bind(workspace_id.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -915,7 +915,7 @@ async fn register_dataset_for_workspace(
 
     tx.commit().await?;
     Ok(EvalDatasetRegisterResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         dataset_id,
         name: request.name,
         items: u64::try_from(items.len())
@@ -927,6 +927,7 @@ async fn list_datasets_for_workspace(
     pool: &PgPool,
     request: EvalDatasetListRequest,
 ) -> Result<EvalDatasetListResponse, EvalServiceError> {
+    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let rows = sqlx::query(
         r#"
         SELECT d.dataset_id, d.name, d.source_path, COUNT(i.item_id)::BIGINT AS items
@@ -937,7 +938,7 @@ async fn list_datasets_for_workspace(
         ORDER BY d.created_at DESC
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(workspace_id.as_str())
     .fetch_all(pool)
     .await?;
 
@@ -945,7 +946,7 @@ async fn list_datasets_for_workspace(
     for row in rows {
         let items: i64 = row.try_get("items")?;
         datasets.push(EvalDatasetSummary {
-            workspace_id: request.workspace_id.clone(),
+            tenant_id: request.tenant_id,
             dataset_id: row.try_get("dataset_id")?,
             name: row.try_get("name")?,
             items: u64::try_from(items)
@@ -954,7 +955,7 @@ async fn list_datasets_for_workspace(
         });
     }
     Ok(EvalDatasetListResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         datasets,
     })
 }
@@ -965,6 +966,7 @@ async fn replay_dataset_for_workspace(
     pool: PgPool,
     request: EvalReplayRequest,
 ) -> Result<EvalReplayResponse, EvalServiceError> {
+    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let run_id = request.run_id.unwrap_or_else(Uuid::now_v7);
     let limit = option_u64_to_usize(request.limit, "limit")?;
     let replay_config = ReplayConfig {
@@ -976,7 +978,7 @@ async fn replay_dataset_for_workspace(
     };
     let items = load_dataset_items_for_workspace(
         &pool,
-        &request.workspace_id,
+        &workspace_id,
         request.dataset_id,
         replay_config.limit,
     )
@@ -984,10 +986,10 @@ async fn replay_dataset_for_workspace(
     if items.is_empty() {
         return Err(EvalServiceError::EmptyWorkspaceDataset {
             dataset_id: request.dataset_id,
-            workspace_id: request.workspace_id,
+            workspace_id,
         });
     }
-    ensure_eval_replay_score_run_parent(&pool, &request.workspace_id, run_id).await?;
+    ensure_eval_replay_score_run_parent(&pool, request.tenant_id, run_id).await?;
 
     let (sink, writer) = MpscSink::spawn(
         MpscSinkConfig::from(&config.observability.lineage),
@@ -1003,7 +1005,7 @@ async fn replay_dataset_for_workspace(
     .await?;
     writer.shutdown().await?;
     Ok(EvalReplayResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         run_id: report.run_id,
         dataset_id: report.dataset_id,
         items: u64::try_from(report.items)
@@ -1016,13 +1018,12 @@ async fn replay_dataset_for_workspace(
 #[cfg(feature = "internal-eval-runner")]
 async fn ensure_eval_replay_score_run_parent(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     run_id: Uuid,
 ) -> Result<(), EvalServiceError> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone()))
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    let scope_context = ScopeContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
         .await
         .map_err(|error| EvalServiceError::Runtime {
             message: error.to_string(),
@@ -1334,22 +1335,20 @@ fn replay_evaluator_name(cfg: &ReplayConfig) -> String {
     }
 }
 
-async fn authorize_workspace(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     relation: Relation,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)
+}
+
+fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
@@ -1371,9 +1370,12 @@ fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
     }
 }
 
-fn eval_scores_response_from_summary(summary: ScoreSummary) -> EvalScoresResponse {
+fn eval_scores_response_from_summary(
+    tenant_id: TenantId,
+    summary: ScoreSummary,
+) -> EvalScoresResponse {
     EvalScoresResponse {
-        workspace_id: summary.workspace_id,
+        tenant_id,
         run_id: summary.run_id,
         rows: summary
             .rows
@@ -1388,9 +1390,12 @@ fn eval_scores_response_from_summary(summary: ScoreSummary) -> EvalScoresRespons
     }
 }
 
-fn eval_compare_response_from_scores(compare: ScoreCompare) -> EvalCompareResponse {
+fn eval_compare_response_from_scores(
+    tenant_id: TenantId,
+    compare: ScoreCompare,
+) -> EvalCompareResponse {
     EvalCompareResponse {
-        workspace_id: compare.workspace_id,
+        tenant_id,
         base_run: compare.base_run,
         new_run: compare.new_run,
         rows: compare

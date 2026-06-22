@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use super::{
     AgentContext, AgentPolicySnapshot, CompletionRequest, ContactRef, EventRecord,
-    ModelCapabilities, SandboxFile, SessionId, SessionMeta, ToolCallId, ToolContent,
-    ToolInvocation, UserId, WorkspaceId,
+    ModelCapabilities, SandboxFile, SessionActorRef, SessionId, SessionMeta, TenantId, ToolCallId,
+    ToolContent, ToolInvocation,
 };
 
 /// Role of a context message passed to the LLM.
@@ -299,13 +299,14 @@ pub struct WorkingContext {
     pub model_capabilities: ModelCapabilities,
     /// Session identifier.
     pub session_id: SessionId,
-    /// User identifier.
-    pub user_id: UserId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Tenant runtime boundary that owns the session.
+    pub tenant_id: TenantId,
     /// Agent-facing contact snapshot attached to this session, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<ContactRef>,
+    /// Actor that created the session, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<SessionActorRef>,
     /// Configured agent policy pinned to this session, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
@@ -332,9 +333,9 @@ impl WorkingContext {
                 .saturating_sub(model_capabilities.max_output),
             model_capabilities,
             session_id: session.id,
-            user_id: session.user_id.clone(),
-            workspace_id: session.workspace_id.clone(),
+            tenant_id: session.tenant_id,
             contact: session.contact.clone(),
+            created_by: session.created_by.clone(),
             agent_context: session.agent_context.clone(),
             tool_schemas: Vec::new(),
             metadata: HashMap::new(),

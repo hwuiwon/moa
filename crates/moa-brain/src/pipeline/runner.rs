@@ -69,15 +69,20 @@ impl ContextPipeline {
 
     /// Runs the configured pipeline against a working context.
     pub async fn run(&self, ctx: &mut WorkingContext) -> Result<Vec<PipelineStageReport>> {
+        let contact_id = ctx
+            .contact
+            .as_ref()
+            .map(|contact| contact.contact_id.to_string())
+            .unwrap_or_else(|| "none".to_string());
         let pipeline_span = tracing::info_span!(
             "context_compilation",
             moa.session.id = %ctx.session_id,
-            moa.user.id = %ctx.user_id,
-            moa.workspace.id = %ctx.workspace_id,
+            moa.tenant.id = %ctx.tenant_id,
+            moa.contact.id = %contact_id,
             moa.model = %ctx.model_capabilities.model_id,
             langfuse.session.id = %ctx.session_id,
-            langfuse.user.id = %ctx.user_id,
-            langfuse.trace.metadata.workspace_id = %ctx.workspace_id,
+            langfuse.user.id = %contact_id,
+            langfuse.trace.metadata.tenant_id = %ctx.tenant_id,
             langfuse.trace.metadata.model = %ctx.model_capabilities.model_id,
             moa.pipeline.stage_count = self.stages.len() as i64,
             moa.pipeline.total_tokens = tracing::field::Empty,
@@ -95,12 +100,12 @@ impl ContextPipeline {
                     "pipeline_stage",
                     otel.name = %stage_span_name,
                     moa.session.id = %ctx.session_id,
-                    moa.user.id = %ctx.user_id,
-                    moa.workspace.id = %ctx.workspace_id,
+                    moa.tenant.id = %ctx.tenant_id,
+                    moa.contact.id = %contact_id,
                     moa.model = %ctx.model_capabilities.model_id,
                     langfuse.session.id = %ctx.session_id,
-                    langfuse.user.id = %ctx.user_id,
-                    langfuse.trace.metadata.workspace_id = %ctx.workspace_id,
+                    langfuse.user.id = %contact_id,
+                    langfuse.trace.metadata.tenant_id = %ctx.tenant_id,
                     langfuse.trace.metadata.model = %ctx.model_capabilities.model_id,
                     moa.pipeline.stage.number = stage.stage() as i64,
                     moa.pipeline.stage.name = %stage_name,
@@ -235,8 +240,8 @@ mod tests {
     use async_trait::async_trait;
     use moa_core::{
         Channel, ContextMessage, ContextProcessor, MoaError, ModelCapabilities, ModelId,
-        ProcessorOutput, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId,
-        WorkingContext, WorkspaceId,
+        ProcessorOutput, Result, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
+        WorkingContext,
     };
     use serde_json::json;
 
@@ -289,8 +294,6 @@ mod tests {
     async fn pipeline_runner_executes_stages_in_order() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
@@ -326,8 +329,6 @@ mod tests {
         // Pins: stable-prefix ratio counts deterministic tool schemas and leading system messages only.
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()

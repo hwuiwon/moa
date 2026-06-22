@@ -1,0 +1,729 @@
+-- Tenant-first runtime boundaries for shared-schema Postgres deployments.
+
+CREATE OR REPLACE FUNCTION moa.current_tenant_id() RETURNS UUID
+LANGUAGE SQL STABLE
+AS $$
+    SELECT NULLIF(current_setting('moa.tenant_id', TRUE), '')::UUID;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.current_contact_id() RETURNS UUID
+LANGUAGE SQL STABLE
+AS $$
+    SELECT NULLIF(current_setting('moa.contact_id', TRUE), '')::UUID;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.current_control_plane() RETURNS BOOLEAN
+LANGUAGE SQL STABLE
+AS $$
+    SELECT lower(COALESCE(NULLIF(current_setting('moa.control_plane', TRUE), ''), 'false'))
+        IN ('1', 'true', 't', 'yes', 'on');
+$$;
+
+CREATE OR REPLACE FUNCTION moa.drop_runtime_boundary_policies(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS contact_isolation ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS workspace_default_tenant_override ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_tenant_rls(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM moa.drop_runtime_boundary_policies(target_table);
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
+    EXECUTE format(
+        'CREATE POLICY tenant_isolation ON %s FOR ALL TO moa_app
+         USING (
+             moa.current_control_plane()
+             OR tenant_id::TEXT = moa.current_tenant_id()::TEXT
+         )
+         WITH CHECK (
+             moa.current_control_plane()
+             OR tenant_id::TEXT = moa.current_tenant_id()::TEXT
+         )',
+        target_table
+    );
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_contact_rls(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM moa.drop_runtime_boundary_policies(target_table);
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
+    EXECUTE format(
+        'CREATE POLICY contact_isolation ON %s FOR ALL TO moa_app
+         USING (
+             moa.current_control_plane()
+             OR (
+                 tenant_id::TEXT = moa.current_tenant_id()::TEXT
+                 AND (
+                     (moa.current_contact_id() IS NULL AND contact_id IS NULL)
+                     OR contact_id::TEXT = moa.current_contact_id()::TEXT
+                 )
+             )
+         )
+         WITH CHECK (
+             moa.current_control_plane()
+             OR (
+                 tenant_id::TEXT = moa.current_tenant_id()::TEXT
+                 AND (
+                     (moa.current_contact_id() IS NULL AND contact_id IS NULL)
+                     OR contact_id::TEXT = moa.current_contact_id()::TEXT
+                 )
+             )
+         )',
+        target_table
+    );
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_workspace_default_tenant_override_rls(target_table REGCLASS)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM moa.drop_runtime_boundary_policies(target_table);
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
+    EXECUTE format(
+        'CREATE POLICY workspace_default_tenant_override ON %s FOR ALL TO moa_app
+         USING (
+             moa.current_control_plane()
+             OR tenant_id::TEXT = moa.current_tenant_id()::TEXT
+             OR (
+                 tenant_id IS NULL
+                 AND moa.current_tenant_id() IS NOT NULL
+                 AND COALESCE(scope, '''') = ''global''
+                 AND user_id IS NULL
+             )
+         )
+         WITH CHECK (
+             moa.current_control_plane()
+             OR tenant_id::TEXT = moa.current_tenant_id()::TEXT
+         )',
+        target_table
+    );
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_age_tenant_rls(target_table REGCLASS) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
+
+    EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', target_table);
+
+    EXECUTE format(
+        'CREATE POLICY tenant_isolation ON %s FOR ALL TO moa_app
+         USING (
+             moa.current_control_plane()
+             OR moa.age_property(properties, ''workspace_id'')::TEXT
+                = moa.current_tenant_id()::TEXT
+         )
+         WITH CHECK (
+             moa.current_control_plane()
+             OR moa.age_property(properties, ''workspace_id'')::TEXT
+                = moa.current_tenant_id()::TEXT
+         )',
+        target_table
+    );
+
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO moa_app', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.workspace_text_to_tenant_uuid(value TEXT, table_name TEXT)
+RETURNS UUID
+LANGUAGE plpgsql IMMUTABLE
+AS $$
+BEGIN
+    IF value IS NULL OR value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+        RAISE EXCEPTION
+            'cannot infer tenant_id for %.workspace_id value %, manual tenant migration required',
+            table_name,
+            value
+            USING ERRCODE = 'P0001';
+    END IF;
+    RETURN value::UUID;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.raise_ambiguous_tenant_rows_if_public(
+    target_table REGCLASS,
+    table_name TEXT
+) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    ambiguous_value TEXT;
+BEGIN
+    IF current_schema() <> 'public' THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format(
+        'SELECT workspace_id FROM %s
+         WHERE tenant_id IS NULL
+           AND workspace_id IS NOT NULL
+           AND workspace_id !~* %L
+         LIMIT 1',
+        target_table,
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    )
+    INTO ambiguous_value;
+
+    IF ambiguous_value IS NOT NULL THEN
+        RAISE EXCEPTION
+            'cannot infer tenant_id for %.workspace_id value %, manual tenant migration required',
+            table_name,
+            ambiguous_value
+            USING ERRCODE = 'P0001';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.backfill_required_tenant_id(
+    target_table REGCLASS,
+    table_name TEXT
+) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    remaining_nulls BIGINT;
+BEGIN
+    PERFORM moa.raise_ambiguous_tenant_rows_if_public(target_table, table_name);
+
+    EXECUTE format(
+        'UPDATE %s
+         SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, %L)
+         WHERE tenant_id IS NULL
+           AND workspace_id IS NOT NULL
+           AND workspace_id ~* %L',
+        target_table,
+        table_name,
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    );
+
+    IF current_schema() <> 'public' THEN
+        EXECUTE format(
+            'UPDATE %s
+             SET tenant_id = md5(%L || '':'' || COALESCE(workspace_id, '''') || '':'' || ctid::TEXT)::UUID
+             WHERE tenant_id IS NULL',
+            target_table,
+            table_name
+        );
+    END IF;
+
+    EXECUTE format('SELECT COUNT(*) FROM %s WHERE tenant_id IS NULL', target_table)
+    INTO remaining_nulls;
+    IF remaining_nulls > 0 THEN
+        RAISE EXCEPTION
+            'cannot infer tenant_id for %, % rows remain without tenant_id; manual tenant migration required',
+            table_name,
+            remaining_nulls
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    EXECUTE format('ALTER TABLE %s ALTER COLUMN tenant_id SET NOT NULL', target_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.apply_workspace_default_tenant_constraint(
+    target_table REGCLASS,
+    constraint_name TEXT
+) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', target_table, constraint_name);
+    EXECUTE format(
+        'ALTER TABLE %s ADD CONSTRAINT %I CHECK (
+             tenant_id IS NOT NULL
+             OR (tenant_id IS NULL AND user_id IS NULL AND COALESCE(scope, '''') = ''global'')
+         )',
+        target_table,
+        constraint_name
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.set_runtime_tenant_columns() RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    session_tenant UUID;
+    session_contact UUID;
+BEGIN
+    IF NEW.tenant_id IS NULL THEN
+        IF TG_TABLE_NAME IN ('events', 'pending_signals', 'context_snapshots') THEN
+            EXECUTE format('SELECT tenant_id, contact_id FROM %I.sessions WHERE id = $1', TG_TABLE_SCHEMA)
+                INTO session_tenant, session_contact
+                USING NEW.session_id;
+            NEW.tenant_id := session_tenant;
+            IF TG_TABLE_NAME = 'events' AND NEW.contact_id IS NULL THEN
+                NEW.contact_id := session_contact;
+            END IF;
+        ELSE
+            NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
+                WHEN NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN NEW.workspace_id::UUID
+                WHEN current_schema() <> 'public'
+                    THEN gen_random_uuid()
+                ELSE moa.workspace_text_to_tenant_uuid(NEW.workspace_id, TG_TABLE_NAME)
+            END);
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION moa.set_memory_runtime_columns() RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    node_tenant UUID;
+    node_contact UUID;
+BEGIN
+    IF TG_TABLE_SCHEMA = 'moa' AND TG_TABLE_NAME = 'embeddings' THEN
+        SELECT tenant_id, contact_id
+        INTO node_tenant, node_contact
+        FROM moa.node_index
+        WHERE uid = NEW.uid;
+
+        IF NEW.tenant_id IS NULL THEN
+            NEW.tenant_id := COALESCE(node_tenant, moa.current_tenant_id());
+        END IF;
+        IF NEW.contact_id IS NULL THEN
+            NEW.contact_id := COALESCE(node_contact, moa.current_contact_id());
+        END IF;
+    ELSE
+        IF NEW.tenant_id IS NULL THEN
+            NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
+                WHEN NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN NEW.workspace_id::UUID
+                WHEN current_schema() <> 'public'
+                    THEN gen_random_uuid()
+                ELSE moa.workspace_text_to_tenant_uuid(NEW.workspace_id, TG_TABLE_NAME)
+            END);
+        END IF;
+        IF NEW.contact_id IS NULL THEN
+            NEW.contact_id := moa.current_contact_id();
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tenant_id UUID;
+UPDATE sessions
+SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, 'sessions')
+WHERE tenant_id IS NULL;
+ALTER TABLE sessions ALTER COLUMN tenant_id SET NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_tenant_updated ON sessions(tenant_id, updated_at DESC);
+DROP TRIGGER IF EXISTS sessions_set_tenant_columns ON sessions;
+CREATE TRIGGER sessions_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON sessions
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+
+ALTER TABLE events
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+UPDATE events e
+SET tenant_id = s.tenant_id,
+    contact_id = COALESCE(e.contact_id, s.contact_id)
+FROM sessions s
+WHERE e.session_id = s.id
+  AND (e.tenant_id IS NULL OR e.contact_id IS NULL);
+ALTER TABLE events ALTER COLUMN tenant_id SET NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_tenant_session ON events(tenant_id, session_id, sequence_num);
+CREATE INDEX IF NOT EXISTS idx_events_contact ON events(tenant_id, contact_id, timestamp)
+    WHERE contact_id IS NOT NULL;
+DROP TRIGGER IF EXISTS events_set_tenant_columns ON events;
+CREATE TRIGGER events_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON events
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+
+ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS tenant_id UUID;
+UPDATE pending_signals p
+SET tenant_id = s.tenant_id
+FROM sessions s
+WHERE p.session_id = s.id
+  AND p.tenant_id IS NULL;
+ALTER TABLE pending_signals ALTER COLUMN tenant_id SET NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_signals_tenant ON pending_signals(tenant_id, resolved_at, created_at);
+DROP TRIGGER IF EXISTS pending_signals_set_tenant_columns ON pending_signals;
+CREATE TRIGGER pending_signals_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON pending_signals
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+
+ALTER TABLE context_snapshots ADD COLUMN IF NOT EXISTS tenant_id UUID;
+UPDATE context_snapshots c
+SET tenant_id = s.tenant_id
+FROM sessions s
+WHERE c.session_id = s.id
+  AND c.tenant_id IS NULL;
+ALTER TABLE context_snapshots ALTER COLUMN tenant_id SET NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_context_snapshots_tenant ON context_snapshots(tenant_id, session_id);
+DROP TRIGGER IF EXISTS context_snapshots_set_tenant_columns ON context_snapshots;
+CREATE TRIGGER context_snapshots_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON context_snapshots
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+
+ALTER TABLE session_agent_context ADD COLUMN IF NOT EXISTS tenant_id UUID;
+UPDATE session_agent_context
+SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, 'session_agent_context')
+WHERE tenant_id IS NULL;
+ALTER TABLE session_agent_context ALTER COLUMN tenant_id SET NOT NULL;
+CREATE INDEX IF NOT EXISTS session_agent_context_tenant_idx
+    ON session_agent_context(tenant_id, agent_revision_uid);
+DROP TRIGGER IF EXISTS session_agent_context_set_tenant_columns ON session_agent_context;
+CREATE TRIGGER session_agent_context_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON session_agent_context
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS contact_id UUID;
+UPDATE contacts SET contact_id = id WHERE contact_id IS NULL;
+ALTER TABLE contacts ALTER COLUMN contact_id SET NOT NULL;
+
+ALTER TABLE moa.node_index
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+SELECT moa.backfill_required_tenant_id('moa.node_index'::REGCLASS, 'moa.node_index');
+DROP TRIGGER IF EXISTS node_index_set_memory_runtime_columns ON moa.node_index;
+CREATE TRIGGER node_index_set_memory_runtime_columns
+    BEFORE INSERT OR UPDATE ON moa.node_index
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_memory_runtime_columns();
+CREATE INDEX IF NOT EXISTS node_index_tenant_label_idx
+    ON moa.node_index(tenant_id, label)
+    WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS node_index_contact_label_idx
+    ON moa.node_index(tenant_id, contact_id, label)
+    WHERE valid_to IS NULL AND contact_id IS NOT NULL;
+
+ALTER TABLE moa.embeddings
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+UPDATE moa.embeddings e
+SET tenant_id = n.tenant_id,
+    contact_id = n.contact_id
+FROM moa.node_index n
+WHERE e.uid = n.uid
+  AND n.tenant_id IS NOT NULL
+  AND (e.tenant_id IS NULL OR e.contact_id IS NULL);
+SELECT moa.backfill_required_tenant_id('moa.embeddings'::REGCLASS, 'moa.embeddings');
+DROP TRIGGER IF EXISTS embeddings_set_memory_runtime_columns ON moa.embeddings;
+CREATE TRIGGER embeddings_set_memory_runtime_columns
+    BEFORE INSERT OR UPDATE ON moa.embeddings
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_memory_runtime_columns();
+CREATE INDEX IF NOT EXISTS embeddings_tenant_label_idx
+    ON moa.embeddings(tenant_id, label)
+    WHERE valid_to IS NULL;
+CREATE INDEX IF NOT EXISTS embeddings_contact_label_idx
+    ON moa.embeddings(tenant_id, contact_id, label)
+    WHERE valid_to IS NULL AND contact_id IS NOT NULL;
+
+ALTER TABLE moa.memory_digests
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+SELECT moa.backfill_required_tenant_id('moa.memory_digests'::REGCLASS, 'moa.memory_digests');
+DROP TRIGGER IF EXISTS memory_digests_set_memory_runtime_columns ON moa.memory_digests;
+CREATE TRIGGER memory_digests_set_memory_runtime_columns
+    BEFORE INSERT OR UPDATE ON moa.memory_digests
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_memory_runtime_columns();
+CREATE INDEX IF NOT EXISTS memory_digests_tenant_contact_idx
+    ON moa.memory_digests(tenant_id, contact_id, updated_at);
+
+ALTER TABLE moa.retrieval_lineage
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+SELECT moa.backfill_required_tenant_id('moa.retrieval_lineage'::REGCLASS, 'moa.retrieval_lineage');
+DROP TRIGGER IF EXISTS retrieval_lineage_set_memory_runtime_columns ON moa.retrieval_lineage;
+CREATE TRIGGER retrieval_lineage_set_memory_runtime_columns
+    BEFORE INSERT OR UPDATE ON moa.retrieval_lineage
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_memory_runtime_columns();
+CREATE INDEX IF NOT EXISTS retrieval_lineage_tenant_contact_idx
+    ON moa.retrieval_lineage(tenant_id, contact_id, retrieved_at);
+
+ALTER TABLE moa.graph_changelog
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS contact_id UUID;
+SELECT moa.backfill_required_tenant_id('moa.graph_changelog'::REGCLASS, 'moa.graph_changelog');
+DROP TRIGGER IF EXISTS graph_changelog_set_memory_runtime_columns ON moa.graph_changelog;
+CREATE TRIGGER graph_changelog_set_memory_runtime_columns
+    BEFORE INSERT OR UPDATE ON moa.graph_changelog
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_memory_runtime_columns();
+CREATE INDEX IF NOT EXISTS graph_changelog_tenant_created_idx
+    ON moa.graph_changelog(tenant_id, created_at DESC);
+
+ALTER TABLE moa.workspace_state ADD COLUMN IF NOT EXISTS tenant_id UUID;
+SELECT moa.backfill_required_tenant_id('moa.workspace_state'::REGCLASS, 'moa.workspace_state');
+DROP TRIGGER IF EXISTS workspace_state_set_tenant_columns ON moa.workspace_state;
+CREATE TRIGGER workspace_state_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON moa.workspace_state
+    FOR EACH ROW
+    EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+CREATE INDEX IF NOT EXISTS workspace_state_tenant_idx ON moa.workspace_state(tenant_id);
+
+DO $$
+DECLARE
+    table_name TEXT;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'moa.ingest_dedup',
+        'moa.ingest_dlq',
+        'moa.agent_installation',
+        'moa.agent_deployment'
+    ] LOOP
+        IF to_regclass(table_name) IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE %s ADD COLUMN IF NOT EXISTS tenant_id UUID', table_name::REGCLASS);
+            PERFORM moa.backfill_required_tenant_id(table_name::REGCLASS, table_name);
+            EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', replace(table_name, '.', '_') || '_set_tenant_columns', table_name::REGCLASS);
+            EXECUTE format(
+                'CREATE TRIGGER %I
+                 BEFORE INSERT OR UPDATE ON %s
+                 FOR EACH ROW
+                 EXECUTE FUNCTION moa.set_runtime_tenant_columns()',
+                replace(table_name, '.', '_') || '_set_tenant_columns',
+                table_name::REGCLASS
+            );
+            EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id)', replace(table_name, '.', '_') || '_tenant_rls_idx', table_name::REGCLASS);
+        END IF;
+    END LOOP;
+END $$;
+
+ALTER TABLE action_policy_rules ADD COLUMN IF NOT EXISTS tenant_id UUID;
+UPDATE action_policy_rules
+SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, 'action_policy_rules')
+WHERE tenant_id IS NULL
+  AND workspace_id <> 'global'
+  AND workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+DO $$
+DECLARE
+    ambiguous_value TEXT;
+BEGIN
+    SELECT workspace_id
+    INTO ambiguous_value
+    FROM action_policy_rules
+    WHERE tenant_id IS NULL
+      AND workspace_id <> 'global'
+      AND workspace_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    LIMIT 1;
+
+    IF ambiguous_value IS NOT NULL AND current_schema() = 'public' THEN
+        RAISE EXCEPTION
+            'cannot infer tenant_id for action_policy_rules.workspace_id value %, manual tenant migration required',
+            ambiguous_value
+            USING ERRCODE = 'P0001';
+    END IF;
+
+    IF current_schema() <> 'public' THEN
+        UPDATE action_policy_rules
+        SET tenant_id = md5('action_policy_rules:' || workspace_id || ':' || id::TEXT)::UUID
+        WHERE tenant_id IS NULL
+          AND workspace_id <> 'global';
+    END IF;
+END $$;
+SELECT moa.apply_workspace_default_tenant_constraint(
+    'action_policy_rules'::REGCLASS,
+    'action_policy_rules_tenant_or_workspace_default_check'
+);
+CREATE INDEX IF NOT EXISTS action_policy_rules_tenant_rls_idx
+    ON action_policy_rules(tenant_id, tool, created_at);
+
+ALTER TABLE workspace_action_reviews ADD COLUMN IF NOT EXISTS tenant_id UUID;
+SELECT moa.backfill_required_tenant_id('workspace_action_reviews'::REGCLASS, 'workspace_action_reviews');
+CREATE INDEX IF NOT EXISTS workspace_action_reviews_tenant_rls_idx
+    ON workspace_action_reviews(tenant_id, created_at DESC);
+
+DO $$
+DECLARE
+    table_name TEXT;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'task_segments',
+        'learning_log',
+        'experience_records',
+        'experience_attributions',
+        'learning_candidates'
+    ] LOOP
+        IF to_regclass(table_name) IS NOT NULL THEN
+            EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id)', table_name || '_tenant_rls_idx', table_name::REGCLASS);
+        END IF;
+    END LOOP;
+END $$;
+
+DO $$
+DECLARE
+    table_name TEXT;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'moa.artifact',
+        'moa.artifact_revision',
+        'moa.artifact_file'
+    ] LOOP
+        IF to_regclass(table_name) IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE %s ADD COLUMN IF NOT EXISTS tenant_id UUID', table_name::REGCLASS);
+            PERFORM moa.raise_ambiguous_tenant_rows_if_public(table_name::REGCLASS, table_name);
+            EXECUTE format(
+                'UPDATE %s
+                 SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, %L)
+                 WHERE tenant_id IS NULL
+                   AND workspace_id IS NOT NULL
+                   AND workspace_id ~* %L',
+                table_name::REGCLASS,
+                table_name,
+                '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            );
+            IF current_schema() <> 'public' THEN
+                EXECUTE format(
+                    'UPDATE %s
+                     SET tenant_id = md5(%L || '':'' || workspace_id || '':'' || ctid::TEXT)::UUID
+                     WHERE tenant_id IS NULL
+                       AND workspace_id IS NOT NULL',
+                    table_name::REGCLASS,
+                    table_name
+                );
+            END IF;
+            PERFORM moa.apply_workspace_default_tenant_constraint(
+                table_name::REGCLASS,
+                replace(table_name, '.', '_') || '_tenant_or_workspace_default_check'
+            );
+            EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id)', replace(table_name, '.', '_') || '_tenant_rls_idx', table_name::REGCLASS);
+        END IF;
+    END LOOP;
+END $$;
+
+DO $$
+DECLARE
+    table_name TEXT;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'moa.artifact_run',
+        'moa.artifact_node_run',
+        'moa.experiment_run',
+        'moa.experiment_run_artifact_revision',
+        'moa.experiment_trial',
+        'analytics.score_run',
+        'analytics.scores',
+        'analytics.turn_lineage'
+    ] LOOP
+        IF to_regclass(table_name) IS NOT NULL THEN
+            EXECUTE format('ALTER TABLE %s ADD COLUMN IF NOT EXISTS tenant_id UUID', table_name::REGCLASS);
+            PERFORM moa.backfill_required_tenant_id(table_name::REGCLASS, table_name);
+            EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', replace(table_name, '.', '_') || '_set_tenant_columns', table_name::REGCLASS);
+            EXECUTE format(
+                'CREATE TRIGGER %I
+                 BEFORE INSERT OR UPDATE ON %s
+                 FOR EACH ROW
+                 EXECUTE FUNCTION moa.set_runtime_tenant_columns()',
+                replace(table_name, '.', '_') || '_set_tenant_columns',
+                table_name::REGCLASS
+            );
+            EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id)', replace(table_name, '.', '_') || '_tenant_rls_idx', table_name::REGCLASS);
+        END IF;
+    END LOOP;
+END $$;
+
+SELECT moa.apply_tenant_rls('sessions'::REGCLASS);
+SELECT moa.apply_tenant_rls('events'::REGCLASS);
+SELECT moa.apply_tenant_rls('pending_signals'::REGCLASS);
+SELECT moa.apply_tenant_rls('context_snapshots'::REGCLASS);
+SELECT moa.apply_tenant_rls('session_agent_context'::REGCLASS);
+SELECT moa.apply_tenant_rls('task_segments'::REGCLASS);
+SELECT moa.apply_tenant_rls('learning_log'::REGCLASS);
+SELECT moa.apply_tenant_rls('experience_records'::REGCLASS);
+SELECT moa.apply_tenant_rls('experience_attributions'::REGCLASS);
+SELECT moa.apply_tenant_rls('learning_candidates'::REGCLASS);
+SELECT moa.apply_tenant_rls('contacts'::REGCLASS);
+SELECT moa.apply_contact_rls('contact_points'::REGCLASS);
+SELECT moa.apply_contact_rls('contact_token_grants'::REGCLASS);
+SELECT moa.apply_contact_rls('contact_verification_challenges'::REGCLASS);
+SELECT moa.apply_contact_rls('contact_channel_accounts'::REGCLASS);
+SELECT moa.apply_contact_rls('session_channel_bindings'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.node_index'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.embeddings'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.memory_digests'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.retrieval_lineage'::REGCLASS);
+SELECT moa.apply_contact_rls('moa.graph_changelog'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.workspace_state'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.ingest_dedup'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.ingest_dlq'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.agent_installation'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.agent_deployment'::REGCLASS);
+SELECT moa.apply_workspace_default_tenant_override_rls('action_policy_rules'::REGCLASS);
+SELECT moa.apply_tenant_rls('workspace_action_reviews'::REGCLASS);
+SELECT moa.apply_workspace_default_tenant_override_rls('moa.artifact'::REGCLASS);
+SELECT moa.apply_workspace_default_tenant_override_rls('moa.artifact_revision'::REGCLASS);
+SELECT moa.apply_workspace_default_tenant_override_rls('moa.artifact_file'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.artifact_run'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.artifact_node_run'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.experiment_run'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.experiment_run_artifact_revision'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.experiment_trial'::REGCLASS);
+SELECT moa.apply_tenant_rls('analytics.score_run'::REGCLASS);
+
+DO $$
+BEGIN
+    IF to_regclass('analytics.scores') IS NOT NULL THEN
+        PERFORM moa.apply_tenant_rls('analytics.scores'::REGCLASS);
+    END IF;
+    IF to_regclass('analytics.turn_lineage') IS NOT NULL THEN
+        PERFORM moa.apply_tenant_rls('analytics.turn_lineage'::REGCLASS);
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    label_name TEXT;
+BEGIN
+    IF to_regnamespace('moa_graph') IS NULL THEN
+        RETURN;
+    END IF;
+
+    FOREACH label_name IN ARRAY (
+        moa.age_vertex_labels() || moa.age_edge_labels() || moa.age_base_labels()
+    ) LOOP
+        IF to_regclass(format('%I.%I', 'moa_graph', label_name)) IS NOT NULL THEN
+            PERFORM moa.apply_age_tenant_rls(format('%I.%I', 'moa_graph', label_name)::REGCLASS);
+        END IF;
+    END LOOP;
+END $$;

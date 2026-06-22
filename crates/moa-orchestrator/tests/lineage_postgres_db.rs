@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use moa_core::{MemoryScope, MoaConfig, SessionId, UserId, WorkspaceId};
+use moa_core::{MemoryScope, MoaConfig, SessionId, TenantId, UserId, WorkspaceId};
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
 };
@@ -14,9 +14,10 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
     // Pins: MOA_LINEAGE_SINK=postgres selects MpscSink and drains one lineage row to Postgres.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
-    let workspace_name = "lineage-postgres-test";
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     sqlx::query("DELETE FROM analytics.turn_lineage WHERE workspace_id = $1")
-        .bind(workspace_name)
+        .bind(workspace_id.as_str())
         .execute(&pool)
         .await?;
 
@@ -32,13 +33,12 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
         build_lineage_sink_from_env_value(&config, pool.clone(), Some("postgres")).await?;
     let turn_id = TurnId::new_v7();
     let session_id = SessionId::new();
-    let workspace_id = WorkspaceId::new(workspace_name);
     let event = LineageEvent::Retrieval(RetrievalLineage {
         turn_id,
         session_id,
         workspace_id: workspace_id.clone(),
         user_id: UserId::new("test-user"),
-        scope: MemoryScope::Workspace { workspace_id },
+        scope: MemoryScope::Tenant { tenant_id },
         ts: Utc::now(),
         query_original: "lineage smoke".to_string(),
         query_expansions: Vec::new(),
@@ -75,7 +75,7 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
     assert_eq!(count, 1);
 
     sqlx::query("DELETE FROM analytics.turn_lineage WHERE workspace_id = $1")
-        .bind(workspace_name)
+        .bind(workspace_id.as_str())
         .execute(&pool)
         .await?;
 

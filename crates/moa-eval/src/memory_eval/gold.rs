@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::ScopeContext;
+use moa_core::{ScopeContext, TenantId, WorkspaceId};
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
@@ -15,6 +15,7 @@ use moa_memory_vector::PgvectorStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
@@ -655,7 +656,7 @@ fn record_for_fact(
 }
 
 fn ingest_ctx_for_turn(base: &IngestCtx, turn: &SessionTurn) -> IngestCtx {
-    let scope = ScopeContext::workspace(turn.workspace_id.clone());
+    let scope = ScopeContext::tenant(tenant_id_from_workspace_id(&turn.workspace_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         base.pool.clone(),
         scope.clone(),
@@ -975,10 +976,24 @@ fn match_tokens(text: &str) -> BTreeSet<String> {
 
 fn scope_tier_str(scope: moa_core::ScopeTier) -> &'static str {
     match scope {
-        moa_core::ScopeTier::Global => "global",
-        moa_core::ScopeTier::Workspace => "workspace",
-        moa_core::ScopeTier::User => "user",
+        moa_core::ScopeTier::Tenant => "tenant",
+        moa_core::ScopeTier::Contact => "contact",
     }
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    uuid::Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn sorted_strings(values: &[String]) -> Vec<String> {
@@ -1244,7 +1259,7 @@ mod tests {
         LedgerFact {
             workspace_id: WorkspaceId::new("workspace-test"),
             user_id: UserId::new("user-test"),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: fact_id.to_string(),
             valid_from: timestamp(),
             valid_to: None,

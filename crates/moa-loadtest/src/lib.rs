@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use clap::ValueEnum;
 use moa_core::{
-    Channel, Event, EventRecord, MoaConfig, MoaError, ModelId, ModelTask, Result, SessionId,
-    SessionMeta, SessionStatus, UserId, WorkspaceId,
+    Channel, Event, EventRecord, MoaConfig, MoaError, ModelId, ModelTask, Result, SessionActorRef,
+    SessionId, SessionMeta, SessionStatus, TenantId, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, mpsc};

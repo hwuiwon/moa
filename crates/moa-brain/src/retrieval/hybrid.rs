@@ -352,9 +352,7 @@ impl HybridRetriever {
             return Ok(Vec::new());
         }
 
-        let Some(workspace_id) = req.scope.workspace_id() else {
-            return run_vector_leg(self.vector.as_ref(), req).await;
-        };
+        let tenant_id = req.scope.tenant_id();
         let state = self.vector_backend_state(req).await?;
         if state.is_dual_read_active() {
             return self.dual_read_vector_leg(req).await;
@@ -373,8 +371,8 @@ impl HybridRetriever {
                 };
             }
             tracing::warn!(
-                workspace_id = %workspace_id,
-                "workspace is configured for Turbopuffer but no client is configured; falling back to pgvector"
+                tenant_id = %tenant_id,
+                "tenant is configured for Turbopuffer but no client is configured; falling back to pgvector"
             );
         }
 
@@ -383,9 +381,7 @@ impl HybridRetriever {
 
     async fn dual_read_vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
         let Some(turbopuffer) = &self.turbopuffer else {
-            tracing::warn!(
-                "workspace is in vector dual-read but no Turbopuffer client is configured"
-            );
+            tracing::warn!("tenant is in vector dual-read but no Turbopuffer client is configured");
             return run_vector_leg(self.vector.as_ref(), req).await;
         };
 
@@ -419,22 +415,16 @@ impl HybridRetriever {
                 .execute(conn.as_mut())
                 .await?;
         }
-        let workspace_id = req.scope.workspace_id().map(|id| id.to_string());
-        let row = match workspace_id {
-            Some(workspace_id) => {
-                sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
-                    r#"
+        let row = sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
+            r#"
                 SELECT vector_backend, vector_backend_state, dual_read_until
                 FROM moa.workspace_state
-                WHERE workspace_id = $1
+                WHERE tenant_id = $1
                 "#,
-                )
-                .bind(workspace_id)
-                .fetch_optional(conn.as_mut())
-                .await?
-            }
-            None => None,
-        };
+        )
+        .bind(req.scope.tenant_id().0)
+        .fetch_optional(conn.as_mut())
+        .await?;
         conn.commit().await?;
         Ok(row
             .map(
@@ -701,11 +691,18 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use moa_core::TenantId;
     use moa_memory_graph::PiiClass;
     use uuid::Uuid;
 
     use super::*;
     use crate::retrieval::reranker::{RerankHit, Reranker};
+
+    fn tenant_scope() -> MemoryScope {
+        MemoryScope::Tenant {
+            tenant_id: TenantId::from(Uuid::from_u128(0x100)),
+        }
+    }
 
     #[test]
     fn layer_bias_prefers_user_over_workspace_for_matching_scores() {
@@ -735,7 +732,7 @@ mod tests {
             seeds: Vec::new(),
             query_text: "deploy provider".to_string(),
             query_embedding: Vec::new(),
-            scope: MemoryScope::Global,
+            scope: tenant_scope(),
             label_filter: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 1,
@@ -783,7 +780,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "workspace fact".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,
@@ -846,7 +843,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "contact email".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,
@@ -902,7 +899,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "regional network".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,
@@ -958,7 +955,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "library owner".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,

@@ -9,7 +9,7 @@ use moa_core::wire::{
     AgentDefinitionListRequest, AgentDeployRequest, AgentDeploymentListRequest,
     AgentInstallRequest, AgentInstallationListRequest,
 };
-use moa_core::{MemoryScope, WorkspaceId};
+use moa_core::{ActionRuleScope, TenantId};
 use moa_orchestrator::services::agent_definitions::{
     deploy_inner, install_inner, list_definitions_inner, list_deployments_inner,
     list_installations_inner,
@@ -26,10 +26,8 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
         moa_session::testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
     let registry = ArtifactRegistry::new(pool.clone());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let agent_name = format!("support-agent-{}", Uuid::now_v7());
     let identity = user_identity();
 
@@ -50,7 +48,7 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
         list_definitions_inner(
             pool.clone(),
             AgentDefinitionListRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 status: None,
             },
         )
@@ -68,7 +66,7 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
         install_inner(
             pool.clone(),
             AgentInstallRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 revision_uid: v1.revision_uid,
                 agent_id: None,
                 display_name: None,
@@ -82,13 +80,7 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
     assert_eq!(installed.revision_uid, v1.revision_uid);
 
     let installations = map_handler_error(
-        list_installations_inner(
-            pool.clone(),
-            AgentInstallationListRequest {
-                workspace_id: workspace_id.clone(),
-            },
-        )
-        .await,
+        list_installations_inner(pool.clone(), AgentInstallationListRequest { tenant_id }).await,
     )?;
     assert_eq!(installations.installations.len(), 1);
     assert_eq!(
@@ -100,7 +92,7 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
         deploy_inner(
             pool.clone(),
             AgentDeployRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 installation_uid: installed.installation_uid,
                 revision_uid: v2.revision_uid,
                 reason: Some("candidate passed simulation".to_string()),
@@ -117,7 +109,7 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
         list_deployments_inner(
             pool.clone(),
             AgentDeploymentListRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 installation_uid: installed.installation_uid,
                 limit: None,
             },
@@ -154,7 +146,7 @@ async fn install_deploy_and_list_agent_definitions_use_exact_revision_locks_db_m
 
 async fn publish_agent_revision(
     registry: &ArtifactRegistry,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     document: ArtifactDocument,
 ) -> Result<StoredArtifactRevision> {
     let report = validate_for_status(&document, ArtifactStatus::Published);
@@ -217,10 +209,11 @@ fn map_handler_error<T>(
 }
 
 fn user_identity() -> Identity {
+    let tenant_id = TenantId::new();
     Identity {
         identity_type: IdentityType::User,
         id: Uuid::now_v7(),
-        tenant_id: Uuid::now_v7(),
+        tenant_id,
         api_key_id: None,
         acting_on_behalf_of: None,
     }

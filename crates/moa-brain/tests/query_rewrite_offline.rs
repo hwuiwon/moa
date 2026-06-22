@@ -7,7 +7,7 @@ use std::sync::Arc;
 use moa_brain::pipeline::query_rewrite::QueryRewriter;
 use moa_core::{
     Channel, ContextMessage, ContextProcessor, LLMProvider, MoaConfig, QueryRewriteResult,
-    RewriteSource, SessionMeta, UserId, WorkspaceId,
+    RewriteSource, SessionMeta, TenantId,
 };
 use moa_providers::OpenAIProvider;
 use serde_json::json;
@@ -38,8 +38,7 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
     );
     let mut ctx = moa_core::WorkingContext::new(
         &SessionMeta {
-            workspace_id: WorkspaceId::new("offline-query-rewrite"),
-            user_id: UserId::new("offline-query-rewrite-user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: provider.capabilities().model_id.clone(),
             ..SessionMeta::default()

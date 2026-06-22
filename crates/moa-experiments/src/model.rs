@@ -1,7 +1,7 @@
 //! Typed experiment definitions and run records.
 
 use chrono::{DateTime, Utc};
-use moa_core::{AgentSessionSelection, Attachment, MemoryScope, ModelId, SessionId};
+use moa_core::{ActionRuleScope, AgentSessionSelection, Attachment, ModelId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -359,8 +359,8 @@ pub struct NewExperimentTrial {
 /// Durable record for one experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRunRecord {
-    /// Memory-style scope that owns the experiment row.
-    pub scope: MemoryScope,
+    /// Artifact/default inheritance scope that owns the experiment row.
+    pub scope: ActionRuleScope,
     /// Stable experiment run identifier.
     pub run_uid: Uuid,
     /// Human-readable run name.
@@ -402,8 +402,8 @@ pub struct ExperimentRunRecord {
 /// Durable record for one experiment trial.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentTrialRecord {
-    /// Memory-style scope that owns the trial row.
-    pub scope: MemoryScope,
+    /// Artifact/default inheritance scope that owns the trial row.
+    pub scope: ActionRuleScope,
     /// Stable trial identifier.
     pub trial_uid: Uuid,
     /// Experiment run that owns the trial.

@@ -11,6 +11,6 @@ pub use injection::{
 };
 pub use mcp_proxy::{EnvironmentCredentialVault, MCPCredentialProxy, McpSessionToken};
 pub use policies::{
-    ActionPolicies, ActionPolicyCheck, ActionPolicyContext, ActionPolicyRuleStore,
-    GLOBAL_ACTION_POLICY_WORKSPACE_ID, glob_match, parse_and_match_command, stricter_effect,
+    ActionPolicies, ActionPolicyCheck, ActionPolicyContext, ActionPolicyRuleStore, glob_match,
+    parse_and_match_command, stricter_effect,
 };

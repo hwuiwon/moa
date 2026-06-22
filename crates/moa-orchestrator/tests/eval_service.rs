@@ -1,16 +1,16 @@
 //! Eval service helper coverage.
 
-use moa_core::WorkspaceId;
 use moa_core::wire::{
     EvalRunResponse, EvalRunStatus, EvalRunStatusResponse, EvalSuiteListDocument,
 };
+use moa_core::{TenantId, WorkspaceId};
 use moa_eval_core::{
     AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite,
 };
 use moa_orchestrator::services::eval::{
     EvalServiceError, accepted_eval_run_response, hosted_eval_report_artifacts,
     parse_dataset_items_for_workspace, status_response_from_run_response,
-    suite_summaries_from_documents, verify_run_status_workspace,
+    suite_summaries_from_documents, verify_run_status_tenant,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -160,12 +160,13 @@ fn dataset_jsonl_items_are_constrained_to_authorized_workspace() {
 }
 
 #[test]
-fn run_status_rejects_stored_workspace_mismatch() {
-    // Pins: run_status does not return workflow state from another workspace.
+fn run_status_rejects_stored_tenant_mismatch() {
+    // Pins: run_status does not return workflow state from another tenant.
     let run_id =
         Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture run id parses");
+    let tenant_a = tenant_fixture(1);
     let response = EvalRunStatusResponse {
-        workspace_id: WorkspaceId::new("workspace-b"),
+        tenant_id: tenant_fixture(2),
         run_id,
         status: EvalRunStatus::Completed,
         suite_name: Some("suite".to_string()),
@@ -175,8 +176,8 @@ fn run_status_rejects_stored_workspace_mismatch() {
         error: None,
     };
 
-    let error = verify_run_status_workspace(&WorkspaceId::new("workspace-a"), &response)
-        .expect_err("workspace mismatch should be rejected");
+    let error =
+        verify_run_status_tenant(tenant_a, &response).expect_err("tenant mismatch should reject");
 
     match error {
         EvalServiceError::RunWorkspaceMismatch {
@@ -184,7 +185,7 @@ fn run_status_rejects_stored_workspace_mismatch() {
             request_workspace_id,
         } => {
             assert_eq!(actual_run_id, run_id);
-            assert_eq!(request_workspace_id, WorkspaceId::new("workspace-a"));
+            assert_eq!(request_workspace_id, workspace_fixture_for_tenant(tenant_a));
         }
         other => panic!("expected run workspace mismatch, got {other:?}"),
     }
@@ -195,8 +196,9 @@ fn terminal_run_response_maps_to_status_response() {
     // Pins: terminal hosted eval results remain observable through run_status.
     let run_id =
         Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture run id parses");
+    let tenant_id = tenant_fixture(1);
     let response = EvalRunResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         run_id,
         status: EvalRunStatus::Completed,
         suite_name: "suite".to_string(),
@@ -208,7 +210,7 @@ fn terminal_run_response_maps_to_status_response() {
 
     let status = status_response_from_run_response(&response);
 
-    assert_eq!(status.workspace_id, WorkspaceId::new("workspace-a"));
+    assert_eq!(status.tenant_id, tenant_id);
     assert_eq!(status.run_id, run_id);
     assert_eq!(status.status, EvalRunStatus::Completed);
     assert_eq!(status.suite_name.as_deref(), Some("suite"));
@@ -221,13 +223,21 @@ fn accepted_run_response_is_non_terminal() {
     // Pins: Eval/run returns an accepted run id rather than terminal eval results.
     let run_id =
         Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture run id parses");
-    let response =
-        accepted_eval_run_response(WorkspaceId::new("workspace-a"), run_id, "suite".to_string());
+    let tenant_id = tenant_fixture(1);
+    let response = accepted_eval_run_response(tenant_id, run_id, "suite".to_string());
 
-    assert_eq!(response.workspace_id, WorkspaceId::new("workspace-a"));
+    assert_eq!(response.tenant_id, tenant_id);
     assert_eq!(response.run_id, run_id);
     assert_eq!(response.status, EvalRunStatus::Running);
     assert_eq!(response.suite_name, "suite");
     assert!(response.results.is_empty());
     assert!(response.error.is_none());
+}
+
+fn tenant_fixture(value: u128) -> TenantId {
+    TenantId::from(Uuid::from_u128(value))
+}
+
+fn workspace_fixture_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }

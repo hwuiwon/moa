@@ -41,7 +41,7 @@ pub(crate) async fn create_key(
     let issued = api_keys::create(
         &mut *transaction,
         NewApiKey {
-            tenant_id: identity.tenant_id,
+            tenant_id: identity.tenant_id.0,
             owner,
             env: request.env,
             name: &request.name,
@@ -55,11 +55,11 @@ pub(crate) async fn create_key(
         &mut transaction,
         TupleOp::Write,
         issued.id,
-        identity.tenant_id,
+        identity.tenant_id.0,
         owner,
     )
     .await?;
-    moa_ocsf::emit_api_key_created_tx(&mut transaction, identity.tenant_id, &identity, issued.id)
+    moa_ocsf::emit_api_key_created_tx(&mut transaction, identity.tenant_id.0, &identity, issued.id)
         .await
         .map_err(|error| TerminalError::new(format!("audit api key create: {error}")))?;
     transaction
@@ -82,12 +82,10 @@ pub(crate) async fn list_keys(
     let (owner_user_id, owner_agent_id) = match identity.identity_type {
         IdentityType::User => (Some(identity.id), None),
         IdentityType::Agent => (None, Some(identity.id)),
-        IdentityType::Service => {
-            return Err(TerminalError::new_with_code(
-                403,
-                "service identities cannot list API keys",
-            )
-            .into());
+        IdentityType::Service | IdentityType::Contact => {
+            return Err(
+                TerminalError::new_with_code(403, "identity type cannot list API keys").into(),
+            );
         }
     };
 
@@ -283,7 +281,7 @@ async fn load_manageable_active_key(
     )
     .await
     .map_err(translate_authz_error)?;
-    load_active_key_for_tenant(pool, key_id, identity.tenant_id).await
+    load_active_key_for_tenant(pool, key_id, identity.tenant_id.0).await
 }
 
 async fn load_direct_owner_key(
@@ -456,7 +454,9 @@ impl ApiKeyRow {
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
         IdentityType::User => Some(identity.id),
-        IdentityType::Agent | IdentityType::Service => identity.acting_on_behalf_of,
+        IdentityType::Agent | IdentityType::Service | IdentityType::Contact => {
+            identity.acting_on_behalf_of
+        }
     }
 }
 

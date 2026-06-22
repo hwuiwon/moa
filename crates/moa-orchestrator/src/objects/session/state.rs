@@ -220,7 +220,7 @@ impl VoState for SessionVoState {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{Attachment, Channel, ModelId, UserId, WorkspaceId};
+    use moa_core::{Attachment, Channel, ModelId};
 
     use super::SessionVoState;
     use moa_core::TurnOutcome;
@@ -240,8 +240,7 @@ mod tests {
 
     fn test_meta() -> moa_core::SessionMeta {
         moa_core::SessionMeta {
-            workspace_id: WorkspaceId::new("workspace-1"),
-            user_id: UserId::new("user-1"),
+            tenant_id: moa_core::TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("test-model"),
             ..moa_core::SessionMeta::default()

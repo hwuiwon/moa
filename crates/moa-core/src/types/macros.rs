@@ -7,8 +7,18 @@ macro_rules! string_id {
     };
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(
+            Debug,
+            Clone,
+            PartialEq,
+            Eq,
+            Hash,
+            serde::Serialize,
+            serde::Deserialize,
+            sqlx::Type,
+        )]
         #[serde(transparent)]
+        #[sqlx(transparent)]
         pub struct $name(pub String);
 
         impl $name {
@@ -50,8 +60,19 @@ macro_rules! uuid_id {
     };
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            Hash,
+            serde::Serialize,
+            serde::Deserialize,
+            sqlx::Type,
+        )]
         #[serde(transparent)]
+        #[sqlx(transparent)]
         pub struct $name(pub uuid::Uuid);
 
         impl $name {

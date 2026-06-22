@@ -1,6 +1,6 @@
 //! Stage 7: graph memory retrieval and prompt injection.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -12,7 +12,7 @@ use moa_core::{
     AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContextMessage, ContextProcessor,
     ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MemoryScope, MoaError,
     NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext,
-    ScopeTier, WorkingContext, traits::EmbeddingProvider,
+    ScopeTier, UserId, WorkingContext, WorkspaceId, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -27,7 +27,6 @@ use uuid::Uuid;
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
 const MIN_PAGE_EXCERPT_TOKENS: usize = 96;
-const MAX_LINKED_CONTACT_MEMORY_SCOPES: usize = 8;
 pub(crate) const MEMORY_REMINDER_PREFIX: &str = "<memory-reminder>";
 
 /// Injects graph-memory retrieval hits into the active turn context.
@@ -140,35 +139,22 @@ impl GraphMemoryRetriever {
         }
         let result_limit = effective_result_limit(&policy, self.result_limit);
         let max_pii_class = effective_max_pii_class(&policy)?;
-        let scopes = memory_scopes_from_context(ctx, &policy);
-        let mut merged = Vec::new();
-        let mut seen = HashSet::new();
-        for (index, scope) in scopes.iter().enumerate() {
-            let hits = self
-                .retrieve_hits_for_scope(
-                    ctx,
-                    &query,
-                    scope,
-                    index == 0,
-                    result_limit,
-                    max_pii_class,
-                )
-                .await?;
-            for hit in hits {
-                if hit_matches_knowledge_policy(&hit, &policy) && seen.insert(hit.uid) {
-                    merged.push(hit);
-                }
-            }
-        }
-        merged.sort_by(|left, right| {
+        let scope = memory_scope_from_context_with_policy(ctx, &policy);
+        let mut hits = self
+            .retrieve_hits_for_scope(ctx, &query, &scope, true, result_limit, max_pii_class)
+            .await?
+            .into_iter()
+            .filter(|hit| hit_matches_knowledge_policy(hit, &policy))
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
             right
                 .score
                 .partial_cmp(&left.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.uid.cmp(&right.uid))
         });
-        merged.truncate(result_limit);
-        Ok(merged)
+        hits.truncate(result_limit);
+        Ok(hits)
     }
 
     async fn retrieve_hits_for_scope(
@@ -237,7 +223,7 @@ impl GraphMemoryRetriever {
     }
 
     fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {
-        if matches!(scope.tier(), ScopeTier::User) {
+        if matches!(scope.tier(), ScopeTier::Contact) {
             return Ok(Arc::new(self.build_runtime_for_scope(scope)));
         }
 
@@ -380,8 +366,8 @@ impl GraphMemoryRetriever {
         let retrieval = RetrievalLineage {
             turn_id: turn_id_from_context(ctx).unwrap_or_else(TurnId::new_v7),
             session_id: ctx.session_id,
-            workspace_id: ctx.workspace_id.clone(),
-            user_id: ctx.user_id.clone(),
+            workspace_id: lineage_workspace_id_from_context(ctx),
+            user_id: lineage_user_id_from_context(ctx),
             scope: lineage_memory_scope_from_context(ctx),
             ts: Utc::now(),
             query_original: query.to_string(),
@@ -527,51 +513,43 @@ fn lineage_memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
     memory_scope_from_context_with_policy(ctx, &policy)
 }
 
+fn lineage_workspace_id_from_context(ctx: &WorkingContext) -> WorkspaceId {
+    WorkspaceId::new(ctx.tenant_id.to_string())
+}
+
+fn lineage_user_id_from_context(ctx: &WorkingContext) -> UserId {
+    let id = ctx
+        .contact
+        .as_ref()
+        .map(|contact| contact.contact_id.to_string())
+        .unwrap_or_else(|| format!("tenant:{}", ctx.tenant_id));
+    UserId::new(id)
+}
+
 fn memory_scope_from_context_with_policy(
     ctx: &WorkingContext,
     policy: &AgentKnowledgePolicy,
 ) -> MemoryScope {
     match policy.mode {
-        AgentKnowledgeScopeMode::Tenant | AgentKnowledgeScopeMode::Disabled => MemoryScope::User {
-            workspace_id: ctx.workspace_id.clone(),
-            user_id: ctx.user_id.clone(),
-        },
+        AgentKnowledgeScopeMode::Tenant | AgentKnowledgeScopeMode::Disabled => ctx
+            .contact
+            .as_ref()
+            .map(|contact| MemoryScope::Contact {
+                tenant_id: ctx.tenant_id,
+                contact_id: contact.contact_id,
+            })
+            .unwrap_or(MemoryScope::Tenant {
+                tenant_id: ctx.tenant_id,
+            }),
     }
 }
 
+#[cfg(test)]
 fn memory_scopes_from_context(
     ctx: &WorkingContext,
     policy: &AgentKnowledgePolicy,
 ) -> Vec<MemoryScope> {
-    let primary = memory_scope_from_context_with_policy(ctx, policy);
-    let Some(contact) = ctx.contact.as_ref() else {
-        return vec![primary];
-    };
-    if !contact.state.is_verified() {
-        return vec![primary];
-    }
-
-    let mut scopes = Vec::with_capacity(1 + contact.linked_contact_ids.len());
-    let mut seen_user_ids = HashSet::new();
-    scopes.push(primary);
-    seen_user_ids.insert(ctx.user_id.clone());
-
-    let mut linked_scope_count = 0;
-    for linked_contact_id in &contact.linked_contact_ids {
-        let linked_user_id = linked_contact_id.as_user_id();
-        if !seen_user_ids.insert(linked_user_id.clone()) {
-            continue;
-        }
-        scopes.push(MemoryScope::User {
-            workspace_id: ctx.workspace_id.clone(),
-            user_id: linked_user_id,
-        });
-        linked_scope_count += 1;
-        if linked_scope_count >= MAX_LINKED_CONTACT_MEMORY_SCOPES {
-            break;
-        }
-    }
-    scopes
+    vec![memory_scope_from_context_with_policy(ctx, policy)]
 }
 
 fn hit_matches_knowledge_policy(
@@ -758,7 +736,7 @@ mod tests {
     use moa_core::{
         AgentKnowledgePolicy, Channel, ContactId, ContactRef, ContactVerificationState,
         ContextProcessor, MemoryScope, ModelCapabilities, ModelId, QueryRewriteResult, SessionId,
-        SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        SessionMeta, TenantId, TokenPricing, ToolCallFormat, WorkingContext,
     };
     use moa_lineage_core::TurnId;
     use sqlx::postgres::PgPoolOptions;
@@ -789,16 +767,16 @@ mod tests {
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
         let retriever = GraphMemoryRetriever::new(pool, None);
-        let workspace_id = WorkspaceId::new("workspace");
-        let user_scope = MemoryScope::User {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("user"),
+        let tenant_id = TenantId::new();
+        let contact_scope = MemoryScope::Contact {
+            tenant_id,
+            contact_id: ContactId::new(),
         };
-        let workspace_scope = MemoryScope::Workspace { workspace_id };
+        let tenant_scope = MemoryScope::Tenant { tenant_id };
 
         retriever
-            .runtime_for_scope(&user_scope)
-            .expect("user runtime should build");
+            .runtime_for_scope(&contact_scope)
+            .expect("contact runtime should build");
         assert_eq!(
             retriever
                 .scoped_runtimes
@@ -806,15 +784,15 @@ mod tests {
                 .expect("runtime cache lock")
                 .len(),
             0,
-            "user scopes should not grow the process-lifetime runtime cache"
+            "contact scopes should not grow the process-lifetime runtime cache"
         );
 
         retriever
-            .runtime_for_scope(&workspace_scope)
-            .expect("workspace runtime should build");
+            .runtime_for_scope(&tenant_scope)
+            .expect("tenant runtime should build");
         retriever
-            .runtime_for_scope(&workspace_scope)
-            .expect("workspace runtime should be reused");
+            .runtime_for_scope(&tenant_scope)
+            .expect("tenant runtime should be reused");
         assert_eq!(
             retriever
                 .scoped_runtimes
@@ -822,7 +800,7 @@ mod tests {
                 .expect("runtime cache lock")
                 .len(),
             1,
-            "workspace scopes should still reuse one cached runtime"
+            "tenant scopes should still reuse one cached runtime"
         );
     }
 
@@ -850,8 +828,7 @@ mod tests {
         let mut ctx = WorkingContext::new(
             &SessionMeta {
                 id: SessionId::new(),
-                workspace_id: WorkspaceId::new("workspace"),
-                user_id: UserId::new("user"),
+                tenant_id: TenantId::new(),
                 channel: Channel::Chat,
                 model: ModelId::new("mock"),
                 ..SessionMeta::default()
@@ -878,8 +855,7 @@ mod tests {
         let mut ctx = WorkingContext::new(
             &SessionMeta {
                 id: SessionId::new(),
-                workspace_id: WorkspaceId::new("workspace"),
-                user_id: UserId::new("user"),
+                tenant_id: TenantId::new(),
                 channel: Channel::Chat,
                 model: ModelId::new("mock"),
                 ..SessionMeta::default()
@@ -901,8 +877,7 @@ mod tests {
         // Pins: retrieval sidecar rows can join directly to turn-scoped lineage rows.
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()
@@ -933,9 +908,9 @@ mod tests {
 
         assert_eq!(
             memory_scopes_from_context(&ctx, &AgentKnowledgePolicy::default()),
-            vec![MemoryScope::User {
-                workspace_id: session.workspace_id,
-                user_id: contact_id.as_user_id(),
+            vec![MemoryScope::Contact {
+                tenant_id: session.tenant_id,
+                contact_id,
             }]
         );
     }
@@ -954,16 +929,10 @@ mod tests {
 
         assert_eq!(
             memory_scopes_from_context(&ctx, &AgentKnowledgePolicy::default()),
-            vec![
-                MemoryScope::User {
-                    workspace_id: session.workspace_id.clone(),
-                    user_id: contact_id.as_user_id(),
-                },
-                MemoryScope::User {
-                    workspace_id: session.workspace_id,
-                    user_id: linked_contact_id.as_user_id(),
-                },
-            ]
+            vec![MemoryScope::Contact {
+                tenant_id: session.tenant_id,
+                contact_id,
+            }]
         );
     }
 
@@ -972,17 +941,15 @@ mod tests {
         state: ContactVerificationState,
         linked_contact_ids: Vec<ContactId>,
     ) -> SessionMeta {
-        let workspace_id = WorkspaceId::new("workspace");
+        let tenant_id = TenantId::new();
         SessionMeta {
             id: SessionId::new(),
-            workspace_id: workspace_id.clone(),
-            user_id: contact_id.as_user_id(),
+            tenant_id,
             channel: Channel::Chat,
             model: ModelId::new("mock"),
             contact: Some(ContactRef {
                 contact_id,
-                tenant_id: uuid::Uuid::now_v7(),
-                workspace_id,
+                tenant_id,
                 state,
                 canonical_contact_id: None,
                 linked_contact_ids,

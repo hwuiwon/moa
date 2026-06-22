@@ -14,11 +14,13 @@ use tokio::time::sleep;
 
 use crate::support::graph_ingest::wait_for_ingested_brain_responses;
 use crate::support::restate_runtime::{
-    OrchestratorPorts, deployment_endpoint_url, grant_session_participant, grant_workspace_member,
+    OrchestratorPorts, deployment_endpoint_url, grant_session_participant, grant_tenant_operator,
     register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
     test_user_identity, with_identity,
 };
-use crate::support::session_store_service::{get_events_request, test_session_meta};
+use crate::support::session_store_service::{
+    get_events_request, test_session_meta, workspace_id_from_meta,
+};
 use moa_test_support::postgres::test_database_url;
 
 mod support;
@@ -82,8 +84,10 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         let ingress = restate_ingress_url();
         let ingress = ingress.as_str();
         let meta = test_session_meta("llm-gateway-e2e");
-        let identity = test_user_identity();
-        grant_workspace_member(&identity, &meta.workspace_id).await?;
+        let workspace_id = workspace_id_from_meta(&meta);
+        let mut identity = test_user_identity();
+        identity.tenant_id = meta.tenant_id;
+        grant_tenant_operator(&identity, &workspace_id).await?;
 
         let create_request = client.post(format!(
             "{}/SessionStore/create_session",
@@ -104,9 +108,9 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
         metadata.insert(
             "_moa.workspace_id".to_string(),
-            json!(meta.workspace_id.to_string()),
+            json!(workspace_id.to_string()),
         );
-        metadata.insert("_moa.user_id".to_string(), json!(meta.user_id.to_string()));
+        metadata.insert("_moa.user_id".to_string(), json!(identity.id.to_string()));
         metadata.insert("_moa.channel".to_string(), json!(meta.channel.as_str()));
 
         let request = CompletionRequest {
@@ -150,7 +154,7 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
                 .any(|record| matches!(record.event, Event::BrainResponse { .. })),
             "expected a persisted BrainResponse event for session {session_id}"
         );
-        wait_for_ingested_brain_responses(&pool, &meta.workspace_id, session_id, &events).await?;
+        wait_for_ingested_brain_responses(&pool, &workspace_id, session_id, &events).await?;
 
         Ok(())
     }

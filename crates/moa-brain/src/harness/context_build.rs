@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use moa_core::{
     CacheReport, CompletionRequest, CompletionResponse, ContextSnapshot, Event, EventRecord,
-    LLMProvider, Result, SessionId, SessionMeta, SessionStore, TokenPricing, TraceContext,
-    WorkingContext, current_turn_root_span, record_pipeline_compile_duration,
+    LLMProvider, Result, SessionActorRef, SessionId, SessionMeta, SessionStore, TokenPricing,
+    TraceContext, WorkingContext, current_turn_root_span, record_pipeline_compile_duration,
     record_turn_compaction, record_turn_event_persist_duration,
     record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     stable_prefix_fingerprint,
@@ -44,22 +44,7 @@ pub(super) async fn build_turn_context(
         "_moa.turn_id",
         serde_json::json!(options.turn_id.0.to_string()),
     );
-    ctx.insert_metadata(
-        "_moa.session_id",
-        serde_json::json!(options.trace_context.session_id.to_string()),
-    );
-    ctx.insert_metadata(
-        "_moa.user_id",
-        serde_json::json!(options.trace_context.user_id.to_string()),
-    );
-    ctx.insert_metadata(
-        "_moa.workspace_id",
-        serde_json::json!(options.trace_context.workspace_id.to_string()),
-    );
-    ctx.insert_metadata(
-        "_moa.model",
-        serde_json::json!(options.trace_context.model.clone()),
-    );
+    insert_trace_context_metadata(&mut ctx, options.trace_context);
     if let Some(workspace_root) = options.workspace_root {
         ctx.insert_metadata(
             WORKSPACE_ROOT_METADATA_KEY,
@@ -77,22 +62,7 @@ pub(super) async fn build_turn_context(
     } else {
         None
     };
-    ctx.insert_metadata(
-        "_moa.session_id",
-        serde_json::json!(options.trace_context.session_id.to_string()),
-    );
-    ctx.insert_metadata(
-        "_moa.user_id",
-        serde_json::json!(options.trace_context.user_id.to_string()),
-    );
-    ctx.insert_metadata(
-        "_moa.workspace_id",
-        serde_json::json!(options.trace_context.workspace_id.to_string()),
-    );
-    ctx.insert_metadata(
-        "_moa.model",
-        serde_json::json!(options.trace_context.model.clone()),
-    );
+    insert_trace_context_metadata(&mut ctx, options.trace_context);
     if let Some(platform) = options.trace_context.channel.as_ref() {
         ctx.insert_metadata("_moa.channel", serde_json::json!(platform.to_string()));
     }
@@ -215,6 +185,39 @@ async fn persist_context_snapshot(
     }
 
     record_turn_snapshot_write_duration(started_at.elapsed());
+}
+
+fn insert_trace_context_metadata(ctx: &mut WorkingContext, trace_context: &TraceContext) {
+    ctx.insert_metadata(
+        "_moa.session_id",
+        serde_json::json!(trace_context.session_id.to_string()),
+    );
+    ctx.insert_metadata(
+        "_moa.tenant_id",
+        serde_json::json!(trace_context.tenant_id.to_string()),
+    );
+    if let Some(contact_id) = trace_context.contact_id {
+        ctx.insert_metadata("_moa.contact_id", serde_json::json!(contact_id.to_string()));
+    }
+    ctx.insert_metadata(
+        "_moa.actor_id",
+        serde_json::json!(trace_actor_id(trace_context)),
+    );
+    ctx.insert_metadata("_moa.model", serde_json::json!(trace_context.model.clone()));
+}
+
+fn trace_actor_id(trace_context: &TraceContext) -> String {
+    if let Some(contact_id) = trace_context.contact_id {
+        return format!("contact:{contact_id}");
+    }
+
+    match &trace_context.created_by {
+        Some(SessionActorRef::Identity { id }) => format!("identity:{id}"),
+        Some(SessionActorRef::Contact { id }) => format!("contact:{id}"),
+        Some(SessionActorRef::Anonymous) | None => {
+            format!("session:{}", trace_context.session_id)
+        }
+    }
 }
 
 pub(super) fn turn_number_for_events(events: &[EventRecord]) -> i64 {

@@ -188,7 +188,7 @@ impl ToolRouter {
                 self.workspace_roots
                     .read()
                     .await
-                    .get(&session.workspace_id)
+                    .get(&tenant_workspace_key(session))
                     .cloned()
             } else {
                 None
@@ -242,7 +242,7 @@ impl ToolRouter {
                 self.workspace_roots
                     .read()
                     .await
-                    .get(&session.workspace_id)
+                    .get(&tenant_workspace_key(session))
                     .cloned()
             } else {
                 None
@@ -270,6 +270,10 @@ impl ToolRouter {
 
 pub(super) fn session_provider_key(session: &SessionMeta, provider: &str) -> String {
     format!("{}:{provider}", session.id)
+}
+
+fn tenant_workspace_key(session: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(session.tenant_id.to_string())
 }
 
 pub(super) fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {

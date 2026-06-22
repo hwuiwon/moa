@@ -11,19 +11,18 @@ use moa_artifacts::validation::validate_for_status;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::traits::Identity;
 use moa_core::wire::{
     ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest,
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
     ArtifactPublishResponse, ArtifactSummary, ArtifactValidateRequest, ArtifactValidateResponse,
 };
-use moa_core::{MemoryScope, MoaError, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
-use crate::services::skills::{SkillScopeError, checked_import_scope};
 
 /// Restate service surface for protected artifact operations.
 #[restate_sdk::service]
@@ -68,9 +67,7 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactImportResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "import");
         let request = request.into_inner();
-        reject_scope_workspace_mismatch(&request.workspace_id, &request.scope)?;
-        let scope =
-            authorized_write_scope(&ctx, &request.workspace_id, request.scope.clone()).await?;
+        let scope = authorized_write_scope(&ctx, request.scope).await?;
 
         Ok(ctx
             .run(|| async move { import_inner(scope, request).await.map(Json::from) })
@@ -86,10 +83,13 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactExportResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "export");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        let scope = request.scope.unwrap_or(ActionRuleScope::Tenant {
+            tenant_id: request.tenant_id,
+        });
+        authorize_read_scope(&ctx, &scope).await?;
 
         Ok(ctx
-            .run(|| async move { export_inner(request).await.map(Json::from) })
+            .run(|| async move { export_inner(scope, request).await.map(Json::from) })
             .name("artifacts_export")
             .await?)
     }
@@ -102,10 +102,13 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactListResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "list");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        let scope = request.scope.unwrap_or(ActionRuleScope::Tenant {
+            tenant_id: request.tenant_id,
+        });
+        authorize_read_scope(&ctx, &scope).await?;
 
         Ok(ctx
-            .run(|| async move { list_inner(request).await.map(Json::from) })
+            .run(|| async move { list_inner(scope, request).await.map(Json::from) })
             .name("artifacts_list")
             .await?)
     }
@@ -118,7 +121,7 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactValidateResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "validate");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         Ok(ctx
             .run(|| async move { validate_inner(request).map(Json::from) })
@@ -134,9 +137,7 @@ impl Artifacts for ArtifactsImpl {
     ) -> Result<Json<ArtifactPublishResponse>, HandlerError> {
         annotate_restate_handler_span("Artifacts", "publish");
         let request = request.into_inner();
-        reject_scope_workspace_mismatch(&request.workspace_id, &request.scope)?;
-        let scope =
-            authorized_write_scope(&ctx, &request.workspace_id, request.scope.clone()).await?;
+        let scope = authorized_write_scope(&ctx, request.scope).await?;
 
         Ok(ctx
             .run(|| async move { publish_inner(scope, request).await.map(Json::from) })
@@ -146,7 +147,7 @@ impl Artifacts for ArtifactsImpl {
 }
 
 async fn import_inner(
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     request: ArtifactImportRequest,
 ) -> Result<ArtifactImportResponse, HandlerError> {
     let document = parse_document(&request.source_format, &request.source_text)?;
@@ -173,11 +174,9 @@ async fn import_inner(
 }
 
 async fn export_inner(
+    scope: ActionRuleScope,
     request: ArtifactExportRequest,
 ) -> Result<ArtifactExportResponse, HandlerError> {
-    let scope = request.scope.unwrap_or(MemoryScope::Workspace {
-        workspace_id: request.workspace_id,
-    });
     let kind = parse_kind(&request.kind)?;
     let registry = artifact_registry();
     let stored = registry
@@ -212,10 +211,10 @@ async fn export_inner(
     })
 }
 
-async fn list_inner(request: ArtifactListRequest) -> Result<ArtifactListResponse, HandlerError> {
-    let scope = request.scope.unwrap_or(MemoryScope::Workspace {
-        workspace_id: request.workspace_id,
-    });
+async fn list_inner(
+    scope: ActionRuleScope,
+    request: ArtifactListRequest,
+) -> Result<ArtifactListResponse, HandlerError> {
     let kind = request.kind.as_deref().map(parse_kind).transpose()?;
     let status = request.status.as_deref().map(parse_status).transpose()?;
     let artifacts = artifact_registry()
@@ -260,7 +259,7 @@ fn validate_inner(
 }
 
 async fn publish_inner(
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     request: ArtifactPublishRequest,
 ) -> Result<ArtifactPublishResponse, HandlerError> {
     let registry = artifact_registry();
@@ -360,29 +359,46 @@ fn artifact_registry() -> ArtifactRegistry {
 
 async fn authorized_write_scope(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
-    scope: MemoryScope,
-) -> Result<MemoryScope, HandlerError> {
-    if scope.is_global() {
-        authorize_deployment_artifact_admin(ctx).await?;
-        return Ok(MemoryScope::Global);
+    scope: ActionRuleScope,
+) -> Result<ActionRuleScope, HandlerError> {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => {
+            authorize_workspace_default_admin(ctx, Relation::Admin).await?;
+        }
+        ActionRuleScope::Tenant { tenant_id } => {
+            authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
+        }
     }
-    let identity = authorize_workspace(ctx, workspace_id, Relation::Editor).await?;
-    checked_import_scope(workspace_id, scope, &identity).map_err(scope_handler_error)
+    Ok(scope)
 }
 
-async fn authorize_workspace(
+async fn authorize_read_scope(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    scope: &ActionRuleScope,
+) -> Result<(), HandlerError> {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => {
+            authorize_workspace_default_admin(ctx, Relation::Admin).await?;
+        }
+        ActionRuleScope::Tenant { tenant_id } => {
+            authorize_tenant(ctx, *tenant_id, Relation::Operator).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn authorize_workspace_default_admin(
+    ctx: &impl RequestHeaders,
     relation: Relation,
 ) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
+    let workspace_id = global_workspace_id();
     require_authz_with_delegation(
         &fga,
         &identity,
         ObjectType::Workspace,
-        workspace_id,
+        &workspace_id,
         relation,
     )
     .await
@@ -390,47 +406,21 @@ async fn authorize_workspace(
     Ok(identity)
 }
 
-async fn authorize_deployment_artifact_admin(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-) -> Result<(), HandlerError> {
+    tenant_id: TenantId,
+    relation: Relation,
+) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
-    if identity.identity_type != IdentityType::Service {
-        return Err(TerminalError::new_with_code(
-            403,
-            "global artifact publish requires a service identity",
-        )
-        .into());
-    }
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        identity.tenant_id,
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)?;
+    Ok(identity)
 }
 
-fn reject_scope_workspace_mismatch(
-    request_workspace_id: &WorkspaceId,
-    scope: &MemoryScope,
-) -> Result<(), HandlerError> {
-    let Some(scope_workspace_id) = scope.workspace_id() else {
-        return Ok(());
-    };
-    if &scope_workspace_id != request_workspace_id {
-        return Err(scope_handler_error(SkillScopeError::WorkspaceMismatch {
-            request_workspace_id: request_workspace_id.clone(),
-            scope_workspace_id,
-        }));
-    }
-    Ok(())
-}
-
-fn scope_handler_error(error: SkillScopeError) -> HandlerError {
-    TerminalError::new_with_code(400, error.to_string()).into()
+fn global_workspace_id() -> WorkspaceId {
+    WorkspaceId::new("workspace")
 }
 
 fn artifact_handler_error(error: MoaError) -> HandlerError {

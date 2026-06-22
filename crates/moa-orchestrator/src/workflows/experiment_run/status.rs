@@ -7,8 +7,8 @@ pub(super) async fn status_response(
     pool: sqlx::PgPool,
     request: ExperimentRunStatusRequest,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let workspace_id = request.workspace_id.clone();
-    let scope = workspace_scope(workspace_id.clone());
+    let tenant_id = request.tenant_id;
+    let scope = tenant_scope(tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let mut run = store
         .load_run(&scope, request.run_uid)
@@ -17,17 +17,16 @@ pub(super) async fn status_response(
         .ok_or_else(|| run_not_found(request.run_uid))?;
 
     if plan_revision_uid_from_run(&run).is_some() {
-        let aggregate =
-            aggregate_plan_status_from_store(pool.clone(), scope.clone(), run.run_uid).await?;
+        let aggregate = aggregate_plan_status_from_store(pool.clone(), scope, run.run_uid).await?;
         if aggregate.status != run.status || aggregate.error != run.error {
             run.status = aggregate.status;
             run.error = aggregate.error;
         }
-        return status_response_from_record(workspace_id, run);
+        return status_response_from_record(tenant_id, run);
     }
 
     if run.target_kind == ExperimentTargetKind::Workflow {
-        return linked_workflow_status_response(pool, scope, workspace_id, run).await;
+        return linked_workflow_status_response(pool, scope, tenant_id, run).await;
     }
 
     if let Some(status) = derived_session_status(run.status, run.session_id).await?
@@ -36,17 +35,17 @@ pub(super) async fn status_response(
         run.status = status;
     }
 
-    status_response_from_record(workspace_id, run)
+    status_response_from_record(tenant_id, run)
 }
 
 async fn linked_workflow_status_response(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
-    workspace_id: WorkspaceId,
+    scope: ActionRuleScope,
+    tenant_id: TenantId,
     mut run: ExperimentRunRecord,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let Some(workflow_run_uid) = run.workflow_run_uid else {
-        return status_response_from_record(workspace_id, run);
+        return status_response_from_record(tenant_id, run);
     };
 
     let workflow_run = workflow_runtime(pool.clone())
@@ -64,7 +63,7 @@ async fn linked_workflow_status_response(
     }
 
     let mut response = status_response_from_record_with_status(
-        workspace_id,
+        tenant_id,
         run,
         workflow_run.status.as_str().to_string(),
     )?;
@@ -131,22 +130,22 @@ fn experiment_status_from_artifact_status(
 }
 
 fn status_response_from_record(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run: ExperimentRunRecord,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let status = run.status.as_str().to_string();
-    status_response_from_record_with_status(workspace_id, run, status)
+    status_response_from_record_with_status(tenant_id, run, status)
 }
 
 fn status_response_from_record_with_status(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run: ExperimentRunRecord,
     status: String,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let run_value = serde_json::to_value(&run)
         .map_err(|error| TerminalError::new(format!("serialize experiment run failed: {error}")))?;
     Ok(ExperimentRunStatusResponse {
-        workspace_id,
+        tenant_id,
         run_uid: run.run_uid,
         status,
         target_kind: Some(run.target_kind.as_str().to_string()),

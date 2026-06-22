@@ -7,16 +7,15 @@ use moa_core::wire::{
     ToolStatsRequest,
 };
 use moa_core::{
-    CacheDailyMetric, Event, EventRecord, EventType, LearningCandidateStatus,
-    SessionAnalyticsSummary, SessionId, SessionStatus, ToolCallSummary, UserId,
-    WorkspaceAnalyticsSummary, WorkspaceId,
+    CacheDailyMetric, ContactId, Event, EventRecord, EventType, LearningCandidateStatus,
+    SessionAnalyticsSummary, SessionId, SessionStatus, TenantAnalyticsSummary, TenantId,
+    ToolCallSummary,
 };
 use moa_orchestrator::services::analytics::{
-    LearningCandidateReadScope, ToolStatsScope, cache_stats_response_from_parts,
-    experiment_stats_response_from_parts, learning_candidate_scope, redacted_event_snippet,
-    redacted_payload_preview, session_search_response_from_events,
-    session_stats_response_from_summary, tool_stats_response_from_rows, tool_stats_scope,
-    workspace_stats_response_from_summary,
+    ToolStatsScope, cache_stats_response_from_parts, experiment_stats_response_from_parts,
+    redacted_event_snippet, redacted_payload_preview, session_search_response_from_events,
+    session_stats_response_from_summary, tenant_stats_response_from_summary,
+    tool_stats_response_from_rows, tool_stats_scope,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -24,56 +23,40 @@ use uuid::Uuid;
 #[test]
 fn tool_stats_scope_accepts_deployment_request() {
     // Pins: unscoped tool stats preserves the former deployment-wide aggregate mode.
-    let request = ToolStatsRequest { workspace_id: None };
+    let request = ToolStatsRequest { tenant_id: None };
 
     let scope = tool_stats_scope(&request);
 
     assert_eq!(scope, ToolStatsScope::Deployment);
-    assert_eq!(scope.workspace_id(), None);
+    assert_eq!(scope.tenant_id(), None);
 }
 
 #[test]
-fn tool_stats_scope_accepts_explicit_workspace() {
-    // Pins: tool stats uses the caller-provided workspace as the protected scope.
+fn tool_stats_scope_accepts_explicit_tenant() {
+    // Pins: tool stats uses the caller-provided tenant as the protected scope.
+    let tenant_id = tenant("11111111-1111-1111-1111-111111111111");
     let request = ToolStatsRequest {
-        workspace_id: Some(WorkspaceId::new("workspace-a")),
+        tenant_id: Some(tenant_id),
     };
 
     let scope = tool_stats_scope(&request);
 
-    assert_eq!(
-        scope,
-        ToolStatsScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace-a")
-        }
-    );
-    assert_eq!(scope.workspace_id(), Some(&WorkspaceId::new("workspace-a")));
+    assert_eq!(scope, ToolStatsScope::Tenant { tenant_id });
+    assert_eq!(scope.tenant_id(), Some(&tenant_id));
 }
 
 #[test]
-fn learning_candidate_scope_distinguishes_workspace_and_tenant_reads() {
-    // Pins: workspace candidate reads are explicitly workspace-scoped; absent workspace means tenant admin.
-    let workspace_request = LearningCandidateListRequest {
-        workspace_id: Some(WorkspaceId::new("workspace-a")),
+fn learning_candidate_list_request_is_tenant_bounded() {
+    // Pins: learning-candidate analytics names the tenant boundary explicitly.
+    let tenant_id = tenant("22222222-2222-2222-2222-222222222222");
+    let request = LearningCandidateListRequest {
+        tenant_id,
         status: Some(LearningCandidateStatus::Proposed),
         limit: 20,
     };
-    assert_eq!(
-        learning_candidate_scope(&workspace_request),
-        LearningCandidateReadScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace-a")
-        }
-    );
 
-    let tenant_request = LearningCandidateListRequest {
-        workspace_id: None,
-        status: None,
-        limit: 20,
-    };
-    assert_eq!(
-        learning_candidate_scope(&tenant_request),
-        LearningCandidateReadScope::Tenant
-    );
+    assert_eq!(request.tenant_id, tenant_id);
+    assert_eq!(request.status, Some(LearningCandidateStatus::Proposed));
 }
 
 #[test]
@@ -83,8 +66,9 @@ fn analytics_experiment_stats_response_sums_status_counts() {
         .with_ymd_and_hms(2026, 6, 16, 12, 0, 0)
         .single()
         .expect("fixture datetime should be valid");
+    let tenant_id = tenant("33333333-3333-3333-3333-333333333333");
     let response = experiment_stats_response_from_parts(
-        WorkspaceId::new("workspace-a"),
+        tenant_id,
         vec![
             ExperimentStatusCount {
                 status: "completed".to_string(),
@@ -118,7 +102,7 @@ fn analytics_experiment_stats_response_sums_status_counts() {
         }],
     );
 
-    assert_eq!(response.workspace_id, WorkspaceId::new("workspace-a"));
+    assert_eq!(response.tenant_id, tenant_id);
     assert_eq!(response.total_runs, 3);
     assert_eq!(response.statuses[0].status, "completed");
     assert_eq!(response.score_runs.len(), 1);
@@ -141,12 +125,12 @@ fn analytics_response_helpers_preserve_core_fields() {
         uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111")
             .expect("session UUID fixture parses"),
     );
-    let workspace_id = WorkspaceId::new("workspace-a");
-    let user_id = UserId::new("user-a");
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
     let session = session_stats_response_from_summary(SessionAnalyticsSummary {
         session_id,
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
+        tenant_id,
+        contact_id: Some(contact_id),
         status: SessionStatus::Completed,
         turn_count: 3,
         event_count: 9,
@@ -161,14 +145,14 @@ fn analytics_response_helpers_preserve_core_fields() {
         error_count: 1,
     });
     assert_eq!(session.session_id, session_id);
-    assert_eq!(session.workspace_id, workspace_id);
-    assert_eq!(session.user_id, user_id);
+    assert_eq!(session.tenant_id, tenant_id);
+    assert_eq!(session.contact_id, Some(contact_id));
     assert_eq!(session.status, SessionStatus::Completed);
     assert_eq!(session.turn_count, 3);
     assert_eq!(session.error_count, 1);
 
-    let workspace = workspace_stats_response_from_summary(WorkspaceAnalyticsSummary {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    let tenant = tenant_stats_response_from_summary(TenantAnalyticsSummary {
+        tenant_id,
         days: 14,
         session_count: 5,
         turn_count: 8,
@@ -178,12 +162,12 @@ fn analytics_response_helpers_preserve_core_fields() {
         total_cost_cents: 42,
         cache_hit_rate: 0.25,
     });
-    assert_eq!(workspace.days, 14);
-    assert_eq!(workspace.session_count, 5);
-    assert_eq!(workspace.total_cache_read_tokens, 250);
+    assert_eq!(tenant.days, 14);
+    assert_eq!(tenant.session_count, 5);
+    assert_eq!(tenant.total_cache_read_tokens, 250);
 
     let tool = tool_stats_response_from_rows(
-        Some(WorkspaceId::new("workspace-a")),
+        Some(tenant_id),
         vec![ToolCallSummary {
             tool_name: "file.read".to_string(),
             call_count: 4,
@@ -193,7 +177,7 @@ fn analytics_response_helpers_preserve_core_fields() {
             success_rate: 0.75,
         }],
     );
-    assert_eq!(tool.workspace_id, Some(WorkspaceId::new("workspace-a")));
+    assert_eq!(tool.tenant_id, Some(tenant_id));
     assert_eq!(tool.rows.len(), 1);
     assert_eq!(tool.rows[0].tool_name, "file.read");
     assert_eq!(tool.rows[0].success_rate, 0.75);
@@ -203,8 +187,8 @@ fn analytics_response_helpers_preserve_core_fields() {
         .single()
         .expect("fixture datetime should be valid");
     let cache = cache_stats_response_from_parts(
-        WorkspaceAnalyticsSummary {
-            workspace_id: WorkspaceId::new("workspace-a"),
+        TenantAnalyticsSummary {
+            tenant_id,
             days: 7,
             session_count: 2,
             turn_count: 3,
@@ -215,7 +199,7 @@ fn analytics_response_helpers_preserve_core_fields() {
             cache_hit_rate: 0.4,
         },
         vec![CacheDailyMetric {
-            workspace_id: WorkspaceId::new("workspace-a"),
+            tenant_id,
             day,
             session_count: 2,
             turn_count: 3,
@@ -276,6 +260,7 @@ fn analytics_redaction_helpers_remove_secret_values() {
 #[test]
 fn session_search_response_returns_redacted_snippets_only() {
     // Pins: session search returns event IDs and redacted snippets, not full raw event payloads.
+    let tenant_id = TenantId::new();
     let session_id = SessionId(
         Uuid::parse_str("33333333-3333-3333-3333-333333333333")
             .expect("session UUID fixture parses"),
@@ -288,7 +273,7 @@ fn session_search_response_returns_redacted_snippets_only() {
         .expect("fixture datetime should be valid");
     let response = session_search_response_from_events(
         SessionSearchRequest {
-            workspace_id: WorkspaceId::new("workspace-a"),
+            tenant_id,
             query: "token".to_string(),
             from_time: None,
             to_time: None,
@@ -311,7 +296,7 @@ fn session_search_response_returns_redacted_snippets_only() {
         }],
     );
 
-    assert_eq!(response.workspace_id, WorkspaceId::new("workspace-a"));
+    assert_eq!(response.tenant_id, tenant_id);
     assert_eq!(response.query, "token");
     assert_eq!(response.results.len(), 1);
     assert_eq!(response.results[0].session_id, session_id);
@@ -321,4 +306,8 @@ fn session_search_response_returns_redacted_snippets_only() {
     assert_eq!(response.results[0].timestamp, timestamp);
     assert_eq!(response.results[0].snippet, "refresh [redacted]");
     assert!(!response.results[0].snippet.contains("refresh-token-123"));
+}
+
+fn tenant(value: &str) -> TenantId {
+    TenantId::from(Uuid::parse_str(value).expect("tenant UUID fixture parses"))
 }

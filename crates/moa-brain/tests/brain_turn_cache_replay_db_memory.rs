@@ -10,8 +10,8 @@ use moa_brain::{
 };
 use moa_core::{
     CompletionRequest, Event, EventRange, EventRecord, ModelCapabilities, Result, SessionMeta,
-    SessionStore, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, TurnReplayCounters,
-    TurnReplaySnapshot, UserId, WorkspaceId, scope_turn_replay_counters,
+    SessionStore, TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
+    TurnReplayCounters, TurnReplaySnapshot, WorkspaceId, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
@@ -73,9 +73,10 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let session_store = Arc::new(session_store);
     let dyn_session_store: Arc<dyn SessionStore> = session_store.clone();
     let workspace_id = WorkspaceId::new("brain-turn-cache-replay");
+    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
     let session = SessionMeta {
-        workspace_id: workspace_id.clone(),
-        user_id: UserId::new("integration-test"),
+        tenant_id,
         model: config.models.main.clone().into(),
         ..SessionMeta::default()
     };
@@ -88,7 +89,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
             .with_session_store(session_store.clone()),
     );
     router
-        .remember_workspace_root(workspace_id.clone(), workspace.clone())
+        .remember_workspace_root(runtime_workspace_id, workspace.clone())
         .await;
 
     let provider = Arc::new(build_scripted_provider());
@@ -656,6 +657,21 @@ fn assert_turn_latency_spans(span_recorder: &SpanRecorder) {
             span_recorder.count(name),
         );
     }
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    uuid::Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> uuid::Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }
 
 #[derive(Clone, Default)]

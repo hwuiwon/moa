@@ -453,7 +453,7 @@ pub fn validate_probes(probes: &[Probe], facts: &[LedgerFact]) -> Result<()> {
             };
 
             if probe.probe_type == ProbeType::CrossUserIsolation
-                && fact.scope == ScopeTier::User
+                && fact.scope == ScopeTier::Contact
                 && fact.user_id == probe.user_id
             {
                 return invalid_config(format!(
@@ -644,7 +644,7 @@ mod tests {
         LedgerFact {
             workspace_id: WorkspaceId::new("workspace-a"),
             user_id: UserId::new("user-a"),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             fact_id: fact_id.to_string(),
             valid_from: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             valid_to: None,

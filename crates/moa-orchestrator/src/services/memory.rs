@@ -16,7 +16,7 @@ use moa_core::wire::{
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
 use moa_core::{
-    MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId, record_memory_operation,
+    ContactId, MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId, record_memory_operation,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -37,22 +37,22 @@ use crate::handlers::authz_shim::{require_fga_client, require_identity, translat
 #[restate_sdk::service]
 #[name = "Memory"]
 pub trait Memory {
-    /// Searches graph memory after a workspace member check.
+    /// Searches graph memory after a tenant operator check.
     async fn search(
         request: Json<MemorySearchRequest>,
     ) -> Result<Json<MemorySearchResponse>, HandlerError>;
 
-    /// Shows one graph-memory node after a workspace member check.
+    /// Shows one graph-memory node after a tenant operator check.
     async fn show(
         request: Json<MemoryShowRequest>,
     ) -> Result<Json<MemoryShowResponse>, HandlerError>;
 
-    /// Ingests documents into graph memory after a workspace editor check.
+    /// Ingests documents into graph memory after a tenant operator check.
     async fn ingest_documents(
         request: Json<MemoryIngestRequest>,
     ) -> Result<Json<MemoryIngestResponse>, HandlerError>;
 
-    /// Runs graph-memory retrieval with debug lineage after a workspace member check.
+    /// Runs graph-memory retrieval with debug lineage after a tenant operator check.
     async fn retrieve_debug(
         request: Json<MemoryRetrieveDebugRequest>,
     ) -> Result<Json<MemoryRetrieveDebugResponse>, HandlerError>;
@@ -71,13 +71,9 @@ impl Memory for MemoryImpl {
     ) -> Result<Json<MemorySearchResponse>, HandlerError> {
         annotate_restate_handler_span("Memory", "search");
         let request = request.into_inner();
-        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let scope = checked_memory_scope(
-            request.workspace_id.clone(),
-            request.user_id.clone(),
-            &identity,
-        )
-        .map_err(user_scope_handler_error)?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let scope = checked_memory_scope(request.tenant_id, request.contact_id, &identity)
+            .map_err(user_scope_handler_error)?;
 
         Ok(ctx
             .run(|| async move { search_inner(request, scope).await.map(Json::from) })
@@ -93,7 +89,7 @@ impl Memory for MemoryImpl {
     ) -> Result<Json<MemoryShowResponse>, HandlerError> {
         annotate_restate_handler_span("Memory", "show");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         Ok(ctx
             .run(|| async move { show_inner(request).await.map(Json::from) })
@@ -109,15 +105,15 @@ impl Memory for MemoryImpl {
     ) -> Result<Json<MemoryIngestResponse>, HandlerError> {
         annotate_restate_handler_span("Memory", "ingest_documents");
         let request = request.into_inner();
-        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
-        let user_id = checked_ingest_user_id(request.user_id.as_ref(), &identity)
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let contact_id = checked_ingest_contact_id(request.contact_id, &identity)
             .map_err(user_scope_handler_error)?;
 
         let started = Instant::now();
         let mut results = Vec::with_capacity(request.documents.len());
         for (index, document) in request.documents.into_iter().enumerate() {
-            let workspace_id = request.workspace_id.clone();
-            let turn_user_id = user_id.clone();
+            let workspace_id = WorkspaceId::new(request.tenant_id.to_string());
+            let turn_user_id = UserId::new(contact_id.to_string());
             let source_name = document.source_name.clone();
             let content = document.content.clone();
             let turn = ctx
@@ -151,7 +147,7 @@ impl Memory for MemoryImpl {
         );
 
         Ok(Json(MemoryIngestResponse {
-            workspace_id: request.workspace_id,
+            tenant_id: request.tenant_id,
             results,
         }))
     }
@@ -164,13 +160,9 @@ impl Memory for MemoryImpl {
     ) -> Result<Json<MemoryRetrieveDebugResponse>, HandlerError> {
         annotate_restate_handler_span("Memory", "retrieve_debug");
         let request = request.into_inner();
-        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
-        let scope = checked_memory_scope(
-            request.workspace_id.clone(),
-            request.user_id.clone(),
-            &identity,
-        )
-        .map_err(user_scope_handler_error)?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let scope = checked_memory_scope(request.tenant_id, request.contact_id, &identity)
+            .map_err(user_scope_handler_error)?;
 
         let response = ctx
             .run(|| async move {
@@ -207,73 +199,63 @@ pub fn effective_user_id(identity: &Identity) -> Option<UserId> {
         IdentityType::Agent => identity
             .acting_on_behalf_of
             .map(|user_id| UserId::new(user_id.to_string())),
-        IdentityType::Service => None,
+        IdentityType::Service | IdentityType::Contact => None,
     }
 }
 
 /// Builds the memory read scope after validating any requested user scope.
 pub fn checked_memory_scope(
-    workspace_id: WorkspaceId,
-    requested_user_id: Option<UserId>,
+    tenant_id: moa_core::TenantId,
+    requested_contact_id: Option<ContactId>,
     identity: &Identity,
 ) -> Result<MemoryScope, UserScopeError> {
-    match requested_user_id {
+    match requested_contact_id {
         Some(requested) => {
-            let effective = effective_user_id(identity);
-            if effective.as_ref() != Some(&requested) {
+            if identity.identity_type == IdentityType::Contact
+                && ContactId(identity.id) != requested
+            {
                 return Err(UserScopeError::Mismatch {
-                    requested,
-                    effective: effective
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "<none>".to_string()),
+                    requested: UserId::new(requested.to_string()),
+                    effective: identity.id.to_string(),
                 });
             }
-            Ok(MemoryScope::User {
-                workspace_id,
-                user_id: requested,
+            Ok(MemoryScope::Contact {
+                tenant_id,
+                contact_id: requested,
             })
         }
-        None => Ok(MemoryScope::Workspace { workspace_id }),
+        None => Ok(MemoryScope::Tenant { tenant_id }),
     }
 }
 
 /// Returns the trusted user id to attach to a document ingestion turn.
-pub fn checked_ingest_user_id(
-    requested_user_id: Option<&UserId>,
+pub fn checked_ingest_contact_id(
+    requested_contact_id: Option<ContactId>,
     identity: &Identity,
-) -> Result<UserId, UserScopeError> {
-    let effective = effective_user_id(identity);
-    if let Some(requested) = requested_user_id {
-        if effective.as_ref() != Some(requested) {
+) -> Result<ContactId, UserScopeError> {
+    if let Some(requested) = requested_contact_id {
+        if identity.identity_type == IdentityType::Contact && ContactId(identity.id) != requested {
             return Err(UserScopeError::Mismatch {
-                requested: requested.clone(),
-                effective: effective
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "<none>".to_string()),
+                requested: UserId::new(requested.to_string()),
+                effective: identity.id.to_string(),
             });
         }
-        return Ok(requested.clone());
+        return Ok(requested);
     }
 
-    Ok(effective.unwrap_or_else(|| UserId::new(identity.id.to_string())))
+    Ok(ContactId(identity.id))
 }
 
-async fn authorize_workspace(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: moa_core::TenantId,
     relation: Relation,
 ) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)?;
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)?;
     Ok(identity)
 }
 
@@ -308,8 +290,8 @@ async fn search_inner(
 
 async fn show_inner(request: MemoryShowRequest) -> Result<MemoryShowResponse, HandlerError> {
     let started = Instant::now();
-    let scope = MemoryScope::Workspace {
-        workspace_id: request.workspace_id,
+    let scope = MemoryScope::Tenant {
+        tenant_id: request.tenant_id,
     };
     let graph = graph_store(&scope);
     let node = graph
@@ -503,11 +485,10 @@ fn record_debug_retrieval_lineage(
     hits: &[RetrievalHit],
 ) -> Result<TurnId, HandlerError> {
     let turn_id = TurnId::new_v7();
-    let workspace_id = scope.workspace_id().ok_or_else(|| {
-        TerminalError::new_with_code(400, "debug retrieval requires workspace scope")
-    })?;
+    let workspace_id = WorkspaceId::new(scope.tenant_id().to_string());
     let user_id = scope
-        .user_id()
+        .contact_id()
+        .map(|contact_id| UserId::new(contact_id.to_string()))
         .or_else(|| effective_user_id(identity))
         .unwrap_or_else(|| UserId::new(identity.id.to_string()));
     let record = RetrievalLineage {

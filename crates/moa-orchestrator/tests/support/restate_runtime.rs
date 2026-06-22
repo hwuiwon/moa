@@ -108,7 +108,7 @@ pub fn test_user_identity() -> Identity {
     Identity {
         identity_type: IdentityType::User,
         id: Uuid::new_v4(),
-        tenant_id: Uuid::new_v4(),
+        tenant_id: moa_core::TenantId::new(),
         api_key_id: None,
         acting_on_behalf_of: None,
     }
@@ -125,34 +125,34 @@ pub fn with_identity(
         .header("x-moa-tenant-id", identity.tenant_id.to_string())
 }
 
-/// Grant the test identity workspace membership directly in live OpenFGA.
-pub async fn grant_workspace_member(
+/// Grant the test identity tenant-operator access directly in live OpenFGA.
+pub async fn grant_tenant_operator(
     identity: &Identity,
-    workspace_id: impl std::fmt::Display,
+    tenant_id: impl std::fmt::Display,
 ) -> Result<()> {
     apply_raw_tuple(
         TupleOp::Write,
         &format!("user:{}", identity.id),
-        "member",
-        &format!("workspace:{workspace_id}"),
+        "operator",
+        &format!("tenant:{tenant_id}"),
     )
     .await
-    .context("grant test workspace membership")
+    .context("grant test tenant operator")
 }
 
-/// Grant the test identity workspace editor privileges directly in live OpenFGA.
-pub async fn grant_workspace_editor(
+/// Grant the test identity tenant-admin access directly in live OpenFGA.
+pub async fn grant_tenant_admin(
     identity: &Identity,
-    workspace_id: impl std::fmt::Display,
+    tenant_id: impl std::fmt::Display,
 ) -> Result<()> {
     apply_raw_tuple(
         TupleOp::Write,
         &format!("user:{}", identity.id),
-        "editor",
-        &format!("workspace:{workspace_id}"),
+        "admin",
+        &format!("tenant:{tenant_id}"),
     )
     .await
-    .context("grant test workspace editor")
+    .context("grant test tenant admin")
 }
 
 /// Grant the test identity direct participation in one session.

@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::{
     HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier, SessionId,
-    SessionMeta, ToolFailureClass, ToolInvocation, ToolOutput, UserId, WorkspaceId,
+    SessionMeta, TenantId, ToolFailureClass, ToolInvocation, ToolOutput,
 };
 use serde_json::json;
 
@@ -127,8 +127,7 @@ async fn router_with_provider(provider: Arc<dyn HandProvider>) -> ToolRouter {
 fn session() -> SessionMeta {
     SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace-router-tests"),
-        user_id: UserId::new("user-router-tests"),
+        tenant_id: TenantId::new(),
         ..SessionMeta::default()
     }
 }

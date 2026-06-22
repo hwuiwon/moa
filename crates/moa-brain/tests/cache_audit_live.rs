@@ -15,8 +15,9 @@ use moa_brain::{
 };
 use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Event, EventRange,
-    LLMProvider, MessageRole, MoaConfig, Result, SessionMeta, SessionStore, ToolContent, UserId,
+    CompletionRequest, CompletionResponse, CompletionStream, ContactId, ContactRef,
+    ContactVerificationState, ContextMessage, Event, EventRange, LLMProvider, MessageRole,
+    MoaConfig, Result, SessionActorRef, SessionMeta, SessionStore, TenantId, ToolContent, UserId,
     WorkspaceId, estimate_text_tokens,
 };
 use moa_hands::ToolRouter;
@@ -417,7 +418,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             .with_session_store(store.clone()),
     );
     tool_router
-        .remember_workspace_root(workspace_id.clone(), repo_root.clone())
+        .remember_workspace_root(runtime_workspace_id(&workspace_id), repo_root.clone())
         .await;
 
     let same_session_audits = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -669,13 +670,60 @@ async fn create_session(
     model: &str,
 ) -> Result<moa_core::SessionId> {
     store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: user_id.clone(),
-            model: moa_core::ModelId::new(model),
-            ..SessionMeta::default()
-        })
+        .create_session(session_meta(workspace_id, user_id, model))
         .await
+}
+
+fn session_meta(workspace_id: &WorkspaceId, user_id: &UserId, model: &str) -> SessionMeta {
+    let tenant_id = tenant_id_from_workspace_id(workspace_id);
+    let contact_id = contact_id_from_user_id(user_id);
+    SessionMeta {
+        tenant_id,
+        contact: Some(contact_ref(tenant_id, contact_id)),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
+        model: moa_core::ModelId::new(model),
+        ..SessionMeta::default()
+    }
+}
+
+fn runtime_workspace_id(workspace_id: &WorkspaceId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id_from_workspace_id(workspace_id).to_string())
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
+    Uuid::parse_str(user_id.as_str())
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }
 }
 
 async fn run_turn(

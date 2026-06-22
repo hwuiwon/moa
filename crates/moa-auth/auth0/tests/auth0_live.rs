@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use moa_auth_providers_auth0::Auth0AuthProvider;
+use moa_core::TenantId;
 use moa_core::traits::{AuthError, AuthProvider, Credential, IdentityType};
 use uuid::Uuid;
 
@@ -22,7 +23,7 @@ async fn auth0_authenticate_valid_token_returns_identity() {
         .await
         .expect("valid live Auth0 token should authenticate");
     assert_eq!(identity.identity_type, IdentityType::User);
-    assert_eq!(identity.tenant_id, env.tenant_id);
+    assert_eq!(identity.tenant_id, TenantId::from(env.tenant_id));
     assert_eq!(identity.api_key_id, None);
 }
 

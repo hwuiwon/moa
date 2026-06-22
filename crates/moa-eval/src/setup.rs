@@ -18,8 +18,8 @@ use moa_brain::{
     },
 };
 use moa_core::{
-    ActionPolicyEffect, ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionMeta,
-    SessionStore, UserId, WorkspaceId,
+    ActionPolicyEffect, ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionActorRef,
+    SessionMeta, SessionStore, TenantId, UserId, WorkspaceId,
 };
 use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
 use moa_hands::ToolRouter;
@@ -32,7 +32,6 @@ use serde_json::Value;
 use tokio::fs;
 use uuid::Uuid;
 
-const DEFAULT_EVAL_WORKSPACE: &str = "eval";
 const DEFAULT_EVAL_USER: &str = "eval-runner";
 
 /// Fully isolated runtime environment for one eval execution.
@@ -113,7 +112,8 @@ pub(crate) async fn build_agent_environment_with_provider(
             source,
         })?;
 
-    let workspace_id = WorkspaceId::new(slugify_name(&agent_config.name).as_str());
+    let tenant_id = TenantId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new(DEFAULT_EVAL_USER);
     let lineage = Arc::new(EvalLineageHandle::default());
     let schema_name = format!("eval_{}", Uuid::now_v7().simple());
@@ -136,8 +136,8 @@ pub(crate) async fn build_agent_environment_with_provider(
     );
 
     let session_meta = SessionMeta {
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
+        tenant_id,
+        created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
         model: llm_provider.capabilities().model_id.clone(),
         title: Some(agent_config.name.clone()),
         ..SessionMeta::default()
@@ -400,26 +400,6 @@ fn expand_local_path(path: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn slugify_name(name: &str) -> String {
-    let mut slug = String::from(DEFAULT_EVAL_WORKSPACE);
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return slug;
-    }
-    slug.push('-');
-    for character in trimmed.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    slug
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -431,7 +411,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::{build_agent_environment_with_provider, slugify_name};
+    use super::build_agent_environment_with_provider;
     use moa_eval_core::{ActionPolicyOverride, AgentConfig, ToolOverride};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
@@ -514,11 +494,8 @@ mod tests {
 
         assert!(environment.tool_router.has_tool("file_read"));
         assert!(!environment.tool_router.has_tool("bash"));
-    }
-
-    #[test]
-    fn slugify_preserves_eval_prefix() {
-        assert_eq!(slugify_name("Deploy Variant"), "eval-deploy-variant");
+        uuid::Uuid::parse_str(environment.workspace_id.as_str())
+            .expect("eval workspace id should be the tenant UUID string");
     }
 
     fn test_moa_config() -> MoaConfig {

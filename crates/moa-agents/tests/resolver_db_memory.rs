@@ -4,7 +4,8 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifact
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
-    AgentRevisionLock, MemoryScope, ModelId, Result, SessionMeta, SessionStore, UserId, WorkspaceId,
+    ActionRuleScope, AgentRevisionLock, ModelId, Result, SessionActorRef, SessionMeta,
+    SessionStore, TenantId, WorkspaceId,
 };
 use serde_json::json;
 use sqlx::types::Json;
@@ -21,10 +22,9 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
     let registry = ArtifactRegistry::new(pool.clone());
     let artifact_resolver = ArtifactResolver::new(ArtifactRegistry::new(pool.clone()));
     let agent_resolver = AgentResolver::new(pool.clone());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let tenant_id = TenantId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let skill_name = format!("support-skill-{}", Uuid::now_v7());
     let agent_name = format!("support-agent-{}", Uuid::now_v7());
 
@@ -111,8 +111,8 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
 
     let session_id = store
         .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("user-1"),
+            tenant_id,
+            created_by: Some(SessionActorRef::Identity { id: Uuid::now_v7() }),
             model: ModelId::new("test-model"),
             agent_context: Some(resolved.agent_context.clone()),
             ..SessionMeta::default()
@@ -134,7 +134,7 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
 async fn publish_document(
     registry: &ArtifactRegistry,
     artifact_resolver: &ArtifactResolver,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     mut document: ArtifactDocument,
 ) -> Result<StoredArtifactRevision> {
     document.reference_resolutions = artifact_resolver.resolve_document(scope, &document).await?;

@@ -4,11 +4,8 @@ use super::*;
 
 pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
     let id = row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?;
-    let workspace_id = row
-        .try_get::<String, _>("workspace_id")
-        .map_err(map_sqlx_error)?;
-    let user_id = row
-        .try_get::<String, _>("user_id")
+    let tenant_id = row
+        .try_get::<Uuid, _>("tenant_id")
         .map_err(map_sqlx_error)?;
     let status_text = row.try_get::<String, _>("status").map_err(map_sqlx_error)?;
     let channel_text = row
@@ -41,11 +38,9 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         .try_get::<Option<Uuid>, _>("created_by_actor_id")
         .map_err(map_sqlx_error)?;
 
-    let workspace = WorkspaceId(workspace_id.clone());
     Ok(SessionMeta {
         id: moa_core::SessionId(id),
-        workspace_id: workspace.clone(),
-        user_id: moa_core::UserId(user_id),
+        tenant_id: TenantId(tenant_id),
         title: row
             .try_get::<Option<String>, _>("title")
             .map_err(map_sqlx_error)?,
@@ -72,7 +67,6 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
         contact: contact_from_columns(
             contact_id,
             contact_tenant_id,
-            workspace.as_str(),
             contact_state.as_deref(),
             contact_canonical_id,
             contact_linked_ids,
@@ -115,7 +109,6 @@ pub(crate) fn session_meta_from_row(row: &PgRow) -> Result<SessionMeta> {
 fn contact_from_columns(
     contact_id: Option<Uuid>,
     tenant_id: Option<Uuid>,
-    workspace_id: &str,
     state: Option<&str>,
     canonical_contact_id: Option<Uuid>,
     linked_contact_ids: Vec<Uuid>,
@@ -133,8 +126,7 @@ fn contact_from_columns(
     };
     Ok(Some(ContactRef {
         contact_id: ContactId(contact_id),
-        tenant_id,
-        workspace_id: WorkspaceId(workspace_id.to_string()),
+        tenant_id: TenantId(tenant_id),
         state,
         canonical_contact_id: canonical_contact_id.map(ContactId),
         linked_contact_ids: linked_contact_ids.into_iter().map(ContactId).collect(),
@@ -163,16 +155,46 @@ fn actor_from_columns(
 
 /// Maps a `sessions` row into a `SessionSummary`.
 pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
+    let tenant_id = row
+        .try_get::<Uuid, _>("tenant_id")
+        .map_err(map_sqlx_error)?;
+    let contact_id = row
+        .try_get::<Option<Uuid>, _>("contact_id")
+        .map_err(map_sqlx_error)?;
+    let contact_tenant_id = row
+        .try_get::<Option<Uuid>, _>("contact_tenant_id")
+        .map_err(map_sqlx_error)?;
+    let contact_state = row
+        .try_get::<Option<String>, _>("contact_state")
+        .map_err(map_sqlx_error)?;
+    let contact_canonical_id = row
+        .try_get::<Option<Uuid>, _>("contact_canonical_id")
+        .map_err(map_sqlx_error)?;
+    let contact_linked_ids = row
+        .try_get::<Vec<Uuid>, _>("contact_linked_ids")
+        .map_err(map_sqlx_error)?;
+    let contact_scopes = row
+        .try_get::<Vec<String>, _>("contact_scopes")
+        .map_err(map_sqlx_error)?;
+    let created_by_actor_type = row
+        .try_get::<Option<String>, _>("created_by_actor_type")
+        .map_err(map_sqlx_error)?;
+    let created_by_actor_id = row
+        .try_get::<Option<Uuid>, _>("created_by_actor_id")
+        .map_err(map_sqlx_error)?;
+
     Ok(SessionSummary {
         session_id: moa_core::SessionId(row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?),
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        user_id: moa_core::UserId(
-            row.try_get::<String, _>("user_id")
-                .map_err(map_sqlx_error)?,
-        ),
+        tenant_id: TenantId(tenant_id),
+        contact: contact_from_columns(
+            contact_id,
+            contact_tenant_id,
+            contact_state.as_deref(),
+            contact_canonical_id,
+            contact_linked_ids,
+            contact_scopes,
+        )?,
+        created_by: actor_from_columns(created_by_actor_type.as_deref(), created_by_actor_id)?,
         title: row
             .try_get::<Option<String>, _>("title")
             .map_err(map_sqlx_error)?,
@@ -190,6 +212,28 @@ pub(crate) fn session_summary_from_row(row: &PgRow) -> Result<SessionSummary> {
             .try_get::<DateTime<Utc>, _>("updated_at")
             .map_err(map_sqlx_error)?,
     })
+}
+
+fn tenant_id_from_storage(value: String) -> TenantId {
+    if let Ok(uuid) = Uuid::parse_str(&value) {
+        return TenantId::from(uuid);
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
+}
+
+fn action_rule_scope_from_columns(scope: &str, workspace_id: &str) -> ActionRuleScope {
+    match scope {
+        "global" | "workspace_default" => ActionRuleScope::WorkspaceDefault,
+        "workspace" | "tenant" => ActionRuleScope::Tenant {
+            tenant_id: tenant_id_from_storage(workspace_id.to_string()),
+        },
+        _ => ActionRuleScope::WorkspaceDefault,
+    }
 }
 
 /// Maps a `task_segments` row into a `TaskSegment`.
@@ -248,9 +292,10 @@ pub(crate) fn task_segment_from_row(row: &PgRow) -> Result<TaskSegment> {
 pub(crate) fn learning_entry_from_row(row: &PgRow) -> Result<LearningEntry> {
     Ok(LearningEntry {
         id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
+        tenant_id: tenant_id_from_storage(
+            row.try_get::<String, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
         learning_type: row
             .try_get::<String, _>("learning_type")
             .map_err(map_sqlx_error)?,
@@ -299,9 +344,10 @@ pub(crate) fn experience_record_from_row(row: &PgRow) -> Result<ExperienceRecord
             row.try_get::<Uuid, _>("session_id")
                 .map_err(map_sqlx_error)?,
         ),
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
+        tenant_id: tenant_id_from_storage(
+            row.try_get::<String, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
         workspace_id: WorkspaceId(
             row.try_get::<String, _>("workspace_id")
                 .map_err(map_sqlx_error)?,
@@ -360,9 +406,10 @@ pub(crate) fn experience_attribution_from_row(row: &PgRow) -> Result<ExperienceA
         experience_id: row
             .try_get::<Uuid, _>("experience_id")
             .map_err(map_sqlx_error)?,
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
+        tenant_id: tenant_id_from_storage(
+            row.try_get::<String, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
         workspace_id: WorkspaceId(
             row.try_get::<String, _>("workspace_id")
                 .map_err(map_sqlx_error)?,
@@ -397,9 +444,10 @@ pub(crate) fn experience_attribution_from_row(row: &PgRow) -> Result<ExperienceA
 pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandidate> {
     Ok(LearningCandidate {
         id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
+        tenant_id: tenant_id_from_storage(
+            row.try_get::<String, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
         workspace_id: WorkspaceId(
             row.try_get::<String, _>("workspace_id")
                 .map_err(map_sqlx_error)?,
@@ -479,9 +527,10 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
 /// Maps a `task_strategy_success_rates` row into a task-conditioned aggregate.
 pub(crate) fn task_strategy_success_rate_from_row(row: &PgRow) -> Result<TaskStrategySuccessRate> {
     Ok(TaskStrategySuccessRate {
-        tenant_id: row
-            .try_get::<String, _>("tenant_id")
-            .map_err(map_sqlx_error)?,
+        tenant_id: tenant_id_from_storage(
+            row.try_get::<String, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
         task_fingerprint: row
             .try_get::<String, _>("task_fingerprint")
             .map_err(map_sqlx_error)?,
@@ -532,16 +581,13 @@ fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAsses
 
 /// Maps an `action_policy_rules` row into an `ActionPolicyRule`.
 pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRule> {
+    let workspace_id = row
+        .try_get::<String, _>("workspace_id")
+        .map_err(map_sqlx_error)?;
+    let scope = row.try_get::<String, _>("scope").map_err(map_sqlx_error)?;
     Ok(ActionPolicyRule {
         id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        user_id: row
-            .try_get::<Option<String>, _>("user_id")
-            .map_err(map_sqlx_error)?
-            .map(moa_core::UserId),
+        scope: action_rule_scope_from_columns(&scope, &workspace_id),
         tool: row.try_get::<String, _>("tool").map_err(map_sqlx_error)?,
         pattern: row
             .try_get::<String, _>("pattern")
@@ -549,10 +595,6 @@ pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRul
         effect: from_db(
             "action policy effect",
             &row.try_get::<String, _>("effect").map_err(map_sqlx_error)?,
-        )?,
-        scope: from_db(
-            "action policy scope",
-            &row.try_get::<String, _>("scope").map_err(map_sqlx_error)?,
         )?,
         reason: row
             .try_get::<Option<String>, _>("reason")

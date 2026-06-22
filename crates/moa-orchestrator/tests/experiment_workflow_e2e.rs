@@ -12,7 +12,7 @@ use moa_core::wire::{
     ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
     ExperimentRunStatusResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
-use moa_core::{MemoryScope, WorkspaceId};
+use moa_core::{ActionRuleScope, TenantId, WorkspaceId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -20,7 +20,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_editor,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_tenant_admin,
     register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
     test_user_identity, with_identity,
 };
@@ -68,9 +68,11 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(format!("experiment-workflow-{}", Uuid::now_v7()));
-    grant_workspace_editor(&identity, &workspace_id).await?;
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 
     let result = async {
@@ -132,12 +134,13 @@ async fn import_and_publish_damaged_food_workflow(
     identity: &Identity,
     workspace_id: &WorkspaceId,
 ) -> Result<ArtifactPublishResponse> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(
+            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+        ),
     };
     let import_request = ArtifactImportRequest {
-        workspace_id: workspace_id.clone(),
-        scope: scope.clone(),
+        scope,
         source_format: "yaml".to_string(),
         source_text: damaged_food_workflow_source().to_string(),
         files: Vec::new(),
@@ -157,7 +160,6 @@ async fn import_and_publish_damaged_food_workflow(
     assert_eq!(imported.status, "draft");
 
     let publish_request = ArtifactPublishRequest {
-        workspace_id: workspace_id.clone(),
         scope,
         revision_uid: imported.revision_uid,
     };
@@ -187,7 +189,7 @@ async fn run_workflow_experiment(
 ) -> Result<ExperimentRunResponse> {
     let order_id = format!("ORD-{}", Uuid::now_v7());
     let request = ExperimentRunRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         name: "damaged-food-workflow-experiment".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
@@ -232,7 +234,7 @@ async fn wait_for_linked_workflow_experiment(
     run_uid: Uuid,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_uid,
     };
     let mut last_status = None;
@@ -266,7 +268,9 @@ async fn workflow_status(
     run_id: Uuid,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: TenantId::from(
+            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+        ),
         run_id,
     };
     post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
@@ -399,4 +403,10 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
     }
 
     bail!("published workflow had validation errors: {errors:?}")
+}
+
+fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .context("workspace fixture id should be a tenant UUID")
 }

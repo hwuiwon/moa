@@ -1,6 +1,6 @@
 //! Integration coverage for the `moa.graph_changelog` outbox.
 
-use moa_core::{ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ScopeContext, ScopedConn, TenantId};
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
 use moa_session::testing;
 use serde_json::json;
@@ -8,6 +8,30 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
+    let workspace_id = workspace_id.as_ref();
+    let tenant_id = Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+    ScopeContext::tenant(tenant_id)
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
+        let slot = index % 16;
+        bytes[slot] = bytes[slot]
+            .wrapping_mul(31)
+            .wrapping_add(byte)
+            .wrapping_add(index as u8);
+        let mirror = (index * 7 + 3) % 16;
+        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
 
 async fn set_app_role(conn: &mut sqlx::PgConnection) {
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -70,7 +94,7 @@ async fn changelog_write_bumps_workspace_version_and_respects_read_rls() {
         .expect("create isolated Postgres store");
     let workspace_a = format!("changelog-{}-a", Uuid::now_v7().simple());
     let workspace_b = format!("changelog-{}-b", Uuid::now_v7().simple());
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_a.clone()));
+    let ctx = tenant_scope(workspace_a.clone());
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped changelog transaction");
@@ -139,7 +163,7 @@ async fn changelog_rejects_updates_for_app_role() {
         .await
         .expect("create isolated Postgres store");
     let workspace_id = format!("changelog-update-{}", Uuid::now_v7().simple());
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let ctx = tenant_scope(workspace_id);
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped changelog transaction");

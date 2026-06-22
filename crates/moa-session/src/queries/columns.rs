@@ -2,7 +2,7 @@
 
 /// Canonical column list for selecting session rows.
 pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
-    "id, workspace_id, user_id, title, status, channel, active_channel_binding_id, model, ",
+    "id, tenant_id, workspace_id, title, status, channel, active_channel_binding_id, model, ",
     "created_at, updated_at, completed_at, parent_session_id, contact_id, contact_tenant_id, ",
     "contact_state, contact_canonical_id, contact_linked_ids, contact_scopes, ",
     "created_by_actor_type, created_by_actor_id, contact_promoted_from_id, total_input_tokens, ",
@@ -12,7 +12,7 @@ pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
 
 /// Canonical column list for inserting session rows.
 pub(crate) const SESSION_INSERT_COLUMNS: &str = concat!(
-    "id, workspace_id, user_id, title, status, channel, active_channel_binding_id, model, ",
+    "id, tenant_id, workspace_id, user_id, title, status, channel, active_channel_binding_id, model, ",
     "created_at, updated_at, completed_at, parent_session_id, contact_id, contact_tenant_id, ",
     "contact_state, contact_canonical_id, contact_linked_ids, contact_scopes, ",
     "created_by_actor_type, created_by_actor_id, contact_promoted_from_id, total_input_tokens_uncached, ",
@@ -25,8 +25,11 @@ pub(crate) const EVENT_COLUMNS: &str =
     "id, session_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count";
 
 /// Canonical column list for selecting session summaries.
-pub(crate) const SESSION_SUMMARY_COLUMNS: &str =
-    "id, workspace_id, user_id, title, status, channel, model, updated_at";
+pub(crate) const SESSION_SUMMARY_COLUMNS: &str = concat!(
+    "id, tenant_id, workspace_id, title, status, channel, model, updated_at, ",
+    "contact_id, contact_tenant_id, contact_state, contact_canonical_id, contact_linked_ids, ",
+    "contact_scopes, created_by_actor_type, created_by_actor_id"
+);
 
 /// Canonical column list for selecting task segment rows.
 pub(crate) const TASK_SEGMENT_COLUMNS: &str = concat!(

@@ -1,19 +1,39 @@
 //! Shared graph-backed skill integration fixtures.
 
-use moa_core::{MoaError, Result, ScopeContext, WorkspaceId};
+use moa_core::{ActionRuleScope, MemoryScope, MoaError, Result, ScopeContext, TenantId};
 use moa_memory_graph::AgeGraphStore;
+use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
+use uuid::Uuid;
 
 pub(crate) static GRAPH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub(crate) fn workspace_scope(workspace_id: &str) -> moa_core::MemoryScope {
-    moa_core::MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(workspace_id),
+pub(crate) fn workspace_scope(workspace_id: &str) -> ActionRuleScope {
+    ActionRuleScope::Tenant {
+        tenant_id: tenant_id_from_workspace(workspace_id),
     }
 }
 
-pub(crate) fn graph_store(pool: &sqlx::PgPool, scope: &moa_core::MemoryScope) -> AgeGraphStore {
+pub(crate) fn memory_scope(workspace_id: &str) -> MemoryScope {
+    MemoryScope::Tenant {
+        tenant_id: tenant_id_from_workspace(workspace_id),
+    }
+}
+
+pub(crate) fn graph_store(pool: &sqlx::PgPool, scope: &MemoryScope) -> AgeGraphStore {
     AgeGraphStore::scoped_for_app_role(pool.clone(), ScopeContext::from(scope.clone()))
+}
+
+fn tenant_id_from_workspace(workspace_id: &str) -> TenantId {
+    if let Ok(uuid) = Uuid::parse_str(workspace_id) {
+        return TenantId::from(uuid);
+    }
+    let digest = Sha256::digest(workspace_id.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
 }
 
 pub(crate) async fn set_app_role(conn: &mut PgConnection) -> Result<()> {

@@ -377,7 +377,7 @@ async fn require_session_participant(
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ContactId, ContactRef, ContactVerificationState, ModelId, SessionMeta, WorkspaceId,
+        Channel, ContactId, ContactRef, ContactVerificationState, ModelId, SessionMeta, TenantId,
     };
 
     use super::admitted_contact_for_turn;
@@ -385,8 +385,9 @@ mod tests {
     #[test]
     fn admitted_contact_for_turn_rejects_per_message_contact_override() {
         // Pins: contact context for turns comes from persisted SessionMeta, not caller payloads.
-        let session_contact = contact(ContactId::new(), WorkspaceId::new("workspace"));
-        let requested_contact = contact(ContactId::new(), WorkspaceId::new("workspace"));
+        let tenant_id = TenantId::new();
+        let session_contact = contact(ContactId::new(), tenant_id);
+        let requested_contact = contact(ContactId::new(), tenant_id);
         let meta = session_meta(session_contact.clone());
 
         let error = admitted_contact_for_turn(Some(requested_contact), &meta)
@@ -409,8 +410,7 @@ mod tests {
 
     fn session_meta(contact: ContactRef) -> SessionMeta {
         SessionMeta {
-            workspace_id: contact.workspace_id.clone(),
-            user_id: contact.contact_id.as_user_id(),
+            tenant_id: contact.tenant_id,
             channel: Channel::Chat,
             model: ModelId::new("mock"),
             contact: Some(contact),
@@ -418,11 +418,10 @@ mod tests {
         }
     }
 
-    fn contact(contact_id: ContactId, workspace_id: WorkspaceId) -> ContactRef {
+    fn contact(contact_id: ContactId, tenant_id: TenantId) -> ContactRef {
         ContactRef {
             contact_id,
-            tenant_id: uuid::Uuid::now_v7(),
-            workspace_id,
+            tenant_id,
             state: ContactVerificationState::Unverified,
             canonical_contact_id: None,
             linked_contact_ids: Vec::new(),

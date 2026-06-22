@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    ActionClass, ActionPolicyEffect, ClaimCheck, RiskLevel, SessionId, ToolCallId, UserId,
-    WorkspaceId,
+    ActionClass, ActionPolicyEffect, ClaimCheck, RiskLevel, SessionId, TenantId, ToolCallId, UserId,
 };
 
 fn default_tool_max_output_tokens() -> u32 {
@@ -370,8 +369,8 @@ pub struct ToolCallRequest {
     /// Owning session when the tool call is part of a durable MOA turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
-    /// Workspace scope used when the call is executed without a persisted session.
-    pub workspace_id: WorkspaceId,
+    /// Tenant scope used when the call is executed without a persisted session.
+    pub tenant_id: TenantId,
     /// User scope used when the call is executed without a persisted session.
     pub user_id: UserId,
     /// Explicit idempotency key required by `IdempotentWithKey` tools.

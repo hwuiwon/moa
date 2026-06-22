@@ -9,7 +9,7 @@ use moa_core::{
     BrainId, Channel, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ContextSnapshot, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelCapabilities,
     ModelId, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, WorkspaceId,
+    SessionSummary, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -174,8 +174,7 @@ pub(super) fn capabilities() -> ModelCapabilities {
 pub(super) fn session() -> SessionMeta {
     SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: moa_core::UserId::new("user"),
+        tenant_id: TenantId::new(),
         channel: Channel::Chat,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()

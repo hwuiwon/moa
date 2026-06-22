@@ -11,8 +11,8 @@ use moa_core::wire::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
 };
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, LearningRiskClass, MemoryScope, MoaConfig, MoaError,
+    ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    LearningCandidateType, LearningEntry, LearningRiskClass, MoaConfig, MoaError, TenantId,
     WorkspaceId,
 };
 use moa_orchestrator::services::learning_review::{
@@ -58,7 +58,7 @@ mod skill_learning_review {
         let loaded = get_learning_candidate_after_authz(
             store.clone(),
             GetLearningCandidateRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id: tenant_id_from_workspace(&workspace_id),
                 candidate_id: candidate.id,
             },
         )
@@ -73,7 +73,7 @@ mod skill_learning_review {
             #[cfg(feature = "internal-eval-runner")]
             review_providers(),
             LearningCandidateReviewRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id: tenant_id_from_workspace(&workspace_id),
                 candidate_id: candidate.id,
                 action: LearningCandidateReviewAction::Accept,
                 reviewer_subject: "user:reviewer".to_string(),
@@ -182,7 +182,7 @@ mod skill_learning_review {
         let response = reject_learning_candidate_after_authz(
             Arc::new(test_db.store().clone()),
             LearningCandidateReviewRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id: tenant_id_from_workspace(&workspace_id),
                 candidate_id: candidate.id,
                 action: LearningCandidateReviewAction::Reject,
                 reviewer_subject: "user:reviewer".to_string(),
@@ -316,12 +316,12 @@ mod skill_learning_review {
     }
 
     #[test]
-    fn accept_reject_requires_workspace_editor() {
-        // Pins: LearningReview handlers authorize workspace editor access before candidate payload reads.
+    fn accept_reject_requires_tenant_operator() {
+        // Pins: LearningReview handlers authorize tenant operator access before candidate payload reads.
         let source = include_str!("../src/services/learning_review.rs");
         assert!(
-            source.contains("Relation::Editor"),
-            "LearningReview must authorize Workspace:Editor"
+            source.contains("ObjectType::Tenant") && source.contains("Relation::Operator"),
+            "LearningReview must authorize Tenant:Operator"
         );
 
         for handler in [
@@ -332,8 +332,8 @@ mod skill_learning_review {
             let handler_start = source.find(handler).expect("handler exists in source");
             let handler_source = &source[handler_start..];
             let auth_pos = handler_source
-                .find("authorize_workspace_editor(&ctx, &request.workspace_id).await?")
-                .expect("handler authorizes workspace editor");
+                .find("authorize_tenant_operator(&ctx, request.tenant_id).await?")
+                .expect("handler authorizes tenant operator");
             let boundary_pos = handler_source
                 .find(".run(|| async move")
                 .or_else(|| handler_source.find("let runtime = OrchestratorCtx::current();"))
@@ -443,10 +443,23 @@ mod skill_learning_review {
         );
     }
 
-    fn workspace_scope(workspace_id: &WorkspaceId) -> MemoryScope {
-        MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
+    fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+        ActionRuleScope::Tenant {
+            tenant_id: tenant_id_from_workspace(workspace_id),
         }
+    }
+
+    fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> TenantId {
+        uuid::Uuid::parse_str(workspace_id.as_str())
+            .map(TenantId::from)
+            .unwrap_or_else(|_| {
+                let hash = blake3::hash(workspace_id.as_str().as_bytes());
+                let mut bytes = [0_u8; 16];
+                bytes.copy_from_slice(&hash.as_bytes()[..16]);
+                bytes[6] = (bytes[6] & 0x0f) | 0x80;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                TenantId::from(uuid::Uuid::from_bytes(bytes))
+            })
     }
 
     #[derive(Clone)]
@@ -561,7 +574,7 @@ mod skill_learning_review {
 
     async fn create_draft_skill_artifact(
         test_db: &moa_test_support::postgres::TestDb,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         package: &ValidatedSkillPackage,
     ) -> moa_artifacts::registry::StoredArtifactRevision {
         let document = skill_artifact_document_from_package(package, ArtifactStatus::Draft)
@@ -604,7 +617,7 @@ mod skill_learning_review {
         let now = Utc::now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
-            tenant_id: workspace_id.as_str().to_string(),
+            tenant_id: tenant_id_from_workspace(workspace_id),
             workspace_id: workspace_id.clone(),
             user_id: None,
             candidate_type,
@@ -654,7 +667,7 @@ mod skill_learning_review {
         action: LearningCandidateReviewAction,
     ) -> LearningCandidateReviewRequest {
         LearningCandidateReviewRequest {
-            workspace_id: workspace_id.clone(),
+            tenant_id: tenant_id_from_workspace(workspace_id),
             candidate_id,
             action,
             reviewer_subject: "user:reviewer".to_string(),

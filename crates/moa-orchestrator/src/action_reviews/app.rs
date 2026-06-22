@@ -90,7 +90,7 @@ pub(crate) async fn list_pending_reviews(
     store::list_pending_reviews(pool, workspace_id).await
 }
 
-/// Apply a workspace-admin decision to one action review.
+/// Apply a tenant-admin decision to one action review.
 pub(crate) async fn decide_review(
     pool: sqlx::PgPool,
     request: DecideActionReviewRequest,
@@ -102,8 +102,8 @@ pub(crate) async fn decide_review(
         .begin()
         .await
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
-    let row =
-        store::load_review_for_update(&mut tx, &request.workspace_id, request.review_id).await?;
+    let workspace_id = storage_workspace_id(request.tenant_id);
+    let row = store::load_review_for_update(&mut tx, &workspace_id, request.review_id).await?;
     let newly_decided = validate_review_transition(row.status, desired_status)?;
     let decided_at = row.decided_at.unwrap_or_else(Utc::now);
     let decided_by = row.decided_by.clone().unwrap_or(decided_by);
@@ -114,7 +114,7 @@ pub(crate) async fn decide_review(
         store::update_review_decision(
             &mut tx,
             ReviewDecisionUpdate {
-                workspace_id: request.workspace_id.clone(),
+                workspace_id: workspace_id.clone(),
                 review_id: request.review_id,
                 status: desired_status,
                 decided_by: decided_by.clone(),
@@ -133,7 +133,7 @@ pub(crate) async fn decide_review(
         execution_tool_request_for_decision(&decision, &row, execution_tool_call_id)?;
     Ok(DecidedReview {
         review_id: request.review_id,
-        workspace_id: request.workspace_id,
+        workspace_id,
         session_id: row.session_id,
         decision,
         status: desired_status,
@@ -144,6 +144,10 @@ pub(crate) async fn decide_review(
         newly_decided,
         tool_request,
     })
+}
+
+fn storage_workspace_id(tenant_id: moa_core::TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 /// Mark the requested event as recorded.
@@ -264,8 +268,8 @@ fn screen_review_tool_input(request: &ToolCallRequest) -> Result<(), TerminalErr
 mod tests {
     use chrono::Utc;
     use moa_core::{
-        ActionClass, ActionReviewDecision, ActionReviewStatus, ToolCallId, ToolCallRequest, UserId,
-        WorkspaceId,
+        ActionClass, ActionReviewDecision, ActionReviewStatus, TenantId, ToolCallId,
+        ToolCallRequest, UserId,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -301,7 +305,7 @@ mod tests {
                 input: json!({"cmd": "printf ok"}),
                 active_canary: Some("canary-token".to_string()),
                 session_id: None,
-                workspace_id: WorkspaceId::new("workspace-1"),
+                tenant_id: TenantId::from(Uuid::from_u128(1)),
                 user_id: UserId::new("user-1"),
                 idempotency_key: None,
             },
@@ -343,7 +347,7 @@ mod tests {
                 input: json!({}),
                 active_canary: None,
                 session_id: None,
-                workspace_id: WorkspaceId::new("workspace-1"),
+                tenant_id: TenantId::from(Uuid::from_u128(1)),
                 user_id: UserId::new("user-1"),
                 idempotency_key: None,
             },
@@ -375,7 +379,7 @@ mod tests {
             input: json!({"cmd": "printf secret-canary"}),
             active_canary: Some("secret-canary".to_string()),
             session_id: None,
-            workspace_id: WorkspaceId::new("workspace-1"),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
             idempotency_key: None,
         };

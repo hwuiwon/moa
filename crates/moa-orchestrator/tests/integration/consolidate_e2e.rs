@@ -1,10 +1,10 @@
-//! End-to-end workspace consolidation coverage through a local Restate ingress.
+//! End-to-end tenant consolidation coverage through a local Restate ingress.
 
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use moa_core::WorkspaceId;
+use moa_core::{TenantId, WorkspaceId};
 use moa_orchestrator::objects::workspace::{
     WorkspaceActionPolicy, WorkspaceConfig, WorkspaceStatus,
 };
@@ -67,10 +67,8 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let workspace_id = WorkspaceId::new(format!(
-        "workspace-consolidate-e2e-{}",
-        uuid::Uuid::now_v7()
-    ));
+    let tenant_id = TenantId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let config = WorkspaceConfig {
         id: workspace_id.clone(),
         name: "Workspace Consolidate E2E".to_string(),
@@ -115,7 +113,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         let report = client
             .post(workflow_url(ingress, &workflow_id))
             .json(&ConsolidateRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 target_date,
             })
             .send()
@@ -127,7 +125,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
             .await
             .context("deserialize consolidate report")?;
 
-        assert_eq!(report.workspace_id, workspace_id);
+        assert_eq!(report.tenant_id, tenant_id);
         assert_eq!(report.relative_dates_normalized, 0);
         assert_eq!(report.records_updated, 0);
         assert!(report.errors.is_empty(), "unexpected consolidation errors");

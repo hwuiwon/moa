@@ -26,8 +26,8 @@ mod tests {
     use chrono::Utc;
     use moa_core::{
         ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview, Channel,
-        ChannelCapabilities, MessageContent, OutboundMessage, RiskLevel, ToolCallId, UserId,
-        WorkspaceId,
+        ChannelCapabilities, MessageContent, OutboundMessage, RiskLevel, SessionActorRef, TenantId,
+        ToolCallId,
     };
     use uuid::Uuid;
 
@@ -38,8 +38,14 @@ mod tests {
             content: MessageContent::ActionReviewRequest {
                 envelope: Box::new(ActionEnvelope {
                     review_id: Uuid::now_v7(),
-                    workspace_id: WorkspaceId::new("workspace-a"),
-                    user_id: UserId::new("user-a"),
+                    tenant_id: TenantId::from(
+                        Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+                            .expect("fixture tenant id parses"),
+                    ),
+                    requested_by: SessionActorRef::Identity {
+                        id: Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+                            .expect("fixture identity id parses"),
+                    },
                     session_id: None,
                     sub_agent_id: None,
                     tool_call_id: ToolCallId::new(),

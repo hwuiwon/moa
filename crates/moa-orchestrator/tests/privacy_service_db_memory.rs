@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::wire::ContactErasureScope;
-use moa_core::{ContactId, ScopeContext, UserId, WorkspaceId};
+use moa_core::{ContactId, ScopeContext, TenantId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
@@ -70,11 +70,11 @@ fn pii_vault_secret() -> Vec<u8> {
 }
 
 fn contact_user_id(contact_id: Uuid) -> String {
-    ContactId(contact_id).as_user_id().to_string()
+    format!("contact:{contact_id}")
 }
 
-fn erase_test_graph(pool: &PgPool, workspace_id: &str, user_id: &str) -> AgeGraphStore {
-    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(user_id));
+fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> AgeGraphStore {
+    let scope = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
@@ -101,11 +101,13 @@ fn erase_test_intent(workspace_id: &str, user_id: &str, name: &str) -> NodeWrite
 
 async fn create_erase_test_node(
     pool: &PgPool,
+    tenant_id: Uuid,
+    contact_id: Uuid,
     workspace_id: &str,
     user_id: &str,
     name: &str,
 ) -> Uuid {
-    let graph = erase_test_graph(pool, workspace_id, user_id);
+    let graph = erase_test_graph(pool, tenant_id, contact_id);
     let intent = erase_test_intent(workspace_id, user_id, name);
     let uid = intent.uid;
     graph
@@ -299,6 +301,8 @@ async fn privacy_erase_dry_run() {
     let subject = Uuid::now_v7();
     let uid = create_erase_test_node(
         store.pool(),
+        Uuid::nil(),
+        subject,
         &workspace_id,
         &subject.to_string(),
         "dry run fact",
@@ -307,7 +311,7 @@ async fn privacy_erase_dry_run() {
     let before_changelog = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: Uuid::nil(),
+        tenant_id: TenantId::from(Uuid::nil()),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -347,6 +351,8 @@ async fn privacy_erase_basic() {
     let subject = Uuid::now_v7();
     let uid = create_erase_test_node(
         store.pool(),
+        Uuid::nil(),
+        subject,
         &workspace_id,
         &subject.to_string(),
         "basic erasure fact",
@@ -356,7 +362,7 @@ async fn privacy_erase_basic() {
     assert_eq!(embedding_count(store.pool(), uid).await, 1);
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: Uuid::nil(),
+        tenant_id: TenantId::from(Uuid::nil()),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -403,6 +409,8 @@ async fn privacy_erase_idempotent() {
     let subject = Uuid::now_v7();
     create_erase_test_node(
         store.pool(),
+        Uuid::nil(),
+        subject,
         &workspace_id,
         &subject.to_string(),
         "idempotent erasure fact",
@@ -410,7 +418,7 @@ async fn privacy_erase_idempotent() {
     .await;
     let first = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: Uuid::nil(),
+        tenant_id: TenantId::from(Uuid::nil()),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -424,7 +432,7 @@ async fn privacy_erase_idempotent() {
     let after_first = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let second = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: Uuid::nil(),
+        tenant_id: TenantId::from(Uuid::nil()),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -462,6 +470,8 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     let subject = Uuid::now_v7();
     let uid_b = create_erase_test_node(
         store.pool(),
+        Uuid::nil(),
+        subject,
         &workspace_b,
         &subject.to_string(),
         "other workspace fact",
@@ -469,7 +479,7 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: Uuid::nil(),
+        tenant_id: TenantId::from(Uuid::nil()),
         workspace_id: workspace_a.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -517,6 +527,8 @@ async fn privacy_erase_contact_requires_explicit_scope() {
     .await;
     create_erase_test_node(
         store.pool(),
+        tenant_id,
+        contact_id,
         &workspace_id,
         &contact_user_id(contact_id),
         "contact scope fact",
@@ -524,7 +536,7 @@ async fn privacy_erase_contact_requires_explicit_scope() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id,
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: contact_id,
         subject_user_id: contact_id.to_string(),
@@ -576,6 +588,8 @@ async fn privacy_erase_unverified_contact_only() {
     .await;
     let contact_uid = create_erase_test_node(
         store.pool(),
+        tenant_id,
+        contact_id,
         &workspace_id,
         &contact_user_id(contact_id),
         "contact-only fact",
@@ -583,6 +597,8 @@ async fn privacy_erase_unverified_contact_only() {
     .await;
     let other_uid = create_erase_test_node(
         store.pool(),
+        tenant_id,
+        other_contact_id,
         &workspace_id,
         &contact_user_id(other_contact_id),
         "other contact fact",
@@ -590,7 +606,7 @@ async fn privacy_erase_unverified_contact_only() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id,
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: contact_id,
         subject_user_id: contact_id.to_string(),
@@ -643,6 +659,8 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     .await;
     let contact_uid = create_erase_test_node(
         store.pool(),
+        tenant_id,
+        contact_id,
         &workspace_id,
         &contact_user_id(contact_id),
         "verified contact fact",
@@ -650,6 +668,8 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     .await;
     let linked_uid = create_erase_test_node(
         store.pool(),
+        tenant_id,
+        linked_contact_id,
         &workspace_id,
         &contact_user_id(linked_contact_id),
         "linked contact fact",
@@ -658,7 +678,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     let subject_user_id = contact_user_id(contact_id);
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id,
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: contact_id,
         subject_user_id: subject_user_id.clone(),
@@ -698,10 +718,13 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         .await
         .expect("create isolated test store");
     let workspace_id = format!("privacy-contact-export-{}", Uuid::now_v7().simple());
+    let tenant_id = Uuid::now_v7();
     let contact_id = Uuid::now_v7();
     let linked_contact_id = Uuid::now_v7();
     create_erase_test_node(
         store.pool(),
+        tenant_id,
+        contact_id,
         &workspace_id,
         &contact_user_id(contact_id),
         "export primary fact",
@@ -709,6 +732,8 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
     .await;
     create_erase_test_node(
         store.pool(),
+        tenant_id,
+        linked_contact_id,
         &workspace_id,
         &contact_user_id(linked_contact_id),
         "export linked fact",
@@ -718,6 +743,7 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
     let subject_user_id = contact_user_id(contact_id);
     let ctx = PrivacyExportContext {
         pool: store.pool().clone(),
+        tenant_id: TenantId::from(tenant_id),
         workspace: Some(workspace_id.clone()),
         subject_user: contact_id,
         subject_user_id: subject_user_id.clone(),
@@ -826,6 +852,7 @@ async fn privacy_export_archive_round_trip() {
     let claims = valid_claims(subject);
     let ctx = PrivacyExportContext {
         pool: PgPool::connect_lazy("postgres://unused").expect("lazy pool"),
+        tenant_id: TenantId::from(Uuid::nil()),
         workspace: Some("workspace-a".to_string()),
         subject_user: subject,
         subject_user_id: subject.to_string(),

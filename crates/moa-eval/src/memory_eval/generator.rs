@@ -639,7 +639,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::Supersession,
             fact_id: deploy_old_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: deploy_old_from,
             valid_to: Some(deploy_new_from),
             subject: component.to_string(),
@@ -664,7 +664,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::Supersession,
             fact_id: deploy_new_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: deploy_new_from,
             valid_to: None,
             subject: component.to_string(),
@@ -689,7 +689,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::WorkspaceShared,
             fact_id: runbook_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: fixed_time(base_day + 1, 0)?,
             valid_to: None,
             subject: format!("{component} deploys"),
@@ -715,7 +715,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::Contradiction,
             fact_id: contradiction_a_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: fixed_time(base_day + 3, 0)?,
             valid_to: None,
             subject: contradiction_subject.clone(),
@@ -740,7 +740,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::Contradiction,
             fact_id: contradiction_b_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: fixed_time(base_day + 4, 0)?,
             valid_to: None,
             subject: contradiction_subject.clone(),
@@ -765,7 +765,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::Temporal,
             fact_id: temporal_old_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: temporal_old_from,
             valid_to: Some(temporal_new_from),
             subject: temporal_subject.clone(),
@@ -790,7 +790,7 @@ fn schedule_workspace_facts(
         FactDraft {
             category: FactCategory::Temporal,
             fact_id: temporal_new_fact_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             valid_from: temporal_new_from,
             valid_to: None,
             subject: temporal_subject.clone(),
@@ -866,7 +866,7 @@ fn schedule_user_facts(
         FactDraft {
             category: FactCategory::UserPrivate,
             fact_id: private_fact_id.clone(),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             valid_from: fixed_time(base_day + 5, 0)?,
             valid_to: None,
             subject: user_label.clone(),
@@ -892,7 +892,7 @@ fn schedule_user_facts(
         FactDraft {
             category: FactCategory::Preference,
             fact_id: preference_fact_id.clone(),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             valid_from: fixed_time(base_day + 6, 0)?,
             valid_to: None,
             subject: user_label.clone(),
@@ -924,7 +924,7 @@ fn schedule_user_facts(
         FactDraft {
             category: FactCategory::Pii,
             fact_id: pii_fact_id.clone(),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             valid_from: fixed_time(base_day + 7, 0)?,
             valid_to: None,
             subject: user_label,
@@ -963,7 +963,7 @@ fn schedule_user_facts(
             FactDraft {
                 category: FactCategory::WorkspaceShared,
                 fact_id: dependency_fact_id.clone(),
-                scope: ScopeTier::Workspace,
+                scope: ScopeTier::Tenant,
                 valid_from: fixed_time(base_day + 8 + pair_index as i64 * 2, 0)?,
                 valid_to: None,
                 subject: service.clone(),
@@ -997,7 +997,7 @@ fn schedule_user_facts(
                 FactDraft {
                     category: FactCategory::WorkspaceShared,
                     fact_id: restatement_fact_id,
-                    scope: ScopeTier::Workspace,
+                    scope: ScopeTier::Tenant,
                     valid_from: fixed_time(base_day + 35 + pair_index as i64 * 2, 0)?,
                     valid_to: None,
                     subject: service.clone(),
@@ -1031,7 +1031,7 @@ fn schedule_user_facts(
             FactDraft {
                 category: FactCategory::WorkspaceShared,
                 fact_id: owner_fact_id.clone(),
-                scope: ScopeTier::Workspace,
+                scope: ScopeTier::Tenant,
                 valid_from: fixed_time(base_day + 9 + pair_index as i64 * 2, 0)?,
                 valid_to: None,
                 subject: library.to_string(),
@@ -1463,7 +1463,8 @@ fn link_recurring_fact_eras(ledger: &mut [LedgerFact], probes: &mut [Probe]) {
         {
             continue;
         }
-        let user_key = (fact.scope == ScopeTier::User).then(|| fact.user_id.as_str().to_string());
+        let user_key =
+            (fact.scope == ScopeTier::Contact).then(|| fact.user_id.as_str().to_string());
         families
             .entry((
                 fact.workspace_id.as_str().to_string(),
@@ -1561,7 +1562,7 @@ fn assign_quality_priors(ledger: &mut [LedgerFact], probes: &[Probe]) -> Result<
 fn quality_prior_group_key(fact: &LedgerFact) -> (String, Option<String>, &'static str, String) {
     (
         fact.workspace_id.to_string(),
-        (fact.scope == ScopeTier::User).then(|| fact.user_id.to_string()),
+        (fact.scope == ScopeTier::Contact).then(|| fact.user_id.to_string()),
         scope_tier_str(fact.scope),
         fact.subject.clone(),
     )
@@ -1569,9 +1570,8 @@ fn quality_prior_group_key(fact: &LedgerFact) -> (String, Option<String>, &'stat
 
 fn scope_tier_str(scope: ScopeTier) -> &'static str {
     match scope {
-        ScopeTier::Global => "global",
-        ScopeTier::Workspace => "workspace",
-        ScopeTier::User => "user",
+        ScopeTier::Tenant => "tenant",
+        ScopeTier::Contact => "contact",
     }
 }
 
@@ -1785,8 +1785,8 @@ fn render_fact_transcript(
 
 fn render_marked_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
     let scope_marker = match fact.scope {
-        ScopeTier::Workspace | ScopeTier::Global => "workspace shared ",
-        ScopeTier::User => "user private ",
+        ScopeTier::Tenant => "tenant shared ",
+        ScopeTier::Contact => "contact private ",
     };
     match category {
         FactCategory::Supersession => format!(
@@ -1801,15 +1801,15 @@ fn render_marked_fact_transcript(category: FactCategory, fact: &LedgerFact) -> S
             fact.subject, fact.predicate, fact.object
         ),
         FactCategory::WorkspaceShared => format!(
-            "Fact: workspace shared {} {} is {}.",
+            "Fact: tenant shared {} {} is {}.",
             fact.subject, fact.predicate, fact.object
         ),
         FactCategory::UserPrivate => format!(
-            "Fact: user private {} {} is {}.",
+            "Fact: contact private {} {} is {}.",
             fact.subject, fact.predicate, fact.object
         ),
         FactCategory::Temporal => format!(
-            "Fact: workspace shared {} {} is {} from {} until {}. Supersedes: {}.",
+            "Fact: tenant shared {} {} is {} from {} until {}. Supersedes: {}.",
             fact.subject,
             fact.predicate,
             fact.object,
@@ -1883,7 +1883,7 @@ mod natural_frames {
             );
         }
 
-        let frames = if fact.scope == ScopeTier::User {
+        let frames = if fact.scope == ScopeTier::Contact {
             USER_FRAMES
         } else {
             WORKSPACE_FRAMES

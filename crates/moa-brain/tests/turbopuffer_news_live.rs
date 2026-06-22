@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::{
-    MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
+    MemoryScope, ScopeContext, SessionId, TenantId, UserId, WorkspaceId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
@@ -75,9 +75,10 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
 
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let pool = session_store.pool().clone();
-    let workspace_id = WorkspaceId::new(format!("tp-news-e2e-{}", Uuid::now_v7().simple()));
+    let tenant_id = TenantId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let workspace_text = workspace_id.to_string();
-    let scope = ScopeContext::workspace(workspace_id.clone());
+    let scope = ScopeContext::tenant(tenant_id);
     let transcript = news_transcript().await?;
     let turn = SessionTurn {
         workspace_id: workspace_id.clone(),
@@ -141,9 +142,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         seeds: Vec::new(),
         query_text: query_text.to_string(),
         query_embedding,
-        scope: MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        },
+        scope: MemoryScope::Tenant { tenant_id },
         label_filter: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,

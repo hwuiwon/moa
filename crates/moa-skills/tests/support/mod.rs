@@ -11,10 +11,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
-    CompletionStream, Event, EventRecord, LLMProvider, MemoryScope, MoaConfig, MoaError,
-    ModelCapabilities, ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason,
-    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    ActionRuleScope, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
+    CompletionStream, Event, EventRecord, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
+    ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, TenantId, TokenPricing,
+    TokenUsage, ToolCallFormat, ToolCallId, ToolOutput, WorkspaceId,
 };
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use moa_providers::ModelRouter;
@@ -27,6 +27,7 @@ use moa_skills::registry::{NewSkill, Skill, SkillRegistry};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -104,11 +105,10 @@ pub fn load_session_fixture(json_text: &str) -> LoadedSession {
         fixture.workspace_id,
         Uuid::now_v7().simple()
     ));
-    let user_id = UserId::new(fixture.user_id);
+    let _user_id = fixture.user_id;
     let session = SessionMeta {
         id: SessionId(fixture.session_id),
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
+        tenant_id: tenant_id_from_workspace_id(&workspace_id),
         title: Some(fixture.task.clone()),
         status: SessionStatus::Completed,
         channel: Channel::Chat,
@@ -220,7 +220,7 @@ pub fn skill_markdown(name: &str, description: &str, body: &str, version: &str) 
 /// Seeds one skill and returns its pipeline metadata.
 pub async fn seed_skill(
     test_db: &TestDb,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     markdown: &str,
 ) -> moa_core::SkillMetadata {
     let document = parse_skill_markdown(markdown).expect("parse seed skill");
@@ -234,7 +234,11 @@ pub async fn seed_skill(
 }
 
 /// Loads the active skill row by name.
-pub async fn load_active_skill(test_db: &TestDb, scope: &MemoryScope, skill_name: &str) -> Skill {
+pub async fn load_active_skill(
+    test_db: &TestDb,
+    scope: &ActionRuleScope,
+    skill_name: &str,
+) -> Skill {
     SkillRegistry::new(test_db.store().pool().clone())
         .load_by_name(scope, skill_name)
         .await
@@ -245,7 +249,7 @@ pub async fn load_active_skill(test_db: &TestDb, scope: &MemoryScope, skill_name
 /// Loads the active skill row by name when one exists.
 pub async fn load_optional_active_skill(
     test_db: &TestDb,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     skill_name: &str,
 ) -> Option<Skill> {
     SkillRegistry::new(test_db.store().pool().clone())
@@ -257,7 +261,7 @@ pub async fn load_optional_active_skill(
 /// Loads the active skill's required `SKILL.md` markdown by name.
 pub async fn load_active_skill_markdown(
     test_db: &TestDb,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     skill_name: &str,
 ) -> String {
     let registry = SkillRegistry::new(test_db.store().pool().clone());
@@ -301,7 +305,7 @@ pub async fn write_output_suite(config: &MoaConfig, workspace_id: &WorkspaceId, 
 /// Returns the active semantic version parsed from the skill markdown.
 pub async fn active_semantic_version(
     test_db: &TestDb,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     skill_name: &str,
 ) -> String {
     let markdown = load_active_skill_markdown(test_db, scope, skill_name).await;
@@ -438,19 +442,28 @@ impl LLMProvider for TestProvider {
     }
 }
 
-/// Returns a workspace scope for tests.
-pub fn workspace_scope(workspace_id: &WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
+/// Returns a tenant artifact-visibility scope for tests.
+pub fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+    ActionRuleScope::Tenant {
+        tenant_id: tenant_id_from_workspace_id(workspace_id),
     }
 }
 
-/// Returns a user scope for tests.
-pub fn user_scope(workspace_id: &WorkspaceId, user_id: &UserId) -> MemoryScope {
-    MemoryScope::User {
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
+/// Returns the legacy storage key for session-scoped learning rows.
+pub fn session_workspace_id(session: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(session.tenant_id.to_string())
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    if let Ok(uuid) = Uuid::parse_str(workspace_id.as_str()) {
+        return TenantId::from(uuid);
     }
+    let digest = Sha256::digest(workspace_id.as_str().as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
 }
 
 pub mod skill_graph;

@@ -33,6 +33,7 @@ pub(crate) fn with_identity_headers<'a, Req, Res>(
 fn identity_type_header(identity_type: IdentityType) -> &'static str {
     match identity_type {
         IdentityType::User => "user",
+        IdentityType::Contact => "contact",
         IdentityType::Agent => "agent",
         IdentityType::Service => "service",
     }

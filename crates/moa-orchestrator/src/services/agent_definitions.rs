@@ -13,7 +13,7 @@ use moa_core::wire::{
     AgentDeploymentListResponse, AgentDeploymentSummary, AgentInstallRequest, AgentInstallResponse,
     AgentInstallationListRequest, AgentInstallationListResponse, AgentInstallationSummary,
 };
-use moa_core::{MemoryScope, MoaError, ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, ScopedConn, TenantId, WorkspaceId};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::Json as SqlJson};
@@ -34,12 +34,12 @@ pub trait AgentDefinitions {
         request: Json<AgentDefinitionListRequest>,
     ) -> Result<Json<AgentDefinitionListResponse>, HandlerError>;
 
-    /// Installs and deploys a published agent revision in a workspace.
+    /// Installs and deploys a published agent revision in a tenant.
     async fn install(
         request: Json<AgentInstallRequest>,
     ) -> Result<Json<AgentInstallResponse>, HandlerError>;
 
-    /// Lists installed agents in a workspace.
+    /// Lists installed agents in a tenant.
     async fn list_installations(
         request: Json<AgentInstallationListRequest>,
     ) -> Result<Json<AgentInstallationListResponse>, HandlerError>;
@@ -68,7 +68,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentDefinitionListResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "list_definitions");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -85,7 +85,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentInstallResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "install");
         let request = request.into_inner();
-        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         if let Some(agent_id) = request.agent_id {
             authorize_agent_operator(&ctx, agent_id).await?;
         }
@@ -105,7 +105,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentInstallationListResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "list_installations");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -126,7 +126,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentDeployResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "deploy");
         let request = request.into_inner();
-        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -143,7 +143,7 @@ impl AgentDefinitions for AgentDefinitionsImpl {
     ) -> Result<Json<AgentDeploymentListResponse>, HandlerError> {
         annotate_restate_handler_span("AgentDefinitions", "list_deployments");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -158,7 +158,7 @@ pub async fn list_definitions_inner(
     pool: PgPool,
     request: AgentDefinitionListRequest,
 ) -> Result<AgentDefinitionListResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let status = request
         .status
         .as_deref()
@@ -193,7 +193,7 @@ pub async fn list_definitions_inner(
         });
     }
     Ok(AgentDefinitionListResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         agents,
     })
 }
@@ -204,7 +204,8 @@ pub async fn install_inner(
     request: AgentInstallRequest,
     identity: Identity,
 ) -> Result<AgentInstallResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
+    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
     let revision =
         load_published_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
     let definition = agent_definition(&revision)?;
@@ -226,7 +227,7 @@ pub async fn install_inner(
     let installation_uid = Uuid::now_v7();
     let deployment_uid = Uuid::now_v7();
 
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::from(scope))
+    let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
     ensure_no_active_installation(conn.as_mut(), &parts, &definition_ref).await?;
@@ -259,7 +260,7 @@ pub async fn install_inner(
         NewDeployment {
             deployment_uid,
             installation_uid,
-            workspace_id: request.workspace_id.as_str(),
+            workspace_id: storage_workspace_id.as_str(),
             user_id: parts.user_id.as_deref(),
             revision_uid: request.revision_uid,
             deployed_by: installed_by.as_deref(),
@@ -271,7 +272,7 @@ pub async fn install_inner(
     conn.commit().await.map_err(moa_error_to_handler_error)?;
 
     Ok(AgentInstallResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         installation_uid,
         deployment_uid,
         revision_uid: request.revision_uid,
@@ -284,8 +285,9 @@ pub async fn list_installations_inner(
     pool: PgPool,
     request: AgentInstallationListRequest,
 ) -> Result<AgentInstallationListResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::from(scope))
+    let scope = tenant_scope(request.tenant_id);
+    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
+    let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
     let rows = sqlx::query(
@@ -298,7 +300,7 @@ pub async fn list_installations_inner(
         ORDER BY updated_at DESC, installation_uid DESC
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(storage_workspace_id.as_str())
     .fetch_all(conn.as_mut())
     .await
     .map_err(sqlx_handler_error)?;
@@ -309,7 +311,7 @@ pub async fn list_installations_inner(
         .map(installation_summary_from_row)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(AgentInstallationListResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         installations,
     })
 }
@@ -320,7 +322,8 @@ pub async fn deploy_inner(
     request: AgentDeployRequest,
     identity: Identity,
 ) -> Result<AgentDeployResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
+    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
     let revision =
         load_published_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
     let policy = AgentResolver::new(pool.clone())
@@ -329,12 +332,12 @@ pub async fn deploy_inner(
         .map_err(moa_error_to_handler_error)?;
     let deployment_uid = Uuid::now_v7();
     let deployed_by = Some(identity.id.to_string());
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::from(scope))
+    let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
     let installation = load_installation_for_update(
         conn.as_mut(),
-        &request.workspace_id,
+        &storage_workspace_id,
         request.installation_uid,
     )
     .await?;
@@ -362,7 +365,7 @@ pub async fn deploy_inner(
         NewDeployment {
             deployment_uid,
             installation_uid: request.installation_uid,
-            workspace_id: request.workspace_id.as_str(),
+            workspace_id: storage_workspace_id.as_str(),
             user_id: installation.user_id.as_deref(),
             revision_uid: request.revision_uid,
             deployed_by: deployed_by.as_deref(),
@@ -390,7 +393,7 @@ pub async fn deploy_inner(
     conn.commit().await.map_err(moa_error_to_handler_error)?;
 
     Ok(AgentDeployResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         installation_uid: request.installation_uid,
         deployment_uid,
         revision_uid: request.revision_uid,
@@ -403,18 +406,19 @@ pub async fn list_deployments_inner(
     pool: PgPool,
     request: AgentDeploymentListRequest,
 ) -> Result<AgentDeploymentListResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
+    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
     let limit = request
         .limit
         .map(|limit| i64::try_from(limit).map_err(|_| bad_request("limit is too large")))
         .transpose()?
         .unwrap_or(DEFAULT_DEPLOYMENT_LIST_LIMIT);
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::from(scope))
+    let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
     ensure_installation_visible(
         conn.as_mut(),
-        &request.workspace_id,
+        &storage_workspace_id,
         request.installation_uid,
     )
     .await?;
@@ -429,7 +433,7 @@ pub async fn list_deployments_inner(
         LIMIT $3
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(storage_workspace_id.as_str())
     .bind(request.installation_uid)
     .bind(limit)
     .fetch_all(conn.as_mut())
@@ -442,7 +446,7 @@ pub async fn list_deployments_inner(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(AgentDeploymentListResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         installation_uid: request.installation_uid,
         deployments,
     })
@@ -582,7 +586,7 @@ async fn ensure_installation_visible(
 
 async fn load_published_agent_revision(
     pool: PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     revision_uid: Uuid,
 ) -> Result<StoredArtifactRevision, HandlerError> {
     let revision = ArtifactRegistry::new(pool)
@@ -650,8 +654,22 @@ fn deployment_summary_from_row(
     })
 }
 
-fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace { workspace_id }
+fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
+    ActionRuleScope::Tenant { tenant_id }
+}
+
+fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
+}
+
+async fn scoped_conn_for_scope<'p>(
+    pool: &'p PgPool,
+    scope: &ActionRuleScope,
+) -> moa_core::Result<ScopedConn<'p>> {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopedConn::begin_control_plane(pool).await,
+        ActionRuleScope::Tenant { tenant_id } => ScopedConn::begin_tenant(pool, *tenant_id).await,
+    }
 }
 
 fn object_or_empty(value: Value) -> Value {
@@ -672,22 +690,16 @@ fn bad_request(message: impl Into<String>) -> HandlerError {
     TerminalError::new_with_code(400, message.into()).into()
 }
 
-async fn authorize_workspace(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     relation: Relation,
 ) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)?;
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)?;
     Ok(identity)
 }
 

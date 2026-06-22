@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, UserId, WorkspaceId,
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, TenantId, UserId, WorkspaceId,
 };
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -252,12 +252,10 @@ impl WorkspaceObject for WorkspaceImpl {
 
         let rule = ActionPolicyRule {
             id: Uuid::now_v7(),
-            workspace_id: workspace_id.clone(),
-            user_id: None,
             tool: pattern.tool_name.clone(),
             pattern: pattern.pattern.clone(),
             effect: pattern.effect,
-            scope: ActionRuleScope::Workspace,
+            scope: ActionRuleScope::WorkspaceDefault,
             reason: pattern.reason,
             created_by: UserId::new(identity.id.to_string()),
             created_at,
@@ -308,18 +306,18 @@ impl WorkspaceObject for WorkspaceImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Workspace", "consolidation_completed");
         let report = report.into_inner();
-        validate_workspace_key(ctx.key(), &report.workspace_id)?;
+        validate_tenant_key(ctx.key(), report.tenant_id)?;
 
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let should_reschedule = state.record_consolidation_completed(report.ran_at);
         tracing::info!(
-            workspace_id = %report.workspace_id,
+            tenant_id = %report.tenant_id,
             target_date = %report.target_date,
             records_updated = report.records_updated,
             records_deleted = report.records_deleted,
             duration_ms = report.duration_ms,
             errors = ?report.errors,
-            "workspace consolidation completed"
+            "tenant consolidation completed"
         );
         if should_reschedule {
             schedule_consolidation_inner(&ctx, &mut state).await?;
@@ -394,20 +392,21 @@ async fn schedule_consolidation_inner(
     let scheduled_at = next + chrono::Duration::seconds(jitter_secs as i64);
     let delay = scheduled_at.signed_duration_since(now);
     let delay = duration_from_chrono(delay);
-    let workflow_id = consolidate_workflow_id(&config.id, next.date_naive());
+    let tenant_id = tenant_id_from_workspace_id(&config.id)?;
+    let workflow_id = consolidate_workflow_id(&tenant_id, next.date_naive());
 
     state.next_consolidation = Some(scheduled_at);
     ctx.workflow_client::<ConsolidateClient>(workflow_id)
         .run(Json(ConsolidateRequest {
-            workspace_id: config.id.clone(),
+            tenant_id,
             target_date: next.date_naive(),
         }))
         .send_after(delay);
     tracing::info!(
-        workspace_id = %config.id,
+        tenant_id = %tenant_id,
         scheduled_at = %scheduled_at,
         hour_utc = config.consolidation_hour_utc,
-        "scheduled next workspace consolidation"
+        "scheduled next tenant consolidation"
     );
     Ok(())
 }
@@ -428,13 +427,10 @@ async fn persist_policy_rules(
     }
 
     let store = OrchestratorCtx::current_session_store();
-    let mut normalized_rules = rules.to_vec();
-    for rule in &mut normalized_rules {
-        rule.workspace_id = workspace_id.clone();
-    }
+    let _ = workspace_id;
 
     let result: Result<(), MoaError> = async {
-        for rule in normalized_rules {
+        for rule in rules.iter().cloned() {
             store.upsert_action_policy_rule(rule).await?;
         }
         Ok(())
@@ -463,6 +459,29 @@ fn validate_workspace_key(key: &str, workspace_id: &WorkspaceId) -> Result<(), H
         "workspace key `{key}` does not match config/report id `{workspace_id}`"
     ))
     .into())
+}
+
+fn validate_tenant_key(key: &str, tenant_id: TenantId) -> Result<(), HandlerError> {
+    if key == tenant_id.to_string() {
+        return Ok(());
+    }
+
+    Err(TerminalError::new(format!(
+        "workspace key `{key}` does not match tenant report id `{tenant_id}`"
+    ))
+    .into())
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> Result<TenantId, HandlerError> {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .map_err(|error| {
+            TerminalError::new_with_code(
+                400,
+                format!("workspace object id must be a tenant UUID for consolidation: {error}"),
+            )
+            .into()
+        })
 }
 
 fn validate_consolidation_hour(hour: u8) -> Result<(), HandlerError> {

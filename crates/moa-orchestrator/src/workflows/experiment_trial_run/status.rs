@@ -4,11 +4,11 @@ use super::*;
 
 pub(super) async fn insert_or_load_trial(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial: NewExperimentTrial,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             ExperimentStore::new(pool)
@@ -24,14 +24,14 @@ pub(super) async fn insert_or_load_trial(
 
 pub(super) async fn persist_trial_status(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial_uid: Uuid,
     status: ExperimentTrialStatus,
     stop_reason: Option<ExperimentTrialStopReason>,
     error: Option<String>,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             update_trial_status(pool, scope, trial_uid, status, stop_reason, error)
@@ -45,7 +45,7 @@ pub(super) async fn persist_trial_status(
 
 pub(super) async fn persist_trial_status_by_key(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_uid: Uuid,
     trial_key: String,
     status: ExperimentTrialStatus,
@@ -53,7 +53,7 @@ pub(super) async fn persist_trial_status_by_key(
     error: Option<String>,
 ) -> Result<(), HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         let store = ExperimentStore::new(pool.clone());
         if let Some(trial) = store
@@ -72,32 +72,25 @@ pub(super) async fn persist_trial_status_by_key(
 
 pub(super) async fn stop_trial(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial_uid: Uuid,
     status: ExperimentTrialStatus,
     stop_reason: ExperimentTrialStopReason,
     error: Option<String>,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let trial = persist_trial_status(
-        ctx,
-        workspace_id.clone(),
-        trial_uid,
-        status,
-        Some(stop_reason),
-        error,
-    )
-    .await?;
+    let trial =
+        persist_trial_status(ctx, tenant_id, trial_uid, status, Some(stop_reason), error).await?;
     ctx.set(K_STATUS, Json(trial.status));
-    status_response_from_record(workspace_id, trial)
+    status_response_from_record(tenant_id, trial)
 }
 
 pub(super) async fn increment_trial_turn(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial_uid: Uuid,
 ) -> Result<(), HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .increment_trial_turn(&scope, trial_uid)
@@ -114,7 +107,7 @@ pub(super) async fn increment_trial_turn(
 
 pub(super) async fn attach_trial_session(
     ctx: &WorkflowContext<'_>,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
@@ -134,7 +127,7 @@ pub(super) async fn attach_trial_session(
 
 pub(super) async fn attach_current_trial_trace(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial_uid: Uuid,
 ) -> Result<(), HandlerError> {
     let Some(trace_id) = current_trace_id() else {
@@ -142,7 +135,7 @@ pub(super) async fn attach_current_trial_trace(
     };
     tracing::Span::current().set_attribute("moa.experiment.trace_id", trace_id.clone());
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .attach_trial_trace(&scope, trial_uid, trace_id)
@@ -158,7 +151,7 @@ pub(super) async fn attach_current_trial_trace(
 
 pub(super) async fn attach_trial_workflow_run(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     workflow_run_uid: Uuid,
 ) -> Result<ExperimentTrialRecord, HandlerError> {
@@ -171,7 +164,7 @@ pub(super) async fn attach_trial_workflow_run(
 
 async fn update_trial_status(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     status: ExperimentTrialStatus,
     stop_reason: Option<ExperimentTrialStopReason>,
@@ -191,24 +184,24 @@ pub(super) async fn trial_status_response(
     pool: sqlx::PgPool,
     request: ExperimentTrialRunStatusRequest,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let trial = ExperimentStore::new(pool)
         .load_trial(&scope, request.trial_uid)
         .await
         .map_err(moa_error_to_handler_error)?
         .ok_or_else(|| trial_not_found(request.trial_uid))?;
-    status_response_from_record(request.workspace_id, trial)
+    status_response_from_record(request.tenant_id, trial)
 }
 
 pub(super) fn status_response_from_record(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial: ExperimentTrialRecord,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
     let trial_value = serde_json::to_value(&trial).map_err(|error| {
         TerminalError::new(format!("serialize experiment trial failed: {error}"))
     })?;
     Ok(ExperimentTrialRunStatusResponse {
-        workspace_id,
+        tenant_id,
         run_uid: trial.run_uid,
         trial_uid: trial.trial_uid,
         trial_key: trial.trial_key,

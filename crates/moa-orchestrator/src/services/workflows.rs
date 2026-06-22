@@ -3,13 +3,12 @@
 use moa_artifacts::registry::ArtifactRegistry;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::ActionRuleScope;
 use moa_core::restate_observability::annotate_restate_handler_span;
-use moa_core::traits::Identity;
 use moa_core::wire::{
     WorkflowCancelRequest, WorkflowCancelResponse, WorkflowRunRequest, WorkflowRunResponse,
     WorkflowRunStatus, WorkflowStatusRequest,
 };
-use moa_core::{MemoryScope, WorkspaceId};
 use moa_workflows::error::WorkflowError;
 use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
 use restate_sdk::prelude::*;
@@ -51,7 +50,7 @@ impl Workflows for WorkflowsImpl {
     ) -> Result<Json<WorkflowRunResponse>, HandlerError> {
         annotate_restate_handler_span("Workflows", "run");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         Ok(ctx
             .run(|| async move { run_inner(request).await.map(Json::from) })
@@ -67,7 +66,7 @@ impl Workflows for WorkflowsImpl {
     ) -> Result<Json<WorkflowRunStatus>, HandlerError> {
         annotate_restate_handler_span("Workflows", "status");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         Ok(ctx
             .run(|| async move { status_inner(request).await.map(Json::from) })
@@ -83,7 +82,7 @@ impl Workflows for WorkflowsImpl {
     ) -> Result<Json<WorkflowCancelResponse>, HandlerError> {
         annotate_restate_handler_span("Workflows", "cancel");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Editor).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
 
         Ok(ctx
             .run(|| async move { cancel_inner(request).await.map(Json::from) })
@@ -93,8 +92,8 @@ impl Workflows for WorkflowsImpl {
 }
 
 async fn run_inner(request: WorkflowRunRequest) -> Result<WorkflowRunResponse, HandlerError> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: request.workspace_id,
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
     };
     let run = workflow_runtime()
         .start(
@@ -116,8 +115,8 @@ async fn run_inner(request: WorkflowRunRequest) -> Result<WorkflowRunResponse, H
 }
 
 async fn status_inner(request: WorkflowStatusRequest) -> Result<WorkflowRunStatus, HandlerError> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: request.workspace_id,
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
     };
     let run = workflow_runtime()
         .status(&scope, request.run_id)
@@ -138,8 +137,8 @@ async fn status_inner(request: WorkflowStatusRequest) -> Result<WorkflowRunStatu
 async fn cancel_inner(
     request: WorkflowCancelRequest,
 ) -> Result<WorkflowCancelResponse, HandlerError> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: request.workspace_id,
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: request.tenant_id,
     };
     let run = workflow_runtime()
         .cancel(&scope, request.run_id, request.reason)
@@ -157,23 +156,16 @@ fn workflow_runtime() -> WorkflowRuntime {
     WorkflowRuntime::new(ArtifactRegistry::new(OrchestratorCtx::current_graph_pool()))
 }
 
-async fn authorize_workspace(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: moa_core::TenantId,
     relation: Relation,
-) -> Result<Identity, HandlerError> {
+) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)?;
-    Ok(identity)
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)
 }
 
 fn workflow_handler_error(error: WorkflowError) -> HandlerError {

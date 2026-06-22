@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{MemoryDigestConfig, ScopeContext, UserId, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{
+    ContactId, MemoryDigestConfig, ScopeContext, TenantId, WorkspaceId, traits::EmbeddingProvider,
+};
 use moa_memory_graph::{
     AgeGraphStore, ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
     NodePropertyUpdateIntent, PiiClass,
@@ -587,6 +589,7 @@ async fn active_rows(
     label: NodeLabel,
     include_embedding_state: bool,
 ) -> Result<Vec<LifecycleNodeRow>> {
+    let tenant_id = tenant_uuid_from_workspace_id(workspace_id)?;
     let mut rows = Vec::new();
     let mut cursor_valid_from: Option<DateTime<Utc>> = None;
     let mut cursor_uid: Option<Uuid> = None;
@@ -597,6 +600,8 @@ async fn active_rows(
             SELECT node.uid,
                    node.workspace_id,
                    node.user_id,
+                   node.tenant_id,
+                   node.contact_id,
                    node.scope,
                    node.name,
                    node.pii_class,
@@ -610,7 +615,7 @@ async fn active_rows(
             LEFT JOIN moa.embeddings AS embedding
               ON embedding.uid = node.uid
              AND embedding.valid_to IS NULL
-            WHERE node.workspace_id = $1
+            WHERE node.tenant_id = $1
               AND node.label = $2
               AND node.valid_to IS NULL
               AND ($3::timestamptz IS NULL OR (node.valid_from, node.uid) > ($3, $4::uuid))
@@ -618,7 +623,7 @@ async fn active_rows(
             LIMIT $5
             "#,
         )
-        .bind(workspace_id.to_string())
+        .bind(tenant_id)
         .bind(label.as_str())
         .bind(cursor_valid_from)
         .bind(cursor_uid)
@@ -644,6 +649,14 @@ async fn active_rows(
     Ok(rows)
 }
 
+fn tenant_uuid_from_workspace_id(workspace_id: &WorkspaceId) -> Result<Uuid> {
+    Uuid::parse_str(workspace_id.as_str()).map_err(|error| {
+        Error::InvalidRow(format!(
+            "workspace_id `{workspace_id}` cannot be used as tenant_id: {error}"
+        ))
+    })
+}
+
 fn lifecycle_row_from_sql(
     row: sqlx::postgres::PgRow,
     include_embedding_state: bool,
@@ -653,6 +666,8 @@ fn lifecycle_row_from_sql(
         uid: row.try_get("uid")?,
         workspace_id: row.try_get("workspace_id")?,
         user_id: row.try_get("user_id")?,
+        tenant_id: row.try_get("tenant_id")?,
+        contact_id: row.try_get("contact_id")?,
         scope: row.try_get("scope")?,
         name: row.try_get("name")?,
         pii_class: pii_class
@@ -710,6 +725,8 @@ struct LifecycleNodeRow {
     uid: Uuid,
     workspace_id: Option<String>,
     user_id: Option<String>,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
     scope: String,
     name: String,
     pii_class: PiiClass,
@@ -740,10 +757,10 @@ impl LifecycleNodeRow {
     }
 
     fn scope_context(&self) -> ScopeContext {
-        let workspace_id = WorkspaceId::new(self.workspace_id.clone().unwrap_or_default());
-        match self.user_id.as_ref() {
-            Some(user_id) => ScopeContext::user(workspace_id, UserId::new(user_id.clone())),
-            None => ScopeContext::workspace(workspace_id),
+        let tenant_id = TenantId::from(self.tenant_id);
+        match self.contact_id {
+            Some(contact_id) => ScopeContext::contact(tenant_id, ContactId(contact_id)),
+            None => ScopeContext::tenant(tenant_id),
         }
     }
 
@@ -1012,6 +1029,8 @@ mod tests {
             uid: uuid(spec.uid_suffix),
             workspace_id: Some("ws".to_string()),
             user_id: spec.user_id.map(ToOwned::to_owned),
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: spec.user_id.map(|_| Uuid::from_u128(0x101)),
             scope: spec.scope.to_string(),
             name: spec.subject.to_string(),
             pii_class: PiiClass::None,

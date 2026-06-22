@@ -260,8 +260,8 @@ mod tests {
         Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
         ContextProcessor, Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier,
         QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason, RewriteSource, SessionId,
-        SessionMeta, StopReason, TokenPricing, TokenUsage, ToolCallFormat, UserId, WorkingContext,
-        WorkspaceId,
+        SessionMeta, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat,
+        WorkingContext,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -331,8 +331,7 @@ mod tests {
     fn context_with_messages(messages: Vec<ContextMessage>) -> WorkingContext {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()

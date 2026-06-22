@@ -1,6 +1,6 @@
 //! Memory-owned privacy erasure helpers.
 
-use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId};
+use moa_core::{ContactId, MoaError, ScopeContext, ScopedConn, TenantId};
 use moa_memory_graph::{
     AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
 };
@@ -95,7 +95,7 @@ pub async fn hard_purge_erase_candidates(
         return Ok(0);
     }
 
-    let graph = erase_graph_store(pool, &audit.workspace_id, &audit.subject_user_id);
+    let graph = erase_graph_store(pool, &audit.workspace_id, &audit.subject_user_id)?;
     let redaction_marker = format!("erase:{}", audit.approval_token_jti);
     let mut erased_count = 0usize;
     for chunk in candidates.chunks(ERASE_CHUNK_SIZE) {
@@ -114,13 +114,13 @@ pub async fn hard_purge_erase_candidates(
     Ok(erased_count)
 }
 
-/// Begins a transaction scoped as `moa_app` for one workspace-bound subject user.
+/// Begins a transaction scoped as `moa_app` for one tenant-bound contact subject.
 pub async fn begin_app_scoped_tx<'a>(
     pool: &'a PgPool,
     workspace_id: &str,
     subject_user_id: &str,
 ) -> Result<ScopedConn<'a>> {
-    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(subject_user_id));
+    let scope = contact_scope_from_legacy_subject(workspace_id, subject_user_id)?;
     let mut tx = ScopedConn::begin(pool, &scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(tx.as_mut())
@@ -128,9 +128,32 @@ pub async fn begin_app_scoped_tx<'a>(
     Ok(tx)
 }
 
-fn erase_graph_store(pool: &PgPool, workspace_id: &str, subject_user_id: &str) -> AgeGraphStore {
-    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(subject_user_id));
-    AgeGraphStore::scoped_for_app_role(pool.clone(), scope)
+fn erase_graph_store(
+    pool: &PgPool,
+    workspace_id: &str,
+    subject_user_id: &str,
+) -> Result<AgeGraphStore> {
+    let scope = contact_scope_from_legacy_subject(workspace_id, subject_user_id)?;
+    Ok(AgeGraphStore::scoped_for_app_role(pool.clone(), scope))
+}
+
+fn contact_scope_from_legacy_subject(
+    workspace_id: &str,
+    subject_user_id: &str,
+) -> Result<ScopeContext> {
+    let tenant_id = Uuid::parse_str(workspace_id).map(TenantId::from).map_err(|error| {
+        ErasureError::Scope(MoaError::ValidationError(format!(
+            "privacy erasure workspace_id must be a tenant UUID for tenant-scoped memory: {error}"
+        )))
+    })?;
+    let contact_id = Uuid::parse_str(subject_user_id)
+        .map(ContactId)
+        .map_err(|error| {
+            ErasureError::Scope(MoaError::ValidationError(format!(
+                "privacy erasure subject_user_id must be a contact UUID for contact-scoped memory: {error}"
+            )))
+        })?;
+    Ok(ScopeContext::contact(tenant_id, contact_id))
 }
 
 fn erase_audit_metadata(audit: &GraphErasureAudit) -> Value {

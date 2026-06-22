@@ -1,7 +1,7 @@
 //! Read-side smoke tests for `GraphStore`.
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ScopeContext, ScopedConn, TenantId};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
     cypher,
@@ -13,6 +13,30 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
+    let workspace_id = workspace_id.as_ref();
+    let tenant_id = Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+    ScopeContext::tenant(tenant_id)
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
+        let slot = index % 16;
+        bytes[slot] = bytes[slot]
+            .wrapping_mul(31)
+            .wrapping_add(byte)
+            .wrapping_add(index as u8);
+        let mirror = (index * 7 + 3) % 16;
+        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
 
 async fn set_app_role(conn: &mut sqlx::PgConnection) {
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -30,7 +54,7 @@ async fn cypher_template_create_uses_bound_params() {
     let run_id = Uuid::now_v7().simple().to_string();
     let workspace_id = format!("graph-template-{run_id}");
     let uid = format!("entity-{run_id}");
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id.clone()));
+    let ctx = tenant_scope(workspace_id.clone());
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped template transaction");
@@ -67,7 +91,7 @@ async fn cypher_template_create_uses_bound_params() {
 }
 
 async fn seed_node(pool: &sqlx::PgPool, workspace_id: &str, uid: Uuid, name: &str) {
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let ctx = tenant_scope(workspace_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped seed transaction");
@@ -203,7 +227,7 @@ async fn read_smoke_get_node_and_lookup_seeds() {
 
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let row = graph
         .get_node(uid)
@@ -255,7 +279,7 @@ async fn lookup_seeds_prefers_exact_name_over_same_shape_siblings() {
 
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let seeds = graph
         .lookup_seeds("audit-shipper-dep-0-0-0", 10, None)
@@ -283,7 +307,7 @@ async fn graph_neighbors_with_no_as_of_returns_active_rows_only() {
     let workspace_id = format!("graph-neighbor-active-{run_id}");
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let (old_uid, new_uid, target_uid, _, _) =
         create_superseded_neighbor_case(&graph, &workspace_id, &run_id).await;
@@ -314,7 +338,7 @@ async fn graph_neighbors_as_of_returns_superseded_node_inside_window() {
     let workspace_id = format!("graph-neighbor-as-of-{run_id}");
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let (old_uid, new_uid, _, old_valid_from, _) =
         create_superseded_neighbor_case(&graph, &workspace_id, &run_id).await;
@@ -349,7 +373,7 @@ async fn lookup_seeds_as_of_includes_invalidated_node_inside_window() {
     let workspace_id = format!("graph-seed-as-of-{run_id}");
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let (old_uid, new_uid, _, old_valid_from, _) =
         create_superseded_neighbor_case(&graph, &workspace_id, &run_id).await;
@@ -390,7 +414,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
     let workspace_id = format!("graph-expand-two-hop-{run_id}");
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let valid_from = utc("2026-02-01T00:00:00Z");
     let source_uid = Uuid::now_v7();
@@ -472,7 +496,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
     let workspace_id = format!("graph-expand-validity-{run_id}");
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let old_valid_from = utc("2026-02-01T00:00:00Z");
     let new_valid_from = utc("2026-04-01T00:00:00Z");

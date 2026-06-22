@@ -509,7 +509,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use moa_core::{
         ClaimCheck, EventFilter, SessionFilter, SessionId, SessionMeta, SessionStatus,
-        SessionSummary, UserId, WorkspaceId,
+        SessionSummary, TenantId, WorkspaceId,
     };
 
     use super::*;
@@ -559,8 +559,7 @@ mod tests {
 
         async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
             Ok(SessionMeta {
-                workspace_id: WorkspaceId::new("workspace"),
-                user_id: UserId::new("user"),
+                tenant_id: TenantId::new(),
                 status: SessionStatus::Running,
                 ..SessionMeta::default()
             })

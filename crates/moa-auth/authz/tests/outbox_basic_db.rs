@@ -42,22 +42,22 @@ async fn outbox_basic_enqueue_is_idempotent_on_same_key() {
     // Pins: repeated enqueue of the same tuple operation creates exactly one outbox row.
     let pool = test_pool().await;
     let user_id = Uuid::new_v4();
-    let workspace_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
     let tuple = TupleKey::new(
         UserType::User,
         user_id,
-        Relation::Editor,
-        ObjectType::Workspace,
-        workspace_id,
+        Relation::Operator,
+        ObjectType::Tenant,
+        tenant_id,
     );
 
-    enqueue(&pool, TupleOp::Write, &tuple, None)
+    enqueue(&pool, TupleOp::Write, &tuple, Some(tenant_id))
         .await
         .expect("first enqueue should succeed");
-    enqueue(&pool, TupleOp::Write, &tuple, None)
+    enqueue(&pool, TupleOp::Write, &tuple, Some(tenant_id))
         .await
         .expect("second enqueue should be idempotent");
-    enqueue(&pool, TupleOp::Write, &tuple, None)
+    enqueue(&pool, TupleOp::Write, &tuple, Some(tenant_id))
         .await
         .expect("third enqueue should be idempotent");
 
@@ -81,19 +81,19 @@ async fn outbox_basic_enqueue_separates_write_and_delete() {
     // Pins: write and delete use distinct idempotency keys for the same tuple.
     let pool = test_pool().await;
     let user_id = Uuid::new_v4();
-    let workspace_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
     let tuple = TupleKey::new(
         UserType::User,
         user_id,
-        Relation::Editor,
-        ObjectType::Workspace,
-        workspace_id,
+        Relation::Operator,
+        ObjectType::Tenant,
+        tenant_id,
     );
 
-    enqueue(&pool, TupleOp::Write, &tuple, None)
+    enqueue(&pool, TupleOp::Write, &tuple, Some(tenant_id))
         .await
         .expect("write enqueue should succeed");
-    enqueue(&pool, TupleOp::Delete, &tuple, None)
+    enqueue(&pool, TupleOp::Delete, &tuple, Some(tenant_id))
         .await
         .expect("delete enqueue should succeed");
 
@@ -121,7 +121,7 @@ async fn outbox_basic_failed_row_moves_to_dead_letter_at_max_attempts() {
     let tuple = TupleKey::new(
         UserType::User,
         user_id,
-        Relation::Member,
+        Relation::Operator,
         ObjectType::Tenant,
         tenant_id,
     );

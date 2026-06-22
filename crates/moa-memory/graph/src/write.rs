@@ -45,7 +45,7 @@ pub async fn create_node_in_conn(
         .execute(&mut *conn)
         .await
         .map_err(|error| GraphError::Cypher(error.to_string()))?;
-    insert_node_index(&mut *conn, &intent).await?;
+    insert_node_index(store, &mut *conn, &intent).await?;
     if let Some(item) = vector_item.as_ref() {
         let vector = require_vector_store(store)?;
         vector
@@ -96,7 +96,7 @@ pub async fn supersede_node(
         "superseded",
     )
     .await?;
-    insert_node_index(conn.as_mut(), &new).await?;
+    insert_node_index(store, conn.as_mut(), &new).await?;
 
     if let Some(vector) = store.vector() {
         vector.delete_in_tx(conn.as_mut(), &[current_uid]).await?;
@@ -640,19 +640,26 @@ fn edge_params(intent: &EdgeWriteIntent) -> Value {
     })
 }
 
-async fn insert_node_index(conn: &mut PgConnection, intent: &NodeWriteIntent) -> Result<()> {
+async fn insert_node_index(
+    store: &AgeGraphStore,
+    conn: &mut PgConnection,
+    intent: &NodeWriteIntent,
+) -> Result<()> {
+    let (tenant_id, contact_id) = runtime_ids_for_node(store, intent)?;
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, workspace_id, user_id, name, pii_class, confidence,
+            (uid, label, workspace_id, user_id, tenant_id, contact_id, name, pii_class, confidence,
              reference_count, valid_from, properties_summary)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(intent.uid)
     .bind(intent.label.as_str())
     .bind(intent.workspace_id.as_deref())
     .bind(intent.user_id.as_deref())
+    .bind(tenant_id)
+    .bind(contact_id)
     .bind(&intent.name)
     .bind(intent.pii_class.as_str())
     .bind(intent.confidence)
@@ -662,6 +669,27 @@ async fn insert_node_index(conn: &mut PgConnection, intent: &NodeWriteIntent) ->
     .execute(conn)
     .await?;
     Ok(())
+}
+
+fn runtime_ids_for_node(
+    store: &AgeGraphStore,
+    intent: &NodeWriteIntent,
+) -> Result<(Uuid, Option<Uuid>)> {
+    if let Some(scope) = store.scope() {
+        return Ok((scope.tenant_id().0, scope.contact_id().map(|id| id.0)));
+    }
+
+    let Some(workspace_id) = intent.workspace_id.as_deref() else {
+        return Err(GraphError::Conflict(
+            "tenant-owned graph nodes require tenant scope".to_string(),
+        ));
+    };
+    let tenant_id = Uuid::parse_str(workspace_id).map_err(|error| {
+        GraphError::Conflict(format!(
+            "workspace_id `{workspace_id}` cannot be used as tenant_id: {error}"
+        ))
+    })?;
+    Ok((tenant_id, None))
 }
 
 fn reference_count_from_properties(properties: &Value) -> i64 {
@@ -758,8 +786,8 @@ fn create_changelog(intent: &NodeWriteIntent, cause_change_id: Option<i64>) -> C
 fn mutation_actor(store: &AgeGraphStore) -> (Option<String>, String) {
     store
         .scope()
-        .and_then(|scope| scope.user_id())
-        .map(|user_id| (Some(user_id.to_string()), "user".to_string()))
+        .and_then(|scope| scope.contact_id())
+        .map(|contact_id| (Some(contact_id.to_string()), "contact".to_string()))
         .unwrap_or((None, "system".to_string()))
 }
 

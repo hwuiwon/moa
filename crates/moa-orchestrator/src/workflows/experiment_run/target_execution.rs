@@ -17,10 +17,10 @@ pub(super) async fn run_agent_loop_target(
     attachments: Vec<moa_core::Attachment>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     let variant = parse_payload::<ExperimentVariant>("variant", request.variant.clone())?;
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     persist_run_status(
         ctx,
-        request.workspace_id.clone(),
+        request.tenant_id,
         request.run_uid,
         ExperimentRunStatus::Running,
         None,
@@ -35,14 +35,8 @@ pub(super) async fn run_agent_loop_target(
             let agent = agent.ok_or_else(|| {
                 bad_request("agent-loop experiment target requires an agent selector")
             })?;
-            let (session_id, meta) = create_new_session(
-                ctx,
-                request.workspace_id.clone(),
-                model.clone(),
-                &request,
-                agent,
-            )
-            .await?;
+            let (session_id, meta) =
+                create_new_session(ctx, request.tenant_id, model.clone(), &request, agent).await?;
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
                     .set_meta(Json::from(meta)),
@@ -58,7 +52,7 @@ pub(super) async fn run_agent_loop_target(
 
     ctx.set(K_SESSION_ID, Json(session_id));
     tracing::Span::current().set_attribute("moa.experiment.session_id", session_id.to_string());
-    persist_attached_session(ctx, scope.clone(), request.run_uid, session_id).await?;
+    persist_attached_session(ctx, scope, request.run_uid, session_id).await?;
 
     with_identity_headers(
         ctx.object_client::<SessionClient>(session_id.to_string())
@@ -76,7 +70,7 @@ pub(super) async fn run_agent_loop_target(
     workflow_status_response(
         ctx,
         ExperimentRunStatusRequest {
-            workspace_id: request.workspace_id,
+            tenant_id: request.tenant_id,
             run_uid: request.run_uid,
         },
     )
@@ -91,10 +85,10 @@ pub(super) async fn run_workflow_target(
     session_id: Option<SessionId>,
     idempotency_key: Option<String>,
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     persist_run_status(
         ctx,
-        request.workspace_id.clone(),
+        request.tenant_id,
         request.run_uid,
         ExperimentRunStatus::Running,
         None,
@@ -121,7 +115,7 @@ pub(super) async fn run_workflow_target(
     workflow_status_response(
         ctx,
         ExperimentRunStatusRequest {
-            workspace_id: request.workspace_id,
+            tenant_id: request.tenant_id,
             run_uid: request.run_uid,
         },
     )
@@ -130,7 +124,7 @@ pub(super) async fn run_workflow_target(
 
 async fn create_new_session(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     model: ModelId,
     request: &ExperimentRunWorkflowRequest,
     agent: AgentSessionSelection,
@@ -139,7 +133,7 @@ async fn create_new_session(
     let identity = request.identity.clone();
     Ok(ctx
         .run(|| async move {
-            let mut meta = new_session_meta(workspace_id, model, &identity)?;
+            let mut meta = new_session_meta(tenant_id, model, &identity)?;
             let agent_context =
                 resolve_agent_context_for_session(store.as_ref(), &meta, &agent).await?;
             apply_agent_model_policy(&mut meta, &agent_context)?;
@@ -156,7 +150,7 @@ async fn create_new_session(
 
 async fn start_and_attach_workflow_run(
     ctx: &WorkflowContext<'_>,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     experiment_run_uid: Uuid,
     workflow_ref: String,
     input: Value,

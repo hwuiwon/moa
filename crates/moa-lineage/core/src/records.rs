@@ -635,19 +635,20 @@ impl LineageEvent {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{MemoryScope, SessionId, UserId, WorkspaceId};
+    use moa_core::{MemoryScope, SessionId, TenantId, UserId, WorkspaceId};
 
     use super::*;
 
     #[test]
     fn lineage_event_serializes_with_kind_and_record() {
         let workspace_id = WorkspaceId::new("workspace");
+        let tenant_id = TenantId::from(Uuid::from_u128(0x1000));
         let event = LineageEvent::Retrieval(RetrievalLineage {
             turn_id: TurnId::new_v7(),
             session_id: SessionId::new(),
             workspace_id: workspace_id.clone(),
             user_id: UserId::new("user"),
-            scope: MemoryScope::Workspace { workspace_id },
+            scope: MemoryScope::Tenant { tenant_id },
             ts: Utc::now(),
             query_original: "query".to_string(),
             query_expansions: Vec::new(),

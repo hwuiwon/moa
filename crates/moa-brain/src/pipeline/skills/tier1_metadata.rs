@@ -340,7 +340,7 @@ fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use moa_core::{AttributionSubjectType, TaskStrategySuccessRate};
+    use moa_core::{AttributionSubjectType, TaskStrategySuccessRate, TenantId};
 
     use super::{
         DEFAULT_MIN_MANIFEST_CHARS, MANIFEST_FOOTER, MANIFEST_PREAMBLE, ResolvedSkillBudget,
@@ -496,7 +496,7 @@ mod tests {
         let task_rates = HashMap::from([(
             "task-winner".to_string(),
             TaskStrategySuccessRate {
-                tenant_id: "tenant".to_string(),
+                tenant_id: TenantId::new(),
                 task_fingerprint: "task-hash".to_string(),
                 subject_type: AttributionSubjectType::Skill,
                 subject_id: "task-winner".to_string(),

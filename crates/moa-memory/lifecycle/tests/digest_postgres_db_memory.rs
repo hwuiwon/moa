@@ -3,8 +3,9 @@
 use chrono::{TimeZone, Utc};
 use moa_brain::pipeline::digest::DigestProcessor;
 use moa_core::{
-    Channel, ContextMessage, ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId,
-    SessionId, SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+    Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
+    MemoryDigestConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
+    ToolCallFormat, WorkingContext, WorkspaceId,
 };
 use moa_memory_lifecycle::digest::rebuild_digests;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
@@ -278,17 +279,62 @@ async fn cleanup_workspaces(pool: &PgPool, workspace_ids: &[&str]) {
 }
 
 fn working_context(workspace_id: &str, user_id: &str) -> WorkingContext {
+    let tenant_id = tenant_id_from_workspace_id(workspace_id);
+    let contact_id = contact_id_from_user_id(user_id);
     WorkingContext::new(
         &SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new(workspace_id),
-            user_id: UserId::new(user_id),
+            tenant_id,
+            contact: Some(contact_ref(tenant_id, contact_id)),
             channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()
         },
         capabilities(),
     )
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &str) -> TenantId {
+    Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)))
+}
+
+fn contact_id_from_user_id(user_id: &str) -> ContactId {
+    Uuid::parse_str(user_id)
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id)))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
+        let slot = index % 16;
+        bytes[slot] = bytes[slot]
+            .wrapping_mul(31)
+            .wrapping_add(byte)
+            .wrapping_add(index as u8);
+        let mirror = (index * 7 + 3) % 16;
+        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }
 }
 
 fn capabilities() -> ModelCapabilities {

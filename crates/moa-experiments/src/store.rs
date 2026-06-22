@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    MemoryScope, MoaError, ModelId, Result as MoaResult, ScopeContext, ScopedConn, SessionId,
+    ActionRuleScope, MoaError, ModelId, Result as MoaResult, ScopeContext, ScopedConn, SessionId,
+    TenantId,
 };
 use moa_scoring::{
     SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL, ensure_score_run_parent,
@@ -32,7 +33,7 @@ impl ExperimentStore {
     /// Inserts a new experiment run or returns the scoped idempotent existing row.
     pub async fn insert_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run: NewExperimentRun,
     ) -> MoaResult<ExperimentRunRecord> {
         let parts = ScopeParts::from_scope(scope);
@@ -42,7 +43,7 @@ impl ExperimentStore {
         let scorecard = to_json(run.scorecard)?;
         let score_run_id = run.score_run_id;
         let artifact_revision_uids = run.artifact_revision_uids;
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         if let Some(idempotency_key) = run.idempotency_key.as_deref()
             && let Some(row) =
                 load_scoped_run_by_idempotency_key(conn.as_mut(), scope, idempotency_key).await?
@@ -127,10 +128,10 @@ impl ExperimentStore {
     /// Loads one experiment run from the exact requested scope.
     pub async fn load_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = load_scoped_run(conn.as_mut(), scope, run_uid).await?;
         conn.commit().await?;
         row.map(|row| run_from_row(&row)).transpose()
@@ -139,12 +140,12 @@ impl ExperimentStore {
     /// Lists experiment runs in the exact requested scope, optionally filtered by status.
     pub async fn list_runs(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         status: Option<ExperimentRunStatus>,
         limit: i64,
     ) -> MoaResult<Vec<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let rows = sqlx::query(
             r#"
             SELECT run_uid, workspace_id, user_id, scope, name, target_kind, status,
@@ -175,14 +176,14 @@ impl ExperimentStore {
     /// Updates lifecycle status and terminal metadata for a scoped experiment run.
     pub async fn update_run_status(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         status: ExperimentRunStatus,
         error: Option<String>,
         completed_at: Option<DateTime<Utc>>,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.experiment_run
@@ -229,7 +230,7 @@ impl ExperimentStore {
     /// Attaches a session to a scoped experiment run.
     pub async fn attach_session(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         session_id: SessionId,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
@@ -240,7 +241,7 @@ impl ExperimentStore {
     /// Attaches a workflow artifact run to a scoped experiment run.
     pub async fn attach_workflow_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         workflow_run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
@@ -251,7 +252,7 @@ impl ExperimentStore {
     /// Inserts a new experiment trial or returns the run-scoped idempotent existing row.
     pub async fn insert_trial(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial: NewExperimentTrial,
     ) -> MoaResult<ExperimentTrialRecord> {
         let parts = ScopeParts::from_scope(scope);
@@ -260,7 +261,7 @@ impl ExperimentStore {
         let target_model = trial.target_model.as_ref().map(ToString::to_string);
         let score_run_id = trial.score_run_id;
         let referenced_revisions = trial_artifact_revision_refs(&trial);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         if let Err(error) = ensure_run_exists_in_scope(conn.as_mut(), scope, trial.run_uid).await {
             let _ = conn.rollback().await;
             return Err(error);
@@ -338,10 +339,10 @@ impl ExperimentStore {
     /// Loads one experiment trial from the exact requested scope.
     pub async fn load_trial(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = load_scoped_trial(conn.as_mut(), scope, trial_uid).await?;
         conn.commit().await?;
         row.map(|row| trial_from_row(&row)).transpose()
@@ -350,11 +351,11 @@ impl ExperimentStore {
     /// Loads one experiment trial by its run-scoped deterministic key.
     pub async fn load_trial_by_key(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         trial_key: &str,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = load_scoped_trial_by_key(conn.as_mut(), scope, run_uid, trial_key).await?;
         conn.commit().await?;
         row.map(|row| trial_from_row(&row)).transpose()
@@ -363,13 +364,13 @@ impl ExperimentStore {
     /// Lists experiment trials for a scoped run, optionally filtered by status.
     pub async fn list_trials(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         status: Option<ExperimentTrialStatus>,
         limit: i64,
     ) -> MoaResult<Vec<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
         let rows = sqlx::query(
             r#"
@@ -405,7 +406,7 @@ impl ExperimentStore {
     /// Claims accepted trial rows for parent workflow dispatch.
     pub async fn claim_trials_for_dispatch(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         trial_keys: &[String],
         limit: i64,
@@ -415,7 +416,7 @@ impl ExperimentStore {
         }
 
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
         let rows = sqlx::query(
             r#"
@@ -470,7 +471,7 @@ impl ExperimentStore {
     /// Updates lifecycle status and terminal metadata for a scoped experiment trial.
     pub async fn update_trial_status(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
         status: ExperimentTrialStatus,
         stop_reason: Option<ExperimentTrialStopReason>,
@@ -478,7 +479,7 @@ impl ExperimentStore {
         completed_at: Option<DateTime<Utc>>,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.experiment_trial
@@ -532,12 +533,12 @@ impl ExperimentStore {
     /// Marks accepted, dispatched, and running trials for a run as cancelled.
     pub async fn cancel_active_trials(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         reason: String,
     ) -> MoaResult<Vec<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
         let rows = sqlx::query(
             r#"
@@ -576,7 +577,7 @@ impl ExperimentStore {
     /// Attaches a session to a scoped experiment trial.
     pub async fn attach_trial_session(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
         session_id: SessionId,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
@@ -587,11 +588,11 @@ impl ExperimentStore {
     /// Attaches a workflow artifact run to a scoped experiment trial.
     pub async fn attach_trial_workflow_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
         workflow_run_uid: Uuid,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         ensure_workflow_run_visible(conn.as_mut(), scope, workflow_run_uid).await?;
         conn.commit().await?;
         self.update_trial_links(scope, trial_uid, None, Some(workflow_run_uid), None)
@@ -601,7 +602,7 @@ impl ExperimentStore {
     /// Attaches an observability trace identifier to a scoped experiment trial.
     pub async fn attach_trial_trace(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
         trace_id: String,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
@@ -612,11 +613,11 @@ impl ExperimentStore {
     /// Increments the persisted turn count for a scoped experiment trial.
     pub async fn increment_trial_turn(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.experiment_trial
@@ -647,14 +648,14 @@ impl ExperimentStore {
 
     async fn update_trial_links(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         trial_uid: Uuid,
         session_id: Option<Uuid>,
         workflow_run_uid: Option<Uuid>,
         trace_id: Option<String>,
     ) -> MoaResult<Option<ExperimentTrialRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.experiment_trial
@@ -690,13 +691,13 @@ impl ExperimentStore {
 
     async fn update_link(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         session_id: Option<Uuid>,
         workflow_run_uid: Option<Uuid>,
     ) -> MoaResult<Option<ExperimentRunRecord>> {
         let parts = ScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let row = sqlx::query(
             r#"
             UPDATE moa.experiment_run
@@ -734,25 +735,17 @@ struct ScopeParts {
 }
 
 impl ScopeParts {
-    fn from_scope(scope: &MemoryScope) -> Self {
+    fn from_scope(scope: &ActionRuleScope) -> Self {
         match scope {
-            MemoryScope::Global => Self {
+            ActionRuleScope::WorkspaceDefault => Self {
                 scope: "global",
                 workspace_id: None,
                 user_id: None,
             },
-            MemoryScope::Workspace { workspace_id } => Self {
+            ActionRuleScope::Tenant { tenant_id } => Self {
                 scope: "workspace",
-                workspace_id: Some(workspace_id.to_string()),
+                workspace_id: Some(tenant_id.to_string()),
                 user_id: None,
-            },
-            MemoryScope::User {
-                workspace_id,
-                user_id,
-            } => Self {
-                scope: "user",
-                workspace_id: Some(workspace_id.to_string()),
-                user_id: Some(user_id.to_string()),
             },
         }
     }
@@ -760,7 +753,7 @@ impl ScopeParts {
 
 async fn load_scoped_run(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run_uid: Uuid,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
@@ -789,7 +782,7 @@ async fn load_scoped_run(
 
 async fn load_scoped_run_by_idempotency_key(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     idempotency_key: &str,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
@@ -818,7 +811,7 @@ async fn load_scoped_run_by_idempotency_key(
 
 async fn ensure_run_exists_in_scope(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run_uid: Uuid,
 ) -> MoaResult<()> {
     if load_scoped_run(conn, scope, run_uid).await?.is_some() {
@@ -832,7 +825,7 @@ async fn ensure_run_exists_in_scope(
 
 async fn load_scoped_trial(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     trial_uid: Uuid,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
     let parts = ScopeParts::from_scope(scope);
@@ -863,7 +856,7 @@ async fn load_scoped_trial(
 
 async fn load_scoped_trial_by_key(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run_uid: Uuid,
     trial_key: &str,
 ) -> MoaResult<Option<sqlx::postgres::PgRow>> {
@@ -897,7 +890,7 @@ async fn load_scoped_trial_by_key(
 
 async fn ensure_workflow_run_visible(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     workflow_run_uid: Uuid,
 ) -> MoaResult<()> {
     let parts = ScopeParts::from_scope(scope);
@@ -932,7 +925,7 @@ async fn ensure_workflow_run_visible(
 
 async fn ensure_artifact_revisions_visible(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     revision_uids: &[Uuid],
 ) -> MoaResult<()> {
     if revision_uids.is_empty() {
@@ -951,21 +944,12 @@ async fn ensure_artifact_revisions_visible(
                   AND workspace_id IS NOT DISTINCT FROM $2
                   AND user_id IS NULL
               )
-              OR (
-                  scope = 'user'
-                  AND workspace_id IS NOT DISTINCT FROM $2
-                  AND user_id IS NOT DISTINCT FROM $3
-              )
           )
         "#,
     )
     .bind(revision_uids)
-    .bind(
-        scope
-            .workspace_id()
-            .map(|workspace_id| workspace_id.to_string()),
-    )
-    .bind(scope.user_id().map(|user_id| user_id.to_string()))
+    .bind(ScopeParts::from_scope(scope).workspace_id)
+    .bind(Option::<String>::None)
     .fetch_all(conn)
     .await
     .map_err(map_sqlx_error)?;
@@ -1109,20 +1093,29 @@ fn scope_from_parts(
     scope: &str,
     workspace_id: Option<String>,
     user_id: Option<String>,
-) -> MoaResult<MemoryScope> {
+) -> MoaResult<ActionRuleScope> {
     match (scope, workspace_id, user_id) {
-        ("global", None, None) => Ok(MemoryScope::Global),
-        ("workspace", Some(workspace_id), None) => Ok(MemoryScope::Workspace {
-            workspace_id: moa_core::WorkspaceId::new(workspace_id),
-        }),
-        ("user", Some(workspace_id), Some(user_id)) => Ok(MemoryScope::User {
-            workspace_id: moa_core::WorkspaceId::new(workspace_id),
-            user_id: moa_core::UserId::new(user_id),
+        ("global", None, None) => Ok(ActionRuleScope::WorkspaceDefault),
+        ("workspace", Some(tenant_id), None) => Ok(ActionRuleScope::Tenant {
+            tenant_id: parse_tenant_storage_key(&tenant_id)?,
         }),
         _ => Err(MoaError::StorageError(format!(
             "invalid experiment scope columns for `{scope}`"
         ))),
     }
+}
+
+fn experiment_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId(uuid::Uuid::nil())),
+        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+    }
+}
+
+fn parse_tenant_storage_key(value: &str) -> MoaResult<TenantId> {
+    uuid::Uuid::parse_str(value)
+        .map(TenantId)
+        .map_err(|error| MoaError::StorageError(format!("invalid tenant scope `{value}`: {error}")))
 }
 
 fn to_json<T: serde::Serialize>(value: T) -> MoaResult<Value> {

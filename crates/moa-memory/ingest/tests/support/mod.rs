@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
+    ContactId, ScopeContext, ScopedConn, SessionId, TenantId, UserId, WorkspaceId,
+    traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
     AgeGraphStore, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, cypher,
@@ -133,7 +134,7 @@ pub(crate) fn ingest_ctx_with_pii(
     workspace_id: Uuid,
     pii: Arc<dyn PiiClassifier>,
 ) -> IngestCtx {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
         AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(vector.clone()),
@@ -210,7 +211,7 @@ pub(crate) async fn create_fact(
     name: &str,
     valid_from: DateTime<Utc>,
 ) -> Uuid {
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+    let ctx = ScopeContext::tenant(TenantId::from(workspace_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), ctx.clone());
     let graph =
         AgeGraphStore::scoped_for_app_role(pool.clone(), ctx).with_vector_store(Arc::new(vector));
@@ -221,16 +222,17 @@ pub(crate) async fn create_fact(
 }
 
 pub(crate) async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> ScopedConn<'a> {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
     scoped_conn_for_scope(pool, scope).await
 }
 
 pub(crate) async fn user_scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> ScopedConn<'a> {
-    let scope = ScopeContext::user(
-        WorkspaceId::new(workspace_id.to_string()),
-        UserId::new(SLOW_PATH_USER_ID),
-    );
+    let scope = ScopeContext::contact(TenantId::from(workspace_id), slow_path_contact_id());
     scoped_conn_for_scope(pool, scope).await
+}
+
+fn slow_path_contact_id() -> ContactId {
+    ContactId(Uuid::from_u128(0x5_10a7))
 }
 
 async fn scoped_conn_for_scope<'a>(pool: &'a PgPool, scope: ScopeContext) -> ScopedConn<'a> {

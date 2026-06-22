@@ -11,7 +11,7 @@ use sqlx::Row;
 
 const DIGEST_REMINDER_PREFIX: &str = "<memory_digest>";
 
-/// Injects standing user and tenant-visible memory digests into context.
+/// Injects standing tenant or contact-local memory digests into context.
 pub struct DigestProcessor {
     pool: sqlx::PgPool,
     config: MemoryDigestConfig,
@@ -25,22 +25,25 @@ impl DigestProcessor {
     }
 
     async fn read_digest_rows(&self, ctx: &WorkingContext) -> Result<Vec<DigestRow>> {
-        let scope = ScopeContext::user(ctx.workspace_id.clone(), ctx.user_id.clone());
+        let contact_id = ctx.contact.as_ref().map(|contact| contact.contact_id);
+        let scope = contact_id
+            .map(|contact_id| ScopeContext::contact(ctx.tenant_id, contact_id))
+            .unwrap_or_else(|| ScopeContext::tenant(ctx.tenant_id));
         let mut conn = ScopedConn::begin(&self.pool, &scope).await?;
         let rows = sqlx::query(
             r#"
-            SELECT scope, user_id, content, updated_at
+            SELECT scope, contact_id::text AS contact_id, content, updated_at
             FROM moa.memory_digests
-            WHERE workspace_id = $1
+            WHERE tenant_id = $1
               AND (
-                    (scope = 'user' AND user_id = $2)
-                 OR (scope = 'workspace' AND user_id IS NULL)
+                    ($2::uuid IS NULL AND contact_id IS NULL)
+                 OR contact_id = $2
               )
-            ORDER BY CASE scope WHEN 'user' THEN 0 ELSE 1 END
+            ORDER BY updated_at DESC
             "#,
         )
-        .bind(ctx.workspace_id.to_string())
-        .bind(ctx.user_id.to_string())
+        .bind(ctx.tenant_id.0)
+        .bind(contact_id.map(|id| id.0))
         .fetch_all(conn.as_mut())
         .await
         .map_err(|error| MoaError::StorageError(format!("read memory digests: {error}")))?;
@@ -75,17 +78,17 @@ impl ContextProcessor for DigestProcessor {
         let insertion_index = trailing_user_insertion_index(&ctx.messages);
         ctx.insert_message(insertion_index, ContextMessage::user(block));
 
-        let user_updated_at = rows
+        let contact_updated_at = rows
             .iter()
-            .find(|row| row.scope == "user")
+            .find(|row| row.contact_id.is_some())
             .map(|row| row.updated_at.to_rfc3339());
-        let workspace_updated_at = rows
+        let tenant_updated_at = rows
             .iter()
-            .find(|row| row.scope == "workspace")
+            .find(|row| row.contact_id.is_none())
             .map(|row| row.updated_at.to_rfc3339());
         tracing::info!(
-            user_digest_updated_at = user_updated_at.as_deref().unwrap_or("missing"),
-            workspace_digest_updated_at = workspace_updated_at.as_deref().unwrap_or("missing"),
+            contact_digest_updated_at = contact_updated_at.as_deref().unwrap_or("missing"),
+            tenant_digest_updated_at = tenant_updated_at.as_deref().unwrap_or("missing"),
             "memory digest context injected"
         );
 
@@ -96,11 +99,8 @@ impl ContextProcessor for DigestProcessor {
                 .map(|row| format!("digest:{}", row.scope))
                 .collect(),
             metadata: serde_json::Map::from_iter([
-                ("user_updated_at".to_string(), json!(user_updated_at)),
-                (
-                    "workspace_updated_at".to_string(),
-                    json!(workspace_updated_at),
-                ),
+                ("contact_updated_at".to_string(), json!(contact_updated_at)),
+                ("tenant_updated_at".to_string(), json!(tenant_updated_at)),
             ])
             .into_iter()
             .collect(),
@@ -144,9 +144,9 @@ fn digest_row_from_sql(row: sqlx::postgres::PgRow) -> Result<DigestRow> {
         scope: row
             .try_get::<String, _>("scope")
             .map_err(|error| MoaError::StorageError(format!("read digest scope: {error}")))?,
-        user_id: row
-            .try_get::<Option<String>, _>("user_id")
-            .map_err(|error| MoaError::StorageError(format!("read digest user_id: {error}")))?,
+        contact_id: row
+            .try_get::<Option<String>, _>("contact_id")
+            .map_err(|error| MoaError::StorageError(format!("read digest contact_id: {error}")))?,
         content: row
             .try_get::<String, _>("content")
             .map_err(|error| MoaError::StorageError(format!("read digest content: {error}")))?,
@@ -159,7 +159,7 @@ fn digest_row_from_sql(row: sqlx::postgres::PgRow) -> Result<DigestRow> {
 #[derive(Debug, Clone, PartialEq)]
 struct DigestRow {
     scope: String,
-    user_id: Option<String>,
+    contact_id: Option<String>,
     content: String,
     updated_at: DateTime<Utc>,
 }
@@ -169,7 +169,7 @@ mod tests {
     use chrono::TimeZone;
     use moa_core::{
         Channel, ContextProcessor, MemoryDigestConfig, ModelCapabilities, ModelId, SessionId,
-        SessionMeta, TokenPricing, ToolCallFormat, UserId, WorkingContext, WorkspaceId,
+        SessionMeta, TokenPricing, ToolCallFormat, WorkingContext,
     };
     use sqlx::postgres::PgPoolOptions;
 
@@ -196,28 +196,28 @@ mod tests {
     }
 
     #[test]
-    fn render_digest_block_preserves_user_then_workspace_order() {
-        // Pins: the prompt block places user standing context before workspace context.
+    fn render_digest_block_preserves_storage_order() {
+        // Pins: the prompt block preserves the storage ordering supplied by the digest query.
         let rows = vec![
             DigestRow {
-                scope: "user".to_string(),
-                user_id: Some("user-a".to_string()),
-                content: "What I know about this user:\n- prefers terse answers".to_string(),
+                scope: "contact".to_string(),
+                contact_id: Some(uuid::Uuid::now_v7().to_string()),
+                content: "What I know about this contact:\n- prefers terse answers".to_string(),
                 updated_at: Utc.with_ymd_and_hms(2026, 6, 11, 0, 0, 0).unwrap(),
             },
             DigestRow {
-                scope: "workspace".to_string(),
-                user_id: None,
-                content: "What I know about this workspace:\n- deploys to staging".to_string(),
+                scope: "tenant".to_string(),
+                contact_id: None,
+                content: "What I know about this tenant:\n- deploys to staging".to_string(),
                 updated_at: Utc.with_ymd_and_hms(2026, 6, 11, 0, 0, 0).unwrap(),
             },
         ];
 
         let block = render_digest_block(&rows);
 
-        let user_index = block.find("this user").expect("user digest text");
-        let workspace_index = block.find("this workspace").expect("workspace digest text");
-        assert!(user_index < workspace_index);
+        let contact_index = block.find("this contact").expect("contact digest text");
+        let tenant_index = block.find("this tenant").expect("tenant digest text");
+        assert!(contact_index < tenant_index);
         assert!(block.starts_with("<memory_digest>\n"));
         assert!(block.ends_with("</memory_digest>"));
     }
@@ -226,8 +226,6 @@ mod tests {
         WorkingContext::new(
             &SessionMeta {
                 id: SessionId::new(),
-                workspace_id: WorkspaceId::new("workspace-a"),
-                user_id: UserId::new("user-a"),
                 channel: Channel::Chat,
                 model: ModelId::new("mock"),
                 ..SessionMeta::default()

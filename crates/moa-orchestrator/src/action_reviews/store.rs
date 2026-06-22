@@ -1,7 +1,10 @@
 //! Postgres storage for workspace action reviews.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ActionClass, ActionReviewStatus, ToolCallId, ToolCallRequest, WorkspaceId};
+use moa_core::{
+    ActionClass, ActionReviewStatus, SessionActorRef, TenantId, ToolCallId, ToolCallRequest,
+    WorkspaceId,
+};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -71,6 +74,8 @@ pub(crate) async fn insert_review(
         .map_err(|error| TerminalError::new(format!("serialize envelope: {error}")))?;
     let preview = serde_json::to_value(&request.preview)
         .map_err(|error| TerminalError::new(format!("serialize preview: {error}")))?;
+    let storage_workspace_id = WorkspaceId::new(request.envelope.tenant_id.to_string());
+    let requested_by = session_actor_ref_to_storage(&request.envelope.requested_by);
     let insert = sqlx::query(
         r#"
         INSERT INTO workspace_action_reviews (
@@ -83,7 +88,7 @@ pub(crate) async fn insert_review(
         "#,
     )
     .bind(request.envelope.review_id)
-    .bind(request.envelope.workspace_id.to_string())
+    .bind(storage_workspace_id.to_string())
     .bind(request.envelope.session_id.map(|id| id.0))
     .bind(request.envelope.sub_agent_id.clone())
     .bind(request.envelope.tool_call_id.0)
@@ -95,19 +100,23 @@ pub(crate) async fn insert_review(
     .bind(envelope)
     .bind(preview)
     .bind(tool_request)
-    .bind(request.envelope.user_id.to_string())
+    .bind(&requested_by)
     .execute(&pool)
     .await
     .map_err(db_error)?;
 
-    let mut stored = load_review_state(
-        pool,
-        request.envelope.workspace_id,
-        request.envelope.review_id,
-    )
-    .await?;
+    let mut stored =
+        load_review_state(pool, storage_workspace_id, request.envelope.review_id).await?;
     stored.newly_inserted = insert.rows_affected() > 0;
     Ok(stored)
+}
+
+fn session_actor_ref_to_storage(actor: &SessionActorRef) -> String {
+    match actor {
+        SessionActorRef::Identity { id } => format!("identity:{id}"),
+        SessionActorRef::Contact { id } => format!("contact:{id}"),
+        SessionActorRef::Anonymous => "anonymous".to_string(),
+    }
 }
 
 /// List pending reviews for one workspace.
@@ -312,7 +321,10 @@ async fn load_review_state(
 fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, HandlerError> {
     Ok(ActionReviewSummary {
         id: row.try_get("id").map_err(db_error)?,
-        workspace_id: WorkspaceId::new(row.try_get::<String, _>("workspace_id").map_err(db_error)?),
+        tenant_id: TenantId::from(
+            Uuid::parse_str(&row.try_get::<String, _>("workspace_id").map_err(db_error)?)
+                .map_err(|error| TerminalError::new(format!("decode review tenant id: {error}")))?,
+        ),
         session_id: row
             .try_get::<Option<Uuid>, _>("session_id")
             .map_err(db_error)?

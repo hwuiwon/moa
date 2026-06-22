@@ -506,7 +506,7 @@ pub fn extract_identity(
 
     let identity_type = parse_identity_type(raw_type)?;
     let id = parse_uuid(raw_id, "x-moa-identity-id")?;
-    let tenant_id = parse_uuid(raw_tenant, "x-moa-tenant-id")?;
+    let tenant_id = moa_core::TenantId::from(parse_uuid(raw_tenant, "x-moa-tenant-id")?);
     let api_key_id = get("x-moa-api-key-id")
         .map(|value| parse_uuid(value, "x-moa-api-key-id"))
         .transpose()?;
@@ -536,6 +536,7 @@ pub fn current_identity(
 fn parse_identity_type(value: &str) -> Result<IdentityType, IdentityHeaderError> {
     match value {
         "user" => Ok(IdentityType::User),
+        "contact" => Ok(IdentityType::Contact),
         "agent" => Ok(IdentityType::Agent),
         "service" => Ok(IdentityType::Service),
         other => Err(IdentityHeaderError::UnknownType(other.to_string())),

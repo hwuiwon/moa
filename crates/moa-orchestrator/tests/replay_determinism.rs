@@ -15,7 +15,7 @@ mod support;
 
 use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::WorkspaceId;
+use moa_core::TenantId;
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOutcome, DecayStats, DigestStats, MergeStats, SweepStats,
 };
@@ -30,7 +30,7 @@ use support::fake_clock::FakeClock;
 
 #[derive(Debug, Clone, Serialize)]
 struct WorkspaceStateFixture {
-    workspace_id: String,
+    tenant_id: TenantId,
     graph_nodes: Vec<GraphNodeFixture>,
     pending_changes: Vec<String>,
 }
@@ -58,7 +58,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
             "Workspace",
             "mark_consolidation_started",
             &json!({
-                "key": request.workspace_id.to_string(),
+                "key": request.tenant_id.to_string(),
                 "request": request.target_date,
             }),
             || (),
@@ -121,7 +121,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
     ) -> Result<ConsolidateReport, HandlerError> {
         Ok(self.recorder.run("report", request, || {
             ConsolidateReport::from_outcome(
-                request.workspace_id.clone(),
+                request.tenant_id,
                 request.target_date,
                 ran_at,
                 self.duration_ms,
@@ -163,7 +163,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
             "Workspace",
             "consolidation_completed",
             &json!({
-                "key": report.workspace_id.to_string(),
+                "key": report.tenant_id.to_string(),
                 "request": report,
             }),
             || (),
@@ -176,7 +176,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
 async fn consolidate_workflow_first_run_and_replay_emit_identical_durable_steps_for_minimal_input()
 {
     let request = ConsolidateRequest {
-        workspace_id: WorkspaceId::new("workspace-minimal"),
+        tenant_id: tenant(1),
         target_date: chrono::NaiveDate::from_ymd_opt(2026, 5, 7).expect("valid target date"),
     };
     let clock = fixed_clock();
@@ -194,7 +194,7 @@ async fn consolidate_workflow_replay_with_realistic_workspace_state_emits_identi
     assert_eq!(fixture.graph_nodes.len(), 16);
     assert_eq!(fixture.pending_changes.len(), 6);
     let request = ConsolidateRequest {
-        workspace_id: WorkspaceId::new(fixture.workspace_id),
+        tenant_id: fixture.tenant_id,
         target_date: chrono::NaiveDate::from_ymd_opt(2026, 5, 7).expect("valid target date"),
     };
     let clock = fixed_clock();
@@ -232,7 +232,7 @@ fn fixed_clock() -> FakeClock {
 
 fn realistic_workspace_fixture() -> WorkspaceStateFixture {
     WorkspaceStateFixture {
-        workspace_id: "workspace-realistic".to_string(),
+        tenant_id: tenant(2),
         graph_nodes: (0..16)
             .map(|index| GraphNodeFixture {
                 uid: format!("node-{index:02}"),
@@ -253,4 +253,8 @@ fn realistic_workspace_fixture() -> WorkspaceStateFixture {
             "refresh workspace summary".to_string(),
         ],
     }
+}
+
+fn tenant(value: u128) -> TenantId {
+    TenantId::from(uuid::Uuid::from_u128(value))
 }

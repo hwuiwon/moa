@@ -20,7 +20,7 @@ pub async fn require_scim_admin(
         identity,
         ObjectType::Tenant,
         identity.tenant_id,
-        Relation::ScimAdmin,
+        Relation::Admin,
     )
     .await
     .map_err(map_authz_error)

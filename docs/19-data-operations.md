@@ -27,7 +27,9 @@ session_preload_libraries=age
 
 AGE still requires transaction-local search path setup for Cypher. MOA's
 `ScopedConn` installs `search_path = ag_catalog, "$user", public` alongside
-row-level-security GUCs before tenant queries run.
+tenant row-level-security GUCs before tenant queries run. The tenant is the
+hard runtime isolation boundary; workspace control-plane reads must use an
+explicit control-plane scope instead of the default tenant connection.
 
 ## Graph Changelog Replication
 
@@ -50,7 +52,7 @@ Migration-owned objects:
 
 - `moa.graph_changelog`, range-partitioned by month and append-only for
   application roles;
-- `moa.workspace_state`, bumped in the same transaction as each changelog
+- tenant freshness state, bumped in the same transaction as each changelog
   insert;
 - `moa_changelog_pub` with `publish_via_partition_root=true`;
 - `moa_replicator`, a `LOGIN REPLICATION` role;
@@ -118,7 +120,7 @@ The shipper scans stable PostgreSQL `*.log` and `*.csv` files, gzip-compresses
 them, and uploads to:
 
 ```text
-s3://moa-audit-{env}/workspace=unknown/year=YYYY/month=MM/<log-file>.gz
+s3://moa-audit-{env}/tenant=unknown/year=YYYY/month=MM/<log-file>.gz
 ```
 
 It records uploaded file versions in its state volume and skips the newest log
@@ -142,7 +144,7 @@ Verify S3 retention:
 ```bash
 aws s3api get-object-retention \
   --bucket moa-audit-dev \
-  --key workspace=unknown/year=YYYY/month=MM/<log-file>.gz
+  --key tenant=unknown/year=YYYY/month=MM/<log-file>.gz
 ```
 
 For breach response, preserve the audit bucket, enable legal hold on relevant

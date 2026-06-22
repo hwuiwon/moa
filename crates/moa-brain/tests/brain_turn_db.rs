@@ -7,11 +7,12 @@ use moa_brain::{
     pipeline::history::HistoryCompiler, run_brain_turn, run_streamed_turn,
 };
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, Event, EventFilter,
-    EventRange, EventRecord, EventType, LLMProvider, MoaConfig, ModelCapabilities, Result,
-    RuntimeEvent, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat,
-    ToolCallId, ToolInvocation, ToolOutput, UserId, WorkspaceId,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContactId,
+    ContactRef, ContactVerificationState, Event, EventFilter, EventRange, EventRecord, EventType,
+    LLMProvider, MoaConfig, ModelCapabilities, Result, RuntimeEvent, SequenceNum, SessionActorRef,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason,
+    TenantId, TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolCallId,
+    ToolInvocation, ToolOutput, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicies;
@@ -47,6 +48,58 @@ fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
         input_tokens_cache_write: 0,
         input_tokens_cache_read: 0,
         output_tokens,
+    }
+}
+
+fn test_tenant_id() -> TenantId {
+    tenant_id_from_workspace_id(&WorkspaceId::new("workspace"))
+}
+
+fn test_contact_id() -> ContactId {
+    contact_id_from_label("user")
+}
+
+fn test_contact_ref() -> ContactRef {
+    contact_ref(test_tenant_id(), test_contact_id())
+}
+
+fn test_runtime_workspace_id() -> WorkspaceId {
+    WorkspaceId::new(test_tenant_id().to_string())
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn contact_id_from_label(label: &str) -> ContactId {
+    Uuid::parse_str(label)
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(label)))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
     }
 }
 
@@ -138,7 +191,7 @@ impl SessionStore for MockSessionStore {
         since: DateTime<Utc>,
     ) -> Result<u32> {
         let session = self.session.lock().await.clone();
-        if &session.workspace_id != workspace_id {
+        if session.tenant_id != tenant_id_from_workspace_id(workspace_id) {
             return Ok(0);
         }
 
@@ -1222,8 +1275,11 @@ fn make_event_record(session_id: &SessionId, sequence_num: u64, event: Event) ->
 async fn run_brain_turn_emits_brain_response_event() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1276,8 +1332,11 @@ async fn run_brain_turn_emits_brain_response_event() {
 async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1326,8 +1385,11 @@ async fn run_brain_turn_marks_cache_prefix_reuse_on_second_request() {
 async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1393,8 +1455,11 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
 async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1442,8 +1507,11 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
 async fn run_brain_turn_executes_tool_in_auto_mode() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1498,8 +1566,11 @@ async fn run_brain_turn_executes_tool_in_auto_mode() {
 async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_execution() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("gpt-5.4"),
         ..SessionMeta::default()
     };
@@ -1552,8 +1623,11 @@ async fn run_brain_turn_preserves_openai_function_call_id_after_auto_mode_tool_e
 async fn run_brain_turn_persists_truncated_tool_result_metadata() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1610,8 +1684,11 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
     let store = test_session_store().await;
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1703,8 +1780,11 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
     let store = test_session_store().await;
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1789,8 +1869,11 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
     let store = test_session_store().await;
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -1997,8 +2080,11 @@ async fn run_brain_turn_recovers_old_artifact_via_session_search() {
 async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("gpt-5.4"),
         ..SessionMeta::default()
     };
@@ -2069,8 +2155,11 @@ async fn run_brain_turn_records_tool_call_before_auto_allowed_tool_error() {
 #[tokio::test]
 async fn streamed_turn_provider_tool_result_surfaces_notice_without_router_execution() {
     let session = SessionMeta {
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -2156,8 +2245,11 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
     );
     let session_id = store
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: test_tenant_id(),
+            contact: Some(test_contact_ref()),
+            created_by: Some(SessionActorRef::Contact {
+                id: test_contact_id(),
+            }),
             model: moa_core::ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         })
@@ -2232,8 +2324,11 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
 #[tokio::test]
 async fn canary_leaks_in_tool_input_are_detected_and_blocked() {
     let session = SessionMeta {
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -2295,13 +2390,16 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
     tool_router
         .remember_workspace_root(
-            WorkspaceId::new("workspace"),
+            test_runtime_workspace_id(),
             sandbox_dir.path().to_path_buf(),
         )
         .await;
     let session = SessionMeta {
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };
@@ -2369,8 +2467,11 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
 #[tokio::test]
 async fn streamed_turn_runtime_matches_buffered_response() {
     let session = SessionMeta {
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: test_tenant_id(),
+        contact: Some(test_contact_ref()),
+        created_by: Some(SessionActorRef::Contact {
+            id: test_contact_id(),
+        }),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     };

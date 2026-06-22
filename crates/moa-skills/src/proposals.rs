@@ -4,8 +4,8 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_core::{
-    LearningCandidate, MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SessionMeta,
-    SkillMetadata, TaskFacetSet, TaskFingerprint,
+    ActionRuleScope, LearningCandidate, MoaError, Result, ScopeContext, ScopedConn, SessionMeta,
+    SkillMetadata, TaskFacetSet, TaskFingerprint, WorkspaceId,
 };
 use moa_session::PostgresSessionStore;
 use serde_json::json;
@@ -98,7 +98,7 @@ pub(crate) async fn store_skill_draft_proposal(
 ) -> Result<SkillDraftProposal> {
     let operation_label = operation.payload_operation();
     let candidate_id = deterministic_skill_candidate_id(
-        &session.workspace_id,
+        session.tenant_id,
         session.id,
         &source.source_experience_ids,
         operation_label,
@@ -112,14 +112,16 @@ pub(crate) async fn store_skill_draft_proposal(
         .iter()
         .map(artifact_file_from_skill_file)
         .collect::<Vec<_>>();
-    let scope = MemoryScope::Workspace {
-        workspace_id: session.workspace_id.clone(),
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: session.tenant_id,
     };
-    let mut conn = ScopedConn::begin(store.pool(), &ScopeContext::from(scope.clone())).await?;
+    let candidate_workspace_id = WorkspaceId::new(session.tenant_id.to_string());
+    let mut conn =
+        ScopedConn::begin(store.pool(), &ScopeContext::tenant(session.tenant_id)).await?;
     acquire_proposal_advisory_lock(conn.as_mut(), candidate_id).await?;
 
     if let Some(existing) = store
-        .get_learning_candidate_with_conn(conn.as_mut(), &session.workspace_id, candidate_id)
+        .get_learning_candidate_with_conn(conn.as_mut(), &candidate_workspace_id, candidate_id)
         .await?
     {
         let proposal = proposal_from_existing(existing, metadata, operation)?;

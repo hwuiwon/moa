@@ -60,7 +60,7 @@ fn resolve_backend_choice(
 mod tests {
     use std::sync::Arc;
 
-    use moa_core::{ScopeContext, WorkspaceId};
+    use moa_core::{ScopeContext, TenantId};
     use secrecy::SecretString;
     use sqlx::PgPool;
 
@@ -69,7 +69,7 @@ mod tests {
     fn pg_store() -> Arc<PgvectorStore> {
         Arc::new(PgvectorStore::new(
             PgPool::connect_lazy("postgres://localhost/moa").expect("lazy pool"),
-            ScopeContext::workspace(WorkspaceId::new("backend-test")),
+            ScopeContext::tenant(TenantId::new()),
         ))
     }
 

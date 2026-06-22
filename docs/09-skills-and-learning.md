@@ -40,20 +40,19 @@ Postgres is the only durable skill package store:
 The context pipeline reads published skill artifact revisions directly. There is
 no separate active skill mirror for turn context injection.
 
-Skill packages are scoped with the same `MemoryScope` tiers used by memory:
+Skill packages use default/override scope, not runtime memory scope:
 
 | Scope | Stored as | Visibility | Typical use |
 |---|---|---|---|
-| Global | `workspace_id IS NULL`, `user_id IS NULL` | Every workspace and user | Operator-curated deployment-wide skills |
-| Workspace | `workspace_id` set, `user_id IS NULL` | All users in one workspace | Team/project conventions and reusable workflows |
-| User | `workspace_id` and `user_id` set | One user inside one workspace | Personal preferences, shortcuts, and learned habits |
+| Workspace default | no `tenant_id` | Inherited by every tenant | Operator-curated defaults and reusable workflows |
+| Tenant override | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and tenant-specific workflows |
 
-Visible skill resolution is name-based. If global, workspace, and user scopes
-all provide the same skill name, the user-scoped package is selected first, then
-the workspace package, then the global package. Global imports require a service
-identity with tenant-admin authorization and can be bootstrapped through
-`/v1/skills/bootstrap-global`; workspace and user imports go through
-`/v1/skills/import` after workspace authorization.
+Visible skill resolution is name-based. If a workspace default and tenant
+override both provide the same skill name, the tenant row is selected first.
+Workspace-level skills are inherited defaults for tenants; tenant-level skill
+rows override those defaults. Workspace default imports require workspace
+control-plane authorization. Tenant imports go through `/v1/skills/import` after
+tenant authorization. There is no contact-scoped skill inheritance.
 
 MOA does not duplicate skill package bytes in object storage. Import/export uses
 package documents containing base64-encoded files. On each turn, selected skill
@@ -97,17 +96,16 @@ Eval-backed regression execution is owned by
 only generates reviewable regression suite source.
 
 Skill distillation runs after successful multi-step work that passes the
-configured evidence threshold. The current learning flow proposes
-workspace-scoped skill changes;
-deployment-wide global skills are operator imported, and user-scoped skills are
-imported explicitly. Current generation flow:
+configured evidence threshold. The current learning flow proposes tenant-local
+skill changes. Tenant learning is never globally promoted and never rewrites
+workspace defaults automatically. Current generation flow:
 
 1. Count tool calls; short/simple sessions are skipped.
 2. Extract a task summary from recent user input.
-3. Compare against existing workspace-scoped skills.
+3. Compare against existing tenant override skills and inherited workspace defaults.
 4. If a similar skill exists, attempt improvement.
 5. Otherwise ask the configured model to produce a complete skill document.
-6. Validate the generated package and store it as a workspace-scoped
+6. Validate the generated package and store it as a tenant-scoped
    `ArtifactKind::Skill` draft revision.
 7. Generate reviewable regression suite TOML and store it in the candidate
    payload without writing or running the suite.
@@ -121,7 +119,8 @@ It does not publish the artifact or append `skill_improved` during generation.
 
 Current review flow:
 
-1. A workspace editor loads the full candidate through `LearningReview/get`.
+1. A tenant admin or tenant operator loads the full candidate through
+   `LearningReview/get`.
 2. `LearningReview/accept_skill` validates that the candidate is a proposed
    skill candidate and that the referenced draft artifact is publishable.
 3. Review-time regression evidence is attached to the candidate

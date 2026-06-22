@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use moa_core::wire::{AppendEventRequest, ToolDescriptor, tool_descriptor};
 use moa_core::{
     Event, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
-    SessionStatus, SessionStore as _, ToolCallId, ToolCallRequest, ToolDefinition,
+    SessionStatus, SessionStore as _, TenantId, ToolCallId, ToolCallRequest, ToolDefinition,
     ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
     record_tool_idempotency_scan,
 };
@@ -27,9 +27,9 @@ pub trait ToolExecutor {
     /// Executes one tool call through the configured router.
     async fn execute(request: Json<ToolCallRequest>) -> Result<Json<ToolOutput>, HandlerError>;
 
-    /// Lists the currently registered tools for the requested workspace.
+    /// Lists the currently registered tools for the requested tenant.
     async fn list_tools(
-        workspace_id: Json<moa_core::WorkspaceId>,
+        tenant_id: Json<TenantId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError>;
 }
 
@@ -177,14 +177,14 @@ impl ToolExecutor for ToolExecutorImpl {
         Ok(Json::from(output))
     }
 
-    #[tracing::instrument(skip(self, _ctx, workspace_id))]
+    #[tracing::instrument(skip(self, _ctx, tenant_id))]
     async fn list_tools(
         &self,
         _ctx: Context<'_>,
-        workspace_id: Json<moa_core::WorkspaceId>,
+        tenant_id: Json<TenantId>,
     ) -> Result<Json<Vec<ToolDescriptor>>, HandlerError> {
         annotate_restate_handler_span("ToolExecutor", "list_tools");
-        let _workspace_id = workspace_id.into_inner();
+        let _tenant_id = tenant_id.into_inner();
         Ok(Json::from(self.list_descriptors()))
     }
 }
@@ -315,8 +315,7 @@ fn agent_tool_policy_denied_output(
 fn annotate_tool_execution_span(session: &SessionMeta, request: &ToolCallRequest) {
     let span = tracing::Span::current();
     span.set_attribute("moa.session.id", session.id.to_string());
-    span.set_attribute("moa.workspace.id", session.workspace_id.to_string());
-    span.set_attribute("moa.user.id", session.user_id.to_string());
+    span.set_attribute("moa.tenant.id", session.tenant_id.to_string());
     span.set_attribute("moa.tool.name", request.tool_name.clone());
     if let Some(contact) = session.contact.as_ref() {
         span.set_attribute("moa.contact.id", contact.contact_id.to_string());
@@ -344,18 +343,17 @@ async fn resolve_session(
     }
 
     Ok(SessionMeta {
-        id: synthetic_session_id(&request.workspace_id),
-        workspace_id: request.workspace_id.clone(),
-        user_id: request.user_id.clone(),
+        id: synthetic_session_id(request.tenant_id),
+        tenant_id: request.tenant_id,
         status: SessionStatus::Running,
         ..SessionMeta::default()
     })
 }
 
-fn synthetic_session_id(workspace_id: &moa_core::WorkspaceId) -> SessionId {
+fn synthetic_session_id(tenant_id: TenantId) -> SessionId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"moa.orchestrator.synthetic_session.v1");
-    update_len_prefixed(&mut hasher, workspace_id.as_str().as_bytes());
+    update_len_prefixed(&mut hasher, tenant_id.to_string().as_bytes());
     let hash = hasher.finalize();
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&hash.as_bytes()[..16]);
@@ -381,7 +379,7 @@ async fn prior_non_idempotent_result_exists(
         )))
     })?;
     let store = OrchestratorCtx::current_session_store();
-    let workspace_id = session.workspace_id.clone();
+    let workspace_id = storage_workspace_id(session);
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
     let exists = ctx
@@ -414,7 +412,7 @@ async fn prior_tool_call_event_exists(
     };
 
     let store = OrchestratorCtx::current_session_store();
-    let workspace_id = session.workspace_id.clone();
+    let workspace_id = storage_workspace_id(session);
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
     let exists = ctx
@@ -430,6 +428,10 @@ async fn prior_tool_call_event_exists(
         .into_inner();
     record_tool_idempotency_scan("ToolCall", 0, scan_started.elapsed());
     Ok(exists)
+}
+
+fn storage_workspace_id(session: &SessionMeta) -> moa_core::WorkspaceId {
+    moa_core::WorkspaceId::new(session.tenant_id.to_string())
 }
 
 async fn append_tool_call_event(
@@ -617,7 +619,7 @@ mod tests {
     use chrono::Utc;
     use moa_core::{
         AgentContext, AgentPolicySnapshot, AgentToolPolicy, AgentToolPolicyMode, Event,
-        EventRecord, EventType, SessionMeta, ToolCallId, ToolCallRequest, UserId, WorkspaceId,
+        EventRecord, EventType, SessionMeta, TenantId, ToolCallId, ToolCallRequest, UserId,
     };
     use uuid::Uuid;
 
@@ -658,7 +660,7 @@ mod tests {
 
     #[test]
     fn synthetic_session_id_is_domain_stable_uuid() {
-        let session_id = synthetic_session_id(&WorkspaceId::new("workspace-1"));
+        let session_id = synthetic_session_id(TenantId::from(Uuid::from_u128(1)));
 
         assert_eq!(
             session_id.0.to_string(),
@@ -732,7 +734,7 @@ mod tests {
             input: serde_json::json!({}),
             active_canary: None,
             session_id: None,
-            workspace_id: WorkspaceId::new("workspace-1"),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
             idempotency_key: None,
         }

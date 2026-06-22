@@ -1,33 +1,27 @@
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{MemoryScope, Result, UserId, WorkspaceId};
+use moa_core::{ActionRuleScope, Result, TenantId};
 use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn registry_preserves_scope_precedence_and_published_revision_history() -> Result<()> {
-    // Pins: artifact visibility uses the same user > workspace > global tiers as skills.
+    // Pins: artifact visibility resolves tenant overrides before workspace defaults.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let registry = ArtifactRegistry::new(store.pool().clone());
     let name = format!("artifact-scope-{}", Uuid::now_v7());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
-    let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
-    let workspace_scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let user_scope = MemoryScope::User {
-        workspace_id: workspace_id.clone(),
-        user_id,
+    let tenant_scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
     };
 
     let global_doc = skill_doc(&name, "global");
     let global_source = global_doc.to_yaml().expect("serialize global doc");
     let global = registry
         .create_draft(
-            &MemoryScope::Global,
+            &ActionRuleScope::WorkspaceDefault,
             NewArtifactDraft {
                 document: &global_doc,
                 source_format: "yaml",
@@ -41,23 +35,23 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         .await?;
     registry
         .publish_revision(
-            &MemoryScope::Global,
+            &ActionRuleScope::WorkspaceDefault,
             global.revision_uid,
             &validate_for_status(&global_doc, ArtifactStatus::Published),
         )
         .await?;
 
     let visible_global = registry
-        .load_visible_published(&workspace_scope, ArtifactKind::Skill, &name)
+        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
-        .expect("global artifact visible to workspace");
+        .expect("workspace-default artifact visible to tenant");
     assert_eq!(visible_global.scope, "global");
 
     let workspace_doc = skill_doc(&name, "workspace-v1");
     let workspace_source = workspace_doc.to_yaml().expect("serialize workspace doc");
     let workspace_v1 = registry
         .create_draft(
-            &workspace_scope,
+            &tenant_scope,
             NewArtifactDraft {
                 document: &workspace_doc,
                 source_format: "yaml",
@@ -68,16 +62,16 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         .await?;
     registry
         .publish_revision(
-            &workspace_scope,
+            &tenant_scope,
             workspace_v1.revision_uid,
             &validate_for_status(&workspace_doc, ArtifactStatus::Published),
         )
         .await?;
 
     let visible_workspace = registry
-        .load_visible_published(&workspace_scope, ArtifactKind::Skill, &name)
+        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
-        .expect("workspace artifact visible");
+        .expect("tenant artifact visible");
     assert_eq!(visible_workspace.scope, "workspace");
     assert_eq!(visible_workspace.version, 1);
 
@@ -87,7 +81,7 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         .expect("serialize workspace v2 doc");
     let workspace_v2 = registry
         .create_draft(
-            &workspace_scope,
+            &tenant_scope,
             NewArtifactDraft {
                 document: &workspace_v2_doc,
                 source_format: "yaml",
@@ -98,54 +92,28 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         .await?;
     registry
         .publish_revision(
-            &workspace_scope,
+            &tenant_scope,
             workspace_v2.revision_uid,
             &validate_for_status(&workspace_v2_doc, ArtifactStatus::Published),
         )
         .await?;
     let visible_workspace_v2 = registry
-        .load_visible_published(&workspace_scope, ArtifactKind::Skill, &name)
+        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
-        .expect("workspace artifact v2 visible");
+        .expect("tenant artifact v2 visible");
     assert_eq!(visible_workspace_v2.version, 2);
     assert_eq!(visible_workspace_v2.description, "workspace-v2");
     let loaded_workspace_v1 = registry
-        .load_revision(&workspace_scope, workspace_v1.revision_uid)
+        .load_revision(&tenant_scope, workspace_v1.revision_uid)
         .await?
-        .expect("workspace v1 remains loadable by exact revision id");
+        .expect("tenant v1 remains loadable by exact revision id");
     assert_eq!(loaded_workspace_v1.version, 1);
     assert_eq!(loaded_workspace_v1.status, ArtifactStatus::Published);
     assert_eq!(loaded_workspace_v1.valid_to, None);
 
-    let user_doc = skill_doc(&name, "user");
-    let user_source = user_doc.to_yaml().expect("serialize user doc");
-    let user_revision = registry
-        .create_draft(
-            &user_scope,
-            NewArtifactDraft {
-                document: &user_doc,
-                source_format: "yaml",
-                source_text: user_source.as_bytes(),
-                files: &[],
-            },
-        )
-        .await?;
-    registry
-        .publish_revision(
-            &user_scope,
-            user_revision.revision_uid,
-            &validate_for_status(&user_doc, ArtifactStatus::Published),
-        )
-        .await?;
-    let visible_user = registry
-        .load_visible_published(&user_scope, ArtifactKind::Skill, &name)
-        .await?
-        .expect("user artifact visible");
-    assert_eq!(visible_user.scope, "user");
-
     let summaries = registry
         .list_visible(
-            &user_scope,
+            &tenant_scope,
             Some(ArtifactKind::Skill),
             Some(ArtifactStatus::Published),
         )
@@ -155,10 +123,10 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         .filter(|summary| summary.name == name)
         .collect::<Vec<_>>();
     assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].scope, "user");
+    assert_eq!(matching[0].scope, "workspace");
 
     let files = registry
-        .load_files(&workspace_scope, global.revision_uid)
+        .load_files(&tenant_scope, global.revision_uid)
         .await?;
     assert_eq!(files[0].path, "SKILL.md");
 
@@ -172,8 +140,8 @@ async fn registry_persists_behavior_lab_artifact_kinds() -> Result<()> {
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let registry = ArtifactRegistry::new(store.pool().clone());
-    let workspace_scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(format!("workspace-{}", Uuid::now_v7())),
+    let workspace_scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
     };
     let name = format!("checkout-plan-{}", Uuid::now_v7());
     let document = experiment_plan_doc(&name);

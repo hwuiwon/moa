@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
+    ActionRuleScope, MoaError, Result, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -13,25 +13,36 @@ use crate::canonical::canonical_hash;
 use crate::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::validation::{ValidationReport, validate_for_status};
 
-/// Workspace/user columns derived from a memory scope.
+/// Legacy artifact storage columns derived from artifact inheritance scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactScopeParts {
-    /// Workspace owning workspace and user scoped artifacts.
+    /// Legacy column used to store tenant override ownership.
     pub workspace_id: Option<String>,
-    /// User owning user scoped artifacts.
+    /// Legacy column retained for schema compatibility; artifact defaults no longer use users.
     pub user_id: Option<String>,
 }
 
 impl ArtifactScopeParts {
-    /// Converts a memory scope into database column values.
+    /// Converts an artifact inheritance scope into database column values.
     #[must_use]
-    pub fn from_scope(scope: &MemoryScope) -> Self {
-        Self {
-            workspace_id: scope
-                .workspace_id()
-                .map(|workspace_id| workspace_id.to_string()),
-            user_id: scope.user_id().map(|user_id| user_id.to_string()),
+    pub fn from_scope(scope: &ActionRuleScope) -> Self {
+        match scope {
+            ActionRuleScope::WorkspaceDefault => Self {
+                workspace_id: None,
+                user_id: None,
+            },
+            ActionRuleScope::Tenant { tenant_id } => Self {
+                workspace_id: Some(tenant_id.to_string()),
+                user_id: None,
+            },
         }
+    }
+}
+
+fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(moa_core::TenantId(Uuid::nil())),
+        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }
 
@@ -327,10 +338,10 @@ impl ArtifactRegistry {
     /// Creates a new draft revision and stores optional package files.
     pub async fn create_draft(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         draft: NewArtifactDraft<'_>,
     ) -> Result<StoredArtifactRevision> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let stored = Self::create_draft_in_tx(conn.as_mut(), scope, draft).await?;
         conn.commit().await?;
         Ok(stored)
@@ -342,7 +353,7 @@ impl ArtifactRegistry {
     /// this method when row-level security is relevant.
     pub async fn create_draft_in_tx(
         conn: &mut PgConnection,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         draft: NewArtifactDraft<'_>,
     ) -> Result<StoredArtifactRevision> {
         validate_source_format(draft.source_format)?;
@@ -399,11 +410,11 @@ impl ArtifactRegistry {
     /// Marks a draft revision as published without invalidating older published revisions.
     pub async fn publish_revision(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         revision_uid: Uuid,
         report: &ValidationReport,
     ) -> Result<StoredArtifactRevision> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let stored = Self::publish_revision_in_tx(conn.as_mut(), revision_uid, report).await?;
         conn.commit().await?;
         Ok(stored)
@@ -466,7 +477,7 @@ impl ArtifactRegistry {
     /// Loads the most specific visible artifact revision by kind and name.
     pub async fn load_visible(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         kind: ArtifactKind,
         name: &str,
     ) -> Result<Option<StoredArtifactRevision>> {
@@ -476,7 +487,7 @@ impl ArtifactRegistry {
     /// Loads the most specific visible published artifact revision by kind and name.
     pub async fn load_visible_published(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         kind: ArtifactKind,
         name: &str,
     ) -> Result<Option<StoredArtifactRevision>> {
@@ -493,10 +504,10 @@ impl ArtifactRegistry {
     /// Loads a visible artifact revision by revision id.
     pub async fn load_revision(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         revision_uid: Uuid,
     ) -> Result<Option<StoredArtifactRevision>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
@@ -531,11 +542,11 @@ impl ArtifactRegistry {
     /// Lists active artifact revisions visible from the provided scope.
     pub async fn list_visible(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         kind: Option<ArtifactKind>,
         status: Option<ArtifactStatus>,
     ) -> Result<Vec<ArtifactSummary>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let parts = ArtifactScopeParts::from_scope(scope);
         let rows = sqlx::query(
             r#"
@@ -551,12 +562,11 @@ impl ArtifactRegistry {
               AND (
                 a.scope = 'global'
                 OR (a.workspace_id = $1 AND a.user_id IS NULL)
-                OR (a.workspace_id = $1 AND a.user_id = $2)
               )
             ORDER BY
               a.kind ASC,
               a.name ASC,
-              CASE a.scope WHEN 'user' THEN 2 WHEN 'workspace' THEN 1 ELSE 0 END DESC,
+              CASE a.scope WHEN 'workspace' THEN 1 ELSE 0 END DESC,
               r.version DESC
             "#,
         )
@@ -574,10 +584,10 @@ impl ArtifactRegistry {
     /// Loads files attached to a visible revision.
     pub async fn load_files(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         revision_uid: Uuid,
     ) -> Result<Vec<ArtifactFile>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let files = load_files(conn.as_mut(), scope, revision_uid).await?;
         conn.commit().await?;
         Ok(files)
@@ -586,11 +596,11 @@ impl ArtifactRegistry {
     /// Appends a workflow run row.
     pub async fn append_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run: NewArtifactRun,
     ) -> Result<ArtifactRun> {
         let parts = ArtifactScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let run_uid = Uuid::now_v7();
         let row = sqlx::query(
             r#"
@@ -627,10 +637,10 @@ impl ArtifactRegistry {
     /// Loads a visible workflow run by id.
     pub async fn load_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
     ) -> Result<Option<ArtifactRun>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
@@ -640,7 +650,6 @@ impl ArtifactRegistry {
               AND (
                 scope = 'global'
                 OR (workspace_id = $1 AND user_id IS NULL)
-                OR (workspace_id = $1 AND user_id = $2)
               )
             LIMIT 1
             "#,
@@ -658,11 +667,11 @@ impl ArtifactRegistry {
     /// Marks a visible workflow run as cancelled.
     pub async fn cancel_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         reason: Option<String>,
     ) -> Result<Option<ArtifactRun>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
@@ -676,7 +685,6 @@ impl ArtifactRegistry {
               AND (
                 scope = 'global'
                 OR (workspace_id = $1 AND user_id IS NULL)
-                OR (workspace_id = $1 AND user_id = $2)
               )
             RETURNING run_uid, session_id, status, current_node_id, output, error, started_at, completed_at
             "#,
@@ -695,11 +703,11 @@ impl ArtifactRegistry {
     /// Appends a workflow node-run row.
     pub async fn append_node_run(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         node_run: NewArtifactNodeRun,
     ) -> Result<Uuid> {
         let parts = ArtifactScopeParts::from_scope(scope);
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
         let node_run_uid = Uuid::now_v7();
         sqlx::query(
             r#"
@@ -792,12 +800,12 @@ pub async fn insert_published_revision(
 
 async fn load_visible_with_status(
     pool: &PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     kind: ArtifactKind,
     name: &str,
     status: Option<ArtifactStatus>,
 ) -> Result<Option<StoredArtifactRevision>> {
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &artifact_scope_context(scope)).await?;
     let parts = ArtifactScopeParts::from_scope(scope);
     let row = sqlx::query(
         r#"
@@ -816,10 +824,9 @@ async fn load_visible_with_status(
           AND (
             a.scope = 'global'
             OR (a.workspace_id = $1 AND a.user_id IS NULL)
-            OR (a.workspace_id = $1 AND a.user_id = $2)
           )
         ORDER BY
-          CASE a.scope WHEN 'user' THEN 2 WHEN 'workspace' THEN 1 ELSE 0 END DESC,
+          CASE a.scope WHEN 'workspace' THEN 1 ELSE 0 END DESC,
           r.version DESC
         LIMIT 1
         "#,
@@ -979,7 +986,7 @@ async fn load_revision_by_uid(
 
 async fn load_files(
     conn: &mut PgConnection,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     revision_uid: Uuid,
 ) -> Result<Vec<ArtifactFile>> {
     let parts = ArtifactScopeParts::from_scope(scope);
@@ -993,7 +1000,6 @@ async fn load_files(
           AND (
             a.scope = 'global'
             OR (a.workspace_id = $1 AND a.user_id IS NULL)
-            OR (a.workspace_id = $1 AND a.user_id = $2)
           )
         ORDER BY f.path ASC
         "#,

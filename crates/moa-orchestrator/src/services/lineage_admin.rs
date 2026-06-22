@@ -4,13 +4,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::WorkspaceId;
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     LineageEraseRequest, LineageEraseResponse, LineageExplainRequest, LineageExplainResponse,
     LineageExportRequest, LineageExportResponse, LineageQueryRequest, LineageQueryResponse,
     LineageVerifyRequest, LineageVerifyResponse,
 };
+use moa_core::{TenantId, WorkspaceId};
 use moa_lineage_audit::admin as lineage_audit_admin;
 use moa_lineage_sink::admin as lineage_sink_admin;
 use restate_sdk::prelude::*;
@@ -66,7 +66,7 @@ impl LineageAdmin for LineageAdminImpl {
     ) -> Result<Json<LineageExplainResponse>, HandlerError> {
         annotate_restate_handler_span("LineageAdmin", "explain");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -83,7 +83,7 @@ impl LineageAdmin for LineageAdminImpl {
     ) -> Result<Json<LineageQueryResponse>, HandlerError> {
         annotate_restate_handler_span("LineageAdmin", "query");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -100,7 +100,7 @@ impl LineageAdmin for LineageAdminImpl {
     ) -> Result<Json<LineageExportResponse>, HandlerError> {
         annotate_restate_handler_span("LineageAdmin", "export");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Admin).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -117,7 +117,7 @@ impl LineageAdmin for LineageAdminImpl {
     ) -> Result<Json<LineageVerifyResponse>, HandlerError> {
         annotate_restate_handler_span("LineageAdmin", "verify");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Member).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -134,7 +134,7 @@ impl LineageAdmin for LineageAdminImpl {
     ) -> Result<Json<LineageEraseResponse>, HandlerError> {
         annotate_restate_handler_span("LineageAdmin", "erase");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Admin).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -144,29 +144,28 @@ impl LineageAdmin for LineageAdminImpl {
     }
 }
 
-async fn authorize_workspace(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     relation: Relation,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)
+}
+
+fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 async fn explain_inner(
     pool: PgPool,
     request: LineageExplainRequest,
 ) -> Result<LineageExplainResponse, HandlerError> {
-    let records = lineage_sink_admin::explain_records(&pool, &request.workspace_id, request.id)
+    let workspace_id = storage_workspace_id(request.tenant_id);
+    let records = lineage_sink_admin::explain_records(&pool, &workspace_id, request.id)
         .await
         .map_err(handler_error)?;
     Ok(LineageExplainResponse {
@@ -187,6 +186,7 @@ async fn query_inner(
         .into());
     }
     let prepared = prepare_lineage_sql(&request.sql)?;
+    let workspace_id = storage_workspace_id(request.tenant_id);
     let mut tx = pool.begin().await.map_err(handler_error)?;
     sqlx::query("SET TRANSACTION READ ONLY")
         .execute(&mut *tx)
@@ -199,7 +199,7 @@ async fn query_inner(
     let rows = lineage_sink_admin::execute_prepared_lineage_query(
         &mut tx,
         &prepared,
-        &request.workspace_id,
+        &workspace_id,
         &request.since,
     )
     .await
@@ -212,17 +212,15 @@ async fn export_inner(
     pool: PgPool,
     request: LineageExportRequest,
 ) -> Result<LineageExportResponse, HandlerError> {
-    let records = lineage_sink_admin::load_dsar_export_records(
-        &pool,
-        &request.workspace_id,
-        &request.subject,
-    )
-    .await
-    .map_err(handler_error)?;
+    let workspace_id = storage_workspace_id(request.tenant_id);
+    let records =
+        lineage_sink_admin::load_dsar_export_records(&pool, &workspace_id, &request.subject)
+            .await
+            .map_err(handler_error)?;
     let export_dir = create_temp_dir("moa-lineage-export").await?;
     let bundle_path = export_dir.join("lineage-dsar.zip");
     let bundle = lineage_audit_admin::export_dsar_bundle(
-        request.workspace_id.as_str(),
+        workspace_id.as_str(),
         &request.subject,
         records,
         &bundle_path,
@@ -244,10 +242,11 @@ async fn verify_inner(
     pool: PgPool,
     request: LineageVerifyRequest,
 ) -> Result<LineageVerifyResponse, HandlerError> {
+    let workspace_id = storage_workspace_id(request.tenant_id);
     if request.window == "hot" || request.window == "db" {
         let rows = lineage_audit_admin::load_compliance_rows_for_interval(
             &pool,
-            request.workspace_id.as_str(),
+            workspace_id.as_str(),
             &request.since,
         )
         .await
@@ -255,7 +254,7 @@ async fn verify_inner(
         let report =
             lineage_audit_admin::verify_compliance_rows(rows, None).map_err(handler_error)?;
         return Ok(LineageVerifyResponse {
-            workspace_id: request.workspace_id,
+            tenant_id: request.tenant_id,
             records: usize_to_u64(report.records),
             root_checked: false,
             status: "ok".to_string(),
@@ -263,13 +262,12 @@ async fn verify_inner(
         });
     }
 
-    let root =
-        lineage_audit_admin::load_audit_root(&pool, request.workspace_id.as_str(), &request.window)
-            .await
-            .map_err(handler_error)?;
+    let root = lineage_audit_admin::load_audit_root(&pool, workspace_id.as_str(), &request.window)
+        .await
+        .map_err(handler_error)?;
     let rows = lineage_audit_admin::load_compliance_rows_for_window(
         &pool,
-        request.workspace_id.as_str(),
+        workspace_id.as_str(),
         root.window_start,
         root.window_end,
     )
@@ -278,7 +276,7 @@ async fn verify_inner(
     let report = lineage_audit_admin::verify_compliance_rows(rows, Some(root.merkle_root))
         .map_err(handler_error)?;
     Ok(LineageVerifyResponse {
-        workspace_id: WorkspaceId::new(root.workspace_id),
+        tenant_id: request.tenant_id,
         records: usize_to_u64(report.records),
         root_checked: true,
         status: "ok".to_string(),
@@ -290,6 +288,7 @@ async fn erase_inner(
     pool: PgPool,
     request: LineageEraseRequest,
 ) -> Result<LineageEraseResponse, HandlerError> {
+    let workspace_id = storage_workspace_id(request.tenant_id);
     let subject = hex::decode(request.subject.trim()).map_err(|error| {
         TerminalError::new_with_code(
             400,
@@ -299,7 +298,7 @@ async fn erase_inner(
     let secret = pii_vault_secret_from_env()?.unwrap_or_default();
     let subjects = lineage_audit_admin::erase_subject_pseudonym(
         &pool,
-        request.workspace_id.as_str(),
+        workspace_id.as_str(),
         &subject,
         secret,
         "lineage-erase",
@@ -307,7 +306,7 @@ async fn erase_inner(
     .await
     .map_err(handler_error)?;
     Ok(LineageEraseResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         subjects,
         status: "scheduled".to_string(),
     })

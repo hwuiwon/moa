@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AgentContext, Attachment, Channel, ContactId, ContactRef, ModelId, SequenceNum,
-    SessionActorRef, SessionChannelBindingId, SessionId, UserId, WorkspaceId,
+    SessionActorRef, SessionChannelBindingId, SessionId, TenantId,
 };
 
 /// Session lifecycle status.
@@ -119,10 +119,8 @@ pub struct CheckpointInfo {
 pub struct SessionMeta {
     /// Session identifier.
     pub id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
-    /// User identifier.
-    pub user_id: UserId,
+    /// Tenant runtime boundary that owns this session.
+    pub tenant_id: TenantId,
     /// Optional title.
     pub title: Option<String>,
     /// Current session status.
@@ -145,7 +143,7 @@ pub struct SessionMeta {
     /// Agent-facing contact attached to this session.
     #[serde(default)]
     pub contact: Option<ContactRef>,
-    /// Boundary actor that created this session.
+    /// Admin, operator, service, contact, or anonymous actor that created this session.
     #[serde(default)]
     pub created_by: Option<SessionActorRef>,
     /// Previous anonymous or unverified contact promoted into the current contact.
@@ -191,8 +189,7 @@ impl Default for SessionMeta {
         let now = Utc::now();
         Self {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new(""),
-            user_id: UserId::new(""),
+            tenant_id: TenantId::new(),
             title: None,
             status: SessionStatus::Created,
             channel: Channel::Chat,
@@ -223,10 +220,14 @@ impl Default for SessionMeta {
 pub struct SessionSummary {
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
-    /// User identifier.
-    pub user_id: UserId,
+    /// Tenant runtime boundary that owns this session.
+    pub tenant_id: TenantId,
+    /// Agent-facing contact attached to this session.
+    #[serde(default)]
+    pub contact: Option<ContactRef>,
+    /// Admin, operator, service, contact, or anonymous actor that created this session.
+    #[serde(default)]
+    pub created_by: Option<SessionActorRef>,
     /// Optional title.
     pub title: Option<String>,
     /// Current status.
@@ -242,10 +243,12 @@ pub struct SessionSummary {
 /// Session listing filter.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionFilter {
-    /// Restrict to a single workspace.
-    pub workspace_id: Option<WorkspaceId>,
-    /// Restrict to a single user.
-    pub user_id: Option<UserId>,
+    /// Restrict to a single tenant runtime boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Restrict to a single agent-facing contact.
+    pub contact_id: Option<ContactId>,
+    /// Restrict to a single creator actor.
+    pub created_by: Option<SessionActorRef>,
     /// Restrict to a single status.
     pub status: Option<SessionStatus>,
     /// Restrict to a single communication channel.

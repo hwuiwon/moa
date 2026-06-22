@@ -1,6 +1,6 @@
 //! Reference resolution for artifact publish validation.
 
-use moa_core::{MemoryScope, Result};
+use moa_core::{ActionRuleScope, Result};
 
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind};
@@ -22,7 +22,7 @@ impl ArtifactResolver {
     /// Resolves all references declared by a document for the provided scope.
     pub async fn resolve_document(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         document: &ArtifactDocument,
     ) -> Result<Vec<ReferenceResolution>> {
         let references = document.reference_paths();
@@ -37,7 +37,11 @@ impl ArtifactResolver {
         Ok(resolutions)
     }
 
-    async fn resolve_one(&self, scope: &MemoryScope, artifact_ref: &ArtifactRef) -> Result<bool> {
+    async fn resolve_one(
+        &self,
+        scope: &ActionRuleScope,
+        artifact_ref: &ArtifactRef,
+    ) -> Result<bool> {
         match artifact_ref {
             ArtifactRef::Tool { .. } => Ok(true),
             ArtifactRef::Artifact { kind, name } => self
@@ -51,7 +55,7 @@ impl ArtifactResolver {
 
     async fn resolve_action(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         artifact_ref: &ArtifactRef,
     ) -> Result<bool> {
         let ArtifactRef::Action { connector, action } = artifact_ref else {

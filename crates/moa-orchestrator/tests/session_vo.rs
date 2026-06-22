@@ -1,13 +1,22 @@
 //! Unit coverage for the Session virtual object's state projection helpers.
 
 use chrono::Utc;
-use moa_core::{CancelMode, Channel, ModelId, SessionMeta, SessionStatus, UserId, WorkspaceId};
+use moa_core::{
+    CancelMode, Channel, ModelId, SessionActorRef, SessionMeta, SessionStatus, TenantId,
+};
 use moa_orchestrator::objects::session::SessionVoState;
+use uuid::Uuid;
 
 fn test_meta() -> SessionMeta {
     SessionMeta {
-        workspace_id: WorkspaceId::new("workspace-1"),
-        user_id: UserId::new("user-1"),
+        tenant_id: TenantId::from(
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+                .expect("fixture tenant id parses"),
+        ),
+        created_by: Some(SessionActorRef::Identity {
+            id: Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+                .expect("fixture identity id parses"),
+        }),
         channel: Channel::Chat,
         model: ModelId::new("test-model"),
         ..SessionMeta::default()

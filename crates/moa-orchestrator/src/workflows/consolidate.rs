@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use moa_core::{LearningEntry, WorkspaceId};
+use moa_core::{LearningEntry, TenantId, WorkspaceId};
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats, MergeStats,
     SweepStats,
@@ -14,17 +14,17 @@ use crate::ctx::OrchestratorCtx;
 use crate::objects::workspace::WorkspaceObjectClient;
 use moa_core::restate_observability::annotate_restate_handler_span;
 
-/// Returns the durable workflow ID for a workspace/date consolidation pass.
+/// Returns the durable workflow ID for a tenant/date consolidation pass.
 #[must_use]
-pub fn consolidate_workflow_id(workspace_id: &WorkspaceId, target_date: NaiveDate) -> String {
-    format!("{workspace_id}:{target_date}")
+pub fn consolidate_workflow_id(tenant_id: &TenantId, target_date: NaiveDate) -> String {
+    format!("{tenant_id}:{target_date}")
 }
 
-/// Workflow input for one workspace/date consolidation run.
+/// Workflow input for one tenant/date consolidation run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsolidateRequest {
-    /// Workspace whose graph memory should be consolidated.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose graph memory should be consolidated.
+    pub tenant_id: TenantId,
     /// Logical UTC date this workflow instance owns.
     pub target_date: NaiveDate,
 }
@@ -32,8 +32,8 @@ pub struct ConsolidateRequest {
 /// Serializable outcome for one workflow execution.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsolidateReport {
-    /// Workspace that was consolidated.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that was consolidated.
+    pub tenant_id: TenantId,
     /// UTC date slot this workflow instance owns.
     pub target_date: NaiveDate,
     /// Timestamp at which the workflow executed.
@@ -85,13 +85,13 @@ impl ConsolidateReport {
     /// Builds a successful no-op report for graph memory.
     #[must_use]
     pub fn graph_noop(
-        workspace_id: WorkspaceId,
+        tenant_id: TenantId,
         target_date: NaiveDate,
         ran_at: DateTime<Utc>,
         duration_ms: u64,
     ) -> Self {
         Self {
-            workspace_id,
+            tenant_id,
             target_date,
             ran_at,
             records_updated: 0,
@@ -117,14 +117,14 @@ impl ConsolidateReport {
     /// Builds a failure report that still lets the workspace reschedule future runs.
     #[must_use]
     pub fn failed(
-        workspace_id: WorkspaceId,
+        tenant_id: TenantId,
         target_date: NaiveDate,
         ran_at: DateTime<Utc>,
         duration_ms: u64,
         error: impl Into<String>,
     ) -> Self {
         Self {
-            workspace_id,
+            tenant_id,
             target_date,
             ran_at,
             records_updated: 0,
@@ -150,7 +150,7 @@ impl ConsolidateReport {
     /// Builds a report from lifecycle operation outcomes.
     #[must_use]
     pub fn from_outcome(
-        workspace_id: WorkspaceId,
+        tenant_id: TenantId,
         target_date: NaiveDate,
         ran_at: DateTime<Utc>,
         duration_ms: u64,
@@ -163,7 +163,7 @@ impl ConsolidateReport {
             + outcome.aliases_promoted
             + outcome.digests_rebuilt;
         Self {
-            workspace_id,
+            tenant_id,
             target_date,
             ran_at,
             records_updated,
@@ -187,10 +187,10 @@ impl ConsolidateReport {
     }
 }
 
-/// Restate workflow surface for one-shot workspace consolidation runs.
+/// Restate workflow surface for one-shot tenant consolidation runs.
 #[restate_sdk::workflow]
 pub trait Consolidate {
-    /// Runs one durable workspace consolidation pass.
+    /// Runs one durable tenant consolidation pass.
     async fn run(
         request: Json<ConsolidateRequest>,
     ) -> Result<Json<ConsolidateReport>, HandlerError>;
@@ -218,7 +218,7 @@ impl Consolidate for ConsolidateImpl {
 /// Durable operations used by the consolidation workflow body.
 #[async_trait]
 pub trait ConsolidateDurableSteps {
-    /// Records that the owning workspace has started a consolidation run.
+    /// Records that the owning tenant has started a consolidation run.
     async fn mark_consolidation_started(
         &mut self,
         request: &ConsolidateRequest,
@@ -275,7 +275,7 @@ pub trait ConsolidateDurableSteps {
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError>;
 
-    /// Records that the owning workspace has completed the consolidation run.
+    /// Records that the owning tenant has completed the consolidation run.
     async fn consolidation_completed(
         &mut self,
         report: &ConsolidateReport,
@@ -324,7 +324,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
     ) -> Result<(), HandlerError> {
         self.ctx
-            .object_client::<WorkspaceObjectClient>(request.workspace_id.to_string())
+            .object_client::<WorkspaceObjectClient>(request.tenant_id.to_string())
             .mark_consolidation_started(Json::from(request.target_date))
             .call()
             .await
@@ -346,7 +346,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<MergeStats, HandlerError> {
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = request.workspace_id.clone();
+        let workspace_id = storage_workspace_id(request.tenant_id);
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::merge_duplicates(&pool, &workspace_id, now)
@@ -366,7 +366,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<DecayStats, HandlerError> {
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = request.workspace_id.clone();
+        let workspace_id = storage_workspace_id(request.tenant_id);
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::decay_confidence(
@@ -391,7 +391,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<SweepStats, HandlerError> {
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = request.workspace_id.clone();
+        let workspace_id = storage_workspace_id(request.tenant_id);
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::sweep_contradictions(&pool, &workspace_id, now)
@@ -411,7 +411,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
     ) -> Result<BackfillStats, HandlerError> {
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
-        let workspace_id = request.workspace_id.clone();
+        let workspace_id = storage_workspace_id(request.tenant_id);
         let embedder = runtime.embedding_provider();
         self.ctx
             .run(|| async move {
@@ -433,7 +433,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
     ) -> Result<DigestStats, HandlerError> {
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
-        let workspace_id = request.workspace_id.clone();
+        let workspace_id = storage_workspace_id(request.tenant_id);
         let digest_config = runtime.config().memory.digest.clone();
         self.ctx
             .run(|| async move {
@@ -458,7 +458,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         self.ctx
             .run(|| async move {
                 Ok(Json::from(ConsolidateReport::from_outcome(
-                    request.workspace_id,
+                    request.tenant_id,
                     request.target_date,
                     ran_at,
                     0,
@@ -483,7 +483,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError> {
         self.ctx
-            .object_client::<WorkspaceObjectClient>(report.workspace_id.to_string())
+            .object_client::<WorkspaceObjectClient>(report.tenant_id.to_string())
             .consolidation_completed(Json::from(report.clone()))
             .call()
             .await
@@ -516,9 +516,9 @@ async fn record_memory_learning(
         store
             .append_learning(&LearningEntry {
                 id: Uuid::now_v7(),
-                tenant_id: report.workspace_id.to_string(),
+                tenant_id: report.tenant_id,
                 learning_type: "memory_updated".to_string(),
-                target_id: report.workspace_id.to_string(),
+                target_id: report.tenant_id.to_string(),
                 target_label: Some("tenant_memory".to_string()),
                 payload: serde_json::json!({
                     "target_date": report.target_date,
@@ -549,6 +549,10 @@ async fn record_memory_learning(
     .name("record_memory_learning")
     .await?;
     Ok(())
+}
+
+fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn lifecycle_handler_error(error: moa_memory_lifecycle::consolidate::Error) -> HandlerError {

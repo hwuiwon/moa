@@ -1,6 +1,6 @@
 use moa_core::{
     McpCredentialConfig, McpServerConfig, McpTransportConfig, MoaConfig, ModelId, SessionMeta,
-    ToolInvocation, UserId, WorkspaceId,
+    TenantId, ToolInvocation,
 };
 use moa_hands::ToolRouter;
 use serde_json::json;
@@ -11,8 +11,7 @@ use uuid::Uuid;
 
 fn session() -> SessionMeta {
     SessionMeta {
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: TenantId::new(),
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }

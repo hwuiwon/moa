@@ -1,9 +1,10 @@
 //! Action-policy rule operations for the Postgres session store.
 
 use moa_core::{ActionRuleScope, UserId, WorkspaceId};
-use moa_security::GLOBAL_ACTION_POLICY_WORKSPACE_ID;
 
 use super::*;
+
+const WORKSPACE_DEFAULT_POLICY_KEY: &str = "workspace_default";
 
 impl PostgresSessionStore {
     /// Lists action-policy rules visible to one workspace user and tool.
@@ -23,7 +24,7 @@ impl PostgresSessionStore {
              ORDER BY created_at ASC"
         ))
         .bind(workspace_id.to_string())
-        .bind(GLOBAL_ACTION_POLICY_WORKSPACE_ID)
+        .bind(WORKSPACE_DEFAULT_POLICY_KEY)
         .bind(user_id.to_string())
         .bind(tool)
         .fetch_all(&self.pool)
@@ -49,7 +50,7 @@ impl PostgresSessionStore {
         ))
         .bind(rule.id)
         .bind(workspace_id.to_string())
-        .bind(rule.user_id.as_ref().map(ToString::to_string))
+        .bind(Option::<String>::None)
         .bind(rule.tool)
         .bind(rule.pattern)
         .bind(rule.effect.as_str())
@@ -93,10 +94,9 @@ impl PostgresSessionStore {
 }
 
 fn stored_workspace_id_for_rule(rule: &ActionPolicyRule) -> WorkspaceId {
-    if matches!(rule.scope, ActionRuleScope::Global) {
-        WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID)
-    } else {
-        rule.workspace_id.clone()
+    match rule.scope {
+        ActionRuleScope::WorkspaceDefault => WorkspaceId::new(WORKSPACE_DEFAULT_POLICY_KEY),
+        ActionRuleScope::Tenant { tenant_id } => WorkspaceId::new(tenant_id.to_string()),
     }
 }
 

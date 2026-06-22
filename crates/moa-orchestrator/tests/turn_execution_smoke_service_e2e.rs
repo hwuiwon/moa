@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
-use moa_core::{ModelId, SessionId, SessionMeta, SessionStatus};
+use moa_core::{ModelId, SessionActorRef, SessionId, SessionMeta, SessionStatus, TenantId};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::support::restate_runtime::{grant_workspace_member, test_user_identity, with_identity};
+use crate::support::restate_runtime::{grant_tenant_operator, test_user_identity, with_identity};
 
 mod support;
 
@@ -55,16 +55,18 @@ fn live_model() -> &'static str {
 
 async fn create_initialized_session(
     client: &reqwest::Client,
-    label: &str,
+    _label: &str,
 ) -> Result<InitializedSession> {
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
     let meta = SessionMeta {
-        workspace_id: format!("workspace-{label}").into(),
-        user_id: "user-1".into(),
+        tenant_id,
         model: ModelId::new(live_model()),
+        created_by: Some(SessionActorRef::Identity { id: identity.id }),
         ..SessionMeta::default()
     };
-    let identity = test_user_identity();
-    grant_workspace_member(&identity, &meta.workspace_id).await?;
+    grant_tenant_operator(&identity, tenant_id).await?;
 
     let create_request = client.post(session_store_url("create_session"));
     let session_id = with_identity(create_request, &identity)

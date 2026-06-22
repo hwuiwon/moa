@@ -1,6 +1,6 @@
 //! Integration coverage for the `moa.node_index` sidecar table.
 
-use moa_core::{ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ScopeContext, ScopedConn, TenantId};
 use moa_memory_graph::{NodeLabel, PiiClass, bump_last_accessed, lookup_seed_by_name};
 use moa_session::testing;
 use sqlx::PgPool;
@@ -8,6 +8,30 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
+    let workspace_id = workspace_id.as_ref();
+    let tenant_id = Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+    ScopeContext::tenant(tenant_id)
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
+        let slot = index % 16;
+        bytes[slot] = bytes[slot]
+            .wrapping_mul(31)
+            .wrapping_add(byte)
+            .wrapping_add(index as u8);
+        let mirror = (index * 7 + 3) % 16;
+        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
 
 async fn set_app_role(conn: &mut sqlx::PgConnection) {
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -23,7 +47,7 @@ async fn insert_workspace_rows(
     label: NodeLabel,
     count: usize,
 ) -> Vec<Uuid> {
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let ctx = tenant_scope(workspace_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped node_index insert transaction");
@@ -80,7 +104,7 @@ async fn node_index_rls_scopes_seed_lookup_and_bump() {
     insert_workspace_rows(store.pool(), &workspace_b, &prefix, NodeLabel::Fact, 30).await;
     insert_workspace_rows(store.pool(), &workspace_c, &prefix, NodeLabel::Entity, 30).await;
 
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_a.clone()));
+    let ctx = tenant_scope(workspace_a.clone());
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped node_index read transaction");

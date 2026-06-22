@@ -3,96 +3,80 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{UserId, WorkspaceId};
+use super::{ContactId, TenantId};
 
-/// Three-tier memory scope walked from global shared knowledge to tenant-visible context to user context during retrieval.
+/// Runtime graph-memory scope.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryScope {
-    /// Cross-workspace knowledge read by every workspace.
-    Global,
-    /// Tenant-visible shared knowledge for the current workspace context.
-    Workspace {
-        /// Workspace owning this memory scope.
-        workspace_id: WorkspaceId,
+    /// Tenant-local memory that is not attached to an individual contact.
+    Tenant {
+        /// Tenant owning this memory scope.
+        tenant_id: TenantId,
     },
-    /// User-personal knowledge inside a workspace context.
-    User {
-        /// Workspace containing this user scope.
-        workspace_id: WorkspaceId,
-        /// User owning this memory scope.
-        user_id: UserId,
+    /// Contact-local memory inside one tenant.
+    Contact {
+        /// Tenant owning the contact.
+        tenant_id: TenantId,
+        /// Contact owning this memory scope.
+        contact_id: ContactId,
     },
 }
 
-/// Fast discriminator for the three memory scope tiers.
+/// Fast discriminator for runtime memory scope tiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeTier {
-    /// Cross-workspace global memory tier.
-    Global,
-    /// Tenant-visible shared tier.
-    Workspace,
-    /// User memory tier within a workspace.
-    User,
+    /// Tenant-local memory tier.
+    Tenant,
+    /// Contact-local memory tier.
+    Contact,
 }
 
 impl MemoryScope {
-    /// Returns the ancestor chain from `Global` through this scope.
+    /// Returns the retrieval scopes to search for this runtime memory scope.
     pub fn ancestors(&self) -> Vec<MemoryScope> {
         match self {
-            MemoryScope::Global => vec![MemoryScope::Global],
-            MemoryScope::Workspace { workspace_id } => vec![
-                MemoryScope::Global,
-                MemoryScope::Workspace {
-                    workspace_id: workspace_id.clone(),
-                },
-            ],
-            MemoryScope::User {
-                workspace_id,
-                user_id,
-            } => vec![
-                MemoryScope::Global,
-                MemoryScope::Workspace {
-                    workspace_id: workspace_id.clone(),
-                },
-                MemoryScope::User {
-                    workspace_id: workspace_id.clone(),
-                    user_id: user_id.clone(),
-                },
-            ],
+            MemoryScope::Tenant { tenant_id } => vec![MemoryScope::Tenant {
+                tenant_id: *tenant_id,
+            }],
+            MemoryScope::Contact {
+                tenant_id,
+                contact_id,
+            } => vec![MemoryScope::Contact {
+                tenant_id: *tenant_id,
+                contact_id: *contact_id,
+            }],
         }
     }
 
-    /// Returns the workspace identifier for workspace and user scopes.
-    pub fn workspace_id(&self) -> Option<WorkspaceId> {
+    /// Returns the tenant identifier for this scope.
+    pub fn tenant_id(&self) -> TenantId {
         match self {
-            MemoryScope::Global => None,
-            MemoryScope::Workspace { workspace_id } | MemoryScope::User { workspace_id, .. } => {
-                Some(workspace_id.clone())
+            MemoryScope::Tenant { tenant_id } | MemoryScope::Contact { tenant_id, .. } => {
+                *tenant_id
             }
         }
     }
 
-    /// Returns the user identifier for user scopes.
-    pub fn user_id(&self) -> Option<UserId> {
+    /// Returns the contact identifier for contact-local memory.
+    pub fn contact_id(&self) -> Option<ContactId> {
         match self {
-            MemoryScope::User { user_id, .. } => Some(user_id.clone()),
-            MemoryScope::Global | MemoryScope::Workspace { .. } => None,
+            MemoryScope::Contact { contact_id, .. } => Some(*contact_id),
+            MemoryScope::Tenant { .. } => None,
         }
     }
 
-    /// Returns whether this scope is the global tier.
-    pub fn is_global(&self) -> bool {
-        matches!(self, MemoryScope::Global)
+    /// Returns whether this scope is contact-local.
+    pub fn is_contact(&self) -> bool {
+        matches!(self, MemoryScope::Contact { .. })
     }
 
     /// Returns the tier discriminator for this memory scope.
     pub fn tier(&self) -> ScopeTier {
         match self {
-            MemoryScope::Global => ScopeTier::Global,
-            MemoryScope::Workspace { .. } => ScopeTier::Workspace,
-            MemoryScope::User { .. } => ScopeTier::User,
+            MemoryScope::Tenant { .. } => ScopeTier::Tenant,
+            MemoryScope::Contact { .. } => ScopeTier::Contact,
         }
     }
 }
@@ -109,16 +93,16 @@ impl ScopeContext {
         Self { scope }
     }
 
-    /// Creates a tenant-visible shared scope context for a workspace.
-    pub fn workspace(workspace_id: WorkspaceId) -> Self {
-        Self::new(MemoryScope::Workspace { workspace_id })
+    /// Creates a tenant-local scope context.
+    pub fn tenant(tenant_id: TenantId) -> Self {
+        Self::new(MemoryScope::Tenant { tenant_id })
     }
 
-    /// Creates a user-tier scope context.
-    pub fn user(workspace_id: WorkspaceId, user_id: UserId) -> Self {
-        Self::new(MemoryScope::User {
-            workspace_id,
-            user_id,
+    /// Creates a contact-local scope context.
+    pub fn contact(tenant_id: TenantId, contact_id: ContactId) -> Self {
+        Self::new(MemoryScope::Contact {
+            tenant_id,
+            contact_id,
         })
     }
 
@@ -127,14 +111,14 @@ impl ScopeContext {
         &self.scope
     }
 
-    /// Returns the workspace identifier for workspace and user scopes.
-    pub fn workspace_id(&self) -> Option<WorkspaceId> {
-        self.scope.workspace_id()
+    /// Returns the tenant identifier for this context.
+    pub fn tenant_id(&self) -> TenantId {
+        self.scope.tenant_id()
     }
 
-    /// Returns the user identifier for user scopes.
-    pub fn user_id(&self) -> Option<UserId> {
-        self.scope.user_id()
+    /// Returns the contact identifier for contact-local memory.
+    pub fn contact_id(&self) -> Option<ContactId> {
+        self.scope.contact_id()
     }
 
     /// Returns the tier discriminator for this context.
@@ -145,9 +129,8 @@ impl ScopeContext {
     /// Returns the canonical SQL value for the scope tier.
     pub fn tier_str(&self) -> &'static str {
         match self.scope.tier() {
-            ScopeTier::Global => "global",
-            ScopeTier::Workspace => "workspace",
-            ScopeTier::User => "user",
+            ScopeTier::Tenant => "tenant",
+            ScopeTier::Contact => "contact",
         }
     }
 }

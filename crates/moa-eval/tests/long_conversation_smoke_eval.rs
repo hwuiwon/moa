@@ -8,9 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
-    CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider, MemoryScope,
-    MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId,
-    ToolInvocation, WorkspaceId,
+    ActionRuleScope, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
+    MoaError, ModelCapabilities, StopReason, TenantId, TokenUsage, ToolCallContent, ToolCallId,
+    ToolInvocation,
 };
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
 use moa_eval_core::{
@@ -22,7 +22,9 @@ use moa_skills::package::SkillPackage;
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 const SCENARIO_ROOT: &str = "scenarios/long_conversation";
 const EXPERIENCE_LEARNING_SCENARIO: &str = "experience_learning_task_conditioned_strategy_reuse";
@@ -745,13 +747,28 @@ async fn insert_eval_skill<T: AsRef<str>>(
     let registry = SkillRegistry::new(pool.clone());
     registry
         .upsert_by_name(NewSkill::from_package(
-            MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new(workspace_id.to_string()),
+            ActionRuleScope::Tenant {
+                tenant_id: tenant_id_from_label(workspace_id),
             },
             SkillPackage::from_skill_markdown(skill_md),
         ))
         .await?;
     Ok(())
+}
+
+fn tenant_id_from_label(label: &str) -> TenantId {
+    Uuid::parse_str(label)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(label)))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn indent_frontmatter_block(value: &str) -> String {

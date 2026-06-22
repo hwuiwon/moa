@@ -13,7 +13,8 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::{
-    Event, EventRange, EventRecord, MemoryScope, ScopeContext, ScopedConn, SessionId, WorkspaceId,
+    ActionRuleScope, Event, EventRange, EventRecord, ScopeContext, ScopedConn, SessionId, TenantId,
+    WorkspaceId,
     traits::Identity,
     wire::{
         ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
@@ -34,7 +35,7 @@ use uuid::Uuid;
 
 use crate::support::{
     restate_runtime::{
-        OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_editor,
+        OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_tenant_admin,
         register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
         test_user_identity, with_identity,
     },
@@ -100,12 +101,12 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(format!("behavior-lab-food-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    grant_workspace_editor(&identity, &workspace_id).await?;
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
@@ -266,12 +267,12 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(format!("behavior-lab-dispute-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    grant_workspace_editor(&identity, &workspace_id).await?;
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let scope = ActionRuleScope::Tenant { tenant_id };
+    grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
@@ -451,9 +452,10 @@ async fn import_support_skill(
     workspace_id: &WorkspaceId,
 ) -> Result<()> {
     let request = SkillImportRequest {
-        workspace_id: workspace_id.clone(),
-        scope: MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: TenantId::from(
+                Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            ),
         },
         packages: vec![support_skill_package()],
     };
@@ -473,12 +475,13 @@ async fn import_and_publish_artifact(
     workspace_id: &WorkspaceId,
     source_text: &str,
 ) -> Result<ArtifactPublishResponse> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(
+            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+        ),
     };
     let import_request = ArtifactImportRequest {
-        workspace_id: workspace_id.clone(),
-        scope: scope.clone(),
+        scope,
         source_format: "yaml".to_string(),
         source_text: source_text.to_string(),
         files: Vec::new(),
@@ -498,7 +501,6 @@ async fn import_and_publish_artifact(
     assert_eq!(imported.status, "draft");
 
     let publish_request = ArtifactPublishRequest {
-        workspace_id: workspace_id.clone(),
         scope,
         revision_uid: imported.revision_uid,
     };
@@ -528,7 +530,7 @@ async fn run_plan_experiment(
     plan_revision_uid: Uuid,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         name: name.to_string(),
         plan_revision_uid: Some(plan_revision_uid),
         target: None,
@@ -554,7 +556,7 @@ async fn wait_for_run_status(
     done: impl Fn(&ExperimentRunStatusResponse) -> bool,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_uid,
     };
     let mut last_status = None;
@@ -583,7 +585,7 @@ async fn list_trials(
     run_uid: Uuid,
 ) -> Result<ExperimentTrialsResponse> {
     let request = ExperimentTrialsRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_uid,
         status: None,
         limit: Some(10),
@@ -603,7 +605,7 @@ async fn trial_status(
     trial_uid: Uuid,
 ) -> Result<ExperimentTrialStatusResponse> {
     let request = ExperimentTrialStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         trial_uid,
     };
     post_json_with_identity(
@@ -628,7 +630,7 @@ async fn experiment_scores(
     run_uid: Uuid,
 ) -> Result<ExperimentScoresResponse> {
     let request = ExperimentScoresRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_uid,
     };
     post_json_with_identity(client, ingress, "Experiments", "scores", identity, &request)
@@ -646,7 +648,9 @@ async fn run_workflow_for_session(
     session_id: SessionId,
 ) -> Result<WorkflowRunResponse> {
     let request = WorkflowRunRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: TenantId::from(
+            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+        ),
         workflow_ref: "workflow://damaged-food-replacement".to_string(),
         input: json!({
             "order_id": "FOOD-42",
@@ -671,7 +675,9 @@ async fn workflow_status(
     run_id: Uuid,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: TenantId::from(
+            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+        ),
         run_id,
     };
     post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
@@ -785,12 +791,13 @@ fn service_url(ingress: &str, service: &str, handler: &str) -> String {
 
 async fn assert_score_run_parent(
     pool: &PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
     source: &str,
 ) -> Result<()> {
     let (scope_label, workspace_id, user_id) = scope_parts(scope);
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let scope_context = scope_context(scope);
+    let mut conn = ScopedConn::begin(pool, &scope_context).await?;
     let exists = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
@@ -847,10 +854,11 @@ async fn assert_no_analytics_scores(
 
 async fn assert_no_learning_candidates(
     pool: &PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     workspace_id: &WorkspaceId,
 ) -> Result<()> {
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let scope_context = scope_context(scope);
+    let mut conn = ScopedConn::begin(pool, &scope_context).await?;
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)
@@ -870,28 +878,31 @@ async fn assert_no_learning_candidates(
     Ok(())
 }
 
-fn scope_parts(scope: &MemoryScope) -> (&'static str, Option<String>, Option<String>) {
+fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
     match scope {
-        MemoryScope::Global => ("global", None, None),
-        MemoryScope::Workspace { workspace_id } => {
-            ("workspace", Some(workspace_id.to_string()), None)
-        }
-        MemoryScope::User {
-            workspace_id,
-            user_id,
-        } => (
-            "user",
-            Some(workspace_id.to_string()),
-            Some(user_id.to_string()),
-        ),
+        ActionRuleScope::WorkspaceDefault => ("global", None, None),
+        ActionRuleScope::Tenant { tenant_id } => ("workspace", Some(tenant_id.to_string()), None),
     }
+}
+
+fn scope_context(scope: &ActionRuleScope) -> ScopeContext {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
+        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+    }
+}
+
+fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .context("workspace fixture id should be a tenant UUID")
 }
 
 fn assert_trial_status_matches_summary(
     status: &ExperimentTrialStatusResponse,
     summary: &ExperimentTrialSummary,
 ) {
-    assert_eq!(status.workspace_id, summary.workspace_id);
+    assert_eq!(status.tenant_id, summary.tenant_id);
     assert_eq!(status.run_uid, summary.run_uid);
     assert_eq!(status.trial_uid, summary.trial_uid);
     assert_eq!(status.status, summary.status);

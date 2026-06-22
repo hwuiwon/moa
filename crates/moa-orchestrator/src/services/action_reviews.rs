@@ -1,4 +1,4 @@
-//! Workspace-admin action review queue and decision service.
+//! Tenant-admin action review queue and decision service.
 
 use chrono::{DateTime, Utc};
 use moa_authz::require_authz_with_delegation;
@@ -8,7 +8,7 @@ use moa_core::traits::Identity;
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
     ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, Event, EventType,
-    ToolCallId, ToolCallRequest, WorkspaceId, record_action_review_decision,
+    TenantId, ToolCallId, ToolCallRequest, WorkspaceId, record_action_review_decision,
     record_action_review_requested,
 };
 use restate_sdk::prelude::*;
@@ -22,13 +22,13 @@ use crate::handlers::authz_shim::{require_fga_client, require_identity, translat
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
 
-/// Summary returned for one workspace action review.
+/// Summary returned for one tenant action review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionReviewSummary {
     /// Review identifier.
     pub id: Uuid,
-    /// Owning workspace.
-    pub workspace_id: WorkspaceId,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
     /// Owning session, when the action came from a session turn.
     pub session_id: Option<moa_core::SessionId>,
     /// Sub-agent that requested the action, when present.
@@ -75,15 +75,15 @@ pub struct RequestActionReview {
 /// Request payload for `ActionReviews/list_pending`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListActionReviewsRequest {
-    /// Workspace whose pending action reviews should be listed.
-    pub workspace_id: WorkspaceId,
+    /// Tenant whose pending action reviews should be listed.
+    pub tenant_id: TenantId,
 }
 
 /// Request payload for `ActionReviews/decide`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecideActionReviewRequest {
-    /// Workspace that owns the review.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the review.
+    pub tenant_id: TenantId,
     /// Review identifier.
     pub review_id: Uuid,
     /// Decision kind.
@@ -154,7 +154,7 @@ impl ActionReviews for ActionReviewsImpl {
             if let Some(session_id) = session_id {
                 let event_exists = prior_action_review_event_exists(
                     &ctx,
-                    &stored.summary.workspace_id,
+                    &storage_workspace_id(stored.summary.tenant_id),
                     session_id,
                     EventType::ActionReviewRequested,
                     stored.summary.id,
@@ -170,13 +170,13 @@ impl ActionReviews for ActionReviewsImpl {
             if session_id.is_none() {
                 tracing::warn!(
                     action_review.id = %stored.summary.id,
-                    workspace_id = %stored.summary.workspace_id,
+                    tenant_id = %stored.summary.tenant_id,
                     sub_agent_id = ?stored.summary.sub_agent_id,
                     "action review has no session id; skipping session event append"
                 );
             }
             let pool = OrchestratorCtx::current_graph_pool();
-            let workspace_id = stored.summary.workspace_id.clone();
+            let workspace_id = storage_workspace_id(stored.summary.tenant_id);
             let review_id = stored.summary.id;
             ctx.run(|| async move {
                 action_review_app::mark_requested_event_recorded(pool, workspace_id, review_id)
@@ -200,12 +200,13 @@ impl ActionReviews for ActionReviewsImpl {
     ) -> Result<Json<Vec<ActionReviewSummary>>, HandlerError> {
         annotate_restate_handler_span("ActionReviews", "list_pending");
         let request = request.into_inner();
-        authorize_workspace(&ctx, &request.workspace_id, Relation::Admin).await?;
+        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
+        let workspace_id = storage_workspace_id(request.tenant_id);
 
         Ok(ctx
             .run(|| async move {
-                action_review_app::list_pending_reviews(pool, request.workspace_id)
+                action_review_app::list_pending_reviews(pool, workspace_id)
                     .await
                     .map(Json::from)
             })
@@ -221,7 +222,7 @@ impl ActionReviews for ActionReviewsImpl {
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("ActionReviews", "decide");
         let request = request.into_inner();
-        let identity = authorize_workspace(&ctx, &request.workspace_id, Relation::Admin).await?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
         let decided = ctx
             .run(|| async move {
@@ -351,21 +352,19 @@ async fn prior_action_review_event_exists(
         .into_inner())
 }
 
-async fn authorize_workspace(
+async fn authorize_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     relation: Relation,
 ) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)?;
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .map_err(translate_authz_error)?;
     Ok(identity)
+}
+
+fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }

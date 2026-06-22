@@ -16,7 +16,7 @@ Postgres stores:
 - task segments
 - learning log entries
 - live behavior experiment run metadata
-- graph changelog outbox rows and per-workspace changelog versions
+- graph changelog outbox rows and per-tenant changelog versions
 - analytics views and materialized views
 
 ## Core Tables
@@ -26,9 +26,7 @@ The session schema baseline lives in `crates/moa-migrations/migrations/postgres/
 ```sql
 CREATE TABLE sessions (
     id UUID PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    CONSTRAINT sessions_user_id_nonempty CHECK (btrim(user_id) <> ''),
+    tenant_id UUID NOT NULL,
     title TEXT,
     status TEXT NOT NULL DEFAULT 'created',
     channel TEXT NOT NULL DEFAULT 'chat',
@@ -53,11 +51,8 @@ CREATE TABLE sessions (
     cache_hit_rate DOUBLE PRECISION GENERATED ALWAYS AS (...) STORED,
     last_checkpoint_seq BIGINT,
     contact_id UUID,
-    contact_tenant_id UUID,
     contact_state TEXT,
     contact_canonical_id UUID,
-    contact_linked_ids UUID[] NOT NULL DEFAULT '{}',
-    contact_scopes TEXT[] NOT NULL DEFAULT '{}',
     created_by_actor_type TEXT,
     created_by_actor_id UUID,
     contact_promoted_from_id UUID
@@ -65,8 +60,7 @@ CREATE TABLE sessions (
 
 CREATE TABLE session_agent_context (
     session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
+    tenant_id UUID NOT NULL,
     agent_id UUID,
     installation_uid UUID,
     deployment_uid UUID,
@@ -85,6 +79,8 @@ CREATE TABLE session_channel_bindings (...);
 CREATE TABLE events (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id),
+    tenant_id UUID NOT NULL,
+    contact_id UUID,
     sequence_num BIGINT NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
@@ -127,14 +123,14 @@ columns such as channel, external tenant key, external conversation key, and
 external thread key. The current active binding is also referenced from
 `sessions.active_channel_binding_id`.
 
-Every committed session must have one `session_agent_context` row and a
-non-empty `sessions.user_id`. `PostgresSessionStore::create_session` enforces
-this before insert, and the database also has a deferred constraint trigger so
-raw SQL or future transaction paths cannot commit a session without the agent
-sidecar. Existing valid sessions are backfilled to the built-in
-`agent://system-default` revision during the tenant-configurable agents
-migration; tenant-authored sessions should use an installed or explicitly
-selected agent revision instead.
+Every committed session must have one `session_agent_context` row, one
+`tenant_id`, and either contact attribution or an admin/operator creator actor.
+`PostgresSessionStore::create_session` enforces this before insert, and the
+database also has a deferred constraint trigger so raw SQL or future transaction
+paths cannot commit a session without the agent sidecar. Existing valid
+sessions are backfilled to the built-in `agent://system-default` revision during
+the tenant-configurable agents migration; tenant-authored sessions should use an
+installed or explicitly selected agent revision instead.
 
 The event table uses a generated `tsvector` column and a GIN index for cross-session search. There is no separate application-side rollup writer for session counters; the trigger and generated columns own aggregate updates.
 
@@ -200,15 +196,15 @@ Live behavior experiment runs are stored in a dedicated ledger instead of being
 encoded as session events, `analytics.scores`, or artifact workflow runs.
 
 `analytics.score_run` is the FK-able parent for a scored run. It stores the
-score run UUID, three-tier scope columns, source label, and timestamps. Eval,
-experiment, and future scored run types can attach many `analytics.scores` rows
-to one parent run ID while preserving scoped reads.
+score run UUID, tenant attribution for runtime scoring, source label, and
+timestamps. Eval, experiment, and future scored run types can attach many
+`analytics.scores` rows to one parent run ID while preserving scoped reads.
 
 `moa.experiment_run` stores one live behavior experiment run:
 
 - `run_uid` is the public experiment run identifier.
-- `workspace_id`, `user_id`, generated `scope`, and three-tier RLS match the
-  artifact and learning-candidate model.
+- `tenant_id` is the runtime isolation key; creator actor fields record the
+  admin/operator principal that admitted the run.
 - `target_kind` is `agent_loop` or `workflow`.
 - `status` is `accepted`, `dispatched`, `running`,
   `completed`, `failed`, or `cancelled`.
@@ -229,24 +225,26 @@ from an experiment run to pinned `moa.artifact_revision` rows. The denormalized
 does not replace the FK table.
 
 `moa.experiment_trial` stores per-trial behavior-lab execution. It belongs to a
-run, carries the workspace/user scope, trial key, status, target kind, variant
-key, pinned plan revision, selected persona/profile/scenario/data-bundle IDs,
-simulator settings, session or workflow run link, score run ID, turn count,
-stop reason, error, trace ID, and timestamps. `ExperimentTrialRun` updates this
-row as simulator turns dispatch target sessions or workflow runs.
+run, carries the tenant and optional contact attribution, trial key, status,
+target kind, variant key, pinned plan revision, selected
+persona/profile/scenario/data-bundle IDs, simulator settings, session or
+workflow run link, score run ID, turn count, stop reason, error, trace ID, and
+timestamps. `ExperimentTrialRun` updates this row as simulator turns dispatch
+target sessions or workflow runs.
 
 The `Experiments` service exposes `generate_plan`, `run`, `status`, `list`,
 `trials`, `trial_status`, `cancel`, `propose_improvements`, `scores`, and
 `compare`. `generate_plan`, `run`, `cancel`, and `propose_improvements` require
-`Workspace:Editor`. `status`, `list`, `trials`, `trial_status`, `scores`, and
-`compare` require `Workspace:Member`. `Analytics/experiment_stats` also
-requires `Workspace:Member`. These service checks sit above the RLS scope on
+tenant admin or tenant operator authorization. `status`, `list`, `trials`,
+`trial_status`, `scores`, and `compare` require tenant authorization for the
+target tenant and resource. `Analytics/experiment_stats` also requires tenant
+authorization. These service checks sit above the tenant RLS scope on
 `moa.experiment_run`, `moa.experiment_trial`,
 `moa.experiment_run_artifact_revision`, and `analytics.score_run`.
 
 ## Graph Changelog
 
-`moa.graph_changelog` is the immutable outbox for graph-memory mutations. Every node or edge create, update, supersession, invalidation, erase, or crypto-shred writes a changelog row in the same transaction as the graph change. An insert trigger bumps `moa.workspace_state.changelog_version`, which cache invalidation uses as the per-workspace freshness marker.
+`moa.graph_changelog` is the immutable outbox for graph-memory mutations. Every node or edge create, update, supersession, invalidation, erase, or crypto-shred writes a changelog row in the same transaction as the graph change. An insert trigger bumps the tenant changelog version, which cache invalidation uses as the per-tenant freshness marker.
 
 The changelog is monthly range-partitioned, protected by FORCE RLS, and grants application roles only `SELECT` and `INSERT`. `moa_changelog_pub` publishes the table for Debezium PostgreSQL CDC; `moa_replicator` consumes it through the `moa_changelog_slot` logical replication slot.
 
@@ -286,6 +284,6 @@ Session rollups come from generated columns and triggers. Views and materialized
 - `tool_call_analytics`
 - `tool_call_summary`
 - `session_turn_metrics`
-- `daily_workspace_metrics`
+- `daily_tenant_metrics`
 - `skill_resolution_rates`
 - `segment_baselines`

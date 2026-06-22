@@ -4,19 +4,33 @@ _Tenant model, skills-first learning, learning log, and rollback._
 
 ## Tenant Model
 
-MOA's tenant is a team. Users and workspaces belong to tenants. Learning state and graph knowledge are tenant-scoped; workspaces are an administration and access-control layer over tenant resources.
+MOA's runtime hierarchy is exactly:
 
 ```text
-Platform
-  -> Tenant
-       -> Users
-       -> Workspaces
-       -> Learning log
-       -> Skill ranking signals
-       -> Memory consolidation signals
+workspace
+  -> tenant
+       -> contact
+            -> session
 ```
 
-Knowledge and memory remain tenant-oriented. Workspace administrators may control which tenant resources are available in a workspace, but MOA does not model workspace-specific memory as a separate product concept. Learning entries and resolution aggregates are tenant-scoped because a team's recurring work patterns usually span projects.
+The workspace is the global control plane and inherited default scope for skills
+and policies. The tenant is the hard runtime isolation boundary for sessions,
+contacts, learning, memory, artifacts, analytics, policies, events, and audit
+evidence.
+
+Contacts are end users inside a tenant. Users are admin/operator principals:
+workspace admins, tenant admins, tenant operators, service users, and API-key
+subjects. Users can administer or operate tenants through authorization, but
+they are not contact memory subjects.
+
+Contact memory is contact-local. A contact session reads memory for that tenant
+and contact only; it does not inherit tenant memory or any other contact's
+memory. Learning entries and resolution aggregates are tenant-scoped because a
+tenant's recurring work patterns usually span sessions and contacts.
+
+Workspace-level skills and policies are inherited by tenants. Tenant-level rows
+override the inherited workspace defaults for that tenant. Tenant-learned data
+is tenant-local and is never promoted into workspace defaults automatically.
 
 ## Skills-First Learning
 

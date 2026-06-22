@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use moa_core::{ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ScopeContext, ScopedConn, TenantId};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
     cypher,
@@ -17,6 +17,30 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
+    let workspace_id = workspace_id.as_ref();
+    let tenant_id = Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+    ScopeContext::tenant(tenant_id)
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
+        let slot = index % 16;
+        bytes[slot] = bytes[slot]
+            .wrapping_mul(31)
+            .wrapping_add(byte)
+            .wrapping_add(index as u8);
+        let mirror = (index * 7 + 3) % 16;
+        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
 fn basis_vector(index: usize) -> Vec<f32> {
     let mut vector = vec![0.0; 1024];
     vector[index % 1024] = 1.0;
@@ -24,7 +48,7 @@ fn basis_vector(index: usize) -> Vec<f32> {
 }
 
 fn graph_store(pool: &PgPool, workspace_id: &str) -> AgeGraphStore {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let scope = tenant_scope(workspace_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
@@ -77,7 +101,7 @@ fn edge_intent(
 }
 
 async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a> {
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let ctx = tenant_scope(workspace_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped test transaction");
@@ -220,7 +244,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
 
     let vector = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
+        tenant_scope(workspace_id.clone()),
     );
     let matches = vector
         .knn(&VectorQuery {

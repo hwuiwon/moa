@@ -9,9 +9,9 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
-    AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event, EventRange,
-    EventRecord, EventType, MemoryScope, MoaError, ModelId, SessionId, SessionMeta, SessionStatus,
-    SessionStore, UserId, WorkspaceId, current_trace_id, record_experiment_trial,
+    ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
+    EventRange, EventRecord, EventType, MoaError, ModelId, SessionActorRef, SessionId, SessionMeta,
+    SessionStatus, SessionStore, TenantId, WorkspaceId, current_trace_id, record_experiment_trial,
     record_experiment_trial_duration, record_simulation_cost_cents, record_simulation_tokens,
     record_simulation_turn,
 };
@@ -63,8 +63,8 @@ const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
 /// Workflow input for one behavior-lab simulator trial.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentTrialRunWorkflowRequest {
-    /// Workspace already authorized by the experiment planner or service.
-    pub workspace_id: WorkspaceId,
+    /// Tenant already authorized by the experiment planner or service.
+    pub tenant_id: TenantId,
     /// Trial fields used for idempotent insert-or-load by `(run_uid, trial_key)`.
     pub trial: NewExperimentTrial,
     /// Serialized experiment target payload selected for this trial.
@@ -78,8 +78,8 @@ pub struct ExperimentTrialRunWorkflowRequest {
 /// Request payload for reading one trial workflow status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExperimentTrialRunStatusRequest {
-    /// Workspace scope used for trial-result filtering.
-    pub workspace_id: WorkspaceId,
+    /// Tenant used for trial-result filtering.
+    pub tenant_id: TenantId,
     /// Stable trial identifier.
     pub trial_uid: Uuid,
 }
@@ -87,8 +87,8 @@ pub struct ExperimentTrialRunStatusRequest {
 /// Response payload for one trial workflow status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentTrialRunStatusResponse {
-    /// Workspace scope that owns the trial.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the trial.
+    pub tenant_id: TenantId,
     /// Experiment run that owns the trial.
     pub run_uid: Uuid,
     /// Stable trial identifier.
@@ -149,7 +149,10 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
             return Err(TerminalError::new_with_code(404, "experiment trial key mismatch").into());
         }
 
-        ctx.set(K_WORKSPACE_ID, Json(request.workspace_id.clone()));
+        ctx.set(
+            K_WORKSPACE_ID,
+            Json(workspace_id_for_tenant(request.tenant_id)),
+        );
         ctx.set(K_RUN_UID, Json(request.trial.run_uid));
         ctx.set(K_TRIAL_KEY, Json(request.trial.trial_key.clone()));
         annotate_trial_span(&request.trial, None);
@@ -161,7 +164,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
                 ctx.set(K_STATUS, Json(ExperimentTrialStatus::Failed));
                 if let Err(update_error) = persist_trial_status_by_key(
                     &ctx,
-                    request.workspace_id,
+                    request.tenant_id,
                     request.trial.run_uid,
                     request.trial.trial_key.clone(),
                     ExperimentTrialStatus::Failed,
@@ -209,19 +212,18 @@ async fn run_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
 ) -> Result<ExperimentTrialRunStatusResponse, HandlerError> {
-    let trial =
-        insert_or_load_trial(ctx, request.workspace_id.clone(), request.trial.clone()).await?;
+    let trial = insert_or_load_trial(ctx, request.tenant_id, request.trial.clone()).await?;
     ctx.set(K_TRIAL_UID, Json(trial.trial_uid));
     ctx.set(K_STATUS, Json(trial.status));
     annotate_trial_record_span(&trial);
-    attach_current_trial_trace(ctx, request.workspace_id.clone(), trial.trial_uid).await?;
+    attach_current_trial_trace(ctx, request.tenant_id, trial.trial_uid).await?;
     if !trial_status_allows_child_start(trial.status) {
-        return status_response_from_record(request.workspace_id, trial);
+        return status_response_from_record(request.tenant_id, trial);
     }
 
     let trial = persist_trial_status(
         ctx,
-        request.workspace_id.clone(),
+        request.tenant_id,
         trial.trial_uid,
         ExperimentTrialStatus::Running,
         None,
@@ -230,8 +232,7 @@ async fn run_trial(
     .await?;
     ctx.set(K_STATUS, Json(trial.status));
 
-    let simulator_context =
-        load_simulator_context(ctx, request.workspace_id.clone(), trial.clone()).await?;
+    let simulator_context = load_simulator_context(ctx, request.tenant_id, trial.clone()).await?;
     match trial.target_kind {
         ExperimentTargetKind::AgentLoop => {
             run_agent_loop_trial(ctx, request, trial, simulator_context).await
@@ -241,37 +242,38 @@ async fn run_trial(
 }
 
 fn new_session_meta(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     model: ModelId,
     identity: &Identity,
 ) -> Result<SessionMeta, HandlerError> {
     let now = Utc::now();
     Ok(SessionMeta {
         id: SessionId::new(),
-        workspace_id,
-        user_id: session_user_id(identity)?,
+        tenant_id,
         title: Some("Experiment trial agent-loop run".to_string()),
         status: SessionStatus::Created,
         channel: Channel::Chat,
         model,
         created_at: now,
         updated_at: now,
+        created_by: Some(session_actor_ref(identity)?),
         ..SessionMeta::default()
     })
 }
 
-fn session_user_id(identity: &Identity) -> Result<UserId, HandlerError> {
+fn session_actor_ref(identity: &Identity) -> Result<SessionActorRef, HandlerError> {
     match identity.identity_type {
-        IdentityType::User => Ok(UserId::new(identity.id.to_string())),
-        IdentityType::Agent => Ok(UserId::new(
-            identity
-                .acting_on_behalf_of
-                .unwrap_or(identity.id)
-                .to_string(),
-        )),
+        IdentityType::User | IdentityType::Agent => Ok(SessionActorRef::Identity {
+            id: identity.acting_on_behalf_of.unwrap_or(identity.id),
+        }),
         IdentityType::Service => Err(TerminalError::new_with_code(
             403,
             "service identities cannot create agent-loop experiment trial sessions",
+        )
+        .into()),
+        IdentityType::Contact => Err(TerminalError::new_with_code(
+            403,
+            "contact identities cannot create agent-loop experiment trial sessions",
         )
         .into()),
     }
@@ -308,6 +310,7 @@ fn identity_type_header(identity_type: IdentityType) -> &'static str {
         IdentityType::User => "user",
         IdentityType::Agent => "agent",
         IdentityType::Service => "service",
+        IdentityType::Contact => "contact",
     }
 }
 
@@ -341,8 +344,12 @@ fn annotate_trial_record_span(trial: &ExperimentTrialRecord) {
     );
 }
 
-fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace { workspace_id }
+fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
+    ActionRuleScope::Tenant { tenant_id }
+}
+
+fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>

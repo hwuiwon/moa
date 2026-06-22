@@ -1,5 +1,6 @@
 //! Tests for trusted identity-header extraction.
 
+use moa_core::TenantId;
 use moa_core::traits::IdentityType;
 use moa_orchestrator::ctx::{HeaderTrustMode, IdentityHeaderError, extract_identity};
 use restate_sdk::prelude::HeaderMap;
@@ -57,7 +58,7 @@ fn full_header_set_produces_expected_identity() {
 
     assert_eq!(identity.identity_type, IdentityType::Agent);
     assert_eq!(identity.id, identity_id);
-    assert_eq!(identity.tenant_id, tenant_id);
+    assert_eq!(identity.tenant_id, TenantId::from(tenant_id));
     assert_eq!(identity.api_key_id, Some(api_key_id));
     assert_eq!(identity.acting_on_behalf_of, Some(acting_user_id));
 }
