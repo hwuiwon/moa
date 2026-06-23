@@ -5,7 +5,7 @@ use moa_agents::AgentResolver;
 use moa_authz::{enqueue, enqueue_raw};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
 use moa_core::{
-    AgentContext, AgentSessionSelection, MemoryScope, ModelId,
+    ActionRuleScope, AgentContext, AgentSessionSelection, ModelId,
     traits::{Identity, IdentityType},
 };
 
@@ -16,8 +16,8 @@ pub(crate) async fn create_session_for_identity(
     identity: Identity,
 ) -> Result<SessionId, HandlerError> {
     let (owner_user_type, owner_id) = owner_tuple_subject(&identity)?;
-    let tenant_id = identity.tenant_id;
-    let workspace_id = meta.workspace_id.clone();
+    let tenant_id = meta.tenant_id;
+    let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
     let mut transaction = store
         .pool()
         .begin()
@@ -40,7 +40,7 @@ pub(crate) async fn create_session_for_identity(
         &mut *transaction,
         TupleOp::Write,
         &owner_tuple,
-        Some(tenant_id),
+        Some(tenant_id.0),
     )
     .await
     .map_err(|error| TerminalError::new(format!("authz outbox owner tuple: {error}")))?;
@@ -48,13 +48,26 @@ pub(crate) async fn create_session_for_identity(
     enqueue_raw(
         &mut *transaction,
         TupleOp::Write,
-        &format!("workspace:{workspace_id}"),
-        "workspace",
+        &format!("tenant:{tenant_id}"),
+        "tenant",
         &format!("session:{session_id}"),
-        Some(tenant_id),
+        Some(tenant_id.0),
     )
     .await
-    .map_err(|error| TerminalError::new(format!("authz outbox parent tuple: {error}")))?;
+    .map_err(|error| TerminalError::new(format!("authz outbox tenant tuple: {error}")))?;
+
+    if let Some(contact_id) = contact_id {
+        enqueue_raw(
+            &mut *transaction,
+            TupleOp::Write,
+            &format!("contact:{contact_id}"),
+            "contact",
+            &format!("session:{session_id}"),
+            Some(tenant_id.0),
+        )
+        .await
+        .map_err(|error| TerminalError::new(format!("authz outbox contact tuple: {error}")))?;
+    }
 
     transaction
         .commit()
@@ -181,16 +194,9 @@ pub(crate) fn apply_agent_model_policy(
     .into())
 }
 
-fn session_agent_scope(meta: &SessionMeta) -> MemoryScope {
-    if meta.user_id.as_str().is_empty() {
-        MemoryScope::Workspace {
-            workspace_id: meta.workspace_id.clone(),
-        }
-    } else {
-        MemoryScope::User {
-            workspace_id: meta.workspace_id.clone(),
-            user_id: meta.user_id.clone(),
-        }
+fn session_agent_scope(meta: &SessionMeta) -> ActionRuleScope {
+    ActionRuleScope::Tenant {
+        tenant_id: meta.tenant_id,
     }
 }
 
@@ -269,12 +275,13 @@ impl SessionStoreImpl {
             .map_err(HandlerError::from)
     }
 
-    pub(super) async fn workspace_cost_since_inner(
+    pub(super) async fn tenant_cost_since_inner(
         &self,
-        request: WorkspaceCostSinceRequest,
+        request: TenantCostSinceRequest,
     ) -> Result<u32, HandlerError> {
+        let storage_workspace_id = WorkspaceId::new(request.tenant_id.to_string());
         self.store
-            .workspace_cost_since(&request.workspace_id, request.since)
+            .workspace_cost_since(&storage_workspace_id, request.since)
             .await
             .map_err(HandlerError::from)
     }
@@ -333,8 +340,9 @@ impl SessionStoreImpl {
         &self,
         request: GetSegmentBaselineRequest,
     ) -> Result<Option<SegmentBaseline>, HandlerError> {
+        let tenant_id = request.tenant_id.to_string();
         self.store
-            .get_segment_baseline(&request.tenant_id)
+            .get_segment_baseline(&tenant_id)
             .await
             .map_err(HandlerError::from)
     }
@@ -343,8 +351,9 @@ impl SessionStoreImpl {
         &self,
         request: ListSkillResolutionRatesRequest,
     ) -> Result<Vec<SkillResolutionRate>, HandlerError> {
+        let tenant_id = request.tenant_id.to_string();
         self.store
-            .list_skill_resolution_rates(&request.tenant_id)
+            .list_skill_resolution_rates(&tenant_id)
             .await
             .map_err(HandlerError::from)
     }
@@ -353,8 +362,9 @@ impl SessionStoreImpl {
         &self,
         request: ListTaskStrategySuccessRatesRequest,
     ) -> Result<Vec<TaskStrategySuccessRate>, HandlerError> {
+        let tenant_id = request.tenant_id.to_string();
         self.store
-            .list_task_strategy_success_rates(&request.tenant_id, &request.task_fingerprint)
+            .list_task_strategy_success_rates(&tenant_id, &request.task_fingerprint)
             .await
             .map_err(HandlerError::from)
     }
@@ -413,16 +423,17 @@ impl SessionStoreImpl {
         &self,
         request: GetLearningCandidateRequest,
     ) -> Result<LearningCandidate, HandlerError> {
+        let workspace_id = WorkspaceId::new(request.tenant_id.to_string());
         self.store
-            .get_learning_candidate(&request.workspace_id, request.candidate_id)
+            .get_learning_candidate(&workspace_id, request.candidate_id)
             .await
             .map_err(HandlerError::from)?
             .ok_or_else(|| {
                 TerminalError::new_with_code(
                     404,
                     format!(
-                        "learning candidate {} not found in workspace {}",
-                        request.candidate_id, request.workspace_id
+                        "learning candidate {} not found in tenant {}",
+                        request.candidate_id, request.tenant_id
                     ),
                 )
                 .into()
@@ -433,8 +444,9 @@ impl SessionStoreImpl {
         &self,
         request: ListLearningCandidatesRequest,
     ) -> Result<Vec<LearningCandidate>, HandlerError> {
+        let tenant_id = request.tenant_id.to_string();
         self.store
-            .list_learning_candidates(&request.tenant_id, request.status, request.limit)
+            .list_learning_candidates(&tenant_id, request.status, request.limit)
             .await
             .map_err(HandlerError::from)
     }
@@ -496,6 +508,7 @@ fn owner_tuple_subject(identity: &Identity) -> Result<(UserType, uuid::Uuid), Ha
 
     match identity.identity_type {
         IdentityType::User => Ok((UserType::User, identity.id)),
+        IdentityType::Contact => Ok((UserType::Contact, identity.id)),
         IdentityType::Agent => Ok((UserType::Agent, identity.id)),
         IdentityType::Service => {
             Err(TerminalError::new_with_code(403, "service identities cannot own sessions").into())

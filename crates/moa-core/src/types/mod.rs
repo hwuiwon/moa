@@ -50,14 +50,14 @@ pub use completion::{
     ProviderToolCallMetadata, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
 };
 pub use contact::{
-    CONTACT_USER_ID_PREFIX, ContactId, ContactPointId, ContactPointInput, ContactPointKind,
-    ContactPointRef, ContactRef, ContactSessionChannelChangeRequest,
-    ContactSessionChannelChangeResponse, ContactSessionChannelRequest, ContactSessionInitRequest,
-    ContactSessionInitResponse, ContactSessionPromotionRequest, ContactSessionPromotionResponse,
-    ContactTokenClaims, ContactTokenIssueRequest, ContactTokenIssueResponse,
-    ContactVerificationChallengeId, ContactVerificationCompleteRequest,
-    ContactVerificationCompleteResponse, ContactVerificationStartRequest,
-    ContactVerificationStartResponse, ContactVerificationState, SessionActorRef,
+    ContactId, ContactPointId, ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
+    ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
+    ContactSessionChannelRequest, ContactSessionInitRequest, ContactSessionInitResponse,
+    ContactSessionPromotionRequest, ContactSessionPromotionResponse, ContactTokenClaims,
+    ContactTokenIssueRequest, ContactTokenIssueResponse, ContactVerificationChallengeId,
+    ContactVerificationCompleteRequest, ContactVerificationCompleteResponse,
+    ContactVerificationStartRequest, ContactVerificationStartResponse, ContactVerificationState,
+    SessionActorRef,
 };
 pub use context::{
     ContextMessage, ContextSourceKind, ContextSourceRef, ExcludedItem, MessageRole,
@@ -74,8 +74,10 @@ pub use hands::{
     HandHandle, HandResources, HandSpec, HandStatus, SandboxFile, SandboxTier,
     validate_sandbox_file_path,
 };
-pub use identifiers::{BrainId, ModelId, SegmentId, SessionId, ToolCallId, UserId, WorkspaceId};
-pub use learning::{LearningEntry, TenantId};
+pub use identifiers::{
+    BrainId, ModelId, SegmentId, SessionId, TenantId, ToolCallId, UserId, WorkspaceId,
+};
+pub use learning::LearningEntry;
 pub use memory::{MemoryScope, ScopeContext, ScopeTier, SkillMetadata};
 pub use model::{Credential, ModelCapabilities, ProviderNativeTool, TokenPricing, ToolCallFormat};
 pub use observability::{

@@ -34,6 +34,7 @@ pub(super) async fn load_skills(pool: &PgPool, ctx: &WorkingContext) -> Result<V
 }
 
 async fn load_visible_skills(pool: &PgPool, ctx: &WorkingContext) -> Result<Vec<SkillMetadata>> {
+    let tenant_id = ctx.tenant_id.to_string();
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT ON (a.name)
@@ -47,15 +48,13 @@ async fn load_visible_skills(pool: &PgPool, ctx: &WorkingContext) -> Result<Vec<
           AND (
             a.scope = 'global'
             OR (a.workspace_id = $1 AND a.user_id IS NULL)
-            OR (a.workspace_id = $1 AND a.user_id = $2)
           )
         ORDER BY a.name ASC,
-                 CASE a.scope WHEN 'user' THEN 2 WHEN 'workspace' THEN 1 ELSE 0 END DESC,
+                 CASE WHEN a.workspace_id = $1 AND a.user_id IS NULL THEN 1 ELSE 0 END DESC,
                  r.version DESC
         "#,
     )
-    .bind(ctx.workspace_id.as_str())
-    .bind(ctx.user_id.as_str())
+    .bind(&tenant_id)
     .fetch_all(pool)
     .await
     .map_err(map_sqlx_error)?;
@@ -73,6 +72,7 @@ async fn load_locked_skills(
     ctx: &WorkingContext,
     locked_skills: &[ResolvedArtifactRevisionRef],
 ) -> Result<Vec<SkillMetadata>> {
+    let tenant_id = ctx.tenant_id.to_string();
     let revision_uids = locked_skills
         .iter()
         .map(|dependency| dependency.revision_uid)
@@ -82,7 +82,7 @@ async fn load_locked_skills(
         SELECT a.name, a.description, a.tags, r.revision_uid, r.definition, r.source_text
         FROM moa.artifact_revision r
         JOIN moa.artifact a ON a.artifact_uid = r.artifact_uid
-        WHERE r.revision_uid = ANY($3::uuid[])
+        WHERE r.revision_uid = ANY($2::uuid[])
           AND a.valid_to IS NULL
           AND r.valid_to IS NULL
           AND a.kind = 'skill'
@@ -90,13 +90,11 @@ async fn load_locked_skills(
           AND (
             a.scope = 'global'
             OR (a.workspace_id = $1 AND a.user_id IS NULL)
-            OR (a.workspace_id = $1 AND a.user_id = $2)
           )
-        ORDER BY array_position($3::uuid[], r.revision_uid), a.name ASC
+        ORDER BY array_position($2::uuid[], r.revision_uid), a.name ASC
         "#,
     )
-    .bind(ctx.workspace_id.as_str())
-    .bind(ctx.user_id.as_str())
+    .bind(&tenant_id)
     .bind(&revision_uids)
     .fetch_all(pool)
     .await
@@ -147,6 +145,7 @@ pub(super) async fn load_selected_skill_files(
         return Ok(Vec::new());
     }
 
+    let tenant_id = ctx.tenant_id.to_string();
     let selected_names = selected
         .iter()
         .map(|skill| skill.name.clone())
@@ -169,7 +168,7 @@ pub(super) async fn load_selected_skill_files(
             r#"
             WITH requested AS (
                 SELECT revision_uid, ord
-                FROM unnest($3::uuid[]) WITH ORDINALITY AS requested(revision_uid, ord)
+                FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(revision_uid, ord)
             )
             SELECT a.name, f.path, f.content, f.executable
             FROM requested
@@ -183,13 +182,11 @@ pub(super) async fn load_selected_skill_files(
               AND (
                 a.scope = 'global'
                 OR (a.workspace_id = $1 AND a.user_id IS NULL)
-                OR (a.workspace_id = $1 AND a.user_id = $2)
               )
             ORDER BY requested.ord ASC, f.path ASC
             "#,
         )
-        .bind(ctx.workspace_id.as_str())
-        .bind(ctx.user_id.as_str())
+        .bind(&tenant_id)
         .bind(&revision_uids)
         .fetch_all(pool)
         .await
@@ -198,13 +195,13 @@ pub(super) async fn load_selected_skill_files(
         r#"
         WITH requested AS (
             SELECT name, ord
-            FROM unnest($3::text[]) WITH ORDINALITY AS requested(name, ord)
+            FROM unnest($2::text[]) WITH ORDINALITY AS requested(name, ord)
         ),
         visible AS (
             SELECT a.name, r.revision_uid, requested.ord,
                    row_number() OVER (
                        PARTITION BY a.name
-                       ORDER BY CASE a.scope WHEN 'user' THEN 2 WHEN 'workspace' THEN 1 ELSE 0 END DESC,
+                       ORDER BY CASE WHEN a.workspace_id = $1 AND a.user_id IS NULL THEN 1 ELSE 0 END DESC,
                                 r.version DESC
                    ) AS rank
             FROM requested
@@ -217,7 +214,6 @@ pub(super) async fn load_selected_skill_files(
               AND (
                 a.scope = 'global'
                 OR (a.workspace_id = $1 AND a.user_id IS NULL)
-                OR (a.workspace_id = $1 AND a.user_id = $2)
               )
         )
         SELECT visible.name, f.path, f.content, f.executable
@@ -227,8 +223,7 @@ pub(super) async fn load_selected_skill_files(
         ORDER BY visible.ord ASC, f.path ASC
         "#,
     )
-    .bind(ctx.workspace_id.as_str())
-    .bind(ctx.user_id.as_str())
+    .bind(&tenant_id)
     .bind(&selected_names)
     .fetch_all(pool)
     .await

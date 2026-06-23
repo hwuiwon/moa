@@ -2,7 +2,7 @@
 
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactRun, ArtifactRunStatus, NewArtifactRun};
 use moa_artifacts::{document::ArtifactKind, reference::ArtifactRef};
-use moa_core::{MemoryScope, SessionId};
+use moa_core::{ActionRuleScope, SessionId};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -36,7 +36,7 @@ impl WorkflowRuntime {
     /// Creates a durable workflow run for a published workflow artifact.
     pub async fn start(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         request: StartWorkflowRun,
     ) -> Result<ArtifactRun> {
         let artifact_ref = parse_workflow_ref(&request.workflow_ref)?;
@@ -70,14 +70,18 @@ impl WorkflowRuntime {
     }
 
     /// Loads the current projection for a visible workflow run.
-    pub async fn status(&self, scope: &MemoryScope, run_uid: Uuid) -> Result<Option<ArtifactRun>> {
+    pub async fn status(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+    ) -> Result<Option<ArtifactRun>> {
         Ok(self.registry.load_run(scope, run_uid).await?)
     }
 
     /// Marks a visible workflow run as cancelled when it is still cancellable.
     pub async fn cancel(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         run_uid: Uuid,
         reason: Option<String>,
     ) -> Result<Option<ArtifactRun>> {

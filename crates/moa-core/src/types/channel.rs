@@ -246,7 +246,7 @@ pub enum MessageContent {
         /// Optional detailed output.
         detail: Option<String>,
     },
-    /// Workspace-admin action-review request card.
+    /// Tenant-admin action-review request card.
     ActionReviewRequest {
         /// Durable policy-facing action envelope.
         envelope: Box<ActionEnvelope>,

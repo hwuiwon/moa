@@ -21,14 +21,14 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 |---|---|---|---|
 | 1 | `IdentityProcessor` | Stable prefix | MOA identity and high-level behavior |
 | 2 | `AgentInstructionProcessor` | Stable prefix | session-pinned configured-agent instructions and workflow affordances |
-| 2 | `InstructionProcessor` | Stable prefix | user/workspace instructions |
+| 2 | `InstructionProcessor` | Stable prefix | workspace-default, tenant, and contact/session instructions |
 | 3 | `ToolDefinitionProcessor` | Stable prefix | deterministic tool schema list, capped at 30 and filtered by pinned agent tool policy |
 | 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
 | 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
-| 6 | `DigestProcessor` | Dynamic tail | standing user and tenant-visible memory digests |
-| 7 | `MemoryRetriever` | Dynamic tail | tenant-visible indexes and relevant memory pages filtered by pinned agent knowledge policy |
+| 6 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
+| 7 | `MemoryRetriever` | Dynamic tail | tenant-isolated indexes and contact memory filtered by pinned agent knowledge policy |
 | 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
-| 9 | `RuntimeContextProcessor` | Dynamic tail | current date, workspace, working directory, branch, user |
+| 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, contact or admin/operator actor |
 | 10 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
 
 If query rewriting or memory digests are disabled, those processors are omitted; later processors keep their configured stage numbers.
@@ -72,19 +72,19 @@ paths; prompt filtering is not treated as a security boundary.
 
 ## Skill Injection
 
-`SkillInjector` loads visible global, workspace, and user skill metadata from
-Postgres artifact revisions and ranks skills with:
+`SkillInjector` loads visible workspace-default and tenant-override skill
+metadata from Postgres artifact revisions and ranks skills with:
 
 - keyword overlap against the current query
 - tenant-level skill resolution rates from `skill_resolution_rates`
 - normalized use count
 - recency
 
-When multiple visible skills share a name, the most specific scope wins: user
-scope overrides tenant-visible shared scope, and tenant-visible shared scope
-overrides global scope. Global skills are the deployment-wide fallback; shared
-tenant-visible and user skills let a tenant or person specialize behavior
-without mutating the shared package.
+When multiple visible skills share a name, the tenant row wins over the
+workspace default. Workspace-level skills are inherited defaults for every
+tenant; tenant-level skill rows override those defaults for that tenant. There
+is no contact-scoped skill inheritance, and tenant-learned skills are never
+promoted into workspace defaults automatically.
 
 When a configured-agent policy is pinned to the session, selection first applies
 that policy. Pinned skills are included before ranked fill, allowlists bound the
@@ -111,7 +111,16 @@ memory crates. See
 current privacy boundary and `crates/moa-memory/README.md` for crate-level
 details.
 
-Search uses `retrieval_query` metadata when present, otherwise the full latest user query. Lexical search still derives terms internally, while semantic retrieval keeps the natural-language query intact. Retrieval can be keyword, semantic, or hybrid depending on the memory store configuration.
+Search uses `retrieval_query` metadata when present, otherwise the full latest
+contact or admin/operator message. Lexical search still derives terms
+internally, while semantic retrieval keeps the natural-language query intact.
+Retrieval can be keyword, semantic, or hybrid depending on the memory store
+configuration.
+
+For contact sessions, retrieval reads only the current tenant/contact memory.
+It does not inherit tenant memory or any other contact's memory. Tenant
+admin/operator memory inspection uses explicit tenant or workspace
+control-plane paths rather than the default contact-session retrieval path.
 
 Memory is inserted as a reminder near the active turn so runtime facts and retrieved context do not disturb the stable prefix.
 
@@ -124,10 +133,10 @@ Memory is inserted as a reminder near the active turn so runtime facts and retri
 `RuntimeContextProcessor` inserts volatile facts at the end of the prompt:
 
 - current date
-- workspace
+- tenant and workspace-control-plane identifiers when available
 - current working directory
 - git branch
-- user
+- contact or admin/operator actor
 
 These values are intentionally outside the stable prefix.
 
@@ -145,4 +154,6 @@ Each processor returns `ProcessorOutput` with:
 - duration
 - metadata
 
-The pipeline records structured tracing spans with session, user, workspace, model, stage number, stage name, token counts, and stable-prefix metrics derived from prompt ordering.
+The pipeline records structured tracing spans with tenant, contact, session,
+admin/operator actor, model, stage number, stage name, token counts, and
+stable-prefix metrics derived from prompt ordering.

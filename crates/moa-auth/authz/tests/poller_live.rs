@@ -34,7 +34,7 @@ async fn test_pool() -> PgPool {
 #[tokio::test]
 #[ignore = "requires MOA_RUN_LIVE_OPENFGA_TESTS=1 and live OpenFGA"]
 async fn poller_drains_write_to_fga() {
-    // Pins: the poller applies a queued tenant-member tuple to live OpenFGA.
+    // Pins: the poller applies a queued tenant-operator tuple to live OpenFGA.
     if std::env::var("MOA_RUN_LIVE_OPENFGA_TESTS").as_deref() != Ok("1") {
         return;
     }
@@ -45,7 +45,7 @@ async fn poller_drains_write_to_fga() {
     let tuple = TupleKey::new(
         UserType::User,
         user_id,
-        Relation::Member,
+        Relation::Operator,
         ObjectType::Tenant,
         tenant_id,
     );
@@ -69,12 +69,12 @@ async fn poller_drains_write_to_fga() {
     let allowed = client
         .check(
             &format!("user:{user_id}"),
-            "member",
+            "operator",
             &format!("tenant:{tenant_id}"),
         )
         .await
         .expect("live FGA check should succeed");
-    assert!(allowed, "tuple write should make user a tenant member");
+    assert!(allowed, "tuple write should make user a tenant operator");
 
     let status: String =
         sqlx::query_scalar("SELECT status FROM authz_outbox WHERE tuple_object=$1 LIMIT 1")

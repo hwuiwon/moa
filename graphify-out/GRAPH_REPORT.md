@@ -1,982 +1,1016 @@
-# Graph Report - .  (2026-06-21)
+# Graph Report - .  (2026-06-22)
 
 ## Corpus Check
-- 64 files · ~600,158 words
+- 116 files · ~624,635 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 21210 nodes · 52232 edges · 995 communities (832 shown, 163 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 2123 edges (avg confidence: 0.8)
+- 22450 nodes · 56631 edges · 1028 communities (864 shown, 164 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 2376 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
-- [[_COMMUNITY_Orchestrator Contacts|Orchestrator Contacts]]
-- [[_COMMUNITY_Experiments|Experiments]]
-- [[_COMMUNITY_Orchestrator Analytics|Orchestrator Analytics]]
-- [[_COMMUNITY_Eval Gold|Eval Gold]]
-- [[_COMMUNITY_Experiments Store|Experiments Store]]
-- [[_COMMUNITY_Orchestrator Action Reviews|Orchestrator Action Reviews]]
-- [[_COMMUNITY_Orchestrator Experiments|Orchestrator Experiments]]
-- [[_COMMUNITY_Orchestrator|Orchestrator]]
-- [[_COMMUNITY_Auth Group Sync|Auth Group Sync]]
-- [[_COMMUNITY_Orchestrator Handlers|Orchestrator Handlers]]
-- [[_COMMUNITY_Core Context|Core Context]]
-- [[_COMMUNITY_Eval Generator|Eval Generator]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Core Sub Agent|Core Sub Agent]]
-- [[_COMMUNITY_Memory Slow Path|Memory Slow Path]]
-- [[_COMMUNITY_Orchestrator Handlers|Orchestrator Handlers]]
-- [[_COMMUNITY_Eval Fixtures|Eval Fixtures]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Orchestrator Consolidate|Orchestrator Consolidate]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Orchestrator Memory|Orchestrator Memory]]
-- [[_COMMUNITY_Session Neon|Session Neon]]
-- [[_COMMUNITY_Messaging Postmark|Messaging Postmark]]
-- [[_COMMUNITY_Orchestrator Experiment Run|Orchestrator Experiment Run]]
-- [[_COMMUNITY_Gateway Renderer|Gateway Renderer]]
-- [[_COMMUNITY_Hands|Hands]]
-- [[_COMMUNITY_Hands|Hands]]
-- [[_COMMUNITY_Orchestrator Behavior Lab Simulation E2E|Orchestrator Behavior Lab Simulation E2E]]
-- [[_COMMUNITY_Lineage Records|Lineage Records]]
-- [[_COMMUNITY_Eval Memory Eval Db Memory|Eval Memory Eval Db Memory]]
-- [[_COMMUNITY_Loadtest Backend|Loadtest Backend]]
-- [[_COMMUNITY_Skills Registry|Skills Registry]]
-- [[_COMMUNITY_Brain Legs|Brain Legs]]
-- [[_COMMUNITY_Messaging Twilio|Messaging Twilio]]
-- [[_COMMUNITY_Artifacts Registry|Artifacts Registry]]
-- [[_COMMUNITY_Orchestrator Turn Execution|Orchestrator Turn Execution]]
-- [[_COMMUNITY_Brain Segments|Brain Segments]]
-- [[_COMMUNITY_Providers Registry|Providers Registry]]
-- [[_COMMUNITY_Memory Llm Extractor|Memory Llm Extractor]]
-- [[_COMMUNITY_Orchestrator Handlers|Orchestrator Handlers]]
-- [[_COMMUNITY_Eval Metrics|Eval Metrics]]
-- [[_COMMUNITY_Ocsf Emit|Ocsf Emit]]
-- [[_COMMUNITY_Hands|Hands]]
-- [[_COMMUNITY_Memory|Memory]]
-- [[_COMMUNITY_Eval Counting|Eval Counting]]
-- [[_COMMUNITY_Eval Long Conversation Smoke Eval|Eval Long Conversation Smoke Eval]]
-- [[_COMMUNITY_Orchestrator Learning Review|Orchestrator Learning Review]]
-- [[_COMMUNITY_Orchestrator Sub Agent Turn Execution|Orchestrator Sub Agent Turn Execution]]
-- [[_COMMUNITY_Skills Format|Skills Format]]
-- [[_COMMUNITY_Hands File Search|Hands File Search]]
-- [[_COMMUNITY_Gateway Approval|Gateway Approval]]
-- [[_COMMUNITY_Core Runtime Metrics|Core Runtime Metrics]]
-- [[_COMMUNITY_Brain Ranking|Brain Ranking]]
-- [[_COMMUNITY_Orchestrator Experiments|Orchestrator Experiments]]
-- [[_COMMUNITY_Brain Hybrid|Brain Hybrid]]
-- [[_COMMUNITY_Memory Extract|Memory Extract]]
-- [[_COMMUNITY_Eval Corpus|Eval Corpus]]
-- [[_COMMUNITY_Gateway|Gateway]]
-- [[_COMMUNITY_Orchestrator Experiment Trial Run|Orchestrator Experiment Trial Run]]
-- [[_COMMUNITY_Orchestrator Skills|Orchestrator Skills]]
-- [[_COMMUNITY_Skills Regression|Skills Regression]]
-- [[_COMMUNITY_Skills|Skills]]
-- [[_COMMUNITY_Orchestrator Target Execution|Orchestrator Target Execution]]
-- [[_COMMUNITY_Gateway Telegram|Gateway Telegram]]
-- [[_COMMUNITY_Memory|Memory]]
-- [[_COMMUNITY_Orchestrator Tool Executor|Orchestrator Tool Executor]]
-- [[_COMMUNITY_Orchestrator Llm Gateway|Orchestrator Llm Gateway]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Auth Client|Auth Client]]
-- [[_COMMUNITY_Hands|Hands]]
-- [[_COMMUNITY_Orchestrator State|Orchestrator State]]
-- [[_COMMUNITY_Orchestrator Artifacts|Orchestrator Artifacts]]
-- [[_COMMUNITY_Brain Test Support|Brain Test Support]]
-- [[_COMMUNITY_Hands Tool Result|Hands Tool Result]]
-- [[_COMMUNITY_Orchestrator Users|Orchestrator Users]]
-- [[_COMMUNITY_Memory Promotion|Memory Promotion]]
-- [[_COMMUNITY_Orchestrator Lineage Admin|Orchestrator Lineage Admin]]
-- [[_COMMUNITY_Skills Review|Skills Review]]
-- [[_COMMUNITY_Core|Core]]
-- [[_COMMUNITY_Eval Score Card|Eval Score Card]]
-- [[_COMMUNITY_Orchestrator Groups|Orchestrator Groups]]
-- [[_COMMUNITY_Eval Types|Eval Types]]
-- [[_COMMUNITY_Gateway Control|Gateway Control]]
-- [[_COMMUNITY_Orchestrator Llm Gateway|Orchestrator Llm Gateway]]
-- [[_COMMUNITY_Orchestrator Agent Artifacts E2E|Orchestrator Agent Artifacts E2E]]
-- [[_COMMUNITY_Orchestrator Turn Execution|Orchestrator Turn Execution]]
-- [[_COMMUNITY_Skills Distiller|Skills Distiller]]
-- [[_COMMUNITY_Orchestrator State|Orchestrator State]]
-- [[_COMMUNITY_Lineage Cascade|Lineage Cascade]]
-- [[_COMMUNITY_Core Tools|Core Tools]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Orchestrator Util|Orchestrator Util]]
-- [[_COMMUNITY_Eval Judge|Eval Judge]]
-- [[_COMMUNITY_Lineage Mpsc Sink|Lineage Mpsc Sink]]
-- [[_COMMUNITY_Orchestrator Approvals|Orchestrator Approvals]]
-- [[_COMMUNITY_Orchestrator Workspace|Orchestrator Workspace]]
-- [[_COMMUNITY_Brain Lineage|Brain Lineage]]
-- [[_COMMUNITY_Eval Recording|Eval Recording]]
-- [[_COMMUNITY_Experiments Experiment Store Db|Experiments Experiment Store Db]]
-- [[_COMMUNITY_Orchestrator Experiment Service|Orchestrator Experiment Service]]
-- [[_COMMUNITY_Providers Instrumentation|Providers Instrumentation]]
-- [[_COMMUNITY_Experiments Plan|Experiments Plan]]
-- [[_COMMUNITY_Scoring|Scoring]]
-- [[_COMMUNITY_Brain Ranking|Brain Ranking]]
-- [[_COMMUNITY_Orchestrator Agents|Orchestrator Agents]]
-- [[_COMMUNITY_Artifacts Validation|Artifacts Validation]]
-- [[_COMMUNITY_Core Contact|Core Contact]]
-- [[_COMMUNITY_Brain Brain Turn Db|Brain Brain Turn Db]]
-- [[_COMMUNITY_Memory Ctx|Memory Ctx]]
-- [[_COMMUNITY_Orchestrator Users|Orchestrator Users]]
-- [[_COMMUNITY_Brain Test Support|Brain Test Support]]
-- [[_COMMUNITY_Memory Node|Memory Node]]
-- [[_COMMUNITY_Orchestrator Plan Expansion|Orchestrator Plan Expansion]]
-- [[_COMMUNITY_Orchestrator Approval Flow E2E|Orchestrator Approval Flow E2E]]
-- [[_COMMUNITY_Orchestrator Skill Learning Review|Orchestrator Skill Learning Review]]
-- [[_COMMUNITY_Security Mcp Proxy|Security Mcp Proxy]]
-- [[_COMMUNITY_Security Policies|Security Policies]]
-- [[_COMMUNITY_Brain Memory|Brain Memory]]
-- [[_COMMUNITY_Hands Normalization|Hands Normalization]]
-- [[_COMMUNITY_Eval Transcript Runner|Eval Transcript Runner]]
-- [[_COMMUNITY_Providers Tools|Providers Tools]]
-- [[_COMMUNITY_Orchestrator Action Policy Flow E2E|Orchestrator Action Policy Flow E2E]]
-- [[_COMMUNITY_Brain Cache|Brain Cache]]
-- [[_COMMUNITY_Orchestrator Delegation|Orchestrator Delegation]]
-- [[_COMMUNITY_Gateway Discord|Gateway Discord]]
-- [[_COMMUNITY_Core Observability|Core Observability]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Memory Read|Memory Read]]
-- [[_COMMUNITY_Memory Contradiction|Memory Contradiction]]
-- [[_COMMUNITY_Messaging Rate Limit|Messaging Rate Limit]]
-- [[_COMMUNITY_Session Rows|Session Rows]]
-- [[_COMMUNITY_Memory Consolidate|Memory Consolidate]]
-- [[_COMMUNITY_Brain Memory|Brain Memory]]
-- [[_COMMUNITY_Eval Generator|Eval Generator]]
-- [[_COMMUNITY_Eval Setup|Eval Setup]]
-- [[_COMMUNITY_Skills|Skills]]
-- [[_COMMUNITY_Hands Policy|Hands Policy]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Brain Planner|Brain Planner]]
-- [[_COMMUNITY_Loadtest Config|Loadtest Config]]
-- [[_COMMUNITY_Core Turn Latency|Core Turn Latency]]
-- [[_COMMUNITY_Core Completion|Core Completion]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Memory Gemini|Memory Gemini]]
-- [[_COMMUNITY_Orchestrator Cron Job|Orchestrator Cron Job]]
-- [[_COMMUNITY_Orchestrator Ingestion Service E2E|Orchestrator Ingestion Service E2E]]
-- [[_COMMUNITY_Brain Tier1 Metadata|Brain Tier1 Metadata]]
-- [[_COMMUNITY_Eval Scripted User Mode Eval|Eval Scripted User Mode Eval]]
-- [[_COMMUNITY_Gateway Approval State|Gateway Approval State]]
-- [[_COMMUNITY_Memory Digest|Memory Digest]]
-- [[_COMMUNITY_Orchestrator Api Keys|Orchestrator Api Keys]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Orchestrator Privacy Service Db Memory|Orchestrator Privacy Service Db Memory]]
-- [[_COMMUNITY_Providers Wiremock Provider Helpers|Providers Wiremock Provider Helpers]]
-- [[_COMMUNITY_Brain Experience|Brain Experience]]
-- [[_COMMUNITY_Brain Runtime Context|Brain Runtime Context]]
-- [[_COMMUNITY_Hands Local Tools Db|Hands Local Tools Db]]
-- [[_COMMUNITY_Memory Age|Memory Age]]
-- [[_COMMUNITY_Memory Openai Filter|Memory Openai Filter]]
-- [[_COMMUNITY_Orchestrator Groups|Orchestrator Groups]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Core Memory|Core Memory]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Brain Query Planner|Brain Query Planner]]
-- [[_COMMUNITY_Core Auth|Core Auth]]
-- [[_COMMUNITY_Eval Embeddings|Eval Embeddings]]
-- [[_COMMUNITY_Orchestrator Experiment Trial Run E2E|Orchestrator Experiment Trial Run E2E]]
-- [[_COMMUNITY_Session Blob|Session Blob]]
-- [[_COMMUNITY_Providers Streaming|Providers Streaming]]
-- [[_COMMUNITY_Gateway Discord|Gateway Discord]]
-- [[_COMMUNITY_Orchestrator Admin Maintenance|Orchestrator Admin Maintenance]]
-- [[_COMMUNITY_Hands Registration|Hands Registration]]
-- [[_COMMUNITY_Brain Hybrid Retrieval Db Memory|Brain Hybrid Retrieval Db Memory]]
-- [[_COMMUNITY_Gateway Slack|Gateway Slack]]
-- [[_COMMUNITY_Orchestrator Tool Executor|Orchestrator Tool Executor]]
-- [[_COMMUNITY_Lineage Merkle|Lineage Merkle]]
-- [[_COMMUNITY_Orchestrator Privacy|Orchestrator Privacy]]
-- [[_COMMUNITY_Skills Package|Skills Package]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Brain Hybrid|Brain Hybrid]]
-- [[_COMMUNITY_Hands Tests|Hands Tests]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Artifacts Reference|Artifacts Reference]]
-- [[_COMMUNITY_Brain Tool Dispatch|Brain Tool Dispatch]]
-- [[_COMMUNITY_Orchestrator Workspace Store|Orchestrator Workspace Store]]
-- [[_COMMUNITY_Orchestrator Status|Orchestrator Status]]
-- [[_COMMUNITY_Orchestrator Skill Learning|Orchestrator Skill Learning]]
-- [[_COMMUNITY_Orchestrator Store|Orchestrator Store]]
-- [[_COMMUNITY_Brain Brain Turn Cache Replay Db Memory|Brain Brain Turn Cache Replay Db Memory]]
-- [[_COMMUNITY_Brain Runner|Brain Runner]]
-- [[_COMMUNITY_Hands Construction|Hands Construction]]
-- [[_COMMUNITY_Auth Require Helpers|Auth Require Helpers]]
-- [[_COMMUNITY_Brain Prune|Brain Prune]]
-- [[_COMMUNITY_Core Analytics|Core Analytics]]
-- [[_COMMUNITY_Core Experience|Core Experience]]
-- [[_COMMUNITY_Eval Provider Recorded|Eval Provider Recorded]]
-- [[_COMMUNITY_Memory Entity Resolution|Memory Entity Resolution]]
-- [[_COMMUNITY_Orchestrator Sub Agent Dispatch|Orchestrator Sub Agent Dispatch]]
-- [[_COMMUNITY_Orchestrator Tool Executor E2E|Orchestrator Tool Executor E2E]]
-- [[_COMMUNITY_Providers Embedding|Providers Embedding]]
-- [[_COMMUNITY_Skills Improver|Skills Improver]]
-- [[_COMMUNITY_Orchestrator Agents|Orchestrator Agents]]
-- [[_COMMUNITY_Hands|Hands]]
-- [[_COMMUNITY_Brain Digest|Brain Digest]]
-- [[_COMMUNITY_Orchestrator Sub Agent Delegation|Orchestrator Sub Agent Delegation]]
-- [[_COMMUNITY_Providers Tests|Providers Tests]]
-- [[_COMMUNITY_Orchestrator Api Keys|Orchestrator Api Keys]]
-- [[_COMMUNITY_Memory Contradiction|Memory Contradiction]]
-- [[_COMMUNITY_Hands Memory|Hands Memory]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Brain Ner|Brain Ner]]
-- [[_COMMUNITY_Brain Planner|Brain Planner]]
-- [[_COMMUNITY_Brain Brain Turn Db|Brain Brain Turn Db]]
-- [[_COMMUNITY_Core Session|Core Session]]
-- [[_COMMUNITY_Eval Collector|Eval Collector]]
-- [[_COMMUNITY_Eval Memory Eval Judge|Eval Memory Eval Judge]]
-- [[_COMMUNITY_Memory Fast Path|Memory Fast Path]]
-- [[_COMMUNITY_Memory Llm Merge|Memory Llm Merge]]
-- [[_COMMUNITY_Memory Turbopuffer|Memory Turbopuffer]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Orchestrator Inner|Orchestrator Inner]]
-- [[_COMMUNITY_Xtask Check Architecture Boundaries|Xtask Check Architecture Boundaries]]
-- [[_COMMUNITY_Core Action Policy|Core Action Policy]]
-- [[_COMMUNITY_Auth Bundle|Auth Bundle]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Brain Context Build|Brain Context Build]]
-- [[_COMMUNITY_Brain Compaction|Brain Compaction]]
-- [[_COMMUNITY_Brain Conversion|Brain Conversion]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Brain Turn|Brain Turn]]
-- [[_COMMUNITY_Edge Routes|Edge Routes]]
-- [[_COMMUNITY_Eval Transcript Runner|Eval Transcript Runner]]
-- [[_COMMUNITY_Memory Consolidate|Memory Consolidate]]
-- [[_COMMUNITY_Orchestrator Experiment Agent Loop E2E|Orchestrator Experiment Agent Loop E2E]]
-- [[_COMMUNITY_Skills Proposals|Skills Proposals]]
-- [[_COMMUNITY_Orchestrator Workflows|Orchestrator Workflows]]
-- [[_COMMUNITY_Brain Lineage|Brain Lineage]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Artifacts Simulation|Artifacts Simulation]]
-- [[_COMMUNITY_Eval Fixtures|Eval Fixtures]]
-- [[_COMMUNITY_Gateway Rate Limit|Gateway Rate Limit]]
-- [[_COMMUNITY_Hands Str Replace|Hands Str Replace]]
-- [[_COMMUNITY_Memory Concurrent Writers Db Memory|Memory Concurrent Writers Db Memory]]
-- [[_COMMUNITY_Memory Pgvector Store|Memory Pgvector Store]]
-- [[_COMMUNITY_Orchestrator Ctx|Orchestrator Ctx]]
-- [[_COMMUNITY_Orchestrator Deps|Orchestrator Deps]]
-- [[_COMMUNITY_Orchestrator Privacy|Orchestrator Privacy]]
-- [[_COMMUNITY_Orchestrator|Orchestrator]]
-- [[_COMMUNITY_Orchestrator Llm Gateway|Orchestrator Llm Gateway]]
-- [[_COMMUNITY_Orchestrator Session Turn Lifecycle Serv|Orchestrator Session Turn Lifecycle Serv]]
-- [[_COMMUNITY_Orchestrator Skill Learning Workflow|Orchestrator Skill Learning Workflow]]
-- [[_COMMUNITY_Providers Streaming|Providers Streaming]]
-- [[_COMMUNITY_Orchestrator Tenants|Orchestrator Tenants]]
-- [[_COMMUNITY_Providers Router|Providers Router]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Eval Json|Eval Json]]
-- [[_COMMUNITY_Hands File Outline|Hands File Outline]]
-- [[_COMMUNITY_Lineage Signing|Lineage Signing]]
-- [[_COMMUNITY_Loadtest Runner|Loadtest Runner]]
-- [[_COMMUNITY_Messaging Twilio Offline|Messaging Twilio Offline]]
-- [[_COMMUNITY_Session Experience|Session Experience]]
-- [[_COMMUNITY_Skills Artifact|Skills Artifact]]
-- [[_COMMUNITY_Brain Cache Audit Live|Brain Cache Audit Live]]
-- [[_COMMUNITY_Providers Streaming|Providers Streaming]]
-- [[_COMMUNITY_Brain Cache Audit Live|Brain Cache Audit Live]]
-- [[_COMMUNITY_Memory Write Protocol Db Memory|Memory Write Protocol Db Memory]]
-- [[_COMMUNITY_Eval Engine|Eval Engine]]
-- [[_COMMUNITY_Eval Memory Metrics|Eval Memory Metrics]]
-- [[_COMMUNITY_Memory Turbopuffer|Memory Turbopuffer]]
-- [[_COMMUNITY_Orchestrator Endpoint|Orchestrator Endpoint]]
-- [[_COMMUNITY_Orchestrator Session Store Service|Orchestrator Session Store Service]]
-- [[_COMMUNITY_Providers Request|Providers Request]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Xtask Check Eval Budgets|Xtask Check Eval Budgets]]
-- [[_COMMUNITY_Xtask|Xtask]]
-- [[_COMMUNITY_Edge Routes|Edge Routes]]
-- [[_COMMUNITY_Gateway Slack|Gateway Slack]]
-- [[_COMMUNITY_Providers Factory|Providers Factory]]
-- [[_COMMUNITY_Auth Http|Auth Http]]
-- [[_COMMUNITY_Brain Gate|Brain Gate]]
-- [[_COMMUNITY_Core Channel|Core Channel]]
-- [[_COMMUNITY_Core Memory|Core Memory]]
-- [[_COMMUNITY_Gateway Edit Window|Gateway Edit Window]]
-- [[_COMMUNITY_Hands Session Search|Hands Session Search]]
-- [[_COMMUNITY_Orchestrator Delegation|Orchestrator Delegation]]
-- [[_COMMUNITY_Providers Tools|Providers Tools]]
-- [[_COMMUNITY_Skills Lessons|Skills Lessons]]
-- [[_COMMUNITY_Xtask Run Memory Retrieval Eval|Xtask Run Memory Retrieval Eval]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Brain Pipeline Stages Db Memory|Brain Pipeline Stages Db Memory]]
-- [[_COMMUNITY_Memory Llm Client|Memory Llm Client]]
-- [[_COMMUNITY_Loadtest Stack|Loadtest Stack]]
-- [[_COMMUNITY_Core Context|Core Context]]
-- [[_COMMUNITY_Core Env Overlay|Core Env Overlay]]
-- [[_COMMUNITY_Auth Api Keys|Auth Api Keys]]
-- [[_COMMUNITY_Brain Scorer|Brain Scorer]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Lineage Admin|Lineage Admin]]
-- [[_COMMUNITY_Lineage Writer|Lineage Writer]]
-- [[_COMMUNITY_Messaging Postmark Provider E2E|Messaging Postmark Provider E2E]]
-- [[_COMMUNITY_Orchestrator Status|Orchestrator Status]]
-- [[_COMMUNITY_Orchestrator Experiment Workflow E2E|Orchestrator Experiment Workflow E2E]]
-- [[_COMMUNITY_Providers Provider Matrix Live|Providers Provider Matrix Live]]
-- [[_COMMUNITY_Skills Candidates|Skills Candidates]]
-- [[_COMMUNITY_Lineage Export|Lineage Export]]
-- [[_COMMUNITY_Orchestrator Ctx|Orchestrator Ctx]]
-- [[_COMMUNITY_Memory Embedder|Memory Embedder]]
-- [[_COMMUNITY_Hands Lifecycle|Hands Lifecycle]]
-- [[_COMMUNITY_Hands Output Budget|Hands Output Budget]]
-- [[_COMMUNITY_Hands Recovery|Hands Recovery]]
-- [[_COMMUNITY_Brain Checkpoint|Brain Checkpoint]]
-- [[_COMMUNITY_Eval Results|Eval Results]]
-- [[_COMMUNITY_Eval Engine|Eval Engine]]
-- [[_COMMUNITY_Eval Stats|Eval Stats]]
-- [[_COMMUNITY_Hands File Read|Hands File Read]]
-- [[_COMMUNITY_Loadtest Isolation|Loadtest Isolation]]
-- [[_COMMUNITY_Memory Fast Path Db Memory|Memory Fast Path Db Memory]]
-- [[_COMMUNITY_Orchestrator Request|Orchestrator Request]]
-- [[_COMMUNITY_Orchestrator Approvals Reaper|Orchestrator Approvals Reaper]]
-- [[_COMMUNITY_Security Vault|Security Vault]]
-- [[_COMMUNITY_Session|Session]]
-- [[_COMMUNITY_Orchestrator Authz Challenges Reaper|Orchestrator Authz Challenges Reaper]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Orchestrator|Orchestrator]]
-- [[_COMMUNITY_Eval Compare|Eval Compare]]
-- [[_COMMUNITY_Core Events Stream|Core Events Stream]]
-- [[_COMMUNITY_Orchestrator Brain Bridge|Orchestrator Brain Bridge]]
-- [[_COMMUNITY_Orchestrator Turn Execution Smoke Servic|Orchestrator Turn Execution Smoke Servic]]
-- [[_COMMUNITY_Orchestrator Replay Determinism|Orchestrator Replay Determinism]]
-- [[_COMMUNITY_Providers Models|Providers Models]]
-- [[_COMMUNITY_Providers Retry|Providers Retry]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Brain Registry|Brain Registry]]
-- [[_COMMUNITY_Core Events|Core Events]]
-- [[_COMMUNITY_Core Platform|Core Platform]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Eval Long Conversation Foundation Eval|Eval Long Conversation Foundation Eval]]
-- [[_COMMUNITY_Lineage|Lineage]]
-- [[_COMMUNITY_Loadtest Metrics|Loadtest Metrics]]
-- [[_COMMUNITY_Loadtest Load|Loadtest Load]]
-- [[_COMMUNITY_Memory Write|Memory Write]]
-- [[_COMMUNITY_Memory Contradiction|Memory Contradiction]]
-- [[_COMMUNITY_Memory Embedder Switch Db Memory|Memory Embedder Switch Db Memory]]
-- [[_COMMUNITY_Messaging Postmark Offline|Messaging Postmark Offline]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Session Neon Branch Manager Live|Session Neon Branch Manager Live]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Eval Compare|Eval Compare]]
-- [[_COMMUNITY_Brain Reranker|Brain Reranker]]
-- [[_COMMUNITY_Skills Registry Db Memory|Skills Registry Db Memory]]
-- [[_COMMUNITY_Core Telemetry|Core Telemetry]]
-- [[_COMMUNITY_Gateway Edit Window|Gateway Edit Window]]
-- [[_COMMUNITY_Ocsf Signing|Ocsf Signing]]
-- [[_COMMUNITY_Orchestrator Authz Challenges|Orchestrator Authz Challenges]]
-- [[_COMMUNITY_Orchestrator Trial Simulator|Orchestrator Trial Simulator]]
-- [[_COMMUNITY_Orchestrator Llm Gateway Provider E2E|Orchestrator Llm Gateway Provider E2E]]
-- [[_COMMUNITY_Security Injection|Security Injection]]
-- [[_COMMUNITY_Skills Render|Skills Render]]
-- [[_COMMUNITY_Session|Session]]
-- [[_COMMUNITY_Memory Cypher|Memory Cypher]]
-- [[_COMMUNITY_Eval Budgets|Eval Budgets]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Artifacts Document|Artifacts Document]]
-- [[_COMMUNITY_Brain Brain Turn Db|Brain Brain Turn Db]]
-- [[_COMMUNITY_Brain Query Rewrite Live|Brain Query Rewrite Live]]
-- [[_COMMUNITY_Eval Terminal|Eval Terminal]]
-- [[_COMMUNITY_Eval Memory Eval Db Memory|Eval Memory Eval Db Memory]]
-- [[_COMMUNITY_Hands Docker File|Hands Docker File]]
-- [[_COMMUNITY_Loadtest Mock Smoke|Loadtest Mock Smoke]]
-- [[_COMMUNITY_Memory Lexical Ranking Db Memory|Memory Lexical Ranking Db Memory]]
-- [[_COMMUNITY_Memory Read Smoke Db Memory|Memory Read Smoke Db Memory]]
-- [[_COMMUNITY_Messaging Twilio Provider E2E|Messaging Twilio Provider E2E]]
-- [[_COMMUNITY_Orchestrator Config|Orchestrator Config]]
-- [[_COMMUNITY_Orchestrator Privacy|Orchestrator Privacy]]
-- [[_COMMUNITY_Orchestrator Target Execution|Orchestrator Target Execution]]
-- [[_COMMUNITY_Session Segments|Session Segments]]
-- [[_COMMUNITY_Orchestrator Store|Orchestrator Store]]
-- [[_COMMUNITY_Eval Compare|Eval Compare]]
-- [[_COMMUNITY_Auth Vault|Auth Vault]]
-- [[_COMMUNITY_Core Env Overlay|Core Env Overlay]]
-- [[_COMMUNITY_Hands Bash|Hands Bash]]
-- [[_COMMUNITY_Auth Ciba|Auth Ciba]]
-- [[_COMMUNITY_Auth Tuple|Auth Tuple]]
-- [[_COMMUNITY_Auth Builtin Authz|Auth Builtin Authz]]
-- [[_COMMUNITY_Brain Tools|Brain Tools]]
-- [[_COMMUNITY_Brain Cache|Brain Cache]]
-- [[_COMMUNITY_Brain Brain Turn Db|Brain Brain Turn Db]]
-- [[_COMMUNITY_Core Restate Observability|Core Restate Observability]]
-- [[_COMMUNITY_Eval Scripted User|Eval Scripted User]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Eval Memory Eval Db Memory|Eval Memory Eval Db Memory]]
-- [[_COMMUNITY_Lineage Chain|Lineage Chain]]
-- [[_COMMUNITY_Memory Slow Path Orchestration Db Memory|Memory Slow Path Orchestration Db Memory]]
-- [[_COMMUNITY_Memory Fast Path Db Memory|Memory Fast Path Db Memory]]
-- [[_COMMUNITY_Memory|Memory]]
-- [[_COMMUNITY_Memory Promotion Db Memory|Memory Promotion Db Memory]]
-- [[_COMMUNITY_Orchestrator Jobs|Orchestrator Jobs]]
-- [[_COMMUNITY_Orchestrator Durable Step Recorder|Orchestrator Durable Step Recorder]]
-- [[_COMMUNITY_Providers Cache Control Markers|Providers Cache Control Markers]]
-- [[_COMMUNITY_Xtask Check Eval Budgets|Xtask Check Eval Budgets]]
-- [[_COMMUNITY_Core Env Overlay|Core Env Overlay]]
-- [[_COMMUNITY_Providers Streaming|Providers Streaming]]
-- [[_COMMUNITY_Brain Signal Wait|Brain Signal Wait]]
-- [[_COMMUNITY_Core Auth|Core Auth]]
-- [[_COMMUNITY_Edge Routes|Edge Routes]]
-- [[_COMMUNITY_Brain Builder|Brain Builder]]
-- [[_COMMUNITY_Brain Verification Signal|Brain Verification Signal]]
-- [[_COMMUNITY_Core Approval|Core Approval]]
-- [[_COMMUNITY_Eval Transcript Runner|Eval Transcript Runner]]
-- [[_COMMUNITY_Loadtest Reporting|Loadtest Reporting]]
-- [[_COMMUNITY_Messaging Delivery|Messaging Delivery]]
-- [[_COMMUNITY_Orchestrator|Orchestrator]]
-- [[_COMMUNITY_Orchestrator Workspace|Orchestrator Workspace]]
-- [[_COMMUNITY_Providers Response|Providers Response]]
-- [[_COMMUNITY_Session|Session]]
-- [[_COMMUNITY_Brain Pending|Brain Pending]]
-- [[_COMMUNITY_Workflows Runtime|Workflows Runtime]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Core Sandbox|Core Sandbox]]
-- [[_COMMUNITY_Hands Dispatch|Hands Dispatch]]
-- [[_COMMUNITY_Hands Telemetry|Hands Telemetry]]
-- [[_COMMUNITY_Auth Outbox|Auth Outbox]]
-- [[_COMMUNITY_Core Error|Core Error]]
-- [[_COMMUNITY_Core Session Replay|Core Session Replay]]
-- [[_COMMUNITY_Core Segment Assessment|Core Segment Assessment]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Eval Loader|Eval Loader]]
-- [[_COMMUNITY_Lineage Writer|Lineage Writer]]
-- [[_COMMUNITY_Messaging Delivery|Messaging Delivery]]
-- [[_COMMUNITY_Orchestrator Tests|Orchestrator Tests]]
-- [[_COMMUNITY_Orchestrator Session Brain E2E|Orchestrator Session Brain E2E]]
-- [[_COMMUNITY_Orchestrator Session Vo E2E|Orchestrator Session Vo E2E]]
-- [[_COMMUNITY_Providers Openai Provider|Providers Openai Provider]]
-- [[_COMMUNITY_Auth Ciba Db|Auth Ciba Db]]
-- [[_COMMUNITY_Core Db|Core Db]]
-- [[_COMMUNITY_Brain Attribution|Brain Attribution]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Auth Jwks Cache|Auth Jwks Cache]]
-- [[_COMMUNITY_Auth Oidc Provider|Auth Oidc Provider]]
-- [[_COMMUNITY_Core Transcript|Core Transcript]]
-- [[_COMMUNITY_Brain Tool Signal|Brain Tool Signal]]
-- [[_COMMUNITY_Edge Proxy|Edge Proxy]]
-- [[_COMMUNITY_Eval Transcript Runner|Eval Transcript Runner]]
-- [[_COMMUNITY_Eval Long Conversation Smoke Eval|Eval Long Conversation Smoke Eval]]
-- [[_COMMUNITY_Eval Memory Eval Db Memory|Eval Memory Eval Db Memory]]
-- [[_COMMUNITY_Gateway Slack|Gateway Slack]]
-- [[_COMMUNITY_Memory Fast Path|Memory Fast Path]]
-- [[_COMMUNITY_Memory Pgvector Store Db Memory|Memory Pgvector Store Db Memory]]
-- [[_COMMUNITY_Migrations|Migrations]]
-- [[_COMMUNITY_Ocsf Classes|Ocsf Classes]]
-- [[_COMMUNITY_Orchestrator Session Vo|Orchestrator Session Vo]]
-- [[_COMMUNITY_Orchestrator Privacy|Orchestrator Privacy]]
-- [[_COMMUNITY_Orchestrator Schema|Orchestrator Schema]]
-- [[_COMMUNITY_Providers Openai Responses Envelope|Providers Openai Responses Envelope]]
-- [[_COMMUNITY_Session Helpers|Session Helpers]]
-- [[_COMMUNITY_Xtask Check Eval Budgets|Xtask Check Eval Budgets]]
-- [[_COMMUNITY_Xtask Check Eval Budgets|Xtask Check Eval Budgets]]
-- [[_COMMUNITY_Migrations V000306 Contacts|Migrations V000306 Contacts]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Brain Instructions|Brain Instructions]]
-- [[_COMMUNITY_Core Query Rewrite|Core Query Rewrite]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Hands File Write|Hands File Write]]
-- [[_COMMUNITY_Hands Daytona Live|Hands Daytona Live]]
-- [[_COMMUNITY_Lineage Dsar|Lineage Dsar]]
-- [[_COMMUNITY_Loadtest Report|Loadtest Report]]
-- [[_COMMUNITY_Memory Chunking|Memory Chunking]]
-- [[_COMMUNITY_Memory Erasure|Memory Erasure]]
-- [[_COMMUNITY_Messaging Delivery Offline|Messaging Delivery Offline]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Orchestrator Patch|Orchestrator Patch]]
-- [[_COMMUNITY_Orchestrator Inner|Orchestrator Inner]]
-- [[_COMMUNITY_Orchestrator Eval Run|Orchestrator Eval Run]]
-- [[_COMMUNITY_Gateway Approval|Gateway Approval]]
-- [[_COMMUNITY_Brain Summarize|Brain Summarize]]
-- [[_COMMUNITY_Brain Candidates|Brain Candidates]]
-- [[_COMMUNITY_Brain Identity|Brain Identity]]
-- [[_COMMUNITY_Brain Input|Brain Input]]
-- [[_COMMUNITY_Brain Test Support|Brain Test Support]]
-- [[_COMMUNITY_Experiments Model|Experiments Model]]
-- [[_COMMUNITY_Lineage Writer|Lineage Writer]]
-- [[_COMMUNITY_Memory Lexical|Memory Lexical]]
-- [[_COMMUNITY_Memory Extractor|Memory Extractor]]
-- [[_COMMUNITY_Memory Digest Postgres Db Memory|Memory Digest Postgres Db Memory]]
-- [[_COMMUNITY_Orchestrator Audit|Orchestrator Audit]]
-- [[_COMMUNITY_Orchestrator Privacy|Orchestrator Privacy]]
-- [[_COMMUNITY_Providers Tests|Providers Tests]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Auth Api Keys|Auth Api Keys]]
-- [[_COMMUNITY_Gateway|Gateway]]
-- [[_COMMUNITY_Providers Schema|Providers Schema]]
-- [[_COMMUNITY_Artifacts Document|Artifacts Document]]
-- [[_COMMUNITY_Artifacts Skill|Artifacts Skill]]
-- [[_COMMUNITY_Brain Budget|Brain Budget]]
-- [[_COMMUNITY_Brain Postprocess|Brain Postprocess]]
-- [[_COMMUNITY_Brain Activation|Brain Activation]]
-- [[_COMMUNITY_Brain Skill Package Materialization Db M|Brain Skill Package Materialization Db M]]
-- [[_COMMUNITY_Hands Edit Output|Hands Edit Output]]
-- [[_COMMUNITY_Core Model|Core Model]]
-- [[_COMMUNITY_Core Snapshot|Core Snapshot]]
-- [[_COMMUNITY_Eval Output Match|Eval Output Match]]
-- [[_COMMUNITY_Eval Comparator|Eval Comparator]]
-- [[_COMMUNITY_Gateway Slack|Gateway Slack]]
-- [[_COMMUNITY_Hands E2B Live|Hands E2B Live]]
-- [[_COMMUNITY_Loadtest Plan|Loadtest Plan]]
-- [[_COMMUNITY_Memory Entity Resolution|Memory Entity Resolution]]
-- [[_COMMUNITY_Memory Contradiction Real|Memory Contradiction Real]]
-- [[_COMMUNITY_Orchestrator Ctx|Orchestrator Ctx]]
-- [[_COMMUNITY_Orchestrator Authz Admin|Orchestrator Authz Admin]]
-- [[_COMMUNITY_Session Events Concurrent Monotonicity D|Session Events Concurrent Monotonicity D]]
-- [[_COMMUNITY_Test Support Postgres|Test Support Postgres]]
-- [[_COMMUNITY_Test Support Pricing|Test Support Pricing]]
-- [[_COMMUNITY_Xtask Check Eval Budgets|Xtask Check Eval Budgets]]
-- [[_COMMUNITY_Xtask Generate Memory Eval Corpus|Xtask Generate Memory Eval Corpus]]
-- [[_COMMUNITY_Eval Readme|Eval Readme]]
-- [[_COMMUNITY_Memory Write|Memory Write]]
-- [[_COMMUNITY_Brain Deterministic|Brain Deterministic]]
-- [[_COMMUNITY_Core Providers|Core Providers]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Artifacts Workflow|Artifacts Workflow]]
-- [[_COMMUNITY_Brain Continuation Signal|Brain Continuation Signal]]
-- [[_COMMUNITY_Core Tool Approval|Core Tool Approval]]
-- [[_COMMUNITY_Core Shell|Core Shell]]
-- [[_COMMUNITY_Eval Engine|Eval Engine]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Memory Quality Postgres Db Memory|Memory Quality Postgres Db Memory]]
-- [[_COMMUNITY_Orchestrator Health|Orchestrator Health]]
-- [[_COMMUNITY_Orchestrator Deactivation|Orchestrator Deactivation]]
-- [[_COMMUNITY_Orchestrator Approval Wait|Orchestrator Approval Wait]]
-- [[_COMMUNITY_Orchestrator Replay Determinism|Orchestrator Replay Determinism]]
-- [[_COMMUNITY_Session Schema|Session Schema]]
-- [[_COMMUNITY_Auth Local|Auth Local]]
-- [[_COMMUNITY_Brain Resolved|Brain Resolved]]
-- [[_COMMUNITY_Loadtest Mock Loadtest Service E2E|Loadtest Mock Loadtest Service E2E]]
-- [[_COMMUNITY_Artifacts Resolver|Artifacts Resolver]]
-- [[_COMMUNITY_Auth Auth0 Provider|Auth Auth0 Provider]]
-- [[_COMMUNITY_Auth Local Auth Live|Auth Local Auth Live]]
-- [[_COMMUNITY_Brain Loop Detector|Brain Loop Detector]]
-- [[_COMMUNITY_Brain Compaction|Brain Compaction]]
-- [[_COMMUNITY_Brain Pipeline Stages Db Memory|Brain Pipeline Stages Db Memory]]
-- [[_COMMUNITY_Eval|Eval]]
-- [[_COMMUNITY_Eval Threshold|Eval Threshold]]
-- [[_COMMUNITY_Eval Plan|Eval Plan]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Eval Evaluators|Eval Evaluators]]
-- [[_COMMUNITY_Hands Tool Result|Hands Tool Result]]
-- [[_COMMUNITY_Lineage Signing|Lineage Signing]]
-- [[_COMMUNITY_Lineage Admin|Lineage Admin]]
-- [[_COMMUNITY_Memory Fast Path|Memory Fast Path]]
-- [[_COMMUNITY_Memory Backend|Memory Backend]]
-- [[_COMMUNITY_Ocsf Jcs|Ocsf Jcs]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Xtask Record Memory Extractions|Xtask Record Memory Extractions]]
-- [[_COMMUNITY_Providers Cost Math|Providers Cost Math]]
-- [[_COMMUNITY_Loadtest Perf Gate|Loadtest Perf Gate]]
-- [[_COMMUNITY_Auth Null Vault|Auth Null Vault]]
-- [[_COMMUNITY_Core Authz|Core Authz]]
-- [[_COMMUNITY_Core Telemetry|Core Telemetry]]
-- [[_COMMUNITY_Artifacts Behavior Lab Offline|Artifacts Behavior Lab Offline]]
-- [[_COMMUNITY_Auth Auth0 Live|Auth Auth0 Live]]
-- [[_COMMUNITY_Auth Api Keys|Auth Api Keys]]
-- [[_COMMUNITY_Brain Legs|Brain Legs]]
-- [[_COMMUNITY_Core Workspace|Core Workspace]]
-- [[_COMMUNITY_Lineage Fjall Journal|Lineage Fjall Journal]]
-- [[_COMMUNITY_Loadtest Options|Loadtest Options]]
-- [[_COMMUNITY_Loadtest Tests|Loadtest Tests]]
-- [[_COMMUNITY_Memory Changelog|Memory Changelog]]
-- [[_COMMUNITY_Memory Edge|Memory Edge]]
-- [[_COMMUNITY_Orchestrator Session Store Db|Orchestrator Session Store Db]]
-- [[_COMMUNITY_Session Action Policy|Session Action Policy]]
-- [[_COMMUNITY_Session Events Append Only Db|Session Events Append Only Db]]
-- [[_COMMUNITY_Xtask Record Memory Merges|Xtask Record Memory Merges]]
-- [[_COMMUNITY_Brain Circuit Breaker|Brain Circuit Breaker]]
-- [[_COMMUNITY_Auth Vault Db|Auth Vault Db]]
-- [[_COMMUNITY_Lineage Merkle|Lineage Merkle]]
-- [[_COMMUNITY_Core Database|Core Database]]
-- [[_COMMUNITY_Brain Stable Prefix Db Memory|Brain Stable Prefix Db Memory]]
-- [[_COMMUNITY_Eval Trajectory Match|Eval Trajectory Match]]
-- [[_COMMUNITY_Eval|Eval]]
-- [[_COMMUNITY_Memory|Memory]]
-- [[_COMMUNITY_Memory Write|Memory Write]]
-- [[_COMMUNITY_Messaging Delivery|Messaging Delivery]]
-- [[_COMMUNITY_Orchestrator Ctx|Orchestrator Ctx]]
-- [[_COMMUNITY_Orchestrator Persistence|Orchestrator Persistence]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Providers Gemini Safety Settings|Providers Gemini Safety Settings]]
-- [[_COMMUNITY_Providers Openai Offline|Providers Openai Offline]]
-- [[_COMMUNITY_Skills Skill Graph|Skills Skill Graph]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Xtask Check Eval Budgets|Xtask Check Eval Budgets]]
-- [[_COMMUNITY_Xtask Compare Eval Reports|Xtask Compare Eval Reports]]
-- [[_COMMUNITY_Eval Long Conversation Smoke Eval|Eval Long Conversation Smoke Eval]]
-- [[_COMMUNITY_Brain Prompt|Brain Prompt]]
-- [[_COMMUNITY_Brain Hybrid|Brain Hybrid]]
-- [[_COMMUNITY_Edge|Edge]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Eval Langfuse|Eval Langfuse]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Eval Long Conversation Smoke Eval|Eval Long Conversation Smoke Eval]]
-- [[_COMMUNITY_Messaging Action Review|Messaging Action Review]]
-- [[_COMMUNITY_Orchestrator Neon Maint|Orchestrator Neon Maint]]
-- [[_COMMUNITY_Orchestrator Inner|Orchestrator Inner]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Orchestrator Consolidate E2E|Orchestrator Consolidate E2E]]
-- [[_COMMUNITY_Session Learning|Session Learning]]
-- [[_COMMUNITY_Xtask Compute Memory Quality Scores|Xtask Compute Memory Quality Scores]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Test Support Session|Test Support Session]]
-- [[_COMMUNITY_Auth Auth0 Provider|Auth Auth0 Provider]]
-- [[_COMMUNITY_Auth Ciba|Auth Ciba]]
-- [[_COMMUNITY_Auth Disabled|Auth Disabled]]
-- [[_COMMUNITY_Brain Chat Harness|Brain Chat Harness]]
-- [[_COMMUNITY_Brain Llm Call|Brain Llm Call]]
-- [[_COMMUNITY_Brain Structural Signal|Brain Structural Signal]]
-- [[_COMMUNITY_Brain Turbopuffer News Live|Brain Turbopuffer News Live]]
-- [[_COMMUNITY_Core Learning|Core Learning]]
-- [[_COMMUNITY_Eval Tool Success|Eval Tool Success]]
-- [[_COMMUNITY_Eval Core Metrics|Eval Core Metrics]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Lineage Writer|Lineage Writer]]
-- [[_COMMUNITY_Memory Validity|Memory Validity]]
-- [[_COMMUNITY_Memory Changelog Outbox Db Memory|Memory Changelog Outbox Db Memory]]
-- [[_COMMUNITY_Orchestrator Ctx|Orchestrator Ctx]]
-- [[_COMMUNITY_Orchestrator Database|Orchestrator Database]]
-- [[_COMMUNITY_Orchestrator Learning Review|Orchestrator Learning Review]]
-- [[_COMMUNITY_Orchestrator Lineage Admin|Orchestrator Lineage Admin]]
-- [[_COMMUNITY_Providers Request Body Snapshots|Providers Request Body Snapshots]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Orchestrator Util|Orchestrator Util]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Core Async Authz|Core Async Authz]]
-- [[_COMMUNITY_Artifacts Connector|Artifacts Connector]]
-- [[_COMMUNITY_Hands Construction|Hands Construction]]
-- [[_COMMUNITY_Auth Ciba Db|Auth Ciba Db]]
-- [[_COMMUNITY_Auth Vault Live|Auth Vault Live]]
-- [[_COMMUNITY_Auth Awakeable|Auth Awakeable]]
-- [[_COMMUNITY_Brain Hybrid|Brain Hybrid]]
-- [[_COMMUNITY_Brain Self Assessment Signal|Brain Self Assessment Signal]]
-- [[_COMMUNITY_Core Runtime Events|Core Runtime Events]]
-- [[_COMMUNITY_Eval Replay|Eval Replay]]
-- [[_COMMUNITY_Eval|Eval]]
-- [[_COMMUNITY_Eval Setup|Eval Setup]]
-- [[_COMMUNITY_Lineage Adapters|Lineage Adapters]]
-- [[_COMMUNITY_Loadtest Harness|Loadtest Harness]]
-- [[_COMMUNITY_Memory Slow Path|Memory Slow Path]]
-- [[_COMMUNITY_Memory Quality|Memory Quality]]
-- [[_COMMUNITY_Gateway Slack|Gateway Slack]]
-- [[_COMMUNITY_Messaging Twilio Provider E2E|Messaging Twilio Provider E2E]]
-- [[_COMMUNITY_Orchestrator Ctx|Orchestrator Ctx]]
-- [[_COMMUNITY_Orchestrator Tenants|Orchestrator Tenants]]
-- [[_COMMUNITY_Orchestrator Whoami|Orchestrator Whoami]]
-- [[_COMMUNITY_Orchestrator Approval|Orchestrator Approval]]
-- [[_COMMUNITY_Orchestrator Fake Clock|Orchestrator Fake Clock]]
-- [[_COMMUNITY_Session Approval|Session Approval]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Session Audit Smoke Db|Session Audit Smoke Db]]
-- [[_COMMUNITY_Auth|Auth]]
-- [[_COMMUNITY_Orchestrator Llm Gateway|Orchestrator Llm Gateway]]
-- [[_COMMUNITY_Brain Pipeline Stages Db Memory|Brain Pipeline Stages Db Memory]]
-- [[_COMMUNITY_Brain Snapshot|Brain Snapshot]]
-- [[_COMMUNITY_Core Env Overlay|Core Env Overlay]]
-- [[_COMMUNITY_Core Messaging|Core Messaging]]
-- [[_COMMUNITY_Core Security|Core Security]]
-- [[_COMMUNITY_Eval Long Conversation Smoke Eval|Eval Long Conversation Smoke Eval]]
-- [[_COMMUNITY_Lineage|Lineage]]
-- [[_COMMUNITY_Providers Streaming|Providers Streaming]]
-- [[_COMMUNITY_Artifacts Simulation|Artifacts Simulation]]
-- [[_COMMUNITY_Auth Jwt Validation Db|Auth Jwt Validation Db]]
-- [[_COMMUNITY_Auth|Auth]]
-- [[_COMMUNITY_Auth Builtin Authz Request Db|Auth Builtin Authz Request Db]]
-- [[_COMMUNITY_Core Telemetry|Core Telemetry]]
-- [[_COMMUNITY_Core Identifiers|Core Identifiers]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Gateway|Gateway]]
-- [[_COMMUNITY_Lineage Sink|Lineage Sink]]
-- [[_COMMUNITY_Memory Fast Path Db Memory|Memory Fast Path Db Memory]]
-- [[_COMMUNITY_Memory Gemini|Memory Gemini]]
-- [[_COMMUNITY_Memory Turbopuffer Offline|Memory Turbopuffer Offline]]
-- [[_COMMUNITY_Orchestrator Auth|Orchestrator Auth]]
-- [[_COMMUNITY_Session Testing|Session Testing]]
-- [[_COMMUNITY_Test Support Fixtures Round Trip|Test Support Fixtures Round Trip]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Eval Setup|Eval Setup]]
-- [[_COMMUNITY_Brain Report|Brain Report]]
-- [[_COMMUNITY_Core Learning|Core Learning]]
-- [[_COMMUNITY_Core Orchestrator|Core Orchestrator]]
-- [[_COMMUNITY_Skills Registry|Skills Registry]]
-- [[_COMMUNITY_Brain Terms|Brain Terms]]
-- [[_COMMUNITY_Core Truncation|Core Truncation]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Eval Cache Metrics|Eval Cache Metrics]]
-- [[_COMMUNITY_Eval Metrics|Eval Metrics]]
-- [[_COMMUNITY_Eval Runner|Eval Runner]]
-- [[_COMMUNITY_Eval Setup|Eval Setup]]
-- [[_COMMUNITY_Eval Golden Eval|Eval Golden Eval]]
-- [[_COMMUNITY_Hands Mcp Router|Hands Mcp Router]]
-- [[_COMMUNITY_Memory Mock|Memory Mock]]
-- [[_COMMUNITY_Memory Sidecar Live|Memory Sidecar Live]]
-- [[_COMMUNITY_Orchestrator Groups|Orchestrator Groups]]
-- [[_COMMUNITY_Orchestrator Inner|Orchestrator Inner]]
-- [[_COMMUNITY_Orchestrator|Orchestrator]]
-- [[_COMMUNITY_Session|Session]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Eval|Eval]]
-- [[_COMMUNITY_Memory Consolidate|Memory Consolidate]]
-- [[_COMMUNITY_Orchestrator Handlers|Orchestrator Handlers]]
-- [[_COMMUNITY_Messaging Provenance|Messaging Provenance]]
-- [[_COMMUNITY_Providers Model|Providers Model]]
-- [[_COMMUNITY_Migrations Readme|Migrations Readme]]
-- [[_COMMUNITY_Core Gateway|Core Gateway]]
-- [[_COMMUNITY_Core Lineage|Core Lineage]]
-- [[_COMMUNITY_Core Loader|Core Loader]]
-- [[_COMMUNITY_Core Session|Core Session]]
-- [[_COMMUNITY_Artifacts Canonical|Artifacts Canonical]]
-- [[_COMMUNITY_Auth Support|Auth Support]]
-- [[_COMMUNITY_Auth Poller Live|Auth Poller Live]]
-- [[_COMMUNITY_Brain Postprocess|Brain Postprocess]]
-- [[_COMMUNITY_Brain Brain Turn Cache Replay Db Memory|Brain Brain Turn Cache Replay Db Memory]]
-- [[_COMMUNITY_Brain Cohere Reranker Live|Brain Cohere Reranker Live]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Lineage Ids|Lineage Ids]]
-- [[_COMMUNITY_Loadtest|Loadtest]]
-- [[_COMMUNITY_Memory Write|Memory Write]]
-- [[_COMMUNITY_Ocsf Support|Ocsf Support]]
-- [[_COMMUNITY_Orchestrator Meta|Orchestrator Meta]]
-- [[_COMMUNITY_Providers Model|Providers Model]]
-- [[_COMMUNITY_Providers Routing|Providers Routing]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Artifacts Definition Roundtrip|Artifacts Definition Roundtrip]]
-- [[_COMMUNITY_Auth Schema|Auth Schema]]
-- [[_COMMUNITY_Brain Memory|Brain Memory]]
-- [[_COMMUNITY_Memory Llm Client|Memory Llm Client]]
-- [[_COMMUNITY_Hands Dispatch|Hands Dispatch]]
-- [[_COMMUNITY_Auth Schema|Auth Schema]]
-- [[_COMMUNITY_Auth Schema|Auth Schema]]
-- [[_COMMUNITY_Eval|Eval]]
-- [[_COMMUNITY_Eval Metrics|Eval Metrics]]
-- [[_COMMUNITY_Hands Tests|Hands Tests]]
-- [[_COMMUNITY_Lineage Schema|Lineage Schema]]
-- [[_COMMUNITY_Ocsf Schema|Ocsf Schema]]
-- [[_COMMUNITY_Orchestrator Schema|Orchestrator Schema]]
-- [[_COMMUNITY_Orchestrator Authz Challenges Reaper|Orchestrator Authz Challenges Reaper]]
-- [[_COMMUNITY_Orchestrator Inner|Orchestrator Inner]]
-- [[_COMMUNITY_Orchestrator Turn Execution|Orchestrator Turn Execution]]
-- [[_COMMUNITY_Orchestrator Scim Compliance Live|Orchestrator Scim Compliance Live]]
-- [[_COMMUNITY_Core Provider|Core Provider]]
-- [[_COMMUNITY_Providers Response|Providers Response]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Providers Http|Providers Http]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Core Runtime Metrics|Core Runtime Metrics]]
-- [[_COMMUNITY_Core Embedding|Core Embedding]]
-- [[_COMMUNITY_Orchestrator Eval|Orchestrator Eval]]
-- [[_COMMUNITY_Orchestrator Turn Execution|Orchestrator Turn Execution]]
-- [[_COMMUNITY_Session Error|Session Error]]
-- [[_COMMUNITY_Test Support Orchestrator Fixture|Test Support Orchestrator Fixture]]
-- [[_COMMUNITY_Skills Registry|Skills Registry]]
-- [[_COMMUNITY_Ocsf Enums|Ocsf Enums]]
-- [[_COMMUNITY_Orchestrator Experiments|Orchestrator Experiments]]
-- [[_COMMUNITY_Orchestrator Experiments|Orchestrator Experiments]]
-- [[_COMMUNITY_Orchestrator Experiments|Orchestrator Experiments]]
-- [[_COMMUNITY_Brain Hybrid Retrieval Db Memory|Brain Hybrid Retrieval Db Memory]]
-- [[_COMMUNITY_Migrations|Migrations]]
-- [[_COMMUNITY_Orchestrator|Orchestrator]]
-- [[_COMMUNITY_Brain Test Support|Brain Test Support]]
-- [[_COMMUNITY_Session Action Policy|Session Action Policy]]
-- [[_COMMUNITY_Test Support Approval|Test Support Approval]]
-- [[_COMMUNITY_Auth Error|Auth Error]]
-- [[_COMMUNITY_Core Wire|Core Wire]]
-- [[_COMMUNITY_Memory Consolidate|Memory Consolidate]]
-- [[_COMMUNITY_Ocsf Sign Verify Roundtrip Db|Ocsf Sign Verify Roundtrip Db]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Security Policies|Security Policies]]
-- [[_COMMUNITY_Skills Proposals|Skills Proposals]]
-- [[_COMMUNITY_Skills Proposals|Skills Proposals]]
-- [[_COMMUNITY_Orchestrator Plan Expansion|Orchestrator Plan Expansion]]
-- [[_COMMUNITY_Orchestrator Action Reviews|Orchestrator Action Reviews]]
-- [[_COMMUNITY_Orchestrator Local Smoke|Orchestrator Local Smoke]]
-- [[_COMMUNITY_Orchestrator Approval Flow E2E|Orchestrator Approval Flow E2E]]
-- [[_COMMUNITY_Artifacts Canonical|Artifacts Canonical]]
-- [[_COMMUNITY_Core Audit Security|Core Audit Security]]
+- [[_COMMUNITY_Memory Eval Corpus Generator|Memory Eval Corpus Generator]]
+- [[_COMMUNITY_Contact Verification|Contact Verification]]
+- [[_COMMUNITY_Memory Eval DB Tests|Memory Eval DB Tests]]
+- [[_COMMUNITY_Analytics & Tool Stats|Analytics & Tool Stats]]
+- [[_COMMUNITY_Experiment Improvement Admission|Experiment Improvement Admission]]
+- [[_COMMUNITY_Restate Handler Instrumentation|Restate Handler Instrumentation]]
+- [[_COMMUNITY_Gold Fact Resolution|Gold Fact Resolution]]
+- [[_COMMUNITY_Experiments Service|Experiments Service]]
+- [[_COMMUNITY_Working Context Assembly|Working Context Assembly]]
+- [[_COMMUNITY_Session Turn Start|Session Turn Start]]
+- [[_COMMUNITY_Service Entrypoints & Probes|Service Entrypoints & Probes]]
+- [[_COMMUNITY_Turn Execution & Tool Calls|Turn Execution & Tool Calls]]
+- [[_COMMUNITY_Graph Memory Consolidation|Graph Memory Consolidation]]
+- [[_COMMUNITY_Session Creation & Agent Policy|Session Creation & Agent Policy]]
+- [[_COMMUNITY_Postgres Store Rows|Postgres Store Rows]]
+- [[_COMMUNITY_Memory Slow Path Decisions|Memory Slow Path Decisions]]
+- [[_COMMUNITY_Memory Ingestion & Scope|Memory Ingestion & Scope]]
+- [[_COMMUNITY_Agent Definitions Deploy|Agent Definitions Deploy]]
+- [[_COMMUNITY_Context Test Fixtures|Context Test Fixtures]]
+- [[_COMMUNITY_Retrieval Expansion Legs|Retrieval Expansion Legs]]
+- [[_COMMUNITY_Cross-Tenant Pentest|Cross-Tenant Pentest]]
+- [[_COMMUNITY_Skill Registry|Skill Registry]]
+- [[_COMMUNITY_Restate Runtime Harness|Restate Runtime Harness]]
+- [[_COMMUNITY_Retrieval Eval Metrics|Retrieval Eval Metrics]]
+- [[_COMMUNITY_Behavior Lab Simulation E2E|Behavior Lab Simulation E2E]]
+- [[_COMMUNITY_Hybrid Retriever|Hybrid Retriever]]
+- [[_COMMUNITY_Messaging Send & Rate Limiting|Messaging Send & Rate Limiting]]
+- [[_COMMUNITY_Twilio SMS Client|Twilio SMS Client]]
+- [[_COMMUNITY_Skills Import Service|Skills Import Service]]
+- [[_COMMUNITY_Transcript Runner|Transcript Runner]]
+- [[_COMMUNITY_Experiment Run Status|Experiment Run Status]]
+- [[_COMMUNITY_Artifact Registry|Artifact Registry]]
+- [[_COMMUNITY_Neon Branch Manager|Neon Branch Manager]]
+- [[_COMMUNITY_Postmark Email Client|Postmark Email Client]]
+- [[_COMMUNITY_Text Renderer|Text Renderer]]
+- [[_COMMUNITY_Records|Records]]
+- [[_COMMUNITY_Handlers|Handlers]]
+- [[_COMMUNITY_Workspace|Workspace]]
+- [[_COMMUNITY_Long Conversation Smoke Eval|Long Conversation Smoke Eval]]
+- [[_COMMUNITY_Cache|Cache]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Store|Store]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Experience|Experience]]
+- [[_COMMUNITY_Learning Review|Learning Review]]
+- [[_COMMUNITY_Tool Executor|Tool Executor]]
+- [[_COMMUNITY_Resolver|Resolver]]
+- [[_COMMUNITY_Completionrequest|Completionrequest]]
+- [[_COMMUNITY_Sub Agent Turn Execution|Sub Agent Turn Execution]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Runtime Metrics|Runtime Metrics]]
+- [[_COMMUNITY_Counting|Counting]]
+- [[_COMMUNITY_Format|Format]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Emit|Emit]]
+- [[_COMMUNITY_File Search|File Search]]
+- [[_COMMUNITY_Ranking|Ranking]]
+- [[_COMMUNITY_Validation|Validation]]
+- [[_COMMUNITY_Tenantid|Tenantid]]
+- [[_COMMUNITY_Target Execution|Target Execution]]
+- [[_COMMUNITY_Registry|Registry]]
+- [[_COMMUNITY_Experience|Experience]]
+- [[_COMMUNITY_Corpus|Corpus]]
+- [[_COMMUNITY_Approval|Approval]]
+- [[_COMMUNITY_Regression|Regression]]
 - [[_COMMUNITY_Artifacts|Artifacts]]
-- [[_COMMUNITY_Eval Error|Eval Error]]
-- [[_COMMUNITY_Lineage Error|Lineage Error]]
-- [[_COMMUNITY_Lineage Error|Lineage Error]]
-- [[_COMMUNITY_Memory Error|Memory Error]]
-- [[_COMMUNITY_Memory Error|Memory Error]]
-- [[_COMMUNITY_Workflows Error|Workflows Error]]
-- [[_COMMUNITY_Lineage Readme|Lineage Readme]]
-- [[_COMMUNITY_Hands Daytona Live|Hands Daytona Live]]
-- [[_COMMUNITY_Hands Daytona Live|Hands Daytona Live]]
-- [[_COMMUNITY_Orchestrator Experiment Run|Orchestrator Experiment Run]]
-- [[_COMMUNITY_Ocsf Jcs|Ocsf Jcs]]
-- [[_COMMUNITY_Brain|Brain]]
-- [[_COMMUNITY_Core|Core]]
-- [[_COMMUNITY_Loadtest Metrics|Loadtest Metrics]]
-- [[_COMMUNITY_Loadtest Readme|Loadtest Readme]]
-- [[_COMMUNITY_Orchestrator Authz Challenges Reaper|Orchestrator Authz Challenges Reaper]]
-- [[_COMMUNITY_Session Approval|Session Approval]]
-- [[_COMMUNITY_Session Experience|Session Experience]]
-- [[_COMMUNITY_Session Learning|Session Learning]]
-- [[_COMMUNITY_Messaging Renderer|Messaging Renderer]]
-- [[_COMMUNITY_Orchestrator Restate Runtime|Orchestrator Restate Runtime]]
-- [[_COMMUNITY_Orchestrator Users|Orchestrator Users]]
-- [[_COMMUNITY_Orchestrator Agent Artifacts E2E|Orchestrator Agent Artifacts E2E]]
-- [[_COMMUNITY_Brain Aggregation|Brain Aggregation]]
-- [[_COMMUNITY_Core Analytics|Core Analytics]]
-- [[_COMMUNITY_Brain Attribution|Brain Attribution]]
-- [[_COMMUNITY_Skills Baseline Skill|Skills Baseline Skill]]
-- [[_COMMUNITY_Session Blob|Session Blob]]
-- [[_COMMUNITY_Session Blob|Session Blob]]
-- [[_COMMUNITY_Brain Builder|Brain Builder]]
-- [[_COMMUNITY_Brain Candidates|Brain Candidates]]
-- [[_COMMUNITY_Brain Cohere Reranker Live|Brain Cohere Reranker Live]]
-- [[_COMMUNITY_Brain Cohere Reranker Offline|Brain Cohere Reranker Offline]]
-- [[_COMMUNITY_Brain Compaction|Brain Compaction]]
-- [[_COMMUNITY_Orchestrator Consolidate|Orchestrator Consolidate]]
-- [[_COMMUNITY_Orchestrator Consolidate E2E|Orchestrator Consolidate E2E]]
-- [[_COMMUNITY_Brain Continuation Signal|Brain Continuation Signal]]
-- [[_COMMUNITY_Gateway Control|Gateway Control]]
-- [[_COMMUNITY_Hands Dispatch|Hands Dispatch]]
-- [[_COMMUNITY_Hands Dispatch|Hands Dispatch]]
-- [[_COMMUNITY_Hands Docker Hardening Docker|Hands Docker Hardening Docker]]
-- [[_COMMUNITY_Hands E2B Live|Hands E2B Live]]
-- [[_COMMUNITY_Hands E2B Live|Hands E2B Live]]
-- [[_COMMUNITY_Gateway Edit Window|Gateway Edit Window]]
-- [[_COMMUNITY_Ocsf Emit|Ocsf Emit]]
-- [[_COMMUNITY_Ocsf Emit|Ocsf Emit]]
-- [[_COMMUNITY_Ocsf Emit|Ocsf Emit]]
-- [[_COMMUNITY_Ocsf Emit|Ocsf Emit]]
-- [[_COMMUNITY_Orchestrator Eval Run|Orchestrator Eval Run]]
-- [[_COMMUNITY_Brain Experience|Brain Experience]]
-- [[_COMMUNITY_Experiments Model|Experiments Model]]
-- [[_COMMUNITY_Memory Judge|Memory Judge]]
-- [[_COMMUNITY_Eval Loader|Eval Loader]]
-- [[_COMMUNITY_Hands Local Tools Db|Hands Local Tools Db]]
-- [[_COMMUNITY_Auth|Auth]]
-- [[_COMMUNITY_Hands Mcp Router|Hands Mcp Router]]
-- [[_COMMUNITY_Brain Summarizer|Brain Summarizer]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Turbopuffer|Turbopuffer]]
+- [[_COMMUNITY_Skill Regression|Skill Regression]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Setup|Setup]]
+- [[_COMMUNITY_Mpsc Sink|Mpsc Sink]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Review|Review]]
+- [[_COMMUNITY_Client|Client]]
+- [[_COMMUNITY_Agent Artifacts E2e|Agent Artifacts E2e]]
+- [[_COMMUNITY_Types|Types]]
+- [[_COMMUNITY_Distiller|Distiller]]
+- [[_COMMUNITY_Test Support|Test Support]]
+- [[_COMMUNITY_Experiment Trial Run|Experiment Trial Run]]
+- [[_COMMUNITY_Users|Users]]
+- [[_COMMUNITY_Tool Result|Tool Result]]
+- [[_COMMUNITY_Promotion|Promotion]]
+- [[_COMMUNITY_.run()|.run()]]
+- [[_COMMUNITY_String|String]]
+- [[_COMMUNITY_Score Card|Score Card]]
+- [[_COMMUNITY_Plan|Plan]]
+- [[_COMMUNITY_Experiment Store Db|Experiment Store Db]]
+- [[_COMMUNITY_Groups|Groups]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Tools|Tools]]
+- [[_COMMUNITY_Privacy|Privacy]]
+- [[_COMMUNITY_Sub Agent|Sub Agent]]
+- [[_COMMUNITY_Engine|Engine]]
+- [[_COMMUNITY_Verifiers|Verifiers]]
 - [[_COMMUNITY_Eval|Eval]]
-- [[_COMMUNITY_Loadtest Options|Loadtest Options]]
-- [[_COMMUNITY_Loadtest Plan|Loadtest Plan]]
-- [[_COMMUNITY_Loadtest Report|Loadtest Report]]
-- [[_COMMUNITY_Memory Quality|Memory Quality]]
-- [[_COMMUNITY_Memory Promotion|Memory Promotion]]
-- [[_COMMUNITY_Migrations Moa Migrations|Migrations Moa Migrations]]
-- [[_COMMUNITY_Orchestrator Analytics|Orchestrator Analytics]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Providers|Providers]]
-- [[_COMMUNITY_Scoring|Scoring]]
-- [[_COMMUNITY_Security Policies|Security Policies]]
-- [[_COMMUNITY_Security Injection|Security Injection]]
-- [[_COMMUNITY_Session Schema|Session Schema]]
+- [[_COMMUNITY_Judge|Judge]]
+- [[_COMMUNITY_Extract|Extract]]
+- [[_COMMUNITY_Pipeline Stages Db Memory|Pipeline Stages Db Memory]]
+- [[_COMMUNITY_Memoryretrievalevaloptions|Memoryretrievalevaloptions]]
+- [[_COMMUNITY_Approvals|Approvals]]
+- [[_COMMUNITY_Plan Expansion|Plan Expansion]]
+- [[_COMMUNITY_Experiment Service|Experiment Service]]
+- [[_COMMUNITY_Contact|Contact]]
+- [[_COMMUNITY_Hybrid Retrieval Db Memory|Hybrid Retrieval Db Memory]]
+- [[_COMMUNITY_Node|Node]]
+- [[_COMMUNITY_Util|Util]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Instrumentation|Instrumentation]]
+- [[_COMMUNITY_Ranking|Ranking]]
+- [[_COMMUNITY_Ciba Db|Ciba Db]]
+- [[_COMMUNITY_Memory|Memory]]
+- [[_COMMUNITY_Wire|Wire]]
+- [[_COMMUNITY_Ctx|Ctx]]
+- [[_COMMUNITY_Agents|Agents]]
+- [[_COMMUNITY_Action Policy Flow E2e|Action Policy Flow E2e]]
+- [[_COMMUNITY_Orchestrator Fixture|Orchestrator Fixture]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Test Support|Test Support]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Approval Flow E2e|Approval Flow E2e]]
+- [[_COMMUNITY_Mcp Proxy|Mcp Proxy]]
+- [[_COMMUNITY_App|App]]
+- [[_COMMUNITY_Users|Users]]
+- [[_COMMUNITY_Subagentvostate|Subagentvostate]]
+- [[_COMMUNITY_Regression|Regression]]
+- [[_COMMUNITY_Vec|Vec]]
+- [[_COMMUNITY_Tier1 Metadata|Tier1 Metadata]]
+- [[_COMMUNITY_Brain Turn Db|Brain Turn Db]]
+- [[_COMMUNITY_Analytics|Analytics]]
+- [[_COMMUNITY_Action Reviews|Action Reviews]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Privacy Service Db Memory|Privacy Service Db Memory]]
+- [[_COMMUNITY_Telemetry|Telemetry]]
+- [[_COMMUNITY_Require Helpers|Require Helpers]]
+- [[_COMMUNITY_Turn Latency|Turn Latency]]
+- [[_COMMUNITY_Discordadapter|Discordadapter]]
+- [[_COMMUNITY_Read|Read]]
+- [[_COMMUNITY_Ingestion Service E2e|Ingestion Service E2e]]
+- [[_COMMUNITY_Completion|Completion]]
+- [[_COMMUNITY_Control Signals|Control Signals]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Local Tools Db|Local Tools Db]]
+- [[_COMMUNITY_Gemini|Gemini]]
+- [[_COMMUNITY_Cron Job|Cron Job]]
+- [[_COMMUNITY_Skill Package Materialization Db Memory|Skill Package Materialization Db Memory]]
+- [[_COMMUNITY_Scripted User Mode Eval|Scripted User Mode Eval]]
+- [[_COMMUNITY_Approval State|Approval State]]
+- [[_COMMUNITY_Contradiction|Contradiction]]
+- [[_COMMUNITY_Digest|Digest]]
+- [[_COMMUNITY_Api Keys|Api Keys]]
+- [[_COMMUNITY_Skill Learning Review|Skill Learning Review]]
+- [[_COMMUNITY_Admin Maintenance|Admin Maintenance]]
+- [[_COMMUNITY_Runtime Context|Runtime Context]]
+- [[_COMMUNITY_Grapherror|Grapherror]]
+- [[_COMMUNITY_Auth|Auth]]
+- [[_COMMUNITY_Age|Age]]
+- [[_COMMUNITY_Openai Filter|Openai Filter]]
+- [[_COMMUNITY_Groups|Groups]]
+- [[_COMMUNITY_Experiment Trial Run E2e|Experiment Trial Run E2e]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Lineage|Lineage]]
+- [[_COMMUNITY_Query Planner|Query Planner]]
+- [[_COMMUNITY_Blob|Blob]]
+- [[_COMMUNITY_Telegram|Telegram]]
+- [[_COMMUNITY_Registration|Registration]]
+- [[_COMMUNITY_Reference|Reference]]
+- [[_COMMUNITY_Memory|Memory]]
+- [[_COMMUNITY_Routes|Routes]]
+- [[_COMMUNITY_Embeddings|Embeddings]]
+- [[_COMMUNITY_Slack|Slack]]
+- [[_COMMUNITY_Merkle|Merkle]]
+- [[_COMMUNITY_Llm Gateway|Llm Gateway]]
+- [[_COMMUNITY_Package|Package]]
+- [[_COMMUNITY_Proposals|Proposals]]
+- [[_COMMUNITY_Simulation|Simulation]]
+- [[_COMMUNITY_Tool Dispatch|Tool Dispatch]]
+- [[_COMMUNITY_Cache Audit Live|Cache Audit Live]]
+- [[_COMMUNITY_Run Memory Retrieval Eval In Store()|Run Memory Retrieval Eval In Store()]]
+- [[_COMMUNITY_Model|Model]]
+- [[_COMMUNITY_Fast Path|Fast Path]]
+- [[_COMMUNITY_Llm Extractor|Llm Extractor]]
+- [[_COMMUNITY_Status|Status]]
+- [[_COMMUNITY_Triggers|Triggers]]
+- [[_COMMUNITY_Digest|Digest]]
+- [[_COMMUNITY_Skill Learning|Skill Learning]]
+- [[_COMMUNITY_Workspace Store|Workspace Store]]
+- [[_COMMUNITY_Brain Turn Cache Replay Db Memory|Brain Turn Cache Replay Db Memory]]
+- [[_COMMUNITY_Construction|Construction]]
+- [[_COMMUNITY_Output Budget|Output Budget]]
+- [[_COMMUNITY_Group Sync|Group Sync]]
+- [[_COMMUNITY_Prune|Prune]]
+- [[_COMMUNITY_Session|Session]]
+- [[_COMMUNITY_Provider Recorded|Provider Recorded]]
+- [[_COMMUNITY_Adapters|Adapters]]
+- [[_COMMUNITY_Recorded|Recorded]]
+- [[_COMMUNITY_Sub Agent Dispatch|Sub Agent Dispatch]]
+- [[_COMMUNITY_Tool Executor|Tool Executor]]
+- [[_COMMUNITY_Embedding|Embedding]]
+- [[_COMMUNITY_Improver|Improver]]
+- [[_COMMUNITY_Eventrecord|Eventrecord]]
+- [[_COMMUNITY_Agents|Agents]]
+- [[_COMMUNITY_Providerregistry|Providerregistry]]
+- [[_COMMUNITY_Context Build|Context Build]]
+- [[_COMMUNITY_Memory|Memory]]
+- [[_COMMUNITY_Runner|Runner]]
+- [[_COMMUNITY_Artifact|Artifact]]
+- [[_COMMUNITY_Postgres Store Db|Postgres Store Db]]
+- [[_COMMUNITY_Arc|Arc]]
+- [[_COMMUNITY_Concurrent Writers Db Memory|Concurrent Writers Db Memory]]
+- [[_COMMUNITY_Fast Path Db Memory|Fast Path Db Memory]]
+- [[_COMMUNITY_Experiment Agent Loop E2e|Experiment Agent Loop E2e]]
+- [[_COMMUNITY_Sub Agent Delegation|Sub Agent Delegation]]
+- [[_COMMUNITY_Orchestratortestfixture|Orchestratortestfixture]]
+- [[_COMMUNITY_Consolidate Workspace()|Consolidate Workspace()]]
+- [[_COMMUNITY_Compare Agent Revision Simulation Inner(|Compare Agent Revision Simulation Inner(]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Api Keys|Api Keys]]
+- [[_COMMUNITY_Workflows|Workflows]]
+- [[_COMMUNITY_.new()|.new()]]
+- [[_COMMUNITY_Memory|Memory]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Ner|Ner]]
+- [[_COMMUNITY_Collector|Collector]]
+- [[_COMMUNITY_Daytonahandprovider|Daytonahandprovider]]
+- [[_COMMUNITY_Llm Merge|Llm Merge]]
+- [[_COMMUNITY_Handlererror|Handlererror]]
+- [[_COMMUNITY_Check Architecture Boundaries|Check Architecture Boundaries]]
+- [[_COMMUNITY_Streaming|Streaming]]
+- [[_COMMUNITY_Bundle|Bundle]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Discord|Discord]]
+- [[_COMMUNITY_Contradictioncontext|Contradictioncontext]]
+- [[_COMMUNITY_Conversion|Conversion]]
+- [[_COMMUNITY_Runner|Runner]]
+- [[_COMMUNITY_Ciba|Ciba]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Registry|Registry]]
+- [[_COMMUNITY_Planner|Planner]]
+- [[_COMMUNITY_Rate Limit|Rate Limit]]
+- [[_COMMUNITY_Pgvector Store|Pgvector Store]]
+- [[_COMMUNITY_Policy|Policy]]
+- [[_COMMUNITY_Graphmemoryretriever|Graphmemoryretriever]]
+- [[_COMMUNITY_Segments|Segments]]
+- [[_COMMUNITY_Turn|Turn]]
+- [[_COMMUNITY_Fixtures|Fixtures]]
+- [[_COMMUNITY_Str Replace|Str Replace]]
+- [[_COMMUNITY_Write Protocol Db Memory|Write Protocol Db Memory]]
+- [[_COMMUNITY_Ctx|Ctx]]
+- [[_COMMUNITY_Deps|Deps]]
+- [[_COMMUNITY_.complete()|.complete()]]
+- [[_COMMUNITY_Llm Gateway|Llm Gateway]]
+- [[_COMMUNITY_Session Turn Lifecycle Service E2e|Session Turn Lifecycle Service E2e]]
+- [[_COMMUNITY_Session Store Service|Session Store Service]]
+- [[_COMMUNITY_Policies|Policies]]
+- [[_COMMUNITY_Lessons|Lessons]]
+- [[_COMMUNITY_Action Policy|Action Policy]]
+- [[_COMMUNITY_.retrieve Hits()|.retrieve Hits()]]
+- [[_COMMUNITY_Anthropicstreamstate|Anthropicstreamstate]]
+- [[_COMMUNITY_Authz Challenges Reaper|Authz Challenges Reaper]]
+- [[_COMMUNITY_Env Overlay|Env Overlay]]
+- [[_COMMUNITY_Router|Router]]
+- [[_COMMUNITY_Agent|Agent]]
+- [[_COMMUNITY_Json|Json]]
+- [[_COMMUNITY_File Outline|File Outline]]
+- [[_COMMUNITY_Signing|Signing]]
+- [[_COMMUNITY_Backend|Backend]]
+- [[_COMMUNITY_Runner|Runner]]
+- [[_COMMUNITY_Providerdeliverysink|Providerdeliverysink]]
+- [[_COMMUNITY_Twilio Offline|Twilio Offline]]
+- [[_COMMUNITY_Lineage Admin|Lineage Admin]]
+- [[_COMMUNITY_Handlererror|Handlererror]]
+- [[_COMMUNITY_Experience|Experience]]
+- [[_COMMUNITY_Check Eval Budgets|Check Eval Budgets]]
+- [[_COMMUNITY_Main|Main]]
+- [[_COMMUNITY_Secretstring|Secretstring]]
+- [[_COMMUNITY_Compaction|Compaction]]
+- [[_COMMUNITY_Lineage|Lineage]]
+- [[_COMMUNITY_Memory Metrics|Memory Metrics]]
+- [[_COMMUNITY_Memory Eval Judge|Memory Eval Judge]]
+- [[_COMMUNITY_Load|Load]]
+- [[_COMMUNITY_Endpoint|Endpoint]]
+- [[_COMMUNITY_.erase()|.erase()]]
+- [[_COMMUNITY_Status|Status]]
+- [[_COMMUNITY_Experiment Workflow E2e|Experiment Workflow E2e]]
+- [[_COMMUNITY_Neon Branch Manager Live|Neon Branch Manager Live]]
+- [[_COMMUNITY_Db|Db]]
+- [[_COMMUNITY_Events Stream|Events Stream]]
+- [[_COMMUNITY_.new()|.new()]]
+- [[_COMMUNITY_Handlererror|Handlererror]]
+- [[_COMMUNITY_Slackadapter|Slackadapter]]
+- [[_COMMUNITY_Stack|Stack]]
+- [[_COMMUNITY_Factory|Factory]]
+- [[_COMMUNITY_Lifecycle|Lifecycle]]
+- [[_COMMUNITY_Http|Http]]
+- [[_COMMUNITY_Gate|Gate]]
+- [[_COMMUNITY_Tools|Tools]]
+- [[_COMMUNITY_Channel|Channel]]
 - [[_COMMUNITY_Session Store|Session Store]]
-- [[_COMMUNITY_Brain Ner Gazetteer|Brain Ner Gazetteer]]
-- [[_COMMUNITY_Brain Ner|Brain Ner]]
-- [[_COMMUNITY_Auth Outbox|Auth Outbox]]
-- [[_COMMUNITY_Brain Pipeline Stages Db Memory|Brain Pipeline Stages Db Memory]]
-- [[_COMMUNITY_Session Experience|Session Experience]]
-- [[_COMMUNITY_Session Learning|Session Learning]]
-- [[_COMMUNITY_Session Segments|Session Segments]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Session Session Store|Session Session Store]]
-- [[_COMMUNITY_Brain Query Rewrite Live|Brain Query Rewrite Live]]
-- [[_COMMUNITY_Brain Query Rewrite Offline|Brain Query Rewrite Offline]]
-- [[_COMMUNITY_Brain Ranking|Brain Ranking]]
-- [[_COMMUNITY_Memory Read|Memory Read]]
-- [[_COMMUNITY_Memory Read|Memory Read]]
-- [[_COMMUNITY_Memory Read Smoke Db Memory|Memory Read Smoke Db Memory]]
-- [[_COMMUNITY_Skills Regression|Skills Regression]]
-- [[_COMMUNITY_Orchestrator Replay Determinism|Orchestrator Replay Determinism]]
-- [[_COMMUNITY_Session Rows|Session Rows]]
-- [[_COMMUNITY_Session Rows|Session Rows]]
-- [[_COMMUNITY_Session Rows|Session Rows]]
-- [[_COMMUNITY_Session Rows|Session Rows]]
-- [[_COMMUNITY_Core Runtime Metrics|Core Runtime Metrics]]
-- [[_COMMUNITY_Auth Schema|Auth Schema]]
-- [[_COMMUNITY_Orchestrator Scim Compliance Live|Orchestrator Scim Compliance Live]]
-- [[_COMMUNITY_Brain Self Assessment Signal|Brain Self Assessment Signal]]
-- [[_COMMUNITY_Orchestrator Session Brain E2E|Orchestrator Session Brain E2E]]
-- [[_COMMUNITY_Orchestrator Session Store Db|Orchestrator Session Store Db]]
-- [[_COMMUNITY_Orchestrator Session Store E2E|Orchestrator Session Store E2E]]
-- [[_COMMUNITY_Orchestrator Session Store|Orchestrator Session Store]]
-- [[_COMMUNITY_Orchestrator Session Vo E2E|Orchestrator Session Vo E2E]]
-- [[_COMMUNITY_Orchestrator Session Vo|Orchestrator Session Vo]]
-- [[_COMMUNITY_Ocsf Signing|Ocsf Signing]]
-- [[_COMMUNITY_Lineage Mpsc Sink|Lineage Mpsc Sink]]
-- [[_COMMUNITY_Brain Skill Package Materialization Db M|Brain Skill Package Materialization Db M]]
-- [[_COMMUNITY_Orchestrator Skill Regression|Orchestrator Skill Regression]]
-- [[_COMMUNITY_Orchestrator Skills Service|Orchestrator Skills Service]]
-- [[_COMMUNITY_Core Snapshot|Core Snapshot]]
-- [[_COMMUNITY_Brain Stable Prefix Db Memory|Brain Stable Prefix Db Memory]]
-- [[_COMMUNITY_Orchestrator Status|Orchestrator Status]]
-- [[_COMMUNITY_Orchestrator Status|Orchestrator Status]]
-- [[_COMMUNITY_Experiments Store|Experiments Store]]
-- [[_COMMUNITY_Experiments Store|Experiments Store]]
-- [[_COMMUNITY_Hands Str Replace|Hands Str Replace]]
-- [[_COMMUNITY_Brain Structural Signal|Brain Structural Signal]]
-- [[_COMMUNITY_Orchestrator Sub Agent Delegation|Orchestrator Sub Agent Delegation]]
-- [[_COMMUNITY_Orchestrator Target Execution|Orchestrator Target Execution]]
-- [[_COMMUNITY_Orchestrator Target Execution|Orchestrator Target Execution]]
-- [[_COMMUNITY_Orchestrator Target Execution|Orchestrator Target Execution]]
-- [[_COMMUNITY_Orchestrator Target Execution|Orchestrator Target Execution]]
-- [[_COMMUNITY_Orchestrator Tenants|Orchestrator Tenants]]
-- [[_COMMUNITY_Brain Test Support|Brain Test Support]]
-- [[_COMMUNITY_Brain Test Support|Brain Test Support]]
-- [[_COMMUNITY_Brain Tier1 Metadata|Brain Tier1 Metadata]]
-- [[_COMMUNITY_Brain Tier1 Metadata|Brain Tier1 Metadata]]
-- [[_COMMUNITY_Orchestrator Tool Executor E2E|Orchestrator Tool Executor E2E]]
-- [[_COMMUNITY_Brain Tool Signal|Brain Tool Signal]]
-- [[_COMMUNITY_Providers Tools|Providers Tools]]
-- [[_COMMUNITY_Providers Tools|Providers Tools]]
-- [[_COMMUNITY_Providers Tools|Providers Tools]]
-- [[_COMMUNITY_Core Embedding|Core Embedding]]
-- [[_COMMUNITY_Core|Core]]
-- [[_COMMUNITY_Core|Core]]
-- [[_COMMUNITY_Orchestrator Trial Simulator|Orchestrator Trial Simulator]]
-- [[_COMMUNITY_Brain Turbopuffer News Offline|Brain Turbopuffer News Offline]]
-- [[_COMMUNITY_Orchestrator Turn Execution Smoke Servic|Orchestrator Turn Execution Smoke Servic]]
-- [[_COMMUNITY_Brain Turn|Brain Turn]]
-- [[_COMMUNITY_Orchestrator Users|Orchestrator Users]]
-- [[_COMMUNITY_Orchestrator Users|Orchestrator Users]]
-- [[_COMMUNITY_Orchestrator Users|Orchestrator Users]]
-- [[_COMMUNITY_Orchestrator Util|Orchestrator Util]]
-- [[_COMMUNITY_Brain Verification Signal|Brain Verification Signal]]
-- [[_COMMUNITY_Orchestrator Whoami|Orchestrator Whoami]]
-- [[_COMMUNITY_Providers Wiremock Provider Helpers|Providers Wiremock Provider Helpers]]
-- [[_COMMUNITY_Orchestrator Workflows|Orchestrator Workflows]]
-- [[_COMMUNITY_Orchestrator Workspace|Orchestrator Workspace]]
-- [[_COMMUNITY_Memory Write|Memory Write]]
-- [[_COMMUNITY_Memory Write|Memory Write]]
+- [[_COMMUNITY_Recording|Recording]]
+- [[_COMMUNITY_Edit Window|Edit Window]]
+- [[_COMMUNITY_Client|Client]]
+- [[_COMMUNITY_Session Search|Session Search]]
+- [[_COMMUNITY_Evalserviceerror|Evalserviceerror]]
+- [[_COMMUNITY_Skill Learning Workflow|Skill Learning Workflow]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Tools|Tools]]
+- [[_COMMUNITY_Candidates|Candidates]]
+- [[_COMMUNITY_Testapiclient|Testapiclient]]
+- [[_COMMUNITY_Run Memory Retrieval Eval|Run Memory Retrieval Eval]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Llm Client|Llm Client]]
+- [[_COMMUNITY_Context|Context]]
+- [[_COMMUNITY_Messaging|Messaging]]
+- [[_COMMUNITY_Recovery|Recovery]]
+- [[_COMMUNITY_Api Keys|Api Keys]]
+- [[_COMMUNITY_Scorer|Scorer]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Admin|Admin]]
+- [[_COMMUNITY_Writer|Writer]]
+- [[_COMMUNITY_Isolation|Isolation]]
+- [[_COMMUNITY_Read Smoke Db Memory|Read Smoke Db Memory]]
+- [[_COMMUNITY_Embedder Switch Db Memory|Embedder Switch Db Memory]]
+- [[_COMMUNITY_Postmark Provider E2e|Postmark Provider E2e]]
+- [[_COMMUNITY_Provider Matrix Live|Provider Matrix Live]]
+- [[_COMMUNITY_Export|Export]]
+- [[_COMMUNITY_Embedder|Embedder]]
+- [[_COMMUNITY_Models|Models]]
+- [[_COMMUNITY_Normalization|Normalization]]
+- [[_COMMUNITY_Registry Db Memory|Registry Db Memory]]
+- [[_COMMUNITY_Auth0 Provider|Auth0 Provider]]
+- [[_COMMUNITY_Outbox Basic Db|Outbox Basic Db]]
+- [[_COMMUNITY_Checkpoint|Checkpoint]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Results|Results]]
+- [[_COMMUNITY_Stats|Stats]]
+- [[_COMMUNITY_Lexical Ranking Db Memory|Lexical Ranking Db Memory]]
+- [[_COMMUNITY_Rrfplusjudgedetector|Rrfplusjudgedetector]]
+- [[_COMMUNITY_Messagingsendresponse|Messagingsendresponse]]
+- [[_COMMUNITY_Authz Challenges|Authz Challenges]]
+- [[_COMMUNITY_Approvals Reaper|Approvals Reaper]]
+- [[_COMMUNITY_Target Execution|Target Execution]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Vault|Vault]]
+- [[_COMMUNITY_App|App]]
+- [[_COMMUNITY_Brain Bridge|Brain Bridge]]
+- [[_COMMUNITY_Turn Execution Smoke Service E2e|Turn Execution Smoke Service E2e]]
+- [[_COMMUNITY_String|String]]
+- [[_COMMUNITY_Recordedconsolidatesteps|Recordedconsolidatesteps]]
+- [[_COMMUNITY_Retry|Retry]]
+- [[_COMMUNITY_Agent|Agent]]
+- [[_COMMUNITY_Document|Document]]
+- [[_COMMUNITY_Behavior Lab Offline|Behavior Lab Offline]]
+- [[_COMMUNITY_Agent Instructions|Agent Instructions]]
+- [[_COMMUNITY_Queryretrievalctx|Queryretrievalctx]]
+- [[_COMMUNITY_Stable Prefix Db Memory|Stable Prefix Db Memory]]
+- [[_COMMUNITY_Events|Events]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_String|String]]
+- [[_COMMUNITY_Mockhandprovider|Mockhandprovider]]
+- [[_COMMUNITY_File Read|File Read]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Metrics|Metrics]]
+- [[_COMMUNITY_Write|Write]]
+- [[_COMMUNITY_Digest Postgres Db Memory|Digest Postgres Db Memory]]
+- [[_COMMUNITY_Delivery|Delivery]]
+- [[_COMMUNITY_Postmark Offline|Postmark Offline]]
+- [[_COMMUNITY_Twilio Provider E2e|Twilio Provider E2e]]
+- [[_COMMUNITY_Tools|Tools]]
+- [[_COMMUNITY_Streaming|Streaming]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Consolidate|Consolidate]]
+- [[_COMMUNITY_Appstate|Appstate]]
+- [[_COMMUNITY_Telegramadapter|Telegramadapter]]
+- [[_COMMUNITY_Reranker|Reranker]]
+- [[_COMMUNITY_Memoryretrievalevalreport|Memoryretrievalevalreport]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Telemetry|Telemetry]]
+- [[_COMMUNITY_Platform|Platform]]
+- [[_COMMUNITY_Drive One Turn()|Drive One Turn()]]
+- [[_COMMUNITY_Run Golden 100 E2e()|Run Golden 100 E2e()]]
+- [[_COMMUNITY_Edit Window|Edit Window]]
+- [[_COMMUNITY_Signing|Signing]]
+- [[_COMMUNITY_Trial Simulator|Trial Simulator]]
+- [[_COMMUNITY_Injection|Injection]]
+- [[_COMMUNITY_Render|Render]]
+- [[_COMMUNITY_Cypher|Cypher]]
+- [[_COMMUNITY_Budgets|Budgets]]
+- [[_COMMUNITY_Mock Loadtest Service E2e|Mock Loadtest Service E2e]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Tuple|Tuple]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Builder|Builder]]
+- [[_COMMUNITY_Artifact Skill Injection Db Memory|Artifact Skill Injection Db Memory]]
+- [[_COMMUNITY_Erasure|Erasure]]
+- [[_COMMUNITY_Learningcandidatesummary|Learningcandidatesummary]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Terminal|Terminal]]
+- [[_COMMUNITY_Docker File|Docker File]]
+- [[_COMMUNITY_Mock Smoke|Mock Smoke]]
+- [[_COMMUNITY_Pgvector Store Db Memory|Pgvector Store Db Memory]]
+- [[_COMMUNITY_Config|Config]]
+- [[_COMMUNITY_Sessionvostate|Sessionvostate]]
+- [[_COMMUNITY_State|State]]
+- [[_COMMUNITY_Durable Step Recorder|Durable Step Recorder]]
+- [[_COMMUNITY_Tenant Rls Db|Tenant Rls Db]]
+- [[_COMMUNITY_Moaenvoverlay|Moaenvoverlay]]
+- [[_COMMUNITY_Credential For Request()|Credential For Request()]]
+- [[_COMMUNITY_Store|Store]]
+- [[_COMMUNITY_Vault|Vault]]
+- [[_COMMUNITY_Lifecyclenoderow|Lifecyclenoderow]]
+- [[_COMMUNITY_Bash|Bash]]
+- [[_COMMUNITY_Builtin Authz|Builtin Authz]]
+- [[_COMMUNITY_Query Rewrite Live|Query Rewrite Live]]
+- [[_COMMUNITY_Hands|Hands]]
+- [[_COMMUNITY_Scripted User|Scripted User]]
+- [[_COMMUNITY_Chain|Chain]]
+- [[_COMMUNITY_Slow Path Orchestration Db Memory|Slow Path Orchestration Db Memory]]
+- [[_COMMUNITY_Promotion Db Memory|Promotion Db Memory]]
+- [[_COMMUNITY_Delegation|Delegation]]
+- [[_COMMUNITY_Request|Request]]
+- [[_COMMUNITY_Jobs|Jobs]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Cache Control Markers|Cache Control Markers]]
+- [[_COMMUNITY_.new()|.new()]]
+- [[_COMMUNITY_Streaming|Streaming]]
+- [[_COMMUNITY_Signal Wait|Signal Wait]]
+- [[_COMMUNITY_Runtime|Runtime]]
+- [[_COMMUNITY_Auth|Auth]]
+- [[_COMMUNITY_Verification Signal|Verification Signal]]
+- [[_COMMUNITY_Restate Observability|Restate Observability]]
+- [[_COMMUNITY_Approval|Approval]]
+- [[_COMMUNITY_Self|Self]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Response|Response]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Pending|Pending]]
+- [[_COMMUNITY_Sandbox|Sandbox]]
+- [[_COMMUNITY_.apply To()|.apply To()]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Session Replay|Session Replay]]
+- [[_COMMUNITY_Segment Assessment|Segment Assessment]]
+- [[_COMMUNITY_Datetime|Datetime]]
+- [[_COMMUNITY_Loader|Loader]]
+- [[_COMMUNITY_Retrieve Probe()|Retrieve Probe()]]
+- [[_COMMUNITY_Run Writer()|Run Writer()]]
+- [[_COMMUNITY_Entityresolver|Entityresolver]]
+- [[_COMMUNITY_.resolve()|.resolve()]]
+- [[_COMMUNITY_Openai Provider|Openai Provider]]
+- [[_COMMUNITY_.emit Event Record()|.emit Event Record()]]
+- [[_COMMUNITY_Attribution|Attribution]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Approval Diffs For()|Approval Diffs For()]]
+- [[_COMMUNITY_Jwks Cache|Jwks Cache]]
+- [[_COMMUNITY_Oidc Provider|Oidc Provider]]
+- [[_COMMUNITY_Transcript|Transcript]]
+- [[_COMMUNITY_Tool Signal|Tool Signal]]
+- [[_COMMUNITY_Proxy|Proxy]]
+- [[_COMMUNITY_Long Conversation Foundation Eval|Long Conversation Foundation Eval]]
+- [[_COMMUNITY_.new()|.new()]]
+- [[_COMMUNITY_File Write|File Write]]
+- [[_COMMUNITY_Fastpathctx|Fastpathctx]]
+- [[_COMMUNITY_Extract|Extract]]
+- [[_COMMUNITY_Delivery Offline|Delivery Offline]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Classes|Classes]]
+- [[_COMMUNITY_Arc|Arc]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Session Brain E2e|Session Brain E2e]]
+- [[_COMMUNITY_Session Vo E2e|Session Vo E2e]]
+- [[_COMMUNITY_Openai Responses Envelope|Openai Responses Envelope]]
+- [[_COMMUNITY_Option|Option]]
+- [[_COMMUNITY_Run()|Run()]]
+- [[_COMMUNITY_Contacts Table|Contacts Table]]
+- [[_COMMUNITY_Loadedmemoryevalcorpus|Loadedmemoryevalcorpus]]
+- [[_COMMUNITY_Instructions|Instructions]]
+- [[_COMMUNITY_Plannedquery|Plannedquery]]
+- [[_COMMUNITY_Tracecontext|Tracecontext]]
+- [[_COMMUNITY_Toolresultreadtool|Toolresultreadtool]]
+- [[_COMMUNITY_Daytona Live|Daytona Live]]
+- [[_COMMUNITY_Dsar|Dsar]]
+- [[_COMMUNITY_Report|Report]]
+- [[_COMMUNITY_Chunking|Chunking]]
+- [[_COMMUNITY_Patch|Patch]]
+- [[_COMMUNITY_Eval Run|Eval Run]]
+- [[_COMMUNITY_Session Store Db|Session Store Db]]
+- [[_COMMUNITY_Request|Request]]
+- [[_COMMUNITY_Events Concurrent Monotonicity Db|Events Concurrent Monotonicity Db]]
+- [[_COMMUNITY_Actionreviewsummary|Actionreviewsummary]]
+- [[_COMMUNITY_Approvalcallbackaction|Approvalcallbackaction]]
+- [[_COMMUNITY_Resolver Db Memory|Resolver Db Memory]]
+- [[_COMMUNITY_Summarize|Summarize]]
+- [[_COMMUNITY_Resolver|Resolver]]
+- [[_COMMUNITY_Candidates|Candidates]]
+- [[_COMMUNITY_Identity|Identity]]
+- [[_COMMUNITY_Input|Input]]
+- [[_COMMUNITY_Skillinjector|Skillinjector]]
+- [[_COMMUNITY_Test Support|Test Support]]
+- [[_COMMUNITY_Observedrecordedprovider|Observedrecordedprovider]]
+- [[_COMMUNITY_Model|Model]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_E2b Live|E2b Live]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Reporting|Reporting]]
+- [[_COMMUNITY_Lexical|Lexical]]
+- [[_COMMUNITY_Extractor|Extractor]]
+- [[_COMMUNITY_Messagingratelimiter|Messagingratelimiter]]
+- [[_COMMUNITY_Lineage Postgres Db|Lineage Postgres Db]]
+- [[_COMMUNITY_Restate Identity|Restate Identity]]
+- [[_COMMUNITY_Audit|Audit]]
+- [[_COMMUNITY_Tenants|Tenants]]
+- [[_COMMUNITY_Agent Revision Simulation Db Memory|Agent Revision Simulation Db Memory]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Comparableproberesult|Comparableproberesult]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Result|Result]]
+- [[_COMMUNITY_Skill|Skill]]
+- [[_COMMUNITY_Budget|Budget]]
+- [[_COMMUNITY_Postprocess|Postprocess]]
+- [[_COMMUNITY_Activation|Activation]]
+- [[_COMMUNITY_Edit Output|Edit Output]]
+- [[_COMMUNITY_Tool Approval|Tool Approval]]
+- [[_COMMUNITY_Model|Model]]
+- [[_COMMUNITY_Snapshot|Snapshot]]
+- [[_COMMUNITY_.from Invocation()|.from Invocation()]]
+- [[_COMMUNITY_Output Match|Output Match]]
+- [[_COMMUNITY_Comparator|Comparator]]
+- [[_COMMUNITY_.check One Fast()|.check One Fast()]]
+- [[_COMMUNITY_Inbound From Interaction Event()|Inbound From Interaction Event()]]
+- [[_COMMUNITY_Admin|Admin]]
+- [[_COMMUNITY_Plan|Plan]]
+- [[_COMMUNITY_Edge|Edge]]
+- [[_COMMUNITY_Contradiction Real|Contradiction Real]]
+- [[_COMMUNITY_Write Manifest()|Write Manifest()]]
+- [[_COMMUNITY_Replay Determinism|Replay Determinism]]
+- [[_COMMUNITY_Skill Graph|Skill Graph]]
+- [[_COMMUNITY_Postgres|Postgres]]
+- [[_COMMUNITY_Pricing|Pricing]]
+- [[_COMMUNITY_Generate Memory Eval Corpus|Generate Memory Eval Corpus]]
+- [[_COMMUNITY_Anthropic Offline|Anthropic Offline]]
+- [[_COMMUNITY_Orchestratorctx|Orchestratorctx]]
+- [[_COMMUNITY_Recording Long Conversation Transcripts|Recording Long Conversation Transcripts]]
+- [[_COMMUNITY_Deterministic|Deterministic]]
+- [[_COMMUNITY_Providers|Providers]]
+- [[_COMMUNITY_.check One Fast()|.check One Fast()]]
+- [[_COMMUNITY_Session|Session]]
+- [[_COMMUNITY_Workflow|Workflow]]
+- [[_COMMUNITY_Continuation Signal|Continuation Signal]]
+- [[_COMMUNITY_Shell|Shell]]
+- [[_COMMUNITY_Engine|Engine]]
+- [[_COMMUNITY_Golden Eval|Golden Eval]]
+- [[_COMMUNITY_.check One Fast()|.check One Fast()]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Instant|Instant]]
+- [[_COMMUNITY_Quality Postgres Db Memory|Quality Postgres Db Memory]]
+- [[_COMMUNITY_Health|Health]]
+- [[_COMMUNITY_Deactivation|Deactivation]]
+- [[_COMMUNITY_Approval Wait|Approval Wait]]
+- [[_COMMUNITY_Wiremock Provider Helpers|Wiremock Provider Helpers]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Events Append Only Db|Events Append Only Db]]
+- [[_COMMUNITY_Local|Local]]
+- [[_COMMUNITY_Resolved|Resolved]]
+- [[_COMMUNITY_Compare|Compare]]
+- [[_COMMUNITY_Create Node In Conn()|Create Node In Conn()]]
+- [[_COMMUNITY_Classify Facts()|Classify Facts()]]
+- [[_COMMUNITY_Compare Reports()|Compare Reports()]]
+- [[_COMMUNITY_.prepare Invocation()|.prepare Invocation()]]
+- [[_COMMUNITY_Loop Detector|Loop Detector]]
+- [[_COMMUNITY_Compaction|Compaction]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Threshold|Threshold]]
+- [[_COMMUNITY_Plan|Plan]]
+- [[_COMMUNITY_Eval Engine Live|Eval Engine Live]]
+- [[_COMMUNITY_Signing|Signing]]
+- [[_COMMUNITY_Changelog Outbox Db Memory|Changelog Outbox Db Memory]]
+- [[_COMMUNITY_Conflict|Conflict]]
+- [[_COMMUNITY_Backend|Backend]]
+- [[_COMMUNITY_Jcs|Jcs]]
+- [[_COMMUNITY_State|State]]
+- [[_COMMUNITY_Authz Admin|Authz Admin]]
+- [[_COMMUNITY_Actionpolicies|Actionpolicies]]
+- [[_COMMUNITY_String|String]]
+- [[_COMMUNITY_Record Memory Extractions|Record Memory Extractions]]
+- [[_COMMUNITY_Cost Math|Cost Math]]
+- [[_COMMUNITY_Perf Gate|Perf Gate]]
+- [[_COMMUNITY_Null Vault|Null Vault]]
+- [[_COMMUNITY_Authz|Authz]]
+- [[_COMMUNITY_Telemetry|Telemetry]]
+- [[_COMMUNITY_Observability|Observability]]
+- [[_COMMUNITY_Segments|Segments]]
+- [[_COMMUNITY_Workspace|Workspace]]
+- [[_COMMUNITY_Goldenstack|Goldenstack]]
+- [[_COMMUNITY_Fjall Journal|Fjall Journal]]
+- [[_COMMUNITY_Options|Options]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Reserve Root Child()|Reserve Root Child()]]
+- [[_COMMUNITY_.prepare Action Review()|.prepare Action Review()]]
+- [[_COMMUNITY_Gemini Offline|Gemini Offline]]
+- [[_COMMUNITY_Record Memory Merges|Record Memory Merges]]
+- [[_COMMUNITY_Circuit Breaker|Circuit Breaker]]
+- [[_COMMUNITY_Merkle|Merkle]]
+- [[_COMMUNITY_Database|Database]]
+- [[_COMMUNITY_Policy|Policy]]
+- [[_COMMUNITY_Run Leg()|Run Leg()]]
+- [[_COMMUNITY_Value|Value]]
+- [[_COMMUNITY_Trajectory Match|Trajectory Match]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Create Edge()|Create Edge()]]
+- [[_COMMUNITY_Entity Resolution|Entity Resolution]]
+- [[_COMMUNITY_Option|Option]]
+- [[_COMMUNITY_Persistence|Persistence]]
+- [[_COMMUNITY_Scripted Response()|Scripted Response()]]
+- [[_COMMUNITY_Failinglearningappendstore|Failinglearningappendstore]]
+- [[_COMMUNITY_Gemini Safety Settings|Gemini Safety Settings]]
+- [[_COMMUNITY_Openai Offline|Openai Offline]]
+- [[_COMMUNITY_Compare Eval Reports|Compare Eval Reports]]
+- [[_COMMUNITY_Auth|Auth]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_.from Request()|.from Request()]]
+- [[_COMMUNITY_Prompt|Prompt]]
+- [[_COMMUNITY_Main|Main]]
+- [[_COMMUNITY_Compactionawarerecordedprovider|Compactionawarerecordedprovider]]
+- [[_COMMUNITY_.execute Local Tool()|.execute Local Tool()]]
+- [[_COMMUNITY_Action Review|Action Review]]
+- [[_COMMUNITY_Sessionlearningreviewstore|Sessionlearningreviewstore]]
+- [[_COMMUNITY_Neon Maint|Neon Maint]]
+- [[_COMMUNITY_Analytics|Analytics]]
+- [[_COMMUNITY_Eval Service|Eval Service]]
+- [[_COMMUNITY_.list Learnings()|.list Learnings()]]
+- [[_COMMUNITY_Run Streamed Turn With Tools Mode|Run Streamed Turn With Tools Mode]]
+- [[_COMMUNITY_Revision History Db Memory|Revision History Db Memory]]
+- [[_COMMUNITY_Disabled|Disabled]]
+- [[_COMMUNITY_Chat Harness|Chat Harness]]
+- [[_COMMUNITY_Signals|Signals]]
+- [[_COMMUNITY_Llm Call|Llm Call]]
+- [[_COMMUNITY_Structural Signal|Structural Signal]]
+- [[_COMMUNITY_Turbopuffer News Live|Turbopuffer News Live]]
+- [[_COMMUNITY_Uuid|Uuid]]
+- [[_COMMUNITY_Learning|Learning]]
+- [[_COMMUNITY_Tool Success|Tool Success]]
+- [[_COMMUNITY_Core Metrics|Core Metrics]]
+- [[_COMMUNITY_Retrievalharness|Retrievalharness]]
+- [[_COMMUNITY_.from Event()|.from Event()]]
+- [[_COMMUNITY_Config|Config]]
+- [[_COMMUNITY_Changelog|Changelog]]
+- [[_COMMUNITY_Validity|Validity]]
+- [[_COMMUNITY_Authdeps|Authdeps]]
+- [[_COMMUNITY_Database|Database]]
+- [[_COMMUNITY_Generate Plan Inner()|Generate Plan Inner()]]
+- [[_COMMUNITY_Session Vo|Session Vo]]
+- [[_COMMUNITY_Request Body Snapshots|Request Body Snapshots]]
+- [[_COMMUNITY_Helpers|Helpers]]
+- [[_COMMUNITY_.start Turn()|.start Turn()]]
+- [[_COMMUNITY_Scorecard|Scorecard]]
+- [[_COMMUNITY_Compute Memory Quality Scores|Compute Memory Quality Scores]]
+- [[_COMMUNITY_Subagentturnexecutionrun|Subagentturnexecution::run]]
+- [[_COMMUNITY_Agentdefinition|Agentdefinition]]
+- [[_COMMUNITY_Postgressessionstore (session Store)|Postgressessionstore (session Store)]]
+- [[_COMMUNITY_Async Authz|Async Authz]]
+- [[_COMMUNITY_Connector|Connector]]
+- [[_COMMUNITY_.tool Definition()|.tool Definition()]]
+- [[_COMMUNITY_Awakeable|Awakeable]]
+- [[_COMMUNITY_Self Assessment Signal|Self Assessment Signal]]
+- [[_COMMUNITY_Runtime Events|Runtime Events]]
+- [[_COMMUNITY_Skillsummary|Skillsummary]]
+- [[_COMMUNITY_Replay|Replay]]
+- [[_COMMUNITY_.get Optional()|.get Optional()]]
+- [[_COMMUNITY_Adapters|Adapters]]
+- [[_COMMUNITY_Config|Config]]
+- [[_COMMUNITY_Quality|Quality]]
+- [[_COMMUNITY_.send Chunk()|.send Chunk()]]
+- [[_COMMUNITY_Localtwiliovault|Localtwiliovault]]
+- [[_COMMUNITY_Memorydeps|Memorydeps]]
+- [[_COMMUNITY_Persistencedeps|Persistencedeps]]
+- [[_COMMUNITY_Wait Child()|Wait Child()]]
+- [[_COMMUNITY_Tenants|Tenants]]
+- [[_COMMUNITY_Whoami|Whoami]]
+- [[_COMMUNITY_Approval|Approval]]
+- [[_COMMUNITY_.progress()|.progress()]]
+- [[_COMMUNITY_Fake Clock|Fake Clock]]
+- [[_COMMUNITY_.list Approval Rules()|.list Approval Rules()]]
+- [[_COMMUNITY_Audit Smoke Db|Audit Smoke Db]]
+- [[_COMMUNITY_Moa Auth Providers Lib|Moa Auth Providers Lib]]
+- [[_COMMUNITY_Pendingmessage|Pendingmessage]]
+- [[_COMMUNITY_Snapshot|Snapshot]]
+- [[_COMMUNITY_Security|Security]]
+- [[_COMMUNITY_Budgetexpectations|Budgetexpectations]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Streaming|Streaming]]
+- [[_COMMUNITY_Action|Action]]
+- [[_COMMUNITY_Builtin Authz Request Db|Builtin Authz Request Db]]
+- [[_COMMUNITY_Contact Ref()|Contact Ref()]]
+- [[_COMMUNITY_Telemetryguard|Telemetryguard]]
+- [[_COMMUNITY_Box Message()|Box Message()]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_Classify Error()|Classify Error()]]
+- [[_COMMUNITY_Sink|Sink]]
+- [[_COMMUNITY_Mockembedder|Mockembedder]]
+- [[_COMMUNITY_Gemini|Gemini]]
+- [[_COMMUNITY_Turbopuffer Offline|Turbopuffer Offline]]
+- [[_COMMUNITY_.check()|.check()]]
+- [[_COMMUNITY_Testing|Testing]]
+- [[_COMMUNITY_Fixtures Round Trip|Fixtures Round Trip]]
+- [[_COMMUNITY_Tooldescriptor|Tooldescriptor]]
+- [[_COMMUNITY_Hosted Eval Report Artifacts()|Hosted Eval Report Artifacts()]]
+- [[_COMMUNITY_Report|Report]]
+- [[_COMMUNITY_Learning|Learning]]
+- [[_COMMUNITY_Memoryretrievalconfig|Memoryretrievalconfig]]
+- [[_COMMUNITY_Orchestrator|Orchestrator]]
+- [[_COMMUNITY_Provider Tools|Provider Tools]]
+- [[_COMMUNITY_Map Sqlx Error()|Map Sqlx Error()]]
+- [[_COMMUNITY_Terms|Terms]]
+- [[_COMMUNITY_Build Scripted Provider()|Build Scripted Provider()]]
+- [[_COMMUNITY_.from Session Meta()|.from Session Meta()]]
+- [[_COMMUNITY_Cache Metrics|Cache Metrics]]
+- [[_COMMUNITY_Evallineagehandle|Evallineagehandle]]
+- [[_COMMUNITY_Golden Vector()|Golden Vector()]]
+- [[_COMMUNITY_Discord Button With Disabled()|Discord Button With Disabled()]]
+- [[_COMMUNITY_Mcp Router|Mcp Router]]
+- [[_COMMUNITY_Mock|Mock]]
+- [[_COMMUNITY_Sidecar Live|Sidecar Live]]
+- [[_COMMUNITY_Grouprow|Grouprow]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Response|Response]]
+- [[_COMMUNITY_Lib|Lib]]
+- [[_COMMUNITY_.event Record From Row()|.event Record From Row()]]
+- [[_COMMUNITY_Response Json Or Error()|Response Json Or Error()]]
+- [[_COMMUNITY_Moa Memory Ingestentitymergefixturerec|Moa Memory Ingest::entitymergefixturerec]]
+- [[_COMMUNITY_Consolidate Workspace|Consolidate Workspace]]
+- [[_COMMUNITY_Moa Orchestratorsrcobjectssessionmod|Moa Orchestrator/src/objects/session/mod]]
+- [[_COMMUNITY_Slack Event Minimal|Slack Event Minimal]]
+- [[_COMMUNITY_Actionreviewpreview|Actionreviewpreview]]
+- [[_COMMUNITY_Model|Model]]
+- [[_COMMUNITY_Lineage Schema|Lineage Schema]]
+- [[_COMMUNITY_Gateway|Gateway]]
+- [[_COMMUNITY_Lineage|Lineage]]
+- [[_COMMUNITY_Loader|Loader]]
+- [[_COMMUNITY_Session|Session]]
+- [[_COMMUNITY_Definition|Definition]]
+- [[_COMMUNITY_Canonical|Canonical]]
+- [[_COMMUNITY_Support|Support]]
+- [[_COMMUNITY_Parse Rewrite Response()|Parse Rewrite Response()]]
+- [[_COMMUNITY_Cohere Reranker Live|Cohere Reranker Live]]
+- [[_COMMUNITY_.into Initial Message()|.into Initial Message()]]
+- [[_COMMUNITY_Completesegmentrequest|Completesegmentrequest]]
+- [[_COMMUNITY_Goldenqueries|Goldenqueries]]
+- [[_COMMUNITY_Ids|Ids]]
+- [[_COMMUNITY_Args|Args]]
+- [[_COMMUNITY_Storednode|Storednode]]
+- [[_COMMUNITY_Cohere Live|Cohere Live]]
+- [[_COMMUNITY_Support|Support]]
+- [[_COMMUNITY_Listed Sub Agent()|Listed Sub Agent()]]
+- [[_COMMUNITY_.load From()|.load From()]]
+- [[_COMMUNITY_Lineage Admin|Lineage Admin]]
+- [[_COMMUNITY_Meta|Meta]]
+- [[_COMMUNITY_With Identity Headers()|With Identity Headers()]]
+- [[_COMMUNITY_Routing|Routing]]
+- [[_COMMUNITY_Serializedtest'a|Serializedtest<'a>]]
+- [[_COMMUNITY_Vec|Vec]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Btreemap|Btreemap]]
+- [[_COMMUNITY_Cohereassistantmessage|Cohereassistantmessage]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Record Session Created()|Record Session Created()]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Scoresummaryrow|Scoresummaryrow]]
+- [[_COMMUNITY_Experiment Variant Score Delta Row()|Experiment Variant Score Delta Row()]]
+- [[_COMMUNITY_Tests|Tests]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Upsert Node Embedding()|Upsert Node Embedding()]]
+- [[_COMMUNITY_Contact Write Db Memory|Contact Write Db Memory]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Schema|Schema]]
+- [[_COMMUNITY_Approvaloutcome|Approvaloutcome]]
+- [[_COMMUNITY_Provider|Provider]]
+- [[_COMMUNITY_Response|Response]]
+- [[_COMMUNITY_Checkpointrollbackresponse|Checkpointrollbackresponse]]
+- [[_COMMUNITY_Http|Http]]
+- [[_COMMUNITY_Event Record()|Event Record()]]
+- [[_COMMUNITY_Embedding|Embedding]]
+- [[_COMMUNITY_Reporter|Reporter]]
+- [[_COMMUNITY_Coherejudge|Coherejudge]]
+- [[_COMMUNITY_Evalerror|Evalerror]]
+- [[_COMMUNITY_Score Row()|Score Row()]]
+- [[_COMMUNITY_.complete()|.complete()]]
+- [[_COMMUNITY_Actionpolicyrulestore|Actionpolicyrulestore]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Subagentimpl|Subagentimpl]]
+- [[_COMMUNITY_Distill Skill With Learning|Distill Skill With Learning]]
+- [[_COMMUNITY_Emit Authn Success|Emit Authn Success]]
+- [[_COMMUNITY_Experiment Compare Row()|Experiment Compare Row()]]
+- [[_COMMUNITY_Experiment Scenario Score Delta Row()|Experiment Scenario Score Delta Row()]]
+- [[_COMMUNITY_Scenarioscoresummary|Scenarioscoresummary]]
+- [[_COMMUNITY_Hybridretriever|Hybridretriever]]
+- [[_COMMUNITY_Moa Migrationssrclib|Moa Migrations/src/lib]]
+- [[_COMMUNITY_Subagentturnexecution Workflow|Subagentturnexecution Workflow]]
+- [[_COMMUNITY_Older Time|Older Time]]
+- [[_COMMUNITY_Postgressessionstore (action Policy)|Postgressessionstore (action Policy)]]
+- [[_COMMUNITY_Approval|Approval]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Updatelearningcandidatestatusrequest|Updatelearningcandidatestatusrequest]]
+- [[_COMMUNITY_Sign Verify Roundtrip Db|Sign Verify Roundtrip Db]]
+- [[_COMMUNITY_Is Terminal Phase()|Is Terminal Phase()]]
+- [[_COMMUNITY_Orchestrator Fixture Service E2e|Orchestrator Fixture Service E2e]]
+- [[_COMMUNITY_Expectations|Expectations]]
+- [[_COMMUNITY_Run Experiment Plan|Run Experiment Plan]]
+- [[_COMMUNITY_Mod|Mod]]
+- [[_COMMUNITY_Moa Orchestratorsrcservicesaction Rev|Moa Orchestrator/src/services/action Rev]]
+- [[_COMMUNITY_Local Smoke.sh|Local Smoke.sh]]
+- [[_COMMUNITY_Approval Allow Once Round Trip Through R|Approval Allow Once Round Trip Through R]]
+- [[_COMMUNITY_Canonical Hash|Canonical Hash]]
+- [[_COMMUNITY_Audit Security|Audit Security]]
+- [[_COMMUNITY_Appendexperiencerecordrequest|Appendexperiencerecordrequest]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Error|Error]]
+- [[_COMMUNITY_Ct Merkle|Ct Merkle]]
+- [[_COMMUNITY_Daytona Provider Round Trip|Daytona Provider Round Trip]]
+- [[_COMMUNITY_Daytona Router Reuses And Isolates|Daytona Router Reuses And Isolates]]
+- [[_COMMUNITY_Experimentrun Workflow|Experimentrun Workflow]]
+- [[_COMMUNITY_Canonicalize|Canonicalize]]
+- [[_COMMUNITY_Queryplanner|Queryplanner]]
+- [[_COMMUNITY_Completionrequest|Completionrequest]]
+- [[_COMMUNITY_Load Test Metrics|Load Test Metrics]]
+- [[_COMMUNITY_Moa Loadtest|Moa Loadtest]]
+- [[_COMMUNITY_Moa Orchestratorsrcservicesauthz Chal|Moa Orchestrator/src/services/authz Chal]]
+- [[_COMMUNITY_Postgressessionstorelist Approval Rule|Postgressessionstore::list Approval Rule]]
+- [[_COMMUNITY_Postgressessionstorelist Experience Re|Postgressessionstore::list Experience Re]]
+- [[_COMMUNITY_Postgressessionstorelist Learnings|Postgressessionstore::list Learnings]]
+- [[_COMMUNITY_Slackrendererrender|Slackrenderer::render]]
+- [[_COMMUNITY_Register Deployment|Register Deployment]]
+- [[_COMMUNITY_Cascade Deactivate User|Cascade Deactivate User]]
+- [[_COMMUNITY_Spawn Orchestrator|Spawn Orchestrator]]
+- [[_COMMUNITY_Workspace Tool Stats From Events|Workspace Tool Stats From Events]]
+- [[_COMMUNITY_Get Session Summary|Get Session Summary]]
+- [[_COMMUNITY_Attributions For Experience|Attributions For Experience]]
+- [[_COMMUNITY_Baseline Auth Flow Skill|Baseline Auth Flow Skill]]
+- [[_COMMUNITY_Decode Event From Storage|Decode Event From Storage]]
+- [[_COMMUNITY_Encode Event For Storage|Encode Event For Storage]]
+- [[_COMMUNITY_Build Default Graph Memory Pipeline With|Build Default Graph Memory Pipeline With]]
+- [[_COMMUNITY_Propose Candidates For Experience|Propose Candidates For Experience]]
+- [[_COMMUNITY_Cohere Rerank V4 Fast Prioritizes Releva|Cohere Rerank V4 Fast Prioritizes Releva]]
+- [[_COMMUNITY_Cohere Reranker Offline Prioritizes Rele|Cohere Reranker Offline Prioritizes Rele]]
+- [[_COMMUNITY_Maybe Compact Events|Maybe Compact Events]]
+- [[_COMMUNITY_Consolidate Workflow|Consolidate Workflow]]
+- [[_COMMUNITY_Workspace Consolidation Round Trip Throu|Workspace Consolidation Round Trip Throu]]
+- [[_COMMUNITY_Score|Score]]
+- [[_COMMUNITY_Control Action For Inbound|Control Action For Inbound]]
+- [[_COMMUNITY_Execute Hand Once|Execute Hand Once]]
+- [[_COMMUNITY_Toolrouterexecute|Toolrouter::execute]]
+- [[_COMMUNITY_Docker Container Runs With Hardening|Docker Container Runs With Hardening]]
+- [[_COMMUNITY_E2b Provider Round Trip|E2b Provider Round Trip]]
+- [[_COMMUNITY_Live Provider|Live Provider]]
+- [[_COMMUNITY_Edit With Followup Fallback|Edit With Followup Fallback]]
+- [[_COMMUNITY_Emit Agent Registered|Emit Agent Registered]]
+- [[_COMMUNITY_Emit Api Key Created|Emit Api Key Created]]
+- [[_COMMUNITY_Emit Authn Failure|Emit Authn Failure]]
+- [[_COMMUNITY_Emit Authz Decision|Emit Authz Decision]]
+- [[_COMMUNITY_Evalrun Workflow|Evalrun Workflow]]
+- [[_COMMUNITY_Experience From Assessment|Experience From Assessment]]
+- [[_COMMUNITY_Experimentrunrecord|Experimentrunrecord]]
+- [[_COMMUNITY_Fact Comparison Judge Prompt|Fact Comparison Judge Prompt]]
+- [[_COMMUNITY_Parse Example Suite|Parse Example Suite]]
+- [[_COMMUNITY_File Read Reads Written Content|File Read Reads Written Content]]
+- [[_COMMUNITY_Args|Args]]
+- [[_COMMUNITY_Router Discovers Stdio Mcp Tools From Co|Router Discovers Stdio Mcp Tools From Co]]
+- [[_COMMUNITY_Summarization Assistant|Summarization Assistant]]
+- [[_COMMUNITY_Moa Eval Lib|Moa Eval Lib]]
+- [[_COMMUNITY_Load Test Options|Load Test Options]]
+- [[_COMMUNITY_Load Test Plan|Load Test Plan]]
+- [[_COMMUNITY_Load Test Report|Load Test Report]]
+- [[_COMMUNITY_Compute Quality Scores|Compute Quality Scores]]
+- [[_COMMUNITY_Promote Workspace Node To Global|Promote Workspace Node To Global]]
+- [[_COMMUNITY_Moa Migrationsrun|Moa Migrations::run]]
+- [[_COMMUNITY_Moa Orchestratorsrcservicesanalytics|Moa Orchestrator/src/services/analytics]]
+- [[_COMMUNITY_Moa Orchestratorsrcservicesskill Regr|Moa Orchestrator/src/services/skill Regr]]
+- [[_COMMUNITY_Debug Build Anthropic Request Body|Debug Build Anthropic Request Body]]
+- [[_COMMUNITY_Debug Build Gemini Request Body|Debug Build Gemini Request Body]]
+- [[_COMMUNITY_Debug Build Openai Request Body|Debug Build Openai Request Body]]
+- [[_COMMUNITY_Score Summaries For Workspace|Score Summaries For Workspace]]
+- [[_COMMUNITY_Actionpoliciescheck|Actionpolicies::check]]
+- [[_COMMUNITY_Inspect Input|Inspect Input]]
+- [[_COMMUNITY_Migrate|Migrate]]
+- [[_COMMUNITY_Postgressessionstore|Postgressessionstore]]
+- [[_COMMUNITY_Auth Service|Auth Service]]
+- [[_COMMUNITY_Nerspan|Nerspan]]
+- [[_COMMUNITY_Enqueue|Enqueue]]
+- [[_COMMUNITY_Digest Processor Registers At Documented|Digest Processor Registers At Documented]]
+- [[_COMMUNITY_Postgressessionstoreappend Experience|Postgressessionstore::append Experience ]]
+- [[_COMMUNITY_Postgressessionstoreappend Learning|Postgressessionstore::append Learning]]
+- [[_COMMUNITY_Postgressessionstorecreate Segment|Postgressessionstore::create Segment]]
+- [[_COMMUNITY_Postgressessionstorecreate Session In|Postgressessionstore::create Session In ]]
+- [[_COMMUNITY_Postgressessionstoreemit Event Record|Postgressessionstore::emit Event Record]]
+- [[_COMMUNITY_Postgressessionstoreget Events|Postgressessionstore::get Events]]
+- [[_COMMUNITY_Live Query Rewrite Gate Matrix|Live Query Rewrite Gate Matrix]]
+- [[_COMMUNITY_Query Rewrite Offline Resolves Coreferen|Query Rewrite Offline Resolves Coreferen]]
+- [[_COMMUNITY_Apply Tool Rankings|Apply Tool Rankings]]
+- [[_COMMUNITY_Agegraphstoreexpand Seeds|Agegraphstore::expand Seeds]]
+- [[_COMMUNITY_Agegraphstoreneighbors|Agegraphstore::neighbors]]
+- [[_COMMUNITY_Seed Node|Seed Node]]
+- [[_COMMUNITY_Generate Skill Test Suite|Generate Skill Test Suite]]
+- [[_COMMUNITY_Graphnodefixture|Graphnodefixture]]
+- [[_COMMUNITY_Experience Attribution From Row|Experience Attribution From Row]]
+- [[_COMMUNITY_Learning Candidate From Row|Learning Candidate From Row]]
+- [[_COMMUNITY_Task Segment From Row|Task Segment From Row]]
+- [[_COMMUNITY_Task Strategy Success Rate From Row|Task Strategy Success Rate From Row]]
+- [[_COMMUNITY_Init Metrics|Init Metrics]]
+- [[_COMMUNITY_Migrate|Migrate]]
+- [[_COMMUNITY_Scim User Lifecycle Smoke|Scim User Lifecycle Smoke]]
+- [[_COMMUNITY_Score|Score]]
+- [[_COMMUNITY_Session Brain Round Trip Through Restate|Session Brain Round Trip Through Restate]]
+- [[_COMMUNITY_Test Store|Test Store]]
+- [[_COMMUNITY_Session Store Round Trip Through Restate|Session Store Round Trip Through Restate]]
+- [[_COMMUNITY_Restatesessionstoreclient|Restatesessionstoreclient]]
+- [[_COMMUNITY_Session Vo Round Trip Through Restate|Session Vo Round Trip Through Restate]]
+- [[_COMMUNITY_Test Meta|Test Meta]]
+- [[_COMMUNITY_Verify|Verify]]
+- [[_COMMUNITY_Mpscsink|Mpscsink]]
+- [[_COMMUNITY_Db Backed Selected Skill Package Is Mate|Db Backed Selected Skill Package Is Mate]]
+- [[_COMMUNITY_Skill Acceptance Regression Report|Skill Acceptance Regression Report]]
+- [[_COMMUNITY_Checked Import Scope|Checked Import Scope]]
+- [[_COMMUNITY_Contextsnapshot|Contextsnapshot]]
+- [[_COMMUNITY_System Prompt Bytes Are Stable Across Co|System Prompt Bytes Are Stable Across Co]]
+- [[_COMMUNITY_Persist Trial Status|Persist Trial Status]]
+- [[_COMMUNITY_Status Response|Status Response]]
+- [[_COMMUNITY_Claim Trials For Dispatch|Claim Trials For Dispatch]]
+- [[_COMMUNITY_Insert Trial|Insert Trial]]
+- [[_COMMUNITY_Str Replaceexecute|Str Replace::execute]]
+- [[_COMMUNITY_Score|Score]]
+- [[_COMMUNITY_Record Root Spawn List Wait Trace|Record Root Spawn List Wait Trace]]
+- [[_COMMUNITY_Run Agent Loop Target|Run Agent Loop Target]]
+- [[_COMMUNITY_Run Agent Loop Trial|Run Agent Loop Trial]]
+- [[_COMMUNITY_Run Workflow Target|Run Workflow Target]]
+- [[_COMMUNITY_Run Workflow Trial|Run Workflow Trial]]
+- [[_COMMUNITY_Tenants Service|Tenants Service]]
+- [[_COMMUNITY_Capabilities|Capabilities]]
+- [[_COMMUNITY_Session|Session]]
+- [[_COMMUNITY_Format Skill Manifest|Format Skill Manifest]]
+- [[_COMMUNITY_Select Skills Within Budget|Select Skills Within Budget]]
+- [[_COMMUNITY_Tool Executor Round Trip Through Restate|Tool Executor Round Trip Through Restate]]
+- [[_COMMUNITY_Score|Score]]
+- [[_COMMUNITY_Flush Pending Parts|Flush Pending Parts]]
+- [[_COMMUNITY_Gemini Function Declaration|Gemini Function Declaration]]
+- [[_COMMUNITY_Thinking Config For Request|Thinking Config For Request]]
+- [[_COMMUNITY_Embeddingprovider|Embeddingprovider]]
+- [[_COMMUNITY_Handprovider|Handprovider]]
+- [[_COMMUNITY_Llmprovider|Llmprovider]]
+- [[_COMMUNITY_Load Simulator Context|Load Simulator Context]]
+- [[_COMMUNITY_Turbopuffer News Offline Upsert And Quer|Turbopuffer News Offline Upsert And Quer]]
+- [[_COMMUNITY_Fire Run|Fire Run]]
+- [[_COMMUNITY_Find Pending Approval Request|Find Pending Approval Request]]
+- [[_COMMUNITY_Fetch Users Page|Fetch Users Page]]
+- [[_COMMUNITY_Userfilter|Userfilter]]
+- [[_COMMUNITY_Userrow|Userrow]]
+- [[_COMMUNITY_Meaningful Cancel Reason|Meaningful Cancel Reason]]
+- [[_COMMUNITY_Score|Score]]
+- [[_COMMUNITY_Whoami Service|Whoami Service]]
+- [[_COMMUNITY_Mount Anthropic Sse|Mount Anthropic Sse]]
+- [[_COMMUNITY_Workflows Service|Workflows Service]]
+- [[_COMMUNITY_Compute Next Consolidation Utc|Compute Next Consolidation Utc]]
+- [[_COMMUNITY_Create Node|Create Node]]
+- [[_COMMUNITY_Supersede Node|Supersede Node]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `annotate_restate_handler_span()` - 176 edges
-2. `String` - 107 edges
-3. `WorkspaceId` - 89 edges
-4. `Option` - 73 edges
-5. `OrchestratorCtx` - 69 edges
-6. `Uuid` - 57 edges
-7. `Uuid` - 54 edges
-8. `Vec` - 52 edges
-9. `require_identity()` - 51 edges
-10. `MemoryRetrievalEvalOptions` - 50 edges
+1. `annotate_restate_handler_span()` - 203 edges
+2. `String` - 124 edges
+3. `TenantId` - 106 edges
+4. `Uuid` - 93 edges
+5. `WorkspaceId` - 89 edges
+6. `Json` - 86 edges
+7. `Option` - 83 edges
+8. `Uuid` - 75 edges
+9. `require_authz_with_delegation()` - 71 edges
+10. `OrchestratorCtx` - 69 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `behavior_lab_plan_round_trips_json_yaml_and_exposes_external_refs()` --calls--> `validate_for_status()`  [INFERRED]
-  crates/moa-artifacts/tests/behavior_lab_offline.rs → crates/moa-artifacts/src/validation.rs
-- `draft_allows_unresolved_refs_but_published_rejects_them()` --calls--> `validate_for_status()`  [INFERRED]
-  crates/moa-artifacts/tests/definition_roundtrip.rs → crates/moa-artifacts/src/validation.rs
-- `prompt_examples_parse_as_draft_artifacts()` --calls--> `validate_for_status()`  [INFERRED]
-  crates/moa-artifacts/tests/definition_roundtrip.rs → crates/moa-artifacts/src/validation.rs
-- `workflow_validation_rejects_duplicate_node_ids()` --calls--> `validate_for_status()`  [INFERRED]
-  crates/moa-artifacts/tests/definition_roundtrip.rs → crates/moa-artifacts/src/validation.rs
 - `incremental_history_falls_back_when_delta_grows_too_large()` --calls--> `compiler_with_recent_turns()`  [INFERRED]
   crates/moa-brain/src/pipeline/history/checkpoint.rs → crates/moa-brain/src/pipeline/history/test_support.rs
+- `spawn_scripted_signal_task()` --calls--> `record_broadcast_lag()`  [INFERRED]
+  crates/moa-eval/src/long_conversation/transcript_runner.rs → crates/moa-core/src/runtime_metrics.rs
+- `RunTurnRequest` --conceptually_related_to--> `SessionMeta`  [INFERRED]
+  crates/moa-core/src/wire.rs → crates/moa-core/src/types/session.rs
+- `seed_eval_quality_scores()` --calls--> `beta_smoothed_quality()`  [INFERRED]
+  crates/moa-eval/src/memory_eval/runner.rs → crates/moa-memory/lifecycle/src/quality.rs
+- `extract_returns_typed_error_for_chunks_exceeding_max_size()` --calls--> `extract_facts_checked()`  [INFERRED]
+  crates/moa-memory/ingest/tests/extract.rs → crates/moa-memory/ingest/src/extract.rs
 
 ## Import Cycles
 - 1-file cycle: `crates/moa-artifacts/src/canonical.rs -> crates/moa-artifacts/src/canonical.rs`
 - 1-file cycle: `crates/moa-artifacts/src/connector.rs -> crates/moa-artifacts/src/connector.rs`
 - 1-file cycle: `crates/moa-artifacts/src/document.rs -> crates/moa-artifacts/src/document.rs`
 - 1-file cycle: `crates/moa-artifacts/src/validation.rs -> crates/moa-artifacts/src/validation.rs`
+- 1-file cycle: `crates/moa-skills/src/artifact.rs -> crates/moa-skills/src/artifact.rs`
 - 1-file cycle: `crates/moa-core/src/config/env_overlay.rs -> crates/moa-core/src/config/env_overlay.rs`
 - 1-file cycle: `crates/moa-auth/auth0/src/vault.rs -> crates/moa-auth/auth0/src/vault.rs`
 - 1-file cycle: `crates/moa-orchestrator/src/main.rs -> crates/moa-orchestrator/src/main.rs`
@@ -992,3125 +1026,3252 @@
 - 1-file cycle: `crates/moa-auth/auth0/src/auth0_provider.rs -> crates/moa-auth/auth0/src/auth0_provider.rs`
 - 1-file cycle: `crates/xtask/src/check_eval_budgets.rs -> crates/xtask/src/check_eval_budgets.rs`
 - 1-file cycle: `crates/moa-auth/auth0/src/ciba.rs -> crates/moa-auth/auth0/src/ciba.rs`
-- 1-file cycle: `crates/moa-auth/fga-bootstrap/src/http.rs -> crates/moa-auth/fga-bootstrap/src/http.rs`
 
-## Communities (995 total, 163 thin omitted)
+## Communities (1028 total, 164 thin omitted)
 
-### Community 0 - "Orchestrator Contacts"
+### Community 0 - "Memory Eval Corpus Generator"
+Cohesion: 0.05
+Nodes (120): BTreeMap, CorpusManifest, CorpusProfile, DateTime, EmbeddingInput, Error, EvalError, Into (+112 more)
+
+### Community 1 - "Contact Verification"
+Cohesion: 0.06
+Nodes (122): ChannelAccountRef, ContactPointInput, ContactPointKind, ContactPointRef, ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse, ContactSessionInitRequest, ContactSessionInitResponse (+114 more)
+
+### Community 2 - "Memory Eval DB Tests"
+Cohesion: 0.04
+Nodes (119): BinaryProbeOutcome, BinaryProbeOutcome, BTreeMap, BTreeSet, CachedEmbeddingFixture, CorpusManifest, DateTime, EmbeddingProvider (+111 more)
+
+### Community 3 - "Analytics & Tool Stats"
+Cohesion: 0.04
+Nodes (114): CacheDailyMetric, CacheStatsRequest, CacheStatsResponse, ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount, ExperimentTrialTrendPoint, FgaClient (+106 more)
+
+### Community 4 - "Experiment Improvement Admission"
+Cohesion: 0.05
+Nodes (121): ActionRuleScope, AgentRevisionSimulationVariant, ArtifactDocument, ArtifactRegistry, CompletionRequest, DateTime, Error, ExperimentCancelRequest (+113 more)
+
+### Community 5 - "Restate Handler Instrumentation"
+Cohesion: 0.05
+Nodes (82): AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest, CompleteSegmentRequest, AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest (+74 more)
+
+### Community 6 - "Gold Fact Resolution"
+Cohesion: 0.05
+Nodes (106): BTreeMap, BTreeSet, ContactId, DateTime, Error, EvalError, FactExtractor, GoldNodeRecord (+98 more)
+
+### Community 7 - "Experiments Service"
+Cohesion: 0.05
+Nodes (97): AdmittedExperimentRun, AgentDependencyChange, AgentRevisionSimulationVariant, Arc, ArtifactDocument, ArtifactRegistry, DateTime, Error (+89 more)
+
+### Community 8 - "Working Context Assembly"
+Cohesion: 0.05
+Nodes (64): anthropic_late_system_message(), anthropic_output_config(), anthropic_text_block(), build_request_body(), debug_build_anthropic_request_body(), mark_stable_prefix_cache_control(), should_enable_automatic_cache_control(), should_mark_stable_prefix() (+56 more)
+
+### Community 9 - "Session Turn Start"
+Cohesion: 0.05
+Nodes (78): CancelMode, CancelResponse, ClearSessionPendingApprovalInput, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, ContactId (+70 more)
+
+### Community 10 - "Service Entrypoints & Probes"
 Cohesion: 0.07
-Nodes (108): ContactPointInput, ContactPointKind, ContactPointRef, ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse, ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionPromotionRequest (+100 more)
+Nodes (86): ApprovalReaperHandle, AtomicBool, CancellationToken, ApprovalReaperHandle, Arc, AtomicBool, AuthzChallengeReaperHandle, AwakeableResolver (+78 more)
 
-### Community 1 - "Experiments"
-Cohesion: 0.05
-Nodes (110): ArtifactDocument, ArtifactRegistry, CompletionRequest, DateTime, Error, ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest (+102 more)
+### Community 11 - "Turn Execution & Tool Calls"
+Cohesion: 0.11
+Nodes (87): ApprovalPrompt, CoreTurnOutcome, ApprovalPrompt, BTreeSet, CompletionResponse, CoreTurnOutcome, EventRange, HandlerError (+79 more)
 
-### Community 2 - "Orchestrator Analytics"
-Cohesion: 0.05
-Nodes (98): CacheStatsRequest, CacheStatsResponse, ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount, ExperimentTrialTrendPoint, CacheDailyMetric, Context (+90 more)
-
-### Community 3 - "Eval Gold"
+### Community 12 - "Graph Memory Consolidation"
 Cohesion: 0.06
-Nodes (99): BTreeMap, BTreeSet, DateTime, Error, EvalError, FactExtractor, GoldNodeRecord, HashMap (+91 more)
+Nodes (68): BackfillStats, ConsolidateRequest, ConsolidateRequest, Context, HandlerError, Json, NaiveDate, Option (+60 more)
 
-### Community 4 - "Experiments Store"
-Cohesion: 0.07
-Nodes (68): DateTime, MemoryScope, ModelId, Option, Self, SessionId, String, Utc (+60 more)
-
-### Community 5 - "Orchestrator Action Reviews"
-Cohesion: 0.06
-Nodes (96): decide_review(), DecidedReview, decision_from_request(), deny_reason_for_decision(), execution_tool_call_id_for_decision(), execution_tool_request_for_clear_uses_fresh_tool_id(), execution_tool_request_for_decision(), execution_tool_request_is_idempotent_after_execution_was_requested() (+88 more)
-
-### Community 6 - "Orchestrator Experiments"
-Cohesion: 0.06
-Nodes (87): Arc, ArtifactDocument, ArtifactRegistry, CompletionRequest, Context, ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest (+79 more)
-
-### Community 7 - "Orchestrator"
-Cohesion: 0.07
-Nodes (88): ApprovalReaperHandle, AtomicBool, CancellationToken, ApprovalReaperHandle, Arc, AtomicBool, AuthzChallengeReaperHandle, AwakeableResolver (+80 more)
-
-### Community 8 - "Auth Group Sync"
-Cohesion: 0.06
-Nodes (77): Arc, Duration, JoinHandle, Option, PgPool, Result, Self, Send (+69 more)
-
-### Community 9 - "Orchestrator Handlers"
+### Community 13 - "Session Creation & Agent Policy"
 Cohesion: 0.05
-Nodes (74): CancelMode, CancelResponse, ClearSessionPendingApprovalInput, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, ApprovalDecision, CancelMode, ConsumeSubAgentChildResultInput (+66 more)
+Nodes (60): ActionRuleScope, AgentContext, AgentModelPolicy, AgentSessionSelection, AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest (+52 more)
 
-### Community 10 - "Core Context"
-Cohesion: 0.06
-Nodes (59): anthropic_late_system_message(), anthropic_output_config(), anthropic_text_block(), build_request_body(), debug_build_anthropic_request_body(), mark_stable_prefix_cache_control(), should_enable_automatic_cache_control(), should_mark_stable_prefix() (+51 more)
-
-### Community 11 - "Eval Generator"
-Cohesion: 0.07
-Nodes (83): BTreeMap, CorpusManifest, CorpusProfile, EmbeddingInput, Error, EvalError, Into, LedgerFact (+75 more)
-
-### Community 12 - "Session Session Store"
+### Community 14 - "Postgres Store Rows"
 Cohesion: 0.05
-Nodes (50): ClaimCheck, ContextSnapshot, ExperienceRecord, ClaimCheck, ContactId, ContactRef, ContextSnapshot, DateTime (+42 more)
+Nodes (83): db_error(), insert_review(), list_pending_reviews(), load_review_for_update(), load_review_state(), mark_decision_event_recorded(), mark_execution_requested(), mark_requested_event_recorded() (+75 more)
 
-### Community 13 - "Core Sub Agent"
-Cohesion: 0.05
-Nodes (71): AgentPath, CompletionResponse, From, ModelId, Option, Result, Self, SessionId (+63 more)
-
-### Community 14 - "Memory Slow Path"
+### Community 15 - "Memory Slow Path Decisions"
 Cohesion: 0.08
-Nodes (84): ApplyOutcome, chunk_turn, ClassifiedFact, AgeGraphStore, Arc, Conflict, ContextMessage, ContradictionDetector (+76 more)
+Nodes (85): ApplyOutcome, chunk_turn, AgeGraphStore, Arc, Conflict, ContactId, ContextMessage, ContradictionDetector (+77 more)
 
-### Community 15 - "Orchestrator Handlers"
-Cohesion: 0.07
-Nodes (54): AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest, CompleteSegmentRequest, Context, CreateSegmentRequest, EventRecord (+46 more)
-
-### Community 16 - "Eval Fixtures"
+### Community 16 - "Memory Ingestion & Scope"
 Cohesion: 0.06
+Nodes (81): AgeGraphStore, Arc, ContactId, Context, Display, GraphStore, HandlerError, Identity (+73 more)
+
+### Community 17 - "Agent Definitions Deploy"
+Cohesion: 0.06
+Nodes (78): AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDeploymentListRequest, AgentDeploymentListResponse, AgentDeployRequest, AgentDeployResponse, AgentInstallationListRequest, AgentInstallationListResponse (+70 more)
+
+### Community 18 - "Context Test Fixtures"
+Cohesion: 0.05
+Nodes (59): BuiltWorkingContextFixture, Result, Arc, ContactId, ContactRef, ContextMessage, DateTime, Default (+51 more)
+
+### Community 19 - "Retrieval Expansion Legs"
+Cohesion: 0.08
+Nodes (77): Arc, DateTime, EdgeLabel, Fn, GraphExpansionHit, GraphStore, HashMap, LegSources (+69 more)
+
+### Community 20 - "Cross-Tenant Pentest"
+Cohesion: 0.07
 Nodes (63): AttackOutcome, Error, Into, MoaError, PgConnection, PgPool, PiiCategory, PiiClassifier (+55 more)
 
-### Community 17 - "Brain"
-Cohesion: 0.05
-Nodes (55): BuiltWorkingContextFixture, Result, Result, Result, Arc, ContextMessage, DateTime, Default (+47 more)
+### Community 21 - "Skill Registry"
+Cohesion: 0.10
+Nodes (63): Cache, ActionRuleScope, ArtifactDocument, ArtifactFile, Cache, DateTime, HashMap, MemoryScope (+55 more)
 
-### Community 18 - "Orchestrator Consolidate"
-Cohesion: 0.07
-Nodes (60): BackfillStats, ConsolidateRequest, ConsolidateRequest, Context, HandlerError, Json, NaiveDate, Option (+52 more)
-
-### Community 19 - "Core Wire"
+### Community 22 - "Restate Runtime Harness"
 Cohesion: 0.06
-Nodes (80): BTreeMap, LearningCandidate, LineageRecordView, TaskSegment, Uuid, Value, WorkspaceId, EvalRunStatus (+72 more)
+Nodes (77): Child, OrchestratorPorts, Result, String, TempDir, WorkspaceId, Child, OrchestratorPorts (+69 more)
 
-### Community 20 - "Orchestrator Memory"
+### Community 23 - "Retrieval Eval Metrics"
 Cohesion: 0.07
-Nodes (73): AgeGraphStore, Arc, Context, Display, GraphStore, HandlerError, Identity, IngestApplyReport (+65 more)
+Nodes (63): BootstrapConfig, BTreeSet, ClusterBootstrapReport, ClusterObservation, Deref, Fn, From, GoldResolutionReport (+55 more)
 
-### Community 21 - "Session Neon"
+### Community 24 - "Behavior Lab Simulation E2E"
+Cohesion: 0.08
+Nodes (78): ActionRuleScope, ArtifactPublishResponse, Child, Client, EventRecord, ExperimentRunResponse, ExperimentRunStatusResponse, ExperimentScoresResponse (+70 more)
+
+### Community 25 - "Hybrid Retriever"
+Cohesion: 0.08
+Nodes (59): Arc, GraphStore, LineageContext, MemoryScope, MoaConfig, NodeLabel, PgPool, PiiClass (+51 more)
+
+### Community 26 - "Messaging Send & Rate Limiting"
+Cohesion: 0.05
+Nodes (67): Result, Arc, MockServer, Platform, ApprovalRequest, Arc, BTreeSet, InboundMessage (+59 more)
+
+### Community 27 - "Twilio SMS Client"
+Cohesion: 0.07
+Nodes (50): Arc, Client, Credential, CredentialVault, Duration, F, From, HeaderMap (+42 more)
+
+### Community 28 - "Skills Import Service"
+Cohesion: 0.07
+Nodes (71): ActionRuleScope, Context, HandlerError, Identity, Json, MemoryScope, MoaError, Option (+63 more)
+
+### Community 29 - "Transcript Runner"
+Cohesion: 0.08
+Nodes (71): AgentEnvironment, CollectedExecution, AgentConfig, AgentEnvironment, CollectedExecution, DateTime, EngineOptions, EvalResult (+63 more)
+
+### Community 30 - "Experiment Run Status"
+Cohesion: 0.07
+Nodes (72): ActionRuleScope, AgentRevisionSimulationVariant, DateTime, ExperimentRunRecord, ExperimentRunStatus, ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentTargetKind (+64 more)
+
+### Community 31 - "Artifact Registry"
+Cohesion: 0.12
+Nodes (56): ArtifactDocument, ArtifactKind, ArtifactStatus, ActionRuleScope, ArtifactDocument, ArtifactKind, ArtifactStatus, DateTime (+48 more)
+
+### Community 32 - "Neon Branch Manager"
 Cohesion: 0.08
 Nodes (58): BranchManager, Arc, CheckpointHandle, CheckpointInfo, Client, DateTime, Duration, HashMap (+50 more)
 
-### Community 22 - "Messaging Postmark"
+### Community 33 - "Postmark Email Client"
 Cohesion: 0.07
 Nodes (50): Arc, Client, Credential, CredentialVault, DateTime, Duration, F, From (+42 more)
 
-### Community 23 - "Orchestrator Experiment Run"
-Cohesion: 0.07
-Nodes (71): DateTime, ExperimentRunRecord, ExperimentRunStatus, ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus (+63 more)
-
-### Community 24 - "Gateway Renderer"
+### Community 34 - "Text Renderer"
 Cohesion: 0.06
 Nodes (61): ActionButton, ActionButton, ApprovalRequest, Option, OutboundMessage, Platform, PlatformCapabilities, RiskLevel (+53 more)
 
-### Community 25 - "Hands"
-Cohesion: 0.07
-Nodes (49): ConnectedSandbox, Duration, HandStatus, HeaderMap, Map, MoaError, Option, Response (+41 more)
+### Community 35 - "Records"
+Cohesion: 0.06
+Nodes (69): AgeIntrospection, BackendIntrospection, Citation, ContextSourceRef, Citation, ContextChunk, DateTime, Duration (+61 more)
 
-### Community 26 - "Hands"
+### Community 36 - "Handlers"
 Cohesion: 0.07
-Nodes (45): Duration, HashMap, Into, Option, PathBuf, Result, Self, String (+37 more)
+Nodes (52): AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput, ClearSubAgentPendingApprovalInput, CompleteSubAgentChildInput, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput, ApprovalDecision, AttachSubAgentResultWaiterInput (+44 more)
 
-### Community 27 - "Orchestrator Behavior Lab Simulation E2E"
+### Community 37 - "Workspace"
 Cohesion: 0.09
-Nodes (73): ArtifactPublishResponse, Child, Client, EventRecord, ExperimentRunResponse, ExperimentRunStatusResponse, ExperimentScoresResponse, ExperimentTrialsResponse (+65 more)
+Nodes (57): ActionPolicyRule, ConsolidateReport, ActionPolicyEffect, ActionPolicyRule, ApprovalRule, ConsolidateReport, DateTime, Duration (+49 more)
 
-### Community 28 - "Lineage Records"
-Cohesion: 0.06
-Nodes (68): AgeIntrospection, BackendIntrospection, ContextSourceRef, Citation, ContextChunk, DateTime, Duration, MemoryScope (+60 more)
-
-### Community 29 - "Eval Memory Eval Db Memory"
-Cohesion: 0.06
-Nodes (73): BinaryProbeOutcome, BTreeMap, CachedEmbeddingFixture, Fn, LegSources, MemoryRetrievalEvalReport, MetricSummary, NodeIndexRow (+65 more)
-
-### Community 30 - "Loadtest Backend"
+### Community 38 - "Long Conversation Smoke Eval"
 Cohesion: 0.07
-Nodes (48): Arc, Client, Duration, Event, EventRange, EventRecord, FgaClient, Identity (+40 more)
+Nodes (72): AgentConfig, ApprovalDecision, Event, Fn, LongRunReport, PgPool, ScoreCard, String (+64 more)
 
-### Community 31 - "Skills Registry"
-Cohesion: 0.10
-Nodes (54): Cache, ArtifactDocument, ArtifactFile, Cache, DateTime, HashMap, MemoryScope, NewArtifactFile (+46 more)
-
-### Community 32 - "Brain Legs"
-Cohesion: 0.10
-Nodes (71): DateTime, EdgeLabel, Fn, GraphExpansionHit, GraphStore, HashMap, LegSources, LineageContext (+63 more)
-
-### Community 33 - "Messaging Twilio"
+### Community 39 - "Cache"
 Cohesion: 0.08
-Nodes (46): Arc, Client, Credential, CredentialVault, Duration, F, From, HeaderMap (+38 more)
+Nodes (49): AtomicI64, Arc, AtomicUsize, Cache, ContactId, DateTime, Default, Duration (+41 more)
 
-### Community 34 - "Artifacts Registry"
-Cohesion: 0.12
-Nodes (52): ArtifactDocument, ArtifactKind, ArtifactStatus, ArtifactDocument, ArtifactKind, ArtifactStatus, DateTime, Into (+44 more)
+### Community 40 - "Mod"
+Cohesion: 0.07
+Nodes (64): CompletionStream, String, ActionRuleScope, Arc, CompletionRequest, CompletionStream, Event, EventRecord (+56 more)
 
-### Community 35 - "Orchestrator Turn Execution"
-Cohesion: 0.12
-Nodes (68): ApprovalPrompt, CoreTurnOutcome, ApprovalPrompt, BTreeSet, CompletionResponse, CoreTurnOutcome, EventRange, HandlerError (+60 more)
+### Community 41 - "Store"
+Cohesion: 0.13
+Nodes (49): ActionRuleScope, DateTime, Error, ExperimentRunRecord, ExperimentRunStatus, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason (+41 more)
 
-### Community 36 - "Brain Segments"
-Cohesion: 0.06
-Nodes (61): ActiveSegment, DateTime, Event, HashMap, Option, SegmentCompleted, SegmentCompletion, SegmentId (+53 more)
-
-### Community 37 - "Providers Registry"
-Cohesion: 0.09
-Nodes (43): Arc, AsRef, CompletionRequest, CompletionStream, LLMProvider, MoaConfig, ModelCapabilities, ModelId (+35 more)
-
-### Community 38 - "Memory Llm Extractor"
-Cohesion: 0.06
-Nodes (54): ExtractedFact, FactExtractor, LlmChatClient, MemoryExtractionConfig, Option, Result, Self, String (+46 more)
-
-### Community 39 - "Orchestrator Handlers"
+### Community 42 - "Mod"
 Cohesion: 0.08
-Nodes (46): AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput, ClearSubAgentPendingApprovalInput, CompleteSubAgentChildInput, ApprovalDecision, AttachSubAgentResultWaiterInput, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput (+38 more)
+Nodes (62): AtomicUsize, Arc, AtomicUsize, ContactId, DateTime, EmbeddingProvider, IngestCtx, Into (+54 more)
 
-### Community 40 - "Eval Metrics"
+### Community 43 - "Experience"
+Cohesion: 0.06
+Nodes (60): Option, PgPool, String, Uuid, PgPool, String, Uuid, Box (+52 more)
+
+### Community 44 - "Learning Review"
+Cohesion: 0.10
+Nodes (64): Arc, Context, GetLearningCandidateRequest, HandlerError, Identity, Json, LearningCandidate, LearningCandidateReviewAction (+56 more)
+
+### Community 45 - "Tool Executor"
 Cohesion: 0.09
-Nodes (54): BootstrapConfig, BTreeSet, ClusterBootstrapReport, ClusterObservation, Fn, GoldResolutionReport, HashMap, Item (+46 more)
+Nodes (64): AgentContext, Arc, Context, EventRecord, HandlerError, Hasher, IdempotencyClass, Json (+56 more)
 
-### Community 41 - "Ocsf Emit"
-Cohesion: 0.14
-Nodes (61): Actor, AuthorizationEvent, DateTime, E, Identity, IdentityType, Option, PgPool (+53 more)
+### Community 46 - "Resolver"
+Cohesion: 0.08
+Nodes (60): AgentInstallationPointer, AgentSkillPolicyMode, ActionPolicy, ActionRuleScope, AgentActionPolicy, AgentDefinition, AgentKnowledgePolicy, AgentModelPolicy (+52 more)
 
-### Community 42 - "Hands"
+### Community 47 - "Completionrequest"
+Cohesion: 0.07
+Nodes (27): Arc, CompletionRequest, CompletionStream, LLMProvider, ModelCapabilities, Mutex, Option, String (+19 more)
+
+### Community 48 - "Sub Agent Turn Execution"
+Cohesion: 0.10
+Nodes (62): ApprovalPrompt, BTreeSet, CompletionRequest, CoreTurnOutcome, DateTime, Event, HandlerError, Json (+54 more)
+
+### Community 49 - "Mod"
 Cohesion: 0.07
 Nodes (45): MCPClient, BufReader, ChildStdin, ChildStdout, Arc, AtomicBool, AtomicU64, Child (+37 more)
 
-### Community 43 - "Memory"
-Cohesion: 0.08
-Nodes (60): AtomicUsize, Arc, AtomicUsize, DateTime, EmbeddingProvider, IngestCtx, Into, NodeIndexRow (+52 more)
+### Community 50 - "Runtime Metrics"
+Cohesion: 0.06
+Nodes (63): ActionClass, ActionPolicyEffect, ActionReviewStatus, Duration, MetricsConfig, ModelId, ModelTier, Option (+55 more)
 
-### Community 44 - "Eval Counting"
+### Community 51 - "Counting"
 Cohesion: 0.05
 Nodes (42): CostError, Default, From, Option, Result, Self, String, EmbeddingProvider (+34 more)
 
-### Community 45 - "Eval Long Conversation Smoke Eval"
-Cohesion: 0.07
-Nodes (67): AgentConfig, ApprovalDecision, Event, Fn, LongRunReport, PgPool, ScoreCard, String (+59 more)
-
-### Community 46 - "Orchestrator Learning Review"
-Cohesion: 0.10
-Nodes (62): Arc, Context, GetLearningCandidateRequest, HandlerError, Identity, Json, LearningCandidate, LearningCandidateReviewAction (+54 more)
-
-### Community 47 - "Orchestrator Sub Agent Turn Execution"
-Cohesion: 0.10
-Nodes (60): Into, ApprovalPrompt, BTreeSet, CompletionRequest, CoreTurnOutcome, DateTime, Event, HandlerError (+52 more)
-
-### Community 48 - "Skills Format"
+### Community 52 - "Format"
 Cohesion: 0.08
 Nodes (32): D, DateTime, Error, HashMap, Into, Ok, Option, Result (+24 more)
 
-### Community 49 - "Hands File Search"
+### Community 53 - "Mod"
+Cohesion: 0.07
+Nodes (41): ActionPolicyRuleStore, BlobStore, test_action_policy_rules(), ActionPolicyRule, ActionPolicyRuleStore, Option, Result, UserId (+33 more)
+
+### Community 54 - "Emit"
+Cohesion: 0.14
+Nodes (60): Actor, AuthorizationEvent, DateTime, E, Identity, IdentityType, Option, PgPool (+52 more)
+
+### Community 55 - "File Search"
 Cohesion: 0.06
 Nodes (57): ContextLine, CancellationToken, Duration, Error, Option, Path, Result, String (+49 more)
 
-### Community 50 - "Gateway Approval"
-Cohesion: 0.06
-Nodes (61): test_action_policy_rules(), ActionButton, ApprovalRequest, OutboundMessage, Platform, PlatformCapabilities, Uuid, Vec (+53 more)
-
-### Community 51 - "Core Runtime Metrics"
-Cohesion: 0.06
-Nodes (61): ActionClass, ActionPolicyEffect, ActionReviewStatus, Duration, MetricsConfig, ModelId, ModelTier, Option (+53 more)
-
-### Community 52 - "Brain Ranking"
+### Community 56 - "Ranking"
 Cohesion: 0.06
 Nodes (59): DateTime, EventRecord, HashMap, Option, String, ToolStats, Utc, Vec (+51 more)
 
-### Community 53 - "Orchestrator Experiments"
+### Community 57 - "Validation"
+Cohesion: 0.09
+Nodes (62): ActionDefinition, ActionPolicy, AgentDefinition, ArtifactKind, ArtifactRef, ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition (+54 more)
+
+### Community 58 - "Tenantid"
 Cohesion: 0.06
-Nodes (64): AdmittedExperimentRun, ExperimentScoreSummaryRow, DateTime, Error, ExperimentRunRecord, ExperimentRunResponse, ExperimentRunWorkflowRequest, ExperimentScorecard (+56 more)
+Nodes (65): AgentRevisionSimulationVariant, AgentRevisionSimulationVariant, MemoryIngestResult, SkillPackageDocument, TenantId, Uuid, WorkspaceId, EvalRunStatus (+57 more)
 
-### Community 54 - "Brain Hybrid"
+### Community 59 - "Target Execution"
 Cohesion: 0.08
-Nodes (46): DateTime, Default, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, HashSet, LineageContext (+38 more)
+Nodes (63): ArtifactRunStatus, ActionRuleScope, AgentSessionSelection, ArtifactRunStatus, ContextMessage, Event, EventRange, EventRecord (+55 more)
 
-### Community 55 - "Memory Extract"
-Cohesion: 0.07
-Nodes (62): DateTime, Option, PiiClass, PiiSpan, Result, SessionId, String, UserId (+54 more)
-
-### Community 56 - "Eval Corpus"
+### Community 60 - "Registry"
 Cohesion: 0.10
+Nodes (39): Arc, AsRef, CompletionRequest, CompletionStream, LLMProvider, MoaConfig, ModelCapabilities, ModelId (+31 more)
+
+### Community 61 - "Experience"
+Cohesion: 0.07
+Nodes (58): BTreeSet, DateTime, EventRecord, ExperienceRecord, Option, QueryRewriteResult, SegmentAssessment, SessionMeta (+50 more)
+
+### Community 62 - "Corpus"
+Cohesion: 0.11
 Nodes (55): CorpusProfile, DateTime, Error, EvalError, Item, Iterator, Option, Path (+47 more)
 
-### Community 57 - "Gateway"
-Cohesion: 0.06
-Nodes (54): Arc, MockServer, Platform, Arc, BTreeSet, InboundMessage, MockServer, PathBuf (+46 more)
-
-### Community 58 - "Orchestrator Experiment Trial Run"
-Cohesion: 0.06
-Nodes (56): Identity, ExperimentTrialRecord, HandlerError, Identity, IdentityType, Into, Json, MoaError (+48 more)
-
-### Community 59 - "Orchestrator Skills"
+### Community 63 - "Approval"
 Cohesion: 0.07
-Nodes (58): Context, HandlerError, Identity, Json, MemoryScope, MoaError, Option, Relation (+50 more)
+Nodes (58): ActionButton, ApprovalRequest, OutboundMessage, Platform, PlatformCapabilities, Uuid, Vec, DateTime (+50 more)
 
-### Community 60 - "Skills Regression"
+### Community 64 - "Regression"
 Cohesion: 0.08
-Nodes (62): AgentConfig, Arc, Box, EvalError, EvalResult, EvalRun, Evaluator, EventRecord (+54 more)
+Nodes (61): AgentConfig, Arc, Box, EvalError, EvalResult, EvalRun, Evaluator, EventRecord (+53 more)
 
-### Community 61 - "Skills"
+### Community 65 - "Artifacts"
+Cohesion: 0.09
+Nodes (56): ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest (+48 more)
+
+### Community 66 - "Result"
 Cohesion: 0.07
-Nodes (57): String, Arc, CompletionRequest, CompletionStream, Event, EventRecord, LLMProvider, MemoryScope (+49 more)
+Nodes (32): ClaimCheck, ContextSnapshot, ClaimCheck, ContactId, ContactRef, ContextSnapshot, DateTime, EventType (+24 more)
 
-### Community 62 - "Orchestrator Target Execution"
+### Community 67 - "Turbopuffer"
 Cohesion: 0.09
-Nodes (60): ArtifactRunStatus, ArtifactRunStatus, ContextMessage, Event, EventRange, EventRecord, ExperimentTarget, ExperimentTrialRecord (+52 more)
+Nodes (43): Arc, Client, Error, Into, Method, MoaConfig, Mutex, Option (+35 more)
 
-### Community 63 - "Gateway Telegram"
+### Community 68 - "Skill Regression"
 Cohesion: 0.09
-Nodes (48): Bot, CallbackQuery, ChatId, ActionButton, Arc, Attachment, ChannelRef, HashMap (+40 more)
+Nodes (55): ArtifactFile, ActionRuleScope, AgentConfig, Arc, ArtifactFile, Box, EvalResult, EvalRun (+47 more)
 
-### Community 64 - "Memory"
+### Community 69 - "Lib"
 Cohesion: 0.07
 Nodes (42): Into, Option, PgPool, Result, Self, String, Vec, Into (+34 more)
 
-### Community 65 - "Orchestrator Tool Executor"
+### Community 70 - "Setup"
+Cohesion: 0.08
+Nodes (54): ActionPolicies, ActionPolicyOverride, ActionPolicies, ActionPolicyOverride, ActionPolicyRuleStore, AgentConfig, ApprovalRuleStore, Arc (+46 more)
+
+### Community 71 - "Mpsc Sink"
+Cohesion: 0.07
+Nodes (36): AtomicU64, LineageEvent, LineageSink, Arc, AtomicU64, Default, Duration, From (+28 more)
+
+### Community 72 - "Mod"
 Cohesion: 0.10
-Nodes (55): Arc, Context, EventRecord, HandlerError, Hasher, IdempotencyClass, Json, MoaError (+47 more)
+Nodes (47): CircuitBreaker, Arc, AsRef, AtomicUsize, CompletionRequest, CompletionStream, ContextMessage, ContextProcessor (+39 more)
 
-### Community 66 - "Orchestrator Llm Gateway"
-Cohesion: 0.10
-Nodes (36): AsRef, Arc, AsRef, CompletionStream, LLMProvider, MoaConfig, ModelCapabilities, ModelId (+28 more)
+### Community 73 - "Review"
+Cohesion: 0.13
+Nodes (56): ActionRuleScope, ArtifactFile, Into, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, MemoryScope (+48 more)
 
-### Community 67 - "Core Wire"
-Cohesion: 0.06
-Nodes (59): Attachment, Attachment, ContactErasureScope, ContactRef, EventFilter, Identity, MemoryScope, Option (+51 more)
-
-### Community 68 - "Auth Client"
+### Community 74 - "Client"
 Cohesion: 0.07
 Nodes (36): Arc, AuthzError, Client, Option, Response, Result, Self, String (+28 more)
 
-### Community 69 - "Hands"
+### Community 75 - "Agent Artifacts E2e"
 Cohesion: 0.10
-Nodes (34): Client, Duration, HandHandle, HandProvider, HandSpec, HandStatus, HeaderMap, Into (+26 more)
+Nodes (57): ActionRuleScope, ArtifactPublishResponse, Child, Client, EventRecord, Identity, Into, Option (+49 more)
 
-### Community 70 - "Orchestrator State"
+### Community 76 - "Types"
 Cohesion: 0.07
-Nodes (36): ContextMessage, HandlerError, MarkSubAgentChildTerminalInput, ModelId, Option, R, Result, Self (+28 more)
+Nodes (48): AgentConfigBody, ActionPolicyEffect, ActionPolicyOverride, Default, ExpectedOutput, From, HashMap, InstructionOverride (+40 more)
 
-### Community 71 - "Orchestrator Artifacts"
-Cohesion: 0.09
-Nodes (51): ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest, ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest (+43 more)
+### Community 77 - "Distiller"
+Cohesion: 0.10
+Nodes (56): AttributionEffect, Arc, AttributionEffect, EventRecord, ExperienceAttribution, ExperienceRecord, HashSet, MoaConfig (+48 more)
 
-### Community 72 - "Brain Test Support"
+### Community 78 - "Test Support"
 Cohesion: 0.07
 Nodes (40): CompiledHistory, Arc, CompiledHistory, CompletionRequest, CompletionStream, ContextSnapshot, DateTime, Event (+32 more)
 
-### Community 73 - "Hands Tool Result"
+### Community 79 - "Experiment Trial Run"
 Cohesion: 0.08
-Nodes (43): ClaimCheck, DateTime, Event, EventFilter, EventRange, EventRecord, HashMap, Option (+35 more)
+Nodes (50): ActionRuleScope, ExperimentTrialRecord, HandlerError, Identity, Into, Json, MoaError, ModelId (+42 more)
 
-### Community 74 - "Orchestrator Users"
+### Community 80 - "Users"
 Cohesion: 0.11
 Nodes (55): CascadeError, HeaderMap, Identity, Result, DateTime, EmitError, Error, HeaderMap (+47 more)
 
-### Community 75 - "Memory Promotion"
+### Community 81 - "Tool Result"
+Cohesion: 0.08
+Nodes (42): ClaimCheck, DateTime, Event, EventFilter, EventRange, EventRecord, HashMap, Option (+34 more)
+
+### Community 82 - "Promotion"
 Cohesion: 0.09
 Nodes (39): Arc, DateTime, Mutex, Option, PgPool, PgRow, Postgres, Result (+31 more)
 
-### Community 76 - "Orchestrator Lineage Admin"
-Cohesion: 0.11
-Nodes (50): Context, DateTime, Display, HandlerError, Json, LineageRecordView, Path, PathBuf (+42 more)
+### Community 83 - ".run()"
+Cohesion: 0.08
+Nodes (46): AgentRevisionSimulationRunRequest, AgentRevisionSimulationRunResponse, Context, ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest, ExperimentCompareResponse, ExperimentListRequest (+38 more)
 
-### Community 77 - "Skills Review"
-Cohesion: 0.14
-Nodes (53): ArtifactFile, Into, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, MemoryScope, Option (+45 more)
+### Community 84 - "String"
+Cohesion: 0.06
+Nodes (55): EventFilter, LearningCandidateSummary, Option, String, TurnOutcomeKind, EventFilter, AgentArtifactDependencyDelta, AgentDefinitionListRequest (+47 more)
 
-### Community 78 - "Core"
-Cohesion: 0.05
-Nodes (49): AsyncAuthzConfig, AuditSecurityConfig, AuthConfig, AuthzConfig, BudgetConfig, CloudConfig, env_only_loader_rejects_zero_neon_checkpoint_limit_when_enabled(), env_only_loads_database_auth_and_openfga_config() (+41 more)
-
-### Community 79 - "Eval Score Card"
+### Community 85 - "Score Card"
 Cohesion: 0.09
 Nodes (47): CacheScores, ContextScores, CostScores, DateTime, Default, FunctionalScores, Into, LatencyScores (+39 more)
 
-### Community 80 - "Orchestrator Groups"
+### Community 86 - "Plan"
+Cohesion: 0.11
+Nodes (53): AgentSessionSelection, ExperimentPlanDefinition, ExperimentScorecard, ExperimentTarget, ExperimentTargetKind, ExperimentTargetVariant, ExperimentVariant, Fn (+45 more)
+
+### Community 87 - "Experiment Store Db"
+Cohesion: 0.15
+Nodes (54): ActionRuleScope, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, MemoryScope, NewExperiment, NewExperimentTrial, Option (+46 more)
+
+### Community 88 - "Groups"
 Cohesion: 0.14
 Nodes (54): ActorInput, EmitError, Error, HeaderMap, Json, ListQuery, ListResponse, PatchOp (+46 more)
 
-### Community 81 - "Eval Types"
+### Community 89 - "Mod"
+Cohesion: 0.05
+Nodes (48): AsyncAuthzConfig, AuditSecurityConfig, AuthConfig, AuthzConfig, BudgetConfig, CloudConfig, env_only_loader_rejects_zero_neon_checkpoint_limit_when_enabled(), env_only_loads_database_auth_and_openfga_config() (+40 more)
+
+### Community 90 - "Tools"
 Cohesion: 0.08
-Nodes (45): AgentConfigBody, ActionPolicyEffect, ActionPolicyOverride, Default, ExpectedOutput, From, HashMap, InstructionOverride (+37 more)
+Nodes (35): ActionClass, ActionPolicyEffect, ClaimCheck, Duration, Into, Option, PolicyAction, RiskLevel (+27 more)
 
-### Community 82 - "Gateway Control"
+### Community 91 - "Privacy"
+Cohesion: 0.10
+Nodes (51): AgeGraphStore, ContactErasureScope, Error, PgPool, ScopedConn, String, UserId, Uuid (+43 more)
+
+### Community 92 - "Sub Agent"
 Cohesion: 0.08
-Nodes (51): InboundMessage, Option, OutboundMessage, Platform, SessionId, SessionSignal, Into, OutboundMessage (+43 more)
+Nodes (46): AgentPath, CompletionResponse, From, Option, String, SubAgentId, SubAgentState, SubAgentTerminalResult (+38 more)
 
-### Community 83 - "Orchestrator Llm Gateway"
-Cohesion: 0.07
-Nodes (45): CompletionRequest, CompletionResponse, Context, DateTime, Default, Drop, HandlerError, Json (+37 more)
-
-### Community 84 - "Orchestrator Agent Artifacts E2E"
-Cohesion: 0.10
-Nodes (53): ArtifactPublishResponse, Child, Client, EventRecord, Identity, Into, Option, OrchestratorPorts (+45 more)
-
-### Community 85 - "Orchestrator Turn Execution"
-Cohesion: 0.10
-Nodes (50): ActiveSegment, AssessmentOverride, AssessmentPhase, ActiveSegment, AssessmentOverride, AssessmentPhase, DateTime, Event (+42 more)
-
-### Community 86 - "Skills Distiller"
+### Community 93 - "Engine"
 Cohesion: 0.11
-Nodes (52): AttributionEffect, Arc, AttributionEffect, EventRecord, ExperienceAttribution, ExperienceRecord, HashSet, MoaConfig (+44 more)
+Nodes (39): AgentConfig, AgentEnvironment, Arc, CollectedExecution, CompletionRequest, CompletionStream, DateTime, EngineOptions (+31 more)
 
-### Community 87 - "Orchestrator State"
-Cohesion: 0.07
-Nodes (32): ActiveSegment, CancelMode, DateTime, HandlerError, MarkSubAgentChildTerminalInput, MoaResult, Option, R (+24 more)
-
-### Community 88 - "Lineage Cascade"
+### Community 94 - "Verifiers"
 Cohesion: 0.08
 Nodes (38): Bm25Verifier, CitationVerifier, ChunkRef, Citation, Default, LineageSink, Option, Self (+30 more)
 
-### Community 89 - "Core Tools"
-Cohesion: 0.08
-Nodes (33): ActionClass, ActionPolicyEffect, ClaimCheck, Duration, Into, Option, PolicyAction, RiskLevel (+25 more)
-
-### Community 90 - "Eval Runner"
-Cohesion: 0.12
-Nodes (41): DateTime, GoldResolutionReport, HashMap, LedgerFact, NodeIndexRow, PgPool, PostgresSessionStore, RerankHit (+33 more)
-
-### Community 91 - "Orchestrator Util"
-Cohesion: 0.07
-Nodes (49): BTreeSet, CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Hash, Hasher, Option (+41 more)
-
-### Community 92 - "Eval Judge"
+### Community 95 - "Eval"
 Cohesion: 0.11
-Nodes (34): Arc, EvalError, Into, JsonResponseFormat, LLMProvider, Option, ProbeType, Result (+26 more)
+Nodes (51): BoxFuture, Arc, EvalResult, EvalRunRequest, EvalRunResponse, Into, LineageSink, Option (+43 more)
 
-### Community 93 - "Lineage Mpsc Sink"
+### Community 96 - "Judge"
+Cohesion: 0.10
+Nodes (35): Arc, EvalError, Into, JsonResponseFormat, LLMProvider, Option, ProbeType, Result (+27 more)
+
+### Community 97 - "Extract"
+Cohesion: 0.10
+Nodes (50): ContactId, DateTime, Option, PiiClass, PiiSpan, Result, SessionId, String (+42 more)
+
+### Community 98 - "Pipeline Stages Db Memory"
 Cohesion: 0.08
-Nodes (30): Arc, AtomicU64, Default, Duration, From, LineageConfig, LineageEvent, LineageHandle (+22 more)
+Nodes (45): Any, Clock, Box, CompletionRequest, CompletionStream, DateTime, FnOnce, LLMProvider (+37 more)
 
-### Community 94 - "Orchestrator Approvals"
+### Community 99 - "Memoryretrievalevaloptions"
+Cohesion: 0.08
+Nodes (20): BootstrapConfig, EvalLane, Fn, Into, MemoryEvalExtractorMode, Path, PathBuf, QueryRewritePolicy (+12 more)
+
+### Community 100 - "Approvals"
 Cohesion: 0.11
 Nodes (45): Arc, Context, DateTime, Duration, Event, EventRange, EventRecord, HandlerError (+37 more)
 
-### Community 95 - "Orchestrator Workspace"
-Cohesion: 0.13
-Nodes (36): ActionPolicyRule, ConsolidateReport, ActionPolicyRule, ApprovalRule, ConsolidateReport, Duration, HandlerError, Identity (+28 more)
-
-### Community 96 - "Brain Lineage"
-Cohesion: 0.08
-Nodes (45): CitationLineage, ChunkRef, CompletionResponse, ContextChunk, ContextMessage, Duration, EventRecord, LineageHandle (+37 more)
-
-### Community 97 - "Eval Recording"
+### Community 101 - "Plan Expansion"
 Cohesion: 0.11
-Nodes (33): BTreeMap, EntityMergeFixtureRecord, EntityMergeVerifier, ExtractionFixtureRecord, Into, MemoryExtractionConfig, Mutex, NodeIndexRow (+25 more)
+Nodes (50): ActionRuleScope, AgentRevisionSimulationVariant, ArtifactKind, ArtifactRegistry, Duration, ExperimentPlanDefinition, ExperimentRunRecord, ExperimentRunStatus (+42 more)
 
-### Community 98 - "Experiments Experiment Store Db"
-Cohesion: 0.15
-Nodes (49): ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, MemoryScope, NewExperimentTrial, Option, PgPool, Result (+41 more)
+### Community 102 - "Experiment Service"
+Cohesion: 0.08
+Nodes (46): DateTime, ExperimentRunRecord, ExperimentTrialRecord, String, T, TenantId, Utc, Uuid (+38 more)
 
-### Community 99 - "Orchestrator Experiment Service"
+### Community 103 - "Contact"
+Cohesion: 0.11
+Nodes (42): ContactPointId, AgentSessionSelection, Channel, ChannelAccountRef, ChannelRef, ContactId, ContactPointId, ContactVerificationChallengeId (+34 more)
+
+### Community 104 - "Hybrid Retrieval Db Memory"
+Cohesion: 0.08
+Nodes (44): AgeGraphStore, ContactId, DateTime, EmbeddingProvider, ExtractedFact, MemoryScope, NodeLabel, NodeWriteIntent (+36 more)
+
+### Community 105 - "Node"
+Cohesion: 0.09
+Nodes (43): DateTime, Error, FromStr, GraphError, NodeLabel, Option, PgConnection, PgRow (+35 more)
+
+### Community 106 - "Util"
 Cohesion: 0.07
-Nodes (45): DateTime, ExperimentRunRecord, ExperimentScoreSummaryRow, ExperimentTrialRecord, Into, String, T, Utc (+37 more)
+Nodes (47): BTreeSet, CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Hash, Hasher, Into (+39 more)
 
-### Community 100 - "Providers Instrumentation"
+### Community 107 - "Lib"
+Cohesion: 0.13
+Nodes (42): ActionRuleScope, MemoryScope, Option, PgConnection, PgPool, PgRow, Result, Self (+34 more)
+
+### Community 108 - "Instrumentation"
 Cohesion: 0.09
 Nodes (38): CompletionContent, attribute_truncation_preserves_utf8_boundaries(), cached_cost_calculation_uses_cache_write_rate(), calculate_cost(), calculate_cost_with_cached(), cost_calculation_correct(), has_meaningful_output(), llm_span_name() (+30 more)
 
-### Community 101 - "Experiments Plan"
-Cohesion: 0.10
-Nodes (48): ExperimentPlanDefinition, ExperimentScorecard, ExperimentTarget, ExperimentTargetKind, ExperimentTargetVariant, ExperimentVariant, Fn, FnOnce (+40 more)
-
-### Community 102 - "Scoring"
-Cohesion: 0.13
-Nodes (41): MemoryScope, Option, PgConnection, PgPool, PgRow, Result, Self, String (+33 more)
-
-### Community 103 - "Brain Ranking"
+### Community 109 - "Ranking"
 Cohesion: 0.12
 Nodes (38): BTreeSet, DateTime, Default, From, MemoryRankingConfig, MemoryRankingWeights, MemoryScope, NodeIndexRow (+30 more)
 
-### Community 104 - "Orchestrator Agents"
+### Community 110 - "Ciba Db"
+Cohesion: 0.08
+Nodes (42): ApprovalRequest, Auth0AsyncAuthzProvider, Auth0TokenVaultProvider, ApprovalRequest, Arc, AwakeableResolveError, AwakeableResolver, MockServer (+34 more)
+
+### Community 111 - "Memory"
+Cohesion: 0.09
+Nodes (46): ContactId, ContactVerificationState, ContextMessage, LegSources, LineageContext, ModelCapabilities, NodeIndexRow, Option (+38 more)
+
+### Community 112 - "Wire"
+Cohesion: 0.07
+Nodes (47): AgentContext, AgentSessionSelection, BTreeMap, Event, EventRange, LearningCandidate, SessionId, SessionMeta (+39 more)
+
+### Community 113 - "Ctx"
+Cohesion: 0.13
+Nodes (26): Arc, ContradictionDetector, EmbeddingProvider, EntityMergeVerifier, EntityResolver, FactExtractor, GraphStore, MoaConfig (+18 more)
+
+### Community 114 - "Agents"
 Cohesion: 0.16
 Nodes (41): ActorInput, Context, DateTime, HandlerError, Identity, IdentityType, Json, Option (+33 more)
 
-### Community 105 - "Artifacts Validation"
+### Community 115 - "Action Policy Flow E2e"
 Cohesion: 0.12
-Nodes (44): ConnectorDefinition, ArtifactDocument, ArtifactKind, ArtifactRef, ArtifactStatus, ExperimentBudget, ExperimentPlanDefinition, ExperimentSimulationDefinition (+36 more)
+Nodes (46): ActionReviewDecisionKind, ActionReviewSummary, ActionReviewDecisionKind, ActionReviewSummary, Error, EventRecord, Identity, IsolatedTest (+38 more)
 
-### Community 106 - "Core Contact"
+### Community 116 - "Orchestrator Fixture"
+Cohesion: 0.13
+Nodes (40): Child, ContainerAsync, Arc, Child, FgaConfig, HashMap, Option, Path (+32 more)
+
+### Community 117 - "Mod"
 Cohesion: 0.12
-Nodes (39): ContactPointId, Channel, ChannelAccountRef, ChannelRef, ContactPointId, ContactVerificationChallengeId, DateTime, Option (+31 more)
+Nodes (22): ConnectedSandbox, Client, Duration, HandHandle, HandProvider, HandSpec, HandStatus, HashMap (+14 more)
 
-### Community 107 - "Brain Brain Turn Db"
-Cohesion: 0.08
-Nodes (19): Arc, LLMProvider, ModelCapabilities, Mutex, ToolCallId, ArtifactRetrievalLlmProvider, ArtifactStderrLlmProvider, CanaryLeakLlmProvider (+11 more)
-
-### Community 108 - "Memory Ctx"
-Cohesion: 0.14
-Nodes (25): Arc, ContradictionDetector, EmbeddingProvider, EntityMergeVerifier, EntityResolver, FactExtractor, GraphStore, MoaConfig (+17 more)
-
-### Community 109 - "Orchestrator Users"
-Cohesion: 0.16
-Nodes (45): ActorInput, AuthzError, ActorInput, AuthzError, DateTime, EmitError, Error, Option (+37 more)
-
-### Community 110 - "Brain Test Support"
+### Community 118 - "Test Support"
 Cohesion: 0.09
 Nodes (29): capabilities(), event_record(), MockLlmProvider, MockSessionStore, session(), Arc, CompletionRequest, CompletionStream (+21 more)
 
-### Community 111 - "Memory Node"
+### Community 119 - "Result"
+Cohesion: 0.11
+Nodes (24): Client, Duration, Event, EventRange, EventRecord, Option, Req, RequestBuilder (+16 more)
+
+### Community 120 - "Approval Flow E2e"
 Cohesion: 0.10
-Nodes (39): DateTime, Error, FromStr, GraphError, NodeLabel, Option, PgConnection, PgRow (+31 more)
-
-### Community 112 - "Orchestrator Plan Expansion"
-Cohesion: 0.12
-Nodes (45): ArtifactKind, ArtifactRegistry, Duration, ExperimentRunRecord, ExperimentRunStatus, ExperimentRunStatusResponse, ExperimentRunWorkflowRequest, ExperimentTrialRecord (+37 more)
-
-### Community 113 - "Orchestrator Approval Flow E2E"
-Cohesion: 0.12
 Nodes (43): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Path, Result (+35 more)
 
-### Community 114 - "Orchestrator Skill Learning Review"
-Cohesion: 0.11
-Nodes (39): Arc, LearningCandidate, LearningCandidateReviewAction, LearningCandidateReviewRequest, LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry (+31 more)
-
-### Community 115 - "Security Mcp Proxy"
+### Community 121 - "Mcp Proxy"
 Cohesion: 0.12
 Nodes (28): Arc, Credential, CredentialVault, DateTime, Duration, HashMap, Into, McpServerConfig (+20 more)
 
-### Community 116 - "Security Policies"
+### Community 122 - "App"
 Cohesion: 0.11
-Nodes (34): ActionPolicyEffect, ActionPolicyRule, ApprovalRule, Default, MoaConfig, Option, PolicyAction, Result (+26 more)
+Nodes (44): decide_review(), DecidedReview, decision_from_request(), deny_reason_for_decision(), execution_tool_call_id_for_decision(), execution_tool_request_for_clear_uses_fresh_tool_id(), execution_tool_request_for_decision(), execution_tool_request_is_idempotent_after_execution_was_requested() (+36 more)
 
-### Community 117 - "Brain Memory"
-Cohesion: 0.11
-Nodes (28): ContextProcessor, Arc, ContextProcessor, Duration, EmbeddingProvider, LineageHandle, MemoryScope, MoaConfig (+20 more)
-
-### Community 118 - "Hands Normalization"
-Cohesion: 0.11
-Nodes (42): action_pattern_chained_inner_uses_first_subcommand(), action_pattern_for(), action_pattern_malformed_wrapper_falls_back_to_full_input(), action_pattern_nested_shell_not_recursed(), action_pattern_simple_command(), action_pattern_single_token(), action_pattern_unwraps_zsh_wrapper(), approval_diffs_for() (+34 more)
-
-### Community 119 - "Eval Transcript Runner"
-Cohesion: 0.14
-Nodes (40): AgentConfig, AgentEnvironment, DateTime, EngineOptions, EvalResult, LongSessionInterleaving, LongTestCase, MoaConfig (+32 more)
-
-### Community 120 - "Providers Tools"
-Cohesion: 0.11
-Nodes (43): CompletionRequest, ContextMessage, HashMap, JsonResponseFormat, Option, ProviderNativeTool, Result, String (+35 more)
-
-### Community 121 - "Orchestrator Action Policy Flow E2E"
-Cohesion: 0.12
-Nodes (42): ActionReviewDecisionKind, ActionReviewSummary, ActionReviewDecisionKind, Error, EventRecord, Identity, IsolatedTest, Option (+34 more)
-
-### Community 122 - "Brain Cache"
-Cohesion: 0.12
-Nodes (29): AtomicI64, AtomicUsize, DateTime, MemoryScope, Result, RetrievalHit, RetrievalRequest, String (+21 more)
-
-### Community 123 - "Orchestrator Delegation"
-Cohesion: 0.14
-Nodes (42): CancelSubAgentInput, Event, HandlerError, Option, ReservedSubAgent, Result, SessionId, SessionMeta (+34 more)
-
-### Community 124 - "Gateway Discord"
-Cohesion: 0.09
-Nodes (31): ChannelId, Arc, HashMap, Instant, Into, MessageId, MoaConfig, OutboundMessage (+23 more)
-
-### Community 125 - "Core Observability"
-Cohesion: 0.10
-Nodes (38): CompletionRequest, Channel, CompletionRequest, ContactId, Default, Into, ModelId, Option (+30 more)
-
-### Community 126 - "Eval Runner"
-Cohesion: 0.09
-Nodes (20): BootstrapConfig, EvalLane, Fn, Into, MemoryEvalExtractorMode, PathBuf, QueryRewritePolicy, RankingConfig (+12 more)
-
-### Community 127 - "Memory Read"
-Cohesion: 0.16
-Nodes (33): DateTime, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel (+25 more)
-
-### Community 128 - "Memory Contradiction"
-Cohesion: 0.10
-Nodes (37): AtomicUsize, Client, LlmChatClient, NodeIndexRow, Option, SecretString, Send, String (+29 more)
-
-### Community 129 - "Messaging Rate Limit"
-Cohesion: 0.12
-Nodes (21): Arc, Channel, Duration, F, HashMap, Instant, Into, Mutex (+13 more)
-
-### Community 130 - "Session Rows"
-Cohesion: 0.10
-Nodes (40): E, Result, ActionPolicyRule, ApprovalRule, ContactRef, ExperienceAttribution, ExperienceRecord, LearningCandidate (+32 more)
-
-### Community 131 - "Memory Consolidate"
-Cohesion: 0.09
-Nodes (37): ContradictionKey, Map, Option, PiiClass, Self, String, Uuid, Value (+29 more)
-
-### Community 132 - "Brain Memory"
-Cohesion: 0.08
-Nodes (40): ContactId, ContactVerificationState, ContextMessage, HashMap, LegSources, LineageContext, ModelCapabilities, Mutex (+32 more)
-
-### Community 133 - "Eval Generator"
-Cohesion: 0.11
-Nodes (38): DateTime, PiiClass, ScopeTier, SessionId, String, UserId, Utc, WorkspaceId (+30 more)
-
-### Community 134 - "Eval Setup"
-Cohesion: 0.13
-Nodes (41): ActionPolicyRuleStore, AgentConfig, ApprovalRuleStore, Arc, AsRef, ContextPipeline, InstructionOverride, LLMProvider (+33 more)
-
-### Community 135 - "Skills"
+### Community 123 - "Users"
 Cohesion: 0.17
-Nodes (37): Into, IntoIterator, Item, MoaConfig, SkillMetadata, configured_test_db(), learning_store(), load_session_fixture() (+29 more)
+Nodes (44): ActorInput, AuthzError, ActorInput, AuthzError, DateTime, EmitError, Error, Option (+36 more)
 
-### Community 136 - "Hands Policy"
-Cohesion: 0.08
-Nodes (27): ActionPolicyCheck, ActionOrigin, PreparedActionInvocation, PreparedToolInvocation, ToolRouter, ActionEnvelope, ActionPolicyEffect, ActionReviewField (+19 more)
-
-### Community 137 - "Core Wire"
-Cohesion: 0.06
-Nodes (42): ArtifactSummary, CacheDailyMetricRow, CheckpointInfo, CheckpointInfo, ExperienceAttribution, LearningCandidateSummary, MemoryHit, MemoryIngestResult (+34 more)
-
-### Community 138 - "Brain Planner"
-Cohesion: 0.12
-Nodes (27): DateTime, NerSpan, NodeLabel, Option, Utc, Uuid, Vec, classify_strategy() (+19 more)
-
-### Community 139 - "Loadtest Config"
+### Community 124 - "Subagentvostate"
 Cohesion: 0.07
-Nodes (34): Vec, Option, PerfGateConfig, PrometheusHandle, Result, Duration, PathBuf, PrometheusHandle (+26 more)
+Nodes (26): ContextMessage, HandlerError, MarkSubAgentChildTerminalInput, ModelId, Option, R, Result, Self (+18 more)
 
-### Community 140 - "Core Turn Latency"
+### Community 125 - "Regression"
+Cohesion: 0.17
+Nodes (39): SkillRegressionSummary, Into, IntoIterator, Item, MoaConfig, SkillMetadata, configured_test_db(), learning_store() (+31 more)
+
+### Community 126 - "Vec"
+Cohesion: 0.05
+Nodes (44): AgentDefinitionSummary, AgentDeploymentSummary, AgentInstallationSummary, ArtifactSummary, CacheDailyMetricRow, CheckpointInfo, AgentDeploymentSummary, AgentInstallationSummary (+36 more)
+
+### Community 127 - "Tier1 Metadata"
+Cohesion: 0.12
+Nodes (42): DateTime, ExcludedItem, HashMap, Option, Ordering, SkillMetadata, String, TaskStrategySuccessRate (+34 more)
+
+### Community 128 - "Brain Turn Db"
+Cohesion: 0.19
+Nodes (39): ContactId, ContactRef, PostgresSessionStore, SequenceNum, TenantId, Uuid, WorkspaceId, run_brain_turn() (+31 more)
+
+### Community 129 - "Analytics"
+Cohesion: 0.17
+Nodes (43): ContactId, DateTime, Error, MoaError, Option, PgConnection, PgPool, PgRow (+35 more)
+
+### Community 130 - "Action Reviews"
+Cohesion: 0.15
+Nodes (40): ActionReviewDecisionKind, Context, E, Error, EventType, HandlerError, Identity, Json (+32 more)
+
+### Community 131 - "Result"
+Cohesion: 0.14
+Nodes (35): Context, EvalRunStatusRequest, EvalRunStatusResponse, HandlerError, Json, Relation, RequestHeaders, Result (+27 more)
+
+### Community 132 - "Privacy Service Db Memory"
+Cohesion: 0.14
+Nodes (42): ApprovalClaims, ContactErasureScope, AgeGraphStore, NodeWriteIntent, PgPool, SigningKey, String, Uuid (+34 more)
+
+### Community 133 - "Telemetry"
+Cohesion: 0.14
+Nodes (30): ToolRouter, record_tool_execution_result(), record_tool_invocation_metadata(), sandbox_tier_label(), tool_execution_span(), truncate_tool_span_text(), Arc, CancellationToken (+22 more)
+
+### Community 134 - "Require Helpers"
+Cohesion: 0.14
+Nodes (41): Display, FgaClient, Identity, PgPool, Relation, Result, String, FgaClient (+33 more)
+
+### Community 135 - "Turn Latency"
 Cohesion: 0.11
-Nodes (23): Arc, AtomicU64, Duration, F, Mutex, Option, Self, Span (+15 more)
+Nodes (24): Arc, AtomicU64, Duration, F, Mutex, Option, Self, Span (+16 more)
 
-### Community 141 - "Core Completion"
+### Community 136 - "Discordadapter"
+Cohesion: 0.10
+Nodes (30): Arc, HashMap, Instant, Into, MessageId, MoaConfig, OutboundMessage, Platform (+22 more)
+
+### Community 137 - "Read"
+Cohesion: 0.16
+Nodes (32): DateTime, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel (+24 more)
+
+### Community 138 - "Ingestion Service E2e"
+Cohesion: 0.13
+Nodes (37): Child, Client, Drop, IngestApplyReport, OrchestratorPorts, PgPool, Result, Self (+29 more)
+
+### Community 139 - "Completion"
 Cohesion: 0.12
 Nodes (25): CancellationToken, ContextMessage, Formatter, HashMap, Into, JoinHandle, ModelId, Option (+17 more)
 
-### Community 142 - "Eval Runner"
-Cohesion: 0.11
-Nodes (35): BTreeSet, GoldNodeRecord, Item, Iterator, Option, Probe, RetrievedCandidate, ScopeTier (+27 more)
+### Community 140 - "Control Signals"
+Cohesion: 0.10
+Nodes (40): InboundMessage, Option, OutboundMessage, Platform, SessionId, SessionSignal, Into, OutboundMessage (+32 more)
 
-### Community 143 - "Memory Gemini"
+### Community 141 - "Mod"
+Cohesion: 0.13
+Nodes (23): Arc, AsRef, Duration, HandHandle, HandProvider, HandSpec, HandStatus, HashMap (+15 more)
+
+### Community 142 - "Local Tools Db"
+Cohesion: 0.11
+Nodes (40): Arc, AsRef, Path, PostgresSessionStore, SessionMeta, TempDir, ToolRouter, WorkspaceId (+32 more)
+
+### Community 143 - "Gemini"
 Cohesion: 0.09
 Nodes (30): Arc, Client, EmbeddingProvider, GeminiContent, Into, MoaConfig, Option, Result (+22 more)
 
-### Community 144 - "Orchestrator Cron Job"
+### Community 144 - "Cron Job"
 Cohesion: 0.14
 Nodes (32): DateTime, HandlerError, Json, ObjectContext, Option, R, Result, SharedObjectContext (+24 more)
 
-### Community 145 - "Orchestrator Ingestion Service E2E"
-Cohesion: 0.14
-Nodes (36): Child, Client, Drop, IngestApplyReport, OrchestratorPorts, PgPool, Result, Self (+28 more)
+### Community 145 - "Skill Package Materialization Db Memory"
+Cohesion: 0.09
+Nodes (39): AgentContext, ArtifactDocument, ContactId, ContactRef, EventRecord, ModelCapabilities, ModelId, NewArtifactFile (+31 more)
 
-### Community 146 - "Brain Tier1 Metadata"
-Cohesion: 0.12
-Nodes (39): DateTime, HashMap, Option, Ordering, SkillMetadata, String, TaskStrategySuccessRate, Utc (+31 more)
-
-### Community 147 - "Eval Scripted User Mode Eval"
+### Community 146 - "Scripted User Mode Eval"
 Cohesion: 0.10
 Nodes (26): CompletionRequest, CompletionStream, LLMProvider, LongRunReport, ModelCapabilities, Mutex, Option, Result (+18 more)
 
-### Community 148 - "Gateway Approval State"
+### Community 147 - "Approval State"
 Cohesion: 0.10
 Nodes (36): ApprovalDecision, ApprovalRequest, Arc, DateTime, HashMap, Into, Mutex, Option (+28 more)
 
-### Community 149 - "Memory Digest"
+### Community 148 - "Contradiction"
+Cohesion: 0.12
+Nodes (35): AtomicUsize, NodeIndexRow, Option, String, Value, FactParts, build_judge_prompt(), candidate() (+27 more)
+
+### Community 149 - "Digest"
 Cohesion: 0.13
 Nodes (37): DateTime, MemoryDigestConfig, Option, PgPool, PgRow, Result, String, Utc (+29 more)
 
-### Community 150 - "Orchestrator Api Keys"
+### Community 150 - "Api Keys"
 Cohesion: 0.16
 Nodes (35): Context, CreateApiKeyRequest, CreateApiKeyResponse, HandlerError, Identity, Json, KeyListItem, KeyOwner (+27 more)
 
-### Community 151 - "Providers"
-Cohesion: 0.12
-Nodes (27): Client, CompletionRequest, CompletionStream, Into, LLMProvider, MoaConfig, ModelCapabilities, OpenAIConfig (+19 more)
+### Community 151 - "Skill Learning Review"
+Cohesion: 0.15
+Nodes (37): ActionRuleScope, Arc, LearningCandidate, LearningCandidateReviewAction, LearningCandidateReviewRequest, LearningCandidateType, MemoryScope, MoaConfig (+29 more)
 
-### Community 152 - "Orchestrator Privacy Service Db Memory"
-Cohesion: 0.14
-Nodes (39): AgeGraphStore, ApprovalClaims, AgeGraphStore, NodeWriteIntent, PgPool, SigningKey, String, Uuid (+31 more)
+### Community 152 - "Admin Maintenance"
+Cohesion: 0.13
+Nodes (31): CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse, CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse, Context, HandlerError (+23 more)
 
-### Community 153 - "Providers Wiremock Provider Helpers"
-Cohesion: 0.11
-Nodes (36): AnthropicProvider, MockServer, MockServer, CompletionRequest, Into, MockServer, ResponseTemplate, String (+28 more)
-
-### Community 154 - "Brain Experience"
-Cohesion: 0.14
-Nodes (39): BTreeSet, DateTime, EventRecord, ExperienceRecord, Option, QueryRewriteResult, SegmentAssessment, SessionMeta (+31 more)
-
-### Community 155 - "Brain Runtime Context"
+### Community 153 - "Runtime Context"
 Cohesion: 0.11
 Nodes (30): Arc, ContextMessage, ContextProcessor, DateTime, Default, ModelCapabilities, Option, Path (+22 more)
 
-### Community 156 - "Hands Local Tools Db"
+### Community 154 - "Grapherror"
 Cohesion: 0.12
-Nodes (38): Arc, AsRef, Path, PostgresSessionStore, SessionMeta, TempDir, ToolRouter, TempDir (+30 more)
+Nodes (26): DateTime, Default, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, HashSet, NodeIndexRow (+18 more)
 
-### Community 157 - "Memory Age"
+### Community 155 - "Auth"
+Cohesion: 0.10
+Nodes (32): DateTime, Duration, Option, Result, SecretString, Send, String, Sync (+24 more)
+
+### Community 156 - "Age"
 Cohesion: 0.09
 Nodes (26): Arc, ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodePropertyUpdateIntent, NodeWriteIntent, Option, PgConnection (+18 more)
 
-### Community 158 - "Memory Openai Filter"
+### Community 157 - "Openai Filter"
 Cohesion: 0.10
 Nodes (24): Client, Default, Into, Option, PiiCategory, PiiClass, PiiClassifier, PiiResult (+16 more)
 
-### Community 159 - "Orchestrator Groups"
+### Community 158 - "Groups"
 Cohesion: 0.19
 Nodes (39): ActorInput, AuthzError, DateTime, EmitError, Error, Option, PgPool, Postgres (+31 more)
 
-### Community 160 - "Providers"
+### Community 159 - "Experiment Trial Run E2e"
+Cohesion: 0.11
+Nodes (39): ActionRuleScope, Child, Client, EventRecord, ExperimentTrialRecord, ExperimentTrialRunStatusResponse, ExperimentTrialRunWorkflowRequest, Identity (+31 more)
+
+### Community 160 - "Mod"
+Cohesion: 0.12
+Nodes (26): Client, CompletionRequest, CompletionStream, Into, LLMProvider, MoaConfig, ModelCapabilities, OpenAIConfig (+18 more)
+
+### Community 161 - "Mod"
 Cohesion: 0.12
 Nodes (20): Arc, CompletionContent, CompletionRequest, CompletionStream, Into, LLMProvider, ModelCapabilities, Mutex (+12 more)
 
-### Community 161 - "Core Memory"
-Cohesion: 0.09
-Nodes (29): CohereEmbedderConfig, CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingMode (+21 more)
+### Community 162 - "Lineage"
+Cohesion: 0.11
+Nodes (36): CascadeVerifier, CitationLineage, ChunkRef, CompletionResponse, ContextChunk, ContextMessage, Duration, EventRecord (+28 more)
 
-### Community 162 - "Brain"
-Cohesion: 0.12
-Nodes (26): Arc, ContextProcessor, Option, PgPool, ProcessorOutput, Result, Self, SessionStore (+18 more)
-
-### Community 163 - "Brain Query Planner"
+### Community 163 - "Query Planner"
 Cohesion: 0.17
 Nodes (17): DateTime, EdgeLabel, EdgeWriteIntent, GraphError, GraphExpansionHit, GraphStore, NodeIndexRow, NodeWriteIntent (+9 more)
 
-### Community 164 - "Core Auth"
-Cohesion: 0.10
-Nodes (31): DateTime, Duration, Option, Result, SecretString, Send, String, Sync (+23 more)
-
-### Community 165 - "Eval Embeddings"
-Cohesion: 0.16
-Nodes (31): EmbeddingInput, EmbeddingProvider, Error, EvalError, HashMap, Into, Path, Result (+23 more)
-
-### Community 166 - "Orchestrator Experiment Trial Run E2E"
-Cohesion: 0.12
-Nodes (38): Child, Client, EventRecord, ExperimentTrialRecord, ExperimentTrialRunStatusResponse, ExperimentTrialRunWorkflowRequest, Identity, MemoryScope (+30 more)
-
-### Community 167 - "Session Blob"
+### Community 164 - "Blob"
 Cohesion: 0.16
 Nodes (27): BlobStore, ClaimCheck, Event, MoaConfig, Option, Path, PathBuf, Result (+19 more)
 
-### Community 168 - "Providers Streaming"
-Cohesion: 0.09
-Nodes (30): ApiError, CompletionContent, CompletionResponse, CreateResponse, Instant, LLMSpanRecorder, MoaError, ModelId (+22 more)
-
-### Community 169 - "Gateway Discord"
-Cohesion: 0.11
-Nodes (34): ChannelType, ComponentInteraction, ActionButton, Attachment, ChannelRef, Context, InboundMessage, Option (+26 more)
-
-### Community 170 - "Orchestrator Admin Maintenance"
+### Community 165 - "Telegram"
 Cohesion: 0.13
-Nodes (29): CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse, CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse, Context, HandlerError (+21 more)
+Nodes (34): Bot, CallbackQuery, ActionButton, Arc, Attachment, ChannelRef, HashMap, InboundMessage (+26 more)
 
-### Community 171 - "Hands Registration"
+### Community 166 - "Registration"
 Cohesion: 0.10
 Nodes (23): default_budget_for_tool(), default_local_prompt_schemas_keep_structured_hand_tool_guidance(), execute_tool_policy(), RegisteredTool, ToolExecution, ToolRegistry, Arc, BuiltInTool (+15 more)
 
-### Community 172 - "Brain Hybrid Retrieval Db Memory"
-Cohesion: 0.09
-Nodes (31): AgeGraphStore, DateTime, EmbeddingProvider, ExtractedFact, NodeLabel, NodeWriteIntent, Option, PgPool (+23 more)
-
-### Community 173 - "Gateway Slack"
-Cohesion: 0.11
-Nodes (35): ChannelRef, DateTime, Option, Utc, ChannelRef, DateTime, Duration, MoaError (+27 more)
-
-### Community 174 - "Orchestrator Tool Executor"
-Cohesion: 0.09
-Nodes (28): ToolPolicySpec, Arc, BuiltInTool, EventRecord, IdempotencyClass, Option, Result, Self (+20 more)
-
-### Community 175 - "Lineage Merkle"
-Cohesion: 0.13
-Nodes (32): Arc, CancellationToken, DateTime, Default, Duration, Hash, Into, Option (+24 more)
-
-### Community 176 - "Orchestrator Privacy"
-Cohesion: 0.13
-Nodes (37): AgeGraphStore, ContactErasureScope, Display, Error, PgPool, ScopedConn, Vec, EraseCandidate (+29 more)
-
-### Community 177 - "Skills Package"
-Cohesion: 0.13
-Nodes (29): ArtifactRef, DateTime, Into, Option, Result, Self, SkillActionDefinition, SkillDefinition (+21 more)
-
-### Community 178 - "Brain"
-Cohesion: 0.14
-Nodes (32): AtomicUsize, ContextMessage, Duration, HashMap, ModelCapabilities, Mutex, Option, ProcessorOutput (+24 more)
-
-### Community 179 - "Brain Hybrid"
-Cohesion: 0.13
-Nodes (27): Arc, GraphStore, MoaConfig, PgPool, RankingConfig, Reranker, Self, TurbopufferStore (+19 more)
-
-### Community 180 - "Hands Tests"
-Cohesion: 0.12
-Nodes (25): Arc, HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Mutex, Result (+17 more)
-
-### Community 181 - "Brain"
-Cohesion: 0.09
-Nodes (29): CompactionReport, Compactor, report_metadata(), tier3_emits_checkpoint_and_replaces_history_with_summary(), history_bounds(), protected_snapshot_tool_use_ids(), recent_turn_boundary_messages(), should_apply_tier2() (+21 more)
-
-### Community 182 - "Artifacts Reference"
+### Community 167 - "Reference"
 Cohesion: 0.13
 Nodes (18): ArtifactKind, D, Display, Error, Formatter, FromStr, Into, Ok (+10 more)
 
-### Community 183 - "Brain Tool Dispatch"
-Cohesion: 0.18
-Nodes (35): Arc, CancellationToken, EventRecord, Option, PendingToolApproval, Receiver, Result, RuntimeEvent (+27 more)
-
-### Community 184 - "Orchestrator Workspace Store"
+### Community 168 - "Memory"
 Cohesion: 0.10
-Nodes (31): ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, ApprovalPrompt, ApprovalRule, Arc, Context (+23 more)
+Nodes (16): ContactId, DateTime, From, Option, Self, String, TenantId, UserId (+8 more)
 
-### Community 185 - "Orchestrator Status"
+### Community 169 - "Routes"
+Cohesion: 0.10
+Nodes (34): Arc, IntoResponse, Method, Value, action_review_public_routes_translate_to_restate_handlers(), admin_maintenance_public_routes_translate_to_restate_handlers(), agent_public_routes_translate_to_restate_handlers(), analytics_public_routes_translate_to_restate_handlers() (+26 more)
+
+### Community 170 - "Embeddings"
+Cohesion: 0.16
+Nodes (30): EmbeddingInput, EmbeddingProvider, Error, EvalError, HashMap, Into, Path, Result (+22 more)
+
+### Community 171 - "Slack"
+Cohesion: 0.11
+Nodes (35): ChannelRef, DateTime, Option, Utc, ChannelRef, DateTime, Duration, MoaError (+27 more)
+
+### Community 172 - "Merkle"
+Cohesion: 0.13
+Nodes (32): Arc, CancellationToken, DateTime, Default, Duration, Hash, Into, Option (+24 more)
+
+### Community 173 - "Llm Gateway"
+Cohesion: 0.15
+Nodes (27): Arc, CompletionStream, HandlerError, LLMProvider, MoaConfig, MoaError, ModelCapabilities, ProviderRegistry (+19 more)
+
+### Community 174 - "Package"
+Cohesion: 0.13
+Nodes (29): ArtifactRef, DateTime, Into, Option, Result, Self, SkillActionDefinition, SkillDefinition (+21 more)
+
+### Community 175 - "Proposals"
+Cohesion: 0.11
+Nodes (35): ArtifactDocument, Error, LearningCandidate, MoaError, NewArtifactFile, Option, PgConnection, PostgresSessionStore (+27 more)
+
+### Community 176 - "Simulation"
+Cohesion: 0.11
+Nodes (33): ArtifactRef, Default, ExperimentBudget, ExperimentSimulationDefinition, ExperimentTargetKind, ExperimentTargetVariant, Option, String (+25 more)
+
+### Community 177 - "Tool Dispatch"
+Cohesion: 0.18
+Nodes (36): Arc, CancellationToken, EventRecord, Option, PendingToolApproval, Receiver, Result, RuntimeEvent (+28 more)
+
+### Community 178 - "Cache Audit Live"
+Cohesion: 0.12
+Nodes (36): Arc, ContactId, ContactRef, ContextPipeline, MoaConfig, Option, Path, PathBuf (+28 more)
+
+### Community 179 - "Run Memory Retrieval Eval In Store()"
+Cohesion: 0.20
+Nodes (37): DateTime, GoldResolutionReport, HashMap, LedgerFact, MemoryDigestConfig, PgPool, Result, Utc (+29 more)
+
+### Community 180 - "Model"
+Cohesion: 0.14
+Nodes (25): ActionRuleScope, DateTime, MemoryScope, ModelId, Option, Self, SessionId, String (+17 more)
+
+### Community 181 - "Fast Path"
+Cohesion: 0.17
+Nodes (36): Duration, NodeLabel, NodeWriteIntent, Option, PiiClass, Result, ScopedConn, String (+28 more)
+
+### Community 182 - "Llm Extractor"
+Cohesion: 0.13
+Nodes (28): ExtractedFact, FactExtractor, LlmChatClient, MemoryExtractionConfig, Option, Result, Self, String (+20 more)
+
+### Community 183 - "Status"
 Cohesion: 0.19
-Nodes (35): MemoryScope, DateTime, ExperimentTrialRecord, ExperimentTrialRunStatusResponse, ExperimentTrialStatus, ExperimentTrialStopReason, HandlerError, MemoryScope (+27 more)
+Nodes (36): MemoryScope, ActionRuleScope, DateTime, ExperimentTrialRecord, ExperimentTrialRunStatusResponse, ExperimentTrialStatus, ExperimentTrialStopReason, HandlerError (+28 more)
 
-### Community 186 - "Orchestrator Skill Learning"
+### Community 184 - "Triggers"
+Cohesion: 0.09
+Nodes (29): CompactionReport, Compactor, report_metadata(), tier3_emits_checkpoint_and_replaces_history_with_summary(), history_bounds(), protected_snapshot_tool_use_ids(), recent_turn_boundary_messages(), should_apply_tier2() (+21 more)
+
+### Community 185 - "Digest"
+Cohesion: 0.09
+Nodes (30): ContextMessage, ContextProcessor, DateTime, MemoryDigestConfig, ModelCapabilities, Option, PgPool, PgRow (+22 more)
+
+### Community 186 - "Skill Learning"
 Cohesion: 0.14
 Nodes (34): Arc, EventRecord, ExperienceRecord, HandlerError, Into, Json, MoaConfig, ModelRouter (+26 more)
 
-### Community 187 - "Orchestrator Store"
-Cohesion: 0.15
-Nodes (34): db_error(), insert_review(), list_pending_reviews(), load_review_for_update(), load_review_state(), mark_decision_event_recorded(), mark_execution_requested(), mark_requested_event_recorded() (+26 more)
+### Community 187 - "Workspace Store"
+Cohesion: 0.13
+Nodes (33): AgentPolicySnapshot, ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, AgentPolicySnapshot, Arc, MoaError (+25 more)
 
-### Community 188 - "Brain Brain Turn Cache Replay Db Memory"
+### Community 188 - "Brain Turn Cache Replay Db Memory"
 Cohesion: 0.10
 Nodes (32): Attributes, Arc, CompletionRequest, Context, EventRecord, Mutex, Option, Result (+24 more)
 
-### Community 189 - "Brain Runner"
-Cohesion: 0.12
-Nodes (23): Box, ContextSnapshotConfig, Box, ContextProcessor, ContextSnapshotConfig, ModelCapabilities, Option, ProcessorOutput (+15 more)
-
-### Community 190 - "Hands Construction"
+### Community 189 - "Construction"
 Cohesion: 0.11
 Nodes (21): default_cloud_provider(), ToolRouter, ActionPolicies, ActionPolicyRuleStore, ApprovalRuleStore, Arc, AsRef, HandProvider (+13 more)
 
-### Community 191 - "Auth Require Helpers"
-Cohesion: 0.14
-Nodes (33): Display, FgaClient, Identity, PgPool, Relation, Result, String, FgaClient (+25 more)
+### Community 190 - "Output Budget"
+Cohesion: 0.11
+Nodes (27): append_footer(), artifact_storage_footer(), count_lines(), estimate_tokens(), format_artifact_summary(), inline_artifact_preview_budget(), ToolRouter, truncate_text_for_budget() (+19 more)
 
-### Community 192 - "Brain Prune"
+### Community 191 - "Group Sync"
+Cohesion: 0.14
+Nodes (28): Arc, Duration, JoinHandle, Option, PgPool, Result, Self, Send (+20 more)
+
+### Community 192 - "Prune"
 Cohesion: 0.10
 Nodes (31): CompiledRecordMessage, Vec, CompiledHistory, ContextSnapshot, Option, Result, CompiledRecordMessage, ContextMessage (+23 more)
 
-### Community 193 - "Core Analytics"
-Cohesion: 0.17
-Nodes (34): DateTime, Error, MoaError, Option, PgPool, PgRow, Result, SessionId (+26 more)
+### Community 193 - "Session"
+Cohesion: 0.11
+Nodes (31): AgentContext, Attachment, Channel, ContactId, ContactRef, DateTime, Default, ModelId (+23 more)
 
-### Community 194 - "Core Experience"
-Cohesion: 0.14
-Nodes (29): DateTime, Option, SegmentEvidence, SegmentId, SegmentOutcome, SessionId, String, TenantId (+21 more)
-
-### Community 195 - "Eval Provider Recorded"
+### Community 194 - "Provider Recorded"
 Cohesion: 0.12
 Nodes (23): Arc, CompletionRequest, CompletionResponse, CompletionStream, Default, LLMProvider, MoaResult, ModelCapabilities (+15 more)
 
-### Community 196 - "Memory Entity Resolution"
-Cohesion: 0.13
-Nodes (26): DateTime, GraphStore, NodeIndexRow, Option, PgPool, PiiClass, Result, ScopeContext (+18 more)
+### Community 195 - "Adapters"
+Cohesion: 0.17
+Nodes (26): Citation, HashMap, Option, Result, Send, String, Sync, Uuid (+18 more)
 
-### Community 197 - "Orchestrator Sub Agent Dispatch"
+### Community 196 - "Recorded"
+Cohesion: 0.12
+Nodes (27): BTreeMap, ExtractedFact, FactExtractor, From, Into, Option, Result, S (+19 more)
+
+### Community 197 - "Sub Agent Dispatch"
 Cohesion: 0.11
 Nodes (33): HandlerError, Hasher, Option, Result, String, SubAgentChildRef, SubAgentId, SubAgentResult (+25 more)
 
-### Community 198 - "Orchestrator Tool Executor E2E"
-Cohesion: 0.11
-Nodes (33): Child, OrchestratorPorts, Result, Child, Client, EventRecord, Identity, Option (+25 more)
+### Community 198 - "Tool Executor"
+Cohesion: 0.10
+Nodes (27): Arc, BuiltInTool, EventRecord, IdempotencyClass, Option, Result, Self, ToolCallId (+19 more)
 
-### Community 199 - "Providers Embedding"
+### Community 199 - "Embedding"
 Cohesion: 0.13
 Nodes (23): Arc, Client, EmbeddingProvider, Into, MoaConfig, Option, Result, Self (+15 more)
 
-### Community 200 - "Skills Improver"
+### Community 200 - "Improver"
 Cohesion: 0.18
 Nodes (34): Arc, DateTime, EventRecord, MoaConfig, ModelRouter, Option, PostgresSessionStore, Result (+26 more)
 
-### Community 201 - "Orchestrator Agents"
+### Community 201 - "Eventrecord"
+Cohesion: 0.09
+Nodes (34): ActiveSegment, AssessmentOverride, AssessmentPhase, ActiveSegment, AssessmentOverride, AssessmentPhase, DateTime, Event (+26 more)
+
+### Community 202 - "Agents"
 Cohesion: 0.20
 Nodes (33): AgentActAsRequest, AgentSummary, ActorInput, HandlerError, Identity, IdentityType, Option, PgPool (+25 more)
 
-### Community 202 - "Hands"
-Cohesion: 0.08
-Nodes (29): ToolRouter, ActionPolicies, ActionPolicyRuleStore, ApprovalRuleStore, Arc, HandHandle, HandProvider, HashMap (+21 more)
+### Community 203 - "Providerregistry"
+Cohesion: 0.16
+Nodes (18): AsRef, AsRef, ModelId, ModelRouter, Option, Path, QueryRewriteConfig, Result (+10 more)
 
-### Community 203 - "Brain Digest"
-Cohesion: 0.09
-Nodes (28): ContextMessage, ContextProcessor, DateTime, MemoryDigestConfig, ModelCapabilities, Option, PgPool, PgRow (+20 more)
+### Community 204 - "Context Build"
+Cohesion: 0.11
+Nodes (32): CacheReport, ContextPipeline, Arc, CompletionRequest, CompletionResponse, ContextPipeline, Event, EventRecord (+24 more)
 
-### Community 204 - "Orchestrator Sub Agent Delegation"
+### Community 205 - "Memory"
+Cohesion: 0.10
+Nodes (24): CohereEmbedderConfig, CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig, MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingMode (+16 more)
+
+### Community 206 - "Runner"
+Cohesion: 0.12
+Nodes (22): ContextSnapshotConfig, Box, ContextProcessor, ContextSnapshotConfig, ModelCapabilities, Option, ProcessorOutput, Result (+14 more)
+
+### Community 207 - "Artifact"
+Cohesion: 0.12
+Nodes (31): Self, ArtifactDocument, ArtifactFile, ArtifactStatus, NewArtifactFile, Result, SkillDefinition, SkillDocument (+23 more)
+
+### Community 208 - "Postgres Store Db"
+Cohesion: 0.17
+Nodes (31): SessionId, F, PostgresSessionStore, SessionMeta, String, TenantId, WorkspaceId, cleanup_schema() (+23 more)
+
+### Community 209 - "Arc"
+Cohesion: 0.10
+Nodes (24): Arc, Duration, ExtractedFact, Mutex, NodeIndexRow, Reranker, RerankHit, RetrievalHit (+16 more)
+
+### Community 210 - "Concurrent Writers Db Memory"
+Cohesion: 0.16
+Nodes (33): AgeGraphStore, AsRef, DateTime, Into, NodeWriteIntent, Option, PgPool, ScopeContext (+25 more)
+
+### Community 211 - "Fast Path Db Memory"
+Cohesion: 0.17
+Nodes (33): DateTime, FastPathCtx, Option, PgPool, PiiClass, PiiClassifier, ScopeContext, ScopedConn (+25 more)
+
+### Community 212 - "Experiment Agent Loop E2e"
+Cohesion: 0.14
+Nodes (33): Child, Client, EventRecord, ExperimentRunResponse, ExperimentRunStatusResponse, Identity, OrchestratorPorts, Path (+25 more)
+
+### Community 213 - "Sub Agent Delegation"
 Cohesion: 0.14
 Nodes (33): AttachSubAgentResultWaiterInput, ConsumeSubAgentChildResultInput, DurableStep, ReserveSubAgentInput, Serialize, SpawnSubAgentInput, String, SubAgentChildRef (+25 more)
 
-### Community 205 - "Providers Tests"
+### Community 214 - "Orchestratortestfixture"
+Cohesion: 0.11
+Nodes (20): Drop, FgaClient, Identity, IsolatedTest, Mutex, TempDir, TenantId, TestApiClient (+12 more)
+
+### Community 215 - "Consolidate Workspace()"
+Cohesion: 0.18
+Nodes (33): AgeGraphStore, BTreeSet, AgeGraphStore, Arc, BTreeMap, BTreeSet, DateTime, EmbeddingProvider (+25 more)
+
+### Community 216 - "Compare Agent Revision Simulation Inner("
+Cohesion: 0.10
+Nodes (28): AgentArtifactDependencyDelta, AgentRevisionCompareRequest, AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest, AgentRevisionSimulationCompareResponse, AgentToolDependencyDelta, ActionRuleScope, AgentRevisionLock (+20 more)
+
+### Community 217 - "Tests"
 Cohesion: 0.08
 Nodes (19): anthropic_content_blocks_render_text_and_json_as_text_blocks(), anthropic_message_wraps_assistant_tool_calls_as_tool_use_blocks(), anthropic_message_wraps_tool_results_with_tool_use_id(), anthropic_tool_from_schema_moves_parameters_into_input_schema(), anthropic_content_blocks(), anthropic_message(), anthropic_tool_from_schema(), native_web_search_tools() (+11 more)
 
-### Community 206 - "Orchestrator Api Keys"
+### Community 218 - "Api Keys"
 Cohesion: 0.22
 Nodes (31): ApiKeyRow, CreateApiKeyRequest, CreateApiKeyResponse, FgaClient, HandlerError, Identity, KeyListItem, Option (+23 more)
 
-### Community 207 - "Memory Contradiction"
+### Community 219 - "Workflows"
 Cohesion: 0.15
-Nodes (20): CohereRerankHit, Arc, EmbeddedFact, NodeLabel, PgPool, Result, ScopeContext, ScopedConn (+12 more)
+Nodes (29): ArtifactRegistry, Context, HandlerError, Identity, Json, Relation, RequestHeaders, Result (+21 more)
 
-### Community 208 - "Hands Memory"
+### Community 220 - ".new()"
+Cohesion: 0.12
+Nodes (27): live_cache_audit_reports_hits_for_available_providers, live_cache_audit_tracks_same_session_cross_session_and_model_switch, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, Into, LLMProvider (+19 more)
+
+### Community 221 - "Memory"
 Cohesion: 0.12
 Nodes (14): ToolRouter::from_config, BuiltInTool, IdempotencyClass, Result, ToolContext, ToolOutput, ToolPolicySpec, Value (+6 more)
 
-### Community 209 - "Brain"
-Cohesion: 0.09
-Nodes (31): Span, Arc, CancellationToken, ContextPipeline, EventRecord, LineageHandle, LLMProvider, Option (+23 more)
+### Community 222 - "Mod"
+Cohesion: 0.08
+Nodes (29): ToolRouter, ActionPolicies, ActionPolicyRuleStore, ApprovalRuleStore, Arc, HandHandle, HandProvider, HashMap (+21 more)
 
-### Community 210 - "Brain Ner"
+### Community 223 - "Mod"
+Cohesion: 0.16
+Nodes (27): AgentContext, AgentSkillPolicy, ExcludedItem, PgPool, ProcessorOutput, Result, SkillMetadata, String (+19 more)
+
+### Community 224 - "Ner"
 Cohesion: 0.19
 Nodes (27): Default, IntoIterator, Item, NerSpan, Self, String, Vec, NerLabel (+19 more)
 
-### Community 211 - "Brain Planner"
-Cohesion: 0.11
-Nodes (20): Arc, CachedHybridRetriever, EmbeddingProvider, GraphStore, Into, LineageContext, MemoryScope, PiiClass (+12 more)
-
-### Community 212 - "Brain Brain Turn Db"
-Cohesion: 0.14
-Nodes (26): EventRange, Into, PostgresSessionStore, Self, SequenceNum, always_allow_rule_persists_and_skips_next_approval(), auto_mode_repeated_tool_runs_without_persisted_action_policy_rules(), canary_leaks_in_tool_input_are_detected_and_blocked() (+18 more)
-
-### Community 213 - "Core Session"
-Cohesion: 0.11
-Nodes (29): Attachment, Channel, ContactId, ContactRef, DateTime, Default, ModelId, Option (+21 more)
-
-### Community 214 - "Eval Collector"
+### Community 225 - "Collector"
 Cohesion: 0.13
 Nodes (22): EvalMetrics, Event, EventRecord, HashMap, Option, Self, String, TokenPricing (+14 more)
 
-### Community 215 - "Eval Memory Eval Judge"
-Cohesion: 0.09
-Nodes (27): Arc, CompletionRequest, CompletionStream, LLMProvider, MoaResult, ModelCapabilities, Mutex, Option (+19 more)
+### Community 226 - "Daytonahandprovider"
+Cohesion: 0.18
+Nodes (15): Client, Duration, HandHandle, HandProvider, HandSpec, Response, Result, SandboxFile (+7 more)
 
-### Community 216 - "Memory Fast Path"
-Cohesion: 0.19
-Nodes (32): Duration, NodeWriteIntent, Option, PiiClass, Result, ScopedConn, String, Uuid (+24 more)
-
-### Community 217 - "Memory Llm Merge"
+### Community 227 - "Llm Merge"
 Cohesion: 0.11
 Nodes (23): BTreeMap, EntityMergeVerifier, Into, LlmChatClient, NodeIndexRow, Option, Result, S (+15 more)
 
-### Community 218 - "Memory Turbopuffer"
-Cohesion: 0.13
-Nodes (25): Arc, Error, Into, MoaConfig, Mutex, Self, SocketAddr, Uuid (+17 more)
+### Community 228 - "Handlererror"
+Cohesion: 0.16
+Nodes (28): Context, HandlerError, Json, PathBuf, Relation, RequestHeaders, Result, TenantId (+20 more)
 
-### Community 219 - "Orchestrator Eval"
-Cohesion: 0.17
-Nodes (25): Context, HandlerError, Json, Relation, Result, EvalCompareRequest, EvalDatasetListRequest, EvalDatasetListResponse (+17 more)
-
-### Community 220 - "Orchestrator Inner"
-Cohesion: 0.11
-Nodes (18): AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest, AppendLearningCandidateRequest, CompleteSegmentRequest, CreateSegmentRequest, HandlerError, ListSessionsRequest (+10 more)
-
-### Community 221 - "Xtask Check Architecture Boundaries"
+### Community 229 - "Check Architecture Boundaries"
 Cohesion: 0.13
 Nodes (23): Display, Option, Path, PathBuf, Result, Self, String, Vec (+15 more)
 
-### Community 222 - "Core Action Policy"
-Cohesion: 0.10
-Nodes (26): ActionPolicyRule, ActionReviewField, ActionReviewFileDiff, DateTime, Option, SessionId, String, SubAgentId (+18 more)
+### Community 230 - "Streaming"
+Cohesion: 0.11
+Nodes (30): ApiError, CompletionContent, CompletionResponse, CreateResponse, Instant, LLMSpanRecorder, MoaError, ModelId (+22 more)
 
-### Community 223 - "Auth Bundle"
+### Community 231 - "Bundle"
 Cohesion: 0.14
 Nodes (28): AsyncAuthzProvider, AwakeableResolver, Arc, AsyncAuthzProvider, AuthError, AuthProvider, AwakeableResolver, ContactTokenIssuer (+20 more)
 
-### Community 224 - "Eval Runner"
-Cohesion: 0.13
-Nodes (20): CachedEmbeddingProvider, CorpusProfile, CorpusProfile, EmbeddingProvider, EntityMergeVerifier, FactExtractor, IngestCtx, TurnChunk (+12 more)
+### Community 232 - "Mod"
+Cohesion: 0.16
+Nodes (22): AuthProvider, Arc, AuthError, AuthProvider, AuthzError, Error, FgaClient, Into (+14 more)
 
-### Community 225 - "Brain Context Build"
-Cohesion: 0.11
-Nodes (30): CacheReport, ContextPipeline, Arc, CompletionRequest, CompletionResponse, ContextPipeline, Event, EventRecord (+22 more)
+### Community 233 - "Discord"
+Cohesion: 0.14
+Nodes (28): ChannelId, ChannelType, ComponentInteraction, Attachment, ChannelRef, Context, InboundMessage, Option (+20 more)
 
-### Community 226 - "Brain Compaction"
-Cohesion: 0.12
-Nodes (30): CompactionConfig, Cow, CompactionConfig, CompletionRequest, EventRecord, LLMProvider, ModelTier, Option (+22 more)
+### Community 234 - "Contradictioncontext"
+Cohesion: 0.15
+Nodes (19): CohereRerankHit, Arc, EmbeddedFact, NodeLabel, PgPool, Result, ScopeContext, ScopedConn (+11 more)
 
-### Community 227 - "Brain Conversion"
+### Community 235 - "Conversion"
 Cohesion: 0.14
 Nodes (26): CompiledRecordMessage, CompiledRecordMessage, ContextMessage, EventRecord, HashMap, Option, Result, Self (+18 more)
 
-### Community 228 - "Eval Runner"
-Cohesion: 0.09
-Nodes (29): ConsolidationOutcome, CorpusManifest, CostError, CostLedger, ClusterBootstrapReport, ConsolidationOutcome, CorpusManifest, CostError (+21 more)
+### Community 236 - "Runner"
+Cohesion: 0.08
+Nodes (23): CorpusProfile, BTreeSet, CorpusProfile, Error, EvalError, ScopeTier, approximate_tokens(), build_eval_report() (+15 more)
 
-### Community 229 - "Brain Turn"
-Cohesion: 0.09
-Nodes (28): ApprovalRequest, Arc, CancellationToken, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRecord (+20 more)
-
-### Community 230 - "Edge Routes"
-Cohesion: 0.11
-Nodes (28): Arc, IntoResponse, Value, action_review_public_routes_translate_to_restate_handlers(), admin_maintenance_public_routes_translate_to_restate_handlers(), agent_public_routes_translate_to_restate_handlers(), analytics_public_routes_translate_to_restate_handlers(), approval_public_routes_translate_to_restate_handlers() (+20 more)
-
-### Community 231 - "Eval Transcript Runner"
-Cohesion: 0.12
-Nodes (30): CollectedExecution, EvalScore, Event, EventRecord, Option, ScoreCard, ScoreRecord, ScoreValue (+22 more)
-
-### Community 232 - "Memory Consolidate"
-Cohesion: 0.19
-Nodes (32): AgeGraphStore, Arc, BTreeSet, DateTime, Default, EmbeddingProvider, MemoryDigestConfig, NodeLabel (+24 more)
-
-### Community 233 - "Orchestrator Experiment Agent Loop E2E"
-Cohesion: 0.15
-Nodes (31): Child, Client, EventRecord, ExperimentRunResponse, ExperimentRunStatusResponse, Identity, OrchestratorPorts, Path (+23 more)
-
-### Community 234 - "Skills Proposals"
-Cohesion: 0.14
-Nodes (29): ArtifactDocument, LearningCandidate, Option, PgConnection, PostgresSessionStore, Result, Self, SessionMeta (+21 more)
-
-### Community 235 - "Orchestrator Workflows"
-Cohesion: 0.15
-Nodes (27): ArtifactRegistry, Context, HandlerError, Identity, Json, Relation, RequestHeaders, Result (+19 more)
-
-### Community 236 - "Brain Lineage"
+### Community 237 - "Ciba"
 Cohesion: 0.13
-Nodes (30): CascadeVerifier, ChunkRef, CompletionResponse, ContextChunk, ContextMessage, Duration, LineageHandle, Option (+22 more)
+Nodes (23): ApprovalDecision, ApprovalHandle, ApprovalRequest, Arc, AsyncAuthzError, AsyncAuthzProvider, AwakeableResolver, Client (+15 more)
 
-### Community 237 - "Providers"
-Cohesion: 0.15
-Nodes (18): enabled_native_tools(), Arc, Client, CompletionRequest, CompletionStream, Into, LLMProvider, MoaConfig (+10 more)
+### Community 238 - "Mod"
+Cohesion: 0.11
+Nodes (21): Arc, CompactionConfig, CompiledHistory, ContextMessage, ContextProcessor, ContextSnapshotConfig, DeduplicationStats, EventRecord (+13 more)
 
-### Community 238 - "Artifacts Simulation"
+### Community 239 - "Registry"
+Cohesion: 0.16
+Nodes (31): DateTime, Error, MoaError, Option, PgPool, PgRow, ResolvedArtifactRevisionRef, Result (+23 more)
+
+### Community 240 - "Planner"
+Cohesion: 0.16
+Nodes (18): DateTime, Option, Utc, month_number(), parse_as_of_fragment(), parse_day_of_month(), parse_four_digit_year(), parse_iso_date_in_text() (+10 more)
+
+### Community 241 - "Rate Limit"
 Cohesion: 0.14
-Nodes (26): ArtifactRef, Default, ExperimentTargetKind, Option, Self, String, Value, Vec (+18 more)
+Nodes (17): Arc, Duration, F, HashMap, Instant, Into, Mutex, Option (+9 more)
 
-### Community 239 - "Eval Fixtures"
+### Community 242 - "Pgvector Store"
+Cohesion: 0.14
+Nodes (18): PgConnection, PgPool, Result, ScopeContext, ScopedConn, Self, Uuid, Vec (+10 more)
+
+### Community 243 - "Policy"
+Cohesion: 0.09
+Nodes (21): ActionPolicyCheck, ActionOrigin, PreparedActionInvocation, PreparedToolInvocation, tenant_workspace_key(), ActionEnvelope, ActionReviewField, ActionReviewFileDiff (+13 more)
+
+### Community 244 - "Graphmemoryretriever"
+Cohesion: 0.12
+Nodes (19): CachedHybridRetriever, ContextProcessor, Arc, CachedHybridRetriever, ContextProcessor, EmbeddingProvider, GraphStore, HashMap (+11 more)
+
+### Community 245 - "Segments"
+Cohesion: 0.11
+Nodes (26): ActiveSegment, DateTime, Event, HashMap, Option, SegmentCompleted, SegmentCompletion, SegmentId (+18 more)
+
+### Community 246 - "Turn"
+Cohesion: 0.09
+Nodes (27): ApprovalRequest, Arc, CancellationToken, CompletionRequest, CompletionResponse, CompletionStream, Event, EventRecord (+19 more)
+
+### Community 247 - "Fixtures"
 Cohesion: 0.14
 Nodes (22): BTreeMap, Error, EvalError, Into, IntoIterator, Item, Iterator, Option (+14 more)
 
-### Community 240 - "Gateway Rate Limit"
-Cohesion: 0.13
-Nodes (17): Arc, Duration, F, HashMap, Instant, Into, Mutex, Option (+9 more)
-
-### Community 241 - "Hands Str Replace"
+### Community 248 - "Str Replace"
 Cohesion: 0.15
 Nodes (30): CancellationToken, Duration, Option, Path, Result, String, ToolOutput, Vec (+22 more)
 
-### Community 242 - "Memory Concurrent Writers Db Memory"
-Cohesion: 0.18
-Nodes (30): AgeGraphStore, DateTime, Into, NodeWriteIntent, Option, PgPool, ScopeContext, ScopedConn (+22 more)
-
-### Community 243 - "Memory Pgvector Store"
+### Community 249 - "Write Protocol Db Memory"
 Cohesion: 0.15
-Nodes (17): PgConnection, PgPool, Result, ScopeContext, ScopedConn, Self, Uuid, Vec (+9 more)
+Nodes (30): AgeGraphStore, AsRef, DateTime, EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, Option (+22 more)
 
-### Community 244 - "Orchestrator Ctx"
+### Community 250 - "Ctx"
 Cohesion: 0.13
 Nodes (22): HeaderMap, Identity, IdentityType, Result, Uuid, current_identity(), extract_identity(), HeaderTrustMode (+14 more)
 
-### Community 245 - "Orchestrator Deps"
+### Community 251 - "Deps"
 Cohesion: 0.12
 Nodes (26): Arc, AwakeableResolver, EmbeddingProvider, FgaClient, GraphMemoryRetriever, MoaConfig, Option, PgPool (+18 more)
 
-### Community 246 - "Orchestrator Privacy"
-Cohesion: 0.25
-Nodes (28): BTreeMap, HandlerError, Path, PathBuf, Postgres, Result, Transaction, PrivacySubject (+20 more)
+### Community 252 - ".complete()"
+Cohesion: 0.09
+Nodes (28): CompletionRequest, CompletionResponse, ContactId, Context, DateTime, Json, RunRetryPolicy, SessionId (+20 more)
 
-### Community 247 - "Orchestrator"
-Cohesion: 0.16
-Nodes (21): Arc, AuthError, AuthProvider, AuthzError, Error, FgaClient, Into, IntoResponse (+13 more)
-
-### Community 248 - "Orchestrator Llm Gateway"
+### Community 253 - "Llm Gateway"
 Cohesion: 0.11
 Nodes (22): Arc, CompletionRequest, CompletionStream, LLMProvider, ModelCapabilities, Mutex, Result, Self (+14 more)
 
-### Community 249 - "Orchestrator Session Turn Lifecycle Serv"
+### Community 254 - "Session Turn Lifecycle Service E2e"
 Cohesion: 0.21
 Nodes (30): Client, Duration, F, Identity, Option, Result, String, await_snapshot_matching() (+22 more)
 
-### Community 250 - "Orchestrator Skill Learning Workflow"
+### Community 255 - "Session Store Service"
 Cohesion: 0.09
-Nodes (26): Arc, CompletionRequest, CompletionStream, Into, IntoIterator, Item, LLMProvider, MemoryScope (+18 more)
+Nodes (27): Arc, ContactRef, Event, EventFilter, InitSessionVoRequest, Into, JoinHandle, PostgresSessionStore (+19 more)
 
-### Community 251 - "Providers Streaming"
+### Community 256 - "Policies"
+Cohesion: 0.18
+Nodes (24): ActionPolicyRule, SessionMeta, TenantId, UserId, WorkspaceId, ActionPolicyContext, configured_tool_policy_cannot_be_weakened_by_persisted_allow_rule(), default_policy_uses_the_stricter_config_or_tool_effect() (+16 more)
+
+### Community 257 - "Lessons"
+Cohesion: 0.11
+Nodes (25): AgeGraphStore, Error, GraphError, MemoryScope, MoaError, Option, PgConnection, Result (+17 more)
+
+### Community 258 - "Action Policy"
+Cohesion: 0.11
+Nodes (24): ActionPolicyRule, DateTime, Option, SessionActorRef, SessionId, String, SubAgentId, TenantId (+16 more)
+
+### Community 259 - ".retrieve Hits()"
+Cohesion: 0.18
+Nodes (24): AgentKnowledgePolicy, AgentKnowledgePolicy, Duration, MemoryScope, PiiClass, ProcessorOutput, Result, RetrievalHit (+16 more)
+
+### Community 260 - "Anthropicstreamstate"
 Cohesion: 0.16
 Nodes (21): AnthropicStreamDebugSnapshot, AnthropicStreamState, consume_sse_events(), initial_tool_input(), BlockAccumulator, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent (+13 more)
 
-### Community 252 - "Orchestrator Tenants"
-Cohesion: 0.14
-Nodes (25): AuthzCheckError, AuthzCheckError, FgaClient, HandlerError, Identity, RequestHeaders, Result, Context (+17 more)
+### Community 261 - "Authz Challenges Reaper"
+Cohesion: 0.11
+Nodes (22): ApprovalDecision, AwakeableResolveError, Arc, AuthzChallengeReaperHandle, AwakeableResolver, Client, Duration, Into (+14 more)
 
-### Community 253 - "Providers Router"
+### Community 262 - "Env Overlay"
+Cohesion: 0.16
+Nodes (28): assert_config_error_contains(), deserialize_optional_headers(), deserialize_optional_list(), env_pairs(), from_iter_applies_flat_single_underscore_env(), invalid_bool_reports_env_name(), invalid_enum_reports_offending_value(), invalid_integer_reports_env_name() (+20 more)
+
+### Community 263 - "Router"
 Cohesion: 0.14
 Nodes (20): MockProvider, ModelRouter, provider(), provider_for_falls_back_to_main_when_auxiliary_is_missing(), provider_for_routes_auxiliary_tasks_to_auxiliary_provider(), ProviderInstance, Arc, CompletionRequest (+12 more)
 
-### Community 254 - "Brain"
-Cohesion: 0.11
-Nodes (20): Arc, CompactionConfig, ContextMessage, ContextProcessor, ContextSnapshotConfig, DeduplicationStats, EventRecord, LLMProvider (+12 more)
+### Community 264 - "Agent"
+Cohesion: 0.18
+Nodes (23): Default, Option, Result, Self, String, Uuid, Value, Vec (+15 more)
 
-### Community 255 - "Eval Json"
+### Community 265 - "Json"
 Cohesion: 0.08
 Nodes (27): ActionPolicyOverride, AgentConfig, EvalRun, HashMap, InstructionOverride, MemoryOverride, Option, PathBuf (+19 more)
 
-### Community 256 - "Hands File Outline"
+### Community 266 - "File Outline"
 Cohesion: 0.14
 Nodes (28): CancellationToken, Duration, Option, Path, Result, String, ToolOutput, Vec (+20 more)
 
-### Community 257 - "Lineage Signing"
+### Community 267 - "Signing"
 Cohesion: 0.13
 Nodes (17): Into, Path, PathBuf, Result, Self, Send, String, Sync (+9 more)
 
-### Community 258 - "Loadtest Runner"
+### Community 268 - "Backend"
+Cohesion: 0.10
+Nodes (26): Arc, FgaClient, Identity, LoadTestOptions, MoaConfig, MoaError, ModelId, Response (+18 more)
+
+### Community 269 - "Runner"
 Cohesion: 0.12
 Nodes (26): Arc, Duration, EventRecord, Instant, JoinHandle, LoadTestOptions, LoadTestReport, Option (+18 more)
 
-### Community 259 - "Messaging Twilio Offline"
+### Community 270 - "Providerdeliverysink"
+Cohesion: 0.17
+Nodes (20): Arc, Credential, CredentialVault, MessagingConfig, Option, Result, Self, String (+12 more)
+
+### Community 271 - "Twilio Offline"
 Cohesion: 0.10
 Nodes (20): BTreeSet, Credential, CredentialVault, HashMap, MockServer, Option, Request, Result (+12 more)
 
-### Community 260 - "Session Experience"
+### Community 272 - "Lineage Admin"
+Cohesion: 0.15
+Nodes (29): DateTime, Display, LineageRecordView, Option, Path, PgPool, PgRow, SigningKey (+21 more)
+
+### Community 273 - "Handlererror"
+Cohesion: 0.25
+Nodes (29): BTreeMap, Display, HandlerError, Path, PathBuf, Postgres, Result, Transaction (+21 more)
+
+### Community 274 - "Experience"
 Cohesion: 0.17
 Nodes (14): ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, Option, PgConnection, Result (+6 more)
 
-### Community 261 - "Skills Artifact"
-Cohesion: 0.14
-Nodes (28): ArtifactDocument, ArtifactFile, ArtifactStatus, Result, SkillDefinition, SkillDocument, SkillPackage, SkillPackageFile (+20 more)
+### Community 275 - "Check Eval Budgets"
+Cohesion: 0.10
+Nodes (29): MetricSummary, QueryRewritePolicy, RetrievalMetrics, Value, CacheScores, check_eval_budgets_min_metric_fails_below_floor(), check_eval_budgets_min_metric_resolves_nested_per_leg_names(), compaction_reduction_ratio() (+21 more)
 
-### Community 262 - "Brain Cache Audit Live"
-Cohesion: 0.12
-Nodes (24): live_cache_audit_reports_hits_for_available_providers, live_cache_audit_tracks_same_session_cross_session_and_model_switch, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage, ModelCapabilities, Mutex (+16 more)
+### Community 276 - "Main"
+Cohesion: 0.20
+Nodes (29): Option, Path, PathBuf, Result, main(), String, Vec, Path (+21 more)
 
-### Community 263 - "Providers Streaming"
-Cohesion: 0.12
-Nodes (23): web_search_completed_block(), web_search_started_block(), CompletionContent, CompletionResponse, Instant, LLMSpanRecorder, Option, Result (+15 more)
-
-### Community 264 - "Brain Cache Audit Live"
+### Community 277 - "Secretstring"
 Cohesion: 0.15
-Nodes (27): Arc, ContextPipeline, Into, LLMProvider, MoaConfig, Option, Path, PathBuf (+19 more)
+Nodes (26): create, Executor, FromStr, Result, SecretString, Self, String, Err (+18 more)
 
-### Community 265 - "Memory Write Protocol Db Memory"
-Cohesion: 0.16
-Nodes (27): AgeGraphStore, DateTime, EdgeLabel, EdgeWriteIntent, NodeLabel, NodeWriteIntent, Option, PgPool (+19 more)
-
-### Community 266 - "Eval Engine"
+### Community 278 - "Compaction"
 Cohesion: 0.14
-Nodes (23): AgentEnvironment, CollectedExecution, CompletionRequest, CompletionStream, EngineOptions, MoaConfig, ModelCapabilities, Path (+15 more)
+Nodes (28): CompactionConfig, Cow, CompactionConfig, CompletionRequest, EventRecord, LLMProvider, ModelTier, Option (+20 more)
 
-### Community 267 - "Eval Memory Metrics"
+### Community 279 - "Lineage"
+Cohesion: 0.15
+Nodes (28): ChunkRef, CompletionResponse, ContextChunk, ContextMessage, Duration, LineageHandle, Option, SessionMeta (+20 more)
+
+### Community 280 - "Memory Metrics"
 Cohesion: 0.13
 Nodes (27): Event, EventType, HashSet, Option, Result, SessionId, SessionStore, String (+19 more)
 
-### Community 268 - "Memory Turbopuffer"
-Cohesion: 0.15
-Nodes (18): Client, Method, Option, Result, SecretString, String, Value, VectorItem (+10 more)
+### Community 281 - "Memory Eval Judge"
+Cohesion: 0.11
+Nodes (23): Arc, CompletionRequest, CompletionStream, LLMProvider, MoaResult, ModelCapabilities, Mutex, Option (+15 more)
 
-### Community 269 - "Orchestrator Endpoint"
+### Community 282 - "Load"
+Cohesion: 0.15
+Nodes (25): Duration, EmbeddingProvider, PerfGateConfig, Result, Self, Stack, String, Vec (+17 more)
+
+### Community 283 - "Endpoint"
 Cohesion: 0.12
 Nodes (27): Arc, Endpoint, Option, PostgresSessionStore, ProviderRegistry, RegisteredDeployment, RegisteredService, String (+19 more)
 
-### Community 270 - "Orchestrator Session Store Service"
-Cohesion: 0.10
-Nodes (25): AppendEventRequest, Arc, Event, EventFilter, InitSessionVoRequest, Into, JoinHandle, PostgresSessionStore (+17 more)
-
-### Community 271 - "Providers Request"
-Cohesion: 0.10
-Nodes (25): CompletionRequest, CreateResponse, JsonResponseFormat, Option, ProviderNativeTool, Result, String, MoaError (+17 more)
-
-### Community 272 - "Test Support Orchestrator Fixture"
+### Community 284 - ".erase()"
 Cohesion: 0.13
-Nodes (18): Drop, FgaClient, Identity, IsolatedTest, Mutex, TempDir, TestApiClient, TupleOp (+10 more)
+Nodes (24): Context, Identity, Json, Option, Relation, RequestHeaders, TenantId, WorkspaceId (+16 more)
 
-### Community 273 - "Xtask Check Eval Budgets"
+### Community 285 - "Status"
+Cohesion: 0.15
+Nodes (28): ActionRuleScope, ArtifactRunStatus, ExperimentRunRecord, ExperimentRunStatus, ExperimentRunStatusRequest, ExperimentRunStatusResponse, HandlerError, MemoryScope (+20 more)
+
+### Community 286 - "Experiment Workflow E2e"
+Cohesion: 0.17
+Nodes (28): ArtifactPublishResponse, Child, Client, ExperimentRunResponse, ExperimentRunStatusResponse, Identity, OrchestratorPorts, Response (+20 more)
+
+### Community 287 - "Neon Branch Manager Live"
+Cohesion: 0.14
+Nodes (28): MoaConfig, Mutex, NeonBranch, Option, PostgresSessionStore, SessionSummary, String, TenantId (+20 more)
+
+### Community 288 - "Db"
+Cohesion: 0.14
+Nodes (18): AsMut, ContactId, Error, MoaError, Option, PgConnection, PgPool, Postgres (+10 more)
+
+### Community 289 - "Events Stream"
 Cohesion: 0.11
-Nodes (28): MetricSummary, QueryRewritePolicy, RetrievalMetrics, Value, CacheScores, check_eval_budgets_min_metric_fails_below_floor(), check_eval_budgets_min_metric_resolves_nested_per_leg_names(), compaction_reduction_ratio() (+20 more)
+Nodes (24): BrainId, ContactId, DateTime, Event, Option, Self, SequenceNum, SessionId (+16 more)
 
-### Community 274 - "Xtask"
-Cohesion: 0.21
-Nodes (28): Option, Path, PathBuf, Result, main(), String, Vec, Path (+20 more)
+### Community 290 - ".new()"
+Cohesion: 0.15
+Nodes (15): CachedEmbeddingProvider, EntityMergeVerifier, FactExtractor, IngestCtx, PostgresSessionStore, EntityMergeVerifier, FactExtractor, LoadedMemoryEvalCorpus (+7 more)
 
-### Community 275 - "Edge Routes"
-Cohesion: 0.26
-Nodes (27): Bytes, HeaderMap, Method, Path, Response, State, String, Uuid (+19 more)
+### Community 291 - "Handlererror"
+Cohesion: 0.19
+Nodes (26): CancelSubAgentInput, Event, HandlerError, Result, SessionId, SubAgentChildRef, SubAgentResult, Vec (+18 more)
 
-### Community 276 - "Gateway Slack"
+### Community 292 - "Slackadapter"
 Cohesion: 0.11
 Nodes (21): ChannelAdapter, Instant, MessageId, OutboundMessage, Platform, PlatformAdapter, PlatformCapabilities, Vec (+13 more)
 
-### Community 277 - "Providers Factory"
+### Community 293 - "Stack"
+Cohesion: 0.12
+Nodes (21): CohereV4Embedder, Arc, CachedHybridRetriever, EmbeddingProvider, MemoryScope, PerfGateConfig, PgPool, Result (+13 more)
+
+### Community 294 - "Factory"
 Cohesion: 0.17
 Nodes (25): build_provider_from_config(), build_provider_from_selection(), default_rewriter_model(), explicit_provider_prefix_overrides_inference(), infer_provider_name(), infers_anthropic_for_claude_models(), infers_google_for_gemini_models(), infers_openai_for_gpt_models() (+17 more)
 
-### Community 278 - "Auth Http"
+### Community 295 - "Lifecycle"
+Cohesion: 0.18
+Nodes (18): hand_id(), sandbox_tier_label(), session_provider_key(), tenant_workspace_key(), ToolRouter, HandHandle, Option, PathBuf (+10 more)
+
+### Community 296 - "Http"
 Cohesion: 0.19
 Nodes (17): BTreeMap, Client, Map, Option, Response, Result, Self, String (+9 more)
 
-### Community 279 - "Brain Gate"
+### Community 297 - "Gate"
 Cohesion: 0.13
 Nodes (21): ContextMessage, QueryRewriteConfig, Vec, approximate_query_tokens(), contains_any(), contains_any_word(), contains_coreference(), decide() (+13 more)
 
-### Community 280 - "Core Channel"
+### Community 298 - "Tools"
+Cohesion: 0.12
+Nodes (21): AgentContext, AgentToolPolicy, ContextProcessor, ModelCapabilities, Option, ProcessorOutput, Result, Self (+13 more)
+
+### Community 299 - "Channel"
 Cohesion: 0.13
 Nodes (23): ChannelAccountId, ContactPointId, DateTime, Duration, Option, PathBuf, String, UserId (+15 more)
 
-### Community 281 - "Core Memory"
-Cohesion: 0.13
-Nodes (13): DateTime, From, Option, Self, String, UserId, Utc, Vec (+5 more)
+### Community 300 - "Session Store"
+Cohesion: 0.10
+Nodes (24): SessionFilter, AgentContext, ChannelRef, Option, PgRow, SegmentBaseline, SessionActorRef, SessionChannelBindingId (+16 more)
 
-### Community 282 - "Gateway Edit Window"
+### Community 301 - "Recording"
+Cohesion: 0.19
+Nodes (24): BTreeMap, EntityMergeFixtureRecord, EntityMergeVerifier, ExtractionFixtureRecord, Mutex, NodeIndexRow, Path, Result (+16 more)
+
+### Community 302 - "Edit Window"
 Cohesion: 0.12
 Nodes (23): Into, MessageId, Option, Platform, Result, Self, String, Channel (+15 more)
 
-### Community 283 - "Hands Session Search"
+### Community 303 - "Client"
+Cohesion: 0.13
+Nodes (27): Duration, HandStatus, HeaderMap, Map, MoaError, Option, Response, Result (+19 more)
+
+### Community 304 - "Session Search"
 Cohesion: 0.10
 Nodes (20): BuiltInTool, EventRecord, EventType, IdempotencyClass, Option, Result, String, ToolContext (+12 more)
 
-### Community 284 - "Orchestrator Delegation"
-Cohesion: 0.13
-Nodes (25): Into, Serialize, SpawnSubAgentInput, SubAgentId, SubAgentState, SubAgentStatus, ToolOutput, DelegationTool (+17 more)
+### Community 305 - "Evalserviceerror"
+Cohesion: 0.11
+Nodes (27): EvalError, From, MoaConfig, PgPool, ScoringError, Self, EvalPlanRequest, EvalPlanResponse (+19 more)
 
-### Community 285 - "Providers Tools"
+### Community 306 - "Skill Learning Workflow"
+Cohesion: 0.10
+Nodes (24): ActionRuleScope, Arc, Into, IntoIterator, Item, LLMProvider, MemoryScope, MoaConfig (+16 more)
+
+### Community 307 - "Mod"
+Cohesion: 0.17
+Nodes (15): Arc, Client, CompletionRequest, CompletionStream, Into, LLMProvider, MoaConfig, ModelCapabilities (+7 more)
+
+### Community 308 - "Tools"
 Cohesion: 0.10
 Nodes (27): CompletionContent, ContextMessage, HashMap, Option, Response, Result, StopReason, String (+19 more)
 
-### Community 286 - "Skills Lessons"
-Cohesion: 0.11
-Nodes (22): AgeGraphStore, Error, GraphError, MemoryScope, MoaError, Option, PgConnection, Result (+14 more)
+### Community 309 - "Candidates"
+Cohesion: 0.13
+Nodes (27): DateTime, ExperienceRecord, Into, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, Option, SessionId (+19 more)
 
-### Community 287 - "Xtask Run Memory Retrieval Eval"
+### Community 310 - "Testapiclient"
+Cohesion: 0.14
+Nodes (17): Client, Event, EventRange, EventRecord, Into, Req, RequestBuilder, Resp (+9 more)
+
+### Community 311 - "Run Memory Retrieval Eval"
 Cohesion: 0.15
 Nodes (22): EvalLane, Item, Iterator, MemoryEvalExtractorMode, Option, PathBuf, QueryRewritePolicy, RankingConfig (+14 more)
 
-### Community 288 - "Providers"
+### Community 312 - "Mod"
 Cohesion: 0.17
 Nodes (15): AnthropicProvider, debug_build_anthropic_request_body(), Arc, Client, CompletionRequest, CompletionStream, Into, LLMProvider (+7 more)
 
-### Community 289 - "Brain Pipeline Stages Db Memory"
-Cohesion: 0.18
-Nodes (24): Clock, DateTime, PgPool, QueryRewriteResult, Result, Self, Utc, Uuid (+16 more)
-
-### Community 290 - "Memory Llm Client"
+### Community 313 - "Llm Client"
 Cohesion: 0.14
 Nodes (19): CohereAssistantMessage, Client, Error, Into, Result, SecretString, Self, StatusCode (+11 more)
 
-### Community 291 - "Loadtest Stack"
-Cohesion: 0.13
-Nodes (20): CohereV4Embedder, Arc, CachedHybridRetriever, EmbeddingProvider, MemoryScope, PerfGateConfig, PgPool, Result (+12 more)
-
-### Community 292 - "Core Context"
+### Community 314 - "Context"
 Cohesion: 0.13
 Nodes (15): BudgetConfig, CompactionConfig, ContextSnapshotConfig, QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig (+7 more)
 
-### Community 293 - "Core Env Overlay"
+### Community 315 - "Messaging"
+Cohesion: 0.08
+Nodes (21): MessagingConfig, Default, Option, Self, String, Default, Drop, String (+13 more)
+
+### Community 316 - "Recovery"
+Cohesion: 0.19
+Nodes (19): HandFailureContext, is_gateway_unavailable_error(), is_timeout_error(), ToolRouter, Duration, HandHandle, MoaError, Option (+11 more)
+
+### Community 317 - "Api Keys"
 Cohesion: 0.18
-Nodes (25): assert_config_error_contains(), deserialize_optional_headers(), deserialize_optional_list(), env_pairs(), from_iter_applies_flat_single_underscore_env(), invalid_bool_reports_env_name(), invalid_enum_reports_offending_value(), invalid_integer_reports_env_name() (+17 more)
+Nodes (23): Cache, DateTime, KeyOwner, Option, PgPool, Utc, Uuid, cache_successful_validation() (+15 more)
 
-### Community 294 - "Auth Api Keys"
-Cohesion: 0.23
-Nodes (23): Cache, PgPool, Result, Uuid, Err, ApiKeyError, cache_successful_validation(), cached_key_is_active() (+15 more)
-
-### Community 295 - "Brain Scorer"
+### Community 318 - "Scorer"
 Cohesion: 0.15
 Nodes (24): AssessmentPhase, Option, ResolutionWeights, SegmentAssessment, SegmentEvidence, SegmentEvidencePolarity, SegmentOutcome, Self (+16 more)
 
-### Community 296 - "Core Wire"
+### Community 319 - "Result"
 Cohesion: 0.13
-Nodes (27): DateTime, EventType, LearningCandidateStatus, LearningCandidateType, LearningRiskClass, Utc, EventType, LearningCandidateStatus (+19 more)
+Nodes (18): DateTime, Event, EventFilter, EventRange, EventRecord, Into, Result, Self (+10 more)
 
-### Community 297 - "Lineage Admin"
+### Community 320 - "Admin"
 Cohesion: 0.18
 Nodes (26): DateTime, Option, Path, PgPool, PgRow, Result, SigningKey, String (+18 more)
 
-### Community 298 - "Lineage Writer"
+### Community 321 - "Writer"
 Cohesion: 0.17
 Nodes (24): DateTime, Option, String, Utc, Uuid, Value, Vec, ScoreRow (+16 more)
 
-### Community 299 - "Messaging Postmark Provider E2E"
+### Community 322 - "Isolation"
+Cohesion: 0.21
+Nodes (26): Arc, AtomicBool, Error, JoinHandle, PgPool, Result, ScopedConn, Stack (+18 more)
+
+### Community 323 - "Read Smoke Db Memory"
+Cohesion: 0.19
+Nodes (26): AgeGraphStore, AsRef, DateTime, NodeLabel, NodeWriteIntent, PgConnection, PgPool, ScopeContext (+18 more)
+
+### Community 324 - "Embedder Switch Db Memory"
+Cohesion: 0.21
+Nodes (26): AsRef, Option, PgPool, PgvectorStore, ScopeContext, ScopedConn, TestDb, Uuid (+18 more)
+
+### Community 325 - "Postmark Provider E2e"
 Cohesion: 0.16
 Nodes (20): Credential, CredentialVault, HashMap, Option, PathBuf, Result, Self, String (+12 more)
 
-### Community 300 - "Orchestrator Status"
-Cohesion: 0.16
-Nodes (26): ArtifactRunStatus, ExperimentRunRecord, ExperimentRunStatus, ExperimentRunStatusRequest, ExperimentRunStatusResponse, HandlerError, MemoryScope, Option (+18 more)
-
-### Community 301 - "Orchestrator Experiment Workflow E2E"
-Cohesion: 0.17
-Nodes (26): ArtifactPublishResponse, Child, Client, ExperimentRunResponse, ExperimentRunStatusResponse, Identity, OrchestratorPorts, Response (+18 more)
-
-### Community 302 - "Providers Provider Matrix Live"
+### Community 326 - "Provider Matrix Live"
 Cohesion: 0.15
 Nodes (23): CompletionRequest, CompletionResponse, CompletionStream, FnMut, Result, String, Value, Vec (+15 more)
 
-### Community 303 - "Skills Candidates"
-Cohesion: 0.14
-Nodes (26): DateTime, ExperienceRecord, Into, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, Option, SessionId (+18 more)
-
-### Community 304 - "Lineage Export"
+### Community 327 - "Export"
 Cohesion: 0.18
 Nodes (22): SigningKey, DateTime, Option, Path, Result, Self, SigningKey, String (+14 more)
 
-### Community 305 - "Orchestrator Ctx"
-Cohesion: 0.21
-Nodes (10): prepare_turn_request, Arc, LineageHandle, MoaConfig, PgPool, PostgresSessionStore, Self, WriterHandle (+2 more)
-
-### Community 306 - "Memory Embedder"
+### Community 328 - "Embedder"
 Cohesion: 0.13
 Nodes (16): CohereEmbeddings, CohereEmbedRequest, Client, EmbeddingProvider, Error, Into, Result, SecretString (+8 more)
 
-### Community 307 - "Hands Lifecycle"
-Cohesion: 0.18
-Nodes (16): hand_id(), sandbox_tier_label(), session_provider_key(), ToolRouter, HandHandle, Option, PathBuf, Result (+8 more)
+### Community 329 - "Models"
+Cohesion: 0.14
+Nodes (21): by_provider(), by_provider_partitions_correctly(), capabilities_for_provider_model(), claude_opus_has_million_token_context(), context_window(), find(), find_for_provider_model(), find_model() (+13 more)
 
-### Community 308 - "Hands Output Budget"
-Cohesion: 0.16
-Nodes (19): append_footer(), artifact_storage_footer(), count_lines(), estimate_tokens(), format_artifact_summary(), inline_artifact_preview_budget(), ToolRouter, truncate_text_for_budget() (+11 more)
+### Community 330 - "Normalization"
+Cohesion: 0.17
+Nodes (23): action_pattern_chained_inner_uses_first_subcommand(), action_pattern_for(), action_pattern_malformed_wrapper_falls_back_to_full_input(), action_pattern_nested_shell_not_recursed(), action_pattern_simple_command(), action_pattern_single_token(), action_pattern_unwraps_zsh_wrapper(), approval_pattern_chained_inner_uses_first_subcommand() (+15 more)
 
-### Community 309 - "Hands Recovery"
-Cohesion: 0.20
-Nodes (18): HandFailureContext, is_gateway_unavailable_error(), is_timeout_error(), ToolRouter, Duration, HandHandle, MoaError, Option (+10 more)
+### Community 331 - "Registry Db Memory"
+Cohesion: 0.15
+Nodes (23): ArtifactDocument, Result, NewArtifactFile, PostgresSessionStore, Result, SkillPackage, ValidatedSkillPackage, Vec (+15 more)
 
-### Community 310 - "Brain Checkpoint"
+### Community 332 - "Auth0 Provider"
+Cohesion: 0.14
+Nodes (21): Arc, AuthError, AuthProvider, Credential, Error, Identity, IdentityType, JwksCache (+13 more)
+
+### Community 333 - "Outbox Basic Db"
+Cohesion: 0.13
+Nodes (23): AuthzError, Executor, Option, Result, String, TupleKey, TupleOp, Uuid (+15 more)
+
+### Community 334 - "Checkpoint"
 Cohesion: 0.12
 Nodes (25): CompiledRecordMessage, ContextMessage, EventRecord, FileReadDedupState, SequenceNum, SessionMeta, SnapshotHistory, Strategy (+17 more)
 
-### Community 311 - "Eval Results"
+### Community 335 - "Mod"
+Cohesion: 0.12
+Nodes (20): Vec, Duration, PathBuf, PrometheusHandle, Result, Vec, TurbopufferStore, Vec (+12 more)
+
+### Community 336 - "Results"
 Cohesion: 0.09
 Nodes (23): Send, Sync, DateTime, Default, EvalMetrics, EvalScore, EvalStatus, Option (+15 more)
 
-### Community 312 - "Eval Engine"
-Cohesion: 0.22
-Nodes (18): AgentConfig, Arc, DateTime, EvalResult, EvalRun, EvalStatus, LLMProvider, Option (+10 more)
-
-### Community 313 - "Eval Stats"
+### Community 337 - "Stats"
 Cohesion: 0.15
 Nodes (21): Default, Into, Item, Iterator, Self, String, Vec, Iterator (+13 more)
 
-### Community 314 - "Hands File Read"
-Cohesion: 0.15
-Nodes (25): CancellationToken, Duration, Option, Path, PathBuf, Result, String, ToolOutput (+17 more)
+### Community 338 - "Lexical Ranking Db Memory"
+Cohesion: 0.19
+Nodes (25): AgeGraphStore, AsRef, DateTime, NodeWriteIntent, Option, ScopeContext, TestDb, Utc (+17 more)
 
-### Community 315 - "Loadtest Isolation"
-Cohesion: 0.21
-Nodes (25): Arc, AtomicBool, Error, JoinHandle, PgPool, Result, ScopedConn, Stack (+17 more)
+### Community 339 - "Rrfplusjudgedetector"
+Cohesion: 0.14
+Nodes (18): Cache, Client, Default, Duration, MoaConfig, SecretString, Self, Send (+10 more)
 
-### Community 316 - "Memory Fast Path Db Memory"
-Cohesion: 0.21
-Nodes (25): DateTime, Option, PgPool, ScopedConn, String, Utc, Uuid, FastRememberRequest (+17 more)
+### Community 340 - "Messagingsendresponse"
+Cohesion: 0.17
+Nodes (12): Channel, Duration, F, Option, Platform, Result, Vec, MessagingSendFailure (+4 more)
 
-### Community 317 - "Orchestrator Request"
-Cohesion: 0.13
-Nodes (23): CompletionRequest, HandlerError, ModelCapabilities, ModelId, Result, SessionMeta, String, SubAgentVoState (+15 more)
+### Community 341 - "Authz Challenges"
+Cohesion: 0.16
+Nodes (22): BuiltinApprovalRow, Context, DateTime, HandlerError, Json, Option, PgPool, Result (+14 more)
 
-### Community 318 - "Orchestrator Approvals Reaper"
+### Community 342 - "Approvals Reaper"
 Cohesion: 0.12
 Nodes (19): ApprovalReaperHandle, Arc, AwakeableResolveError, AwakeableResolver, Client, Duration, Into, JoinHandle (+11 more)
 
-### Community 319 - "Security Vault"
+### Community 343 - "Target Execution"
+Cohesion: 0.16
+Nodes (25): ActionRuleScope, AgentSessionSelection, Attachment, ExperimentRunStatusResponse, ExperimentRunWorkflowRequest, HandlerError, MemoryScope, ModelId (+17 more)
+
+### Community 344 - "Tests"
+Cohesion: 0.10
+Nodes (19): ModelCapabilities, Result, String, String, Value, ProviderNativeTool, canonical_model_id(), capabilities_for_model() (+11 more)
+
+### Community 345 - "Vault"
 Cohesion: 0.19
 Nodes (15): Credential, CredentialVault, Into, Path, PathBuf, Result, SecretString, Self (+7 more)
 
-### Community 320 - "Session"
-Cohesion: 0.10
-Nodes (18): ActionPolicyRuleStore, CacheDailyMetric, CacheDailyMetric, ChannelAccountId, ChannelRef, ContactId, ContactPointId, SessionAnalyticsSummary (+10 more)
-
-### Community 321 - "Orchestrator Authz Challenges Reaper"
-Cohesion: 0.14
-Nodes (18): ApprovalDecision, AwakeableResolveError, Arc, AuthzChallengeReaperHandle, AwakeableResolver, Client, Duration, Into (+10 more)
-
-### Community 322 - "Orchestrator Skill Regression"
-Cohesion: 0.22
-Nodes (22): ArtifactFile, Arc, ArtifactFile, Box, LearningCandidate, MemoryScope, MoaConfig, ProviderRegistry (+14 more)
-
-### Community 323 - "Orchestrator"
+### Community 346 - "App"
 Cohesion: 0.19
 Nodes (24): AsyncApprovalDecision, challenge_row(), decide_builtin_challenge(), decision_from_outcome(), decision_from_outcome_maps_denial_reason(), decision_from_outcome_rejects_unknown_value(), ResolvedAuthzChallenge, terminal_decision_from_row() (+16 more)
 
-### Community 324 - "Eval Compare"
-Cohesion: 0.22
-Nodes (23): BootstrapConfig, ComparableReport, BootstrapConfig, Fn, Path, Result, Fn, compare_eval_report_files() (+15 more)
-
-### Community 325 - "Core Events Stream"
-Cohesion: 0.13
-Nodes (21): BrainId, DateTime, Event, Option, Self, SequenceNum, SessionId, String (+13 more)
-
-### Community 326 - "Orchestrator Brain Bridge"
+### Community 347 - "Brain Bridge"
 Cohesion: 0.12
 Nodes (24): ChunkRef, ChunkRef, Option, QueryRewriteResult, Result, SandboxFile, SessionId, SessionStore (+16 more)
 
-### Community 327 - "Orchestrator Turn Execution Smoke Servic"
+### Community 348 - "Turn Execution Smoke Service E2e"
 Cohesion: 0.25
 Nodes (23): Client, Client, Duration, Identity, Option, Result, String, await_cancel_requested() (+15 more)
 
-### Community 328 - "Orchestrator Replay Determinism"
+### Community 349 - "String"
+Cohesion: 0.14
+Nodes (22): ClusterBootstrapReport, ClusterObservation, ComparableManifest, ComparableProbeResult, ComparedMetric, BinaryProbeOutcome, BTreeMap, BTreeSet (+14 more)
+
+### Community 350 - "Recordedconsolidatesteps"
 Cohesion: 0.20
 Nodes (15): ConsolidateDurableSteps, BackfillStats, ConsolidateReport, ConsolidateRequest, ConsolidationOutcome, DateTime, DecayStats, DigestStats (+7 more)
 
-### Community 329 - "Providers Models"
-Cohesion: 0.15
-Nodes (20): by_provider(), by_provider_partitions_correctly(), capabilities_for_provider_model(), claude_opus_has_million_token_context(), context_window(), find(), find_for_provider_model(), find_model() (+12 more)
-
-### Community 330 - "Providers Retry"
+### Community 351 - "Retry"
 Cohesion: 0.15
 Nodes (17): parse_retry_after(), response_text(), retries_on_rate_limit(), retry_after_delay(), retry_after_delay_from_message(), RetryPolicy, Default, Duration (+9 more)
 
-### Community 331 - "Brain"
-Cohesion: 0.31
-Nodes (24): Arc, CancellationToken, ContextPipeline, EventRecord, LineageHandle, LLMProvider, Option, Receiver (+16 more)
+### Community 352 - "Agent"
+Cohesion: 0.23
+Nodes (18): ArtifactRef, Default, Option, String, Value, Vec, ActionPolicy, AgentPurpose (+10 more)
 
-### Community 332 - "Brain Registry"
-Cohesion: 0.18
-Nodes (24): DateTime, Option, PgPool, PgRow, Result, SandboxFile, SkillMetadata, String (+16 more)
+### Community 353 - "Document"
+Cohesion: 0.16
+Nodes (16): Self, ArtifactRef, Default, Option, ReferenceResolution, String, Value, Vec (+8 more)
 
-### Community 333 - "Core Events"
+### Community 354 - "Behavior Lab Offline"
+Cohesion: 0.11
+Nodes (19): ArtifactDocument, ArtifactStatus, String, ValidationReport, Value, Vec, validate_envelope(), validate_for_status() (+11 more)
+
+### Community 355 - "Agent Instructions"
+Cohesion: 0.15
+Nodes (20): AgentContext, AgentWorkflowPolicy, BTreeMap, ContextProcessor, ModelCapabilities, Option, ProcessorOutput, Result (+12 more)
+
+### Community 356 - "Queryretrievalctx"
+Cohesion: 0.15
+Nodes (14): Arc, CachedHybridRetriever, EmbeddingProvider, GraphStore, LineageContext, MemoryScope, PiiClass, Self (+6 more)
+
+### Community 357 - "Stable Prefix Db Memory"
+Cohesion: 0.13
+Nodes (24): CompletionRequest, ContactId, ContactRef, ModelCapabilities, ModelId, Result, ScriptedProvider, SessionMeta (+16 more)
+
+### Community 358 - "Events"
 Cohesion: 0.10
 Nodes (13): ActionEnvelope, ActionReviewPreview, ApprovalPrompt, EventType, RiskLevel, Uuid, session_requires_processing, action_review_requested_event_round_trips_full_payload() (+5 more)
 
-### Community 334 - "Core Platform"
-Cohesion: 0.15
-Nodes (23): DateTime, Duration, Option, PathBuf, String, UserId, Utc, Vec (+15 more)
+### Community 359 - "Mod"
+Cohesion: 0.24
+Nodes (22): CancellationToken, Option, Send, SessionMeta, Sync, Value, Send, Sync (+14 more)
 
-### Community 335 - "Eval Golden Eval"
+### Community 360 - "String"
+Cohesion: 0.22
+Nodes (24): GoldNodeRecord, Item, Iterator, Option, Probe, RetrievedCandidate, String, GoldNodeRecord (+16 more)
+
+### Community 361 - "Mockhandprovider"
 Cohesion: 0.14
-Nodes (23): DateTime, HashMap, PathBuf, RetrievalHit, SessionTurn, String, Utc, Vec (+15 more)
+Nodes (16): Arc, HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Mutex, Result (+8 more)
 
-### Community 336 - "Eval Long Conversation Foundation Eval"
-Cohesion: 0.12
-Nodes (20): LineageEvent, LineageSink, ProviderEvent, ScoreCard, TokenUsage, Vec, LineageEvent, ProviderEvent (+12 more)
+### Community 362 - "File Read"
+Cohesion: 0.16
+Nodes (24): CancellationToken, Duration, Option, Path, PathBuf, Result, String, ToolOutput (+16 more)
 
-### Community 337 - "Lineage"
+### Community 363 - "Mod"
 Cohesion: 0.19
 Nodes (23): Hash, Option, PathBuf, Result, String, fixture_json(), fixture_path(), fixture_text() (+15 more)
 
-### Community 338 - "Loadtest Metrics"
+### Community 364 - "Metrics"
 Cohesion: 0.18
 Nodes (24): BTreeMap, Option, Result, String, Vec, HistogramSeries, prometheus_histogram_percentile(), cumulative_histogram_percentile() (+16 more)
 
-### Community 339 - "Loadtest Load"
-Cohesion: 0.18
-Nodes (22): Duration, EmbeddingProvider, PerfGateConfig, Result, Stack, String, Vec, QueryOutcome (+14 more)
-
-### Community 340 - "Memory Write"
+### Community 365 - "Write"
 Cohesion: 0.24
 Nodes (24): ExistingSupersessionIntent, Option, PgConnection, PgRow, Result, String, Uuid, ExistingSupersessionIntent (+16 more)
 
-### Community 341 - "Memory Contradiction"
-Cohesion: 0.16
-Nodes (17): Cache, Default, Duration, MoaConfig, Self, Value, execute_memory_tool, fast_remember (+9 more)
+### Community 366 - "Digest Postgres Db Memory"
+Cohesion: 0.15
+Nodes (24): ContactId, ContactRef, ModelCapabilities, Option, PgPool, String, TenantId, TestDb (+16 more)
 
-### Community 342 - "Memory Embedder Switch Db Memory"
-Cohesion: 0.22
-Nodes (24): Option, PgPool, PgvectorStore, ScopeContext, ScopedConn, TestDb, Uuid, Vec (+16 more)
+### Community 367 - "Delivery"
+Cohesion: 0.14
+Nodes (19): AsRef, BTreeMap, Channel, ContactDeliveryChannel, ContactId, DateTime, Into, Send (+11 more)
 
-### Community 343 - "Messaging Postmark Offline"
+### Community 368 - "Postmark Offline"
 Cohesion: 0.12
 Nodes (14): Credential, CredentialVault, HashMap, MockServer, Request, Result, Self, String (+6 more)
 
-### Community 344 - "Orchestrator Eval"
-Cohesion: 0.17
-Nodes (24): Arc, EvalResult, LineageSink, RequestHeaders, ScoreRecord, EvalCompareResponse, LineageSink, ReplayConfig (+16 more)
+### Community 369 - "Twilio Provider E2e"
+Cohesion: 0.18
+Nodes (21): HashMap, Option, PathBuf, Self, String, TwilioSmsClient, LocalTwilioVault, dotenv_values() (+13 more)
 
-### Community 345 - "Session Neon Branch Manager Live"
+### Community 370 - "Tools"
+Cohesion: 0.19
+Nodes (24): ContextMessage, ContextMessage, Option, Result, ToolContent, ToolInvocation, Value, Vec (+16 more)
+
+### Community 371 - "Streaming"
+Cohesion: 0.15
+Nodes (20): CompletionContent, CompletionResponse, Instant, LLMSpanRecorder, Option, Result, S, Self (+12 more)
+
+### Community 372 - "Result"
 Cohesion: 0.16
-Nodes (24): MoaConfig, Mutex, NeonBranch, Option, PostgresSessionStore, SessionSummary, String, Vec (+16 more)
+Nodes (13): SegmentAssessment, Option, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SessionId (+5 more)
 
-### Community 346 - "Test Support Orchestrator Fixture"
-Cohesion: 0.17
-Nodes (15): Client, Event, EventRange, EventRecord, Req, RequestBuilder, Resp, SessionId (+7 more)
+### Community 373 - "Consolidate"
+Cohesion: 0.13
+Nodes (22): DuplicateKey, PgvectorStore, ConsolidationOutcome, contradiction_fact(), contradiction_sweep_newest_object_wins_deterministically(), contradiction_sweep_skips_broad_preference_predicates(), contradiction_sweep_skips_multi_value_dependency_and_owner_predicates(), decay_anchors_to_base_confidence_and_is_idempotent_at_same_instant() (+14 more)
 
-### Community 347 - "Eval Compare"
+### Community 374 - "Appstate"
+Cohesion: 0.37
+Nodes (24): Bytes, HeaderMap, Path, Response, State, String, Uuid, HeaderMap (+16 more)
+
+### Community 375 - "Telegramadapter"
 Cohesion: 0.20
-Nodes (17): BTreeSet, ComparableCandidate, BTreeSet, Option, String, Value, all_expected_found_at_k(), ComparableCandidate (+9 more)
+Nodes (14): ChatId, MessageId, MoaConfig, OutboundMessage, Platform, PlatformAdapter, PlatformCapabilities, Result (+6 more)
 
-### Community 348 - "Brain Reranker"
+### Community 376 - "Reranker"
 Cohesion: 0.14
 Nodes (18): CohereRerankResponseHit, Client, Into, Result, SecretString, Self, Send, String (+10 more)
 
-### Community 349 - "Skills Registry Db Memory"
-Cohesion: 0.15
-Nodes (21): ArtifactDocument, Result, NewArtifactFile, PostgresSessionStore, Result, SkillPackage, ValidatedSkillPackage, Vec (+13 more)
+### Community 377 - "Memoryretrievalevalreport"
+Cohesion: 0.12
+Nodes (24): ConsolidationOutcome, CorpusManifest, CostError, CostLedger, ClusterBootstrapReport, ConsolidationOutcome, CorpusManifest, CostError (+16 more)
 
-### Community 350 - "Core Telemetry"
+### Community 378 - "Mod"
+Cohesion: 0.11
+Nodes (23): Span, Arc, CancellationToken, ContextPipeline, EventRecord, LineageHandle, LLMProvider, Option (+15 more)
+
+### Community 379 - "Telemetry"
 Cohesion: 0.16
 Nodes (23): HashMap, HeaderMap, MoaConfig, ObservabilityConfig, PathBuf, Result, String, MetadataMap (+15 more)
 
-### Community 351 - "Gateway Edit Window"
+### Community 380 - "Platform"
+Cohesion: 0.15
+Nodes (22): DateTime, Duration, Option, PathBuf, String, UserId, Utc, Vec (+14 more)
+
+### Community 381 - "Drive One Turn()"
+Cohesion: 0.22
+Nodes (20): Arc, CancellationToken, LLMProvider, Receiver, RuntimeEvent, Self, Sender, SessionId (+12 more)
+
+### Community 382 - "Run Golden 100 E2e()"
+Cohesion: 0.16
+Nodes (19): DateTime, HashMap, IngestCtx, MemoryScope, RetrievalHit, SessionTurn, String, Utc (+11 more)
+
+### Community 383 - "Edit Window"
 Cohesion: 0.17
 Nodes (23): MessageId, MockServer, Result, String, Value, MessageId, MessageId, MockServer (+15 more)
 
-### Community 352 - "Ocsf Signing"
+### Community 384 - "Signing"
 Cohesion: 0.31
 Nodes (23): Option, PgPool, Postgres, Result, SecretString, String, Transaction, Uuid (+15 more)
 
-### Community 353 - "Orchestrator Authz Challenges"
-Cohesion: 0.18
-Nodes (21): BuiltinApprovalRow, Context, DateTime, HandlerError, Json, Option, PgPool, Result (+13 more)
-
-### Community 354 - "Orchestrator Trial Simulator"
+### Community 385 - "Trial Simulator"
 Cohesion: 0.16
-Nodes (23): ContextMessage, ExperimentTrialRecord, HandlerError, MemoryScope, Option, PgPool, Result, String (+15 more)
+Nodes (23): ActionRuleScope, ContextMessage, ExperimentTrialRecord, HandlerError, MemoryScope, Option, PgPool, Result (+15 more)
 
-### Community 355 - "Orchestrator Llm Gateway Provider E2E"
-Cohesion: 0.12
-Nodes (22): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+14 more)
-
-### Community 356 - "Security Injection"
+### Community 386 - "Injection"
 Cohesion: 0.17
 Nodes (23): Option, String, Vec, WorkingContext, canary_detection_works(), canary_system_message(), canary_system_message_contains_token(), check_canary() (+15 more)
 
-### Community 357 - "Skills Render"
+### Community 387 - "Render"
 Cohesion: 0.14
 Nodes (19): Error, MemoryScope, MoaError, PgConnection, PgPool, Result, Self, Skill (+11 more)
 
-### Community 358 - "Session"
-Cohesion: 0.26
-Nodes (11): BlobStore, Arc, BlobStore, MoaConfig, Option, PgPool, Result, Self (+3 more)
-
-### Community 359 - "Memory Cypher"
+### Community 388 - "Cypher"
 Cohesion: 0.12
 Nodes (16): BoxDynError, Postgres, Query, Result, Self, Value, Encode, IsNull (+8 more)
 
-### Community 360 - "Eval Budgets"
+### Community 389 - "Budgets"
 Cohesion: 0.16
 Nodes (19): BudgetResult, Default, Display, Formatter, Option, Result, ScoreCard, Self (+11 more)
 
-### Community 361 - "Test Support Orchestrator Fixture"
-Cohesion: 0.23
-Nodes (17): ContainerAsync, Arc, Result, Self, Value, GenericImage, ensure_postgres_image(), locate_orchestrator_binary() (+9 more)
+### Community 390 - "Mock Loadtest Service E2e"
+Cohesion: 0.15
+Nodes (20): Command, FgaClient, PathBuf, Result, Args, main(), String, String (+12 more)
 
-### Community 362 - "Artifacts Document"
-Cohesion: 0.19
-Nodes (15): ArtifactRef, Default, Option, ReferenceResolution, String, Value, Vec, ArtifactDefinition (+7 more)
+### Community 391 - "Lib"
+Cohesion: 0.13
+Nodes (20): Error, DateTime, From, Option, Result, Self, Send, Error (+12 more)
 
-### Community 363 - "Brain Brain Turn Db"
-Cohesion: 0.25
-Nodes (9): CompletionRequest, CompletionStream, Option, Result, String, TokenUsage, extract_tool_id_field(), extract_tool_result_id() (+1 more)
+### Community 392 - "Tuple"
+Cohesion: 0.15
+Nodes (15): Self, String, TupleOp, Uuid, TupleOp, idempotency_key_is_deterministic_and_includes_model_version(), ObjectType, Relation (+7 more)
 
-### Community 364 - "Brain Query Rewrite Live"
+### Community 393 - "Mod"
+Cohesion: 0.32
+Nodes (22): Arc, CancellationToken, ContextPipeline, EventRecord, LineageHandle, LLMProvider, Option, Receiver (+14 more)
+
+### Community 394 - "Builder"
+Cohesion: 0.18
+Nodes (21): Arc, ContextPipeline, EmbeddingProvider, GraphMemoryRetriever, LineageHandle, LLMProvider, MoaConfig, Option (+13 more)
+
+### Community 395 - "Artifact Skill Injection Db Memory"
 Cohesion: 0.14
-Nodes (18): Arc, AtomicUsize, CompletionRequest, CompletionStream, ContextMessage, LLMProvider, MoaConfig, ModelCapabilities (+10 more)
+Nodes (22): ActionRuleScope, AgentContext, ArtifactDocument, ArtifactRegistry, ContactId, ContactRef, Result, StoredArtifactRevision (+14 more)
 
-### Community 365 - "Eval Terminal"
+### Community 396 - "Erasure"
+Cohesion: 0.20
+Nodes (21): AgeGraphStore, PgPool, Result, ScopeContext, ScopedConn, String, Uuid, Value (+13 more)
+
+### Community 397 - "Learningcandidatesummary"
+Cohesion: 0.11
+Nodes (23): ContactErasureScope, ContactId, LearningCandidateStatus, LearningCandidateType, LearningRiskClass, SessionStatus, UserId, LearningCandidateStatus (+15 more)
+
+### Community 398 - "Mod"
+Cohesion: 0.11
+Nodes (18): AgentConfig, EvalRun, Reporter, Result, Self, String, TestSuite, Box (+10 more)
+
+### Community 399 - "Terminal"
 Cohesion: 0.21
 Nodes (17): AgentConfig, BTreeMap, EvalResult, EvalRun, EvalScore, EvalStatus, Reporter, Result (+9 more)
 
-### Community 366 - "Eval Memory Eval Db Memory"
-Cohesion: 0.15
-Nodes (23): CorpusManifest, DateTime, LedgerFact, Probe, ScopeTier, SessionId, SyntheticSession, UserId (+15 more)
-
-### Community 367 - "Hands Docker File"
+### Community 400 - "Docker File"
 Cohesion: 0.23
 Nodes (20): CancellationToken, Duration, Option, Output, Result, String, Vec, container_path_validation_accepts_workspace_absolute_paths() (+12 more)
 
-### Community 368 - "Loadtest Mock Smoke"
+### Community 401 - "Mock Smoke"
 Cohesion: 0.21
 Nodes (21): Default, Duration, LoadTestReport, Option, PathBuf, Result, Self, String (+13 more)
 
-### Community 369 - "Memory Lexical Ranking Db Memory"
+### Community 402 - "Pgvector Store Db Memory"
 Cohesion: 0.21
-Nodes (22): AgeGraphStore, DateTime, NodeWriteIntent, Option, ScopeContext, TestDb, Utc, Uuid (+14 more)
+Nodes (22): AsRef, DateTime, Option, PgConnection, PgPool, ScopeContext, Utc, Uuid (+14 more)
 
-### Community 370 - "Memory Read Smoke Db Memory"
-Cohesion: 0.20
-Nodes (22): AgeGraphStore, DateTime, NodeLabel, NodeWriteIntent, PgConnection, PgPool, Uuid, create_edge() (+14 more)
-
-### Community 371 - "Messaging Twilio Provider E2E"
-Cohesion: 0.19
-Nodes (19): HashMap, Option, PathBuf, Self, String, LocalTwilioVault, dotenv_values(), local_env_bool() (+11 more)
-
-### Community 372 - "Orchestrator Config"
+### Community 403 - "Config"
 Cohesion: 0.17
 Nodes (16): FnMut, MoaConfig, Option, Result, Self, String, env_flag_from_reader(), is_prod_value() (+8 more)
 
-### Community 373 - "Orchestrator Privacy"
-Cohesion: 0.15
-Nodes (18): Context, Identity, Json, Option, RequestHeaders, WorkspaceId, PrivacyEraseRequest, PrivacyExportRequest (+10 more)
+### Community 404 - "Sessionvostate"
+Cohesion: 0.11
+Nodes (12): ActiveSegment, CancelMode, MarkSubAgentChildTerminalInput, Option, String, SubAgentChildRef, SubAgentTerminalResult, Vec (+4 more)
 
-### Community 374 - "Orchestrator Target Execution"
-Cohesion: 0.19
-Nodes (22): Attachment, ExperimentRunStatusResponse, ExperimentRunWorkflowRequest, HandlerError, MemoryScope, ModelId, Option, Result (+14 more)
-
-### Community 375 - "Session Segments"
+### Community 405 - "State"
 Cohesion: 0.18
-Nodes (11): Option, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SessionId, SkillResolutionRate (+3 more)
+Nodes (14): DateTime, MoaResult, SessionMeta, SessionStatus, TurnOutcome, UserMessage, Utc, session_vo_cancel_flag_round_trips() (+6 more)
 
-### Community 376 - "Orchestrator Store"
+### Community 406 - "Durable Step Recorder"
+Cohesion: 0.17
+Nodes (15): FnOnce, I, Option, Self, Serialize, String, Vec, Debug (+7 more)
+
+### Community 407 - "Tenant Rls Db"
+Cohesion: 0.22
+Nodes (22): Option, PgPool, Postgres, SessionMeta, String, TenantId, TestDb, Transaction (+14 more)
+
+### Community 408 - "Moaenvoverlay"
+Cohesion: 0.10
+Nodes (20): ActionPolicyEffect, AsyncAuthzKind, AuthHeaderTrustKind, AuthProviderKind, AuthzEngine, MoaEnvOverlay, parse_error(), MoaConfig (+12 more)
+
+### Community 409 - "Credential For Request()"
+Cohesion: 0.15
+Nodes (17): AuthError, AuthError, AuthProvider, Credential, Error, Identity, Option, PgPool (+9 more)
+
+### Community 410 - "Store"
 Cohesion: 0.21
 Nodes (21): BuiltinChallengeDecisionRow, BuiltinChallengeDecisionUpdate, list_pending_builtin_challenges(), load_builtin_challenge_for_update(), mark_builtin_challenge_resolved(), unresolved_terminal_builtin_challenges(), UnresolvedBuiltinChallenge, update_builtin_challenge_decision() (+13 more)
 
-### Community 377 - "Eval Compare"
-Cohesion: 0.13
-Nodes (20): BinaryProbeOutcome, ClusterBootstrapReport, ClusterObservation, ComparableManifest, ComparableProbeResult, ComparedMetric, BinaryProbeOutcome, BTreeMap (+12 more)
-
-### Community 378 - "Auth Vault"
+### Community 411 - "Vault"
 Cohesion: 0.21
 Nodes (15): CachedM2mToken, Arc, Client, PgPool, Result, RwLock, SecretString, Self (+7 more)
 
-### Community 379 - "Core Env Overlay"
-Cohesion: 0.32
-Nodes (10): any_present(), require_non_empty(), set_copy_if_some(), set_if_some(), set_option_if_some(), set_vec_if_some(), MoaConfig, Option (+2 more)
+### Community 412 - "Lifecyclenoderow"
+Cohesion: 0.13
+Nodes (18): ContradictionKey, Map, Option, PiiClass, ScopeContext, Self, String, Uuid (+10 more)
 
-### Community 380 - "Hands Bash"
+### Community 413 - "Bash"
 Cohesion: 0.19
 Nodes (17): ToolRouter, CancellationToken, Duration, Option, Path, Result, String, ToolOutput (+9 more)
 
-### Community 381 - "Auth Ciba"
-Cohesion: 0.19
-Nodes (16): ApprovalDecision, ApprovalHandle, ApprovalRequest, Arc, AsyncAuthzError, AsyncAuthzProvider, AwakeableResolver, Option (+8 more)
-
-### Community 382 - "Auth Tuple"
-Cohesion: 0.16
-Nodes (14): Self, String, TupleOp, Uuid, TupleOp, idempotency_key_is_deterministic_and_includes_model_version(), ObjectType, Relation (+6 more)
-
-### Community 383 - "Auth Builtin Authz"
+### Community 414 - "Builtin Authz"
 Cohesion: 0.13
 Nodes (17): ApprovalDecision, ApprovalHandle, ApprovalRequest, Arc, AsyncAuthzError, AsyncAuthzProvider, DateTime, Option (+9 more)
 
-### Community 384 - "Brain Tools"
-Cohesion: 0.14
-Nodes (15): ContextProcessor, ModelCapabilities, ProcessorOutput, Result, Self, Value, Vec, WorkingContext (+7 more)
+### Community 415 - "Query Rewrite Live"
+Cohesion: 0.15
+Nodes (17): Arc, AtomicUsize, CompletionRequest, CompletionStream, ContextMessage, LLMProvider, MoaConfig, ModelCapabilities (+9 more)
 
-### Community 385 - "Brain Cache"
-Cohesion: 0.24
-Nodes (15): Arc, Cache, Default, Duration, PgPool, Self, Send, Sync (+7 more)
+### Community 416 - "Hands"
+Cohesion: 0.16
+Nodes (16): Duration, HashMap, Into, Option, PathBuf, Result, Self, String (+8 more)
 
-### Community 386 - "Brain Brain Turn Db"
-Cohesion: 0.13
-Nodes (15): DateTime, Event, EventFilter, EventRecord, SessionFilter, SessionId, SessionMeta, SessionStatus (+7 more)
-
-### Community 387 - "Core Restate Observability"
-Cohesion: 0.20
-Nodes (21): Option, SessionId, SessionMeta, Span, String, TurnReplaySnapshot, SpanContext, add_session_trace_link() (+13 more)
-
-### Community 388 - "Eval Scripted User"
+### Community 417 - "Scripted User"
 Cohesion: 0.17
 Nodes (17): ApprovalDecision, Option, Path, Result, ScriptedApprovalDecision, ScriptedUserTurn, Self, String (+9 more)
 
-### Community 389 - "Eval Golden Eval"
-Cohesion: 0.12
-Nodes (15): FastPathCtx, GraphStore, IngestCtx, MemoryScope, PgvectorStore, PiiClassifier, PiiError, PiiResult (+7 more)
-
-### Community 390 - "Eval Memory Eval Db Memory"
-Cohesion: 0.11
-Nodes (15): Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, EmbeddingProvider, IngestError, NodeLabel, PiiClassifier (+7 more)
-
-### Community 391 - "Lineage Chain"
+### Community 418 - "Chain"
 Cohesion: 0.17
 Nodes (18): Hash, IntoIterator, Item, Option, Result, T, Value, Vec (+10 more)
 
-### Community 392 - "Memory Slow Path Orchestration Db Memory"
+### Community 419 - "Slow Path Orchestration Db Memory"
 Cohesion: 0.16
 Nodes (21): IngestCtx, ExpectedFact, NodeIndexRow, String, Uuid, Vec, ExpectedFact, ingest_turn_direct_with_ctx() (+13 more)
 
-### Community 393 - "Memory Fast Path Db Memory"
-Cohesion: 0.16
-Nodes (19): Conflict, ContradictionContext, ContradictionDetector, Duration, EmbeddedFact, FastPathCtx, IngestError, NodeLabel (+11 more)
-
-### Community 394 - "Memory"
-Cohesion: 0.14
-Nodes (20): DateTime, From, Option, Result, Self, Send, Error, String (+12 more)
-
-### Community 395 - "Memory Promotion Db Memory"
+### Community 420 - "Promotion Db Memory"
 Cohesion: 0.22
 Nodes (21): Option, PgPool, ScopeContext, ScopedConn, TestDb, Uuid, Vec, VectorItem (+13 more)
 
-### Community 396 - "Orchestrator Jobs"
+### Community 421 - "Delegation"
+Cohesion: 0.17
+Nodes (19): Into, Serialize, SpawnSubAgentInput, SubAgentState, ToolOutput, DelegationTool, SpawnSubAgentInput, SpawnSubAgentOutput (+11 more)
+
+### Community 422 - "Request"
+Cohesion: 0.16
+Nodes (20): CompletionRequest, HandlerError, ModelCapabilities, ModelId, Result, SessionMeta, String, SubAgentVoState (+12 more)
+
+### Community 423 - "Jobs"
 Cohesion: 0.13
 Nodes (21): Arc, AuthzChallengeReaperHandle, AwakeableResolver, FgaClient, JoinHandle, MoaConfig, Option, PgPool (+13 more)
 
-### Community 397 - "Orchestrator Durable Step Recorder"
-Cohesion: 0.18
-Nodes (14): FnOnce, I, Option, Self, Serialize, String, Vec, Debug (+6 more)
+### Community 424 - "Tests"
+Cohesion: 0.25
+Nodes (21): Error, HandlerError, Option, Result, SessionMeta, String, Uuid, append_event_db_increments_sequence() (+13 more)
 
-### Community 398 - "Providers Cache Control Markers"
+### Community 425 - "Tests"
+Cohesion: 0.15
+Nodes (19): CompletionRequest, CreateResponse, JsonResponseFormat, Option, ProviderNativeTool, Result, String, build_responses_request() (+11 more)
+
+### Community 426 - "Cache Control Markers"
 Cohesion: 0.20
 Nodes (21): CompletionRequest, String, Value, Vec, anthropic_body(), anthropic_large_request_uses_top_level_and_stable_prefix_cache_control(), anthropic_request_byte_layout_changes_only_in_messages_segment_when_only_messages_change(), anthropic_request_byte_layout_is_identical_before_dynamic_user_turn() (+13 more)
 
-### Community 399 - "Xtask Check Eval Budgets"
+### Community 427 - ".new()"
 Cohesion: 0.24
 Nodes (19): Into, MemoryRetrievalEvalReport, ProbeResult, ScoreCard, Vec, check_bool(), check_max_f64(), check_max_u64() (+11 more)
 
-### Community 400 - "Core Env Overlay"
-Cohesion: 0.10
-Nodes (19): ActionPolicyEffect, AsyncAuthzKind, AuthHeaderTrustKind, AuthProviderKind, AuthzEngine, MoaEnvOverlay, MoaConfig, ActionPolicyEffect (+11 more)
-
-### Community 401 - "Providers Streaming"
+### Community 428 - "Streaming"
 Cohesion: 0.11
 Nodes (20): BlockAccumulator, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStart, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEvent, MessageDeltaEvent (+12 more)
 
-### Community 402 - "Brain Signal Wait"
+### Community 429 - "Signal Wait"
 Cohesion: 0.11
 Nodes (20): wait_for_signal_approval(), Arc, CancellationToken, EventRecord, Option, Receiver, Result, RiskLevel (+12 more)
 
-### Community 403 - "Core Auth"
+### Community 430 - "Runtime"
+Cohesion: 0.20
+Nodes (16): ArtifactRun, ActionRuleScope, ArtifactRef, ArtifactRegistry, MemoryScope, Option, Result, Self (+8 more)
+
+### Community 431 - "Auth"
 Cohesion: 0.10
 Nodes (17): Auth0AuthConfig, Auth0AuthConfig, AuthConfig, AuthHeaderTrustKind, AuthProviderKind, ContactTokenConfig, LocalAuthConfig, OidcAuthConfig (+9 more)
 
-### Community 404 - "Edge Routes"
-Cohesion: 0.17
-Nodes (17): AuthError, AuthProvider, AuthError, AuthProvider, Credential, Error, Identity, Option (+9 more)
-
-### Community 405 - "Brain Builder"
-Cohesion: 0.24
-Nodes (20): Arc, ContextPipeline, EmbeddingProvider, GraphMemoryRetriever, LineageHandle, LLMProvider, MoaConfig, Option (+12 more)
-
-### Community 406 - "Brain Verification Signal"
+### Community 432 - "Verification Signal"
 Cohesion: 0.17
 Nodes (16): AssessmentOverride, Event, EventRecord, Option, String, Value, Vec, classify_command() (+8 more)
 
-### Community 407 - "Core Approval"
+### Community 433 - "Restate Observability"
+Cohesion: 0.20
+Nodes (20): Option, SessionId, SessionMeta, Span, String, TurnReplaySnapshot, SpanContext, add_session_trace_link() (+12 more)
+
+### Community 434 - "Approval"
 Cohesion: 0.16
 Nodes (18): DateTime, Option, String, SubAgentId, UserId, Utc, Uuid, Vec (+10 more)
 
-### Community 408 - "Eval Transcript Runner"
-Cohesion: 0.16
-Nodes (16): CompletionRequest, CompletionStream, Map, ModelCapabilities, Mutex, RecordedScriptedProvider, String, Vec (+8 more)
+### Community 435 - "Self"
+Cohesion: 0.24
+Nodes (8): Into, MemoryExtractionConfig, Option, PathBuf, Self, String, MemoryExtractionRecordingOptions, MemoryMergeRecordingOptions
 
-### Community 409 - "Loadtest Reporting"
-Cohesion: 0.15
-Nodes (19): Self, PathBuf, PerfGateConfig, PrometheusHandle, Result, String, LeakReport, LoadReport (+11 more)
-
-### Community 410 - "Messaging Delivery"
-Cohesion: 0.14
-Nodes (18): AsRef, BTreeMap, Channel, ContactDeliveryChannel, ContactId, DateTime, Into, Send (+10 more)
-
-### Community 411 - "Orchestrator"
+### Community 436 - "Mod"
 Cohesion: 0.16
 Nodes (16): ObjectContext, ObjectContext, Default, HandlerError, ObjectContext, Option, Result, T (+8 more)
 
-### Community 412 - "Orchestrator Workspace"
-Cohesion: 0.14
-Nodes (18): ActionPolicyEffect, DateTime, Option, String, UserId, Utc, VoState, AlwaysAllowPattern (+10 more)
-
-### Community 413 - "Providers Response"
+### Community 437 - "Response"
 Cohesion: 0.14
 Nodes (20): GeminiContent, Option, StopReason, String, TokenUsage, Value, Vec, finish_reason_to_stop_reason() (+12 more)
 
-### Community 414 - "Session"
+### Community 438 - "Mod"
 Cohesion: 0.20
 Nodes (19): Error, PgPool, Postgres, Result, String, TestDb, Transaction, Uuid (+11 more)
 
-### Community 415 - "Brain Pending"
+### Community 439 - "Pending"
 Cohesion: 0.12
 Nodes (19): wait_for_approval(), Arc, CancellationToken, EventRecord, Option, PendingToolApproval, Receiver, Result (+11 more)
 
-### Community 416 - "Workflows Runtime"
-Cohesion: 0.20
-Nodes (15): ArtifactRun, ArtifactRef, ArtifactRegistry, MemoryScope, Option, Result, Self, SessionId (+7 more)
-
-### Community 417 - "Test Support Orchestrator Fixture"
-Cohesion: 0.19
-Nodes (18): Child, Child, FgaConfig, HashMap, Option, Path, FgaConfig, MutexGuard (+10 more)
-
-### Community 418 - "Core Sandbox"
+### Community 440 - "Sandbox"
 Cohesion: 0.18
 Nodes (15): CloudFlyioConfig, CloudHandsConfig, CloudConfig, CloudFlyioConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig (+7 more)
 
-### Community 419 - "Hands Dispatch"
-Cohesion: 0.43
-Nodes (10): ToolRouter, CancellationToken, Option, Result, SandboxTier, SessionMeta, String, ToolDefinition (+2 more)
+### Community 441 - ".apply To()"
+Cohesion: 0.36
+Nodes (8): any_present(), require_non_empty(), set_copy_if_some(), set_if_some(), set_option_if_some(), MoaConfig, Result, MoaConfig
 
-### Community 420 - "Hands Telemetry"
-Cohesion: 0.15
-Nodes (19): record_tool_execution_result(), record_tool_invocation_metadata(), record_tool_output_truncated(), sandbox_tier_label(), tool_execution_span(), truncate_tool_span_text(), ActionPolicyEffect, Duration (+11 more)
-
-### Community 421 - "Auth Outbox"
-Cohesion: 0.17
-Nodes (18): AuthzError, Executor, Option, Result, String, TupleKey, TupleOp, Uuid (+10 more)
-
-### Community 422 - "Core Error"
+### Community 442 - "Error"
 Cohesion: 0.16
 Nodes (12): From, Option, Self, classifies_rate_limit_as_retryable(), classifies_repeated_timeout_as_reprovision(), classifies_unknown_tool_as_fatal(), classify_message_error(), classify_timeout_like_message() (+4 more)
 
-### Community 423 - "Core Session Replay"
+### Community 443 - "Session Replay"
 Cohesion: 0.22
 Nodes (14): Arc, AtomicU64, Duration, F, T, display_duration_ms(), record_pipeline_compile_duration(), record_session_event_replay() (+6 more)
 
-### Community 424 - "Core Segment Assessment"
+### Community 444 - "Segment Assessment"
 Cohesion: 0.11
 Nodes (18): AssessmentPhase, DateTime, Option, SegmentEvidence, SegmentEvidencePolarity, SegmentOutcome, String, Utc (+10 more)
 
-### Community 425 - "Core Wire"
-Cohesion: 0.11
-Nodes (20): Event, EventRange, SessionId, SessionMeta, SessionStatus, AppendEventRequest, CheckpointCreateRequest, ExperimentRunResponse (+12 more)
+### Community 445 - "Datetime"
+Cohesion: 0.18
+Nodes (20): DateTime, EventType, Utc, EventType, MemoryNeighbor, AgentDefinitionSummary, AgentDeploymentSummary, AgentInstallationSummary (+12 more)
 
-### Community 426 - "Eval Loader"
+### Community 446 - "Loader"
 Cohesion: 0.25
 Nodes (17): AgentConfig, Path, PathBuf, Result, T, TestSuite, Vec, discover_configs() (+9 more)
 
-### Community 427 - "Lineage Writer"
+### Community 447 - "Retrieve Probe()"
+Cohesion: 0.13
+Nodes (19): CachedHybridRetriever, ContactId, EmbeddingProvider, PlanningCtx, QueryPlanner, TenantId, UserId, WorkspaceId (+11 more)
+
+### Community 448 - "Run Writer()"
 Cohesion: 0.19
 Nodes (17): Arc, AtomicU64, CancellationToken, JoinHandle, Mutex, Receiver, Journal, MpscSinkConfig (+9 more)
 
-### Community 428 - "Messaging Delivery"
-Cohesion: 0.24
-Nodes (11): Arc, MessagingConfig, Option, Self, CredentialVault, PostmarkEmailClient, DeliveryReceipt, optional_postmark_client() (+3 more)
+### Community 449 - "Entityresolver"
+Cohesion: 0.20
+Nodes (12): Arc, Default, EmbeddingProvider, Self, Send, Sync, VectorStore, EmbeddingBlocker (+4 more)
 
-### Community 429 - "Orchestrator Tests"
-Cohesion: 0.24
-Nodes (19): Error, HandlerError, Option, Result, SessionMeta, String, Uuid, append_event_db_increments_sequence() (+11 more)
+### Community 450 - ".resolve()"
+Cohesion: 0.20
+Nodes (13): DateTime, GraphStore, NodeIndexRow, Option, PgPool, PiiClass, Result, ScopeContext (+5 more)
 
-### Community 430 - "Orchestrator Session Brain E2E"
-Cohesion: 0.17
-Nodes (19): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+11 more)
-
-### Community 431 - "Orchestrator Session Vo E2E"
-Cohesion: 0.17
-Nodes (19): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+11 more)
-
-### Community 432 - "Providers Openai Provider"
+### Community 451 - "Openai Provider"
 Cohesion: 0.19
 Nodes (18): String, Value, Vec, openai_provider_does_not_retry_after_partial_stream_output(), openai_provider_drops_oversized_metadata_values(), openai_provider_includes_native_web_search_when_enabled(), openai_provider_omits_native_web_search_when_disabled(), openai_provider_retries_after_rate_limit() (+10 more)
 
-### Community 433 - "Auth Ciba Db"
-Cohesion: 0.22
-Nodes (17): ApprovalRequest, Auth0AsyncAuthzProvider, ApprovalRequest, Arc, MockServer, PgPool, Receiver, Self (+9 more)
+### Community 452 - ".emit Event Record()"
+Cohesion: 0.13
+Nodes (12): Event, EventFilter, EventRange, EventRecord, ExperienceAttribution, SkillResolutionRate, TaskStrategySuccessRate, Vec (+4 more)
 
-### Community 434 - "Core Db"
-Cohesion: 0.15
-Nodes (13): AsMut, Error, MoaError, PgConnection, PgPool, Postgres, Result, ScopeContext (+5 more)
-
-### Community 435 - "Brain Attribution"
+### Community 453 - "Attribution"
 Cohesion: 0.22
 Nodes (18): AttributionSubjectType, AttributionEffect, DateTime, EventRecord, ExperienceAttribution, ExperienceRecord, Option, SegmentOutcome (+10 more)
 
-### Community 436 - "Eval Runner"
-Cohesion: 0.15
-Nodes (18): BTreeMap, CachedEmbeddingFixture, BTreeMap, CachedEmbeddingFixture, EmbeddingInput, PiiClassifier, PiiError, PiiResult (+10 more)
+### Community 454 - "Lib"
+Cohesion: 0.20
+Nodes (17): Box, Box, Error, Path, PathBuf, Result, TestCase, TestSuite (+9 more)
 
-### Community 437 - "Orchestrator Eval"
-Cohesion: 0.23
-Nodes (19): CoreEvalRun, AgentConfig, Option, ScoreValue, String, TestSuite, Value, Vec (+11 more)
+### Community 455 - "Approval Diffs For()"
+Cohesion: 0.22
+Nodes (19): approval_diffs_for(), approval_fields_for(), expand_local_path(), read_existing_text_file(), review_diffs_for(), review_fields_for(), single_approval_field(), single_review_field() (+11 more)
 
-### Community 438 - "Auth Jwks Cache"
+### Community 456 - "Jwks Cache"
 Cohesion: 0.18
 Nodes (15): Cache, Client, Duration, Into, Result, Self, String, Value (+7 more)
 
-### Community 439 - "Auth Oidc Provider"
+### Community 457 - "Oidc Provider"
 Cohesion: 0.15
 Nodes (15): Arc, AuthError, AuthProvider, Credential, Identity, JwksCache, Map, Option (+7 more)
 
-### Community 440 - "Core Transcript"
+### Community 458 - "Transcript"
 Cohesion: 0.18
 Nodes (14): Path, ProviderEvent, Result, Self, String, Vec, MetadataLine, ProviderEvent (+6 more)
 
-### Community 441 - "Brain Tool Signal"
+### Community 459 - "Tool Signal"
 Cohesion: 0.18
 Nodes (13): Event, EventRecord, Option, ToolCallId, Vec, all_tools_failed(), brain_response(), record() (+5 more)
 
-### Community 442 - "Edge Proxy"
+### Community 460 - "Proxy"
 Cohesion: 0.19
 Nodes (15): Client, Error, HeaderMap, Identity, IdentityType, Into, Method, Response (+7 more)
 
-### Community 443 - "Eval Transcript Runner"
-Cohesion: 0.26
-Nodes (17): Arc, CancellationToken, LLMProvider, Receiver, RuntimeEvent, Self, Sender, SessionId (+9 more)
-
-### Community 444 - "Eval Long Conversation Smoke Eval"
+### Community 461 - "Long Conversation Foundation Eval"
 Cohesion: 0.18
-Nodes (16): Box, Error, Path, PathBuf, Result, TestCase, TestSuite, Error (+8 more)
+Nodes (16): ProviderEvent, ScoreCard, TokenUsage, Vec, ProviderEvent, budgets_evaluate_reports_each_violation_with_metric_name_and_actual_value(), long_test_case_dispatches_to_run_scenario_with_provider(), recorded_provider_handles_compaction_requests_without_advancing_transcript_cursor() (+8 more)
 
-### Community 445 - "Eval Memory Eval Db Memory"
-Cohesion: 0.19
-Nodes (15): BTreeSet, IngestCtx, PgPool, Self, String, GeneratedMemoryEvalCorpus, cleanup_gold_resolution_age_rows(), cleanup_gold_resolution_age_table() (+7 more)
-
-### Community 446 - "Gateway Slack"
+### Community 462 - ".new()"
 Cohesion: 0.19
 Nodes (15): InboundMessage, Into, MoaConfig, Result, Self, Sender, InboundMessage, Into (+7 more)
 
-### Community 447 - "Memory Fast Path"
+### Community 463 - "File Write"
+Cohesion: 0.22
+Nodes (18): CancellationToken, Duration, Option, Path, Result, String, ToolOutput, ExistingFileContent (+10 more)
+
+### Community 464 - "Fastpathctx"
 Cohesion: 0.17
 Nodes (14): Arc, ContradictionContext, ContradictionDetector, EmbeddingProvider, GraphStore, PgPool, PiiClassifier, PiiError (+6 more)
 
-### Community 448 - "Memory Pgvector Store Db Memory"
-Cohesion: 0.25
-Nodes (18): DateTime, Option, PgConnection, PgPool, Utc, Uuid, Vec, VectorItem (+10 more)
+### Community 465 - "Extract"
+Cohesion: 0.15
+Nodes (18): ExpectedFact, String, TurnChunk, Vec, extraction_confidence_hint(), extracted_confidence(), chunk(), ExpectedFact (+10 more)
 
-### Community 449 - "Migrations"
+### Community 466 - "Delivery Offline"
+Cohesion: 0.16
+Nodes (16): BTreeSet, Channel, ContactDeliveryChannel, MockServer, Request, Self, String, DeliveryMessage (+8 more)
+
+### Community 467 - "Lib"
 Cohesion: 0.22
 Nodes (15): PgConnection, PgPool, Result, String, PgConnection, ensure_lineage_schema(), quote_identifier(), run() (+7 more)
 
-### Community 450 - "Ocsf Classes"
+### Community 468 - "Classes"
 Cohesion: 0.32
 Nodes (18): DateTime, Option, Session, String, Utc, Vec, Product, AccountChangeEvent (+10 more)
 
-### Community 451 - "Orchestrator Session Vo"
-Cohesion: 0.15
-Nodes (16): HandlerError, MoaError, ObjectContext, Result, SessionId, SessionMeta, UserMessage, sync_status() (+8 more)
+### Community 469 - "Arc"
+Cohesion: 0.24
+Nodes (6): Arc, EmbeddingProvider, MoaConfig, ProviderRegistry, Self, ProviderDeps
 
-### Community 452 - "Orchestrator Privacy"
-Cohesion: 0.17
-Nodes (15): Self, UserId, Uuid, VerifyingKey, PrivacySubjectProvenance, ApprovalTokenVerifier, ContactLinkedSubjectPolicy, load_privacy_contact_row() (+7 more)
-
-### Community 453 - "Orchestrator Schema"
+### Community 470 - "Schema"
 Cohesion: 0.20
 Nodes (18): DateTime, Option, ScimGroupMember, String, T, Utc, Vec, Meta (+10 more)
 
-### Community 454 - "Providers Openai Responses Envelope"
+### Community 471 - "Session Brain E2e"
+Cohesion: 0.15
+Nodes (18): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+10 more)
+
+### Community 472 - "Session Vo E2e"
+Cohesion: 0.15
+Nodes (18): Child, Client, EventRecord, Identity, Option, OrchestratorPorts, Result, SessionId (+10 more)
+
+### Community 473 - "Openai Responses Envelope"
 Cohesion: 0.23
 Nodes (18): CompletionContent, CompletionRequest, ProviderEvent, String, Value, Vec, base_request(), file_read_tool() (+10 more)
 
-### Community 455 - "Session Helpers"
-Cohesion: 0.15
-Nodes (15): Event, EventRecord, Option, PgRow, Result, SegmentAssessment, String, record_sessions_active() (+7 more)
-
-### Community 456 - "Xtask Check Eval Budgets"
-Cohesion: 0.23
-Nodes (13): BudgetExpectations, FunctionalExpectations, Item, Iterator, Path, Result, Self, Baselines (+5 more)
-
-### Community 457 - "Xtask Check Eval Budgets"
+### Community 474 - "Option"
 Cohesion: 0.14
-Nodes (14): ContextBudgetExpectations, Option, PathBuf, SafetyBudgetExpectations, MinMetricFloor, PathConfig, RegressionConfig, BudgetExpectations (+6 more)
+Nodes (15): ContextBudgetExpectations, Option, PathBuf, SafetyBudgetExpectations, MinMetricFloor, PathConfig, RegressionConfig, BudgetExpectations (+7 more)
 
-### Community 458 - "Migrations V000306 Contacts"
+### Community 475 - "Run()"
+Cohesion: 0.26
+Nodes (12): Item, Iterator, Path, Result, Self, Baselines, load_json_report(), load_memory_retrieval_report() (+4 more)
+
+### Community 476 - "Contacts Table"
 Cohesion: 0.12
 Nodes (19): contact_points table, contact_token_grants table, contact_verification_challenges table, contacts table, contacts.canonical_contact_id self-reference, contacts state CHECK constraint, idx_contact_points_contact, idx_contact_points_contact_lookup (unique) (+11 more)
 
-### Community 459 - "Brain"
-Cohesion: 0.28
-Nodes (12): CircuitBreaker, Arc, AsRef, ContextProcessor, LLMProvider, QueryRewriteConfig, Self, SessionStore (+4 more)
+### Community 477 - "Loadedmemoryevalcorpus"
+Cohesion: 0.15
+Nodes (17): CachedEmbeddingFixture, BTreeMap, CachedEmbeddingFixture, EmbeddingInput, PiiClassifier, PiiError, PiiResult, SyntheticSession (+9 more)
 
-### Community 460 - "Brain Instructions"
+### Community 478 - "Instructions"
 Cohesion: 0.20
 Nodes (12): ContextProcessor, MoaConfig, Option, ProcessorOutput, Result, Self, String, WorkingContext (+4 more)
 
-### Community 461 - "Core Query Rewrite"
-Cohesion: 0.17
-Nodes (14): Into, Option, RewriteReason, Self, String, TaskFacetSet, Value, RewriteReason (+6 more)
+### Community 479 - "Plannedquery"
+Cohesion: 0.16
+Nodes (15): Into, NerSpan, NodeLabel, Result, RetrievalHit, RetrievalRequest, String, Uuid (+7 more)
 
-### Community 462 - "Eval Runner"
-Cohesion: 0.22
-Nodes (13): Arc, Duration, ExtractedFact, Mutex, T, ExtractedFact, duration_ms_u64(), LiveChatThrottle (+5 more)
+### Community 480 - "Tracecontext"
+Cohesion: 0.18
+Nodes (16): Channel, ContactId, Option, Platform, SessionActorRef, SessionId, Span, TenantId (+8 more)
 
-### Community 463 - "Hands File Write"
-Cohesion: 0.23
-Nodes (17): CancellationToken, Duration, Option, Path, Result, String, ToolOutput, ExistingFileContent (+9 more)
+### Community 481 - "Toolresultreadtool"
+Cohesion: 0.13
+Nodes (6): BuiltInTool, IdempotencyClass, ToolPolicySpec, Value, ToolResultReadTool, ToolResultSearchTool
 
-### Community 464 - "Hands Daytona Live"
+### Community 482 - "Daytona Live"
 Cohesion: 0.24
 Nodes (17): Duration, HandHandle, HandStatus, MoaConfig, Result, SessionMeta, DaytonaHandProvider, daytona_provider_round_trip() (+9 more)
 
-### Community 465 - "Lineage Dsar"
+### Community 483 - "Dsar"
 Cohesion: 0.25
 Nodes (17): Path, SigningKey, Value, Vec, DsarExporter, ExportOptions, fixture_jsonl(), dsar_export_excludes_records_belonging_to_other_users() (+9 more)
 
-### Community 466 - "Loadtest Report"
+### Community 484 - "Report"
 Cohesion: 0.20
 Nodes (16): Result, main(), LoadMode, Option, Result, SessionId, SessionProfileKind, SessionStatus (+8 more)
 
-### Community 467 - "Memory Chunking"
+### Community 485 - "Chunking"
 Cohesion: 0.29
 Nodes (17): Result, SessionTurn, String, TurnChunk, Vec, chunk_turn(), estimate_tokens(), flush_paragraph() (+9 more)
 
-### Community 468 - "Memory Erasure"
-Cohesion: 0.25
-Nodes (17): AgeGraphStore, PgPool, Result, String, Uuid, Value, Vec, begin_app_scoped_tx() (+9 more)
-
-### Community 469 - "Messaging Delivery Offline"
-Cohesion: 0.16
-Nodes (15): BTreeSet, Channel, ContactDeliveryChannel, MockServer, Request, Self, String, DeliveryMessage (+7 more)
-
-### Community 470 - "Orchestrator Eval"
-Cohesion: 0.18
-Nodes (17): EvalError, From, MoaConfig, PgPool, ScoringError, Self, EvalReplayRequest, EvalReplayResponse (+9 more)
-
-### Community 471 - "Orchestrator Patch"
+### Community 486 - "Patch"
 Cohesion: 0.31
 Nodes (17): Option, Result, String, Value, Vec, Operation, email_from_json(), email_from_value() (+9 more)
 
-### Community 472 - "Orchestrator Inner"
-Cohesion: 0.12
-Nodes (12): EventRecord, ExperienceAttribution, ExperienceRecord, GetEventsRequest, ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest (+4 more)
-
-### Community 473 - "Orchestrator Eval Run"
+### Community 487 - "Eval Run"
 Cohesion: 0.16
 Nodes (15): EvalRunRequest, EvalRunResponse, EvalRunStatusRequest, EvalRunStatusResponse, HandlerError, Json, Result, SharedWorkflowContext (+7 more)
 
-### Community 474 - "Gateway Approval"
+### Community 488 - "Session Store Db"
+Cohesion: 0.28
+Nodes (17): ContactId, ContactRef, PostgresSessionStore, Result, SessionMeta, String, TenantId, append_event_increments_sequence() (+9 more)
+
+### Community 489 - "Request"
+Cohesion: 0.29
+Nodes (17): CompletionRequest, HashMap, JsonResponseFormat, Option, ProviderNativeTool, Result, String, Value (+9 more)
+
+### Community 490 - "Events Concurrent Monotonicity Db"
+Cohesion: 0.26
+Nodes (17): Option, Result, SessionId, TenantId, TestDb, Vec, assert_dense_sequences(), configured_test_db() (+9 more)
+
+### Community 491 - "Actionreviewsummary"
+Cohesion: 0.21
+Nodes (17): ActionEnvelope, ActionReviewPreview, ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, DateTime, Option (+9 more)
+
+### Community 492 - "Approvalcallbackaction"
 Cohesion: 0.13
 Nodes (14): approval_buttons, prepare_outbound_message, resolved_approval_buttons, parse_approval_decision, ApprovalDecision, Option, Self, String (+6 more)
 
-### Community 475 - "Brain Summarize"
+### Community 493 - "Resolver Db Memory"
+Cohesion: 0.24
+Nodes (16): ArtifactResolver, ActionRuleScope, AgentRevisionLock, ArtifactDocument, ArtifactRegistry, PgPool, Result, StoredArtifactRevision (+8 more)
+
+### Community 494 - "Summarize"
 Cohesion: 0.13
 Nodes (15): apply_tier3(), Tier3Summary, CompactionConfig, ContextMessage, LLMProvider, Option, Result, SessionStore (+7 more)
 
-### Community 476 - "Brain Candidates"
+### Community 495 - "Resolver"
+Cohesion: 0.21
+Nodes (11): ConnectorDefinition, ActionRuleScope, ArtifactDocument, ArtifactRef, ArtifactRegistry, MemoryScope, ReferenceResolution, Result (+3 more)
+
+### Community 496 - "Candidates"
 Cohesion: 0.24
 Nodes (16): DateTime, ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateType, LearningRiskClass, String, Utc (+8 more)
 
-### Community 477 - "Brain Identity"
+### Community 497 - "Identity"
 Cohesion: 0.19
 Nodes (11): ContextProcessor, Default, Into, ProcessorOutput, Result, Self, String, WorkingContext (+3 more)
 
-### Community 478 - "Brain Input"
+### Community 498 - "Input"
 Cohesion: 0.24
 Nodes (14): ContextMessage, EventRecord, Option, Result, Self, String, Vec, WorkingContext (+6 more)
 
-### Community 479 - "Brain Test Support"
+### Community 499 - "Skillinjector"
+Cohesion: 0.21
+Nodes (10): Arc, ContextProcessor, Option, Self, SessionStore, SkillBudgetConfig, SkillBudgetConfig, SharedSkillInjector (+2 more)
+
+### Community 500 - "Test Support"
 Cohesion: 0.16
 Nodes (15): ResolvedSkillBudget, DateTime, ModelCapabilities, ResolvedSkillBudget, SessionMeta, SkillMetadata, Utc, Vec (+7 more)
 
-### Community 480 - "Experiments Model"
+### Community 501 - "Observedrecordedprovider"
+Cohesion: 0.21
+Nodes (13): CompletionRequest, CompletionStream, Mutex, RecordedScriptedProvider, String, Vec, latest_non_manifest_user_message(), LearningRunSummary (+5 more)
+
+### Community 502 - "Model"
 Cohesion: 0.17
 Nodes (13): BTreeSet, ExperimentRunRecord, ExperimentTarget, ExperimentTargetKind, Option, SessionId, Uuid, action_policy_migration_allows_current_trial_stop_reasons_offline() (+5 more)
 
-### Community 481 - "Lineage Writer"
+### Community 503 - "Mod"
+Cohesion: 0.21
+Nodes (12): HeaderMap, Into, MoaConfig, Self, String, Value, default_headers(), derive_toolbox_url() (+4 more)
+
+### Community 504 - "E2b Live"
+Cohesion: 0.23
+Nodes (15): Duration, HandHandle, MoaConfig, Result, SessionMeta, E2BHandProvider, destroy_and_wait(), e2b_provider_round_trip() (+7 more)
+
+### Community 505 - "Result"
 Cohesion: 0.26
 Nodes (17): Error, PgPool, Postgres, Result, Transaction, LineageRow, PendingRow, apply_compliance_hashes() (+9 more)
 
-### Community 482 - "Memory Lexical"
+### Community 506 - "Reporting"
+Cohesion: 0.20
+Nodes (16): PathBuf, PerfGateConfig, PrometheusHandle, Result, String, LeakReport, LoadReport, enforce_gates() (+8 more)
+
+### Community 507 - "Lexical"
 Cohesion: 0.24
 Nodes (12): DateTime, GraphError, NodeIndexRow, Option, PgPool, Result, ScopeContext, Self (+4 more)
 
-### Community 483 - "Memory Extractor"
+### Community 508 - "Extractor"
 Cohesion: 0.21
 Nodes (12): Arc, ExtractedFact, I, Result, Self, Send, Sync, TurnChunk (+4 more)
 
-### Community 484 - "Memory Digest Postgres Db Memory"
-Cohesion: 0.21
-Nodes (16): ModelCapabilities, Option, PgPool, String, TestDb, Vec, WorkingContext, capabilities() (+8 more)
+### Community 509 - "Messagingratelimiter"
+Cohesion: 0.22
+Nodes (9): Arc, HashMap, Instant, Into, Mutex, Self, String, MessagingRateLimiter (+1 more)
 
-### Community 485 - "Orchestrator Audit"
+### Community 510 - "Lineage Postgres Db"
+Cohesion: 0.18
+Nodes (15): Arc, LineageHandle, MoaConfig, Option, PgPool, Result, Self, WriterHandle (+7 more)
+
+### Community 511 - "Restate Identity"
+Cohesion: 0.15
+Nodes (16): Identity, IdentityType, Req, Request, Res, IdentityType, Req, Request (+8 more)
+
+### Community 512 - "Audit"
 Cohesion: 0.24
 Nodes (15): Context, HandlerError, Json, PgPool, Result, String, Uuid, Vec (+7 more)
 
-### Community 486 - "Orchestrator Privacy"
-Cohesion: 0.15
-Nodes (14): SigningKey, String, Value, ManifestFile, ManifestSignature, ManifestSubject, Ed25519ManifestSigner, JwtHeader (+6 more)
+### Community 513 - "Tenants"
+Cohesion: 0.29
+Nodes (13): Context, HandlerError, Identity, Json, Option, Result, String, Uuid (+5 more)
 
-### Community 487 - "Providers Tests"
-Cohesion: 0.15
-Nodes (8): String, Value, gemini_3_pro_maps_medium_reasoning_to_medium_thinking_level(), gemini_provider_groups_tool_history_and_preserves_thought_signatures(), gemini_provider_serializes_google_search_without_functions(), gemini_provider_serializes_system_messages_and_tools(), gemini_provider_streams_tool_calls_and_google_search_updates(), sse_stream()
+### Community 514 - "Agent Revision Simulation Db Memory"
+Cohesion: 0.20
+Nodes (16): ActionRuleScope, HandlerError, NewExperiment, NewExperimentTrial, PgPool, Result, T, Uuid (+8 more)
 
-### Community 488 - "Orchestrator Skill Regression"
-Cohesion: 0.23
-Nodes (16): AgentConfig, AgentConfig, LLMProvider, Path, PathBuf, String, TestSuite, estimate_suite_cost() (+8 more)
-
-### Community 489 - "Auth Api Keys"
-Cohesion: 0.17
-Nodes (13): create, DateTime, FromStr, KeyOwner, Option, Self, String, Utc (+5 more)
-
-### Community 490 - "Gateway"
+### Community 515 - "Lib"
 Cohesion: 0.17
 Nodes (15): ChannelRef, ChannelRef, InboundMessage, Span, String, InboundMessage, SlackClient, SlackClientEventsUserState (+7 more)
 
-### Community 491 - "Providers Schema"
+### Community 516 - "Comparableproberesult"
+Cohesion: 0.31
+Nodes (12): ComparableCandidate, Option, Value, all_expected_found_at_k(), ComparableProbeResult, ComparedMetric, discount(), metrics_for() (+4 more)
+
+### Community 517 - "Schema"
 Cohesion: 0.25
 Nodes (15): compile_for_gemini(), compile_for_gemini_removes_additional_properties_recursively(), compile_for_openai_strict(), compile_for_openai_strict_adds_additional_properties_false_recursively(), compile_for_openai_strict_does_not_duplicate_null_in_type_arrays(), compile_for_openai_strict_makes_optional_properties_required_and_nullable(), compile_for_openai_strict_preserves_existing_required_properties(), compile_for_openai_strict_strips_validation_only_keywords() (+7 more)
 
-### Community 492 - "Artifacts Document"
+### Community 518 - "Result"
 Cohesion: 0.23
 Nodes (7): Display, Formatter, FromStr, Result, Self, ArtifactKind, ArtifactStatus
 
-### Community 493 - "Artifacts Skill"
+### Community 519 - "Skill"
 Cohesion: 0.20
 Nodes (13): ArtifactRef, Default, Option, Self, SkillActionDefinition, String, Value, Vec (+5 more)
 
-### Community 494 - "Brain Budget"
+### Community 520 - "Budget"
 Cohesion: 0.14
 Nodes (14): Arc, DateTime, EventRecord, Option, Result, RuntimeEvent, Sender, SessionId (+6 more)
 
-### Community 495 - "Brain Postprocess"
+### Community 521 - "Postprocess"
 Cohesion: 0.27
 Nodes (15): HashSet, Option, RewriteInput, String, TaskFacetSet, Vec, WorkingContext, allowed_terms() (+7 more)
 
-### Community 496 - "Brain Activation"
+### Community 522 - "Activation"
 Cohesion: 0.27
 Nodes (12): EventRecord, HashMap, Result, SkillResolutionRate, String, TaskStrategySuccessRate, Vec, WorkingContext (+4 more)
 
-### Community 497 - "Brain Skill Package Materialization Db M"
-Cohesion: 0.16
-Nodes (14): EventRecord, ModelCapabilities, Option, Result, ScriptedProvider, SkillPackage, String, ToolOutput (+6 more)
-
-### Community 498 - "Hands Edit Output"
+### Community 523 - "Edit Output"
 Cohesion: 0.21
 Nodes (12): String, Duration, ToolOutput, compute_unified_diff(), small_edit_diff_is_substantially_smaller_than_full_file(), unified_diff_contains_standard_headers_and_hunks(), binary_overwrite_returns_binary_notice(), build_file_write_output() (+4 more)
 
-### Community 499 - "Core Model"
+### Community 524 - "Tool Approval"
+Cohesion: 0.17
+Nodes (14): EventRecord, Option, String, ToolCallId, Value, EventRecord, SessionMeta, find_pending_tool_approval() (+6 more)
+
+### Community 525 - "Model"
 Cohesion: 0.19
 Nodes (13): Default, Duration, ModelId, Option, Self, String, Value, Vec (+5 more)
 
-### Community 500 - "Core Snapshot"
+### Community 526 - "Snapshot"
 Cohesion: 0.14
 Nodes (14): ContextMessage, DateTime, FileReadDedupState, HashMap, SequenceNum, SessionId, SnapshotFileReadState, String (+6 more)
 
-### Community 501 - "Eval Output Match"
+### Community 527 - ".from Invocation()"
+Cohesion: 0.16
+Nodes (12): Result, Self, T, ToolCallId, ToolInvocation, ToolOutput, DelegationTool, is_delegation_tool_name() (+4 more)
+
+### Community 528 - "Output Match"
 Cohesion: 0.16
 Nodes (13): EvalResult, EvalScore, Evaluator, ExpectedOutput, Option, Result, String, TestCase (+5 more)
 
-### Community 502 - "Eval Comparator"
+### Community 529 - "Comparator"
 Cohesion: 0.23
 Nodes (14): Display, Error, Formatter, Option, Result, RetrievalHit, String, Uuid (+6 more)
 
-### Community 503 - "Gateway Slack"
+### Community 530 - ".check One Fast()"
+Cohesion: 0.16
+Nodes (12): Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestError, NodeLabel, PiiClassifier, PiiError (+4 more)
+
+### Community 531 - "Inbound From Interaction Event()"
 Cohesion: 0.28
 Nodes (14): Arc, HashMap, RwLock, String, Arc, HashMap, String, RwLock (+6 more)
 
-### Community 504 - "Hands E2B Live"
-Cohesion: 0.25
-Nodes (15): Duration, HandHandle, MoaConfig, Result, SessionMeta, E2BHandProvider, destroy_and_wait(), e2b_provider_round_trip() (+7 more)
+### Community 532 - "Admin"
+Cohesion: 0.29
+Nodes (14): LineageRecordView, PgConnection, PgPool, PgRow, Result, Uuid, Value, Vec (+6 more)
 
-### Community 505 - "Loadtest Plan"
+### Community 533 - "Plan"
 Cohesion: 0.29
 Nodes (15): Option, Path, Result, SessionProfileKind, String, Vec, build_session_plans(), first_existing_relative_path() (+7 more)
 
-### Community 506 - "Memory Entity Resolution"
-Cohesion: 0.27
-Nodes (8): Arc, Default, EmbeddingProvider, Self, VectorStore, EmbeddingBlocker, EmbeddingBlocker, EntityResolver
+### Community 534 - "Edge"
+Cohesion: 0.16
+Nodes (10): FromStr, Option, Result, Self, String, Uuid, Value, FromStr (+2 more)
 
-### Community 507 - "Memory Contradiction Real"
+### Community 535 - "Contradiction Real"
 Cohesion: 0.20
 Nodes (14): DateTime, NodeIndexRow, Option, Utc, Value, candidate(), candidate_with(), contradiction_detector_does_not_flag_self_referential_fact_repetition() (+6 more)
 
-### Community 508 - "Orchestrator Ctx"
-Cohesion: 0.23
-Nodes (6): FgaClient, Option, Providers, AuthDeps, LineageDeps, WriterHandle
+### Community 536 - "Write Manifest()"
+Cohesion: 0.19
+Nodes (9): Self, SigningKey, VerifyingKey, ApprovalTokenVerifier, decode_key_material(), Ed25519ManifestSigner, usize_to_u64(), write_manifest() (+1 more)
 
-### Community 509 - "Orchestrator Authz Admin"
-Cohesion: 0.21
-Nodes (13): Context, HandlerError, Json, Option, Result, String, Uuid, OrchestratorCtx (+5 more)
+### Community 537 - "Replay Determinism"
+Cohesion: 0.24
+Nodes (15): DurableStep, String, TenantId, Vec, FakeClock, GraphNodeFixture, Recorder, consolidate_workflow_first_run_and_replay_emit_identical_durable_steps_for_minimal_input() (+7 more)
 
-### Community 510 - "Session Events Concurrent Monotonicity D"
-Cohesion: 0.31
-Nodes (15): Option, Result, SessionId, TestDb, Vec, assert_dense_sequences(), configured_test_db(), create_session() (+7 more)
+### Community 538 - "Skill Graph"
+Cohesion: 0.17
+Nodes (15): ActionRuleScope, AgeGraphStore, Error, MemoryScope, MoaError, PgConnection, PgPool, Result (+7 more)
 
-### Community 511 - "Test Support Postgres"
+### Community 539 - "Postgres"
 Cohesion: 0.23
 Nodes (10): Drop, Option, PostgresSessionStore, Result, String, bootstrap_test_db(), cleanup_test_schema(), create_isolated_test_store() (+2 more)
 
-### Community 512 - "Test Support Pricing"
+### Community 540 - "Pricing"
 Cohesion: 0.28
 Nodes (11): HashMap, Option, Result, Self, String, ceil_div(), checked_cent_tokens(), PricingError (+3 more)
 
-### Community 513 - "Xtask Check Eval Budgets"
-Cohesion: 0.14
-Nodes (14): CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores, SafetyScores, ToolScores (+6 more)
-
-### Community 514 - "Xtask Generate Memory Eval Corpus"
+### Community 541 - "Generate Memory Eval Corpus"
 Cohesion: 0.23
 Nodes (13): CorpusProfile, Item, Iterator, PathBuf, Result, Self, String, TranscriptStyle (+5 more)
 
-### Community 515 - "Eval Readme"
+### Community 542 - "Anthropic Offline"
+Cohesion: 0.27
+Nodes (13): AnthropicProvider, Duration, MockServer, mount_anthropic_sse(), anthropic_offline_429_response_triggers_retry_with_backoff(), anthropic_offline_500_response_triggers_retry_then_surfaces_typed_error(), anthropic_offline_completion_returns_text_for_minimal_request(), anthropic_offline_malformed_json_response_returns_typed_parse_error() (+5 more)
+
+### Community 543 - "Orchestratorctx"
+Cohesion: 0.32
+Nodes (6): prepare_turn_request, ToolRouter, Value, Vec, OrchestratorCtx, ToolDeps
+
+### Community 544 - "Recording Long Conversation Transcripts"
 Cohesion: 0.13
 Nodes (15): Canary Token Must Not Leak Through Tool Chain, Code Task: 30 Turns With str_replace And Recovery, Concurrent Workspace Writes to Same Subgraph, Context Compaction Under Sustained Token Pressure, Experience Learning Task Conditioned Strategy Reuse, long_conversation_smoke_eval, moa_core::transcript::Transcript, Apache AGE (+7 more)
 
-### Community 516 - "Memory Write"
-Cohesion: 0.27
-Nodes (15): ChangelogRecord, AgeGraphStore, ChangelogRecord, NodeWriteIntent, VectorItem, VectorStore, create_changelog(), create_node() (+7 more)
-
-### Community 517 - "Brain Deterministic"
+### Community 545 - "Deterministic"
 Cohesion: 0.30
 Nodes (14): apply_tier1(), apply_tier2(), compacted_tool_result(), is_compacted_tool_result(), is_file_read_result_message(), referenced_tool_use_ids(), tier1_is_idempotent_for_compacted_messages(), tier2_replaces_old_history_with_placeholder() (+6 more)
 
-### Community 518 - "Core Providers"
+### Community 546 - "Providers"
 Cohesion: 0.27
 Nodes (9): GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig, Default, Into, Option, Self (+1 more)
 
-### Community 519 - "Eval Runner"
+### Community 547 - ".check One Fast()"
 Cohesion: 0.19
 Nodes (13): Conflict, ContradictionContext, ContradictionDetector, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestError (+5 more)
 
-### Community 520 - "Artifacts Workflow"
+### Community 548 - "Session"
+Cohesion: 0.32
+Nodes (14): tenant_id_for_label(), tenant_workspace_key(), test_create_and_get_session(), test_emit_and_get_events(), test_event_search(), test_list_sessions_with_filter(), test_session_meta(), test_session_status_update() (+6 more)
+
+### Community 549 - "Workflow"
 Cohesion: 0.19
 Nodes (14): ArtifactRef, Option, String, Value, Vec, WorkflowCondition, WorkflowDefinition, WorkflowEdge (+6 more)
 
-### Community 521 - "Brain Continuation Signal"
+### Community 550 - "Continuation Signal"
 Cohesion: 0.19
 Nodes (9): HashMap, Option, String, ContinuationInput, is_acknowledgment(), is_correction(), lexical_cosine_similarity(), score() (+1 more)
 
-### Community 522 - "Core Tool Approval"
-Cohesion: 0.19
-Nodes (13): EventRecord, Option, String, ToolCallId, Value, EventRecord, SessionMeta, find_pending_tool_approval() (+5 more)
-
-### Community 523 - "Core Shell"
+### Community 551 - "Shell"
 Cohesion: 0.21
 Nodes (10): String, Vec, glob_match(), parse_and_match_bash(), parse_and_match_command(), rule_matches(), has_action_policy_unsafe_shell_syntax(), has_approval_unsafe_shell_syntax() (+2 more)
 
-### Community 524 - "Eval Engine"
+### Community 552 - "Engine"
 Cohesion: 0.17
 Nodes (12): DateTime, Default, EvalResult, PathBuf, Self, String, Utc, Vec (+4 more)
 
-### Community 525 - "Eval Golden Eval"
+### Community 553 - "Golden Eval"
 Cohesion: 0.46
 Nodes (14): Duration, PgPool, ScopedConn, TestResult, Uuid, embedding_count(), fact_create_changelog_count(), fact_node_count() (+6 more)
 
-### Community 526 - "Memory Quality Postgres Db Memory"
+### Community 554 - ".check One Fast()"
+Cohesion: 0.17
+Nodes (12): Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestError, NodeLabel, PiiClassifier, PiiError (+4 more)
+
+### Community 555 - "Tests"
+Cohesion: 0.33
+Nodes (12): Self, SessionMeta, ToolInvocation, ToolRouter, bash_invocation(), MockProviderSnapshot, recovery_caps_reprovision_attempts_per_session(), recovery_reprovisions_and_succeeds_after_transient_sandbox_death() (+4 more)
+
+### Community 556 - "Instant"
+Cohesion: 0.32
+Nodes (14): Instant, MemoryToolExecutor, SessionMeta, ToolOutput, Value, Instant, MemoryToolExecutor, actor_id_from_session() (+6 more)
+
+### Community 557 - "Quality Postgres Db Memory"
 Cohesion: 0.23
 Nodes (14): DateTime, Option, PgPool, SessionId, TestDb, UserId, Utc, Uuid (+6 more)
 
-### Community 527 - "Orchestrator Health"
+### Community 558 - "Health"
 Cohesion: 0.24
 Nodes (10): Context, HandlerError, Json, Option, Result, Self, String, Health (+2 more)
 
-### Community 528 - "Orchestrator Deactivation"
+### Community 559 - "Deactivation"
 Cohesion: 0.48
 Nodes (14): ActorInput, Error, Postgres, Result, Transaction, Uuid, cascade_deactivate_user(), CascadeError (+6 more)
 
-### Community 529 - "Orchestrator Approval Wait"
+### Community 560 - "Approval Wait"
 Cohesion: 0.23
 Nodes (11): ApprovalDecision, Duration, Option, String, cancel_reason(), configured_timeout(), is_cancel_reason(), outcome_label() (+3 more)
 
-### Community 530 - "Orchestrator Replay Determinism"
-Cohesion: 0.24
-Nodes (14): DurableStep, String, Vec, FakeClock, GraphNodeFixture, Recorder, assert_traces_identical(), consolidate_workflow_first_run_and_replay_emit_identical_durable_steps_for_minimal_input() (+6 more)
+### Community 561 - "Wiremock Provider Helpers"
+Cohesion: 0.22
+Nodes (14): CompletionRequest, Into, MockServer, ResponseTemplate, String, Value, emit_token_tool(), fixture_body() (+6 more)
 
-### Community 531 - "Session Schema"
+### Community 562 - "Schema"
 Cohesion: 0.21
 Nodes (14): Error, MoaError, Option, PgConnection, PgPool, Result, migrate(), String (+6 more)
 
-### Community 532 - "Auth Local"
+### Community 563 - "Events Append Only Db"
+Cohesion: 0.29
+Nodes (14): Option, TenantId, TestDb, Uuid, configured_test_db(), delete_empty_session_rejects_session_with_append_only_events(), delete_empty_session_removes_session_without_touching_events_table(), delete_on_events_is_blocked_for_app_role() (+6 more)
+
+### Community 564 - "Local"
 Cohesion: 0.19
 Nodes (10): validate, Arc, AuthError, AuthProvider, Credential, Identity, PgPool, Result (+2 more)
 
-### Community 533 - "Brain Resolved"
+### Community 565 - "Resolved"
 Cohesion: 0.18
 Nodes (13): process_resolved_approval(), Arc, CancellationToken, EventRecord, Option, Result, RuntimeEvent, Sender (+5 more)
 
-### Community 534 - "Loadtest Mock Loadtest Service E2E"
+### Community 566 - "Compare"
+Cohesion: 0.36
+Nodes (13): BootstrapConfig, BootstrapConfig, Fn, Fn, compare_eval_reports_with_config(), compare_reports_applies_benjamini_hochberg_across_metrics(), compare_reports_errors_on_asymmetric_probe_sets(), compare_reports_exits_nonzero_on_corpus_mismatch() (+5 more)
+
+### Community 567 - "Create Node In Conn()"
+Cohesion: 0.32
+Nodes (14): ChangelogRecord, AgeGraphStore, ChangelogRecord, NodeWriteIntent, VectorItem, create_changelog(), create_node(), create_node_in_conn() (+6 more)
+
+### Community 568 - "Classify Facts()"
 Cohesion: 0.26
-Nodes (12): Command, String, PathBuf, bootstrap_is_idempotent_across_two_runs(), default_preshared_key_if_unset(), grep_env(), base_perf_gate_command(), metric_value() (+4 more)
+Nodes (14): ClassifiedFact, ExtractedFact, PiiCategory, PiiClassifier, PiiResult, Vec, classify_facts(), classify_facts_with() (+6 more)
 
-### Community 535 - "Artifacts Resolver"
+### Community 569 - "Compare Reports()"
 Cohesion: 0.24
-Nodes (9): ArtifactDocument, ArtifactRef, ArtifactRegistry, MemoryScope, ReferenceResolution, Result, Self, Vec (+1 more)
+Nodes (11): ComparableReport, Path, Result, compare_eval_report_files(), compare_eval_reports(), compare_reports(), CompareReportsError, EvalReportComparison (+3 more)
 
-### Community 536 - "Auth Auth0 Provider"
-Cohesion: 0.27
-Nodes (10): Arc, AuthProvider, JwksCache, Option, PgPool, Self, String, JwksCache (+2 more)
-
-### Community 537 - "Auth Local Auth Live"
+### Community 570 - ".prepare Invocation()"
 Cohesion: 0.30
-Nodes (12): Box, Client, Error, FgaClient, Identity, Request, Response, Result (+4 more)
+Nodes (9): identity_actor_for_policy_lookup(), ToolRouter, ActionPolicyEffect, PolicyAction, Result, SessionMeta, ToolDefinition, ToolInvocation (+1 more)
 
-### Community 538 - "Brain Loop Detector"
+### Community 571 - "Loop Detector"
 Cohesion: 0.25
 Nodes (9): Self, String, VecDeque, loop_detector_disabled_at_zero_threshold(), loop_detector_does_not_trigger_on_varied_calls(), loop_detector_resets(), loop_detector_sliding_window(), loop_detector_triggers_after_threshold() (+1 more)
 
-### Community 539 - "Brain Compaction"
+### Community 572 - "Compaction"
 Cohesion: 0.22
 Nodes (7): CompiledHistory, EventRecord, Result, WorkingContext, compaction_triggers_even_when_incremental_snapshot_is_current(), HistoryCompiler, stage_inputs_hash()
 
-### Community 540 - "Brain Pipeline Stages Db Memory"
-Cohesion: 0.14
-Nodes (11): CompletionRequest, CompletionStream, LLMProvider, MemoryHit, ModelCapabilities, String, Value, Vec (+3 more)
-
-### Community 541 - "Eval"
+### Community 573 - "Mod"
 Cohesion: 0.19
 Nodes (13): Box, EvalRun, EvalScore, Evaluator, Option, Result, String, TestSuite (+5 more)
 
-### Community 542 - "Eval Threshold"
+### Community 574 - "Threshold"
 Cohesion: 0.19
 Nodes (11): EvalResult, EvalScore, Evaluator, Option, Result, String, TestCase, Vec (+3 more)
 
-### Community 543 - "Eval Plan"
+### Community 575 - "Plan"
 Cohesion: 0.23
 Nodes (13): AgentConfig, MoaConfig, String, TestCase, TestSuite, TokenPricing, Vec, build_eval_plan() (+5 more)
 
-### Community 544 - "Eval Runner"
-Cohesion: 0.16
-Nodes (14): CachedHybridRetriever, PlanningCtx, QueryPlanner, Reranker, RetrievalHit, ProbeRetrieval, retrieve_probe(), retrieve_probe_hits() (+6 more)
-
-### Community 545 - "Eval Evaluators"
+### Community 576 - "Eval Engine Live"
 Cohesion: 0.16
 Nodes (5): Option, moa-eval, live_eval_engine_runs_single_case(), live_model(), live_provider_tests_enabled()
 
-### Community 546 - "Hands Tool Result"
-Cohesion: 0.15
-Nodes (4): BuiltInTool, IdempotencyClass, ToolResultReadTool, ToolResultSearchTool
-
-### Community 547 - "Lineage Signing"
+### Community 577 - "Signing"
 Cohesion: 0.27
 Nodes (13): SigningKey, String, Vec, Ed25519Case, ed25519_sign_with_rfc8032_test_keypair_produces_expected_signature(), ed25519_verify_fails_for_corrupted_signature_with_one_flipped_bit(), ed25519_verify_fails_for_message_with_one_flipped_bit(), ed25519_verify_fails_for_signature_under_different_keypair() (+5 more)
 
-### Community 548 - "Lineage Admin"
-Cohesion: 0.29
-Nodes (13): PgConnection, PgPool, PgRow, Result, Uuid, Value, Vec, WorkspaceId (+5 more)
+### Community 578 - "Changelog Outbox Db Memory"
+Cohesion: 0.27
+Nodes (13): AsRef, ChangelogRecord, PgConnection, ScopeContext, Uuid, changelog_rejects_updates_for_app_role(), changelog_write_bumps_workspace_version_and_respects_read_rls(), record() (+5 more)
 
-### Community 549 - "Memory Fast Path"
-Cohesion: 0.32
-Nodes (13): Instant, MemoryToolExecutor, NodeLabel, SessionMeta, ToolOutput, Value, execute_forget_tool(), execute_memory_tool() (+5 more)
+### Community 579 - "Conflict"
+Cohesion: 0.20
+Nodes (11): Conflict, ContradictionContext, ContradictionDetector, Duration, EmbeddedFact, IngestError, NodeLabel, PiiError (+3 more)
 
-### Community 550 - "Memory Backend"
+### Community 580 - "Backend"
 Cohesion: 0.35
 Nodes (13): Arc, Option, PgPool, PgvectorStore, Result, TurbopufferStore, VectorStore, hipaa_tier_requires_baa_enabled_turbopuffer_client() (+5 more)
 
-### Community 551 - "Ocsf Jcs"
+### Community 581 - "Jcs"
 Cohesion: 0.32
 Nodes (13): Ordering, Result, Value, Vec, Number, canonicalize(), canonicalize_rejects_floats(), canonicalize_sorts_keys() (+5 more)
 
-### Community 552 - "Orchestrator Eval"
-Cohesion: 0.19
-Nodes (12): EvalRunStatusRequest, EvalRunStatusResponse, EvalRunStatusRequest, EvalRunStatusResponse, status_response_from_run_response(), verify_run_status_workspace(), accepted_run_response_is_non_terminal(), dataset_jsonl_items_are_constrained_to_authorized_workspace() (+4 more)
+### Community 582 - "State"
+Cohesion: 0.34
+Nodes (11): SubAgentMessage, build_result_uses_terminal_state(), follow_up_queues_message(), initial_task(), initial_task_seeds_state(), nested_child_terminal_result_refunds_once_and_consumes_once(), task_hash_uses_shared_dispatch_hash(), terminal_result_requires_explicit_terminal_lifecycle() (+3 more)
 
-### Community 553 - "Xtask Record Memory Extractions"
+### Community 583 - "Authz Admin"
+Cohesion: 0.25
+Nodes (12): Context, HandlerError, Json, Option, Result, String, Uuid, Authz (+4 more)
+
+### Community 584 - "Actionpolicies"
+Cohesion: 0.24
+Nodes (10): ActionPolicyEffect, Default, MoaConfig, Self, String, Vec, ActionPolicies, ActionPolicyCheck (+2 more)
+
+### Community 585 - "String"
+Cohesion: 0.25
+Nodes (9): BTreeMap, String, MetricValue, AnalyticsScoreRow, metric_bool(), metric_number(), MetricValue, print_failures() (+1 more)
+
+### Community 586 - "Record Memory Extractions"
 Cohesion: 0.26
 Nodes (11): Item, Iterator, Option, PathBuf, Result, Self, String, Options (+3 more)
 
-### Community 554 - "Providers Cost Math"
+### Community 587 - "Cost Math"
 Cohesion: 0.33
 Nodes (13): PricingTable, ProviderPricing, cost_cents_for_anthropic_sonnet_matches_pricing_table_v1_for_known_token_counts(), cost_cents_for_gemini_pro_matches_pricing_table_v1_for_known_token_counts(), cost_cents_for_openai_gpt41_matches_pricing_table_v1_for_known_token_counts(), cost_cents_rounds_up_to_nearest_cent_at_final_step_only(), cost_cents_with_cached_input_tokens_uses_discounted_rate(), expected_from_row() (+5 more)
 
-### Community 555 - "Loadtest Perf Gate"
+### Community 588 - "Perf Gate"
 Cohesion: 0.23
 Nodes (10): Args, main(), Profile, Duration, Option, PathBuf, PerfGateConfig, Result (+2 more)
 
-### Community 556 - "Auth Null Vault"
+### Community 589 - "Null Vault"
 Cohesion: 0.21
 Nodes (9): build_providers, Result, String, TokenVaultError, TokenVaultProvider, Uuid, VaultToken, Vec (+1 more)
 
-### Community 557 - "Core Authz"
+### Community 590 - "Authz"
 Cohesion: 0.15
 Nodes (9): AuthzConfig, AuthzEngine, OpenFgaConfig, AuthzEngine, Default, Option, Self, String (+1 more)
 
-### Community 558 - "Core Telemetry"
+### Community 591 - "Telemetry"
 Cohesion: 0.24
 Nodes (9): MetricsConfig, ObservabilityConfig, OtlpProtocol, Default, HashMap, LineageConfig, Option, Self (+1 more)
 
-### Community 559 - "Artifacts Behavior Lab Offline"
-Cohesion: 0.21
-Nodes (11): String, ValidationReport, Value, Vec, assert_error(), behavior_lab_plan_round_trips_json_yaml_and_exposes_external_refs(), behavior_lab_schema_has_only_experiment_plan_as_simulation_artifact_kind(), enum_labels() (+3 more)
+### Community 592 - "Observability"
+Cohesion: 0.28
+Nodes (12): String, T, Value, canonical_json(), fingerprint_json(), normalize_environment(), sanitize_langfuse_id(), tags_include_channel_and_tenant() (+4 more)
 
-### Community 560 - "Auth Auth0 Live"
-Cohesion: 0.36
-Nodes (12): Option, PgPool, String, Uuid, auth0_authenticate_valid_token_returns_identity(), auth0_expired_token_returns_expired(), auth0_wrong_audience_returns_rejected(), live_config() (+4 more)
+### Community 593 - "Segments"
+Cohesion: 0.28
+Nodes (11): ActiveSegment, DateTime, Option, SegmentAssessment, SegmentId, String, Utc, Vec (+3 more)
 
-### Community 561 - "Auth Api Keys"
-Cohesion: 0.22
-Nodes (13): Executor, SecretString, Executor, SecretString, create(), flipping_a_random_char_breaks_crc(), generate(), generated_key_has_correct_shape() (+5 more)
-
-### Community 562 - "Brain Legs"
-Cohesion: 0.22
-Nodes (7): Arc, Mutex, PgConnection, VectorError, VectorItem, VectorStore, RecordingVectorStore
-
-### Community 563 - "Core Workspace"
+### Community 594 - "Workspace"
 Cohesion: 0.32
 Nodes (11): Option, Path, String, Vec, async_discovery_truncates_oversized_files(), discover_workspace_instructions(), discover_workspace_instructions_async(), discovers_agents_md() (+3 more)
 
-### Community 564 - "Lineage Fjall Journal"
+### Community 595 - "Goldenstack"
+Cohesion: 0.17
+Nodes (10): FastPathCtx, GraphStore, PgvectorStore, ScopeContext, Self, SessionId, WorkspaceId, FastPathCtx (+2 more)
+
+### Community 596 - "Fjall Journal"
 Cohesion: 0.21
 Nodes (7): Path, Result, Self, Vec, SingleWriterTxDatabase, SingleWriterTxKeyspace, Journal
 
-### Community 565 - "Loadtest Options"
+### Community 597 - "Options"
 Cohesion: 0.19
 Nodes (8): Duration, Option, Result, String, LoadMode, LoadTestOptions, OutputFormat, SessionProfileKind
 
-### Community 566 - "Loadtest Tests"
+### Community 598 - "Tests"
 Cohesion: 0.21
 Nodes (12): LoadTestOptions, InspectionFiles, PercentileSummary, percentile(), summarize_percentiles(), human_report_renders_remote_endpoint(), inspection_files(), load_options_accept_remote_endpoint() (+4 more)
 
-### Community 567 - "Memory Changelog"
-Cohesion: 0.23
-Nodes (12): Option, PgConnection, Result, String, Uuid, Value, NodeEmbeddingIntent, NodeEmbeddingIntent (+4 more)
+### Community 599 - "Reserve Root Child()"
+Cohesion: 0.28
+Nodes (13): ReservedSubAgent, SessionMeta, String, UserId, WorkspaceId, DispatchSubAgentInput, ReservedSubAgent, append_child_spawned_event() (+5 more)
 
-### Community 568 - "Memory Edge"
-Cohesion: 0.21
-Nodes (10): FromStr, Option, Result, Self, String, Uuid, Value, FromStr (+2 more)
-
-### Community 569 - "Orchestrator Session Store Db"
-Cohesion: 0.44
-Nodes (12): PostgresSessionStore, Result, SessionMeta, String, append_event_increments_sequence(), cleanup(), create_session_persists_requested_metadata(), get_events_respects_range() (+4 more)
-
-### Community 570 - "Session Action Policy"
+### Community 600 - ".prepare Action Review()"
 Cohesion: 0.24
-Nodes (9): ActionPolicyRule, ActionPolicyRuleStore, Option, Result, UserId, Vec, WorkspaceId, PostgresSessionStore (+1 more)
+Nodes (10): ApprovalPrompt, ApprovalRule, Context, HandlerError, Json, PolicyAction, Result, UserId (+2 more)
 
-### Community 571 - "Session Events Append Only Db"
+### Community 601 - "Gemini Offline"
 Cohesion: 0.32
-Nodes (12): Option, TestDb, Uuid, configured_test_db(), delete_empty_session_rejects_session_with_append_only_events(), delete_empty_session_removes_session_without_touching_events_table(), delete_on_events_is_blocked_for_app_role(), migration_applied_idempotently_does_not_break_invariant() (+4 more)
+Nodes (11): MockServer, GeminiProvider, mount_gemini_sse(), gemini_offline_429_response_triggers_retry_with_backoff(), gemini_offline_500_response_triggers_retry_then_surfaces_typed_error(), gemini_offline_completion_returns_text_for_minimal_request(), gemini_offline_malformed_json_response_returns_typed_parse_error(), gemini_offline_streaming_disconnect_mid_response_surfaces_typed_error_with_partial_events() (+3 more)
 
-### Community 572 - "Xtask Record Memory Merges"
+### Community 602 - "Record Memory Merges"
 Cohesion: 0.27
 Nodes (10): Item, Iterator, Option, PathBuf, Result, Self, String, Options (+2 more)
 
-### Community 573 - "Brain Circuit Breaker"
+### Community 603 - "Circuit Breaker"
 Cohesion: 0.30
 Nodes (5): AtomicU32, AtomicU64, Self, CircuitBreaker, now_epoch_millis()
 
-### Community 574 - "Auth Vault Db"
-Cohesion: 0.39
-Nodes (10): Auth0TokenVaultProvider, MockServer, PgPool, Uuid, insert_linked_user(), insert_user_map(), provider(), vault_caches_m2m_token_between_exchanges() (+2 more)
-
-### Community 575 - "Lineage Merkle"
+### Community 604 - "Merkle"
 Cohesion: 0.30
 Nodes (11): Blake3Case, String, Vec, assert_merkle_root_matches_fixture(), Blake3Case, Blake3Vectors, leaves_for_case(), merkle_root_matches_blake3_known_vector_for_balanced_tree_of_4_leaves() (+3 more)
 
-### Community 576 - "Core Database"
+### Community 605 - "Database"
 Cohesion: 0.23
 Nodes (7): DatabaseConfig, DatabaseNeonConfig, Default, Option, Self, String, DatabaseNeonConfig
 
-### Community 577 - "Brain Stable Prefix Db Memory"
-Cohesion: 0.26
-Nodes (11): CompletionRequest, ModelCapabilities, Result, ScriptedProvider, Value, Vec, capabilities(), extend_tool_schemas() (+3 more)
+### Community 606 - "Policy"
+Cohesion: 0.17
+Nodes (11): AgentActionPolicy, AgentContext, AgentKnowledgePolicy, AgentModelPolicy, AgentRevisionLock, AgentSkillPolicy, AgentToolPolicy, AgentWorkflowPolicy (+3 more)
 
-### Community 578 - "Eval Trajectory Match"
+### Community 607 - "Run Leg()"
+Cohesion: 0.18
+Nodes (12): Duration, Elapsed, F, T, Duration, Elapsed, F, T (+4 more)
+
+### Community 608 - "Value"
+Cohesion: 0.27
+Nodes (9): Value, cancel_sub_agent_tool_schema(), delegation_tool_schema(), DelegationToolKind, dispatch_sub_agent_tool_schema(), list_sub_agents_tool_schema(), message_sub_agent_tool_schema(), spawn_sub_agent_tool_schema() (+1 more)
+
+### Community 609 - "Trajectory Match"
 Cohesion: 0.20
 Nodes (9): EvalResult, EvalScore, Evaluator, Result, TestCase, Vec, lcs_len(), partial_match_scores_below_one() (+1 more)
 
-### Community 579 - "Eval"
-Cohesion: 0.23
-Nodes (10): Box, Default, Reporter, Result, Self, String, Vec, build_reporters() (+2 more)
-
-### Community 580 - "Memory"
+### Community 610 - "Lib"
 Cohesion: 0.18
 Nodes (11): DateTime, EdgeLabel, NodeLabel, Send, Sync, Utc, Uuid, Vec (+3 more)
 
-### Community 581 - "Memory Write"
+### Community 611 - "Create Edge()"
 Cohesion: 0.23
 Nodes (12): EdgeLabel, EdgeWriteIntent, NodePropertyUpdateIntent, Value, Cypher, NodePropertyUpdateIntent, create_edge(), edge_create_template() (+4 more)
 
-### Community 582 - "Messaging Delivery"
+### Community 612 - "Entity Resolution"
 Cohesion: 0.33
-Nodes (8): Credential, Result, String, Vec, EnvironmentDeliveryCredentialVault, optional_env(), required_any_env(), required_env()
+Nodes (10): String, Uuid, alias_mention(), deterministic_entity_uid(), deterministic_entity_uid_includes_contact_scope(), deterministic_entity_uid_includes_user_scope(), deterministic_entity_uid_is_stable_inside_scope(), display_entity_name() (+2 more)
 
-### Community 583 - "Orchestrator Ctx"
-Cohesion: 0.35
-Nodes (4): ToolRouter, Value, Vec, ToolDeps
+### Community 613 - "Option"
+Cohesion: 0.36
+Nodes (5): LineageHandle, Option, WriterHandle, LineageDeps, WriterHandle
 
-### Community 584 - "Orchestrator Persistence"
+### Community 614 - "Persistence"
 Cohesion: 0.18
 Nodes (11): Event, HandlerError, MoaError, ObjectContext, Result, SessionId, String, UserMessage (+3 more)
 
-### Community 585 - "Orchestrator Eval"
-Cohesion: 0.41
-Nodes (12): EvalRunRequest, EvalRunResponse, Into, Uuid, EvalRunRequest, EvalRunResponse, accepted_eval_run_response(), attach_summary_field() (+4 more)
+### Community 615 - "Scripted Response()"
+Cohesion: 0.23
+Nodes (10): StopReason, ScriptedCompletion, ScriptedResponse, parse_scripted_stop_reason(), scripted_response(), ScriptedEntry, parse_scripted_stop_reason(), scripted_response() (+2 more)
 
-### Community 586 - "Providers Gemini Safety Settings"
+### Community 616 - "Failinglearningappendstore"
+Cohesion: 0.27
+Nodes (8): LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, LearningReviewStore, LearningReviewStoreFuture, PgConnection, PostgresSessionStore, FailingLearningAppendStore
+
+### Community 617 - "Gemini Safety Settings"
 Cohesion: 0.41
 Nodes (11): CompletionRequest, Value, base_request(), file_read_tool(), gemini_body(), gemini_request_includes_default_safety_settings_for_4_categories(), gemini_request_with_custom_safety_threshold_overrides_default(), gemini_request_with_function_declarations_serializes_correctly() (+3 more)
 
-### Community 587 - "Providers Openai Offline"
+### Community 618 - "Openai Offline"
 Cohesion: 0.36
 Nodes (11): MockServer, OpenAIProvider, mount_openai_sse(), openai_offline_429_response_triggers_retry_with_backoff(), openai_offline_500_response_triggers_retry_then_surfaces_typed_error(), openai_offline_completion_returns_text_for_minimal_request(), openai_offline_malformed_json_response_returns_typed_parse_error(), openai_offline_streaming_disconnect_mid_response_surfaces_typed_error_with_partial_events() (+3 more)
 
-### Community 588 - "Skills Skill Graph"
-Cohesion: 0.21
-Nodes (11): AgeGraphStore, Error, MemoryScope, MoaError, PgConnection, PgPool, Result, graph_store() (+3 more)
-
-### Community 589 - "Test Support Orchestrator Fixture"
-Cohesion: 0.20
-Nodes (9): Into, PathBuf, String, default_test_identity(), derive_admin_url(), RegisteredService, repo_root(), trim_url() (+1 more)
-
-### Community 590 - "Xtask Check Eval Budgets"
-Cohesion: 0.30
-Nodes (8): BTreeMap, String, AnalyticsScoreRow, metric_bool(), metric_number(), MetricValue, print_failures(), ScenarioFailure
-
-### Community 591 - "Xtask Compare Eval Reports"
+### Community 619 - "Compare Eval Reports"
 Cohesion: 0.26
 Nodes (9): Item, Iterator, Option, PathBuf, Result, Self, String, Options (+1 more)
 
-### Community 592 - "Eval Long Conversation Smoke Eval"
+### Community 620 - "Auth"
+Cohesion: 0.22
+Nodes (10): AuthzCheckError, AuthzCheckError, AuthzCheckError, Identity, Result, ScimResponseError, ScimState, translate_authz_error() (+2 more)
+
+### Community 621 - "Mod"
 Cohesion: 0.18
 Nodes (8): BudgetExpectations, Budgets, BudgetExpectations, FunctionalExpectations, SafetyScores, FunctionalExpectations, SafetyScores, ScenarioExpectations
 
-### Community 593 - "Brain Prompt"
+### Community 622 - ".from Request()"
+Cohesion: 0.38
+Nodes (10): CompletionRequest, CompletionRequest, Default, Into, ModelId, CacheReport, full_request_fingerprint(), stable_prefix_byte_len() (+2 more)
+
+### Community 623 - "Prompt"
 Cohesion: 0.38
 Nodes (10): ContextMessage, RewriteInput, String, Vec, WorkingContext, available_skill_lines(), available_tool_names(), build_rewriter_prompt() (+2 more)
 
-### Community 594 - "Brain Hybrid"
-Cohesion: 0.20
-Nodes (11): Duration, Elapsed, F, T, Duration, Elapsed, F, T (+3 more)
-
-### Community 595 - "Edge"
+### Community 624 - "Main"
 Cohesion: 0.25
 Nodes (9): MoaConfig, Option, Result, Args, main(), shutdown_signal(), String, OrchestratorProxy (+1 more)
 
-### Community 596 - "Orchestrator Skill Regression"
-Cohesion: 0.22
-Nodes (9): Send, Sync, EvalRun, EvalRun, ExecutedRegressionRuns, run_has_execution_failure(), SkillRegressionSummary, summarize_regression_run() (+1 more)
-
-### Community 597 - "Eval Langfuse"
-Cohesion: 0.24
-Nodes (8): AgentConfig, EvalRun, Reporter, Result, Self, String, TestSuite, LangfuseReporter
-
-### Community 598 - "Eval Golden Eval"
-Cohesion: 0.25
-Nodes (8): Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestError, NodeLabel, Result, InsertOnlyDetector
-
-### Community 599 - "Eval Long Conversation Smoke Eval"
+### Community 625 - "Compactionawarerecordedprovider"
 Cohesion: 0.22
 Nodes (8): CompletionRequest, CompletionStream, LLMProvider, ModelCapabilities, RecordedScriptedProvider, RecordedScriptedProvider, CompactionAwareRecordedProvider, is_compaction_request()
 
-### Community 600 - "Messaging Action Review"
+### Community 626 - ".execute Local Tool()"
+Cohesion: 0.38
+Nodes (6): CancellationToken, MoaError, Option, ToolFailureClass, ToolOutput, classify_error()
+
+### Community 627 - "Action Review"
 Cohesion: 0.35
 Nodes (10): Channel, ChannelCapabilities, OutboundMessage, Platform, PlatformCapabilities, capabilities(), prepare_outbound_message(), prepare_outbound_message_degrades_review_card_to_text() (+2 more)
 
-### Community 601 - "Orchestrator Neon Maint"
+### Community 628 - "Sessionlearningreviewstore"
+Cohesion: 0.31
+Nodes (7): LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry, LearningReviewStore, LearningReviewStoreFuture, PgConnection, SessionLearningReviewStore
+
+### Community 629 - "Neon Maint"
 Cohesion: 0.22
 Nodes (9): Context, HandlerError, Json, Result, String, Value, NeonMaint, NeonMaintImpl (+1 more)
 
-### Community 602 - "Orchestrator Inner"
+### Community 630 - "Analytics"
+Cohesion: 0.27
+Nodes (9): TenantId, tool_stats_scope(), analytics_experiment_stats_response_sums_status_counts(), learning_candidate_list_request_is_tenant_bounded(), tenant(), tool_stats_scope_accepts_deployment_request(), tool_stats_scope_accepts_explicit_tenant(), tool_stats_scope_accepts_explicit_workspace() (+1 more)
+
+### Community 631 - "Eval Service"
 Cohesion: 0.25
-Nodes (8): Identity, PostgresSessionStore, SessionId, SessionMeta, Uuid, create_session_for_identity(), owner_tuple_subject(), UserType
+Nodes (10): TenantId, WorkspaceId, accepted_run_response_is_non_terminal(), dataset_jsonl_items_are_constrained_to_authorized_workspace(), hosted_eval_reports_return_terminal_and_json_artifacts(), run_status_rejects_stored_tenant_mismatch(), run_status_rejects_stored_workspace_mismatch(), tenant_fixture() (+2 more)
 
-### Community 603 - "Orchestrator Skill Regression"
-Cohesion: 0.24
-Nodes (9): Option, Skill, Value, generated_suite_payload(), generated_suite_summary(), GeneratedSuitePayload, previous_skill_payload(), regression_summary_to_json() (+1 more)
-
-### Community 604 - "Orchestrator Consolidate E2E"
-Cohesion: 0.31
-Nodes (10): Child, OrchestratorPorts, Result, String, TempDir, WorkspaceId, object_url(), spawn_orchestrator() (+2 more)
-
-### Community 605 - "Session Learning"
+### Community 632 - ".list Learnings()"
 Cohesion: 0.27
 Nodes (7): LearningEntry, Option, PgConnection, Result, Uuid, Vec, PostgresSessionStore
 
-### Community 606 - "Xtask Compute Memory Quality Scores"
-Cohesion: 0.29
-Nodes (8): Item, Iterator, Result, Self, String, Options, run(), WorkspaceId
-
-### Community 607 - "Brain"
+### Community 633 - "Run Streamed Turn With Tools Mode"
 Cohesion: 0.20
 Nodes (10): enforce_workspace_budget, build_turn_context, run_brain_turn, emit_context_lineage, emit_generation_lineage, run_brain_turn, run_streamed_turn_with_tools_mode, execute_tool (+2 more)
 
-### Community 608 - "Test Support Session"
-Cohesion: 0.44
-Nodes (9): test_create_and_get_session(), test_emit_and_get_events(), test_event_search(), test_list_sessions_with_filter(), test_session_meta(), test_session_status_update(), test_workspace_cost_since(), S (+1 more)
+### Community 634 - "Revision History Db Memory"
+Cohesion: 0.47
+Nodes (9): ArtifactDocument, PgPool, Result, Uuid, agent_doc(), agent_revisions_remain_loadable_while_installation_pointer_moves(), insert_deployment(), load_current_revision() (+1 more)
 
-### Community 609 - "Auth Auth0 Provider"
-Cohesion: 0.29
-Nodes (9): AuthError, Credential, Error, Identity, IdentityType, Result, Uuid, parse_identity_type() (+1 more)
-
-### Community 610 - "Auth Ciba"
-Cohesion: 0.24
-Nodes (7): Client, DateTime, Duration, Utc, Value, PollOutcome, CibaPoller
-
-### Community 611 - "Auth Disabled"
+### Community 635 - "Disabled"
 Cohesion: 0.20
 Nodes (6): AuthError, AuthProvider, Credential, Identity, Result, DisabledAuthProvider
 
-### Community 612 - "Brain Chat Harness"
+### Community 636 - "Chat Harness"
 Cohesion: 0.29
 Nodes (9): Arc, ContextPipeline, LLMProvider, PostgresSessionStore, Result, SessionId, ToolRouter, main() (+1 more)
 
-### Community 613 - "Brain Llm Call"
+### Community 637 - "Signals"
+Cohesion: 0.29
+Nodes (9): Option, Receiver, Result, RuntimeEvent, Sender, SessionSignal, drain_signal_queue(), handle_stream_signal() (+1 more)
+
+### Community 638 - "Llm Call"
 Cohesion: 0.22
 Nodes (8): JsonResponseFormat, QueryRewriteResult, Result, RewriteInput, RewriteReason, WorkingContext, query_rewrite_response_format(), QueryRewriter
 
-### Community 614 - "Brain Structural Signal"
+### Community 639 - "Structural Signal"
 Cohesion: 0.33
 Nodes (7): Option, SegmentBaseline, baseline(), cold_start_returns_none(), is_high_outlier(), score(), SegmentMetrics
 
-### Community 615 - "Brain Turbopuffer News Live"
+### Community 640 - "Turbopuffer News Live"
 Cohesion: 0.47
 Nodes (9): RetrievalHit, String, TestResult, assert_contains_artemis_core_stage(), cohere_api_key(), news_transcript(), require_live_turbopuffer(), required_env() (+1 more)
 
-### Community 616 - "Core Learning"
-Cohesion: 0.22
+### Community 641 - "Uuid"
+Cohesion: 0.29
+Nodes (7): Default, From, Self, Uuid, ModelId, TenantId, ToolCallId
+
+### Community 642 - "Learning"
+Cohesion: 0.24
 Nodes (9): DateTime, Option, String, TenantId, Utc, Uuid, Value, Vec (+1 more)
 
-### Community 617 - "Eval Tool Success"
+### Community 643 - "Tool Success"
 Cohesion: 0.20
 Nodes (7): EvalResult, EvalScore, Evaluator, Result, TestCase, Vec, ToolSuccessEvaluator
 
-### Community 618 - "Eval Core Metrics"
+### Community 644 - "Core Metrics"
 Cohesion: 0.33
 Nodes (5): Default, Self, MetricSummary, PerLegRecall, RetrievalCoreMetrics
 
-### Community 619 - "Eval Golden Eval"
+### Community 645 - "Retrievalharness"
 Cohesion: 0.20
 Nodes (7): Arc, CachedHybridRetriever, EmbeddingProvider, PlanningCtx, QueryPlanner, GoldenEmbedder, RetrievalHarness
 
-### Community 620 - "Lineage Writer"
+### Community 646 - ".from Event()"
 Cohesion: 0.27
 Nodes (7): LineageEvent, ScoreRecord, ScoreSource, Self, pending_row_routes_eval_events_to_scores(), PendingRow, score_source_to_db()
 
-### Community 621 - "Memory Validity"
+### Community 647 - "Config"
+Cohesion: 0.33
+Nodes (9): Option, PerfGateConfig, PrometheusHandle, Result, install_metrics_recorder(), linux_memory_gb(), validate_config(), validate_hardware_floor() (+1 more)
+
+### Community 648 - "Changelog"
+Cohesion: 0.33
+Nodes (9): Option, PgConnection, Result, String, Uuid, Value, ChangelogRecord, validate_scope() (+1 more)
+
+### Community 649 - "Validity"
 Cohesion: 0.29
 Nodes (9): DateTime, Option, Postgres, QueryBuilder, Utc, push_validity_filter(), utc(), validity_predicate_sql_matches_active_rows_without_as_of() (+1 more)
 
-### Community 622 - "Memory Changelog Outbox Db Memory"
-Cohesion: 0.38
-Nodes (9): ChangelogRecord, PgConnection, Uuid, changelog_rejects_updates_for_app_role(), changelog_write_bumps_workspace_version_and_respects_read_rls(), record(), set_app_role(), set_auditor_role() (+1 more)
+### Community 650 - "Authdeps"
+Cohesion: 0.36
+Nodes (4): FgaClient, Providers, Providers, AuthDeps
 
-### Community 623 - "Orchestrator Ctx"
-Cohesion: 0.33
-Nodes (3): EmbeddingProvider, ProviderRegistry, ProviderDeps
-
-### Community 624 - "Orchestrator Database"
+### Community 651 - "Database"
 Cohesion: 0.33
 Nodes (9): Duration, MoaConfig, PgPool, Result, String, apply_database_migrations(), build_database_pool(), database_search_path() (+1 more)
 
-### Community 625 - "Orchestrator Learning Review"
+### Community 652 - "Generate Plan Inner()"
 Cohesion: 0.33
-Nodes (6): LearningCandidateStatus, LearningEntry, LearningReviewStore, LearningReviewStoreFuture, PgConnection, SessionLearningReviewStore
+Nodes (9): CompletionRequest, ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, LLMGatewayImpl, generate_plan_inner(), plan_generation_request() (+1 more)
 
-### Community 626 - "Orchestrator Lineage Admin"
-Cohesion: 0.24
-Nodes (9): Option, String, prepare_lineage_sql(), VerificationReport, verify_compliance_rows(), prepare_lineage_sql_rejects_mutating_statement(), prepare_lineage_sql_scopes_logical_source_to_workspace_and_since(), verify_compliance_rows_pins_chain_and_merkle_root() (+1 more)
+### Community 653 - "Session Vo"
+Cohesion: 0.36
+Nodes (8): SessionMeta, UserMessage, session_vo_destroy_clears_state(), session_vo_post_message_queues_in_state(), session_vo_post_message_updates_status_to_running_then_idle_parks_paused(), session_vo_post_message_without_meta_errors(), test_message(), test_meta()
 
-### Community 627 - "Providers Request Body Snapshots"
+### Community 654 - "Request Body Snapshots"
 Cohesion: 0.36
 Nodes (9): CompletionRequest, Value, anthropic_request_body__minimal_request_serializes_with_stable_byte_layout(), file_read_tool(), gemini_request_body__minimal_request_serializes_with_stable_byte_layout(), minimal_request(), openai_request_body__minimal_request_serializes_with_stable_byte_layout(), shell_command_tool() (+1 more)
 
-### Community 628 - "Test Support Orchestrator Fixture"
+### Community 655 - "Helpers"
+Cohesion: 0.29
+Nodes (8): Event, Option, String, event_hand_id(), normalize_event_search_query(), qualified_name(), quote_identifier(), redact_password()
+
+### Community 656 - ".start Turn()"
 Cohesion: 0.22
 Nodes (7): Duration, SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome, SessionSnapshot, TestSessionHandle
 
-### Community 629 - "Orchestrator Util"
+### Community 657 - "Scorecard"
+Cohesion: 0.20
+Nodes (9): CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores, SafetyScores, ToolScores (+1 more)
+
+### Community 658 - "Compute Memory Quality Scores"
+Cohesion: 0.33
+Nodes (7): Item, Iterator, Result, Self, String, Options, run()
+
+### Community 659 - "Subagentturnexecution::run"
 Cohesion: 0.24
 Nodes (10): screen_tool_input_for_canary, SubAgentTurnExecution::run, TurnExecution::run, allowed_tool_names, ensure_delegation_tool_schemas, ensure_dispatch_tool_schema, response_tool_calls, stable_tool_call_id (+2 more)
 
-### Community 630 - "Session Session Store"
+### Community 660 - "Agentdefinition"
+Cohesion: 0.22
+Nodes (9): AgentPurpose, ActionPolicy, InstructionPolicy, ModelPolicy, SkillPolicy, ToolPolicy, WorkflowPolicy, KnowledgePolicy (+1 more)
+
+### Community 661 - "Postgressessionstore (session Store)"
 Cohesion: 0.22
 Nodes (9): cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage, PostgresSessionStore (Helpers), SessionStore, PostgresSessionStore, PostgresSessionStore::get_session, PostgresSessionStore::list_sessions, session_meta_from_row, session_summary_from_row (+1 more)
 
-### Community 631 - "Core Async Authz"
+### Community 662 - "Async Authz"
 Cohesion: 0.25
 Nodes (6): AsyncAuthzConfig, AsyncAuthzKind, default_timeout_secs(), AsyncAuthzKind, Default, Self
 
-### Community 632 - "Artifacts Connector"
+### Community 663 - "Connector"
 Cohesion: 0.28
 Nodes (8): ConnectorActionDefinition, ConnectorActionDefinition, Option, String, Value, Vec, ConnectorActionDefinition, ConnectorDefinition
 
-### Community 633 - "Hands Construction"
+### Community 664 - ".tool Definition()"
 Cohesion: 0.22
 Nodes (5): Option, String, ToolDefinition, Value, Vec
 
-### Community 634 - "Auth Ciba Db"
-Cohesion: 0.25
-Nodes (8): AwakeableResolveError, AwakeableResolver, Mutex, Option, Result, Sender, Value, RecordingResolver
-
-### Community 635 - "Auth Vault Live"
-Cohesion: 0.50
-Nodes (8): PgPool, String, Uuid, live_auth0_token_vault_returns_third_party_token(), required_env(), required_pointed_env(), required_uuid(), upsert_linked_user()
-
-### Community 636 - "Auth Awakeable"
+### Community 665 - "Awakeable"
 Cohesion: 0.22
 Nodes (7): Into, Self, Send, String, Sync, AwakeableResolveError, AwakeableResolver
 
-### Community 637 - "Brain Hybrid"
-Cohesion: 0.25
-Nodes (5): VectorError, VectorItem, VectorMatch, VectorQuery, EmptyVector
-
-### Community 638 - "Brain Self Assessment Signal"
+### Community 666 - "Self Assessment Signal"
 Cohesion: 0.25
 Nodes (3): Option, contains_any(), score()
 
-### Community 639 - "Core Runtime Events"
+### Community 667 - "Runtime Events"
 Cohesion: 0.28
 Nodes (6): Option, String, Uuid, RuntimeEvent, ToolCardStatus, ToolUpdate
 
-### Community 640 - "Eval Replay"
+### Community 668 - "Skillsummary"
+Cohesion: 0.39
+Nodes (9): ActionRuleScope, MemoryScope, ArtifactExportRequest, ArtifactImportRequest, ArtifactListRequest, ArtifactPublishRequest, SkillImportRequest, SkillImportResponse (+1 more)
+
+### Community 669 - "Replay"
 Cohesion: 0.33
 Nodes (7): BTreeSet, Option, String, Uuid, normalized_tokens(), ReplayConfig, token_f1()
 
-### Community 641 - "Eval"
+### Community 670 - ".get Optional()"
 Cohesion: 0.25
 Nodes (7): EntityMergeFixtureRecord, ExtractionFixtureRecord, Option, crate::kernel::FixtureStore<moa_memory_ingest::EntityMergeFixtureRecord>, crate::kernel::FixtureStore<moa_memory_ingest::ExtractionFixtureRecord>, RecordedEntityMergeStore, RecordedExtractionStore
 
-### Community 642 - "Eval Setup"
-Cohesion: 0.22
-Nodes (6): CompletionRequest, CompletionStream, ModelCapabilities, TokenUsage, MockProvider, token_usage()
-
-### Community 643 - "Lineage Adapters"
+### Community 671 - "Adapters"
 Cohesion: 0.36
 Nodes (8): ChunkRef, Vec, anthropic_adapter_maps_document_index(), cascade_flags_vendor_hallucinated_citation(), chunks(), cohere_adapter_maps_document_sources(), openai_adapter_maps_file_annotations(), vertex_adapter_maps_grounding_supports()
 
-### Community 644 - "Loadtest Harness"
+### Community 672 - "Config"
 Cohesion: 0.22
 Nodes (7): MoaConfig, Result, LoadTestOptions, LoadTestReport, Result, load_config(), run_loadtest()
 
-### Community 645 - "Memory Slow Path"
-Cohesion: 0.39
-Nodes (9): ExtractedFact, PiiCategory, PiiResult, pii_fact(), pii_result(), redact_fact(), redact_fact_recomputes_uid_from_redacted_parts(), redact_fact_replaces_field_value_when_summary_span_has_punctuation() (+1 more)
-
-### Community 646 - "Memory Quality"
+### Community 673 - "Quality"
 Cohesion: 0.36
 Nodes (7): PgPool, Result, WorkspaceId, beta_smoothed_quality(), compute_quality_scores(), QualityStats, task_segment_outcome_source_exists()
 
-### Community 647 - "Gateway Slack"
+### Community 674 - ".send Chunk()"
 Cohesion: 0.33
 Nodes (7): Span, SlackMessageContent, SlackMessageRef, SlackRenderChunk, SlackTarget, slack_api_span(), slack_message_content()
 
-### Community 648 - "Messaging Twilio Provider E2E"
+### Community 675 - "Localtwiliovault"
 Cohesion: 0.36
 Nodes (5): Credential, CredentialVault, Result, Vec, LocalTwilioVault
 
-### Community 649 - "Orchestrator Ctx"
+### Community 676 - "Memorydeps"
 Cohesion: 0.33
 Nodes (3): GraphMemoryRetriever, SkillInjector, MemoryDeps
 
-### Community 650 - "Orchestrator Tenants"
+### Community 677 - "Persistencedeps"
+Cohesion: 0.36
+Nodes (3): PgPool, PostgresSessionStore, PersistenceDeps
+
+### Community 678 - "Wait Child()"
+Cohesion: 0.39
+Nodes (9): Option, SubAgentTerminalResult, clamp_wait_timeout_ms(), consume_parent_cached_terminal(), wait_child(), wait_terminal_output(), wait_timed_out(), WaitSubAgentInput (+1 more)
+
+### Community 679 - "Tenants"
 Cohesion: 0.47
 Nodes (8): HandlerError, PgPool, Result, Uuid, ensure_signing_key(), rotate_signing_key(), set_audit_destination(), SetAuditDestinationRequest
 
-### Community 651 - "Orchestrator Whoami"
+### Community 680 - "Whoami"
 Cohesion: 0.28
 Nodes (7): Context, HandlerError, Identity, Json, Result, Whoami, WhoamiImpl
 
-### Community 652 - "Orchestrator Approval"
+### Community 681 - "Approval"
 Cohesion: 0.39
 Nodes (8): ApprovalDecision, Result, String, TerminalError, awakeable_decision_round_trips_through_json_payload(), parse_awakeable_decision(), serialize_awakeable_decision(), awakeable_decision_round_trips_through_json_payload()
 
-### Community 653 - "Orchestrator Fake Clock"
+### Community 682 - ".progress()"
+Cohesion: 0.22
+Nodes (8): SharedWorkflowContext, TurnProgress, LLMGatewayClient, SharedWorkflowContext, ToolExecutorClient, TurnProgress, TurnExecutionImpl, WorkspaceStoreClient
+
+### Community 683 - "Fake Clock"
 Cohesion: 0.33
 Nodes (6): Arc, DateTime, Mutex, Self, Utc, FakeClock
 
-### Community 654 - "Session Approval"
+### Community 684 - ".list Approval Rules()"
 Cohesion: 0.33
 Nodes (6): ApprovalRule, ApprovalRuleStore, Result, Vec, WorkspaceId, PostgresSessionStore
 
-### Community 655 - "Session Session Store"
-Cohesion: 0.31
-Nodes (8): ChannelRef, SessionActorRef, String, channel_route_keys(), channel_route_keys_use_account_id_for_email_and_sms(), channel_route_keys_use_slack_conversation_and_thread_columns(), ChannelRouteKeys, session_actor_type()
-
-### Community 656 - "Session Audit Smoke Db"
+### Community 685 - "Audit Smoke Db"
 Cohesion: 0.36
 Nodes (8): Box, Error, Result, String, audit_writes_log_line(), pgaudit_migration_configures_labels_when_provider_loaded_and_auditor_view(), pgaudit_smoke_requested(), quote_identifier()
 
-### Community 657 - "Auth"
+### Community 686 - "Moa Auth Providers Lib"
 Cohesion: 0.22
 Nodes (9): moa-auth-providers-auth0 lib, moa-auth-providers lib, moa-auth README, moa-brain lib, Query Rewrite Gate, Query Rewrite Live Test, moa-core lib, Transcript Runner (+1 more)
 
-### Community 658 - "Orchestrator Llm Gateway"
-Cohesion: 0.25
-Nodes (7): ScriptedCompletion, ScriptedResponse, ScriptedEntry, parse_scripted_stop_reason(), scripted_response(), ScriptedEntry, StopReason
+### Community 687 - "Pendingmessage"
+Cohesion: 0.50
+Nodes (8): Attachment, Attachment, ContactRef, Identity, PendingMessage, QueueMessageRequest, RunTurnRequest, StartTurnRequest
 
-### Community 659 - "Brain Pipeline Stages Db Memory"
-Cohesion: 0.29
-Nodes (8): Any, Box, FnOnce, Send, FnOnce, assert_stage_contract(), panic_message(), pipeline_stage_failure_message_names_the_stage_clearly()
-
-### Community 660 - "Brain Snapshot"
+### Community 688 - "Snapshot"
 Cohesion: 0.39
 Nodes (7): collapse_snapshot_for_tier2(), load_snapshot(), store_snapshot(), ContextSnapshot, Option, Result, WorkingContext
 
-### Community 661 - "Core Env Overlay"
-Cohesion: 0.25
-Nodes (5): parse_error(), Display, MoaError, MoaError, Session
-
-### Community 662 - "Core Messaging"
-Cohesion: 0.25
-Nodes (6): MessagingConfig, Default, Option, Self, String, Default
-
-### Community 663 - "Core Security"
+### Community 689 - "Security"
 Cohesion: 0.29
 Nodes (6): PermissionsConfig, ActionPolicyEffect, Default, Self, String, Vec
 
-### Community 664 - "Eval Long Conversation Smoke Eval"
+### Community 690 - "Budgetexpectations"
 Cohesion: 0.25
 Nodes (8): ContextBudgetExpectations, ContextBudgetExpectations, Option, SafetyBudgetExpectations, SafetyBudgetExpectations, BudgetExpectations, ContextBudgetExpectations, SafetyBudgetExpectations
 
-### Community 665 - "Lineage"
+### Community 691 - "Lib"
 Cohesion: 0.36
 Nodes (7): ContextLineage, Span, GenerationLineage, RetrievalLineage, emit_context_attrs(), emit_generation_attrs(), emit_retrieval_attrs()
 
-### Community 666 - "Providers Streaming"
+### Community 692 - "Streaming"
 Cohesion: 0.32
 Nodes (7): decode_failure_surfaces_provider_quirk(), event(), parse_sse_json(), Probe, Result, SseEvent, T
 
-### Community 667 - "Artifacts Simulation"
-Cohesion: 0.25
-Nodes (8): ExperimentBudget, ExperimentSimulationDefinition, ExperimentTargetVariant, ExperimentBudget, ExperimentLearningProposalSettings, ExperimentSimulationDefinition, ExperimentTargetVariant, ExperimentPlanDefinition
-
-### Community 668 - "Auth Jwt Validation Db"
+### Community 693 - "Action"
 Cohesion: 0.36
-Nodes (7): PgPool, String, Uuid, RsaPrivateKey, Claims, jwt_validation_accepts_self_signed_auth0_token(), signed_token()
+Nodes (6): ArtifactRef, Option, String, Value, Vec, ActionDefinition
 
-### Community 669 - "Auth"
-Cohesion: 0.36
-Nodes (7): FgaClient, PathBuf, Result, Args, main(), String, run_smoke_checks()
-
-### Community 670 - "Auth Builtin Authz Request Db"
+### Community 694 - "Builtin Authz Request Db"
 Cohesion: 0.46
 Nodes (7): PgPool, String, migrated_pool(), quote_identifier(), request_approval_inserts_pending_row(), request_approval_requires_tenant_id_in_action_details(), test_database_url()
 
-### Community 671 - "Core Telemetry"
+### Community 695 - "Contact Ref()"
+Cohesion: 0.25
+Nodes (8): ContactId, ContactRef, TenantId, Uuid, WorkspaceId, contact_ref(), stable_uuid_from_label(), tenant_id_from_workspace_id()
+
+### Community 696 - "Telemetryguard"
 Cohesion: 0.25
 Nodes (6): Drop, Option, Self, SdkTracerProvider, TelemetryGuard, WorkerGuard
 
-### Community 672 - "Core Identifiers"
-Cohesion: 0.29
-Nodes (6): Default, From, Self, Uuid, ModelId, ToolCallId
-
-### Community 673 - "Eval Golden Eval"
+### Community 697 - "Box Message()"
 Cohesion: 0.36
 Nodes (8): Box, E, Error, Into, Send, Sync, box_error(), box_message()
 
-### Community 674 - "Gateway"
+### Community 698 - "Lib"
 Cohesion: 0.32
 Nodes (6): ChannelRef, InboundMessage, Span, String, gateway_channel_label(), gateway_receive_span()
 
-### Community 675 - "Lineage Sink"
+### Community 699 - "Classify Error()"
+Cohesion: 0.36
+Nodes (7): HandStatus, MoaError, Option, ToolFailureClass, classify_error(), parse_retry_after(), status_label()
+
+### Community 700 - "Sink"
 Cohesion: 0.32
 Nodes (5): LineageEvent, Send, Sync, LineageSink, NullSink
 
-### Community 676 - "Memory Fast Path Db Memory"
+### Community 701 - "Mockembedder"
 Cohesion: 0.29
 Nodes (4): EmbeddingProvider, Vec, deterministic_vector(), MockEmbedder
 
-### Community 677 - "Memory Gemini"
+### Community 702 - "Gemini"
 Cohesion: 0.39
 Nodes (7): MockServer, Request, Value, embedding_response(), gemini_v2_does_not_renormalize_server_output(), gemini_v2_uses_prompt_prefix_and_snake_case_output_dimensionality(), only_request()
 
-### Community 678 - "Memory Turbopuffer Offline"
+### Community 703 - "Turbopuffer Offline"
 Cohesion: 0.43
 Nodes (7): Uuid, Vec, VectorItem, basis_vector(), test_item(), turbopuffer_as_of_query_returns_unsupported_without_http_request(), turbopuffer_offline_round_trip()
 
-### Community 679 - "Orchestrator Auth"
+### Community 704 - ".check()"
 Cohesion: 0.32
-Nodes (7): AuthzCheckError, Identity, Result, ScimResponseError, ScimState, map_authz_error(), require_scim_admin()
+Nodes (7): ApprovalRule, Option, PolicyAction, Result, ToolPolicyInput, PolicyCheck, rule_visible_to_workspace()
 
-### Community 680 - "Session Testing"
+### Community 705 - "Testing"
 Cohesion: 0.43
 Nodes (7): PostgresSessionStore, Result, String, cleanup_test_schema(), create_isolated_test_store(), quote_identifier(), test_database_url()
 
-### Community 681 - "Test Support Fixtures Round Trip"
+### Community 706 - "Fixtures Round Trip"
 Cohesion: 0.29
 Nodes (4): PathBuf, bootstrap_test_db_creates_isolated_schema_and_drops_on_drop(), fixture_path(), transcript_jsonl_round_trips_through_read_and_write()
 
-### Community 682 - "Core Wire"
+### Community 707 - "Tooldescriptor"
 Cohesion: 0.29
 Nodes (7): ActionClass, ActionClass, IdempotencyClass, RiskLevel, ToolDefinition, tool_descriptor(), ToolDescriptor
 
-### Community 683 - "Eval Setup"
-Cohesion: 0.29
-Nodes (7): ActionPolicies, ActionPolicyOverride, ActionPolicies, ActionPolicyOverride, PermissionOverride, ToolPolicies, build_eval_policies()
+### Community 708 - "Hosted Eval Report Artifacts()"
+Cohesion: 0.52
+Nodes (7): AgentConfig, CoreEvalRun, AgentConfig, TestSuite, hosted_eval_report_artifacts(), parse_agent_config_documents(), render_hosted_terminal_report()
 
-### Community 684 - "Brain Report"
+### Community 709 - "Report"
 Cohesion: 0.33
 Nodes (5): CompactionReport, CompactionTier, Option, String, Vec
 
-### Community 685 - "Core Learning"
+### Community 710 - "Learning"
 Cohesion: 0.29
 Nodes (5): LearningConfig, SkillLearningConfig, Default, Self, SkillLearningConfig
 
-### Community 686 - "Core Orchestrator"
+### Community 711 - "Memoryretrievalconfig"
+Cohesion: 0.24
+Nodes (7): MemoryRetrievalConfig, MemoryVectorConfig, MemoryRankingConfig, MemoryRerankerMode, MemoryRerankerMode, TurbopufferVectorConfig, VectorEmbedderConfig
+
+### Community 712 - "Orchestrator"
 Cohesion: 0.29
 Nodes (5): OrchestratorConfig, Default, Option, Self, String
 
-### Community 687 - "Skills Registry"
+### Community 713 - "Provider Tools"
+Cohesion: 0.33
+Nodes (6): enabled_native_tools(), web_search_completed_block(), web_search_started_block(), CompletionContent, ModelCapabilities, ProviderNativeTool
+
+### Community 714 - "Map Sqlx Error()"
 Cohesion: 0.38
 Nodes (7): Error, MoaError, map_sqlx_error(), Error, MoaError, map_sqlx_error(), map_sqlx_error()
 
-### Community 688 - "Brain Terms"
+### Community 715 - "Terms"
 Cohesion: 0.43
 Nodes (6): String, Vec, entity_terms(), is_entity_like(), is_rewrite_function_word(), normalize_entity_token()
 
-### Community 689 - "Core Truncation"
-Cohesion: 0.48
-Nodes (6): String, char_truncation_preserves_head_and_tail(), head_tail_preserves_both_ends(), small_output_not_truncated(), truncate_head_tail(), truncate_head_tail_lines()
-
-### Community 690 - "Session Session Store"
+### Community 716 - "Build Scripted Provider()"
 Cohesion: 0.29
-Nodes (6): SessionFilter, SessionFilter, SessionSummary, SessionFilter, SessionSummary, ListSessionsRequest
+Nodes (7): ModelCapabilities, ScriptedProvider, TokenUsage, ScriptedProvider, build_scripted_provider(), cached_usage(), scripted_capabilities()
 
-### Community 691 - "Eval Cache Metrics"
+### Community 717 - ".from Session Meta()"
+Cohesion: 0.33
+Nodes (5): Self, SessionMeta, SessionMeta, completion_request_fingerprints_are_json_object_order_insensitive(), trace_context_from_session_meta()
+
+### Community 718 - "Cache Metrics"
 Cohesion: 0.43
 Nodes (6): Vec, CompiledRequest, compute_input_cached_ratio(), compute_prefix_stability(), compute_stable_prefix_bytes(), TurnUsage
 
-### Community 692 - "Eval Metrics"
-Cohesion: 0.33
-Nodes (5): Deref, RetrievalCoreMetrics, Target, DerefMut, RetrievalMetrics
-
-### Community 693 - "Eval Runner"
-Cohesion: 0.33
-Nodes (5): Error, EvalError, Path, io_error(), write_report()
-
-### Community 694 - "Eval Setup"
+### Community 719 - "Evallineagehandle"
 Cohesion: 0.43
 Nodes (5): LineageHandle, Mutex, Value, Vec, EvalLineageHandle
 
-### Community 695 - "Eval Golden Eval"
+### Community 720 - "Golden Vector()"
 Cohesion: 0.29
 Nodes (7): Item, Iterator, Option, fact_index(), golden_vector(), stable_index(), tokens()
 
-### Community 696 - "Hands Mcp Router"
+### Community 721 - "Discord Button With Disabled()"
+Cohesion: 0.38
+Nodes (7): ActionButton, Vec, CreateActionRow, CreateButton, discord_button(), discord_button_with_disabled(), render_action_rows()
+
+### Community 722 - "Mcp Router"
 Cohesion: 0.48
 Nodes (6): SessionMeta, router_calls_http_mcp_server_and_surfaces_jsonrpc_errors(), router_discovers_and_calls_streamable_http_tools_with_sse_responses(), router_discovers_stdio_mcp_tools_from_config(), router_injects_mcp_credentials_via_proxy(), session()
 
-### Community 697 - "Memory Mock"
+### Community 723 - "Mock"
 Cohesion: 0.33
 Nodes (5): PiiClassifier, PiiError, PiiResult, Result, MockClassifier
 
-### Community 698 - "Memory Sidecar Live"
+### Community 724 - "Sidecar Live"
 Cohesion: 0.33
 Nodes (4): String, moa-memory-pii, live_service_url(), live_sidecar_classifies_private_and_clean_text()
 
-### Community 699 - "Orchestrator Groups"
+### Community 725 - "Grouprow"
 Cohesion: 0.33
 Nodes (7): DateTime, Option, String, Utc, GroupRow, GroupTarget, ListQuery
 
-### Community 700 - "Orchestrator Inner"
-Cohesion: 0.29
-Nodes (4): GetSegmentBaselineRequest, Option, SegmentBaseline, TaskSegment
-
-### Community 701 - "Orchestrator"
+### Community 726 - "Mod"
 Cohesion: 0.48
 Nodes (5): Arc, PostgresSessionStore, Self, RestateSessionStore, SessionStoreImpl
 
-### Community 702 - "Session"
+### Community 727 - "Response"
+Cohesion: 0.29
+Nodes (6): MoaError, TokenUsage, ResponsesStreamError, token_usage_from_openai_usage(), token_usage_from_openai_usage_splits_cached_prompt_tokens(), ResponseUsage
+
+### Community 728 - "Lib"
 Cohesion: 0.38
 Nodes (6): Arc, MoaConfig, PostgresSessionStore, Result, NeonBranchManager, create_session_store()
 
-### Community 703 - "Test Support Orchestrator Fixture"
-Cohesion: 0.29
-Nodes (7): RegisteredService, Vec, Deployment, RegisteredService, default_script(), Deployment, DeploymentsResponse
+### Community 729 - ".event Record From Row()"
+Cohesion: 0.33
+Nodes (5): EventRecord, PgRow, Result, record_sessions_active(), PostgresSessionStore
 
-### Community 704 - "Eval"
+### Community 730 - "Response Json Or Error()"
+Cohesion: 0.33
+Nodes (5): Response, Value, Response, ensure_success(), response_json_or_error()
+
+### Community 731 - "Moa Memory Ingest::entitymergefixturerec"
 Cohesion: 0.29
 Nodes (3): FixtureRecord, moa_memory_ingest::EntityMergeFixtureRecord, moa_memory_ingest::ExtractionFixtureRecord
 
-### Community 705 - "Memory Consolidate"
+### Community 732 - "Consolidate Workspace"
 Cohesion: 0.29
 Nodes (7): backfill_entities, consolidate_workspace, decay_confidence, merge_duplicates, sweep_contradictions, rebuild_digests, render_digest
 
-### Community 706 - "Orchestrator Handlers"
+### Community 733 - "Moa Orchestrator/src/objects/session/mod"
 Cohesion: 0.29
 Nodes (7): moa-orchestrator/src/delegation.rs, moa-orchestrator/src/objects/session/handlers.rs, moa-orchestrator/src/objects/session/mod.rs, moa-orchestrator/src/objects/session/state.rs, moa-orchestrator/src/objects/sub_agent/handlers.rs, moa-orchestrator/src/objects/sub_agent/mod.rs, moa-orchestrator/src/objects/sub_agent/state.rs
 
-### Community 707 - "Messaging Provenance"
+### Community 734 - "Slack Event Minimal"
 Cohesion: 0.43
 Nodes (3): Slack Block Kit API, Slack Message Event API, Slack Threaded Message API
 
-### Community 710 - "Providers Model"
+### Community 737 - "Actionreviewpreview"
+Cohesion: 0.33
+Nodes (6): ActionReviewField, ActionReviewFileDiff, ActionReviewField, ActionReviewFileDiff, Vec, ActionReviewPreview
+
+### Community 738 - "Model"
 Cohesion: 0.40
 Nodes (5): canonical_model_id(), capabilities_for_model(), ModelCapabilities, Result, String
 
-### Community 711 - "Migrations Readme"
+### Community 739 - "Lineage Schema"
 Cohesion: 0.33
 Nodes (5): Architecture Overview, moa-lineage README, moa-migrations README, Technology Stack, xtask check-migrations
 
-### Community 712 - "Core Gateway"
+### Community 740 - "Gateway"
 Cohesion: 0.33
 Nodes (4): GatewayConfig, Default, Self, String
 
-### Community 713 - "Core Lineage"
+### Community 741 - "Lineage"
 Cohesion: 0.33
 Nodes (4): LineageConfig, Default, Self, String
 
-### Community 714 - "Core Loader"
+### Community 742 - "Loader"
 Cohesion: 0.53
 Nodes (3): MoaConfig, Result, Self
 
-### Community 715 - "Core Session"
+### Community 743 - "Session"
 Cohesion: 0.33
 Nodes (4): SessionConfig, Default, Self, String
 
-### Community 716 - "Artifacts Canonical"
+### Community 744 - "Definition"
+Cohesion: 0.47
+Nodes (5): AgentRevisionLock, Option, String, Uuid, AgentInstallationPointer
+
+### Community 745 - "Canonical"
 Cohesion: 0.60
 Nodes (5): Result, T, Vec, canonical_hash(), canonical_json_bytes()
 
-### Community 717 - "Auth Support"
+### Community 746 - "Support"
 Cohesion: 0.47
 Nodes (5): PgPool, String, quote_identifier(), test_database_url(), migrated_auth0_pool()
 
-### Community 718 - "Auth Poller Live"
-Cohesion: 0.47
-Nodes (5): FgaConfig, PgPool, fga_from_env(), poller_drains_write_to_fga(), test_pool()
-
-### Community 719 - "Brain Postprocess"
+### Community 747 - "Parse Rewrite Response()"
 Cohesion: 0.53
 Nodes (5): QueryRewriteResult, Result, RewriteReason, parse_rewrite_response(), store_rewrite_result()
 
-### Community 720 - "Brain Brain Turn Cache Replay Db Memory"
-Cohesion: 0.33
-Nodes (6): ModelCapabilities, ScriptedProvider, TokenUsage, build_scripted_provider(), cached_usage(), scripted_capabilities()
-
-### Community 721 - "Brain Cohere Reranker Live"
+### Community 748 - "Cohere Reranker Live"
 Cohesion: 0.53
 Nodes (5): Option, SecretString, cohere_rerank_v4_fast_prioritizes_relevant_retrieval_candidate(), live_cohere_key(), live_cohere_requested()
 
-### Community 722 - "Core Wire"
+### Community 749 - ".into Initial Message()"
+Cohesion: 0.53
+Nodes (4): ModelId, SessionId, UserId, WorkspaceId
+
+### Community 750 - "Completesegmentrequest"
 Cohesion: 0.33
 Nodes (6): SegmentAssessment, SegmentCompletion, SegmentId, SegmentCompletion, CompleteSegmentRequest, UpdateSegmentAssessmentRequest
 
-### Community 723 - "Lineage Ids"
+### Community 751 - "Goldenqueries"
+Cohesion: 0.33
+Nodes (6): PathBuf, GoldenQuery, HistoricalQuery, fixture_root(), GoldenQueries, load_queries()
+
+### Community 752 - "Ids"
 Cohesion: 0.40
 Nodes (3): Self, LineageRecordId, TurnId
 
-### Community 724 - "Loadtest"
+### Community 753 - "Args"
 Cohesion: 0.33
 Nodes (6): LoadMode, Option, SessionProfileKind, Args, String, OutputFormat
 
-### Community 725 - "Memory Write"
+### Community 754 - "Storednode"
 Cohesion: 0.33
 Nodes (6): DateTime, NodeLabel, PiiClass, Utc, node_create_template(), StoredNode
 
-### Community 726 - "Ocsf Support"
+### Community 755 - "Cohere Live"
+Cohesion: 0.53
+Nodes (5): Option, SecretString, cohere_embed_v4_returns_1024_dimensional_float_embeddings(), live_cohere_key(), live_cohere_requested()
+
+### Community 756 - "Support"
 Cohesion: 0.47
 Nodes (5): PgPool, String, quote_identifier(), test_database_url(), migrated_ocsf_pool()
 
-### Community 727 - "Orchestrator Meta"
+### Community 757 - "Listed Sub Agent()"
+Cohesion: 0.33
+Nodes (6): SubAgentId, SubAgentStatus, ListedSubAgent, listed_sub_agent(), listed_sub_agent_preserves_status_fields(), SubAgentStatus
+
+### Community 758 - ".load From()"
+Cohesion: 0.33
+Nodes (5): HandlerError, R, Result, Self, R
+
+### Community 759 - "Lineage Admin"
+Cohesion: 0.40
+Nodes (5): String, prepare_lineage_sql(), prepare_lineage_sql_rejects_mutating_statement(), prepare_lineage_sql_scopes_logical_source_to_workspace_and_since(), verify_compliance_rows_rejects_broken_chain_link()
+
+### Community 760 - "Meta"
 Cohesion: 0.67
 Nodes (5): Json, Value, resource_types(), schemas(), service_provider_config()
 
-### Community 728 - "Providers Model"
-Cohesion: 0.40
-Nodes (5): ModelCapabilities, Result, String, canonical_model_id(), capabilities_for_model()
+### Community 761 - "With Identity Headers()"
+Cohesion: 0.33
+Nodes (6): IdentityType, Req, Request, Res, identity_type_header(), with_identity_headers()
 
-### Community 729 - "Providers Routing"
+### Community 762 - "Routing"
 Cohesion: 0.53
 Nodes (4): Option, infer_provider_kind(), ProviderKind, split_explicit_provider()
 
-### Community 730 - "Test Support Orchestrator Fixture"
+### Community 763 - "Serializedtest<'a>"
 Cohesion: 0.33
 Nodes (5): Deref, Target, Deref, SerializedTest<'a>, Target
 
-### Community 731 - "Artifacts Definition Roundtrip"
+### Community 764 - "Vec"
 Cohesion: 0.33
-Nodes (3): draft_allows_unresolved_refs_but_published_rejects_them(), prompt_examples_parse_as_draft_artifacts(), workflow_validation_rejects_duplicate_node_ids()
+Nodes (6): RegisteredService, Vec, Deployment, RegisteredService, Deployment, DeploymentsResponse
 
-### Community 732 - "Auth Schema"
+### Community 766 - "Schema"
 Cohesion: 0.60
 Nodes (4): ApiKeyError, PgPool, Result, migrate()
 
-### Community 733 - "Brain Memory"
+### Community 767 - "Btreemap"
 Cohesion: 0.40
-Nodes (5): CachedHybridRetriever, CachedHybridRetriever, GraphStore, GraphStore, ScopedRetrievalRuntime
+Nodes (5): BTreeMap, ManifestFile, ManifestSignature, ManifestSubject, Manifest
 
-### Community 734 - "Memory Llm Client"
+### Community 768 - "Cohereassistantmessage"
 Cohesion: 0.40
 Nodes (5): CohereChatContent, CohereChatMessage, Vec, CohereAssistantMessage, CohereChatRequest
 
-### Community 735 - "Hands Dispatch"
-Cohesion: 0.50
-Nodes (3): Arc, MCPClient, HashMap
-
-### Community 736 - "Auth Schema"
+### Community 769 - "Schema"
 Cohesion: 0.50
 Nodes (4): MigrateError, PgPool, Result, migrate()
 
-### Community 737 - "Auth Schema"
+### Community 770 - "Schema"
 Cohesion: 0.60
 Nodes (4): AuthzError, PgPool, Result, migrate()
 
-### Community 738 - "Eval"
+### Community 771 - "Record Session Created()"
+Cohesion: 0.40
+Nodes (5): SessionStatus, TenantId, WorkspaceId, record_session_created(), session_status_label()
+
+### Community 772 - "Mod"
 Cohesion: 0.60
 Nodes (4): FnMut, Path, kernel_sources_never_import_memory_eval(), visit_rust_files()
 
-### Community 739 - "Eval Metrics"
-Cohesion: 0.50
-Nodes (4): From, LegSources, Self, CandidateLegs
+### Community 773 - "Scoresummaryrow"
+Cohesion: 0.40
+Nodes (5): ExperimentScoreSummaryRow, ExperimentScoreSummaryRow, ScoreSummaryRow, experiment_score_summary_row(), experiment_score_summary_row()
 
-### Community 740 - "Hands Tests"
+### Community 774 - "Experiment Variant Score Delta Row()"
+Cohesion: 0.50
+Nodes (5): ExperimentVariantScoreDeltaRow, ExperimentVariantScoreDeltaRow, experiment_variant_score_delta_row(), experiment_variant_score_delta_row(), VariantScoreDeltaRow
+
+### Community 775 - "Tests"
 Cohesion: 0.60
 Nodes (4): String, Value, encode_test_envelopes(), provisions_executes_and_destroys_sandbox()
 
-### Community 741 - "Lineage Schema"
+### Community 776 - "Schema"
 Cohesion: 0.60
 Nodes (3): PgPool, Result, ensure_schema()
 
-### Community 742 - "Ocsf Schema"
+### Community 777 - "Upsert Node Embedding()"
+Cohesion: 0.40
+Nodes (5): NodeEmbeddingIntent, VectorStore, NodeEmbeddingIntent, require_vector_store(), upsert_node_embedding()
+
+### Community 778 - "Contact Write Db Memory"
+Cohesion: 0.50
+Nodes (4): NodeWriteIntent, TenantId, contact_scoped_graph_write_sets_contact_and_blocks_other_contact_db_memory(), node_intent()
+
+### Community 779 - "Schema"
 Cohesion: 0.50
 Nodes (4): MigrateError, PgPool, Result, migrate()
 
-### Community 743 - "Orchestrator Schema"
+### Community 780 - "Schema"
 Cohesion: 0.50
 Nodes (4): MigrateError, PgPool, Result, migrate()
 
-### Community 744 - "Orchestrator Authz Challenges Reaper"
-Cohesion: 0.40
-Nodes (4): JoinHandle, Option, Sender, AuthzChallengeReaperHandle
-
-### Community 745 - "Orchestrator Inner"
-Cohesion: 0.40
-Nodes (3): GetLearningCandidateRequest, LearningCandidate, ListLearningCandidatesRequest
-
-### Community 746 - "Orchestrator Turn Execution"
+### Community 781 - "Approvaloutcome"
 Cohesion: 0.60
 Nodes (3): Self, ToolOutput, ApprovalOutcome
 
-### Community 747 - "Orchestrator Scim Compliance Live"
-Cohesion: 0.50
-Nodes (4): String, StatusCode, required_env(), scim_user_lifecycle_smoke()
-
-### Community 749 - "Providers Response"
+### Community 783 - "Response"
 Cohesion: 0.50
 Nodes (3): stop_reason_from_anthropic(), StopReason, String
 
-### Community 750 - "Orchestrator Eval"
-Cohesion: 0.50
-Nodes (4): BoxFuture, T, block_on_current_thread(), StdResult
-
-### Community 751 - "Core Wire"
+### Community 784 - "Checkpointrollbackresponse"
 Cohesion: 0.67
 Nodes (4): CheckpointHandle, CheckpointHandle, CheckpointCreateResponse, CheckpointRollbackResponse
 
-### Community 752 - "Providers Http"
+### Community 785 - "Http"
 Cohesion: 0.67
 Nodes (3): build_http_client(), Client, Result
 
-### Community 753 - "Brain"
-Cohesion: 0.50
-Nodes (3): CompletionRequest, CompletionStream, Result
-
-### Community 754 - "Brain"
+### Community 786 - "Event Record()"
 Cohesion: 0.50
 Nodes (4): Event, EventRecord, SessionId, event_record()
 
-### Community 755 - "Core Runtime Metrics"
-Cohesion: 0.50
-Nodes (4): SessionStatus, WorkspaceId, record_session_created(), session_status_label()
-
-### Community 756 - "Core Embedding"
+### Community 787 - "Embedding"
 Cohesion: 0.50
 Nodes (3): Send, Sync, EmbeddingProvider
 
-### Community 757 - "Orchestrator Eval"
+### Community 788 - "Reporter"
 Cohesion: 0.50
-Nodes (4): ScoreSummary, EvalScoresResponse, ScoreSummary, eval_scores_response_from_summary()
+Nodes (3): Send, Sync, Reporter
 
-### Community 758 - "Orchestrator Turn Execution"
+### Community 789 - "Coherejudge"
+Cohesion: 0.83
+Nodes (3): LlmChatClient, LlmChatClient, CohereJudge
+
+### Community 790 - "Evalerror"
+Cohesion: 0.50
+Nodes (4): EvalError, MoaError, EvalError, map_eval_error()
+
+### Community 791 - "Score Row()"
+Cohesion: 0.50
+Nodes (4): ExperimentScoreSummaryRow, Into, ExperimentScoreSummaryRow, score_row()
+
+### Community 792 - ".complete()"
+Cohesion: 0.50
+Nodes (3): CompletionRequest, CompletionStream, Result
+
+### Community 793 - "Actionpolicyrulestore"
 Cohesion: 0.67
-Nodes (4): TurnOutcomeKind, TurnOutcomeKind, BodyOutcome, turn_outcome_kind_label()
+Nodes (4): Send, Sync, ActionPolicyRuleStore, ApprovalRuleStore
 
-### Community 759 - "Session Error"
+### Community 794 - "Error"
 Cohesion: 0.50
 Nodes (3): Error, MoaError, map_sqlx_error()
 
-### Community 760 - "Test Support Orchestrator Fixture"
-Cohesion: 0.67
-Nodes (4): Response, Response, ensure_success(), response_json_or_error()
+### Community 795 - "Subagentimpl"
+Cohesion: 0.50
+Nodes (4): execute_delegation_tool, SessionImpl, validate_dispatch_limits, SubAgentImpl
 
-### Community 761 - "Skills Registry"
+### Community 796 - "Distill Skill With Learning"
 Cohesion: 0.50
 Nodes (4): distill_skill_with_learning, improve_skill_with_learning, SkillRegistry::load_for_scope, SkillRegistry::upsert_by_name
 
-### Community 762 - "Ocsf Enums"
+### Community 797 - "Emit Authn Success"
 Cohesion: 0.50
 Nodes (4): emit_authn_success, category_uid, class_uid, severity_id
 
-### Community 763 - "Orchestrator Experiments"
+### Community 798 - "Experiment Compare Row()"
 Cohesion: 0.67
 Nodes (4): ExperimentCompareRow, ScoreCompareRow, experiment_compare_row(), experiment_compare_row()
 
-### Community 764 - "Orchestrator Experiments"
+### Community 799 - "Experiment Scenario Score Delta Row()"
 Cohesion: 0.67
 Nodes (4): ExperimentScenarioScoreDeltaRow, ScenarioScoreDeltaRow, experiment_scenario_score_delta_row(), experiment_scenario_score_delta_row()
 
-### Community 765 - "Orchestrator Experiments"
+### Community 800 - "Scenarioscoresummary"
 Cohesion: 0.67
-Nodes (4): ExperimentVariantScoreDeltaRow, experiment_variant_score_delta_row(), experiment_variant_score_delta_row(), VariantScoreDeltaRow
+Nodes (4): ExperimentScenarioScoreSummary, ScenarioScoreSummary, experiment_scenario_score_summary(), experiment_scenario_score_summary()
 
-### Community 766 - "Brain Hybrid Retrieval Db Memory"
+### Community 801 - "Hybridretriever"
 Cohesion: 0.50
 Nodes (4): hybrid_retrieval_db_memory_returns_fused_annotated_results, query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in, HybridRetriever, turbopuffer_live_news_ingest_promote_and_retrieve
 
-### Community 768 - "Orchestrator"
+### Community 803 - "Subagentturnexecution Workflow"
 Cohesion: 0.50
 Nodes (4): SessionStore Service, SubAgentTurnExecution Workflow, ToolExecutor Service, WorkspaceStore Service
 
-### Community 769 - "Brain Test Support"
+### Community 804 - "Older Time"
 Cohesion: 0.50
 Nodes (4): fixed_time, older_time, skills, test_skill
 
-### Community 770 - "Session Action Policy"
+### Community 806 - "Postgressessionstore (action Policy)"
 Cohesion: 0.67
 Nodes (3): PostgresSessionStore (Action Policy), ActionPolicyRuleStore, action_policy_rule_from_row
 
-### Community 773 - "Core Wire"
+### Community 809 - "Updatelearningcandidatestatusrequest"
 Cohesion: 0.67
 Nodes (3): LearningCandidateStatusUpdate, LearningCandidateStatusUpdate, UpdateLearningCandidateStatusRequest
 
-### Community 776 - "Orchestrator Skill Regression"
+### Community 811 - "Is Terminal Phase()"
 Cohesion: 0.67
-Nodes (3): EvalResult, EvalResult, result_score()
+Nodes (3): TurnPhase, TurnPhase, is_terminal_phase()
 
-### Community 777 - "Security Policies"
+### Community 813 - "Expectations"
 Cohesion: 0.67
-Nodes (3): Send, Sync, ApprovalRuleStore
+Nodes (3): BudgetExpectations, FunctionalExpectations, Expectations
 
-### Community 778 - "Skills Proposals"
-Cohesion: 0.67
-Nodes (3): Error, MoaError, map_sqlx_error()
-
-### Community 779 - "Skills Proposals"
-Cohesion: 0.67
-Nodes (3): NewArtifactFile, ValidatedSkillPackageFile, artifact_file_from_skill_file()
-
-### Community 780 - "Orchestrator Plan Expansion"
+### Community 814 - "Run Experiment Plan"
 Cohesion: 0.67
 Nodes (3): ExperimentTrialRun::run, dispatch_plan_trials, run_experiment_plan
 
-### Community 782 - "Orchestrator Action Reviews"
+### Community 817 - "Moa Orchestrator/src/services/action Rev"
 Cohesion: 0.67
 Nodes (3): moa-orchestrator/src/services/action_reviews.rs, moa-orchestrator/src/objects/workspace.rs, moa-orchestrator/src/services/workspace_store.rs
 
 ## Knowledge Gaps
-- **4107 isolated node(s):** `Vec`, `Vec`, `ConnectorActionDefinition`, `String`, `Option` (+4102 more)
+- **4358 isolated node(s):** `Vec`, `Vec`, `ConnectorActionDefinition`, `String`, `Option` (+4353 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **163 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **164 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Deserialize` connect `Skills` to `Hands File Outline`, `Orchestrator`, `Memory Slow Path Orchestration Db Memory`, `Orchestrator Endpoint`, `Eval Golden Eval`, `Xtask Check Eval Budgets`, `Auth Http`, `Auth Auth0 Provider`, `Providers Streaming`, `Hands Session Search`, `Memory Openai Filter`, `Test Support Orchestrator Fixture`, `Messaging Twilio`, `Lineage Signing`, `Providers Registry`, `Core Env Overlay`, `Memory Llm Extractor`, `Hands`, `Eval Long Conversation Smoke Eval`, `Hands File Search`, `Artifacts Reference`, `Auth Oidc Provider`, `Memory Extract`, `Hands File Read`, `Lineage Merkle`, `Orchestrator Turn Execution Smoke Servic`, `Hands Tool Result`, `Orchestrator Users`, `Hands File Write`, `Orchestrator Groups`, `Orchestrator Llm Gateway`, `Orchestrator Patch`, `Orchestrator Eval`, `Session Neon Branch Manager Live`, `Memory Turbopuffer`, `Edge Routes`, `Brain Postprocess`, `Hands Str Replace`, `Orchestrator Session Turn Lifecycle Serv`, `Auth Vault`, `Hands Bash`, `Auth Ciba`?**
-  _High betweenness centrality (0.138) - this node is a cross-community bridge._
-- **Why does `Uuid` connect `Gateway Approval` to `Brain Memory`, `Skills Artifact`, `Eval Setup`, `Brain Cache Audit Live`, `Eval Generator`, `Loadtest Config`, `Session Audit Smoke Db`, `Orchestrator Consolidate`, `Auth Builtin Authz Request Db`, `Test Support Orchestrator Fixture`, `Brain Segments`, `Auth Outbox`, `Session Testing`, `Gateway Slack`, `Eval Long Conversation Smoke Eval`, `Orchestrator Tool Executor`, `Brain`, `Brain Tool Dispatch`, `Eval Corpus`, `Gateway`, `Eval Long Conversation Smoke Eval`, `Skills`, `Session`, `Orchestrator Authz Challenges Reaper`, `Orchestrator Skill Regression`, `Orchestrator Tool Executor`, `Core Analytics`, `Orchestrator Turn Execution Smoke Servic`, `Orchestrator Lineage Admin`, `Auth Support`, `Auth Poller Live`, `Eval Long Conversation Foundation Eval`, `Orchestrator Llm Gateway`, `Brain Brain Turn Db`, `Messaging Delivery Offline`, `Ocsf Support`, `Skills Distiller`, `Messaging Action Review`, `Session Neon Branch Manager Live`, `Skills Registry Db Memory`, `Orchestrator Workspace`, `Brain Lineage`, `Memory Digest Postgres Db Memory`, `Eval Transcript Runner`, `Orchestrator Scim Compliance Live`, `Orchestrator Approval Flow E2E`, `Security Policies`, `Orchestrator Skill Learning Workflow`, `Test Support Postgres`?**
-  _High betweenness centrality (0.135) - this node is a cross-community bridge._
-- **Why does `OrchestratorCtx` connect `Orchestrator Authz Admin` to `Orchestrator Contacts`, `Orchestrator Analytics`, `Orchestrator Action Reviews`, `Orchestrator Consolidate`, `Orchestrator Memory`, `Orchestrator Api Keys`, `Orchestrator Experiment Run`, `Orchestrator Admin Maintenance`, `Orchestrator Learning Review`, `Orchestrator Privacy`, `Orchestrator Experiments`, `Orchestrator Experiment Trial Run`, `Orchestrator Skills`, `Orchestrator Skill Learning`, `Orchestrator Request`, `Orchestrator Tool Executor`, `Orchestrator Brain Bridge`, `Orchestrator Artifacts`, `Orchestrator Lineage Admin`, `Orchestrator Turn Execution`, `Orchestrator Eval`, `Orchestrator Neon Maint`, `Orchestrator Workspace`, `Orchestrator Authz Challenges`, `Orchestrator Audit`, `Orchestrator Agents`, `Orchestrator Workflows`, `Orchestrator Deps`, `Orchestrator Tenants`?**
-  _High betweenness centrality (0.099) - this node is a cross-community bridge._
-- **Are the 175 inferred relationships involving `annotate_restate_handler_span()` (e.g. with `.configure()` and `.pause()`) actually correct?**
-  _`annotate_restate_handler_span()` has 175 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `Uuid` connect `Approval` to `Memory Eval Corpus Generator`, `Service Entrypoints & Probes`, `Graph Memory Consolidation`, `Agent Definitions Deploy`, `Cross-Tenant Pentest`, `Restate Runtime Harness`, `Messaging Send & Rate Limiting`, `Postgres`, `Skill Graph`, `Transcript Runner`, `Twilio SMS Client`, `Skills Import Service`, `Session`, `Workspace`, `Long Conversation Smoke Eval`, `Cache`, `Mod`, `Experience`, `Tool Executor`, `Mod`, `Experience`, `Corpus`, `Skill Regression`, `Setup`, `Mpsc Sink`, `Mod`, `Distiller`, `Tool Result`, `Contact`, `Ranking`, `Memory`, `Action Review`, `Orchestrator Fixture`, `Analytics`, `Eval Service`, `Disabled`, `Brain Turn Db`, `Analytics`, `Turbopuffer News Live`, `Session Vo`, `Lineage`, `Slack`, `Llm Gateway`, `Audit Smoke Db`, `Tool Dispatch`, `Cache Audit Live`, `Llm Extractor`, `Builtin Authz Request Db`, `Testing`, `Recorded`, `Tool Executor`, `Artifact`, `Postgres Store Db`, `Mcp Router`, `Support`, `Registry`, `Support`, `Ctx`, `Policies`, `Lessons`, `Authz Challenges Reaper`, `Contact Write Db Memory`, `Lineage Admin`, `Neon Branch Manager Live`, `Scope`, `Skill Learning Workflow`, `Registry Db Memory`, `Outbox Basic Db`, `Mod`, `Turn Execution Smoke Service E2e`, `Agent Instructions`, `Mod`, `Digest Postgres Db Memory`, `Attribution`, `Oidc Provider`, `Long Conversation Foundation Eval`, `Delivery Offline`, `Daytona Live`, `Session Store Db`, `Events Concurrent Monotonicity Db`, `Candidates`, `E2b Live`, `Lineage Postgres Db`?**
+  _High betweenness centrality (0.188) - this node is a cross-community bridge._
+- **Why does `Json` connect `Turn Execution & Tool Calls` to `Brain Turn Db`, `Lessons`, `Agent Revision Simulation Db Memory`, `Experiment Improvement Admission`, `Privacy Service Db Memory`, `Gold Fact Resolution`, `Require Helpers`, `Contact Write Db Memory`, `Artifact Skill Injection Db Memory`, `Mod`, `Local Tools Db`, `Skill Package Materialization Db Memory`, `Scripted User Mode Eval`, `Restate Runtime Harness`, `Skill Learning Review`, `Replay Determinism`, `Messaging Send & Rate Limiting`, `Twilio SMS Client`, `Deterministic`, `Observability`, `Long Conversation Smoke Eval`, `Tools`, `Tests`, `Slack`, `Quality Postgres Db Memory`, `.progress()`, `Proposals`, `Mod`, `Skill Learning Workflow`, `Digest`, `Changelog Outbox Db Memory`, `Read Smoke Db Memory`, `Mod`, `Registry Db Memory`, `Test Support`, `Runner`, `Mod`, `Postgres Store Db`, `Concurrent Writers Db Memory`, `Delivery Offline`, `Experiment Agent Loop E2e`, `Fast Path Db Memory`, `Lexical Ranking Db Memory`, `Experiment Store Db`, `Mcp Router`, `Sub Agent Delegation`, `Mod`, `Collector`, `Daytona Live`, `Pipeline Stages Db Memory`, `Entity Resolution`, `Plan Expansion`, `Experiment Service`, `Stable Prefix Db Memory`, `Hybrid Retrieval Db Memory`, `Write Protocol Db Memory`, `Util`, `Instrumentation`, `Ranking`, `Digest Postgres Db Memory`, `Resolver Db Memory`, `Candidates`, `Action Policy Flow E2e`, `Orchestrator Fixture`, `Consolidate`, `Analytics`, `Eval Service`, `E2b Live`, `Model`, `App`, `Revision History Db Memory`?**
+  _High betweenness centrality (0.164) - this node is a cross-community bridge._
+- **Why does `Deserialize` connect `Auth0 Provider` to `Env Overlay`, `Postprocess`, `Service Entrypoints & Probes`, `File Outline`, `Check Eval Budgets`, `Endpoint`, `Vault`, `Openai Filter`, `Twilio SMS Client`, `Neon Branch Manager Live`, `Bash`, `Slow Path Orchestration Db Memory`, `Long Conversation Smoke Eval`, `Reference`, `Mod`, `Http`, `Routes`, `Golden Eval`, `Llm Gateway`, `Session Search`, `Mod`, `Streaming`, `Llm Extractor`, `File Search`, `Registry`, `Signing`, `Turbopuffer`, `Oidc Provider`, `File Write`, `Users`, `Extract`, `Tool Result`, `Groups`, `Merkle`, `Turn Execution Smoke Service E2e`, `Eval`, `Patch`, `File Read`, `Ciba`, `Orchestrator Fixture`, `Str Replace`, `Session Turn Lifecycle Service E2e`?**
+  _High betweenness centrality (0.112) - this node is a cross-community bridge._
+- **Are the 202 inferred relationships involving `annotate_restate_handler_span()` (e.g. with `.configure()` and `.pause()`) actually correct?**
+  _`annotate_restate_handler_span()` has 202 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `Vec`, `Vec`, `ConnectorActionDefinition` to the rest of the system?**
-  _4107 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `Orchestrator Contacts` be split into smaller, more focused modules?**
-  _Cohesion score 0.06581709145427286 - nodes in this community are weakly interconnected._
-- **Should `Experiments` be split into smaller, more focused modules?**
-  _Cohesion score 0.049959049959049956 - nodes in this community are weakly interconnected._
+  _4358 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `Memory Eval Corpus Generator` be split into smaller, more focused modules?**
+  _Cohesion score 0.0520471894517696 - nodes in this community are weakly interconnected._
+- **Should `Contact Verification` be split into smaller, more focused modules?**
+  _Cohesion score 0.06177698270721527 - nodes in this community are weakly interconnected._

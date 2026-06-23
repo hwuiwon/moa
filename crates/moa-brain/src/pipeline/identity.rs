@@ -140,8 +140,8 @@ impl ContextProcessor for IdentityProcessor {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
-        UserId, WorkspaceId,
+        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
+        ToolCallFormat,
     };
 
     use super::*;
@@ -150,8 +150,7 @@ mod tests {
     async fn identity_processor_appends_system_prompt() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
@@ -190,8 +189,7 @@ mod tests {
     async fn identity_prompt_includes_coding_guardrails() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()

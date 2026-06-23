@@ -9,17 +9,16 @@ MOA is a cloud-first, Rust-based, multi-tenant AI agent operations platform for 
 The core product model is:
 
 ```text
-Platform
-  -> Tenant (team)
-       -> Users
-       -> Workspaces
-       -> Admin controls
-       -> Task segments
-       -> Experience records and learning candidates
-       -> Learning log
-       -> Lineage and audit evidence
-       -> Tenant knowledge and skills
+workspace
+  -> tenant
+       -> contact
+            -> session
 ```
+
+The workspace is the global control plane and inherited default scope. The
+tenant is the hard runtime isolation boundary. Contacts are end users inside a
+tenant, while users are admin/operator principals who manage or operate the
+workspace and tenants.
 
 MOA is not a personal assistant or chat wrapper. It is an execution platform with durable orchestration, an auditable event log, graph memory, evidence-backed task segment assessment, and a tenant-scoped learning pipeline.
 
@@ -31,8 +30,9 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 - **Per-tenant learning:** task outcomes become experience records, attributions, candidates, skill changes, and memory updates at tenant scope without requiring a fixed session intent taxonomy.
 - **Learning log:** every learned pattern, segment assessment, memory update, and skill change can be audited and invalidated by version or batch.
 - **Lineage and audit:** retrieval, context, generation, scores, DSAR exports, and optional compliance audit records are first-class operational artifacts.
-- **Tenant knowledge:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval. Workspace administration controls access to tenant resources; it is not a separate memory product layer.
+- **Tenant knowledge:** graph memory stores facts, decisions, lessons, sources, and provenance while Postgres sidecars and pgvector provide retrieval. Contact memory is contact-local and does not inherit tenant memory or another contact's memory.
 - **Skills:** successful workflows can become reusable Agent Skills; ranking improves as segment outcomes accumulate.
+- **Default inheritance:** workspace-level skills and policies are inherited defaults for tenants; tenant-level rows override those defaults.
 - **Pluggable execution:** local hands, Docker, Daytona, E2B, and MCP servers are routed through one tool abstraction.
 - **Multiple interfaces:** REST/gateway, API automation, and messaging adapters all talk to the same session model.
 
@@ -40,7 +40,7 @@ MOA is not a personal assistant or chat wrapper. It is an execution platform wit
 
 1. **Durability before cleverness.** A session should recover from crashes, pauses, and human approval waits without losing state.
 2. **Inspectable state.** Product-visible facts live in queryable stores: Postgres tables, graph memory records, event records, and learning-log entries.
-3. **Tenant control.** Learned behavior must be scoped and reviewable. Platform-wide defaults are libraries to adopt, not policies to impose.
+3. **Tenant control.** Learned behavior must be scoped and reviewable. Tenant learning is tenant-local and never globally promoted; workspace defaults are libraries to adopt, not policies to impose.
 4. **Blank-slate learning.** A new tenant should not inherit another team's assumptions. Useful behavior emerges from its own conversations and explicit admin choices.
 5. **Small stable abstractions.** Traits in `moa-core` define the boundaries; implementations can differ between local and cloud runtimes.
 6. **Progressive context.** The pipeline keeps stable prefix content cacheable and loads expensive dynamic context only when it matters.

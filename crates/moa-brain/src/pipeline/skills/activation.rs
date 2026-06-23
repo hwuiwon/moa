@@ -41,8 +41,9 @@ impl SkillInjector {
         let Some(session_store) = &self.session_store else {
             return Ok(HashMap::new());
         };
+        let tenant_id = ctx.tenant_id.to_string();
         let rates = session_store
-            .list_skill_resolution_rates(ctx.workspace_id.as_str())
+            .list_skill_resolution_rates(&tenant_id)
             .await?;
         Ok(skill_resolution_rate_map(&rates))
     }
@@ -57,8 +58,9 @@ impl SkillInjector {
         let Some(fingerprint) = task_fingerprint_for_context(ctx) else {
             return Ok(HashMap::new());
         };
+        let tenant_id = ctx.tenant_id.to_string();
         let rates = session_store
-            .list_task_strategy_success_rates(ctx.workspace_id.as_str(), &fingerprint.hash)
+            .list_task_strategy_success_rates(&tenant_id, &fingerprint.hash)
             .await?;
         Ok(task_strategy_success_rate_map(&rates))
     }

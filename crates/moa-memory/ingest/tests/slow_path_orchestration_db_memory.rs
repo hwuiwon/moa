@@ -15,7 +15,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use support::{
-    SLOW_PATH_USER_ID, TEST_LOCK, active_user_entity_rows, active_user_fact_rows,
+    SLOW_PATH_CONTACT_ID, TEST_LOCK, active_user_entity_rows, active_user_fact_rows,
     active_workspace_entity_rows, active_workspace_fact_rows, configured_test_db,
     contradiction_edge_count, create_changelog_payloads, create_fact, entity_resolution_edges,
     entity_rows, fact_rows, fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence,
@@ -95,7 +95,7 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
             expected.confidence
         );
         assert_eq!(row.scope.as_str(), "user");
-        assert_eq!(row.user_id.as_deref(), Some(SLOW_PATH_USER_ID));
+        assert_eq!(row.user_id.as_deref(), Some(SLOW_PATH_CONTACT_ID));
     }
     assert_eq!(
         active_user_entity_rows(test_db.store().pool(), workspace_id)
@@ -126,7 +126,7 @@ async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
         ctx,
         turn(
             workspace_id,
-            "Fact: editor_theme uses solarized\nFact: user private shell uses zsh\nFact: workspace shared API runs_on_port 3000",
+            "Fact: editor_theme uses solarized\nFact: contact private shell uses zsh\nFact: tenant shared API runs_on_port 3000",
             10,
         ),
     )
@@ -151,8 +151,8 @@ async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
             ))
             .collect::<Vec<_>>(),
         vec![
-            ("editor_theme", "user", Some(SLOW_PATH_USER_ID)),
-            ("shell", "user", Some(SLOW_PATH_USER_ID)),
+            ("editor_theme", "contact", Some(SLOW_PATH_CONTACT_ID)),
+            ("shell", "contact", Some(SLOW_PATH_CONTACT_ID)),
         ]
     );
     assert_eq!(workspace_rows[0].name, "API");
@@ -396,7 +396,7 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
 
 #[tokio::test]
 async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
-    // Pins: slow-path ingestion links user fact endpoints to user-scoped Entity nodes.
+    // Pins: slow-path ingestion links contact fact endpoints to contact-scoped Entity nodes.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
@@ -486,7 +486,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
         ctx.clone(),
         turn(
             workspace_id,
-            "Fact: workspace shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
+            "Fact: tenant shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
             10,
         ),
     )
@@ -496,7 +496,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
         ctx,
         turn(
             workspace_id,
-            "Fact: workspace shared lib-audit-wire-test owned_by is profile-experience-test.",
+            "Fact: tenant shared lib-audit-wire-test owned_by is profile-experience-test.",
             11,
         ),
     )

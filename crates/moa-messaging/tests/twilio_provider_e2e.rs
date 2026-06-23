@@ -16,8 +16,7 @@ use moa_messaging::{
     TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
     TWILIO_AUTH_TOKEN_ENV, TWILIO_AUTH_TOKEN_SERVICE, TWILIO_FROM_NUMBER_ENV,
     TWILIO_FROM_NUMBER_SERVICE, TWILIO_MESSAGING_SERVICE_SID_ENV,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TWILIO_SID_ENV, TwilioSmsClient, TwilioSmsMessage,
-    TwilioSmsSendResult,
+    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsMessage, TwilioSmsSendResult,
 };
 use tokio::time::sleep;
 
@@ -113,7 +112,7 @@ impl LocalTwilioEnv {
         let test_to = optional_local_env(TWILIO_TEST_TO_ENV)
             .map(|value| normalize_us_test_number(&value))
             .filter(|value| !value.trim().is_empty())?;
-        let account_sid = required_any_local_env(&[TWILIO_ACCOUNT_SID_ENV, TWILIO_SID_ENV]);
+        let account_sid = required_local_env(TWILIO_ACCOUNT_SID_ENV);
         let auth_token = optional_local_env(TWILIO_AUTH_TOKEN_ENV);
         let api_key_sid = optional_local_env(TWILIO_API_KEY_SID_ENV)
             .or_else(|| optional_local_env(TWILIO_API_KEY_ENV));
@@ -217,11 +216,8 @@ fn local_env_bool(name: &str) -> bool {
     )
 }
 
-fn required_any_local_env(names: &[&str]) -> String {
-    names
-        .iter()
-        .find_map(|name| optional_local_env(name))
-        .unwrap_or_else(|| panic!("{LIVE_FLAG_ENV}=1 requires one of {}", names.join(", ")))
+fn required_local_env(name: &str) -> String {
+    optional_local_env(name).unwrap_or_else(|| panic!("{LIVE_FLAG_ENV}=1 requires {name}"))
 }
 
 fn optional_local_env(name: &str) -> Option<String> {

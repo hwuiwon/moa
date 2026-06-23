@@ -3,9 +3,16 @@
 use super::*;
 
 fn validate_session_create_meta(meta: &SessionMeta) -> Result<()> {
-    if meta.user_id.as_str().trim().is_empty() {
+    if meta.contact.is_none() && meta.created_by.is_none() {
         return Err(MoaError::ValidationError(
-            "session creation requires a non-empty user_id".to_string(),
+            "session creation requires contact or creator attribution".to_string(),
+        ));
+    }
+    if let Some(contact) = &meta.contact
+        && contact.tenant_id != meta.tenant_id
+    {
+        return Err(MoaError::ValidationError(
+            "session contact tenant_id must match session tenant_id".to_string(),
         ));
     }
     if meta.agent_context.is_none() {
@@ -30,18 +37,20 @@ impl PostgresSessionStore {
     ) -> Result<moa_core::SessionId> {
         validate_session_create_meta(&meta)?;
         let session_id = meta.id;
-        let workspace_id = meta.workspace_id.clone();
-        let user_id = meta.user_id.clone();
+        let tenant_id = meta.tenant_id;
+        let tenant_storage_key = tenant_id.to_string();
+        let actor_storage_key = session_actor_storage_key(meta.created_by.as_ref());
         let status = meta.status.clone();
         let agent_context = meta.agent_context.clone();
         let sessions = self.table_name("sessions");
         sqlx::query(&format!(
             "INSERT INTO {sessions} ({SESSION_INSERT_COLUMNS}) VALUES \
-             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)"
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)"
         ))
         .bind(session_id.0)
-        .bind(meta.workspace_id.to_string())
-        .bind(meta.user_id.to_string())
+        .bind(tenant_id.0)
+        .bind(tenant_storage_key.as_str())
+        .bind(actor_storage_key.as_str())
         .bind(meta.title)
         .bind(meta.status.as_str())
         .bind(meta.channel.as_str())
@@ -52,7 +61,7 @@ impl PostgresSessionStore {
         .bind(meta.completed_at)
         .bind(meta.parent_session_id.map(|value| value.0))
         .bind(meta.contact.as_ref().map(|contact| contact.contact_id.0))
-        .bind(meta.contact.as_ref().map(|contact| contact.tenant_id))
+        .bind(meta.contact.as_ref().map(|contact| contact.tenant_id.0))
         .bind(meta.contact.as_ref().map(|contact| contact.state.as_str()))
         .bind(
             meta.contact
@@ -95,13 +104,13 @@ impl PostgresSessionStore {
             self.insert_session_agent_context_in_tx(
                 tx,
                 session_id,
-                &workspace_id,
-                &user_id,
+                tenant_id,
+                actor_storage_key.as_str(),
                 agent_context,
             )
             .await?;
         }
-        record_session_created(&workspace_id, &status);
+        record_session_created(&tenant_id, &status);
 
         Ok(session_id)
     }
@@ -110,8 +119,8 @@ impl PostgresSessionStore {
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
         session_id: moa_core::SessionId,
-        workspace_id: &WorkspaceId,
-        user_id: &moa_core::UserId,
+        tenant_id: moa_core::TenantId,
+        actor_storage_key: &str,
         context: &moa_core::AgentContext,
     ) -> Result<()> {
         let table = self.table_name("session_agent_context");
@@ -127,8 +136,8 @@ impl PostgresSessionStore {
             "#
         ))
         .bind(session_id.0)
-        .bind(workspace_id.as_str())
-        .bind(user_id.as_str())
+        .bind(tenant_id.to_string())
+        .bind(actor_storage_key)
         .bind(context.agent_id)
         .bind(context.installation_uid)
         .bind(context.deployment_uid)
@@ -176,7 +185,7 @@ impl PostgresSessionStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(binding_id.0)
-        .bind(replacement.tenant_id)
+        .bind(replacement.tenant_id.0)
         .bind(replacement.workspace_id.as_str())
         .bind(replacement.session_id.0)
         .bind(replacement.contact_id.0)
@@ -195,12 +204,12 @@ impl PostgresSessionStore {
         let affected = sqlx::query(&format!(
             "UPDATE {sessions} \
              SET channel = $1, active_channel_binding_id = $2, updated_at = NOW() \
-             WHERE id = $3 AND workspace_id = $4"
+             WHERE id = $3 AND tenant_id = $4"
         ))
         .bind(replacement.channel_ref.channel().as_str())
         .bind(binding_id.0)
         .bind(replacement.session_id.0)
-        .bind(replacement.workspace_id.as_str())
+        .bind(replacement.tenant_id.0)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?
@@ -230,12 +239,11 @@ impl PostgresSessionStore {
                  contact_linked_ids = $5, \
                  contact_scopes = $6, \
                  contact_promoted_from_id = $7, \
-                 user_id = $8, \
-                 updated_at = $9 \
-             WHERE id = $10"
+                 updated_at = $8 \
+             WHERE id = $9"
         ))
         .bind(contact.contact_id.0)
-        .bind(contact.tenant_id)
+        .bind(contact.tenant_id.0)
         .bind(contact.state.as_str())
         .bind(contact.canonical_contact_id.map(|id| id.0))
         .bind(
@@ -247,7 +255,6 @@ impl PostgresSessionStore {
         )
         .bind(contact.scopes)
         .bind(promoted_from.map(|id| id.0))
-        .bind(contact.contact_id.as_user_id().to_string())
         .bind(Utc::now())
         .bind(session_id.0)
         .execute(&self.pool)
@@ -418,6 +425,15 @@ fn session_actor_id(actor: &moa_core::SessionActorRef) -> Option<Uuid> {
     }
 }
 
+fn session_actor_storage_key(actor: Option<&moa_core::SessionActorRef>) -> String {
+    match actor {
+        Some(moa_core::SessionActorRef::Identity { id }) => format!("identity:{id}"),
+        Some(moa_core::SessionActorRef::Contact { id }) => format!("contact:{id}"),
+        Some(moa_core::SessionActorRef::Anonymous) => "anonymous".to_string(),
+        None => "system".to_string(),
+    }
+}
+
 #[async_trait]
 impl SessionStore for PostgresSessionStore {
     /// Creates a new session record.
@@ -462,7 +478,7 @@ impl SessionStore for PostgresSessionStore {
         let events = self.table_name("events");
 
         let locked_session = sqlx::query(&format!(
-            "SELECT event_count, workspace_id, user_id FROM {sessions} WHERE id = $1 FOR UPDATE"
+            "SELECT event_count, tenant_id, workspace_id, user_id, contact_id FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
         .bind(session_id.0)
         .fetch_optional(&mut *transaction)
@@ -472,22 +488,30 @@ impl SessionStore for PostgresSessionStore {
         let sequence_num = locked_session
             .try_get::<i64, _>("event_count")
             .map_err(map_sqlx_error)? as u64;
-        let workspace_id = locked_session
+        let tenant_id = locked_session
+            .try_get::<Uuid, _>("tenant_id")
+            .map_err(map_sqlx_error)?;
+        let legacy_workspace_key = locked_session
             .try_get::<String, _>("workspace_id")
             .map_err(map_sqlx_error)?;
-        let user_id = locked_session
+        let actor_storage_key = locked_session
             .try_get::<String, _>("user_id")
+            .map_err(map_sqlx_error)?;
+        let contact_id = locked_session
+            .try_get::<Option<Uuid>, _>("contact_id")
             .map_err(map_sqlx_error)?;
 
         sqlx::query(&format!(
             "INSERT INTO {events} \
-             (id, session_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+             (id, session_id, tenant_id, contact_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(event_id)
         .bind(session_id.0)
-        .bind(workspace_id)
-        .bind(user_id)
+        .bind(tenant_id)
+        .bind(contact_id)
+        .bind(legacy_workspace_key)
+        .bind(actor_storage_key)
         .bind(sequence_num as i64)
         .bind(event_type)
         .bind(Json(payload))
@@ -817,13 +841,13 @@ impl SessionStore for PostgresSessionStore {
             query.push(" AND e.session_id = ");
             query.push_bind(session_id.0);
         }
-        if let Some(workspace_id) = filter.workspace_id {
-            query.push(" AND s.workspace_id = ");
-            query.push_bind(workspace_id.to_string());
+        if let Some(tenant_id) = filter.tenant_id {
+            query.push(" AND e.tenant_id = ");
+            query.push_bind(tenant_id.0);
         }
-        if let Some(user_id) = filter.user_id {
-            query.push(" AND s.user_id = ");
-            query.push_bind(user_id.to_string());
+        if let Some(contact_id) = filter.contact_id {
+            query.push(" AND e.contact_id = ");
+            query.push_bind(contact_id.0);
         }
         if let Some(from_time) = filter.from_time {
             query.push(" AND e.timestamp >= ");
@@ -867,13 +891,26 @@ impl SessionStore for PostgresSessionStore {
             "SELECT {SESSION_SUMMARY_COLUMNS} FROM {sessions} WHERE TRUE"
         ));
 
-        if let Some(workspace_id) = filter.workspace_id {
-            query.push(" AND workspace_id = ");
-            query.push_bind(workspace_id.to_string());
+        if let Some(tenant_id) = filter.tenant_id {
+            query.push(" AND tenant_id = ");
+            query.push_bind(tenant_id.0);
         }
-        if let Some(user_id) = filter.user_id {
-            query.push(" AND user_id = ");
-            query.push_bind(user_id.to_string());
+        if let Some(contact_id) = filter.contact_id {
+            query.push(" AND contact_id = ");
+            query.push_bind(contact_id.0);
+        }
+        if let Some(created_by) = filter.created_by {
+            query.push(" AND created_by_actor_type = ");
+            query.push_bind(session_actor_type(&created_by));
+            match session_actor_id(&created_by) {
+                Some(actor_id) => {
+                    query.push(" AND created_by_actor_id = ");
+                    query.push_bind(actor_id);
+                }
+                None => {
+                    query.push(" AND created_by_actor_id IS NULL");
+                }
+            }
         }
         if let Some(status) = filter.status {
             query.push(" AND status = ");

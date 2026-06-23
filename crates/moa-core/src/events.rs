@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::types::{
     ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, Channel,
     ContactId, EventType, ModelId, ModelTier, SegmentId, SessionActorRef, SessionChannelBindingId,
-    SessionStatus, SubAgentId, SubAgentState, ToolCallId, ToolOutput, UserId, WorkspaceId,
+    SessionStatus, SubAgentId, SubAgentState, TenantId, ToolCallId, ToolOutput,
 };
 
 /// Append-only session event payload.
@@ -17,10 +17,14 @@ use crate::types::{
 pub enum Event {
     /// Session was created.
     SessionCreated {
-        /// Workspace identifier.
-        workspace_id: WorkspaceId,
-        /// User identifier.
-        user_id: UserId,
+        /// Tenant runtime boundary that owns the session.
+        tenant_id: TenantId,
+        /// Contact attached to the session, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contact_id: Option<ContactId>,
+        /// Actor that created the session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_by: Option<SessionActorRef>,
         /// Model identifier.
         model: ModelId,
         /// Initial delivery channel.
@@ -186,18 +190,18 @@ pub enum Event {
         /// Whether the failure is retryable.
         retryable: bool,
     },
-    /// A tool call was queued for workspace-admin action review.
+    /// A tool call was queued for tenant-admin action review.
     ActionReviewRequested {
-        /// Workspace-admin review identifier.
+        /// Tenant-admin review identifier.
         review_id: Uuid,
         /// Durable policy-facing action envelope.
         envelope: ActionEnvelope,
         /// Human-readable review preview.
         preview: ActionReviewPreview,
     },
-    /// A workspace-admin action review was decided.
+    /// A tenant-admin action review was decided.
     ActionReviewDecided {
-        /// Workspace-admin review identifier.
+        /// Tenant-admin review identifier.
         review_id: Uuid,
         /// Review decision.
         decision: ActionReviewDecision,
@@ -509,8 +513,10 @@ mod tests {
     ) -> ActionEnvelope {
         ActionEnvelope {
             review_id,
-            workspace_id: WorkspaceId::new("workspace-1"),
-            user_id: UserId::new("user-1"),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            requested_by: SessionActorRef::Identity {
+                id: Uuid::from_u128(2),
+            },
             session_id: Some(crate::types::SessionId::new()),
             sub_agent_id: None,
             tool_call_id: ToolCallId::from(review_id),
@@ -563,7 +569,7 @@ mod tests {
 
     #[test]
     fn action_review_requested_event_round_trips_full_payload() {
-        // Pins: workspace-admin action-review events preserve policy envelope and preview details.
+        // Pins: tenant-admin action-review events preserve policy envelope and preview details.
         let review_id = Uuid::now_v7();
         let event = Event::ActionReviewRequested {
             review_id,

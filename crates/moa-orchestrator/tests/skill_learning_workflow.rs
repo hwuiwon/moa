@@ -13,12 +13,12 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_brain::learning::attribution::attributions_for_experience;
 use moa_brain::learning::experience::experience_from_assessment;
 use moa_core::{
-    AssessmentPhase, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
-    CompletionStream, Event, LLMProvider, MemoryScope, MoaConfig, MoaError, ModelCapabilities,
-    ModelId, ModelTier, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionId, SessionMeta, SessionStatus,
-    SessionStore as _, StopReason, TaskSegment, TokenPricing, TokenUsage, ToolCallFormat,
-    ToolCallId, ToolOutput, UserId, WorkspaceId,
+    ActionRuleScope, AssessmentPhase, Attachment, Channel, CompletionContent, CompletionRequest,
+    CompletionResponse, CompletionStream, Event, LLMProvider, MoaConfig, MoaError,
+    ModelCapabilities, ModelId, ModelTier, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
+    SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionActorRef, SessionId, SessionMeta,
+    SessionStatus, SessionStore as _, StopReason, TaskSegment, TenantId, TokenPricing, TokenUsage,
+    ToolCallFormat, ToolCallId, ToolOutput, WorkspaceId,
 };
 use moa_orchestrator::workflows::skill_learning::{
     RunSkillLearningRequest, record_skill_learning_failure, run_skill_learning_for_experience,
@@ -192,17 +192,19 @@ mod skill_learning {
 
 async fn seed_experience_fixture(
     test_db: &moa_test_support::postgres::TestDb,
-    label: &str,
+    _label: &str,
 ) -> (MoaConfig, RunSkillLearningRequest, WorkspaceId) {
-    let workspace_id = WorkspaceId::new(format!("workspace-{label}-{}", Uuid::now_v7().simple()));
+    let tenant_id = TenantId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let creator_id = Uuid::now_v7();
     let session = SessionMeta {
         id: SessionId::new(),
-        workspace_id: workspace_id.clone(),
-        user_id: UserId::new("user-skill-learning"),
+        tenant_id,
         title: Some("Distill a reusable Rust workflow".to_string()),
         status: SessionStatus::Completed,
         channel: Channel::Chat,
         model: ModelId::new("scripted-skill-model"),
+        created_by: Some(SessionActorRef::Identity { id: creator_id }),
         ..SessionMeta::default()
     };
     test_db
@@ -420,9 +422,11 @@ fn skill_markdown(name: &str, description: &str, body: &str) -> String {
     )
 }
 
-fn workspace_scope(workspace_id: &WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
+fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+    ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(
+            Uuid::parse_str(workspace_id.as_str()).expect("test workspace id is tenant UUID"),
+        ),
     }
 }
 

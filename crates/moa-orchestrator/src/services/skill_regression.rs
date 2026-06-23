@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moa_artifacts::registry::ArtifactFile;
+use moa_core::{ActionRuleScope, LearningCandidate, MoaConfig, Result};
 #[cfg(feature = "internal-eval-runner")]
 use moa_core::{LLMProvider, MoaError, ModelTask};
-use moa_core::{LearningCandidate, MemoryScope, MoaConfig, Result};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::EvalEngine;
 #[cfg(feature = "internal-eval-runner")]
@@ -67,7 +67,7 @@ pub async fn skill_acceptance_regression_report(
     config: MoaConfig,
     #[cfg(feature = "internal-eval-runner")] providers: Arc<ProviderRegistry>,
     registry: SkillRegistry,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     candidate: LearningCandidate,
     draft_files: Vec<ArtifactFile>,
 ) -> Result<SkillRegressionGate> {
@@ -95,7 +95,7 @@ async fn internal_eval_regression_report(
     config: MoaConfig,
     providers: Arc<ProviderRegistry>,
     registry: SkillRegistry,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     candidate: LearningCandidate,
     draft_files: Vec<ArtifactFile>,
 ) -> Result<SkillRegressionGate> {
@@ -115,7 +115,7 @@ async fn internal_eval_regression_report_inner(
     config: MoaConfig,
     providers: Arc<ProviderRegistry>,
     registry: SkillRegistry,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     candidate: LearningCandidate,
     draft_files: Vec<ArtifactFile>,
 ) -> Result<SkillRegressionGate> {

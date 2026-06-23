@@ -5,9 +5,10 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFil
 use moa_artifacts::validation::validate_for_status;
 use moa_brain::pipeline::skills::{SELECTED_SKILL_NAMES_METADATA_KEY, SkillInjector};
 use moa_core::{
-    AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
-    ContextMessage, ContextProcessor, LockedToolRef, MemoryScope, ModelCapabilities,
-    ResolvedArtifactRevisionRef, Result, SessionMeta, UserId, WorkingContext, WorkspaceId,
+    ActionRuleScope, AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
+    AgentSkillPolicyMode, ContactId, ContactRef, ContactVerificationState, ContextMessage,
+    ContextProcessor, LockedToolRef, ModelCapabilities, ResolvedArtifactRevisionRef, Result,
+    SessionActorRef, SessionMeta, TenantId, UserId, WorkingContext, WorkspaceId,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -19,17 +20,20 @@ async fn pinned_agent_skill_policy_injects_artifact_revision_files_db_memory() -
         moa_session::testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
     let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
+    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let user_id = UserId::new("artifact-skill-user");
     let skill_name = format!("artifact-injected-skill-{}", Uuid::now_v7().simple());
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let skill_revision =
         publish_skill_revision(&ArtifactRegistry::new(pool.clone()), &scope, &skill_name).await?;
     let agent_revision_uid = Uuid::now_v7();
     let mut ctx = WorkingContext::new(
         &SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("artifact-skill-user"),
+            tenant_id,
+            contact: Some(contact_ref(tenant_id, contact_id_from_user_id(&user_id))),
+            created_by: Some(SessionActorRef::Contact {
+                id: contact_id_from_user_id(&user_id),
+            }),
             agent_context: Some(agent_context(
                 &skill_name,
                 skill_revision.artifact_uid,
@@ -68,7 +72,7 @@ async fn pinned_agent_skill_policy_injects_artifact_revision_files_db_memory() -
 
 async fn publish_skill_revision(
     registry: &ArtifactRegistry,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     skill_name: &str,
 ) -> Result<moa_artifacts::registry::StoredArtifactRevision> {
     let document = skill_document(skill_name);
@@ -96,6 +100,42 @@ async fn publish_skill_revision(
             &validate_for_status(&document, ArtifactStatus::Published),
         )
         .await
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
+    Uuid::parse_str(user_id.as_str())
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }
 }
 
 fn skill_document(skill_name: &str) -> ArtifactDocument {

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    CompletionRequest, Event, EventRecord, MemoryScope, MoaConfig, ModelTask, Result, SessionMeta,
-    SkillMetadata,
+    ActionRuleScope, CompletionRequest, Event, EventRecord, MoaConfig, ModelTask, Result,
+    SessionMeta, SkillMetadata, WorkspaceId,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -126,8 +126,8 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
         return Ok(ImprovementResult::Skipped);
     };
     let registry = SkillRegistry::new(store.pool().clone());
-    let scope = MemoryScope::Workspace {
-        workspace_id: session.workspace_id.clone(),
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: session.tenant_id,
     };
     let Some(stored_package) = registry
         .load_package_by_name(&scope, &existing.name)
@@ -184,8 +184,8 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
     let candidate_package =
         package_with_replaced_skill_md(&stored_package.files, candidate_markdown).validate()?;
-    let generated_suite =
-        generate_skill_test_suite_source(&session.workspace_id, &improved, events)?;
+    let workspace_id = WorkspaceId::new(session.tenant_id.to_string());
+    let generated_suite = generate_skill_test_suite_source(&workspace_id, &improved, events)?;
     let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,

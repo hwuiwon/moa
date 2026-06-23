@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use moa_core::{
-    Event, EventFilter, EventRange, ModelId, SessionMeta, SessionStatus, UserId, WorkspaceId,
+    ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
+    SessionActorRef, SessionMeta, SessionStatus, TenantId,
     traits::{Identity, IdentityType},
 };
 use moa_session::testing;
@@ -26,9 +27,12 @@ struct AuthzOutboxTuple {
 }
 
 fn test_session_meta(workspace_id: &str) -> SessionMeta {
+    let _ = workspace_id;
     SessionMeta {
-        workspace_id: WorkspaceId::new(workspace_id),
-        user_id: UserId::new("user-1"),
+        tenant_id: TenantId::new(),
+        created_by: Some(SessionActorRef::Identity {
+            id: Uuid::from_u128(1),
+        }),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }
@@ -62,19 +66,19 @@ async fn install_authz_outbox(service: &SessionStoreImpl) -> Result<()> {
 }
 
 #[tokio::test]
-async fn create_session_for_identity_db_enqueues_owner_and_workspace_tuples() -> Result<()> {
-    // Pins: authorized session creation relies on session#participant being derived from owner/workspace.
+async fn create_session_for_identity_db_enqueues_owner_and_tenant_tuples() -> Result<()> {
+    // Pins: authorized session creation relies on session#participant being derived from owner/tenant.
     let (service, database_url, schema_name) = test_service().await?;
     install_authz_outbox(&service).await?;
+    let meta = test_session_meta("authorized-helper");
+    let tenant_id = meta.tenant_id;
     let identity = Identity {
         identity_type: IdentityType::User,
         id: Uuid::new_v4(),
-        tenant_id: Uuid::new_v4(),
+        tenant_id,
         api_key_id: None,
         acting_on_behalf_of: None,
     };
-    let meta = test_session_meta("authorized-helper");
-    let workspace_id = meta.workspace_id.clone();
     let session_id = create_session_for_identity(service.store.as_ref(), meta, identity.clone())
         .await
         .map_err(into_anyhow)?;
@@ -99,16 +103,87 @@ async fn create_session_for_identity_db_enqueues_owner_and_workspace_tuples() ->
                 tuple_user: format!("user:{}", identity.id),
                 tuple_relation: "owner".to_string(),
                 tuple_object: session_object.clone(),
-                tenant_id: Some(identity.tenant_id),
+                tenant_id: Some(identity.tenant_id.0),
             },
             AuthzOutboxTuple {
-                tuple_user: format!("workspace:{workspace_id}"),
-                tuple_relation: "workspace".to_string(),
+                tuple_user: format!("tenant:{tenant_id}"),
+                tuple_relation: "tenant".to_string(),
                 tuple_object: session_object,
-                tenant_id: Some(identity.tenant_id),
+                tenant_id: Some(identity.tenant_id.0),
             },
         ]
     );
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+async fn create_contact_session_for_identity_db_enqueues_contact_session_tuple() -> Result<()> {
+    // Pins: contact-backed sessions enqueue the session#contact tuple that grants contact participation.
+    let (service, database_url, schema_name) = test_service().await?;
+    install_authz_outbox(&service).await?;
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let meta = SessionMeta {
+        tenant_id,
+        contact: Some(ContactRef {
+            contact_id,
+            tenant_id,
+            state: ContactVerificationState::Verified,
+            canonical_contact_id: None,
+            linked_contact_ids: Vec::new(),
+            scopes: Vec::new(),
+            permissions: serde_json::json!({}),
+            agent_ids: Vec::new(),
+            session_ids: Vec::new(),
+            verified_contact_point_ids: Vec::new(),
+        }),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
+        model: ModelId::new("test-model"),
+        ..SessionMeta::default()
+    };
+    let identity = Identity {
+        identity_type: IdentityType::Contact,
+        id: contact_id.0,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
+    };
+    let session_id = create_session_for_identity(service.store.as_ref(), meta, identity.clone())
+        .await
+        .map_err(into_anyhow)?;
+    let session_object = format!("session:{session_id}");
+
+    let tuples = sqlx::query_as::<_, AuthzOutboxTuple>(
+        r#"
+        SELECT tuple_user, tuple_relation, tuple_object, tenant_id
+        FROM authz_outbox
+        WHERE tuple_object = $1
+        ORDER BY tuple_relation, tuple_user
+        "#,
+    )
+    .bind(&session_object)
+    .fetch_all(service.store.pool())
+    .await?;
+
+    assert!(tuples.contains(&AuthzOutboxTuple {
+        tuple_user: format!("contact:{contact_id}"),
+        tuple_relation: "contact".to_string(),
+        tuple_object: session_object.clone(),
+        tenant_id: Some(tenant_id.0),
+    }));
+    assert!(tuples.contains(&AuthzOutboxTuple {
+        tuple_user: format!("contact:{contact_id}"),
+        tuple_relation: "owner".to_string(),
+        tuple_object: session_object.clone(),
+        tenant_id: Some(tenant_id.0),
+    }));
+    assert!(tuples.contains(&AuthzOutboxTuple {
+        tuple_user: format!("tenant:{tenant_id}"),
+        tuple_relation: "tenant".to_string(),
+        tuple_object: session_object,
+        tenant_id: Some(tenant_id.0),
+    }));
 
     cleanup(&database_url, &schema_name).await
 }

@@ -12,12 +12,12 @@ use moa_brain::planning::{
     PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
 };
 use moa_brain::retrieval::{
-    CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig,
-    RankingMode, Reranker, RetrievalHit,
+    CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig, Reranker,
+    RetrievalHit,
 };
 use moa_core::{
-    MemoryDigestConfig, MemoryScope, ScopeContext, ScopeTier, WorkspaceId,
-    config::MemoryExtractionConfig, traits::EmbeddingProvider,
+    ContactId, MemoryDigestConfig, MemoryScope, ScopeContext, ScopeTier, TenantId, UserId,
+    WorkspaceId, config::MemoryExtractionConfig, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_ingest::{
@@ -34,6 +34,7 @@ use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use uuid::Uuid;
@@ -119,13 +120,6 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn with_reranker(mut self, enabled: bool) -> Self {
         self.reranker_enabled = enabled;
-        self
-    }
-
-    /// Overrides the deterministic ranking mode used by the eval run.
-    #[must_use]
-    pub fn with_ranking_mode(mut self, ranking_mode: RankingMode) -> Self {
-        self.ranking_config.mode = ranking_mode;
         self
     }
 
@@ -222,12 +216,6 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn reranker_enabled(&self) -> bool {
         self.reranker_enabled
-    }
-
-    /// Returns the configured deterministic ranking mode.
-    #[must_use]
-    pub fn ranking_mode(&self) -> RankingMode {
-        self.ranking_config.mode
     }
 
     /// Returns the configured deterministic ranking config.
@@ -1478,9 +1466,9 @@ async fn retrieve_probe(
         deterministic_replay,
     } = options;
     let started = Instant::now();
-    let scope = MemoryScope::User {
-        workspace_id: probe.workspace_id.clone(),
-        user_id: probe.user_id.clone(),
+    let scope = MemoryScope::Contact {
+        tenant_id: tenant_id_from_workspace_id(&probe.workspace_id),
+        contact_id: contact_id_from_user_id(&probe.user_id),
     };
     let scope_context = ScopeContext::new(scope.clone());
     let mut vector_store = PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone());
@@ -2043,8 +2031,8 @@ async fn entity_fragmentation_counts(
         .flat_map(|fact| {
             [&fact.subject, &fact.object].into_iter().map(|mention| {
                 let user_id = match fact.scope {
-                    ScopeTier::User => fact.user_id.to_string(),
-                    ScopeTier::Workspace | ScopeTier::Global => String::new(),
+                    ScopeTier::Contact => fact.user_id.to_string(),
+                    ScopeTier::Tenant => String::new(),
                 };
                 (
                     scope_tier_name(fact.scope).to_string(),
@@ -2069,10 +2057,34 @@ async fn entity_fragmentation_counts(
 
 fn scope_tier_name(scope: ScopeTier) -> &'static str {
     match scope {
-        ScopeTier::Global => "global",
-        ScopeTier::Workspace => "workspace",
-        ScopeTier::User => "user",
+        ScopeTier::Tenant => "tenant",
+        ScopeTier::Contact => "contact",
     }
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    uuid::Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| tenant_id_from_label(workspace_id.as_str()))
+}
+
+fn tenant_id_from_label(label: &str) -> TenantId {
+    TenantId::from(stable_uuid_from_label(label))
+}
+
+fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
+    uuid::Uuid::parse_str(user_id.as_str())
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn gold_records_by_fact_id(
@@ -2118,9 +2130,9 @@ async fn digest_context_by_user(
         let user_id: Option<String> = row.try_get("user_id")?;
         let scope: String = row.try_get("scope")?;
         let content: String = row.try_get("content")?;
-        if scope == "workspace" {
+        if scope == "tenant" {
             workspace_content.insert(workspace_id, content);
-        } else if scope == "user"
+        } else if scope == "contact"
             && let Some(user_id) = user_id
         {
             user_content.insert((workspace_id, user_id), content);
@@ -2286,8 +2298,8 @@ async fn extracted_embedding_texts(
     for session in sessions {
         for turn in &session.turns {
             let session_turn = SessionTurn {
-                workspace_id: session.workspace_id.clone(),
-                user_id: session.user_id.clone(),
+                tenant_id: tenant_id_from_workspace_id(&session.workspace_id),
+                contact_id: contact_id_from_user_id(&session.user_id),
                 session_id: session.session_id,
                 turn_seq: turn.turn_seq,
                 transcript: turn.transcript.clone(),
@@ -2411,8 +2423,8 @@ impl IsolatedEvalStore {
         entity_merge_verifier: Arc<dyn EntityMergeVerifier>,
         entity_blocking_enabled: bool,
     ) -> IngestCtx {
-        let workspace_id = WorkspaceId::new(format!("memory-eval-runner-{}", self.schema_name));
-        let scope = ScopeContext::workspace(workspace_id);
+        let tenant_id = tenant_id_from_label(&format!("memory-eval-runner-{}", self.schema_name));
+        let scope = ScopeContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             self.pool().clone(),
             scope.clone(),

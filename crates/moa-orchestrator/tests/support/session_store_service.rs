@@ -10,7 +10,8 @@ use moa_core::wire::{
     AppendEventRequest, GetEventsRequest, SearchEventsRequest, UpdateStatusRequest,
 };
 use moa_core::{
-    Event, EventFilter, EventRange, ModelId, SessionId, SessionMeta, SessionStatus, UserMessage,
+    ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
+    SessionId, SessionMeta, SessionStatus, TenantId, UserMessage, WorkspaceId,
 };
 use moa_orchestrator::services::session_store::{RestateSessionStore, SessionStoreImpl};
 use moa_session::{PostgresSessionStore, testing};
@@ -92,12 +93,34 @@ impl TestSessionStoreApp {
 
 /// Returns a session metadata payload suitable for `create_session`.
 pub fn test_session_meta(workspace_id: &str) -> SessionMeta {
+    let _ = workspace_id;
+    let tenant_id = TenantId::new();
     SessionMeta {
-        workspace_id: workspace_id.into(),
-        user_id: "user-1".into(),
+        tenant_id,
+        contact: Some(test_contact_ref(tenant_id)),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }
+}
+
+fn test_contact_ref(tenant_id: TenantId) -> ContactRef {
+    ContactRef {
+        contact_id: ContactId::new(),
+        tenant_id,
+        state: ContactVerificationState::Unverified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::json!({}),
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }
+}
+
+/// Returns the workspace-compatible API id for a tenant-owned session fixture.
+pub fn workspace_id_from_meta(meta: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(meta.tenant_id.to_string())
 }
 
 /// Returns a user-message event suitable for append-event tests.

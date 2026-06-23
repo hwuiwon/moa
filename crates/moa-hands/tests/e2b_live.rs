@@ -13,7 +13,7 @@ use std::{panic::AssertUnwindSafe, panic::resume_unwind};
 use futures_util::FutureExt;
 use moa_core::{
     CloudHandsConfig, HandHandle, HandProvider, HandResources, HandSpec, HandStatus, MoaConfig,
-    MoaError, Result, SessionMeta, ToolInvocation, UserId, WorkspaceId,
+    MoaError, Result, SessionMeta, TenantId, ToolInvocation,
 };
 use moa_hands::{E2BHandProvider, ToolRouter};
 use serde_json::json;
@@ -21,10 +21,9 @@ use tempfile::tempdir;
 use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
-fn session(label: &str) -> SessionMeta {
+fn session(_label: &str) -> SessionMeta {
     SessionMeta {
-        workspace_id: WorkspaceId::new("e2b-live-workspace"),
-        user_id: UserId::new(format!("e2b-live-user-{label}")),
+        tenant_id: TenantId::new(),
         model: moa_core::ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }

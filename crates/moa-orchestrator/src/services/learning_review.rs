@@ -10,7 +10,7 @@ use moa_core::wire::{
     LearningCandidateReviewResponse,
 };
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, MoaError,
+    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, MoaError, TenantId,
     WorkspaceId,
 };
 use moa_session::PostgresSessionStore;
@@ -62,7 +62,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidate>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "get");
         let request = request.into_inner();
-        authorize_workspace_editor(&ctx, &request.workspace_id).await?;
+        authorize_tenant_operator(&ctx, request.tenant_id).await?;
         let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
@@ -83,7 +83,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "accept_skill");
         let mut request = request.into_inner();
-        let identity = authorize_workspace_editor(&ctx, &request.workspace_id).await?;
+        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let runtime = OrchestratorCtx::current();
         let store = runtime.session_store();
@@ -110,7 +110,7 @@ impl LearningReview for LearningReviewImpl {
     ) -> Result<Json<LearningCandidateReviewResponse>, HandlerError> {
         annotate_restate_handler_span("LearningReview", "reject");
         let mut request = request.into_inner();
-        let identity = authorize_workspace_editor(&ctx, &request.workspace_id).await?;
+        let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let store = OrchestratorCtx::current_session_store();
 
@@ -190,18 +190,19 @@ impl LearningReviewStore for SessionLearningReviewStore {
     }
 }
 
-/// Loads one candidate after the caller has authorized workspace editor access.
+/// Loads one candidate after the caller has authorized tenant operator access.
 pub async fn get_learning_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
     request: GetLearningCandidateRequest,
 ) -> Result<LearningCandidate, HandlerError> {
     let review_store = SessionLearningReviewStore::new(store);
-    get_learning_candidate_for_review(&review_store, &request.workspace_id, request.candidate_id)
+    let workspace_id = storage_workspace_id(request.tenant_id);
+    get_learning_candidate_for_review(&review_store, &workspace_id, request.candidate_id)
         .await
         .map_err(skill_review_error_to_handler_error)
 }
 
-/// Accepts one skill candidate after the caller has authorized workspace editor access.
+/// Accepts one skill candidate after the caller has authorized tenant operator access.
 pub async fn accept_skill_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
     config: Arc<moa_core::MoaConfig>,
@@ -220,7 +221,7 @@ pub async fn accept_skill_candidate_after_authz(
         #[cfg(feature = "internal-eval-runner")]
         providers,
         SkillRegistry::new(pool.clone()),
-        prepared.scope.clone(),
+        prepared.scope,
         prepared.candidate.clone(),
         prepared.draft_files.clone(),
     )
@@ -274,7 +275,7 @@ async fn accept_skill_candidate_after_authz_on_runtime(
     })?
 }
 
-/// Rejects one candidate after the caller has authorized workspace editor access.
+/// Rejects one candidate after the caller has authorized tenant operator access.
 pub async fn reject_learning_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
     request: LearningCandidateReviewRequest,
@@ -289,22 +290,26 @@ pub async fn reject_learning_candidate_after_authz(
     Ok(review_response_from_outcome(outcome))
 }
 
-async fn authorize_workspace_editor(
+async fn authorize_tenant_operator(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<moa_core::traits::Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        Relation::Editor,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Operator,
     )
     .await
     .map_err(translate_authz_error)?;
     Ok(identity)
+}
+
+fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn ensure_requested_action(
@@ -329,7 +334,7 @@ fn skill_review_request(
     action: SkillReviewAction,
 ) -> SkillReviewRequest {
     SkillReviewRequest {
-        workspace_id: request.workspace_id.clone(),
+        workspace_id: storage_workspace_id(request.tenant_id),
         candidate_id: request.candidate_id,
         action,
         reviewer_subject: request.reviewer_subject.clone(),
@@ -344,7 +349,6 @@ fn review_response_from_outcome(outcome: SkillReviewOutcome) -> LearningCandidat
         artifact_uid: outcome.artifact_uid,
         draft_artifact_revision_uid: outcome.draft_artifact_revision_uid,
         published_artifact_revision_uid: outcome.published_artifact_revision_uid,
-        skill_uid: outcome.skill_uid,
     }
 }
 

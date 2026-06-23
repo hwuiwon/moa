@@ -7,6 +7,7 @@
 use crate::jwks_cache::JwksCache;
 use async_trait::async_trait;
 use jsonwebtoken::{Algorithm, Validation, decode, decode_header};
+use moa_core::TenantId;
 use moa_core::traits::{AuthError, AuthProvider, Credential, Identity, IdentityType};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -110,7 +111,7 @@ impl AuthProvider for Auth0AuthProvider {
         Ok(Identity {
             identity_type,
             id,
-            tenant_id,
+            tenant_id: TenantId::from(tenant_id),
             api_key_id: None,
             acting_on_behalf_of: None,
         })

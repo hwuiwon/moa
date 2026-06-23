@@ -49,7 +49,7 @@ impl Authz for AuthzImpl {
         let tenant_id = request
             .tenant_id
             .or_else(|| tenant_id_from_object(&request.object))
-            .unwrap_or(identity.tenant_id);
+            .unwrap_or(identity.tenant_id.0);
         let fga = require_fga_client()?;
         require_authz_with_delegation(
             &fga,

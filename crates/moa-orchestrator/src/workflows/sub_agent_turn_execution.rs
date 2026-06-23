@@ -429,8 +429,8 @@ async fn handle_tool_call(
             input: invocation.input.clone(),
             active_canary: tool_context.active_canary.map(ToOwned::to_owned),
             session_id: Some(session_id),
-            workspace_id: meta.workspace_id.clone(),
-            user_id: meta.user_id.clone(),
+            tenant_id: meta.tenant_id,
+            user_id: storage_user_id(meta),
             idempotency_key: invocation.id.clone(),
         };
         if tool_input_leaks_canary(tool_context.active_canary, &tool_request.input)
@@ -459,7 +459,7 @@ async fn handle_tool_call(
             .await?;
         let output = ToolOutput::error(
             format!(
-                "Action is pending workspace admin review: {}: {}",
+                "Action is pending tenant admin review: {}: {}",
                 invocation.name, prepared_action.input_summary
             ),
             Duration::ZERO,
@@ -488,8 +488,8 @@ async fn handle_tool_call(
             input: invocation.input.clone(),
             active_canary: tool_context.active_canary.map(ToOwned::to_owned),
             session_id: Some(session_id),
-            workspace_id: meta.workspace_id.clone(),
-            user_id: meta.user_id.clone(),
+            tenant_id: meta.tenant_id,
+            user_id: storage_user_id(meta),
             idempotency_key: invocation.id.clone(),
         }))
         .call()
@@ -767,6 +767,24 @@ fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
         TurnOutcomeKind::Completed => "completed",
         TurnOutcomeKind::Cancelled => "cancelled",
         TurnOutcomeKind::Failed => "failed",
+    }
+}
+
+fn storage_user_id(meta: &SessionMeta) -> moa_core::UserId {
+    let value = meta
+        .contact
+        .as_ref()
+        .map(|contact| contact.contact_id.to_string())
+        .or_else(|| meta.created_by.as_ref().map(session_actor_storage_id))
+        .unwrap_or_else(|| format!("tenant:{}", meta.tenant_id));
+    moa_core::UserId::new(value)
+}
+
+fn session_actor_storage_id(actor: &moa_core::SessionActorRef) -> String {
+    match actor {
+        moa_core::SessionActorRef::Identity { id } => format!("identity:{id}"),
+        moa_core::SessionActorRef::Contact { id } => id.to_string(),
+        moa_core::SessionActorRef::Anonymous => "anonymous".to_string(),
     }
 }
 

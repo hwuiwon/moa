@@ -5,11 +5,8 @@ use globset::Glob;
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
     ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, Result, SessionMeta,
-    ToolPolicyInput, UserId, WorkspaceId,
+    TenantId, ToolPolicyInput, UserId, WorkspaceId,
 };
-
-/// Reserved workspace id used for deployment-global action-policy rules.
-pub const GLOBAL_ACTION_POLICY_WORKSPACE_ID: &str = "global";
 
 /// Persistent action-policy rule storage used by policy-aware tool routing.
 #[async_trait]
@@ -38,18 +35,15 @@ pub trait ActionPolicyRuleStore: Send + Sync {
 /// Session-scoped inputs required for tool policy evaluation.
 #[derive(Debug, Clone)]
 pub struct ActionPolicyContext {
-    /// Workspace associated with the current session.
-    pub workspace_id: WorkspaceId,
-    /// User associated with the current session.
-    pub user_id: UserId,
+    /// Tenant associated with the current session.
+    pub tenant_id: TenantId,
 }
 
 impl ActionPolicyContext {
     /// Creates a policy context from a session metadata record.
     pub fn from_session(session: &SessionMeta) -> Self {
         Self {
-            workspace_id: session.workspace_id.clone(),
-            user_id: session.user_id.clone(),
+            tenant_id: session.tenant_id,
         }
     }
 }
@@ -167,7 +161,7 @@ impl ActionPolicies {
         {
             return Some((
                 ActionPolicyEffect::AdminReview,
-                "tool requires workspace admin review by config".to_string(),
+                "tool requires tenant admin review by config".to_string(),
             ));
         }
 
@@ -208,17 +202,9 @@ pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> bool {
 
 fn rule_visible_to_context(rule: &ActionPolicyRule, ctx: &ActionPolicyContext) -> bool {
     match rule.scope {
-        ActionRuleScope::Global
-            if rule.workspace_id.0.as_str() == GLOBAL_ACTION_POLICY_WORKSPACE_ID => {}
-        ActionRuleScope::Workspace
-            if rule.workspace_id == ctx.workspace_id
-                && rule.workspace_id.0.as_str() != GLOBAL_ACTION_POLICY_WORKSPACE_ID => {}
-        _ => return false,
+        ActionRuleScope::WorkspaceDefault => true,
+        ActionRuleScope::Tenant { tenant_id } => tenant_id == ctx.tenant_id,
     }
-
-    rule.user_id
-        .as_ref()
-        .is_none_or(|user_id| user_id == &ctx.user_id)
 }
 
 /// Returns the strictest outcome from two action-policy effects.
@@ -247,19 +233,23 @@ mod tests {
     use moa_core::shell::split_shell_chain;
     use moa_core::{
         ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ModelId, RiskLevel, SessionMeta,
-        ToolPolicyInput, UserId, WorkspaceId,
+        TenantId, ToolPolicyInput, UserId,
     };
     use uuid::Uuid;
 
-    use super::{
-        ActionPolicies, ActionPolicyContext, GLOBAL_ACTION_POLICY_WORKSPACE_ID,
-        parse_and_match_command,
-    };
+    use super::{ActionPolicies, ActionPolicyContext, parse_and_match_command};
+
+    fn tenant_id() -> TenantId {
+        TenantId::from(Uuid::from_u128(42))
+    }
+
+    fn other_tenant_id() -> TenantId {
+        TenantId::from(Uuid::from_u128(43))
+    }
 
     fn session() -> SessionMeta {
         SessionMeta {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: tenant_id(),
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         }
@@ -311,12 +301,12 @@ mod tests {
         let ctx = ActionPolicyContext::from_session(&session());
         let rules = vec![ActionPolicyRule {
             id: Uuid::now_v7(),
-            workspace_id: WorkspaceId::new("workspace"),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id(),
+            },
             tool: "file_write".to_string(),
             pattern: "src/*.rs".to_string(),
-            user_id: None,
             effect: ActionPolicyEffect::AdminReview,
-            scope: ActionRuleScope::Workspace,
             reason: Some("review source edits".to_string()),
             created_by: UserId::new("user"),
             created_at: Utc::now(),
@@ -350,24 +340,24 @@ mod tests {
         let rules = vec![
             ActionPolicyRule {
                 id: Uuid::now_v7(),
-                workspace_id: WorkspaceId::new("workspace"),
+                scope: ActionRuleScope::Tenant {
+                    tenant_id: tenant_id(),
+                },
                 tool: "bash".to_string(),
                 pattern: "git *".to_string(),
-                user_id: None,
                 effect: ActionPolicyEffect::Allow,
-                scope: ActionRuleScope::Workspace,
                 reason: Some("allow git".to_string()),
                 created_by: UserId::new("admin"),
                 created_at: Utc::now(),
             },
             ActionPolicyRule {
                 id: Uuid::now_v7(),
-                workspace_id: WorkspaceId::new("workspace"),
+                scope: ActionRuleScope::Tenant {
+                    tenant_id: tenant_id(),
+                },
                 tool: "bash".to_string(),
                 pattern: "git push".to_string(),
-                user_id: None,
                 effect: ActionPolicyEffect::Deny,
-                scope: ActionRuleScope::Workspace,
                 reason: Some("deny pushes".to_string()),
                 created_by: UserId::new("admin"),
                 created_at: Utc::now(),
@@ -398,18 +388,18 @@ mod tests {
     }
 
     #[test]
-    fn user_scoped_rules_only_match_the_current_user() {
-        // Pins: a user-scoped action-policy rule must not affect other workspace users.
+    fn tenant_scoped_rules_only_match_the_current_tenant() {
+        // Pins: a tenant action-policy override must not affect other tenants.
         let policies = ActionPolicies::default();
         let rule = ActionPolicyRule {
             id: Uuid::now_v7(),
-            workspace_id: WorkspaceId::new("workspace"),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id(),
+            },
             tool: "bash".to_string(),
             pattern: "git push".to_string(),
-            user_id: Some(UserId::new("target-user")),
             effect: ActionPolicyEffect::Deny,
-            scope: ActionRuleScope::Workspace,
-            reason: Some("target user only".to_string()),
+            reason: Some("target tenant only".to_string()),
             created_by: UserId::new("admin"),
             created_at: Utc::now(),
         };
@@ -423,8 +413,7 @@ mod tests {
         };
 
         let other_session = SessionMeta {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("other-user"),
+            tenant_id: other_tenant_id(),
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -439,8 +428,7 @@ mod tests {
         assert!(other_check.matched_rule.is_none());
 
         let target_session = SessionMeta {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("target-user"),
+            tenant_id: tenant_id(),
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         };
@@ -510,12 +498,12 @@ mod tests {
         let ctx = ActionPolicyContext::from_session(&session());
         let allow_rule = ActionPolicyRule {
             id: Uuid::now_v7(),
-            workspace_id: WorkspaceId::new("workspace"),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id(),
+            },
             tool: "bash".to_string(),
             pattern: "git status".to_string(),
-            user_id: None,
             effect: ActionPolicyEffect::Allow,
-            scope: ActionRuleScope::Workspace,
             reason: Some("allow status".to_string()),
             created_by: UserId::new("admin"),
             created_at: Utc::now(),
@@ -548,12 +536,11 @@ mod tests {
     }
 
     #[test]
-    fn global_rules_require_reserved_workspace_id() {
-        // Pins: a global-scoped row stored under a normal workspace id is not visible cross-workspace.
+    fn workspace_default_rules_apply_to_all_tenants() {
+        // Pins: workspace-default action-policy rules remain inherited tenant defaults.
         let policies = ActionPolicies::default();
         let ctx = ActionPolicyContext::from_session(&SessionMeta {
-            workspace_id: WorkspaceId::new("other-workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: other_tenant_id(),
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         });
@@ -565,45 +552,30 @@ mod tests {
             default_effect: ActionPolicyEffect::Allow,
             action_class: moa_core::ActionClass::CommandExecution,
         };
-        let stale_global_rule = ActionPolicyRule {
+        let default_rule = ActionPolicyRule {
             id: Uuid::now_v7(),
-            workspace_id: WorkspaceId::new("source-workspace"),
+            scope: ActionRuleScope::WorkspaceDefault,
             tool: "bash".to_string(),
             pattern: "git push".to_string(),
-            user_id: None,
             effect: ActionPolicyEffect::Deny,
-            scope: ActionRuleScope::Global,
-            reason: Some("bad global row".to_string()),
+            reason: Some("workspace default".to_string()),
             created_by: UserId::new("admin"),
             created_at: Utc::now(),
         };
-        let valid_global_rule = ActionPolicyRule {
-            workspace_id: WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID),
-            reason: Some("reserved global row".to_string()),
-            ..stale_global_rule.clone()
-        };
 
-        assert_eq!(
-            policies
-                .check(&input, &ctx, &[stale_global_rule])
-                .expect("stale global check")
-                .effect,
-            ActionPolicyEffect::Allow
-        );
         let check = policies
-            .check(&input, &ctx, &[valid_global_rule])
-            .expect("valid global check");
+            .check(&input, &ctx, &[default_rule])
+            .expect("workspace default check");
         assert_eq!(check.effect, ActionPolicyEffect::Deny);
-        assert_eq!(check.reason.as_deref(), Some("reserved global row"));
+        assert_eq!(check.reason.as_deref(), Some("workspace default"));
     }
 
     #[test]
-    fn reserved_global_workspace_id_is_not_a_workspace_scope() {
-        // Pins: the reserved global sentinel cannot accidentally behave as a normal workspace rule.
+    fn tenant_rules_do_not_match_other_tenants() {
+        // Pins: tenant overrides do not leak across tenant boundaries.
         let policies = ActionPolicies::default();
         let ctx = ActionPolicyContext::from_session(&SessionMeta {
-            workspace_id: WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID),
-            user_id: UserId::new("user"),
+            tenant_id: other_tenant_id(),
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
         });
@@ -615,21 +587,21 @@ mod tests {
             default_effect: ActionPolicyEffect::Allow,
             action_class: moa_core::ActionClass::CommandExecution,
         };
-        let sentinel_workspace_rule = ActionPolicyRule {
+        let tenant_rule = ActionPolicyRule {
             id: Uuid::now_v7(),
-            workspace_id: WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id(),
+            },
             tool: "bash".to_string(),
             pattern: "git push".to_string(),
-            user_id: None,
             effect: ActionPolicyEffect::Deny,
-            scope: ActionRuleScope::Workspace,
-            reason: Some("invalid sentinel workspace rule".to_string()),
+            reason: Some("source tenant rule".to_string()),
             created_by: UserId::new("admin"),
             created_at: Utc::now(),
         };
 
         let check = policies
-            .check(&input, &ctx, &[sentinel_workspace_rule])
+            .check(&input, &ctx, &[tenant_rule])
             .expect("policy evaluation");
 
         assert_eq!(check.effect, ActionPolicyEffect::Allow);

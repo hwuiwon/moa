@@ -9,7 +9,9 @@ use moa_skills::regression::{
     SkillRegressionDecision, SkillRegressionReport, SkillRegressionSummary, compare_scores,
     generate_skill_test_suite_source,
 };
-use support::{SESSION_WITH_5_TOOL_CALLS, load_session_fixture, skill_markdown};
+use support::{
+    SESSION_WITH_5_TOOL_CALLS, load_session_fixture, session_workspace_id, skill_markdown,
+};
 
 #[test]
 fn generated_suite_source_is_reviewable_without_writing_files() {
@@ -23,9 +25,9 @@ fn generated_suite_source_is_reviewable_without_writing_files() {
     );
     let skill = parse_skill_markdown(&markdown).expect("parse test skill");
 
-    let generated =
-        generate_skill_test_suite_source(&loaded.session.workspace_id, &skill, &loaded.events)
-            .expect("generate suite source");
+    let workspace_id = session_workspace_id(&loaded.session);
+    let generated = generate_skill_test_suite_source(&workspace_id, &skill, &loaded.events)
+        .expect("generate suite source");
 
     assert!(
         generated

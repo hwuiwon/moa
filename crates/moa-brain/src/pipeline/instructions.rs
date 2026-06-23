@@ -104,8 +104,8 @@ impl ContextProcessor for InstructionProcessor {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, GeneralConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing,
-        ToolCallFormat, UserId, WorkspaceId,
+        Channel, GeneralConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId,
+        TokenPricing, ToolCallFormat,
     };
 
     use super::*;
@@ -114,8 +114,7 @@ mod tests {
     async fn instruction_processor_appends_config_backed_sections() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
@@ -164,8 +163,7 @@ mod tests {
     async fn instruction_processor_combines_config_and_discovered_workspace_instructions() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()

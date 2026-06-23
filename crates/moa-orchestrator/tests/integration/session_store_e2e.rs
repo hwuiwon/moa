@@ -7,11 +7,12 @@ use std::process::{Child, Command, Stdio};
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_workspace_member, register_deployment, reserve_orchestrator_ports, restate_admin_url,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
     restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     append_event_request, get_events_request, test_session_meta, user_message_event,
+    workspace_id_from_meta,
 };
 
 fn spawn_orchestrator(ports: OrchestratorPorts) -> Result<Child> {
@@ -46,8 +47,10 @@ async fn session_store_round_trip_through_restate() -> Result<()> {
         let ingress = restate_ingress_url();
         let ingress = ingress.as_str();
         let meta = test_session_meta("restate-e2e");
-        let identity = test_user_identity();
-        grant_workspace_member(&identity, &meta.workspace_id).await?;
+        let workspace_id = workspace_id_from_meta(&meta);
+        let mut identity = test_user_identity();
+        identity.tenant_id = meta.tenant_id;
+        grant_tenant_operator(&identity, &workspace_id).await?;
 
         let create_request = client.post(format!(
             "{}/SessionStore/create_session",

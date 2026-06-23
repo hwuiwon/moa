@@ -15,7 +15,7 @@ use moa_core::wire::{
     ExperimentTrialSummary, ExperimentTrialsRequest, ExperimentTrialsResponse,
     ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{MemoryScope, ModelId, SessionId, WorkspaceId};
+use moa_core::{ActionRuleScope, ModelId, SessionId, TenantId, WorkspaceId};
 use moa_experiments::app::{
     ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
 };
@@ -29,8 +29,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[test]
-fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
-    // Pins: the public experiment surface is separate from EvalRunRequest and remains workspace-scoped.
+fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
+    // Pins: the public experiment surface is separate from EvalRunRequest and remains tenant-scoped.
+    let tenant_id = tenant_id_fixture();
     assert_experiment_type::<ExperimentRunRequest>();
     assert_experiment_type::<ExperimentRunResponse>();
     assert_experiment_type::<ExperimentGeneratePlanRequest>();
@@ -52,8 +53,8 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
     assert_experiment_type::<ExperimentCompareRequest>();
     assert_experiment_type::<ExperimentCompareResponse>();
 
-    assert_has_workspace_id(ExperimentRunRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentRunRequest {
+        tenant_id,
         name: "live behavior smoke".to_string(),
         plan_revision_uid: None,
         target: Some(json!({"kind": "agent_loop", "prompt": "summarize"})),
@@ -63,14 +64,14 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
         idempotency_key: Some("run-key".to_string()),
         agent_revision_variants: Vec::new(),
     });
-    assert_has_workspace_id(ExperimentGeneratePlanRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentGeneratePlanRequest {
+        tenant_id,
         description: "Simulate damaged-food-order support behavior.".to_string(),
         model: Some("gpt-5.4".to_string()),
         artifact_refs: vec!["workflow://damaged-food-order".to_string()],
     });
-    assert_has_workspace_id(ExperimentGeneratePlanResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentGeneratePlanResponse {
+        tenant_id,
         artifact_uid: fixture_uuid(1),
         revision_uid: fixture_uuid(2),
         status: "draft".to_string(),
@@ -79,20 +80,20 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
         document: json!({"kind": "experiment_plan"}),
         validation_report: json!({"errors": []}),
     });
-    assert_has_workspace_id(ExperimentRunResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentRunResponse {
+        tenant_id,
         run_uid: fixture_uuid(1),
         status: "accepted".to_string(),
         score_run_id: fixture_uuid(2),
         session_id: None,
         workflow_run_uid: None,
     });
-    assert_has_workspace_id(ExperimentRunStatusRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentRunStatusRequest {
+        tenant_id,
         run_uid: fixture_uuid(1),
     });
-    assert_has_workspace_id(ExperimentRunStatusResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentRunStatusResponse {
+        tenant_id,
         run_uid: fixture_uuid(1),
         status: "accepted".to_string(),
         target_kind: Some("agent_loop".to_string()),
@@ -102,17 +103,17 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
         error: None,
         run: json!({}),
     });
-    assert_has_workspace_id(ExperimentListRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentListRequest {
+        tenant_id,
         status: Some("accepted".to_string()),
         limit: Some(20),
     });
-    assert_has_workspace_id(ExperimentListResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentListResponse {
+        tenant_id,
         runs: vec![json!({"run_uid": fixture_uuid(1)})],
     });
     let trial_summary = ExperimentTrialSummary {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         run_uid: fixture_uuid(1),
         trial_uid: fixture_uuid(2),
         status: "completed".to_string(),
@@ -128,23 +129,23 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
         error: None,
         turn_count: 3,
     };
-    assert_has_workspace_id(ExperimentTrialsRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentTrialsRequest {
+        tenant_id,
         run_uid: fixture_uuid(1),
         status: Some("completed".to_string()),
         limit: Some(20),
     });
-    assert_has_workspace_id(ExperimentTrialsResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentTrialsResponse {
+        tenant_id,
         run_uid: fixture_uuid(1),
         trials: vec![trial_summary.clone()],
     });
-    assert_has_workspace_id(ExperimentTrialStatusRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentTrialStatusRequest {
+        tenant_id,
         trial_uid: fixture_uuid(2),
     });
-    assert_has_workspace_id(ExperimentTrialStatusResponse {
-        workspace_id: trial_summary.workspace_id,
+    assert_has_tenant_id(ExperimentTrialStatusResponse {
+        tenant_id: trial_summary.tenant_id,
         run_uid: trial_summary.run_uid,
         trial_uid: trial_summary.trial_uid,
         status: trial_summary.status,
@@ -160,35 +161,35 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
         error: trial_summary.error,
         turn_count: trial_summary.turn_count,
     });
-    assert_has_workspace_id(ExperimentCancelRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentCancelRequest {
+        tenant_id,
         run_uid: fixture_uuid(1),
         reason: Some("operator request".to_string()),
     });
-    assert_has_workspace_id(ExperimentCancelResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentCancelResponse {
+        tenant_id,
         run_uid: fixture_uuid(1),
         cancelled: true,
         status: "cancelled".to_string(),
         reason: "operator request".to_string(),
     });
-    assert_has_workspace_id(ExperimentProposeImprovementsRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentProposeImprovementsRequest {
+        tenant_id,
         run_uid: fixture_uuid(1),
         idempotency_key: Some("proposal-key".to_string()),
     });
-    assert_has_workspace_id(ExperimentProposeImprovementsResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentProposeImprovementsResponse {
+        tenant_id,
         run_uid: fixture_uuid(1),
         candidate_ids: vec![fixture_uuid(2)],
         draft_artifact_revision_uids: Vec::new(),
     });
-    assert_has_workspace_id(ExperimentScoresRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentScoresRequest {
+        tenant_id,
         run_uid: fixture_uuid(1),
     });
-    assert_has_workspace_id(ExperimentScoresResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentScoresResponse {
+        tenant_id,
         run_uid: fixture_uuid(1),
         score_run_id: fixture_uuid(2),
         rows: vec![score_row("task.completed", "boolean", 1, 1.0)],
@@ -206,13 +207,13 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
             rows: vec![score_row("task.completed", "boolean", 2, 0.5)],
         }],
     });
-    assert_has_workspace_id(ExperimentCompareRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentCompareRequest {
+        tenant_id,
         base_run_uid: fixture_uuid(1),
         new_run_uid: fixture_uuid(2),
     });
-    assert_has_workspace_id(ExperimentCompareResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+    assert_has_tenant_id(ExperimentCompareResponse {
+        tenant_id,
         base_run_uid: fixture_uuid(1),
         new_run_uid: fixture_uuid(2),
         base_score_run_id: fixture_uuid(3),
@@ -243,8 +244,9 @@ fn experiment_wire_dtos_use_experiment_names_and_include_workspace_id() {
 #[test]
 fn experiment_score_dtos_use_run_uids_without_legacy_score_run_fields() {
     // Pins: public experiment score APIs address experiment runs, not internal score-run IDs.
+    let tenant_id = tenant_id_fixture();
     let scores = serde_json::to_value(ExperimentScoresRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         run_uid: fixture_uuid(1),
     })
     .expect("scores request should serialize");
@@ -252,7 +254,7 @@ fn experiment_score_dtos_use_run_uids_without_legacy_score_run_fields() {
     assert!(scores.get("run_id").is_none());
 
     let compare = serde_json::to_value(ExperimentCompareRequest {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         base_run_uid: fixture_uuid(1),
         new_run_uid: fixture_uuid(2),
     })
@@ -263,7 +265,7 @@ fn experiment_score_dtos_use_run_uids_without_legacy_score_run_fields() {
     assert!(compare.get("new_run").is_none());
 
     let compare_response = serde_json::to_value(ExperimentCompareResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         base_run_uid: fixture_uuid(1),
         new_run_uid: fixture_uuid(2),
         base_score_run_id: fixture_uuid(3),
@@ -282,9 +284,10 @@ fn experiment_score_dtos_use_run_uids_without_legacy_score_run_fields() {
 #[test]
 fn experiment_score_responses_serialize_typed_trial_and_scenario_breakdowns() {
     // Pins: Experiments/scores exposes typed aggregate, trial, and scenario score APIs.
+    let tenant_id = tenant_id_fixture();
     let scenario_id = fixture_uuid(7);
     let response = ExperimentScoresResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         run_uid: fixture_uuid(1),
         score_run_id: fixture_uuid(2),
         rows: vec![score_row("quality", "numeric", 2, 0.75)],
@@ -318,6 +321,7 @@ fn experiment_score_responses_serialize_typed_trial_and_scenario_breakdowns() {
 #[test]
 fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     // Pins: trial list/status APIs expose typed UI fields without raw record payloads.
+    let tenant_id = tenant_id_fixture();
     let run_uid = fixture_uuid(1);
     let trial_uid = fixture_uuid(2);
     let scenario_id = fixture_uuid(3);
@@ -326,10 +330,10 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     let workflow_run_uid = fixture_uuid(6);
 
     let response = ExperimentTrialsResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         run_uid,
         trials: vec![ExperimentTrialSummary {
-            workspace_id: WorkspaceId::new("workspace-a"),
+            tenant_id,
             run_uid,
             trial_uid,
             status: "completed".to_string(),
@@ -350,7 +354,7 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
     let encoded = serde_json::to_value(response).expect("trials response should serialize");
 
     assert_eq!(encoded["run_uid"], run_uid.to_string());
-    assert_eq!(encoded["trials"][0]["workspace_id"], "workspace-a");
+    assert_eq!(encoded["trials"][0]["tenant_id"], tenant_id.to_string());
     assert_eq!(encoded["trials"][0]["trial_uid"], trial_uid.to_string());
     assert_eq!(encoded["trials"][0]["target_kind"], "agent_loop");
     assert_eq!(encoded["trials"][0]["variant_key"], "candidate");
@@ -373,9 +377,10 @@ fn experiment_trial_responses_serialize_typed_ui_drilldown_fields() {
 #[test]
 fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
     // Pins: Experiments/compare exposes typed scenario and variant deltas for trial rollups.
+    let tenant_id = tenant_id_fixture();
     let scenario_id = fixture_uuid(7);
     let response = ExperimentCompareResponse {
-        workspace_id: WorkspaceId::new("workspace-a"),
+        tenant_id,
         base_run_uid: fixture_uuid(1),
         new_run_uid: fixture_uuid(2),
         base_score_run_id: fixture_uuid(3),
@@ -414,39 +419,29 @@ fn experiment_compare_response_serializes_scenario_and_variant_deltas() {
 }
 
 #[test]
-fn experiments_service_declares_required_workspace_relations() {
-    // Pins: experiment service handlers keep the planned Workspace relation requirements.
+fn experiments_service_declares_required_tenant_relations() {
+    // Pins: experiment service handlers authorize tenant runtime access before protected work.
     let source = include_str!("../src/services/experiments.rs");
-    assert_eq!(
-        source.matches("Relation::Editor").count(),
-        5,
-        "generate_plan, run, cancel, propose_improvements, and run_agent_revision_simulation should require workspace editor"
-    );
-    assert_eq!(
-        source.matches("Relation::Member").count(),
-        8,
-        "status, list, trials, trial_status, scores, compare, compare_agent_revisions, and compare_agent_revision_simulation should require workspace member"
+    assert!(
+        source.contains("ObjectType::Tenant"),
+        "experiment service must authorize tenant objects"
     );
     for method in [
         "generate_plan",
         "run",
-        "cancel",
-        "propose_improvements",
-        "run_agent_revision_simulation",
-    ] {
-        assert_method_requires_relation(source, method, "Relation::Editor");
-    }
-    for method in [
         "status",
         "list",
         "trials",
         "trial_status",
+        "cancel",
+        "propose_improvements",
         "scores",
         "compare",
+        "run_agent_revision_simulation",
         "compare_agent_revisions",
         "compare_agent_revision_simulation",
     ] {
-        assert_method_requires_relation(source, method, "Relation::Member");
+        assert_method_requires_relation(source, method, "Relation::Operator");
     }
 }
 
@@ -483,6 +478,7 @@ fn experiments_exposes_propose_improvements_without_candidate_read_endpoint() {
 fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     // Pins: proposal candidates preserve experiment evidence without promoting learned state.
     let workspace_id = WorkspaceId::new("workspace-a");
+    let tenant_id = TenantId::new();
     let run = completed_run_record(workspace_id.clone());
     let trials = vec![completed_trial_record(run.run_uid)];
     let score_summary = moa_scoring::ScoreSummary {
@@ -509,7 +505,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     };
 
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
-        tenant_id: "tenant-a".to_string(),
+        tenant_id,
         workspace_id,
         run: &run,
         completed_trials: &trials,
@@ -524,7 +520,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     });
 
     assert_eq!(candidate.status.as_str(), "proposed");
-    assert_eq!(candidate.tenant_id, "tenant-a");
+    assert_eq!(candidate.tenant_id, tenant_id);
     assert_eq!(candidate.candidate_type.as_str(), "workflow");
     assert_eq!(candidate.payload["kind"], "workflow_learning_proposal");
     assert_eq!(
@@ -539,7 +535,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
         candidate.payload["evidence_refs"]["experiment_run_uid"],
         run.run_uid.to_string()
     );
-    assert_eq!(candidate.payload["tenant_id"], "tenant-a");
+    assert_eq!(candidate.payload["tenant_id"], tenant_id.to_string());
     assert_eq!(
         candidate.payload["evidence_refs"]["run_score_run_id"],
         run.score_run_id.to_string()
@@ -953,14 +949,10 @@ fn experiment_trial_run_attaches_current_trace_before_target_execution() {
     let source_text = experiment_trial_run_workflow_source();
     let source = normalized_source(&source_text);
     let insert_index = source
-        .find(
-            "insert_or_load_trial(ctx, request.workspace_id.clone(), request.trial.clone()).await?",
-        )
+        .find("insert_or_load_trial(ctx, request.tenant_id, request.trial.clone()).await?")
         .expect("trial workflow should insert or load a durable trial row");
     let attach_index = source
-        .find(
-            "attach_current_trial_trace(ctx, request.workspace_id.clone(), trial.trial_uid).await?",
-        )
+        .find("attach_current_trial_trace(ctx, request.tenant_id, trial.trial_uid).await?")
         .expect("trial workflow should attach the active trace to the durable trial row");
     let agent_loop_index = source
         .find("run_agent_loop_trial(ctx, request, trial, simulator_context).await")
@@ -1074,10 +1066,11 @@ fn experiment_score_handlers_resolve_run_uids_through_scoped_experiment_runs() {
     );
     assert!(
         app_source.contains(&normalized_source(
-            "let scope = workspace_scope(request.workspace_id.clone());
+            "let scope = tenant_scope(request.tenant_id);
+             let workspace_id = workspace_id_for_tenant(request.tenant_id);
              let run = load_required_run(&ExperimentStore::new(pool.clone()), &scope, request.run_uid).await?;"
         )),
-        "experiment app must load the experiment run in the requested workspace before reading scores"
+        "experiment app must load the experiment run in the requested tenant before reading scores"
     );
     assert!(
         app_source.contains(&normalized_source("run_id: run.score_run_id")),
@@ -1095,12 +1088,13 @@ fn experiment_score_handlers_resolve_run_uids_through_scoped_experiment_runs() {
     );
     assert!(
         app_source.contains(&normalized_source(
-            "let scope = workspace_scope(request.workspace_id.clone());
+            "let scope = tenant_scope(request.tenant_id);
+             let workspace_id = workspace_id_for_tenant(request.tenant_id);
              let store = ExperimentStore::new(pool.clone());
              let base_run = load_required_run(&store, &scope, request.base_run_uid).await?;
              let new_run = load_required_run(&store, &scope, request.new_run_uid).await?;"
         )),
-        "experiment app must load both experiment runs in the requested workspace"
+        "experiment app must load both experiment runs in the requested tenant"
     );
     assert!(
         app_source.contains(&normalized_source("base_run: base_run.score_run_id")),
@@ -1138,11 +1132,11 @@ fn assert_experiment_type<T: 'static>() {
     );
 }
 
-fn assert_has_workspace_id<T: Serialize>(value: T) {
+fn assert_has_tenant_id<T: Serialize>(value: T) {
     let encoded = serde_json::to_value(value).expect("wire DTO should serialize");
     assert!(
-        encoded.get("workspace_id").is_some(),
-        "wire DTO should include workspace_id: {encoded}"
+        encoded.get("tenant_id").is_some(),
+        "wire DTO should include tenant_id: {encoded}"
     );
 }
 
@@ -1161,7 +1155,7 @@ fn assert_method_requires_relation(source: &str, method: &str, relation: &str) {
 
     assert!(
         method_body.contains(&format!(
-            "authorize_workspace(&ctx, &request.workspace_id, {relation})"
+            "authorize_tenant(&ctx, request.tenant_id, {relation})"
         )),
         "Experiments::{method} should require {relation}"
     );
@@ -1171,6 +1165,10 @@ fn fixture_uuid(last_byte: u8) -> Uuid {
     let mut bytes = [0_u8; 16];
     bytes[15] = last_byte;
     Uuid::from_bytes(bytes)
+}
+
+fn tenant_id_fixture() -> TenantId {
+    TenantId::from(fixture_uuid(42))
 }
 
 fn score_row(
@@ -1189,11 +1187,11 @@ fn score_row(
 
 fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
     ExperimentRunRecord {
-        scope: MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: TenantId::new(),
         },
         run_uid: fixture_uuid(1),
-        name: "proposal fixture".to_string(),
+        name: format!("proposal fixture {workspace_id}"),
         target_kind: ExperimentTargetKind::AgentLoop,
         status: ExperimentRunStatus::Completed,
         target: ExperimentTarget::AgentLoop {
@@ -1231,8 +1229,8 @@ fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
 
 fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
     ExperimentTrialRecord {
-        scope: MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace-a"),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: TenantId::new(),
         },
         trial_uid: fixture_uuid(6),
         run_uid,

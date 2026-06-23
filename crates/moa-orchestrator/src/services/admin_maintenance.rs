@@ -10,7 +10,7 @@ use moa_core::wire::{
     CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
     VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
 };
-use moa_core::{BranchManager, ScopeContext, WorkspaceId};
+use moa_core::{BranchManager, ScopeContext, TenantId};
 use moa_memory_vector::{
     PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, WorkspacePromotion,
     finalize_promotion, rollback_promotion,
@@ -74,15 +74,15 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "promote_workspace");
         let request = request.into_inner();
-        authorize_workspace_admin(&ctx, &request.workspace_id).await?;
+        authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
         let config = runtime.config();
 
         Ok(ctx
             .run(|| async move {
-                let workspace_id = request.workspace_id.to_string();
-                let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.clone()));
+                let workspace_id = request.tenant_id.to_string();
+                let scope = ScopeContext::tenant(request.tenant_id);
                 let pgvector = Arc::new(PgvectorStore::new(pool.clone(), scope));
                 let turbopuffer =
                     Arc::new(TurbopufferStore::from_config(&config).map_err(|error| {
@@ -99,6 +99,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
                     .await
                     .map_err(|error| TerminalError::new(format!("promote workspace: {error}")))?;
                 Ok::<_, HandlerError>(Json(promotion_response_from_report(
+                    request.tenant_id,
                     report,
                     Some(request.dual_read_hours),
                 )))
@@ -115,17 +116,17 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "rollback_promotion");
         let request = request.into_inner();
-        authorize_workspace_admin(&ctx, &request.workspace_id).await?;
+        authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
         validate_promotion_action(&request.action, "rollback")?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
-                rollback_promotion(&pool, &request.workspace_id.to_string())
+                rollback_promotion(&pool, &request.tenant_id.to_string())
                     .await
                     .map_err(|error| TerminalError::new(format!("rollback promotion: {error}")))?;
                 Ok::<_, HandlerError>(Json(promotion_update_response(
-                    request.workspace_id,
+                    request.tenant_id,
                     "pgvector",
                     "steady",
                 )))
@@ -142,17 +143,17 @@ impl AdminMaintenance for AdminMaintenanceImpl {
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("AdminMaintenance", "finalize_promotion");
         let request = request.into_inner();
-        authorize_workspace_admin(&ctx, &request.workspace_id).await?;
+        authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
         validate_promotion_action(&request.action, "finalize")?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
             .run(|| async move {
-                finalize_promotion(&pool, &request.workspace_id.to_string())
+                finalize_promotion(&pool, &request.tenant_id.to_string())
                     .await
                     .map_err(|error| TerminalError::new(format!("finalize promotion: {error}")))?;
                 Ok::<_, HandlerError>(Json(promotion_update_response(
-                    request.workspace_id,
+                    request.tenant_id,
                     "turbopuffer",
                     "steady",
                 )))
@@ -278,11 +279,12 @@ impl AdminMaintenance for AdminMaintenanceImpl {
 /// Converts a promotion report into the hosted API response DTO.
 #[must_use]
 pub fn promotion_response_from_report(
+    tenant_id: TenantId,
     report: PromotionReport,
     dual_read_hours: Option<u32>,
 ) -> VectorPromotionResponse {
     VectorPromotionResponse {
-        workspace_id: WorkspaceId::new(report.workspace_id),
+        tenant_id,
         copied_vectors: u64::try_from(report.copied).unwrap_or(u64::MAX),
         validation_overlap: report.validation_overlap,
         vector_backend: report.vector_backend,
@@ -294,12 +296,12 @@ pub fn promotion_response_from_report(
 /// Builds a response for a promotion state update.
 #[must_use]
 pub fn promotion_update_response(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     backend: impl Into<String>,
     state: impl Into<String>,
 ) -> VectorPromotionResponse {
     VectorPromotionResponse {
-        workspace_id,
+        tenant_id,
         copied_vectors: 0,
         validation_overlap: 1.0,
         vector_backend: backend.into(),
@@ -319,17 +321,17 @@ fn validate_promotion_action(actual: &str, expected: &str) -> Result<(), Handler
     Ok(())
 }
 
-async fn authorize_workspace_admin(
+async fn authorize_tenant_admin_for_tenant(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
-        ObjectType::Workspace,
-        workspace_id,
+        ObjectType::Tenant,
+        tenant_id,
         Relation::Admin,
     )
     .await

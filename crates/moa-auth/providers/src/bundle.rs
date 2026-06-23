@@ -296,7 +296,10 @@ mod tests {
             .expect("disabled auth accepts any credential");
         assert_eq!(identity.identity_type, IdentityType::Service);
         assert_eq!(identity.id, uuid::Uuid::nil());
-        assert_eq!(identity.tenant_id, uuid::Uuid::nil());
+        assert_eq!(
+            identity.tenant_id,
+            moa_core::TenantId::from(uuid::Uuid::nil())
+        );
         assert_eq!(identity.api_key_id, None);
     }
 }

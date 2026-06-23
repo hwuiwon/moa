@@ -216,10 +216,7 @@ pub async fn vector_leg(
 
     let hits = vector
         .knn(&VectorQuery {
-            workspace_id: req
-                .scope
-                .workspace_id()
-                .map(|workspace_id| workspace_id.to_string()),
+            workspace_id: Some(req.scope.tenant_id().to_string()),
             embedding: req.query_embedding.clone(),
             k: VECTOR_LIMIT,
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
@@ -474,26 +471,18 @@ pub async fn write_retrieval_lineage(
     if ranked_uids.is_empty() {
         return Ok(());
     }
-    let MemoryScope::User {
-        workspace_id,
-        user_id,
-    } = scope
-    else {
-        return Ok(());
-    };
-
-    let write_scope = MemoryScope::User {
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
-    };
-    let mut conn = begin_scoped(&pool, &write_scope, assume_app_role).await?;
+    let tenant_id = scope.tenant_id();
+    let contact_id = scope.contact_id();
+    let mut conn = begin_scoped(&pool, &scope, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "INSERT INTO moa.retrieval_lineage \
-         (workspace_id, user_id, session_id, turn_seq, turn_id, uid, rank, retrieved_at) ",
+         (tenant_id, contact_id, workspace_id, user_id, session_id, turn_seq, turn_id, uid, rank, retrieved_at) ",
     );
     builder.push_values(ranked_uids.iter().enumerate(), |mut row, (index, uid)| {
-        row.push_bind(workspace_id.as_str())
-            .push_bind(user_id.as_str())
+        row.push_bind(tenant_id.0)
+            .push_bind(contact_id.map(|id| id.0))
+            .push_bind(tenant_id.to_string())
+            .push_bind(contact_id.map(|id| id.to_string()))
             .push_bind(lineage.session_id.0)
             .push_bind(lineage.turn_seq)
             .push_bind(lineage.turn_id.map(|turn_id| turn_id.0))
@@ -643,7 +632,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use moa_core::{MemoryScope, WorkspaceId};
+    use moa_core::{MemoryScope, TenantId};
     use moa_memory_graph::{EdgeLabel, GraphExpansionHit, NodeIndexRow, NodeLabel, PiiClass};
     use moa_memory_vector::{Error as VectorError, VectorItem, VectorMatch, VectorQuery};
     use sqlx::PgConnection;
@@ -972,8 +961,8 @@ mod tests {
             seeds: Vec::new(),
             query_text: "who owns the dependency".to_string(),
             query_embedding: vec![0.1, 0.2],
-            scope: MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace-a"),
+            scope: MemoryScope::Tenant {
+                tenant_id: TenantId::from(Uuid::from_u128(0x100)),
             },
             label_filter: None,
             max_pii_class: PiiClass::Restricted,

@@ -304,7 +304,7 @@ pub struct ToolOverride {
 pub struct ActionPolicyOverride {
     /// Default effect when no rule or tool-specific config matches.
     pub default_effect: Option<ActionPolicyEffect>,
-    /// Tools that should be recorded for workspace-admin review.
+    /// Tools that should be recorded for tenant-admin review.
     pub admin_review: Vec<String>,
     /// Always denies the listed tools.
     pub always_deny: Vec<String>,

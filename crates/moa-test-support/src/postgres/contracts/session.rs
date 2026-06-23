@@ -2,17 +2,33 @@
 
 use chrono::{Duration, Utc};
 use moa_core::{
-    Event, EventFilter, EventRange, EventType, ModelId, SessionFilter, SessionMeta, SessionStatus,
-    SessionStore, UserId, WorkspaceId,
+    Event, EventFilter, EventRange, EventType, ModelId, SessionActorRef, SessionFilter,
+    SessionMeta, SessionStatus, SessionStore, TenantId, WorkspaceId,
 };
+use uuid::Uuid;
 
 fn test_session_meta(workspace: &str) -> SessionMeta {
     SessionMeta {
-        workspace_id: WorkspaceId::new(workspace),
-        user_id: UserId::new("u1"),
+        tenant_id: tenant_id_for_label(workspace),
+        created_by: Some(SessionActorRef::Identity {
+            id: Uuid::from_u128(1),
+        }),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }
+}
+
+fn tenant_id_for_label(label: &str) -> TenantId {
+    let value = match label {
+        "ws1" => 1,
+        "ws2" => 2,
+        _ => 3,
+    };
+    TenantId::from(Uuid::from_u128(value))
+}
+
+fn tenant_workspace_key(label: &str) -> WorkspaceId {
+    WorkspaceId::new(tenant_id_for_label(label).to_string())
 }
 
 /// Verifies session creation, event append, and aggregate counters.
@@ -217,13 +233,13 @@ where
 
     let sessions = store
         .list_sessions(SessionFilter {
-            workspace_id: Some(WorkspaceId::new("ws1")),
+            tenant_id: Some(tenant_id_for_label("ws1")),
             ..Default::default()
         })
         .await
         .expect("list sessions");
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].workspace_id, WorkspaceId::new("ws1"));
+    assert_eq!(sessions[0].tenant_id, tenant_id_for_label("ws1"));
 }
 
 /// Verifies workspace spend aggregation since a specific timestamp.
@@ -303,13 +319,13 @@ where
         .expect("emit other workspace response");
 
     let workspace_total = store
-        .workspace_cost_since(&WorkspaceId::new("ws1"), since)
+        .workspace_cost_since(&tenant_workspace_key("ws1"), since)
         .await
         .expect("load workspace spend");
     assert_eq!(workspace_total, 18);
 
     let future_total = store
-        .workspace_cost_since(&WorkspaceId::new("ws1"), future_since)
+        .workspace_cost_since(&tenant_workspace_key("ws1"), future_since)
         .await
         .expect("load future workspace spend");
     assert_eq!(future_total, 0);

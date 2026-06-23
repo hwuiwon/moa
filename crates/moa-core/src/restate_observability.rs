@@ -35,7 +35,7 @@ pub fn trace_id_for_span(span: &tracing::Span) -> Option<String> {
     }
 }
 
-/// Applies stable session/user/workspace tracing attributes to the provided span.
+/// Applies stable session, tenant, and contact tracing attributes to the provided span.
 pub fn apply_session_trace(
     span: &tracing::Span,
     meta: &SessionMeta,
@@ -68,8 +68,8 @@ pub fn session_turn_span(
         otel.name = %trace_name,
         moa.session.id = %meta.id,
         moa.sub_agent.id = tracing::field::Empty,
-        moa.workspace.id = %meta.workspace_id,
-        moa.user.id = %meta.user_id,
+        moa.tenant.id = %meta.tenant_id,
+        moa.contact.id = tracing::field::Empty,
         moa.model = %meta.model,
         moa.turn.number = turn_number,
         moa.turn.get_events_calls = tracing::field::Empty,
@@ -123,15 +123,13 @@ pub fn llm_call_span(meta: &SessionMeta) -> tracing::Span {
             "llm_call",
             gen_ai.request.model = %meta.model,
             moa.session.id = %meta.id,
-            moa.workspace.id = %meta.workspace_id,
-            moa.user.id = %meta.user_id,
+            moa.tenant.id = %meta.tenant_id,
         ),
         None => tracing::info_span!(
             "llm_call",
             gen_ai.request.model = %meta.model,
             moa.session.id = %meta.id,
-            moa.workspace.id = %meta.workspace_id,
-            moa.user.id = %meta.user_id,
+            moa.tenant.id = %meta.tenant_id,
         ),
     }
 }

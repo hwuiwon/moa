@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::Utc;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{AgentRevisionSimulationCompareRequest, AgentRevisionSimulationVariant};
-use moa_core::{MemoryScope, ModelId, ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ActionRuleScope, ModelId, ScopeContext, ScopedConn, TenantId};
 use moa_experiments::model::{
     ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTargetKind,
     ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
@@ -24,10 +24,8 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
         moa_session::testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
     let experiment_store = ExperimentStore::new(pool.clone());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let tenant_id = TenantId::new();
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
     let base_revision_uid = Uuid::now_v7();
     let candidate_revision_uid = Uuid::now_v7();
@@ -80,7 +78,7 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
         compare_agent_revision_simulation_inner(
             pool,
             AgentRevisionSimulationCompareRequest {
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 run_uid: run.run_uid,
                 base_variant_key: "base".to_string(),
                 candidate_variant_keys: Vec::new(),
@@ -89,7 +87,7 @@ async fn compare_agent_revision_simulation_groups_trials_by_exact_revision_db_me
         .await,
     )?;
 
-    assert_eq!(compared.workspace_id, workspace_id);
+    assert_eq!(compared.tenant_id, tenant_id);
     assert_eq!(compared.run_uid, run.run_uid);
     assert_eq!(compared.base_variant_key, "base");
     assert_eq!(compared.variants.len(), 2);
@@ -194,14 +192,14 @@ fn new_trial(
     }
 }
 
-async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &MemoryScope) -> Result<Uuid> {
-    let workspace_id = scope
-        .workspace_id()
-        .expect("simulation comparison test uses workspace scope")
-        .to_string();
+async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
+    let ActionRuleScope::Tenant { tenant_id } = scope else {
+        anyhow::bail!("simulation comparison test uses tenant scope");
+    };
+    let workspace_id = tenant_id.to_string();
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
@@ -243,7 +241,7 @@ fn identity_json() -> serde_json::Value {
     let identity = Identity {
         identity_type: IdentityType::User,
         id: Uuid::now_v7(),
-        tenant_id: Uuid::now_v7(),
+        tenant_id: TenantId::new(),
         api_key_id: None,
         acting_on_behalf_of: None,
     };

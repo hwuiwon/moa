@@ -61,7 +61,7 @@ pub enum CorpusProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptStyle {
-    /// Legacy marker-heavy transcripts optimized for the heuristic extractor.
+    /// Marker-heavy transcripts optimized for the heuristic extractor.
     #[default]
     Marked,
     /// Conversational transcripts with no fact or scope markers.
@@ -453,7 +453,7 @@ pub fn validate_probes(probes: &[Probe], facts: &[LedgerFact]) -> Result<()> {
             };
 
             if probe.probe_type == ProbeType::CrossUserIsolation
-                && fact.scope == ScopeTier::User
+                && fact.scope == ScopeTier::Contact
                 && fact.user_id == probe.user_id
             {
                 return invalid_config(format!(
@@ -589,7 +589,7 @@ mod tests {
             "expected_redacted": false
         });
 
-        let fact: LedgerFact = serde_json::from_value(raw).expect("legacy ledger fact parses");
+        let fact: LedgerFact = serde_json::from_value(raw).expect("ledger fact parses");
 
         assert_eq!(fact.restates, None);
         assert_eq!(fact.prior_uses, None);
@@ -644,7 +644,7 @@ mod tests {
         LedgerFact {
             workspace_id: WorkspaceId::new("workspace-a"),
             user_id: UserId::new("user-a"),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             fact_id: fact_id.to_string(),
             valid_from: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             valid_to: None,

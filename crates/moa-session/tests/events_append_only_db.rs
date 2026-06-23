@@ -3,7 +3,7 @@
 mod shared;
 
 use moa_core::{
-    Event, EventRange, MoaError, ModelId, SessionMeta, SessionStore, UserId, WorkspaceId,
+    Event, EventRange, MoaError, ModelId, SessionActorRef, SessionMeta, SessionStore, TenantId,
 };
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use uuid::Uuid;
@@ -22,12 +22,24 @@ async fn configured_test_db() -> Option<TestDb> {
     )
 }
 
+fn tenant_id(label: &str) -> TenantId {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.bytes().enumerate() {
+        bytes[index % 16] = bytes[index % 16].wrapping_mul(31).wrapping_add(byte);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
+}
+
 async fn seeded_event(test_db: &TestDb) -> Uuid {
     let session_id = test_db
         .store()
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new(WORKSPACE_ID),
-            user_id: UserId::new(USER_ID),
+            tenant_id: tenant_id(WORKSPACE_ID),
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(42),
+            }),
             model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
@@ -63,8 +75,10 @@ async fn delete_empty_session_removes_session_without_touching_events_table() {
     let session_id = test_db
         .store()
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new(WORKSPACE_ID),
-            user_id: UserId::new(USER_ID),
+            tenant_id: tenant_id(WORKSPACE_ID),
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(42),
+            }),
             model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })
@@ -93,8 +107,10 @@ async fn delete_empty_session_rejects_session_with_append_only_events() {
     let session_id = test_db
         .store()
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new(WORKSPACE_ID),
-            user_id: UserId::new(USER_ID),
+            tenant_id: tenant_id(WORKSPACE_ID),
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(42),
+            }),
             model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })

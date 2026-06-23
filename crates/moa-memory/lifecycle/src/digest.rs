@@ -134,16 +134,16 @@ pub async fn rebuild_digests(
     let mut groups = BTreeMap::<DigestIdentity, Vec<DigestFact>>::new();
     for row in rows {
         let identity = match row.scope.as_str() {
-            "workspace" if row.user_id.is_none() => DigestIdentity {
+            "tenant" if row.user_id.is_none() => DigestIdentity {
                 scope_kind: DigestScopeKind::Workspace,
                 user_id: None,
             },
-            "user" => {
+            "contact" => {
                 let Some(user_id) = row.user_id.clone() else {
                     tracing::warn!(
                         uid = %row.fact.uid,
                         workspace_id = %workspace_id,
-                        "skipping user-scope digest fact without user_id"
+                        "skipping contact-scope digest fact without user_id"
                     );
                     continue;
                 };
@@ -292,7 +292,7 @@ async fn active_digest_fact_rows(
         WHERE workspace_id = $1
           AND label = 'Fact'
           AND valid_to IS NULL
-          AND scope IN ('user', 'workspace')
+          AND scope IN ('contact', 'tenant')
           AND (confidence IS NULL OR confidence > $2)
         ORDER BY scope ASC, user_id ASC NULLS FIRST, valid_from DESC, uid ASC
         "#,

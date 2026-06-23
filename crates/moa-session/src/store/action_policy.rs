@@ -1,9 +1,10 @@
 //! Action-policy rule operations for the Postgres session store.
 
 use moa_core::{ActionRuleScope, UserId, WorkspaceId};
-use moa_security::GLOBAL_ACTION_POLICY_WORKSPACE_ID;
 
 use super::*;
+
+const WORKSPACE_DEFAULT_POLICY_KEY: &str = "workspace_default";
 
 impl PostgresSessionStore {
     /// Lists action-policy rules visible to one workspace user and tool.
@@ -17,13 +18,15 @@ impl PostgresSessionStore {
         let rows = sqlx::query(&format!(
             "SELECT id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
              FROM {action_policy_rules} \
-             WHERE (workspace_id = $1 OR (workspace_id = $2 AND scope = 'global')) \
+             WHERE ((tenant_id = $1 AND scope = 'tenant') OR (tenant_id IS NULL AND workspace_id = $2 AND scope = 'workspace_default')) \
                AND (user_id IS NULL OR user_id = $3) \
                AND tool = $4 \
              ORDER BY created_at ASC"
         ))
-        .bind(workspace_id.to_string())
-        .bind(GLOBAL_ACTION_POLICY_WORKSPACE_ID)
+        .bind(workspace_id.as_str().parse::<uuid::Uuid>().map_err(|error| {
+            MoaError::StorageError(format!("action policy workspace id must be a tenant UUID: {error}"))
+        })?)
+        .bind(WORKSPACE_DEFAULT_POLICY_KEY)
         .bind(user_id.to_string())
         .bind(tool)
         .fetch_all(&self.pool)
@@ -37,10 +40,12 @@ impl PostgresSessionStore {
     pub async fn upsert_action_policy_rule(&self, rule: ActionPolicyRule) -> Result<()> {
         let action_policy_rules = self.table_name("action_policy_rules");
         let workspace_id = stored_workspace_id_for_rule(&rule);
+        let tenant_id = stored_tenant_id_for_rule(&rule);
         sqlx::query(&format!(
-            "INSERT INTO {action_policy_rules} (id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+            "INSERT INTO {action_policy_rules} (id, tenant_id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
              ON CONFLICT (workspace_id, tool, pattern, (COALESCE(user_id, ''))) DO UPDATE SET \
+                 tenant_id = EXCLUDED.tenant_id, \
                  effect = EXCLUDED.effect, \
                  scope = EXCLUDED.scope, \
                  reason = EXCLUDED.reason, \
@@ -48,8 +53,9 @@ impl PostgresSessionStore {
                  created_at = EXCLUDED.created_at"
         ))
         .bind(rule.id)
+        .bind(tenant_id)
         .bind(workspace_id.to_string())
-        .bind(rule.user_id.as_ref().map(ToString::to_string))
+        .bind(Option::<String>::None)
         .bind(rule.tool)
         .bind(rule.pattern)
         .bind(rule.effect.as_str())
@@ -93,10 +99,16 @@ impl PostgresSessionStore {
 }
 
 fn stored_workspace_id_for_rule(rule: &ActionPolicyRule) -> WorkspaceId {
-    if matches!(rule.scope, ActionRuleScope::Global) {
-        WorkspaceId::new(GLOBAL_ACTION_POLICY_WORKSPACE_ID)
-    } else {
-        rule.workspace_id.clone()
+    match rule.scope {
+        ActionRuleScope::WorkspaceDefault => WorkspaceId::new(WORKSPACE_DEFAULT_POLICY_KEY),
+        ActionRuleScope::Tenant { tenant_id } => WorkspaceId::new(tenant_id.to_string()),
+    }
+}
+
+fn stored_tenant_id_for_rule(rule: &ActionPolicyRule) -> Option<uuid::Uuid> {
+    match rule.scope {
+        ActionRuleScope::WorkspaceDefault => None,
+        ActionRuleScope::Tenant { tenant_id } => Some(tenant_id.0),
     }
 }
 

@@ -1,7 +1,7 @@
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{MemoryScope, Result, WorkspaceId};
+use moa_core::{ActionRuleScope, Result, TenantId, WorkspaceId};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -14,8 +14,8 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
     let pool = store.pool().clone();
     let registry = ArtifactRegistry::new(pool.clone());
     let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
+    let scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
     };
     let name = format!("support-agent-{}", Uuid::now_v7());
 

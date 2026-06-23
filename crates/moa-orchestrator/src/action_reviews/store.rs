@@ -1,7 +1,10 @@
-//! Postgres storage for workspace action reviews.
+//! Postgres storage for tenant action reviews.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ActionClass, ActionReviewStatus, ToolCallId, ToolCallRequest, WorkspaceId};
+use moa_core::{
+    ActionClass, ActionReviewStatus, SessionActorRef, TenantId, ToolCallId, ToolCallRequest,
+    WorkspaceId,
+};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -60,7 +63,7 @@ pub(crate) struct ReviewDecisionUpdate {
     pub(crate) execution_tool_call_id: Option<Uuid>,
 }
 
-/// Insert a pending workspace action review, or load the existing idempotent row.
+/// Insert a pending tenant action review, or load the existing idempotent row.
 pub(crate) async fn insert_review(
     pool: sqlx::PgPool,
     request: RequestActionReview,
@@ -71,19 +74,23 @@ pub(crate) async fn insert_review(
         .map_err(|error| TerminalError::new(format!("serialize envelope: {error}")))?;
     let preview = serde_json::to_value(&request.preview)
         .map_err(|error| TerminalError::new(format!("serialize preview: {error}")))?;
+    let tenant_id = request.envelope.tenant_id;
+    let storage_workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let requested_by = session_actor_ref_to_storage(&request.envelope.requested_by);
     let insert = sqlx::query(
         r#"
         INSERT INTO workspace_action_reviews (
-            id, workspace_id, user_id, session_id, sub_agent_id, tool_call_id, tool_name,
+            id, tenant_id, workspace_id, user_id, session_id, sub_agent_id, tool_call_id, tool_name,
             action_class, risk_level, input_summary, normalized_input, envelope,
             preview, tool_request, requested_by
         )
-        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         ON CONFLICT (id) DO NOTHING
         "#,
     )
     .bind(request.envelope.review_id)
-    .bind(request.envelope.workspace_id.to_string())
+    .bind(tenant_id.0)
+    .bind(storage_workspace_id.to_string())
     .bind(request.envelope.session_id.map(|id| id.0))
     .bind(request.envelope.sub_agent_id.clone())
     .bind(request.envelope.tool_call_id.0)
@@ -95,19 +102,23 @@ pub(crate) async fn insert_review(
     .bind(envelope)
     .bind(preview)
     .bind(tool_request)
-    .bind(request.envelope.user_id.to_string())
+    .bind(&requested_by)
     .execute(&pool)
     .await
     .map_err(db_error)?;
 
-    let mut stored = load_review_state(
-        pool,
-        request.envelope.workspace_id,
-        request.envelope.review_id,
-    )
-    .await?;
+    let mut stored =
+        load_review_state(pool, storage_workspace_id, request.envelope.review_id).await?;
     stored.newly_inserted = insert.rows_affected() > 0;
     Ok(stored)
+}
+
+fn session_actor_ref_to_storage(actor: &SessionActorRef) -> String {
+    match actor {
+        SessionActorRef::Identity { id } => format!("identity:{id}"),
+        SessionActorRef::Contact { id } => format!("contact:{id}"),
+        SessionActorRef::Anonymous => "anonymous".to_string(),
+    }
 }
 
 /// List pending reviews for one workspace.
@@ -117,7 +128,7 @@ pub(crate) async fn list_pending_reviews(
 ) -> Result<Vec<ActionReviewSummary>, HandlerError> {
     let rows = sqlx::query(
         r#"
-        SELECT id, workspace_id, session_id, sub_agent_id, tool_call_id, tool_name,
+        SELECT id, tenant_id, workspace_id, session_id, sub_agent_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
                requested_by, decided_by, deny_reason, created_at, decided_at
         FROM workspace_action_reviews
@@ -142,7 +153,7 @@ pub(crate) async fn load_review_for_update(
 ) -> Result<ReviewDecisionRow, HandlerError> {
     let row = sqlx::query(
         r#"
-        SELECT id, workspace_id, session_id, action_class, status, tool_request,
+        SELECT id, tenant_id, workspace_id, session_id, action_class, status, tool_request,
                decided_by, deny_reason, decided_at, decision_event_recorded_at,
                execution_tool_call_id, execution_requested_at
         FROM workspace_action_reviews
@@ -285,7 +296,7 @@ async fn load_review_state(
 ) -> Result<StoredReview, HandlerError> {
     let row = sqlx::query(
         r#"
-        SELECT id, workspace_id, session_id, sub_agent_id, tool_call_id, tool_name,
+        SELECT id, tenant_id, workspace_id, session_id, sub_agent_id, tool_call_id, tool_name,
                action_class, risk_level, input_summary, envelope, preview, status,
                requested_by, requested_event_recorded_at, decided_by, deny_reason,
                created_at, decided_at
@@ -312,7 +323,7 @@ async fn load_review_state(
 fn summary_from_row(row: &sqlx::postgres::PgRow) -> Result<ActionReviewSummary, HandlerError> {
     Ok(ActionReviewSummary {
         id: row.try_get("id").map_err(db_error)?,
-        workspace_id: WorkspaceId::new(row.try_get::<String, _>("workspace_id").map_err(db_error)?),
+        tenant_id: TenantId::from(row.try_get::<Uuid, _>("tenant_id").map_err(db_error)?),
         session_id: row
             .try_get::<Option<Uuid>, _>("session_id")
             .map_err(db_error)?

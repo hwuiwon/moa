@@ -265,7 +265,7 @@ pub trait SessionStore: Send + Sync {
         ))
     }
 
-    /// Loads one full learning candidate for a workspace-scoped review path.
+    /// Loads one full learning candidate for a tenant-scoped review path.
     async fn get_learning_candidate(
         &self,
         _workspace_id: &WorkspaceId,

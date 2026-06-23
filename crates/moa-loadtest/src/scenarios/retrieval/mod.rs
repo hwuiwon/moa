@@ -23,7 +23,7 @@ use moa_brain::{
     planning::{PlannedQuery, Strategy},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };
-use moa_core::{MemoryScope, ScopeContext, ScopedConn, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{MemoryScope, ScopeContext, ScopedConn, TenantId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VECTOR_DIMENSION};
 use moa_session::{PostgresSessionStore, testing::cleanup_test_schema};

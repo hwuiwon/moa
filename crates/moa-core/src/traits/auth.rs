@@ -11,12 +11,16 @@ use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::TenantId;
+
 /// Principal category resolved from an inbound credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityType {
     /// Human user.
     User,
+    /// Tenant-local end-user contact.
+    Contact,
     /// AI agent principal.
     Agent,
     /// Internal service principal.
@@ -30,8 +34,8 @@ pub struct Identity {
     pub identity_type: IdentityType,
     /// Principal UUID.
     pub id: Uuid,
-    /// Tenant UUID for this request.
-    pub tenant_id: Uuid,
+    /// Tenant runtime boundary for this request.
+    pub tenant_id: TenantId,
     /// API key UUID when authentication used a local API key.
     pub api_key_id: Option<Uuid>,
     /// User UUID when an agent is acting on behalf of a user.
@@ -223,7 +227,7 @@ mod tests {
             Ok(Identity {
                 identity_type: IdentityType::User,
                 id: Uuid::from_u128(1),
-                tenant_id: Uuid::from_u128(2),
+                tenant_id: TenantId::from(Uuid::from_u128(2)),
                 api_key_id: Some(Uuid::from_u128(3)),
                 acting_on_behalf_of: None,
             })
@@ -287,7 +291,7 @@ mod tests {
         assert_eq!(provider.name(), "dummy-auth");
         assert_eq!(identity.identity_type, IdentityType::User);
         assert_eq!(identity.id, Uuid::from_u128(1));
-        assert_eq!(identity.tenant_id, Uuid::from_u128(2));
+        assert_eq!(identity.tenant_id, TenantId::from(Uuid::from_u128(2)));
         assert_eq!(identity.api_key_id, Some(Uuid::from_u128(3)));
         assert_eq!(identity.acting_on_behalf_of, None);
     }

@@ -11,7 +11,7 @@ use moa_skills::distiller::{
 use support::{
     SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_5_TOOL_CALLS, configured_test_db, failed_session,
     learning_store, load_optional_active_skill, load_session_fixture, scripted_router, seed_skill,
-    skill_markdown, test_config, workspace_scope,
+    session_workspace_id, skill_markdown, test_config, workspace_scope,
 };
 
 #[tokio::test]
@@ -42,7 +42,8 @@ async fn session_with_5_tool_calls_and_success_outcome_triggers_distillation() {
         panic!("expected new skill proposal");
     };
     assert_eq!(proposal.metadata.name, "oauth-refresh-regression");
-    let scope = workspace_scope(&loaded.session.workspace_id);
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
     assert!(
         load_optional_active_skill(&test_db, &scope, "oauth-refresh-regression")
             .await
@@ -101,7 +102,8 @@ async fn distillation_above_similarity_threshold_routes_to_improver() {
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
     let similar = skill_markdown(
         "debug-oauth-refresh-regression",
         "debug oauth refresh regression with bash file search validation",
@@ -147,7 +149,8 @@ async fn distillation_below_similarity_threshold_creates_new_skill() {
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
     let unrelated = skill_markdown(
         "terraform-state-cleanup",
         "Clean Terraform state for decommissioned services",
@@ -206,8 +209,9 @@ async fn distilled_skill_includes_lineage_pointer_to_originating_session() {
         panic!("expected lineage proposal");
     };
     let store = learning_store(&test_db);
+    let workspace_id = session_workspace_id(&loaded.session);
     let candidate = store
-        .get_learning_candidate(&loaded.session.workspace_id, proposal.candidate_id)
+        .get_learning_candidate(&workspace_id, proposal.candidate_id)
         .await
         .expect("load lineage candidate")
         .expect("candidate exists");

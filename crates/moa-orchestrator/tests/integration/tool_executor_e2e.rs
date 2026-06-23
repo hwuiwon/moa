@@ -12,11 +12,11 @@ use tokio::time::sleep;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_workspace_member, register_deployment, reserve_orchestrator_ports, restate_admin_url,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
     restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
-    append_event_request, get_events_request, test_session_meta,
+    append_event_request, get_events_request, test_session_meta, workspace_id_from_meta,
 };
 
 fn spawn_orchestrator(
@@ -58,8 +58,8 @@ fn tool_request(
         input,
         active_canary: None,
         session_id: Some(session_id),
-        workspace_id: meta.workspace_id.clone(),
-        user_id: meta.user_id.clone(),
+        tenant_id: meta.tenant_id,
+        user_id: fallback_tool_user_id(meta),
         idempotency_key: None,
     }
 }
@@ -79,9 +79,21 @@ fn tool_request_with_provider_id(
         input,
         active_canary: None,
         session_id: Some(session_id),
-        workspace_id: meta.workspace_id.clone(),
-        user_id: meta.user_id.clone(),
+        tenant_id: meta.tenant_id,
+        user_id: fallback_tool_user_id(meta),
         idempotency_key: None,
+    }
+}
+
+fn fallback_tool_user_id(meta: &moa_core::SessionMeta) -> moa_core::UserId {
+    match &meta.created_by {
+        Some(moa_core::SessionActorRef::Identity { id }) => moa_core::UserId::new(id.to_string()),
+        Some(moa_core::SessionActorRef::Contact { id }) => {
+            moa_core::UserId::new(format!("contact:{id}"))
+        }
+        Some(moa_core::SessionActorRef::Anonymous) | None => {
+            moa_core::UserId::new(format!("tenant:{}", meta.tenant_id))
+        }
     }
 }
 
@@ -102,8 +114,10 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
         let ingress = restate_ingress_url();
         let ingress = ingress.as_str();
         let meta = test_session_meta("tool-executor-e2e");
-        let identity = test_user_identity();
-        grant_workspace_member(&identity, &meta.workspace_id).await?;
+        let workspace_id = workspace_id_from_meta(&meta);
+        let mut identity = test_user_identity();
+        identity.tenant_id = meta.tenant_id;
+        grant_tenant_operator(&identity, &workspace_id).await?;
 
         let create_request = client.post(format!(
             "{}/SessionStore/create_session",
@@ -215,7 +229,7 @@ async fn tool_executor_round_trip_through_restate() -> Result<()> {
                 "{}/ToolExecutor/list_tools",
                 ingress.trim_end_matches('/')
             ))
-            .json(&meta.workspace_id)
+            .json(&meta.tenant_id)
             .send()
             .await
             .context("list registered tools")?;
@@ -272,8 +286,10 @@ async fn tool_executor_blocks_canary_input_before_backend_execution() -> Result<
         let ingress = restate_ingress_url();
         let ingress = ingress.as_str();
         let meta = test_session_meta("tool-executor-canary-block");
-        let identity = test_user_identity();
-        grant_workspace_member(&identity, &meta.workspace_id).await?;
+        let workspace_id = workspace_id_from_meta(&meta);
+        let mut identity = test_user_identity();
+        identity.tenant_id = meta.tenant_id;
+        grant_tenant_operator(&identity, &workspace_id).await?;
 
         let create_request = client.post(format!(
             "{}/SessionStore/create_session",
@@ -411,8 +427,10 @@ async fn tool_executor_does_not_duplicate_preexisting_tool_call_event() -> Resul
         let ingress = restate_ingress_url();
         let ingress = ingress.as_str();
         let meta = test_session_meta("tool-executor-preexisting-call");
-        let identity = test_user_identity();
-        grant_workspace_member(&identity, &meta.workspace_id).await?;
+        let workspace_id = workspace_id_from_meta(&meta);
+        let mut identity = test_user_identity();
+        identity.tenant_id = meta.tenant_id;
+        grant_tenant_operator(&identity, &workspace_id).await?;
 
         let create_request = client.post(format!(
             "{}/SessionStore/create_session",

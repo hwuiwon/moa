@@ -1,4 +1,4 @@
-//! Restate service for protected session, workspace, tool, and cache analytics.
+//! Restate service for protected session, tenant, tool, and cache analytics.
 
 use std::sync::OnceLock;
 
@@ -12,13 +12,12 @@ use moa_core::wire::{
     ExperimentStatusCount, ExperimentTrialTrendPoint, LearningCandidateListRequest,
     LearningCandidateListResponse, LearningCandidateSummary, SessionSearchRequest,
     SessionSearchResponse, SessionSearchResult, SessionStatsRequest, SessionStatsResponse,
-    ToolStatsRequest, ToolStatsResponse, ToolStatsRow, WorkspaceStatsRequest,
-    WorkspaceStatsResponse,
+    TenantStatsRequest, TenantStatsResponse, ToolStatsRequest, ToolStatsResponse, ToolStatsRow,
 };
 use moa_core::{
     CacheDailyMetric, Event, EventFilter, EventRecord, LearningCandidateStatus,
-    LearningCandidateType, LearningRiskClass, MemoryScope, MoaError, ScopeContext, ScopedConn,
-    SessionAnalyticsSummary, ToolCallSummary, UserId, WorkspaceAnalyticsSummary, WorkspaceId,
+    LearningCandidateType, LearningRiskClass, MoaError, ScopeContext, ScopedConn, SessionActorRef,
+    SessionAnalyticsSummary, TenantAnalyticsSummary, TenantId, ToolCallSummary,
 };
 use regex::Regex;
 use restate_sdk::prelude::*;
@@ -38,32 +37,32 @@ pub trait Analytics {
         request: Json<SessionStatsRequest>,
     ) -> Result<Json<SessionStatsResponse>, HandlerError>;
 
-    /// Loads workspace analytics after a workspace member check.
-    async fn workspace_stats(
-        request: Json<WorkspaceStatsRequest>,
-    ) -> Result<Json<WorkspaceStatsResponse>, HandlerError>;
+    /// Loads tenant analytics after a tenant admin check.
+    async fn tenant_stats(
+        request: Json<TenantStatsRequest>,
+    ) -> Result<Json<TenantStatsResponse>, HandlerError>;
 
-    /// Loads per-tool analytics after a workspace member check.
+    /// Loads per-tool analytics after a tenant operator check.
     async fn tool_stats(
         request: Json<ToolStatsRequest>,
     ) -> Result<Json<ToolStatsResponse>, HandlerError>;
 
-    /// Loads workspace cache analytics after a workspace member check.
+    /// Loads tenant cache analytics after a tenant admin check.
     async fn cache_stats(
         request: Json<CacheStatsRequest>,
     ) -> Result<Json<CacheStatsResponse>, HandlerError>;
 
-    /// Loads workspace-scoped live experiment analytics after a workspace member check.
+    /// Loads tenant-scoped live experiment analytics after a tenant operator check.
     async fn experiment_stats(
         request: Json<ExperimentAnalyticsRequest>,
     ) -> Result<Json<ExperimentAnalyticsResponse>, HandlerError>;
 
-    /// Lists curated learning-candidate summaries after a workspace editor or tenant admin check.
+    /// Lists curated learning-candidate summaries after a tenant operator or tenant admin check.
     async fn learning_candidates(
         request: Json<LearningCandidateListRequest>,
     ) -> Result<Json<LearningCandidateListResponse>, HandlerError>;
 
-    /// Searches workspace session events and returns redacted snippets after a workspace member check.
+    /// Searches tenant session events and returns redacted snippets after a tenant operator check.
     async fn session_search(
         request: Json<SessionSearchRequest>,
     ) -> Result<Json<SessionSearchResponse>, HandlerError>;
@@ -98,14 +97,14 @@ impl Analytics for AnalyticsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn workspace_stats(
+    async fn tenant_stats(
         &self,
         ctx: Context<'_>,
-        request: Json<WorkspaceStatsRequest>,
-    ) -> Result<Json<WorkspaceStatsResponse>, HandlerError> {
-        annotate_restate_handler_span("Analytics", "workspace_stats");
+        request: Json<TenantStatsRequest>,
+    ) -> Result<Json<TenantStatsResponse>, HandlerError> {
+        annotate_restate_handler_span("Analytics", "tenant_stats");
         let request = request.into_inner();
-        authorize_workspace_member(&ctx, &request.workspace_id).await?;
+        authorize_tenant_admin(&ctx, request.tenant_id).await?;
         let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
@@ -114,13 +113,17 @@ impl Analytics for AnalyticsImpl {
                     .refresh_analytics_materialized_views()
                     .await
                     .map_err(to_handler_error)?;
-                let summary = store
-                    .get_workspace_stats(&request.workspace_id, request.days)
-                    .await
-                    .map_err(to_handler_error)?;
-                Ok(Json(workspace_stats_response_from_summary(summary)))
+                let summary = moa_core::analytics::get_tenant_stats_control_plane(
+                    store.pool(),
+                    store.schema_name(),
+                    &request.tenant_id,
+                    request.days,
+                )
+                .await
+                .map_err(to_handler_error)?;
+                Ok(Json(tenant_stats_response_from_summary(summary)))
             })
-            .name("analytics_workspace_stats")
+            .name("analytics_tenant_stats")
             .await?)
     }
 
@@ -134,8 +137,8 @@ impl Analytics for AnalyticsImpl {
         let request = request.into_inner();
         let scope = tool_stats_scope(&request);
         match &scope {
-            ToolStatsScope::Workspace { workspace_id } => {
-                authorize_workspace_member(&ctx, workspace_id).await?;
+            ToolStatsScope::Tenant { tenant_id } => {
+                authorize_tenant_member(&ctx, *tenant_id).await?;
             }
             ToolStatsScope::Deployment => {
                 authorize_deployment_operator(&ctx).await?;
@@ -145,12 +148,12 @@ impl Analytics for AnalyticsImpl {
 
         Ok(ctx
             .run(|| async move {
-                let workspace_id = scope.workspace_id().cloned();
+                let tenant_id = scope.tenant_id().copied();
                 let rows = store
-                    .list_tool_call_summaries(workspace_id.as_ref())
+                    .list_tool_call_summaries(tenant_id.as_ref())
                     .await
                     .map_err(to_handler_error)?;
-                Ok(Json(tool_stats_response_from_rows(workspace_id, rows)))
+                Ok(Json(tool_stats_response_from_rows(tenant_id, rows)))
             })
             .name("analytics_tool_stats")
             .await?)
@@ -164,7 +167,7 @@ impl Analytics for AnalyticsImpl {
     ) -> Result<Json<CacheStatsResponse>, HandlerError> {
         annotate_restate_handler_span("Analytics", "cache_stats");
         let request = request.into_inner();
-        authorize_workspace_member(&ctx, &request.workspace_id).await?;
+        authorize_tenant_admin(&ctx, request.tenant_id).await?;
         let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
@@ -173,14 +176,22 @@ impl Analytics for AnalyticsImpl {
                     .refresh_analytics_materialized_views()
                     .await
                     .map_err(to_handler_error)?;
-                let summary = store
-                    .get_workspace_stats(&request.workspace_id, request.days)
-                    .await
-                    .map_err(to_handler_error)?;
-                let daily = store
-                    .list_cache_daily_metrics(&request.workspace_id, request.days)
-                    .await
-                    .map_err(to_handler_error)?;
+                let summary = moa_core::analytics::get_tenant_stats_control_plane(
+                    store.pool(),
+                    store.schema_name(),
+                    &request.tenant_id,
+                    request.days,
+                )
+                .await
+                .map_err(to_handler_error)?;
+                let daily = moa_core::analytics::list_cache_daily_metrics_control_plane(
+                    store.pool(),
+                    store.schema_name(),
+                    &request.tenant_id,
+                    request.days,
+                )
+                .await
+                .map_err(to_handler_error)?;
                 Ok(Json(cache_stats_response_from_parts(summary, daily)))
             })
             .name("analytics_cache_stats")
@@ -195,7 +206,7 @@ impl Analytics for AnalyticsImpl {
     ) -> Result<Json<ExperimentAnalyticsResponse>, HandlerError> {
         annotate_restate_handler_span("Analytics", "experiment_stats");
         let request = request.into_inner();
-        authorize_workspace_member(&ctx, &request.workspace_id).await?;
+        authorize_tenant_member(&ctx, request.tenant_id).await?;
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx
@@ -212,13 +223,8 @@ impl Analytics for AnalyticsImpl {
     ) -> Result<Json<LearningCandidateListResponse>, HandlerError> {
         annotate_restate_handler_span("Analytics", "learning_candidates");
         let request = request.into_inner();
-        let tenant_id = match learning_candidate_scope(&request) {
-            LearningCandidateReadScope::Workspace { workspace_id } => {
-                authorize_workspace_editor(&ctx, &workspace_id).await?;
-                require_identity(&ctx)?.tenant_id.to_string()
-            }
-            LearningCandidateReadScope::Tenant => authorize_tenant_admin(&ctx).await?,
-        };
+        let tenant_id = request.tenant_id;
+        authorize_tenant_member(&ctx, tenant_id).await?;
         let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
@@ -244,7 +250,7 @@ impl Analytics for AnalyticsImpl {
     ) -> Result<Json<SessionSearchResponse>, HandlerError> {
         annotate_restate_handler_span("Analytics", "session_search");
         let request = request.into_inner();
-        authorize_workspace_member(&ctx, &request.workspace_id).await?;
+        authorize_tenant_member(&ctx, request.tenant_id).await?;
         let store = OrchestratorCtx::current_session_store();
 
         Ok(ctx
@@ -254,8 +260,8 @@ impl Analytics for AnalyticsImpl {
                         &request.query,
                         EventFilter {
                             session_id: None,
-                            workspace_id: Some(request.workspace_id.clone()),
-                            user_id: None,
+                            tenant_id: Some(request.tenant_id),
+                            contact_id: None,
                             event_types: request.event_types.clone(),
                             from_time: request.from_time,
                             to_time: request.to_time,
@@ -274,59 +280,32 @@ impl Analytics for AnalyticsImpl {
 /// Scope used by the tool-stats analytics API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolStatsScope {
-    /// Workspace-restricted analytics visible to workspace members.
-    Workspace {
-        /// Workspace whose tool calls are summarized.
-        workspace_id: WorkspaceId,
+    /// Tenant-restricted analytics visible to tenant operators.
+    Tenant {
+        /// Tenant whose tool calls are summarized.
+        tenant_id: TenantId,
     },
     /// Deployment-wide aggregate analytics visible to authorized service operators.
     Deployment,
 }
 
 impl ToolStatsScope {
-    /// Returns the workspace filter, when the request is workspace-scoped.
+    /// Returns the tenant filter, when the request is tenant-scoped.
     #[must_use]
-    pub fn workspace_id(&self) -> Option<&WorkspaceId> {
+    pub fn tenant_id(&self) -> Option<&TenantId> {
         match self {
-            Self::Workspace { workspace_id } => Some(workspace_id),
+            Self::Tenant { tenant_id } => Some(tenant_id),
             Self::Deployment => None,
         }
     }
 }
 
-/// Scope used by the learning-candidate analytics API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LearningCandidateReadScope {
-    /// Workspace-restricted candidates visible to workspace editors.
-    Workspace {
-        /// Workspace whose learning candidates are listed.
-        workspace_id: WorkspaceId,
-    },
-    /// Tenant-wide candidates visible to tenant admins.
-    Tenant,
-}
-
 /// Returns the requested tool analytics scope.
 #[must_use]
 pub fn tool_stats_scope(request: &ToolStatsRequest) -> ToolStatsScope {
-    match &request.workspace_id {
-        Some(workspace_id) => ToolStatsScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        },
+    match request.tenant_id {
+        Some(tenant_id) => ToolStatsScope::Tenant { tenant_id },
         None => ToolStatsScope::Deployment,
-    }
-}
-
-/// Returns the requested learning-candidate analytics scope.
-#[must_use]
-pub fn learning_candidate_scope(
-    request: &LearningCandidateListRequest,
-) -> LearningCandidateReadScope {
-    match &request.workspace_id {
-        Some(workspace_id) => LearningCandidateReadScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        },
-        None => LearningCandidateReadScope::Tenant,
     }
 }
 
@@ -337,8 +316,8 @@ pub fn session_stats_response_from_summary(
 ) -> SessionStatsResponse {
     SessionStatsResponse {
         session_id: summary.session_id,
-        workspace_id: summary.workspace_id,
-        user_id: summary.user_id,
+        tenant_id: summary.tenant_id,
+        contact_id: summary.contact_id,
         status: summary.status,
         turn_count: summary.turn_count,
         event_count: summary.event_count,
@@ -354,13 +333,11 @@ pub fn session_stats_response_from_summary(
     }
 }
 
-/// Converts a core workspace analytics summary into the public wire response.
+/// Converts a core tenant analytics summary into the public wire response.
 #[must_use]
-pub fn workspace_stats_response_from_summary(
-    summary: WorkspaceAnalyticsSummary,
-) -> WorkspaceStatsResponse {
-    WorkspaceStatsResponse {
-        workspace_id: summary.workspace_id,
+pub fn tenant_stats_response_from_summary(summary: TenantAnalyticsSummary) -> TenantStatsResponse {
+    TenantStatsResponse {
+        tenant_id: summary.tenant_id,
         days: summary.days,
         session_count: summary.session_count,
         turn_count: summary.turn_count,
@@ -375,11 +352,11 @@ pub fn workspace_stats_response_from_summary(
 /// Converts core per-tool analytics rows into the public wire response.
 #[must_use]
 pub fn tool_stats_response_from_rows(
-    workspace_id: Option<WorkspaceId>,
+    tenant_id: Option<TenantId>,
     rows: Vec<ToolCallSummary>,
 ) -> ToolStatsResponse {
     ToolStatsResponse {
-        workspace_id,
+        tenant_id,
         rows: rows
             .into_iter()
             .map(|row| ToolStatsRow {
@@ -397,11 +374,11 @@ pub fn tool_stats_response_from_rows(
 /// Converts workspace and daily cache analytics into the public wire response.
 #[must_use]
 pub fn cache_stats_response_from_parts(
-    summary: WorkspaceAnalyticsSummary,
+    summary: TenantAnalyticsSummary,
     daily: Vec<CacheDailyMetric>,
 ) -> CacheStatsResponse {
     CacheStatsResponse {
-        workspace_id: summary.workspace_id,
+        tenant_id: summary.tenant_id,
         days: summary.days,
         cache_hit_rate: summary.cache_hit_rate,
         total_cache_read_tokens: summary.total_cache_read_tokens,
@@ -412,7 +389,7 @@ pub fn cache_stats_response_from_parts(
         daily: daily
             .into_iter()
             .map(|row| CacheDailyMetricRow {
-                workspace_id: row.workspace_id,
+                tenant_id: row.tenant_id,
                 day: row.day,
                 session_count: row.session_count,
                 turn_count: row.turn_count,
@@ -430,10 +407,7 @@ async fn experiment_stats_inner(
     pool: sqlx::PgPool,
     request: ExperimentAnalyticsRequest,
 ) -> Result<ExperimentAnalyticsResponse, HandlerError> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: request.workspace_id.clone(),
-    };
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::from(scope))
+    let mut conn = ScopedConn::begin(&pool, &ScopeContext::tenant(request.tenant_id))
         .await
         .map_err(to_handler_error)?;
     let status_rows = sqlx::query(
@@ -449,7 +423,7 @@ async fn experiment_stats_inner(
         ORDER BY status
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(request.tenant_id.to_string())
     .bind(request.from_time)
     .bind(request.to_time)
     .fetch_all(conn.as_mut())
@@ -468,7 +442,7 @@ async fn experiment_stats_inner(
         LIMIT $4
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(request.tenant_id.to_string())
     .bind(request.from_time)
     .bind(request.to_time)
     .bind(i64::from(request.limit))
@@ -490,7 +464,7 @@ async fn experiment_stats_inner(
         ORDER BY day ASC, status
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(request.tenant_id.to_string())
     .bind(request.from_time)
     .bind(request.to_time)
     .fetch_all(conn.as_mut())
@@ -516,7 +490,7 @@ async fn experiment_stats_inner(
                  scenario_id ASC NULLS FIRST
         "#,
     )
-    .bind(request.workspace_id.as_str())
+    .bind(request.tenant_id.to_string())
     .bind(request.from_time)
     .bind(request.to_time)
     .fetch_all(conn.as_mut())
@@ -542,7 +516,7 @@ async fn experiment_stats_inner(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(experiment_stats_response_from_parts(
-        request.workspace_id,
+        request.tenant_id,
         statuses,
         score_runs,
         run_trends,
@@ -553,21 +527,17 @@ async fn experiment_stats_inner(
 async fn learning_candidates_inner(
     pool: sqlx::PgPool,
     schema_name: Option<String>,
-    tenant_id: String,
+    tenant_id: TenantId,
     request: LearningCandidateListRequest,
 ) -> Result<LearningCandidateListResponse, HandlerError> {
     let learning_candidates = qualified_table(schema_name.as_deref(), "learning_candidates");
     let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT id, tenant_id, workspace_id, user_id, candidate_type, status, \
+        "SELECT id, tenant_id, workspace_id, contact_id, candidate_type, status, \
          target_id, target_label, task_fingerprint, payload, \
          confidence::DOUBLE PRECISION AS confidence, risk_class, created_at, updated_at \
          FROM {learning_candidates} WHERE tenant_id = "
     ));
-    query.push_bind(tenant_id.as_str());
-    if let Some(workspace_id) = &request.workspace_id {
-        query.push(" AND workspace_id = ");
-        query.push_bind(workspace_id.as_str());
-    }
+    query.push_bind(tenant_id.0);
     if let Some(status) = request.status {
         query.push(" AND status = ");
         query.push_bind(status.as_str());
@@ -587,7 +557,6 @@ async fn learning_candidates_inner(
 
     Ok(LearningCandidateListResponse {
         tenant_id,
-        workspace_id: request.workspace_id,
         candidates,
     })
 }
@@ -595,7 +564,7 @@ async fn learning_candidates_inner(
 /// Converts experiment status counts and score-run references into a response.
 #[must_use]
 pub fn experiment_stats_response_from_parts(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     statuses: Vec<ExperimentStatusCount>,
     score_runs: Vec<ExperimentScoreRunRef>,
     run_trends: Vec<ExperimentRunTrendPoint>,
@@ -603,7 +572,7 @@ pub fn experiment_stats_response_from_parts(
 ) -> ExperimentAnalyticsResponse {
     let total_runs = statuses.iter().map(|row| row.count).sum();
     ExperimentAnalyticsResponse {
-        workspace_id,
+        tenant_id,
         total_runs,
         statuses,
         score_runs,
@@ -619,7 +588,7 @@ pub fn session_search_response_from_events(
     events: Vec<EventRecord>,
 ) -> SessionSearchResponse {
     SessionSearchResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         query: request.query,
         results: events
             .iter()
@@ -640,13 +609,19 @@ pub fn session_search_response_from_events(
 pub fn redacted_event_snippet(event: &Event) -> String {
     let text = match event {
         Event::SessionCreated {
-            workspace_id,
-            user_id,
+            tenant_id,
+            contact_id,
+            created_by,
             model,
             channel,
-        } => format!(
-            "session created in workspace {workspace_id} by {user_id} using {model} over {channel}"
-        ),
+        } => {
+            let actor = created_by
+                .as_ref()
+                .map(session_actor_label)
+                .or_else(|| contact_id.map(|contact_id| format!("contact:{contact_id}")))
+                .unwrap_or_else(|| "unknown actor".to_string());
+            format!("session created in tenant {tenant_id} by {actor} using {model} over {channel}")
+        }
         Event::SessionStatusChanged { from, to } => {
             format!("session status changed from {from:?} to {to:?}")
         }
@@ -726,6 +701,14 @@ pub fn redacted_event_snippet(event: &Event) -> String {
     truncate_snippet(&redact_sensitive_text(&text), 240)
 }
 
+fn session_actor_label(actor: &SessionActorRef) -> String {
+    match actor {
+        SessionActorRef::Identity { id } => format!("identity:{id}"),
+        SessionActorRef::Contact { id } => format!("contact:{id}"),
+        SessionActorRef::Anonymous => "anonymous".to_string(),
+    }
+}
+
 /// Builds a short redacted preview for a dynamic JSON payload.
 #[must_use]
 pub fn redacted_payload_preview(value: &Value) -> String {
@@ -801,14 +784,7 @@ fn learning_candidate_summary_from_row(
     Ok(LearningCandidateSummary {
         id: row.try_get("id").map_err(sqlx_to_handler_error)?,
         tenant_id: row.try_get("tenant_id").map_err(sqlx_to_handler_error)?,
-        workspace_id: WorkspaceId::new(
-            row.try_get::<String, _>("workspace_id")
-                .map_err(sqlx_to_handler_error)?,
-        ),
-        user_id: row
-            .try_get::<Option<String>, _>("user_id")
-            .map_err(sqlx_to_handler_error)?
-            .map(UserId::new),
+        contact_id: row.try_get("contact_id").map_err(sqlx_to_handler_error)?,
         candidate_type,
         status,
         target_id: row.try_get("target_id").map_err(sqlx_to_handler_error)?,
@@ -966,53 +942,38 @@ async fn authorize_session_participant(
     .map_err(translate_authz_error)
 }
 
-async fn authorize_workspace_member(
+async fn authorize_tenant_member(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        Relation::Member,
-    )
-    .await
-    .map_err(translate_authz_error)
-}
-
-async fn authorize_workspace_editor(
-    ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
-) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        Relation::Editor,
-    )
-    .await
-    .map_err(translate_authz_error)
-}
-
-async fn authorize_tenant_admin(ctx: &impl RequestHeaders) -> Result<String, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
         ObjectType::Tenant,
-        identity.tenant_id,
+        tenant_id,
+        Relation::Operator,
+    )
+    .await
+    .map_err(translate_authz_error)
+}
+
+async fn authorize_tenant_admin(
+    ctx: &impl RequestHeaders,
+    tenant_id: TenantId,
+) -> Result<(), HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Tenant,
+        tenant_id,
         Relation::Admin,
     )
     .await
-    .map_err(translate_authz_error)?;
-    Ok(identity.tenant_id.to_string())
+    .map_err(translate_authz_error)
 }
 
 async fn authorize_deployment_operator(ctx: &impl RequestHeaders) -> Result<(), HandlerError> {

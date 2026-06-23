@@ -18,7 +18,7 @@ use moa_core::wire::{
     ExperimentRunStatusResponse, SkillImportRequest, SkillImportResponse, SkillPackageDocument,
     SkillPackageDocumentFile,
 };
-use moa_core::{Event, EventRange, EventRecord, MemoryScope, WorkspaceId};
+use moa_core::{ActionRuleScope, Event, EventRange, EventRecord, TenantId, WorkspaceId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::json;
 use tempfile::TempDir;
@@ -26,7 +26,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::support::restate_runtime::{
-    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_workspace_editor,
+    OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_tenant_admin,
     register_deployment, reserve_orchestrator_ports, restate_admin_url, restate_ingress_url,
     test_user_identity, with_identity,
 };
@@ -90,9 +90,11 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(format!("experiment-agent-loop-{}", Uuid::now_v7()));
-    grant_workspace_editor(&identity, &workspace_id).await?;
+    let tenant_id = TenantId::new();
+    let mut identity = test_user_identity();
+    identity.tenant_id = tenant_id;
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
@@ -145,9 +147,10 @@ async fn import_support_skill(
     workspace_id: &WorkspaceId,
 ) -> Result<()> {
     let request = SkillImportRequest {
-        workspace_id: workspace_id.clone(),
-        scope: MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: TenantId::from(
+                Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            ),
         },
         packages: vec![support_skill_package()],
     };
@@ -167,7 +170,7 @@ async fn run_agent_loop_experiment(
     workspace_id: &WorkspaceId,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         name: "spilled-order-support-agent-loop".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
@@ -208,7 +211,7 @@ async fn wait_for_experiment_status(
     run_uid: Uuid,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_uid,
     };
     let mut last_status = None;
@@ -381,6 +384,12 @@ fn write_scripted_fixture(path: &Path, final_text: &str) -> Result<()> {
     });
     let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted fixture")?;
     fs::write(path, body).context("write scripted fixture")
+}
+
+fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .context("workspace fixture id should be a tenant UUID")
 }
 
 fn support_skill_package() -> SkillPackageDocument {

@@ -9,9 +9,9 @@ use moa_core::{
     ExperienceAttribution, ExperienceRecord, FileReadDedupState, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry,
     LearningRiskClass, MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence,
-    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta,
-    SessionStore, TaskFacetSet, TaskFingerprint, TaskSegment, ToolCallId, ToolOutput, UserId,
-    WorkspaceId, deterministic_segment_id,
+    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionActorRef, SessionId,
+    SessionMeta, SessionStore, TaskFacetSet, TaskFingerprint, TaskSegment, TenantId, ToolCallId,
+    ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use moa_test_support::postgres::{
@@ -50,14 +50,40 @@ fn qualified(schema_name: &str, table_name: &str) -> String {
     format!("\"{}\".\"{}\"", schema_name, table_name)
 }
 
+fn tenant_id(label: &str) -> TenantId {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.bytes().enumerate() {
+        bytes[index % 16] = bytes[index % 16].wrapping_mul(31).wrapping_add(byte);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
+}
+
+fn workspace_key(label: &str) -> WorkspaceId {
+    WorkspaceId::new(tenant_id(label).to_string())
+}
+
+fn test_session_meta(label: &str, model: &str) -> SessionMeta {
+    SessionMeta {
+        tenant_id: tenant_id(label),
+        created_by: Some(SessionActorRef::Identity {
+            id: Uuid::from_u128(1),
+        }),
+        model: ModelId::new(model),
+        ..SessionMeta::default()
+    }
+}
+
 #[tokio::test]
 #[ignore]
 async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
     with_test_store(|store| async move {
         let batch_id = Uuid::now_v7();
+        let tenant_id = tenant_id("tenant-learning");
         let entry = LearningEntry {
             id: Uuid::now_v7(),
-            tenant_id: "tenant-learning".to_string(),
+            tenant_id,
             learning_type: "skill_created".to_string(),
             target_id: "skill:moa-rust".to_string(),
             target_label: Some("moa-rust".to_string()),
@@ -75,7 +101,7 @@ async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
             .await
             .expect("append learning");
         let learnings = store
-            .list_learnings("tenant-learning", Some("skill_created"), 10)
+            .list_learnings(&tenant_id.to_string(), Some("skill_created"), 10)
             .await
             .expect("list learnings");
         assert_eq!(learnings.len(), 1);
@@ -94,7 +120,7 @@ async fn learning_log_round_trips_skill_entry_and_rollback_invalidates_batch() {
         assert_eq!(invalidated, 1);
         assert!(
             store
-                .list_learnings("tenant-learning", Some("skill_created"), 10)
+                .list_learnings(&tenant_id.to_string(), Some("skill_created"), 10)
                 .await
                 .expect("list current learnings")
                 .is_empty()
@@ -138,28 +164,22 @@ async fn postgres_shared_session_store_contract() {
 
 #[tokio::test]
 #[ignore]
-async fn postgres_create_session_requires_non_empty_user_and_agent_context() {
+async fn postgres_create_session_requires_creator_or_contact_and_agent_context() {
     with_test_store(|store| async move {
-        let missing_user = store
+        let missing_creator = store
             .create_session(SessionMeta {
-                workspace_id: WorkspaceId::new("pg-session-user-required"),
-                user_id: UserId::new(""),
-                model: ModelId::new("test-model"),
-                ..SessionMeta::default()
+                created_by: None,
+                contact: None,
+                ..test_session_meta("pg-session-creator-required", "test-model")
             })
             .await
-            .expect_err("empty user_id must be rejected");
+            .expect_err("missing creator/contact attribution must be rejected");
         assert!(
-            matches!(missing_user, MoaError::ValidationError(ref message) if message.contains("user_id")),
-            "expected user_id validation error, got {missing_user}"
+            matches!(missing_creator, MoaError::ValidationError(ref message) if message.contains("contact or creator")),
+            "expected creator/contact validation error, got {missing_creator}"
         );
 
-        let mut missing_agent = SessionMeta {
-            workspace_id: WorkspaceId::new("pg-session-agent-required"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        };
+        let mut missing_agent = test_session_meta("pg-session-agent-required", "test-model");
         missing_agent.agent_context = None;
         let missing_agent = store
             .create_session(missing_agent)
@@ -178,6 +198,7 @@ async fn postgres_create_session_requires_non_empty_user_and_agent_context() {
 async fn postgres_direct_session_insert_requires_agent_context_sidecar() {
     let (store, database_url, schema_name) = create_test_store().await;
     let sessions = qualified(&schema_name, "sessions");
+    let tenant_id = tenant_id("pg-session-db-agent-required");
     let mut tx = store
         .pool()
         .begin()
@@ -189,7 +210,7 @@ async fn postgres_direct_session_insert_requires_agent_context_sidecar() {
          VALUES ($1, $2, $3, 'created', 'chat', 'test-model', NOW(), NOW())"
     ))
     .bind(Uuid::now_v7())
-    .bind("pg-session-db-agent-required")
+    .bind(tenant_id.to_string())
     .bind("user")
     .execute(&mut *tx)
     .await
@@ -220,12 +241,7 @@ async fn postgres_direct_session_insert_requires_agent_context_sidecar() {
 async fn postgres_event_payloads_round_trip_as_jsonb() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("pg-jsonb"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-jsonb", "test-model"))
         .await
         .expect("create session");
 
@@ -289,24 +305,14 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
 #[ignore]
 async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id() {
     let (store, database_url, schema_name) = create_test_store().await;
-    let workspace_id = WorkspaceId::new("pg-tool-event-exists");
-    let other_workspace_id = WorkspaceId::new("pg-tool-event-exists-other");
+    let workspace_id = workspace_key("pg-tool-event-exists");
+    let other_workspace_id = workspace_key("pg-tool-event-exists-other");
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-tool-event-exists", "test-model"))
         .await
         .expect("create session");
     let other_session_id = store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-tool-event-exists", "test-model"))
         .await
         .expect("create other session");
     let tool_id = ToolCallId(Uuid::now_v7());
@@ -406,12 +412,7 @@ async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id()
 async fn postgres_task_segments_track_boundaries_and_usage() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("pg-segments"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-segments", "test-model"))
         .await
         .expect("create session");
     let first_id = deterministic_segment_id(session_id, 0);
@@ -570,12 +571,7 @@ async fn postgres_session_owned_writes_fail_when_session_is_missing() {
 async fn postgres_task_segment_assessments_and_views_refresh() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("pg-outcome"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-outcome", "test-model"))
         .await
         .expect("create session");
     let now = Utc::now();
@@ -693,16 +689,13 @@ async fn postgres_task_segment_assessments_and_views_refresh() {
 async fn experience_records_and_candidates_round_trip() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("pg-experience"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-experience", "test-model"))
         .await
         .expect("create session");
     let segment_id = deterministic_segment_id(session_id, 0);
     let now = Utc::now();
+    let tenant_id = tenant_id("pg-experience");
+    let workspace_id = workspace_key("pg-experience");
     let assessment = SegmentAssessment {
         outcome: SegmentOutcome::Resolved,
         confidence: 0.9,
@@ -720,7 +713,7 @@ async fn experience_records_and_candidates_round_trip() {
         .create_segment(&TaskSegment {
             id: segment_id,
             session_id,
-            tenant_id: "pg-experience".to_string(),
+            tenant_id: tenant_id.to_string(),
             segment_index: 0,
             task_summary: Some("Fix Rust auth failure".to_string()),
             started_at: now,
@@ -756,8 +749,8 @@ async fn experience_records_and_candidates_round_trip() {
         id: Uuid::now_v7(),
         segment_id,
         session_id,
-        tenant_id: "pg-experience".to_string(),
-        workspace_id: WorkspaceId::new("pg-experience"),
+        tenant_id,
+        workspace_id: workspace_id.clone(),
         user_id: UserId::new("user"),
         task_summary: Some("Fix Rust auth failure".to_string()),
         task_fingerprint: fingerprint.clone(),
@@ -783,8 +776,8 @@ async fn experience_records_and_candidates_round_trip() {
     let attribution = ExperienceAttribution {
         id: Uuid::now_v7(),
         experience_id: experience.id,
-        tenant_id: "pg-experience".to_string(),
-        workspace_id: WorkspaceId::new("pg-experience"),
+        tenant_id,
+        workspace_id: workspace_id.clone(),
         user_id: Some(UserId::new("user")),
         subject_type: AttributionSubjectType::Skill,
         subject_id: "moa-rust".to_string(),
@@ -799,8 +792,8 @@ async fn experience_records_and_candidates_round_trip() {
         .expect("append attribution");
     let candidate = LearningCandidate {
         id: Uuid::now_v7(),
-        tenant_id: "pg-experience".to_string(),
-        workspace_id: WorkspaceId::new("pg-experience"),
+        tenant_id,
+        workspace_id: workspace_id.clone(),
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
         status: LearningCandidateStatus::Proposed,
@@ -866,7 +859,7 @@ async fn experience_records_and_candidates_round_trip() {
     assert_eq!(attributions[0].subject_id, "moa-rust");
     let candidates = store
         .list_learning_candidates(
-            "pg-experience",
+            &tenant_id.to_string(),
             Some(LearningCandidateStatus::Evaluating),
             10,
         )
@@ -884,7 +877,7 @@ async fn experience_records_and_candidates_round_trip() {
         .await
         .expect("refresh experience views");
     let rates = store
-        .list_task_strategy_success_rates("pg-experience", "task-hash")
+        .list_task_strategy_success_rates(&tenant_id.to_string(), "task-hash")
         .await
         .expect("list task strategy rates");
     assert_eq!(rates.len(), 1);
@@ -902,8 +895,9 @@ async fn experience_records_and_candidates_round_trip() {
 #[ignore]
 async fn postgres_store_learning_candidate_review_lookup() {
     with_test_store(|store| async move {
-        let workspace_id = WorkspaceId::new("pg-review");
-        let other_workspace_id = WorkspaceId::new("pg-review-other");
+        let tenant_id = tenant_id("pg-review");
+        let workspace_id = workspace_key("pg-review");
+        let other_workspace_id = workspace_key("pg-review-other");
         let source_experience_id = Uuid::now_v7();
         let artifact_uid = Uuid::now_v7();
         let draft_revision_uid = Uuid::now_v7();
@@ -924,7 +918,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
         let now = Utc::now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
-            tenant_id: "pg-review".to_string(),
+            tenant_id,
             workspace_id: workspace_id.clone(),
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
@@ -1033,12 +1027,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
 async fn postgres_session_ids_are_native_uuid_and_concurrent_emits_are_serialized() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("pg-concurrency"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("pg-concurrency", "test-model"))
         .await
         .expect("create session");
 
@@ -1109,12 +1098,7 @@ async fn postgres_connection_retry_surfaces_final_failure() {
 async fn postgres_trigger_populates_generated_session_rollups() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("analytics-ws"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("analytics-ws", "test-model"))
         .await
         .expect("create session");
 
@@ -1177,12 +1161,7 @@ async fn postgres_trigger_populates_generated_session_rollups() {
 async fn postgres_session_summary_tracks_model_tier_costs() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("tiered-costs-ws"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("claude-sonnet-4-6"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("tiered-costs-ws", "claude-sonnet-4-6"))
         .await
         .expect("create session");
 
@@ -1292,12 +1271,7 @@ async fn postgres_session_summary_tracks_model_tier_costs() {
 async fn postgres_trigger_failure_rolls_back_insert() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("rollback-ws"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("rollback-ws", "test-model"))
         .await
         .expect("create session");
 
@@ -1367,12 +1341,7 @@ async fn postgres_trigger_failure_rolls_back_insert() {
 async fn postgres_tool_call_summary_view_reports_percentiles() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store
-        .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("tool-stats-ws"),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("tool-stats-ws", "test-model"))
         .await
         .expect("create session");
 
@@ -1414,11 +1383,11 @@ async fn postgres_tool_call_summary_view_reports_percentiles() {
             .expect("emit tool result");
     }
 
-    let workspace_rows = store
-        .list_tool_call_summaries(Some(&WorkspaceId::new("tool-stats-ws")))
+    let tenant_rows = store
+        .list_tool_call_summaries(Some(&tenant_id("tool-stats-ws")))
         .await
-        .expect("load workspace tool summary");
-    let summary = workspace_rows
+        .expect("load tenant tool summary");
+    let summary = tenant_rows
         .iter()
         .find(|row| row.tool_name == "bash")
         .expect("bash summary");
@@ -1452,23 +1421,14 @@ async fn postgres_tool_call_summary_view_reports_percentiles() {
 #[ignore]
 async fn postgres_materialized_analytics_views_refresh() {
     let (store, database_url, schema_name) = create_test_store().await;
-    let workspace_id = WorkspaceId::new("mv-ws");
+    let workspace_id = workspace_key("mv-ws");
+    let tenant_id = tenant_id("mv-ws");
     let first_session_id = store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("mv-ws", "test-model"))
         .await
         .expect("create first session");
     let second_session_id = store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("user"),
-            model: ModelId::new("test-model"),
-            ..SessionMeta::default()
-        })
+        .create_session(test_session_meta("mv-ws", "test-model"))
         .await
         .expect("create second session");
 
@@ -1556,19 +1516,19 @@ async fn postgres_materialized_analytics_views_refresh() {
     assert_eq!(turn_metrics[0].tool_call_count, 1);
     assert_eq!(turn_metrics[0].total_input_tokens, 20);
 
-    let workspace_summary = store
-        .get_workspace_stats(&workspace_id, 30)
+    let tenant_summary = store
+        .get_tenant_stats(&tenant_id, 30)
         .await
-        .expect("load workspace stats");
-    assert_eq!(workspace_summary.session_count, 2);
-    assert_eq!(workspace_summary.turn_count, 3);
-    assert_eq!(workspace_summary.total_input_tokens, 60);
-    assert_eq!(workspace_summary.total_cache_read_tokens, 17);
-    assert_eq!(workspace_summary.total_output_tokens, 13);
-    assert_eq!(workspace_summary.total_cost_cents, 36);
+        .expect("load tenant stats");
+    assert_eq!(tenant_summary.session_count, 2);
+    assert_eq!(tenant_summary.turn_count, 3);
+    assert_eq!(tenant_summary.total_input_tokens, 60);
+    assert_eq!(tenant_summary.total_cache_read_tokens, 17);
+    assert_eq!(tenant_summary.total_output_tokens, 13);
+    assert_eq!(tenant_summary.total_cost_cents, 36);
 
     let daily_metrics = store
-        .list_cache_daily_metrics(&workspace_id, 30)
+        .list_cache_daily_metrics(&tenant_id, 30)
         .await
         .expect("load cache daily metrics");
     assert_eq!(daily_metrics.len(), 1);

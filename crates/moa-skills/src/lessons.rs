@@ -60,10 +60,10 @@ pub async fn learn_lesson(
     }
 
     let scope_context = ScopeContext::from(scope.clone());
-    let workspace_id = scope_context
-        .workspace_id()
-        .map(|workspace_id| workspace_id.to_string());
-    let user_id = scope_context.user_id().map(|user_id| user_id.to_string());
+    let workspace_id = Some(scope_context.tenant_id().to_string());
+    let user_id = scope_context
+        .contact_id()
+        .map(|contact_id| contact_id.to_string());
     let scope_tier = scope_context.tier_str().to_string();
     let mut conn = ScopedConn::begin(ctx.graph.pool(), &scope_context).await?;
     if ctx.assume_app_role {

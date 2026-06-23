@@ -84,7 +84,7 @@ fn base_candidate(
 ) -> LearningCandidate {
     LearningCandidate {
         id: Uuid::now_v7(),
-        tenant_id: experience.tenant_id.clone(),
+        tenant_id: experience.tenant_id,
         workspace_id: experience.workspace_id.clone(),
         user_id: Some(experience.user_id.clone()),
         candidate_type,
@@ -148,7 +148,9 @@ fn should_propose_policy(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{SegmentId, SessionId, TaskFacetSet, TaskFingerprint, UserId, WorkspaceId};
+    use moa_core::{
+        SegmentId, SessionId, TaskFacetSet, TaskFingerprint, TenantId, UserId, WorkspaceId,
+    };
 
     use super::*;
 
@@ -163,7 +165,7 @@ mod tests {
             id: Uuid::now_v7(),
             segment_id: SegmentId::new(),
             session_id: SessionId::new(),
-            tenant_id: "tenant".to_string(),
+            tenant_id: TenantId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             task_summary: Some("Fix deploy".to_string()),
@@ -190,7 +192,7 @@ mod tests {
         let attribution = ExperienceAttribution {
             id: Uuid::now_v7(),
             experience_id: experience.id,
-            tenant_id: "tenant".to_string(),
+            tenant_id: TenantId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: None,
             subject_type: AttributionSubjectType::Tool,

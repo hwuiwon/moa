@@ -130,7 +130,10 @@ async fn build_runtime_reminder(now: DateTime<Utc>, ctx: &WorkingContext) -> Str
         lines.push(format!("Current git branch: {branch}"));
     }
 
-    lines.push(format!("Current user: {}", ctx.user_id));
+    lines.push(format!("Current tenant: {}", ctx.tenant_id));
+    if let Some(contact) = ctx.contact.as_ref() {
+        lines.push(format!("Current contact: {}", contact.contact_id));
+    }
     lines.push("</system-reminder>".to_string());
     lines.join("\n")
 }
@@ -183,7 +186,7 @@ mod tests {
     use chrono::TimeZone;
     use moa_core::{
         Channel, ContextMessage, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing,
-        ToolCallFormat, UserId, WorkspaceId,
+        ToolCallFormat,
     };
 
     use super::*;
@@ -212,8 +215,6 @@ mod tests {
     fn session() -> SessionMeta {
         SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()

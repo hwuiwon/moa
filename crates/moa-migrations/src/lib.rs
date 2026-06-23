@@ -28,6 +28,7 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000306__contacts.sql",
     "V000307__session_channels.sql",
     "V000308__tenant_configurable_agents.sql",
+    "V000309__tenant_runtime_boundaries.sql",
 ];
 
 // Schema-isolated session tests do not own artifact/experiment tables. Keep
@@ -42,14 +43,14 @@ CREATE TABLE IF NOT EXISTS action_policy_rules (
     tool TEXT NOT NULL,
     pattern TEXT NOT NULL,
     effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny', 'admin_review')),
-    scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
+    scope TEXT NOT NULL CHECK (scope IN ('global', 'tenant')),
     reason TEXT,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT action_policy_rules_global_workspace_check
         CHECK (
             (scope = 'global' AND workspace_id = 'global')
-            OR (scope = 'workspace' AND workspace_id <> 'global')
+            OR (scope = 'tenant' AND workspace_id <> 'global')
         )
 );
 
@@ -132,6 +133,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000308__tenant_configurable_agents.sql",
         sql: include_str!("../migrations/postgres/V000308__tenant_configurable_agents.sql"),
+    },
+    SchemaMigration {
+        name: "V000309__tenant_runtime_boundaries.sql",
+        sql: include_str!("../migrations/postgres/V000309__tenant_runtime_boundaries.sql"),
     },
 ];
 

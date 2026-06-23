@@ -318,7 +318,7 @@ mod tests {
     use super::*;
     use moa_core::{
         ActionButton, ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview,
-        ButtonStyle, RiskLevel, ToolCallId, UserId, WorkspaceId,
+        ButtonStyle, RiskLevel, SessionActorRef, TenantId, ToolCallId,
     };
 
     #[cfg(feature = "slack")]
@@ -355,8 +355,14 @@ mod tests {
             content: MessageContent::ActionReviewRequest {
                 envelope: Box::new(ActionEnvelope {
                     review_id: uuid::Uuid::now_v7(),
-                    workspace_id: WorkspaceId::new("workspace-a"),
-                    user_id: UserId::new("user-a"),
+                    tenant_id: TenantId::from(
+                        uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+                            .expect("fixture tenant id parses"),
+                    ),
+                    requested_by: SessionActorRef::Identity {
+                        id: uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+                            .expect("fixture identity id parses"),
+                    },
                     session_id: None,
                     sub_agent_id: None,
                     tool_call_id: ToolCallId::new(),

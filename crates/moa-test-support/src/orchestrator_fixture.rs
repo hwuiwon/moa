@@ -22,8 +22,8 @@ use moa_core::wire::{
     StartTurnResponse, TurnOutcome,
 };
 use moa_core::{
-    Channel, Event, EventRange, EventRecord, ModelId, SessionId, SessionMeta, SessionStatus,
-    UserId, WorkspaceId,
+    Channel, Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionMeta,
+    SessionStatus, TenantId, UserId, WorkspaceId,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -215,20 +215,20 @@ impl OrchestratorTestFixture {
         })
     }
 
-    /// Grants the provided identity workspace-member access.
-    pub async fn grant_workspace_member_identity(
+    /// Grants the provided identity tenant-operator access.
+    pub async fn grant_tenant_operator_identity(
         &self,
         identity: &Identity,
-        workspace_id: &WorkspaceId,
+        tenant_id: TenantId,
     ) -> Result<()> {
         self.apply_raw_tuple(
             TupleOp::Write,
             &identity_subject(identity),
-            "member",
-            &format!("workspace:{workspace_id}"),
+            "operator",
+            &format!("tenant:{tenant_id}"),
         )
         .await
-        .context("grant fixture workspace membership")
+        .context("grant fixture tenant operator")
     }
 
     async fn grant_session_participant(
@@ -246,8 +246,8 @@ impl OrchestratorTestFixture {
         .context("grant fixture session participation")
     }
 
-    /// Grants the fixture client's default identity workspace-admin access.
-    pub async fn grant_default_workspace_admin(&self, workspace_id: &WorkspaceId) -> Result<()> {
+    /// Grants the fixture client's default identity tenant-admin access.
+    pub async fn grant_default_tenant_admin(&self, tenant_id: TenantId) -> Result<()> {
         let identity = self
             .client
             .identity
@@ -257,10 +257,10 @@ impl OrchestratorTestFixture {
             TupleOp::Write,
             &identity_subject(identity),
             "admin",
-            &format!("workspace:{workspace_id}"),
+            &format!("tenant:{tenant_id}"),
         )
         .await
-        .context("grant fixture workspace admin")
+        .context("grant fixture tenant admin")
     }
 
     async fn apply_raw_tuple(
@@ -308,7 +308,7 @@ fn default_test_identity() -> Identity {
     Identity {
         identity_type: IdentityType::User,
         id: Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0001),
-        tenant_id: Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0001),
+        tenant_id: TenantId::from(Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0001)),
         api_key_id: None,
         acting_on_behalf_of: None,
     }
@@ -322,6 +322,7 @@ fn identity_subject(identity: &Identity) -> String {
         IdentityType::User => format!("user:{}", identity.id),
         IdentityType::Agent => format!("agent:{}", identity.id),
         IdentityType::Service => format!("service:{}", identity.id),
+        IdentityType::Contact => format!("contact:{}", identity.id),
     }
 }
 
@@ -356,8 +357,6 @@ impl IsolatedTest<'_> {
     pub async fn create_session(&self, suffix: &str) -> Result<SessionId> {
         let session_id = SessionId::new();
         let now = Utc::now();
-        let workspace_id = self.workspace_id("workspace");
-        let user_id = self.user_id("user");
         let identity = self
             .client()
             .identity
@@ -365,12 +364,11 @@ impl IsolatedTest<'_> {
             .context("fixture test client must carry identity headers")?
             .clone();
         self.fixture
-            .grant_workspace_member_identity(&identity, &workspace_id)
+            .grant_tenant_operator_identity(&identity, identity.tenant_id)
             .await?;
         let meta = SessionMeta {
             id: session_id,
-            workspace_id: workspace_id.clone(),
-            user_id: user_id.clone(),
+            tenant_id: identity.tenant_id,
             title: Some(format!("{}-{suffix}", self.prefix)),
             status: SessionStatus::Created,
             channel: Channel::Chat,
@@ -381,7 +379,7 @@ impl IsolatedTest<'_> {
             completed_at: None,
             parent_session_id: None,
             contact: None,
-            created_by: None,
+            created_by: Some(SessionActorRef::Identity { id: identity.id }),
             contact_promoted_from_id: None,
             agent_context: Some(moa_core::AgentContext::system_default()),
             total_input_tokens: 0,
@@ -404,8 +402,9 @@ impl IsolatedTest<'_> {
             .append_event(
                 session_id,
                 Event::SessionCreated {
-                    workspace_id,
-                    user_id,
+                    tenant_id: identity.tenant_id,
+                    contact_id: None,
+                    created_by: Some(SessionActorRef::Identity { id: identity.id }),
                     model: ModelId::new("scripted-loadtest"),
                     channel: Channel::Chat,
                 },
@@ -565,6 +564,7 @@ impl TestApiClient {
             IdentityType::User => "user",
             IdentityType::Agent => "agent",
             IdentityType::Service => "service",
+            IdentityType::Contact => "contact",
         };
         let mut request = request
             .header("x-moa-identity-type", identity_type)

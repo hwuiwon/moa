@@ -13,7 +13,7 @@ pub trait FactExtractor: Send + Sync {
     async fn extract(&self, chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>>;
 }
 
-/// Deterministic extractor backed by the legacy heuristic implementation.
+/// Deterministic extractor backed by the heuristic implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HeuristicFactExtractor;
 

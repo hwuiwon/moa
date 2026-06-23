@@ -31,7 +31,7 @@ pub(crate) struct RemoteTarget {
     fga: FgaClient,
     identity: Identity,
     workspace_id: WorkspaceId,
-    user_id: UserId,
+    tenant_id: TenantId,
     model: ModelId,
 }
 
@@ -43,8 +43,7 @@ impl SessionTarget for RemoteTarget {
         let now = chrono::Utc::now();
         let meta = SessionMeta {
             id: session_id,
-            workspace_id: self.workspace_id.clone(),
-            user_id: self.user_id.clone(),
+            tenant_id: self.tenant_id,
             title: Some(plan.title.clone()),
             status: SessionStatus::Created,
             channel: Channel::Chat,
@@ -55,7 +54,9 @@ impl SessionTarget for RemoteTarget {
             completed_at: None,
             parent_session_id: None,
             contact: None,
-            created_by: None,
+            created_by: Some(SessionActorRef::Identity {
+                id: self.identity.id,
+            }),
             contact_promoted_from_id: None,
             agent_context: Some(moa_core::AgentContext::system_default()),
             total_input_tokens: 0,
@@ -77,8 +78,11 @@ impl SessionTarget for RemoteTarget {
             .append_event(
                 session_id,
                 Event::SessionCreated {
-                    workspace_id: self.workspace_id.clone(),
-                    user_id: self.user_id.clone(),
+                    tenant_id: self.tenant_id,
+                    contact_id: None,
+                    created_by: Some(SessionActorRef::Identity {
+                        id: self.identity.id,
+                    }),
                     model: self.model.clone(),
                     channel: Channel::Chat,
                 },
@@ -197,10 +201,11 @@ pub(crate) async fn build_backend(
     options: &LoadTestOptions,
     config: &MoaConfig,
 ) -> Result<Arc<dyn SessionTarget>> {
+    let tenant_id = TenantId::new();
     let identity = Identity {
         identity_type: IdentityType::User,
         id: Uuid::now_v7(),
-        tenant_id: Uuid::now_v7(),
+        tenant_id,
         api_key_id: None,
         acting_on_behalf_of: None,
     };
@@ -216,11 +221,8 @@ pub(crate) async fn build_backend(
         client,
         fga,
         identity,
-        workspace_id: WorkspaceId::new(format!(
-            "loadtest-{}",
-            &Uuid::now_v7().simple().to_string()[..8]
-        )),
-        user_id: UserId::new("loadtest"),
+        workspace_id: WorkspaceId::new(tenant_id.to_string()),
+        tenant_id,
         model: ModelId::new(model),
     }))
 }
@@ -388,6 +390,7 @@ impl RemoteHttpClient {
             IdentityType::User => "user",
             IdentityType::Agent => "agent",
             IdentityType::Service => "service",
+            IdentityType::Contact => "contact",
         };
         let mut request = request
             .header("x-moa-identity-type", identity_type)

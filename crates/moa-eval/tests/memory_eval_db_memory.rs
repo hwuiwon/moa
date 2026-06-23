@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
 use moa_brain::retrieval::{LegSources, RetrievalHit};
 use moa_core::{
-    MoaError, ScopeContext, ScopeTier, SessionId, UserId, WorkspaceId, traits::EmbeddingProvider,
+    MoaError, ScopeContext, ScopeTier, SessionId, TenantId, UserId, WorkspaceId,
+    traits::EmbeddingProvider,
 };
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
@@ -39,6 +40,7 @@ use moa_memory_ingest::{
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -288,9 +290,9 @@ fn manifest_round_trips_transcript_style_and_defaults_to_marked() -> TestResult 
     // Pins: prompt-02-era manifests remain readable and new manifests preserve transcript style.
     let old_manifest = serde_json::json!({
         "version": CORPUS_SCHEMA_VERSION,
-        "corpus_id": "memory-eval-pr-legacy",
+        "corpus_id": "memory-eval-pr-minimal",
         "profile": "pr",
-        "description": "legacy manifest without transcript style",
+        "description": "manifest without transcript style",
         "seeds": [1, 2, 3]
     });
     let parsed_old: CorpusManifest = serde_json::from_value(old_manifest)?;
@@ -320,7 +322,7 @@ fn natural_transcripts_contain_no_fact_markers() {
     .expect("generate natural PR corpus");
 
     for turn in corpus.sessions.iter().flat_map(|session| &session.turns) {
-        for forbidden in ["Fact:", "workspace shared", "user private"] {
+        for forbidden in ["Fact:", "tenant shared", "contact private"] {
             assert!(
                 !turn.transcript.contains(forbidden),
                 "natural transcript should not contain marker `{forbidden}`: {}",
@@ -1487,7 +1489,9 @@ impl GoldResolutionStack {
     }
 
     fn ingest_ctx(&self) -> IngestCtx {
-        let scope = ScopeContext::workspace(workspace("gold-resolution-base-workspace"));
+        let scope = ScopeContext::tenant(tenant_id_from_workspace_id(&workspace(
+            "gold-resolution-base-workspace",
+        )));
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             self.pool.clone(),
             scope.clone(),
@@ -1704,7 +1708,7 @@ fn explicit_gold_resolution_corpus(
         gold_fact(GoldFactSpec {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: "fact-explicit-runtime",
             valid_from: utc("2026-02-01T00:00:00Z"),
             subject: "runtime",
@@ -1717,7 +1721,7 @@ fn explicit_gold_resolution_corpus(
         gold_fact(GoldFactSpec {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             fact_id: "fact-explicit-user-preference",
             valid_from: utc("2026-02-02T00:00:00Z"),
             subject: "casey",
@@ -1735,7 +1739,7 @@ fn explicit_gold_resolution_corpus(
         turns: vec![
             SyntheticTurn {
                 turn_seq: 1,
-                transcript: "Fact: workspace shared runtime uses restate.".to_string(),
+                transcript: "Fact: tenant shared runtime uses restate.".to_string(),
                 fact_ids: vec!["fact-explicit-runtime".to_string()],
             },
             SyntheticTurn {
@@ -1759,7 +1763,7 @@ fn partial_gold_resolution_corpus(
         gold_fact(GoldFactSpec {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: "fact-visible-runtime",
             valid_from: utc("2026-02-03T00:00:00Z"),
             subject: "planner",
@@ -1772,7 +1776,7 @@ fn partial_gold_resolution_corpus(
         gold_fact(GoldFactSpec {
             workspace_id: workspace_id.clone(),
             user_id: user_id.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: "fact-hidden-launch-code",
             valid_from: utc("2026-02-04T00:00:00Z"),
             subject: "launch",
@@ -1921,11 +1925,11 @@ fn assert_ledger_first_fact_classes(ledger: &[LedgerFact]) {
     assert!(
         ledger
             .iter()
-            .any(|fact| fact.scope == ScopeTier::Workspace && fact.predicate == "require_runbook"),
+            .any(|fact| fact.scope == ScopeTier::Tenant && fact.predicate == "require_runbook"),
         "ledger should include workspace-shared facts"
     );
     assert!(
-        ledger.iter().any(|fact| fact.scope == ScopeTier::User
+        ledger.iter().any(|fact| fact.scope == ScopeTier::Contact
             && fact.predicate == "private_repository"
             && fact.pii_class == PiiClass::None),
         "ledger should include user-private facts"
@@ -2695,7 +2699,7 @@ fn realistic_corpus() -> (
         LedgerFact {
             workspace_id: payments_workspace.clone(),
             user_id: alice.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: "fact-deploy-target-v1".to_string(),
             valid_from: utc("2026-01-01T00:00:00Z"),
             valid_to: Some(utc("2026-01-08T00:00:00Z")),
@@ -2715,7 +2719,7 @@ fn realistic_corpus() -> (
         LedgerFact {
             workspace_id: payments_workspace.clone(),
             user_id: alice.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: "fact-deploy-target-v2".to_string(),
             valid_from: utc("2026-01-08T00:00:00Z"),
             valid_to: None,
@@ -2735,7 +2739,7 @@ fn realistic_corpus() -> (
         LedgerFact {
             workspace_id: payments_workspace.clone(),
             user_id: alice.clone(),
-            scope: ScopeTier::Workspace,
+            scope: ScopeTier::Tenant,
             fact_id: "fact-runbook".to_string(),
             valid_from: utc("2026-01-02T00:00:00Z"),
             valid_to: None,
@@ -2755,7 +2759,7 @@ fn realistic_corpus() -> (
         LedgerFact {
             workspace_id: payments_workspace.clone(),
             user_id: bob.clone(),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             fact_id: "fact-bob-editor".to_string(),
             valid_from: utc("2026-01-03T00:00:00Z"),
             valid_to: None,
@@ -2775,7 +2779,7 @@ fn realistic_corpus() -> (
         LedgerFact {
             workspace_id: payments_workspace.clone(),
             user_id: alice.clone(),
-            scope: ScopeTier::User,
+            scope: ScopeTier::Contact,
             fact_id: "fact-alice-phone".to_string(),
             valid_from: utc("2026-01-04T00:00:00Z"),
             valid_to: None,
@@ -2999,6 +3003,21 @@ fn user(value: &str) -> UserId {
 
 fn workspace(value: &str) -> WorkspaceId {
     WorkspaceId::new(value)
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn utc(value: &str) -> DateTime<Utc> {

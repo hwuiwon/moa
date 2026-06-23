@@ -10,8 +10,8 @@ use moa_core::{
     CompletionRequest, CompletionResponse, CompletionStream, ContextSnapshot,
     ContextSnapshotConfig, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelId,
     Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, StopReason, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
-    ToolOutputConfig, UserId, WorkspaceId,
+    SessionSummary, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId,
+    ToolOutput, ToolOutputConfig, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -208,8 +208,7 @@ pub(crate) fn event_record(session_id: &SessionId, sequence_num: u64, event: Eve
 pub(crate) fn session() -> SessionMeta {
     SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: TenantId::new(),
         channel: Channel::Chat,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()

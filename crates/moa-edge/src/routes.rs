@@ -159,7 +159,7 @@ async fn handle_proxy(
     span.record("moa.edge.auth.result", "accepted");
     if let Err(error) = moa_ocsf::emit_authn_success(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         &identity,
         state.auth.name(),
         source_ip(&headers),
@@ -977,10 +977,10 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
-            "/v1/skills/bootstrap-global" => {
+            "/v1/skills/bootstrap-workspace-default" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
-                    path: "/Skills/bootstrap_global".to_string(),
+                    path: "/Skills/bootstrap_workspace_default".to_string(),
                     body: body.to_vec(),
                 };
             }
@@ -1311,6 +1311,7 @@ fn translate_json_object_with_fields<const N: usize>(
 mod tests {
     use async_trait::async_trait;
     use axum::http::header::AUTHORIZATION;
+    use moa_core::TenantId;
     use moa_core::traits::{AuthError, Identity, IdentityType};
 
     use super::*;
@@ -1336,7 +1337,7 @@ mod tests {
             Ok(Identity {
                 identity_type: IdentityType::Service,
                 id: Uuid::nil(),
-                tenant_id: Uuid::nil(),
+                tenant_id: TenantId::from(Uuid::nil()),
                 api_key_id: None,
                 acting_on_behalf_of: None,
             })
@@ -1447,7 +1448,7 @@ mod tests {
 
     #[test]
     fn action_review_public_routes_translate_to_restate_handlers() {
-        // Pins: workspace-admin action-review routes forward to the internal ActionReviews service.
+        // Pins: tenant-admin action-review routes forward to the internal ActionReviews service.
         let list_uri = "/v1/workspaces/workspace-a/action-reviews"
             .parse::<Uri>()
             .expect("route path should parse");
@@ -2121,8 +2122,8 @@ mod tests {
                 r#"{"workspace_id":"workspace-a"}"#,
             ),
             (
-                "/v1/skills/bootstrap-global",
-                "/Skills/bootstrap_global",
+                "/v1/skills/bootstrap-workspace-default",
+                "/Skills/bootstrap_workspace_default",
                 r#"{"documents":[]}"#,
             ),
         ];

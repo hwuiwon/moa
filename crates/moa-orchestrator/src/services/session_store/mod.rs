@@ -14,8 +14,8 @@ use moa_core::wire::{
     ListExperienceAttributionsRequest, ListExperienceRecordsRequest, ListLearningCandidatesRequest,
     ListSessionsRequest, ListSkillResolutionRatesRequest, ListTaskStrategySuccessRatesRequest,
     RecordSegmentSkillActivationRequest, RecordSegmentToolUseRequest,
-    RecordSegmentTurnUsageRequest, SearchEventsRequest, UpdateLearningCandidateStatusRequest,
-    UpdateSegmentAssessmentRequest, UpdateStatusRequest, WorkspaceCostSinceRequest,
+    RecordSegmentTurnUsageRequest, SearchEventsRequest, TenantCostSinceRequest,
+    UpdateLearningCandidateStatusRequest, UpdateSegmentAssessmentRequest, UpdateStatusRequest,
 };
 use moa_core::{
     Event, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
@@ -69,10 +69,8 @@ pub trait RestateSessionStore {
         request: Json<ListSessionsRequest>,
     ) -> Result<Json<Vec<SessionSummary>>, HandlerError>;
 
-    /// Aggregates workspace spend since the requested timestamp.
-    async fn workspace_cost_since(
-        request: Json<WorkspaceCostSinceRequest>,
-    ) -> Result<u32, HandlerError>;
+    /// Aggregates tenant spend since the requested timestamp.
+    async fn tenant_cost_since(request: Json<TenantCostSinceRequest>) -> Result<u32, HandlerError>;
 
     /// Bootstraps VO state after the session row exists in Postgres.
     async fn init_session_vo(request: Json<InitSessionVoRequest>) -> Result<(), HandlerError>;

@@ -100,8 +100,8 @@ fn tool_name(schema: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use moa_core::{
-        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TokenPricing, ToolCallFormat,
-        UserId, WorkspaceId,
+        Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
+        ToolCallFormat,
     };
     use serde_json::json;
 
@@ -132,8 +132,7 @@ mod tests {
     async fn tool_processor_serializes_tool_schemas() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
@@ -163,8 +162,7 @@ mod tests {
     async fn tool_processor_orders_schemas_by_name_for_stable_prefixes() {
         let session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()
@@ -188,8 +186,7 @@ mod tests {
         // Pins: prompt-visible tool schemas must match the session-pinned agent policy.
         let mut session = SessionMeta {
             id: SessionId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
             channel: Channel::Chat,
             model: ModelId::new("claude-sonnet-4-6"),
             ..SessionMeta::default()

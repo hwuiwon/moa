@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    MemoryScope, MemoryToolExecutor, MoaError, ScopeContext, ScopedConn, SessionMeta, ToolOutput,
-    UserId, WorkspaceId, traits::EmbeddingProvider,
+    ContactId, MemoryToolExecutor, MoaError, ScopeContext, ScopedConn, SessionActorRef,
+    SessionMeta, TenantId, ToolOutput, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
@@ -60,7 +60,7 @@ pub enum ForgetPattern {
     Uid(Uuid),
     /// Forget all active nodes whose projected name exactly matches this value.
     NameMatch(String),
-    /// Forget all active user-scoped nodes for this user in the current workspace.
+    /// Forget all active contact-scoped nodes for this contact in the current tenant.
     SoftAll(Uuid),
 }
 
@@ -327,13 +327,13 @@ fn validate_remember_request(req: &FastRememberRequest) -> Result<(), FastError>
         return Err(FastError::Invalid("empty text".to_string()));
     }
     match req.scope.as_str() {
-        "workspace" if req.user_id.is_none() => Ok(()),
-        "user" if req.user_id.is_some() => Ok(()),
-        "workspace" => Err(FastError::Invalid(
-            "workspace scope must not include user_id".to_string(),
+        "tenant" if req.user_id.is_none() => Ok(()),
+        "contact" if req.user_id.is_some() => Ok(()),
+        "tenant" => Err(FastError::Invalid(
+            "tenant scope must not include user_id".to_string(),
         )),
-        "user" => Err(FastError::Invalid(
-            "user scope requires user_id".to_string(),
+        "contact" => Err(FastError::Invalid(
+            "contact scope requires user_id".to_string(),
         )),
         "global" => Err(FastError::Invalid(
             "fast memory writes cannot target global scope".to_string(),
@@ -492,9 +492,9 @@ async fn execute_remember_tool(
 ) -> Result<ToolOutput, FastError> {
     let params: RememberToolInput = serde_json::from_value(input.clone())?;
     let label = parse_node_label(params.label.as_deref())?;
-    let scope = params.scope.unwrap_or_else(|| "workspace".to_string());
+    let scope = params.scope.unwrap_or_else(|| "tenant".to_string());
     let (ctx, workspace_id, user_id) = runtime_ctx_for_scope(session, &scope)?;
-    let actor_id = parse_optional_uuid(session.user_id.as_str()).unwrap_or_else(Uuid::now_v7);
+    let actor_id = actor_id_from_session(session);
     let uid = fast_remember(
         FastRememberRequest {
             workspace_id,
@@ -571,15 +571,10 @@ fn runtime_ctx_for_scope(
     session: &SessionMeta,
     scope: &str,
 ) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
-    let workspace_id = workspace_uuid(session)?;
+    let workspace_id = tenant_uuid(session);
     let user_id = match scope {
-        "workspace" => None,
-        "user" => Some(Uuid::parse_str(session.user_id.as_str()).map_err(|error| {
-            FastError::Invalid(format!(
-                "user_id `{}` must be a UUID for user-scoped graph memory: {error}",
-                session.user_id
-            ))
-        })?),
+        "tenant" => None,
+        "contact" => Some(session_contact_uuid(session)?),
         other => {
             return Err(FastError::Invalid(format!(
                 "unsupported memory scope `{other}`"
@@ -587,42 +582,47 @@ fn runtime_ctx_for_scope(
         }
     };
     let scope_ctx = match user_id {
-        Some(user_id) => ScopeContext::new(MemoryScope::User {
-            workspace_id: WorkspaceId::new(workspace_id.to_string()),
-            user_id: UserId::new(user_id.to_string()),
-        }),
-        None => ScopeContext::new(MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new(workspace_id.to_string()),
-        }),
+        Some(user_id) => ScopeContext::contact(TenantId::from(workspace_id), ContactId(user_id)),
+        None => ScopeContext::tenant(TenantId::from(workspace_id)),
     };
     Ok((runtime_fast_ctx(scope_ctx)?, workspace_id, user_id))
 }
 
 fn runtime_ctx_for_user(session: &SessionMeta, user_id: Uuid) -> Result<FastPathCtx, FastError> {
-    let workspace_id = workspace_uuid(session)?;
-    let scope_ctx = ScopeContext::new(MemoryScope::User {
-        workspace_id: WorkspaceId::new(workspace_id.to_string()),
-        user_id: UserId::new(user_id.to_string()),
-    });
+    let workspace_id = tenant_uuid(session);
+    let scope_ctx = ScopeContext::contact(TenantId::from(workspace_id), ContactId(user_id));
     runtime_fast_ctx(scope_ctx)
 }
 
 fn runtime_ctx_for_visible_session_scope(session: &SessionMeta) -> Result<FastPathCtx, FastError> {
-    if let Some(user_id) = parse_optional_uuid(session.user_id.as_str()) {
-        runtime_ctx_for_user(session, user_id)
+    if let Some(contact) = &session.contact {
+        runtime_ctx_for_user(session, contact.contact_id.0)
     } else {
-        let (ctx, _, _) = runtime_ctx_for_scope(session, "workspace")?;
+        let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant")?;
         Ok(ctx)
     }
 }
 
-fn workspace_uuid(session: &SessionMeta) -> Result<Uuid, FastError> {
-    Uuid::parse_str(session.workspace_id.as_str()).map_err(|error| {
-        FastError::Invalid(format!(
-            "workspace_id `{}` must be a UUID for graph memory: {error}",
-            session.workspace_id
-        ))
-    })
+fn tenant_uuid(session: &SessionMeta) -> Uuid {
+    session.tenant_id.0
+}
+
+fn session_contact_uuid(session: &SessionMeta) -> Result<Uuid, FastError> {
+    session
+        .contact
+        .as_ref()
+        .map(|contact| contact.contact_id.0)
+        .ok_or_else(|| {
+            FastError::Invalid("contact-scoped graph memory requires a session contact".to_string())
+        })
+}
+
+fn actor_id_from_session(session: &SessionMeta) -> Uuid {
+    match &session.created_by {
+        Some(SessionActorRef::Identity { id }) => *id,
+        Some(SessionActorRef::Contact { id }) => id.0,
+        Some(SessionActorRef::Anonymous) | None => Uuid::now_v7(),
+    }
 }
 
 fn runtime_fast_ctx(scope: ScopeContext) -> Result<FastPathCtx, FastError> {
@@ -661,10 +661,6 @@ fn parse_node_label(value: Option<&str>) -> Result<NodeLabel, FastError> {
         }
         None => Ok(NodeLabel::Fact),
     }
-}
-
-fn parse_optional_uuid(value: &str) -> Option<Uuid> {
-    Uuid::parse_str(value).ok()
 }
 
 #[derive(Debug, Clone)]

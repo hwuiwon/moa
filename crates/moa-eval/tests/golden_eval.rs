@@ -16,7 +16,7 @@ use moa_brain::{
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };
 use moa_core::{
-    MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
+    ContactId, MemoryScope, ScopeContext, ScopedConn, SessionId, TenantId,
     traits::EmbeddingProvider,
 };
 use moa_eval::golden::comparator::dump_traces;
@@ -141,7 +141,6 @@ struct GoldenStack {
     workspace_uuid: Uuid,
     user_uuid: Uuid,
     session_id: SessionId,
-    workspace_id: WorkspaceId,
     scope: ScopeContext,
     graph: Arc<dyn GraphStore>,
     vector: Arc<PgvectorStore>,
@@ -158,8 +157,8 @@ impl GoldenStack {
         let pool = session_store.pool().clone();
         let workspace_uuid = Uuid::now_v7();
         let user_uuid = Uuid::now_v7();
-        let workspace_id = WorkspaceId::new(workspace_uuid.to_string());
-        let scope = ScopeContext::workspace(workspace_id.clone());
+        let tenant_id = TenantId::from(workspace_uuid);
+        let scope = ScopeContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let graph = Arc::new(
             AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
@@ -173,7 +172,6 @@ impl GoldenStack {
             workspace_uuid,
             user_uuid,
             session_id: SessionId::new(),
-            workspace_id,
             scope,
             graph,
             vector,
@@ -208,8 +206,8 @@ impl GoldenStack {
     }
 
     fn memory_scope(&self) -> MemoryScope {
-        MemoryScope::Workspace {
-            workspace_id: self.workspace_id.clone(),
+        MemoryScope::Tenant {
+            tenant_id: TenantId::from(self.workspace_uuid),
         }
     }
 
@@ -282,7 +280,7 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
             FastRememberRequest {
                 workspace_id: stack.workspace_uuid,
                 user_id: None,
-                scope: "workspace".to_string(),
+                scope: "tenant".to_string(),
                 text: superseded_text(old_summary),
                 label: NodeLabel::Fact,
                 supersedes_specific: Some(old_uid),
@@ -332,8 +330,8 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
         }
     }
 
-    let other_scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(Uuid::now_v7().to_string()),
+    let other_scope = MemoryScope::Tenant {
+        tenant_id: TenantId::new(),
     };
     let other_retrieval = RetrievalHarness::new(stack, other_scope);
     for query in &queries.cross_queries {
@@ -483,11 +481,11 @@ fn load_queries() -> TestResult<GoldenQueries> {
 
 fn session_turn(stack: &GoldenStack, fixture: &GoldenFixture, turn_seq: u64) -> SessionTurn {
     SessionTurn {
-        workspace_id: stack.workspace_id.clone(),
-        user_id: UserId::new(stack.user_uuid.to_string()),
+        tenant_id: TenantId::from(stack.workspace_uuid),
+        contact_id: ContactId(stack.user_uuid),
         session_id: stack.session_id,
         turn_seq,
-        transcript: format!("Fact: workspace shared {}", fixture.summary),
+        transcript: format!("Fact: tenant shared {}", fixture.summary),
         dominant_pii_class: "none".to_string(),
         finalized_at: fixture.valid_from,
     }
@@ -675,7 +673,7 @@ async fn wait_for_dlq_empty(pool: &PgPool, workspace_id: Uuid, timeout: Duration
 }
 
 async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> TestResult<ScopedConn<'a>> {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
     let mut conn = ScopedConn::begin(pool, &scope).await.map_err(box_error)?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())

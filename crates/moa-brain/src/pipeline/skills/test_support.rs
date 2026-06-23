@@ -2,8 +2,8 @@
 
 use chrono::{TimeZone, Utc};
 use moa_core::{
-    Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, SkillMetadata, TokenPricing,
-    ToolCallFormat, UserId, WorkspaceId,
+    Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, SkillMetadata, TenantId,
+    TokenPricing, ToolCallFormat,
 };
 
 use super::tier1_metadata::ResolvedSkillBudget;
@@ -42,8 +42,7 @@ pub(super) fn capabilities(context_window: usize) -> ModelCapabilities {
 pub(super) fn session() -> SessionMeta {
     SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new("workspace"),
-        user_id: UserId::new("user"),
+        tenant_id: TenantId::new(),
         channel: Channel::Chat,
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()

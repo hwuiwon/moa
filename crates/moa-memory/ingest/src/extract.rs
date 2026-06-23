@@ -1,7 +1,7 @@
 //! Deterministic DTOs and extract/chunk helpers for graph-memory ingestion.
 
 use chrono::{DateTime, Utc};
-use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_core::{ContactId, SessionId, TenantId};
 use moa_memory_graph::PiiClass;
 use moa_memory_pii::PiiSpan;
 use serde::{Deserialize, Serialize};
@@ -15,10 +15,10 @@ pub const MAX_EXTRACT_CHUNK_CHARS: usize = 32_768;
 /// Finalized session turn payload sent to the slow-path ingestion VO.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTurn {
-    /// Workspace that owns the session.
-    pub workspace_id: WorkspaceId,
-    /// User that produced the session turn.
-    pub user_id: UserId,
+    /// Tenant that owns the session.
+    pub tenant_id: TenantId,
+    /// Contact that produced the session turn.
+    pub contact_id: ContactId,
     /// Session identifier.
     pub session_id: SessionId,
     /// Durable turn sequence, normally the persisted `BrainResponse` event sequence number.
@@ -46,11 +46,11 @@ pub struct TurnChunk {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtractedFactScopeHint {
-    /// The fact belongs to the workspace-bound user who produced the turn.
+    /// The fact belongs to the contact who produced the turn.
     #[default]
-    User,
-    /// The fact is intentionally shared with the whole workspace.
-    Workspace,
+    Contact,
+    /// The fact is intentionally shared with the whole tenant.
+    Tenant,
 }
 
 /// One fact candidate emitted by extraction.
@@ -218,13 +218,13 @@ pub fn fact_uid_from_hash(hash: &[u8]) -> Uuid {
 /// Returns the deterministic graph node UUID for one fact in one finalized turn.
 #[must_use]
 pub fn scoped_fact_uid(
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     session_id: &SessionId,
     turn_seq: u64,
     fact_hash: &[u8],
 ) -> Uuid {
     let mut hasher = Sha256::new();
-    hasher.update(workspace_id.to_string().as_bytes());
+    hasher.update(tenant_id.to_string().as_bytes());
     hasher.update([0]);
     hasher.update(session_id.0.as_bytes());
     hasher.update(turn_seq.to_be_bytes());
@@ -239,7 +239,7 @@ pub fn should_ingest_degraded(turn: &SessionTurn) -> bool {
         return true;
     }
     let mut hasher = Sha256::new();
-    hasher.update(turn.workspace_id.to_string().as_bytes());
+    hasher.update(turn.tenant_id.to_string().as_bytes());
     hasher.update(turn.session_id.0.as_bytes());
     hasher.update(turn.turn_seq.to_be_bytes());
     let digest = hasher.finalize();
@@ -297,13 +297,13 @@ fn extracted_fact_from_summary(source_chunk: usize, summary: String) -> Extracte
 }
 
 fn scope_hint_from_summary(summary: &str) -> (ExtractedFactScopeHint, String) {
-    let scope_hint = if contains_scope_marker(summary, "workspace shared") {
-        ExtractedFactScopeHint::Workspace
+    let scope_hint = if contains_scope_marker(summary, "tenant shared") {
+        ExtractedFactScopeHint::Tenant
     } else {
-        ExtractedFactScopeHint::User
+        ExtractedFactScopeHint::Contact
     };
-    let summary = strip_scope_marker(summary, "workspace shared");
-    let summary = strip_scope_marker(&summary, "user private");
+    let summary = strip_scope_marker(summary, "tenant shared");
+    let summary = strip_scope_marker(&summary, "contact private");
     (scope_hint, normalize_stripped_scope_summary(&summary))
 }
 
@@ -371,14 +371,14 @@ fn object_words<'a>(words: &'a [&'a str]) -> &'a [&'a str] {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{SessionId, UserId, WorkspaceId};
+    use moa_core::{ContactId, SessionId, TenantId};
 
     use super::*;
 
     fn turn(transcript: &str) -> SessionTurn {
         SessionTurn {
-            workspace_id: WorkspaceId::new("workspace"),
-            user_id: UserId::new("user"),
+            tenant_id: TenantId::new(),
+            contact_id: ContactId::new(),
             session_id: SessionId::new(),
             turn_seq: 7,
             transcript: transcript.to_string(),
@@ -401,19 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn extraction_defaults_unmarked_facts_to_user_scope() {
+    fn extraction_defaults_unmarked_facts_to_contact_scope() {
         let chunks =
             chunk_turn(&turn("Fact: auth service uses JWT"), 700, 100).expect("chunk one fact");
         let facts = extract_facts(&chunks);
 
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::User);
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Contact);
     }
 
     #[test]
     fn extraction_strips_scope_markers_before_parsing() {
         let chunks = chunk_turn(
-            &turn("Fact: workspace shared API runs_on_port 3000\nFact: user private theme uses dark_mode"),
+            &turn("Fact: tenant shared API runs_on_port 3000\nFact: contact private theme uses dark_mode"),
             700,
             100,
         )
@@ -421,10 +421,10 @@ mod tests {
         let facts = extract_facts(&chunks);
 
         assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Workspace);
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Tenant);
         assert_eq!(facts[0].summary, "API runs_on_port 3000");
         assert_eq!(facts[0].subject, "API");
-        assert_eq!(facts[1].scope_hint, ExtractedFactScopeHint::User);
+        assert_eq!(facts[1].scope_hint, ExtractedFactScopeHint::Contact);
         assert_eq!(facts[1].summary, "theme uses dark_mode");
         assert_eq!(facts[1].subject, "theme");
     }
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn extracted_fact_deserializes_without_confidence_field() {
-        // Pins: old Restate journal entries without model confidence keep deserializing.
+        // Pins: Restate journal entries without model confidence keep deserializing.
         let json = serde_json::json!({
             "uid": uuid::Uuid::now_v7(),
             "subject": "auth",
@@ -448,26 +448,26 @@ mod tests {
             "object": "JWT",
             "summary": "auth uses JWT",
             "source_chunk": 0,
-            "scope_hint": "workspace"
+            "scope_hint": "tenant"
         });
 
         let fact: ExtractedFact =
-            serde_json::from_value(json).expect("old extracted fact JSON should deserialize");
+            serde_json::from_value(json).expect("extracted fact JSON should deserialize");
 
         assert_eq!(fact.confidence, None);
-        assert_eq!(fact.scope_hint, ExtractedFactScopeHint::Workspace);
+        assert_eq!(fact.scope_hint, ExtractedFactScopeHint::Tenant);
     }
 
     #[test]
-    fn scoped_fact_uid_differs_by_workspace() {
+    fn scoped_fact_uid_differs_by_tenant() {
         let chunks =
             chunk_turn(&turn("Fact: auth service uses JWT"), 700, 100).expect("chunk one fact");
         let facts = extract_facts(&chunks);
         let hash = fact_hash(&facts[0]).expect("hash fact");
         let session_id = SessionId::new();
 
-        let first = scoped_fact_uid(&WorkspaceId::new("workspace-a"), &session_id, 7, &hash);
-        let second = scoped_fact_uid(&WorkspaceId::new("workspace-b"), &session_id, 7, &hash);
+        let first = scoped_fact_uid(&TenantId::new(), &session_id, 7, &hash);
+        let second = scoped_fact_uid(&TenantId::new(), &session_id, 7, &hash);
 
         assert_ne!(first, second);
     }

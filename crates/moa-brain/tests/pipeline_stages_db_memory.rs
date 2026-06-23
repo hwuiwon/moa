@@ -20,9 +20,9 @@ use moa_brain::{
 };
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
-    ContextProcessor, LLMProvider, MemoryScope, MessageRole, MoaConfig, ModelCapabilities, ModelId,
+    ContextProcessor, LLMProvider, MessageRole, MoaConfig, ModelCapabilities, ModelId,
     NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
-    RewriteSource, ScopeContext, StopReason, TokenUsage, WorkingContext, WorkspaceId,
+    RewriteSource, ScopeContext, StopReason, TenantId, TokenUsage, WorkingContext, WorkspaceId,
     stable_prefix_fingerprint,
 };
 use moa_memory_graph::{NodeLabel, PiiClass};
@@ -350,19 +350,20 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         ])
         .build();
     let mut ctx = fixture.ctx;
+    let runtime_workspace_id = WorkspaceId::new(ctx.tenant_id.to_string());
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
-    delete_memory_rows(store.pool(), &ctx.workspace_id).await?;
+    delete_memory_rows(store.pool(), &runtime_workspace_id).await?;
     seed_memory_rows(
         store.pool(),
-        &ctx.workspace_id,
+        &runtime_workspace_id,
         &fixture.memory_hits,
         fixture.clock_at,
     )
     .await?;
-    let vector_noise_uid = seed_global_vector_noise(store.pool(), fixture.clock_at).await?;
+    let vector_noise_uid = seed_other_tenant_vector_noise(store.pool(), fixture.clock_at).await?;
 
     // GraphMemoryRetriever injects the top three active lexical hits, excludes invalidated nodes,
-    // and does not retrieve vector-only global rows when no real query embedding exists.
+    // and does not retrieve vector-only rows from another tenant when no real query embedding exists.
     let output = GraphMemoryRetriever::new(store.pool().clone(), None)
         .with_assume_app_role(true)
         .with_result_limit(3)
@@ -424,10 +425,10 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         !output
             .items_included
             .contains(&format!("graph:Fact:{vector_noise_uid}")),
-        "GraphMemoryRetriever: vector-only global noise leaked without a query embedding"
+        "GraphMemoryRetriever: vector-only cross-tenant noise leaked without a query embedding"
     );
-    delete_global_vector_noise(store.pool(), vector_noise_uid).await?;
-    delete_memory_rows(store.pool(), &ctx.workspace_id).await?;
+    delete_other_tenant_vector_noise(store.pool(), vector_noise_uid).await?;
+    delete_memory_rows(store.pool(), &runtime_workspace_id).await?;
     Ok(())
 }
 
@@ -588,8 +589,13 @@ async fn seed_memory_rows(
     Ok(())
 }
 
-async fn seed_global_vector_noise(pool: &sqlx::PgPool, clock_at: DateTime<Utc>) -> Result<Uuid> {
+async fn seed_other_tenant_vector_noise(
+    pool: &sqlx::PgPool,
+    clock_at: DateTime<Utc>,
+) -> Result<Uuid> {
     let uid = Uuid::from_u128(0x2_000);
+    let other_tenant_id = TenantId::new();
+    let other_workspace_id = other_tenant_id.to_string();
     sqlx::query("DELETE FROM moa.node_index WHERE uid = $1")
         .bind(uid)
         .execute(pool)
@@ -600,25 +606,26 @@ async fn seed_global_vector_noise(pool: &sqlx::PgPool, clock_at: DateTime<Utc>) 
         INSERT INTO moa.node_index
             (uid, label, workspace_id, user_id, name, pii_class, confidence,
              properties_summary, last_accessed_at)
-        VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(uid)
     .bind(NodeLabel::Fact.as_str())
-    .bind("unrelated global vector noise")
+    .bind(&other_workspace_id)
+    .bind("unrelated cross-tenant vector noise")
     .bind(PiiClass::None.as_str())
     .bind(0.99_f64)
-    .bind(json!({ "summary": "unrelated global vector noise" }))
+    .bind(json!({ "summary": "unrelated cross-tenant vector noise" }))
     .bind(clock_at + Duration::seconds(10_000))
     .execute(pool)
     .await
     .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
 
-    let vector = PgvectorStore::new(pool.clone(), ScopeContext::new(MemoryScope::Global));
+    let vector = PgvectorStore::new(pool.clone(), ScopeContext::tenant(other_tenant_id));
     vector
         .upsert(&[VectorItem {
             uid,
-            workspace_id: None,
+            workspace_id: Some(other_workspace_id),
             user_id: None,
             label: NodeLabel::Fact.as_str().to_string(),
             pii_class: PiiClass::None.as_str().to_string(),
@@ -642,7 +649,7 @@ async fn delete_memory_rows(pool: &sqlx::PgPool, workspace_id: &WorkspaceId) -> 
     Ok(())
 }
 
-async fn delete_global_vector_noise(pool: &sqlx::PgPool, uid: Uuid) -> Result<()> {
+async fn delete_other_tenant_vector_noise(pool: &sqlx::PgPool, uid: Uuid) -> Result<()> {
     sqlx::query("DELETE FROM moa.node_index WHERE uid = $1")
         .bind(uid)
         .execute(pool)

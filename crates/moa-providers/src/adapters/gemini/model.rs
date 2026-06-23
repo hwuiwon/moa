@@ -8,8 +8,7 @@ pub(crate) fn canonical_model_id(model: &str) -> Result<String> {
     let model = model.trim();
     if model.starts_with("gemini-2.") {
         return Err(MoaError::Unsupported(
-            "legacy Gemini 2 models are no longer supported; use gemini-3-flash-preview"
-                .to_string(),
+            "Gemini 2 models are no longer supported; use gemini-3-flash-preview".to_string(),
         ));
     }
     if models::find_for_provider_model(PROVIDER_GOOGLE, model).is_some() {

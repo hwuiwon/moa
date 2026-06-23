@@ -1,5 +1,6 @@
 use moa_core::{
-    MemoryScope, ModelId, Result, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
+    ActionRuleScope, ModelId, Result, ScopeContext, ScopedConn, SessionId, TenantId, UserId,
+    WorkspaceId,
 };
 use moa_experiments::{
     model::{
@@ -18,7 +19,7 @@ static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn workspace_scoped_run_insert_load_round_trip_db() -> Result<()> {
-    // Pins: workspace-scoped experiment metadata persists and loads through the scoped store.
+    // Pins: tenant-scoped experiment metadata persists and loads through the scoped store.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
@@ -254,11 +255,10 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let experiment_store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let session_id =
         insert_session_for_experiment_fk(test_db.store().pool(), &workspace_id, &user_id).await?;
     let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
@@ -514,11 +514,10 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let session_id =
         insert_session_for_experiment_fk(test_db.store().pool(), &workspace_id, &user_id).await?;
     let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
@@ -746,9 +745,9 @@ async fn concurrent_trial_creation_uses_unique_workspace_ids_db() -> Result<()> 
     Ok(())
 }
 
-fn workspace_scope(label: &str) -> MemoryScope {
-    MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(format!("{label}-{}", Uuid::now_v7())),
+fn workspace_scope(_label: &str) -> ActionRuleScope {
+    ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
     }
 }
 
@@ -852,15 +851,12 @@ fn assert_trial_status(
 
 async fn insert_workflow_run(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     session_id: SessionId,
 ) -> Result<Uuid> {
-    let workspace_id = scope
-        .workspace_id()
-        .expect("workflow link test uses a workspace scope")
-        .to_string();
+    let workspace_id = scope_workspace_id(scope);
     let run_uid = Uuid::now_v7();
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_run (
@@ -882,14 +878,11 @@ async fn insert_workflow_run(
     Ok(run_uid)
 }
 
-async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &MemoryScope) -> Result<Uuid> {
-    let workspace_id = scope
-        .workspace_id()
-        .expect("artifact revision test uses a workspace scope")
-        .to_string();
+async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
+    let workspace_id = scope_workspace_id(scope);
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
@@ -929,7 +922,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &MemoryScope) -> R
 
 async fn assert_score_run_exists(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
 ) -> Result<()> {
     assert_score_run_exists_with_source(pool, scope, score_run_id, "experiment_run").await
@@ -937,12 +930,12 @@ async fn assert_score_run_exists(
 
 async fn assert_score_run_exists_with_source(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
     source: &str,
 ) -> Result<()> {
     let parts = scope_parts(scope);
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     let exists = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
@@ -989,12 +982,12 @@ async fn assert_score_run_absent(pool: &sqlx::PgPool, score_run_id: Uuid) -> Res
 
 async fn assert_scoped_experiment_count_for_score_run(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
     expected: i64,
 ) -> Result<()> {
     let parts = scope_parts(scope);
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
@@ -1019,12 +1012,12 @@ async fn assert_scoped_experiment_count_for_score_run(
 
 async fn assert_scoped_trial_count_for_score_run(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
     expected: i64,
 ) -> Result<()> {
     let parts = scope_parts(scope);
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)
@@ -1062,7 +1055,7 @@ async fn assert_no_experiment_trial_event_table(pool: &sqlx::PgPool) -> Result<(
 
 async fn insert_score_run(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
 ) -> Result<()> {
     insert_score_run_with_source(pool, scope, score_run_id, "experiment_run").await
@@ -1070,12 +1063,12 @@ async fn insert_score_run(
 
 async fn insert_score_run_with_source(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     score_run_id: Uuid,
     source: &str,
 ) -> Result<()> {
     let parts = scope_parts(scope);
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO analytics.score_run (
@@ -1097,11 +1090,11 @@ async fn insert_score_run_with_source(
 
 async fn assert_artifact_revision_links(
     pool: &sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run_uid: Uuid,
     expected_revision_uids: &[Uuid],
 ) -> Result<()> {
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     let mut revision_uids = sqlx::query_scalar::<_, Uuid>(
         r#"
         SELECT revision_uid
@@ -1158,19 +1151,23 @@ async fn insert_session_for_experiment_fk(
     Ok(session_id)
 }
 
-fn scope_parts(scope: &MemoryScope) -> (&'static str, Option<String>, Option<String>) {
+fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
     match scope {
-        MemoryScope::Global => ("global", None, None),
-        MemoryScope::Workspace { workspace_id } => {
-            ("workspace", Some(workspace_id.to_string()), None)
-        }
-        MemoryScope::User {
-            workspace_id,
-            user_id,
-        } => (
-            "user",
-            Some(workspace_id.to_string()),
-            Some(user_id.to_string()),
-        ),
+        ActionRuleScope::WorkspaceDefault => ("global", None, None),
+        ActionRuleScope::Tenant { tenant_id } => ("workspace", Some(tenant_id.to_string()), None),
+    }
+}
+
+fn scope_workspace_id(scope: &ActionRuleScope) -> String {
+    match scope {
+        ActionRuleScope::Tenant { tenant_id } => tenant_id.to_string(),
+        ActionRuleScope::WorkspaceDefault => "workspace-default".to_string(),
+    }
+}
+
+fn scope_context(scope: &ActionRuleScope) -> ScopeContext {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
+        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }

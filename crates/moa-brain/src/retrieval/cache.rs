@@ -42,7 +42,7 @@ impl RetrievalBackend for HybridRetriever {
 
 #[async_trait]
 trait ChangelogVersionReader: Send + Sync {
-    async fn current_version(&self, scope: &MemoryScope, workspace_id: &str) -> Result<i64>;
+    async fn current_version(&self, scope: &MemoryScope) -> Result<i64>;
 }
 
 #[derive(Clone)]
@@ -53,11 +53,7 @@ struct PostgresChangelogVersionReader {
 
 #[async_trait]
 impl ChangelogVersionReader for PostgresChangelogVersionReader {
-    async fn current_version(&self, scope: &MemoryScope, workspace_id: &str) -> Result<i64> {
-        if uuid::Uuid::parse_str(workspace_id).is_err() {
-            return Ok(0);
-        }
-
+    async fn current_version(&self, scope: &MemoryScope) -> Result<i64> {
         let scope_context = ScopeContext::from(scope.clone());
         let mut conn = ScopedConn::begin(&self.pool, &scope_context).await?;
         if self.assume_app_role {
@@ -66,9 +62,9 @@ impl ChangelogVersionReader for PostgresChangelogVersionReader {
                 .await?;
         }
         let version = sqlx::query_scalar::<_, i64>(
-            "SELECT changelog_version FROM moa.workspace_state WHERE workspace_id = $1",
+            "SELECT changelog_version FROM moa.workspace_state WHERE tenant_id = $1",
         )
-        .bind(workspace_id)
+        .bind(scope.tenant_id().0)
         .fetch_optional(conn.as_mut())
         .await?
         .unwrap_or(0);
@@ -209,10 +205,7 @@ impl CachedHybridRetriever {
         }
 
         let workspace_id = workspace_cache_id(&req.scope);
-        let current_version = self
-            .version_reader
-            .current_version(&req.scope, &workspace_id)
-            .await?;
+        let current_version = self.version_reader.current_version(&req.scope).await?;
         let key = CacheKey {
             workspace_id: workspace_id.clone(),
             fingerprint: fingerprint(planned, &req, self.inner.ranking_fingerprint()),
@@ -265,15 +258,12 @@ impl CachedHybridRetriever {
     }
 
     fn cacheable_scope(&self, scope: &MemoryScope) -> bool {
-        !matches!(scope.tier(), ScopeTier::User) || self.config.cache_user_scope
+        !matches!(scope.tier(), ScopeTier::Contact) || self.config.cache_user_scope
     }
 }
 
 fn workspace_cache_id(scope: &MemoryScope) -> String {
-    scope
-        .workspace_id()
-        .map(|workspace_id| workspace_id.to_string())
-        .unwrap_or_else(|| "global".to_string())
+    scope.tenant_id().to_string()
 }
 
 fn fingerprint(
@@ -360,19 +350,18 @@ fn canonicalize(
 
 fn push_scope(out: &mut String, scope: &MemoryScope) {
     match scope {
-        MemoryScope::Global => out.push_str("global"),
-        MemoryScope::Workspace { workspace_id } => {
-            out.push_str("workspace:");
-            out.push_str(workspace_id.as_str());
+        MemoryScope::Tenant { tenant_id } => {
+            out.push_str("tenant:");
+            out.push_str(&tenant_id.to_string());
         }
-        MemoryScope::User {
-            workspace_id,
-            user_id,
+        MemoryScope::Contact {
+            tenant_id,
+            contact_id,
         } => {
-            out.push_str("user:");
-            out.push_str(workspace_id.as_str());
+            out.push_str("contact:");
+            out.push_str(&tenant_id.to_string());
             out.push(':');
-            out.push_str(user_id.as_str());
+            out.push_str(&contact_id.to_string());
         }
     }
 }
@@ -382,16 +371,14 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use moa_core::{MemoryScope, UserId, WorkspaceId};
+    use moa_core::{ContactId, MemoryScope, TenantId};
     use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
     use uuid::Uuid;
 
     use super::*;
     use crate::planning::Strategy;
     use crate::retrieval::LegSources;
-    use crate::retrieval::ranking::{
-        RANKING_PIPELINE_VERSION, RankingConfig, RankingMode, ranking_fingerprint,
-    };
+    use crate::retrieval::ranking::{RANKING_PIPELINE_VERSION, RankingConfig, ranking_fingerprint};
 
     #[tokio::test]
     async fn cache_hit_reuses_successful_workspace_retrieval() {
@@ -452,9 +439,9 @@ mod tests {
             version,
             CachedHybridRetrieverConfig::default(),
         );
-        let scope = MemoryScope::User {
-            workspace_id: WorkspaceId::new("workspace-a"),
-            user_id: UserId::new("user-a"),
+        let scope = MemoryScope::Contact {
+            tenant_id: test_tenant_id(),
+            contact_id: test_contact_id(),
         };
         let planned = planned_query(scope, "auth service");
         let req = request(&planned, "what owns auth?");
@@ -549,25 +536,23 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_ranking_fingerprint() {
-        // Pins: final ranked hits cannot be reused across ranking modes.
+        // Pins: final ranked hits cannot be reused across ranking-weight changes.
         let planned = planned_query(workspace_scope(), "auth service");
         let req = request(&planned, "what owns auth?");
-        let legacy = RankingConfig {
-            mode: RankingMode::Legacy,
-            weights: Default::default(),
-        };
-        let feature = RankingConfig::default();
+        let baseline = RankingConfig::default();
+        let mut tuned = RankingConfig::default();
+        tuned.weights.subject_match += 0.1;
 
         assert_ne!(
-            fingerprint(&planned, &req, ranking_fingerprint(&legacy)),
-            fingerprint(&planned, &req, ranking_fingerprint(&feature))
+            fingerprint(&planned, &req, ranking_fingerprint(&baseline)),
+            fingerprint(&planned, &req, ranking_fingerprint(&tuned))
         );
     }
 
     #[test]
     fn cache_key_changes_with_pipeline_version_bump() {
-        // Pins: stemmed ranking tokens and graph-activation scoring require version 6.
-        assert_eq!(RANKING_PIPELINE_VERSION, 6);
+        // Pins: single-mode ranking config shape requires version 7.
+        assert_eq!(RANKING_PIPELINE_VERSION, 7);
     }
 
     #[derive(Default)]
@@ -638,15 +623,23 @@ mod tests {
 
     #[async_trait]
     impl ChangelogVersionReader for MockVersionReader {
-        async fn current_version(&self, _scope: &MemoryScope, _workspace_id: &str) -> Result<i64> {
+        async fn current_version(&self, _scope: &MemoryScope) -> Result<i64> {
             Ok(self.version.load(Ordering::SeqCst))
         }
     }
 
     fn workspace_scope() -> MemoryScope {
-        MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace-a"),
+        MemoryScope::Tenant {
+            tenant_id: test_tenant_id(),
         }
+    }
+
+    fn test_tenant_id() -> TenantId {
+        TenantId::from(Uuid::from_u128(0x100))
+    }
+
+    fn test_contact_id() -> ContactId {
+        ContactId(Uuid::from_u128(0x101))
     }
 
     fn planned_query(scope: MemoryScope, name: &str) -> PlannedQuery {

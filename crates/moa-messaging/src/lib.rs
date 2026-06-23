@@ -46,8 +46,8 @@ pub use twilio::{
     TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
     TWILIO_AUTH_TOKEN_ENV, TWILIO_AUTH_TOKEN_SERVICE, TWILIO_FROM_NUMBER_ENV,
     TWILIO_FROM_NUMBER_SERVICE, TWILIO_MESSAGING_SERVICE_SID_ENV,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TWILIO_SID_ENV, TwilioSmsClient,
-    TwilioSmsDeliveryFailure, TwilioSmsFailureClass, TwilioSmsMessage, TwilioSmsSendResult,
+    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsDeliveryFailure,
+    TwilioSmsFailureClass, TwilioSmsMessage, TwilioSmsSendResult,
 };
 
 #[cfg(feature = "slack")]

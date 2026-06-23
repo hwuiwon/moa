@@ -17,7 +17,7 @@ use moa_core::wire::{
     ContactErasureScope, PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest,
     PrivacyExportResponse,
 };
-use moa_core::{ContactId, UserId, WorkspaceId};
+use moa_core::{TenantId, UserId, WorkspaceId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
 use moa_memory_pii::erasure::{
@@ -42,6 +42,7 @@ const EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
 const EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
 const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
 const ERASE_SAMPLE_LIMIT: usize = 20;
+const CONTACT_SUBJECT_PREFIX: &str = "contact:";
 
 /// Restate service surface for protected privacy administration.
 #[restate_sdk::service]
@@ -71,9 +72,10 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyExportResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "export");
         let request = request.into_inner();
-        let identity = authorize_privacy_export(&ctx, request.workspace_id.as_ref()).await?;
+        authorize_tenant_or_workspace_admin(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let workspace = request.workspace_id.as_ref().map(WorkspaceId::as_str);
+        let storage_workspace_id = storage_workspace_id_for_tenant(request.tenant_id);
+        let workspace = Some(storage_workspace_id.as_str());
         let claims = ApprovalTokenVerifier::from_env()?.verify(
             &request.approval_token,
             "export",
@@ -84,7 +86,7 @@ impl Privacy for PrivacyImpl {
 
         Ok(ctx
             .run(|| async move {
-                execute_privacy_export(pool, identity.tenant_id, request, claims)
+                execute_privacy_export(pool, request.tenant_id, request, claims)
                     .await
                     .map(Json::from)
             })
@@ -100,9 +102,10 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyEraseResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "erase");
         let request = request.into_inner();
-        let identity = authorize_workspace_admin(&ctx, &request.workspace_id).await?;
+        authorize_tenant_or_workspace_admin(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let workspace = Some(request.workspace_id.as_str());
+        let storage_workspace_id = storage_workspace_id_for_tenant(request.tenant_id);
+        let workspace = Some(storage_workspace_id.as_str());
         let claims = ApprovalTokenVerifier::from_env()?.verify(
             &request.approval_token,
             "erase",
@@ -110,8 +113,7 @@ impl Privacy for PrivacyImpl {
             workspace,
         )?;
         let pool = OrchestratorCtx::current_graph_pool();
-        let erase_ctx =
-            PrivacyEraseContext::from_request(pool, identity.tenant_id, request, claims)?;
+        let erase_ctx = PrivacyEraseContext::from_request(pool, request, claims)?;
 
         Ok(ctx
             .run(|| async move { run_privacy_erase(erase_ctx).await.map(Json::from) })
@@ -283,7 +285,9 @@ impl Ed25519ManifestSigner {
 pub struct PrivacyExportContext {
     /// Postgres pool used for privacy reads and audit writes.
     pub pool: PgPool,
-    /// Optional workspace filter.
+    /// Tenant that authorized the privacy operation.
+    pub tenant_id: TenantId,
+    /// Storage workspace partition derived from the tenant id.
     pub workspace: Option<String>,
     /// Subject user UUID.
     pub subject_user: Uuid,
@@ -303,8 +307,8 @@ pub struct PrivacyEraseContext {
     /// Postgres pool used for graph and PII-vault erasure.
     pub pool: PgPool,
     /// Tenant that authorized the privacy operation.
-    pub tenant_id: Uuid,
-    /// Workspace containing subject data.
+    pub tenant_id: TenantId,
+    /// Storage workspace partition derived from the tenant id.
     pub workspace_id: String,
     /// Subject user UUID.
     pub subject_user: Uuid,
@@ -326,15 +330,15 @@ impl PrivacyEraseContext {
     /// Builds an erase context from the public wire request and verified claims.
     pub fn from_request(
         pool: PgPool,
-        tenant_id: Uuid,
         request: PrivacyEraseRequest,
         claims: ApprovalClaims,
     ) -> Result<Self, HandlerError> {
         let subject_user = parse_subject_uuid(&request.subject_user_id)?;
+        let storage_workspace_id = storage_workspace_id_for_tenant(request.tenant_id);
         Ok(Self {
             pool,
-            tenant_id,
-            workspace_id: request.workspace_id.to_string(),
+            tenant_id: request.tenant_id,
+            workspace_id: storage_workspace_id.to_string(),
             subject_user,
             subject_user_id: request.subject_user_id.to_string(),
             reason: request.reason,
@@ -370,7 +374,7 @@ impl PrivacySubject {
 
     fn linked_contact(contact_id: Uuid) -> Self {
         Self {
-            user_id: ContactId(contact_id).as_user_id().to_string(),
+            user_id: format!("{CONTACT_SUBJECT_PREFIX}{contact_id}"),
             target_uid: contact_id,
             provenance: PrivacySubjectProvenance::LinkedContact,
         }
@@ -408,40 +412,24 @@ struct ResolvedPrivacySubjects {
     subjects: Vec<PrivacySubject>,
 }
 
-async fn authorize_privacy_export(
+async fn authorize_tenant_or_workspace_admin(
     ctx: &impl RequestHeaders,
-    workspace_id: Option<&WorkspaceId>,
-) -> Result<Identity, HandlerError> {
-    match workspace_id {
-        Some(workspace_id) => authorize_workspace_admin(ctx, workspace_id).await,
-        None => {
-            let identity = require_identity(ctx)?;
-            let fga = require_fga_client()?;
-            require_authz_with_delegation(
-                &fga,
-                &identity,
-                ObjectType::Tenant,
-                identity.tenant_id,
-                Relation::Admin,
-            )
-            .await
-            .map_err(translate_authz_error)?;
-            Ok(identity)
-        }
-    }
-}
-
-async fn authorize_workspace_admin(
-    ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
+    relation: Relation,
 ) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
+    if require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+        .await
+        .is_ok()
+    {
+        return Ok(identity);
+    }
     require_authz_with_delegation(
         &fga,
         &identity,
         ObjectType::Workspace,
-        workspace_id,
+        &global_workspace_id(),
         Relation::Admin,
     )
     .await
@@ -449,9 +437,17 @@ async fn authorize_workspace_admin(
     Ok(identity)
 }
 
+fn global_workspace_id() -> WorkspaceId {
+    WorkspaceId::new("workspace")
+}
+
+fn storage_workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
+}
+
 async fn execute_privacy_export(
     pool: PgPool,
-    tenant_id: Uuid,
+    tenant_id: TenantId,
     request: PrivacyExportRequest,
     claims: ApprovalClaims,
 ) -> Result<PrivacyExportResponse, HandlerError> {
@@ -459,10 +455,11 @@ async fn execute_privacy_export(
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
     consume_approval_jti(&pool, &claims).await?;
+    let storage_workspace_id = storage_workspace_id_for_tenant(tenant_id);
     let resolved = resolve_privacy_subjects(
         &pool,
-        tenant_id,
-        request.workspace_id.as_ref(),
+        tenant_id.0,
+        Some(&storage_workspace_id),
         &request.subject_user_id,
         ContactLinkedSubjectPolicy::IncludeVerifiedLinks,
     )
@@ -481,6 +478,7 @@ async fn execute_privacy_export(
         .map_err(handler_error)?;
     let ctx = PrivacyExportContext {
         pool,
+        tenant_id,
         workspace,
         subject_user,
         subject_user_id: request.subject_user_id.to_string(),
@@ -505,10 +503,7 @@ async fn execute_privacy_export(
     let (counts, manifest, archive) = result?;
     Ok(PrivacyExportResponse {
         subject_user_id: request.subject_user_id,
-        workspace_id: ctx
-            .workspace
-            .as_ref()
-            .map(|workspace| WorkspaceId::new(workspace.clone())),
+        tenant_id: ctx.tenant_id,
         archive_uri: "inline:privacy-export.tgz".to_string(),
         file_count: usize_to_u64(counts.len().saturating_add(3)),
         counts: counts
@@ -538,7 +533,7 @@ pub async fn run_privacy_erase(
     };
     let resolved = resolve_privacy_subjects(
         &ctx.pool,
-        ctx.tenant_id,
+        ctx.tenant_id.0,
         Some(&WorkspaceId::new(ctx.workspace_id.clone())),
         &UserId::new(ctx.subject_user_id.clone()),
         linked_policy,
@@ -737,7 +732,7 @@ async fn resolve_privacy_subjects(
     };
 
     let mut subjects = vec![PrivacySubject::primary(
-        ContactId(contact_row.id).as_user_id().to_string(),
+        format!("{CONTACT_SUBJECT_PREFIX}{}", contact_row.id),
         contact_row.id,
     )];
     if contact_row.state == "verified"
@@ -766,14 +761,9 @@ fn parse_privacy_subject_id(
     subject_user_id: &UserId,
 ) -> Result<ParsedPrivacySubjectId, HandlerError> {
     let raw = subject_user_id.as_str();
-    let parsed_contact = ContactId::from_user_id(subject_user_id);
-    let (value, is_contact_prefixed) = parsed_contact.map_or((raw, false), |_| {
-        (
-            raw.strip_prefix(moa_core::CONTACT_USER_ID_PREFIX)
-                .unwrap_or(raw),
-            true,
-        )
-    });
+    let (value, is_contact_prefixed) = raw
+        .strip_prefix(CONTACT_SUBJECT_PREFIX)
+        .map_or((raw, false), |value| (value, true));
     let uuid = Uuid::parse_str(value).map_err(|error| {
         TerminalError::new_with_code(
             400,
@@ -958,7 +948,7 @@ fn erase_response(
     pii_vault_erased: u64,
 ) -> PrivacyEraseResponse {
     PrivacyEraseResponse {
-        workspace_id: WorkspaceId::new(ctx.workspace_id.clone()),
+        tenant_id: ctx.tenant_id,
         subject_user_id: UserId::new(ctx.subject_user_id.clone()),
         candidate_count: usize_to_u64(candidates.len()),
         erased_count: usize_to_u64(erased_count),

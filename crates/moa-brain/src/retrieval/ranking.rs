@@ -3,23 +3,12 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights, MemoryScope};
+use moa_core::{MemoryRankingConfig, MemoryRankingWeights, MemoryScope};
 use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 6;
-
-/// Ranking mode for hydrated hybrid retrieval candidates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RankingMode {
-    /// Preserve the legacy RRF plus layer-bias ranking path.
-    Legacy,
-    /// Apply deterministic feature scoring after candidate hydration.
-    #[default]
-    FeatureV1,
-}
+pub const RANKING_PIPELINE_VERSION: u32 = 7;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +28,9 @@ pub struct RankingWeights {
     pub graph_rescue: f64,
     /// Outcome-derived quality prior contribution.
     pub quality: f64,
-    /// Additive score for user-scoped rows.
+    /// Additive score for contact-scoped rows.
     pub scope_user: f64,
-    /// Additive score for workspace-scoped rows.
+    /// Additive score for tenant-scoped rows.
     pub scope_workspace: f64,
     /// Half-life in days for valid-from recency.
     pub recency_half_life_days: f64,
@@ -70,16 +59,13 @@ impl Default for RankingWeights {
 /// Ranking configuration applied after candidate hydration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankingConfig {
-    /// Ranking mode.
-    pub mode: RankingMode,
-    /// Feature weights used when `mode` is `FeatureV1`.
+    /// Feature weights used by deterministic post-hydration ranking.
     pub weights: RankingWeights,
 }
 
 impl Default for RankingConfig {
     fn default() -> Self {
         Self {
-            mode: RankingMode::FeatureV1,
             weights: RankingWeights::default(),
         }
     }
@@ -88,10 +74,6 @@ impl Default for RankingConfig {
 impl From<&MemoryRankingConfig> for RankingConfig {
     fn from(value: &MemoryRankingConfig) -> Self {
         Self {
-            mode: match value.mode {
-                MemoryRankingMode::Legacy => RankingMode::Legacy,
-                MemoryRankingMode::FeatureV1 => RankingMode::FeatureV1,
-            },
             weights: RankingWeights::from(&value.weights),
         }
     }
@@ -185,9 +167,9 @@ impl<'a> FeatureRanker<'a> {
             weights.scope_user
         };
         let scope_term = match row.scope.as_str() {
-            "user" if self.user_row_matches_request(row) => user_scope_weight,
-            "user" if self.request_scope.is_none() => user_scope_weight,
-            "workspace" => weights.scope_workspace,
+            "contact" if self.contact_row_matches_request(row) => user_scope_weight,
+            "contact" if self.request_scope.is_none() => user_scope_weight,
+            "tenant" => weights.scope_workspace,
             _ => 0.0,
         };
 
@@ -200,16 +182,18 @@ impl<'a> FeatureRanker<'a> {
             + scope_term
     }
 
-    fn user_row_matches_request(&self, row: &NodeIndexRow) -> bool {
-        let Some(MemoryScope::User {
-            workspace_id,
-            user_id,
+    fn contact_row_matches_request(&self, row: &NodeIndexRow) -> bool {
+        let Some(MemoryScope::Contact {
+            tenant_id,
+            contact_id,
         }) = self.request_scope
         else {
             return false;
         };
-        row.workspace_id.as_deref() == Some(workspace_id.as_str())
-            && row.user_id.as_deref() == Some(user_id.as_str())
+        let tenant_id = tenant_id.to_string();
+        let contact_id = contact_id.to_string();
+        row.workspace_id.as_deref() == Some(tenant_id.as_str())
+            && row.user_id.as_deref() == Some(contact_id.as_str())
     }
 }
 
@@ -527,9 +511,9 @@ mod tests {
             .single()
             .expect("test timestamp should be valid");
         let config = RankingConfig::default();
-        let request_scope = MemoryScope::User {
-            workspace_id: moa_core::WorkspaceId::new("workspace"),
-            user_id: moa_core::UserId::new("user-a"),
+        let request_scope = MemoryScope::Contact {
+            tenant_id: moa_core::TenantId::from(Uuid::from_u128(0x100)),
+            contact_id: moa_core::ContactId(Uuid::from_u128(0x101)),
         };
         let ranker = FeatureRanker::new(&config, reference_time).with_request_scope(&request_scope);
         let query_tokens = normalize_tokens("checkout service");
@@ -540,7 +524,8 @@ mod tests {
             reference_time,
             None,
         );
-        caller.user_id = Some("user-a".to_string());
+        caller.workspace_id = Some(Uuid::from_u128(0x100).to_string());
+        caller.user_id = Some(Uuid::from_u128(0x101).to_string());
         let mut other_user = row(
             "user",
             "checkout service",
@@ -548,7 +533,8 @@ mod tests {
             reference_time,
             None,
         );
-        other_user.user_id = Some("user-b".to_string());
+        other_user.workspace_id = Some(Uuid::from_u128(0x100).to_string());
+        other_user.user_id = Some(Uuid::from_u128(0x102).to_string());
 
         assert!(
             ranker.score(1.0, 1.0, &query_tokens, &caller)

@@ -201,11 +201,11 @@ impl EntityResolver {
             .create_node(NodeWriteIntent {
                 uid,
                 label: NodeLabel::Entity,
-                workspace_id: request
+                workspace_id: Some(request.scope.tenant_id().to_string()),
+                user_id: request
                     .scope
-                    .workspace_id()
-                    .map(|workspace_id| workspace_id.to_string()),
-                user_id: request.scope.user_id().map(|user_id| user_id.to_string()),
+                    .contact_id()
+                    .map(|contact_id| contact_id.to_string()),
                 scope: request.scope.tier_str().to_string(),
                 name: display_name.clone(),
                 properties: json!({
@@ -240,10 +240,8 @@ impl EntityResolver {
         scope: &ScopeContext,
         normalized_name: &str,
     ) -> Result<Vec<NodeIndexRow>> {
-        let workspace_id = scope
-            .workspace_id()
-            .map(|workspace_id| workspace_id.to_string());
-        let user_id = scope.user_id().map(|user_id| user_id.to_string());
+        let workspace_id = Some(scope.tenant_id().to_string());
+        let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
         let mut conn = ScopedConn::begin(pool, scope).await?;
         if self.assume_app_role {
             sqlx::query("SET LOCAL ROLE moa_app")
@@ -291,9 +289,7 @@ impl EntityResolver {
         let mut matches = blocker
             .vector
             .knn(&VectorQuery {
-                workspace_id: scope
-                    .workspace_id()
-                    .map(|workspace_id| workspace_id.to_string()),
+                workspace_id: Some(scope.tenant_id().to_string()),
                 embedding,
                 k: EMBEDDING_BLOCK_K,
                 label_filter: Some(vec![NodeLabel::Entity.as_str().to_string()]),
@@ -315,10 +311,8 @@ impl EntityResolver {
             return Ok(Vec::new());
         }
 
-        let workspace_id = scope
-            .workspace_id()
-            .map(|workspace_id| workspace_id.to_string());
-        let user_id = scope.user_id().map(|user_id| user_id.to_string());
+        let workspace_id = Some(scope.tenant_id().to_string());
+        let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
         let uids = matches
             .iter()
             .map(|candidate| candidate.uid)
@@ -480,12 +474,10 @@ fn deterministic_entity_uid(scope: &ScopeContext, normalized_name: &str) -> Uuid
     hasher.update([0]);
     hasher.update(scope.tier_str().as_bytes());
     hasher.update([0]);
-    if let Some(workspace_id) = scope.workspace_id() {
-        hasher.update(workspace_id.to_string().as_bytes());
-    }
+    hasher.update(scope.tenant_id().to_string().as_bytes());
     hasher.update([0]);
-    if let Some(user_id) = scope.user_id() {
-        hasher.update(user_id.to_string().as_bytes());
+    if let Some(contact_id) = scope.contact_id() {
+        hasher.update(contact_id.to_string().as_bytes());
     }
     hasher.update([0]);
     hasher.update(normalized_name.as_bytes());
@@ -499,7 +491,8 @@ fn deterministic_entity_uid(scope: &ScopeContext, normalized_name: &str) -> Uuid
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ScopeContext, UserId, WorkspaceId};
+    use moa_core::{ContactId, ScopeContext, TenantId};
+    use uuid::Uuid;
 
     use super::{deterministic_entity_uid, normalize_entity_name};
 
@@ -514,7 +507,7 @@ mod tests {
     #[test]
     fn deterministic_entity_uid_is_stable_inside_scope() {
         // Pins: eval graph expansion is not perturbed by fresh entity UUIDs.
-        let scope = ScopeContext::workspace(WorkspaceId::new("workspace-a"));
+        let scope = ScopeContext::tenant(TenantId::from(Uuid::from_u128(0x1000)));
         let normalized = normalize_entity_name("Lib Audit Wire");
 
         let first = deterministic_entity_uid(&scope, &normalized);
@@ -524,15 +517,15 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_entity_uid_includes_user_scope() {
-        // Pins: same entity text in different user scopes does not alias.
-        let workspace_id = WorkspaceId::new("workspace-a");
-        let user_a = ScopeContext::user(workspace_id.clone(), UserId::new("user-a"));
-        let user_b = ScopeContext::user(workspace_id, UserId::new("user-b"));
+    fn deterministic_entity_uid_includes_contact_scope() {
+        // Pins: same entity text in different contact scopes does not alias.
+        let tenant_id = TenantId::from(Uuid::from_u128(0x1000));
+        let contact_a = ScopeContext::contact(tenant_id, ContactId(Uuid::from_u128(0x2000)));
+        let contact_b = ScopeContext::contact(tenant_id, ContactId(Uuid::from_u128(0x2001)));
         let normalized = normalize_entity_name("repo/search-platform");
 
-        let uid_a = deterministic_entity_uid(&user_a, &normalized);
-        let uid_b = deterministic_entity_uid(&user_b, &normalized);
+        let uid_a = deterministic_entity_uid(&contact_a, &normalized);
+        let uid_b = deterministic_entity_uid(&contact_b, &normalized);
 
         assert_ne!(uid_a, uid_b);
     }

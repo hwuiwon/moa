@@ -183,9 +183,9 @@ account, suppression, or rate limit failures against the real service is
 brittle.
 
 Twilio SMS e2e coverage is also ignored by default and reads local `.env`
-values directly. It requires `TWILIO_ACCOUNT_SID` or `TWILIO_SID`, either
-`TWILIO_AUTH_TOKEN` or `TWILIO_API_KEY_SID` plus `TWILIO_API_KEY_SECRET`, and
-either `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID`. Set
+values directly. It requires `TWILIO_ACCOUNT_SID`, either `TWILIO_AUTH_TOKEN`
+or `TWILIO_API_KEY_SID` plus `TWILIO_API_KEY_SECRET`, and either
+`TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID`. Set
 `TWILIO_TEST_TO` to the recipient number for a live send; the test skips when
 that value is absent:
 

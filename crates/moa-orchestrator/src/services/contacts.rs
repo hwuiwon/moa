@@ -14,7 +14,7 @@ use moa_core::{
     ContactTokenIssueResponse, ContactVerificationChallengeId, ContactVerificationCompleteRequest,
     ContactVerificationCompleteResponse, ContactVerificationStartRequest,
     ContactVerificationStartResponse, ContactVerificationState, Event, ModelId, SessionActorRef,
-    SessionMeta, SessionStatus, WorkspaceId,
+    SessionMeta, SessionStatus, TenantId, WorkspaceId,
 };
 use moa_core::{MoaError, SessionStore};
 use moa_messaging::{DeliveryMessage, DeliverySink, ProviderDeliverySink};
@@ -51,14 +51,13 @@ const VERIFIED_SCOPES: &[&str] = &[
     "memory:self:read",
     "memory:self:write",
 ];
-const MAX_LINKED_CONTACT_IDS: i64 = 8;
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
 /// Restate surface for contact identity and contact-scoped sessions.
 #[restate_sdk::service]
 #[name = "Contacts"]
 pub trait Contacts {
-    /// Issues a low-assurance contact token for a workspace contact.
+    /// Issues a low-assurance contact token for a tenant contact.
     async fn issue_token(
         request: Json<ContactTokenIssueRequest>,
     ) -> Result<Json<ContactTokenIssueResponse>, HandlerError>;
@@ -103,8 +102,8 @@ impl Contacts for ContactsImpl {
         annotate_restate_handler_span("Contacts", "issue_token");
         let request = request.into_inner();
         let identity = require_identity(&ctx)?;
-        authorize_workspace_admin(&identity, &request.workspace_id).await?;
-        let tenant_id = identity.tenant_id;
+        authorize_tenant_operator(&identity, request.tenant_id).await?;
+        let tenant_id = request.tenant_id;
         let token_issuer = contact_token_issuer()?;
         let pool = OrchestratorCtx::current_graph_pool();
         let requested_scopes = request.requested_scopes.clone();
@@ -155,7 +154,7 @@ impl Contacts for ContactsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: contact JWT verification and scope checks bound this operation to one contact and workspace.
+    // SAFETY: contact JWT verification and scope checks bound this operation to one contact and tenant.
     async fn start_verification(
         &self,
         ctx: Context<'_>,
@@ -163,7 +162,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactVerificationStartResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "start_verification");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:verify:start")?;
         require_contact_session_permission(&claims, request.session_id)?;
         let contact_id = contact_id_from_claims(&claims)?;
@@ -187,7 +186,7 @@ impl Contacts for ContactsImpl {
                     validate_contact_session(
                         store.as_ref(),
                         session_id,
-                        &request.workspace_id,
+                        request.tenant_id,
                         contact_id,
                     )
                     .await?;
@@ -196,7 +195,6 @@ impl Contacts for ContactsImpl {
                     pool,
                     ContactVerificationStartCommand {
                         tenant_id,
-                        workspace_id: request.workspace_id,
                         contact_id,
                         contact_point,
                         requested_channel: delivery_channel,
@@ -212,7 +210,7 @@ impl Contacts for ContactsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: contact JWT verification and one-time challenge verification bind promotion to the contact point.
+    // SAFETY: contact JWT verification and one-time challenge verification bind promotion to the tenant contact point.
     async fn complete_verification(
         &self,
         ctx: Context<'_>,
@@ -220,7 +218,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactVerificationCompleteResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "complete_verification");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:verify:complete")?;
         require_contact_session_permission(&claims, request.session_id)?;
         let contact_id = contact_id_from_claims(&claims)?;
@@ -238,7 +236,7 @@ impl Contacts for ContactsImpl {
                     validate_contact_session(
                         store.as_ref(),
                         session_id,
-                        &request.workspace_id,
+                        request.tenant_id,
                         contact_id,
                     )
                     .await?;
@@ -246,7 +244,6 @@ impl Contacts for ContactsImpl {
                 complete_contact_verification(
                     pool,
                     tenant_id,
-                    request.workspace_id,
                     contact_id,
                     request.challenge_id,
                     request.code,
@@ -287,7 +284,7 @@ impl Contacts for ContactsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: contact JWT verification and scope checks bound this session creation to one contact and workspace.
+    // SAFETY: contact JWT verification and scope checks bound this session creation to one contact and tenant.
     async fn init_session(
         &self,
         ctx: Context<'_>,
@@ -295,7 +292,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionInitResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "init_session");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "agent:session:create")?;
         require_contact_agent_permission(&claims, &request.agent)?;
         let contact_id = contact_id_from_claims(&claims)?;
@@ -303,7 +300,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
-        let workspace_id = request.workspace_id.clone();
+        let storage_workspace_id = storage_workspace_id_for_tenant(tenant_id);
         let model = ModelId::new(request.model);
         let channel_request = request.channel;
         let initial_channel_ref = channel_request.channel_ref;
@@ -324,8 +321,7 @@ impl Contacts for ContactsImpl {
         } = ctx
             .run(|| async move {
                 ensure_contact_token_grant_active(&pool, &claims, contact_id).await?;
-                let mut contact =
-                    load_contact_ref(pool.clone(), &workspace_id, tenant_id, contact_id).await?;
+                let mut contact = load_contact_ref(pool.clone(), tenant_id, contact_id).await?;
                 contact.scopes = token_scopes;
                 contact.permissions = token_permissions;
                 contact.agent_ids = token_agent_ids;
@@ -345,8 +341,7 @@ impl Contacts for ContactsImpl {
             .await?
             .into_inner();
         let meta = SessionMeta {
-            workspace_id: request.workspace_id.clone(),
-            user_id: contact.contact_id.as_user_id(),
+            tenant_id,
             title: request.title,
             status: SessionStatus::Created,
             channel: channel_ref.channel(),
@@ -360,7 +355,7 @@ impl Contacts for ContactsImpl {
         };
         let response_contact = contact.clone();
         let event_channel = meta.channel;
-        let workspace_id_for_create = request.workspace_id.clone();
+        let storage_workspace_id_for_create = storage_workspace_id.clone();
         let (session_id, meta_for_vo) = ctx
             .run(|| async move {
                 let agent_context =
@@ -375,7 +370,7 @@ impl Contacts for ContactsImpl {
                 store
                     .replace_session_channel_binding(SessionChannelBindingReplacement {
                         tenant_id,
-                        workspace_id: &workspace_id_for_create,
+                        workspace_id: &storage_workspace_id_for_create,
                         session_id,
                         contact_id: contact.contact_id,
                         channel_account_id: channel_account
@@ -391,8 +386,11 @@ impl Contacts for ContactsImpl {
                     .emit_event(
                         session_id,
                         Event::SessionCreated {
-                            workspace_id: workspace_id_for_create,
-                            user_id: contact.contact_id.as_user_id(),
+                            tenant_id,
+                            contact_id: Some(contact.contact_id),
+                            created_by: Some(SessionActorRef::Contact {
+                                id: contact.contact_id,
+                            }),
                             model,
                             channel: event_channel,
                         },
@@ -429,7 +427,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionChannelChangeResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "change_session_channel");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:channel:update")?;
         require_contact_session_permission(&claims, Some(request.session_id))?;
         let contact_id = contact_id_from_claims(&claims)?;
@@ -438,6 +436,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
+        let storage_workspace_id = storage_workspace_id_for_tenant(tenant_id);
 
         let ChannelChangeResult {
             contact,
@@ -450,19 +449,17 @@ impl Contacts for ContactsImpl {
                 let existing_meta = validate_contact_session(
                     store.as_ref(),
                     session_id,
-                    &request.workspace_id,
+                    request.tenant_id,
                     contact_id,
                 )
                 .await?;
-                let contact =
-                    load_contact_ref(pool.clone(), &request.workspace_id, tenant_id, contact_id)
-                        .await?;
+                let contact = load_contact_ref(pool.clone(), tenant_id, contact_id).await?;
                 let resolved =
                     resolve_contact_session_channel(&pool, &contact, request.channel_ref).await?;
                 let binding_id = store
                     .replace_session_channel_binding(SessionChannelBindingReplacement {
                         tenant_id,
-                        workspace_id: &request.workspace_id,
+                        workspace_id: &storage_workspace_id,
                         session_id,
                         contact_id: contact.contact_id,
                         channel_account_id: resolved
@@ -529,7 +526,7 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionPromotionResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "promote_session");
         let request = request.into_inner();
-        let claims = verify_contact_token(&request.contact_token, &request.workspace_id)?;
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:promote")?;
         require_contact_session_permission(&claims, Some(request.session_id))?;
         if !claims.state.is_verified() {
@@ -550,18 +547,16 @@ impl Contacts for ContactsImpl {
         } = ctx
             .run(|| async move {
                 ensure_contact_token_grant_active(&pool, &claims, contact_id).await?;
-                let contact =
-                    load_contact_ref(pool, &request.workspace_id, tenant_id, contact_id).await?;
+                let contact = load_contact_ref(pool.clone(), tenant_id, contact_id).await?;
                 let meta = store
                     .get_session(request.session_id)
                     .await
                     .map_err(session_store_handler_error)?;
-                if meta.workspace_id != request.workspace_id {
-                    return Err(
-                        TerminalError::new_with_code(403, "session workspace mismatch").into(),
-                    );
+                if meta.tenant_id != request.tenant_id {
+                    return Err(TerminalError::new_with_code(403, "session tenant mismatch").into());
                 }
-                let promoted_from = promoted_from_contact(&meta, &contact)?;
+                let promoted_from =
+                    promoted_from_contact(&pool, &meta, &contact, tenant_id).await?;
                 store
                     .update_session_contact(request.session_id, contact.clone(), promoted_from)
                     .await
@@ -576,7 +571,6 @@ impl Contacts for ContactsImpl {
             .await?
             .into_inner();
         meta.contact = Some(contact.clone());
-        meta.user_id = contact.contact_id.as_user_id();
         meta.contact_promoted_from_id = promoted_from;
         ctx.object_client::<SessionClient>(request.session_id.to_string())
             .set_meta(Json::from(meta))
@@ -632,9 +626,13 @@ impl ContactScopesExt for ContactRef {
     }
 }
 
+fn storage_workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
+}
+
 async fn issue_contact(
     pool: sqlx::PgPool,
-    tenant_id: Uuid,
+    tenant_id: TenantId,
     request: ContactTokenIssueRequest,
 ) -> Result<(ContactRef, Vec<ContactPointRef>), HandlerError> {
     let contact_id = ContactId::new();
@@ -649,13 +647,16 @@ async fn issue_contact(
         .map_err(|error| db_handler_error("begin contact issuance", error))?;
     sqlx::query(
         r#"
-        INSERT INTO contacts (id, tenant_id, workspace_id, state, display_name, profile, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO contacts (
+            id, tenant_id, workspace_id, contact_id, state, display_name, profile, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(request.workspace_id.as_str())
+    .bind(tenant_id.0)
+    .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
+    .bind(contact_id.0)
     .bind(state.as_str())
     .bind(request.display_name.as_deref())
     .bind(&request.profile)
@@ -666,15 +667,8 @@ async fn issue_contact(
 
     let mut contact_points = Vec::with_capacity(request.contact_points.len());
     for point in request.contact_points {
-        let contact_point = insert_contact_point(
-            &mut transaction,
-            tenant_id,
-            &request.workspace_id,
-            contact_id,
-            point,
-            false,
-        )
-        .await?;
+        let contact_point =
+            insert_contact_point(&mut transaction, tenant_id, contact_id, point, false).await?;
         contact_points.push(contact_point);
     }
 
@@ -687,7 +681,6 @@ async fn issue_contact(
         ContactRef {
             contact_id,
             tenant_id,
-            workspace_id: request.workspace_id,
             state,
             canonical_contact_id: None,
             linked_contact_ids: Vec::new(),
@@ -703,8 +696,7 @@ async fn issue_contact(
 
 #[derive(Debug, Clone)]
 struct ContactVerificationStartCommand {
-    tenant_id: Uuid,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     contact_id: ContactId,
     contact_point: ContactPointInput,
     requested_channel: Option<Channel>,
@@ -721,17 +713,10 @@ async fn start_contact_verification(
         .begin()
         .await
         .map_err(|error| db_handler_error("begin contact verification", error))?;
-    ensure_contact_in_workspace(
-        &mut transaction,
-        &command.workspace_id,
-        command.tenant_id,
-        command.contact_id,
-    )
-    .await?;
+    ensure_contact_in_tenant(&mut transaction, command.tenant_id, command.contact_id).await?;
     let contact_point = insert_contact_point(
         &mut transaction,
         command.tenant_id,
-        &command.workspace_id,
         command.contact_id,
         command.contact_point,
         false,
@@ -747,14 +732,12 @@ async fn start_contact_verification(
         WHERE contact_id = $1
           AND contact_point_id = $2
           AND tenant_id = $3
-          AND workspace_id = $4
           AND consumed_at IS NULL
         "#,
     )
     .bind(command.contact_id.0)
     .bind(contact_point.id.0)
-    .bind(command.tenant_id)
-    .bind(command.workspace_id.as_str())
+    .bind(command.tenant_id.0)
     .execute(&mut *transaction)
     .await
     .map_err(|error| db_handler_error("close previous contact verification challenges", error))?;
@@ -768,8 +751,8 @@ async fn start_contact_verification(
     .bind(challenge_id.0)
     .bind(command.contact_id.0)
     .bind(contact_point.id.0)
-    .bind(command.tenant_id)
-    .bind(command.workspace_id.as_str())
+    .bind(command.tenant_id.0)
+    .bind(storage_workspace_id_for_tenant(command.tenant_id).as_str())
     .bind(hash_verification_code(challenge_id, &code))
     .bind(expires_at)
     .execute(&mut *transaction)
@@ -780,7 +763,7 @@ async fn start_contact_verification(
         .await
         .map_err(|error| db_handler_error("commit contact verification", error))?;
     let sink = match ProviderDeliverySink::from_env(
-        command.workspace_id.as_str(),
+        storage_workspace_id_for_tenant(command.tenant_id).as_str(),
         &command.messaging_config,
     )
     .await
@@ -800,8 +783,8 @@ async fn start_contact_verification(
         }
     };
     let delivery_message = DeliveryMessage::contact_verification_otp(
-        command.tenant_id,
-        command.workspace_id.clone(),
+        command.tenant_id.0,
+        storage_workspace_id_for_tenant(command.tenant_id),
         command.contact_id,
         delivery.channel,
         delivery.destination,
@@ -904,8 +887,7 @@ async fn consume_contact_verification_challenge(
 
 async fn complete_contact_verification(
     pool: sqlx::PgPool,
-    tenant_id: Uuid,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     contact_id: ContactId,
     challenge_id: ContactVerificationChallengeId,
     code: String,
@@ -920,14 +902,13 @@ async fn complete_contact_verification(
                p.kind, p.normalized_hash, p.display_value
         FROM contact_verification_challenges c
         JOIN contact_points p ON p.id = c.contact_point_id
-        WHERE c.id = $1 AND c.contact_id = $2 AND c.tenant_id = $3 AND c.workspace_id = $4
+        WHERE c.id = $1 AND c.contact_id = $2 AND c.tenant_id = $3
         FOR UPDATE
         "#,
     )
     .bind(challenge_id.0)
     .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
     .fetch_optional(&mut *transaction)
     .await
     .map_err(|error| db_handler_error("load contact verification challenge", error))?
@@ -999,7 +980,6 @@ async fn complete_contact_verification(
     let canonical_id = existing_verified_contact(
         &mut transaction,
         tenant_id,
-        &workspace_id,
         point_kind.as_str(),
         &normalized_hash,
         contact_id,
@@ -1011,13 +991,12 @@ async fn complete_contact_verification(
             r#"
             UPDATE contacts
             SET state = 'merged', canonical_contact_id = $1, merged_at = NOW(), updated_at = NOW()
-            WHERE id = $2 AND tenant_id = $3 AND workspace_id = $4
+            WHERE id = $2 AND tenant_id = $3
             "#,
         )
         .bind(canonical_id.0)
         .bind(contact_id.0)
-        .bind(tenant_id)
-        .bind(workspace_id.as_str())
+        .bind(tenant_id.0)
         .execute(&mut *transaction)
         .await
         .map_err(|error| db_handler_error("merge contact", error))?;
@@ -1034,18 +1013,16 @@ async fn complete_contact_verification(
         .await
         .map_err(|error| db_handler_error("mark contact point verified", error))?;
         sqlx::query(
-            "UPDATE contacts SET state = 'verified', updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
+            "UPDATE contacts SET state = 'verified', updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
         )
         .bind(contact_id.0)
-        .bind(tenant_id)
-        .bind(workspace_id.as_str())
+        .bind(tenant_id.0)
         .execute(&mut *transaction)
         .await
         .map_err(|error| db_handler_error("mark contact verified", error))?;
         upsert_verified_contact_point_channel_account(
             &mut transaction,
             tenant_id,
-            &workspace_id,
             contact_id,
             point_id,
             point_kind,
@@ -1060,13 +1037,11 @@ async fn complete_contact_verification(
         SET revoked_at = NOW()
         WHERE contact_id = $1
           AND tenant_id = $2
-          AND workspace_id = $3
           AND revoked_at IS NULL
         "#,
     )
     .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
     .execute(&mut *transaction)
     .await
     .map_err(|error| db_handler_error("revoke pre-verification contact token grants", error))?;
@@ -1082,31 +1057,23 @@ async fn complete_contact_verification(
         .await
         .map_err(|error| db_handler_error("commit contact verification completion", error))?;
 
-    load_contact_ref(
-        pool,
-        &workspace_id,
-        tenant_id,
-        canonical_id.unwrap_or(contact_id),
-    )
-    .await
+    load_contact_ref(pool, tenant_id, canonical_id.unwrap_or(contact_id)).await
 }
 
 async fn load_contact_ref(
     pool: sqlx::PgPool,
-    workspace_id: &WorkspaceId,
-    tenant_id: Uuid,
+    tenant_id: TenantId,
     contact_id: ContactId,
 ) -> Result<ContactRef, HandlerError> {
     let row = sqlx::query(
         r#"
         SELECT id, tenant_id, state, canonical_contact_id
         FROM contacts
-        WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
+        WHERE id = $1 AND tenant_id = $2
         "#,
     )
     .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
     .fetch_optional(&pool)
     .await
     .map_err(|error| db_handler_error("load contact", error))?
@@ -1114,34 +1081,15 @@ async fn load_contact_ref(
     let state = row
         .try_get::<String, _>("state")
         .map_err(|error| db_handler_error("read contact state", error))?;
-    let links = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT id
-        FROM contacts
-        WHERE canonical_contact_id = $1
-          AND tenant_id = $2
-          AND workspace_id = $3
-        ORDER BY merged_at NULLS LAST, updated_at DESC, id
-        LIMIT $4
-        "#,
-    )
-    .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
-    .bind(MAX_LINKED_CONTACT_IDS)
-    .fetch_all(&pool)
-    .await
-    .map_err(|error| db_handler_error("load linked contacts", error))?;
     Ok(ContactRef {
         contact_id,
         tenant_id,
-        workspace_id: workspace_id.clone(),
         state: parse_contact_state(&state)?,
         canonical_contact_id: row
             .try_get::<Option<Uuid>, _>("canonical_contact_id")
             .map_err(|error| db_handler_error("read canonical contact id", error))?
             .map(ContactId),
-        linked_contact_ids: links.into_iter().map(ContactId).collect(),
+        linked_contact_ids: Vec::new(),
         scopes: Vec::new(),
         permissions: serde_json::Value::Null,
         agent_ids: Vec::new(),
@@ -1258,15 +1206,13 @@ async fn upsert_external_channel_account(
         SELECT id, contact_id, display_name
         FROM contact_channel_accounts
         WHERE tenant_id = $1
-          AND workspace_id = $2
-          AND channel = $3
-          AND COALESCE(external_tenant_key, '') = COALESCE($4, '')
-          AND external_user_key = $5
+          AND channel = $2
+          AND COALESCE(external_tenant_key, '') = COALESCE($3, '')
+          AND external_user_key = $4
           AND merged_into_id IS NULL
         "#,
     )
-    .bind(contact.tenant_id)
-    .bind(contact.workspace_id.as_str())
+    .bind(contact.tenant_id.0)
     .bind(channel.as_str())
     .bind(external_tenant_key)
     .bind(external_user_key)
@@ -1324,8 +1270,8 @@ async fn upsert_external_channel_account(
         "#,
     )
     .bind(account_id.0)
-    .bind(contact.tenant_id)
-    .bind(contact.workspace_id.as_str())
+    .bind(contact.tenant_id.0)
+    .bind(storage_workspace_id_for_tenant(contact.tenant_id).as_str())
     .bind(contact.contact_id.0)
     .bind(channel.as_str())
     .bind(external_tenant_key)
@@ -1358,14 +1304,12 @@ async fn resolve_contact_point_channel_account(
         JOIN contact_points p ON p.id = a.contact_point_id
         WHERE a.id = $1
           AND a.tenant_id = $2
-          AND a.workspace_id = $3
-          AND a.channel = $4
+          AND a.channel = $3
           AND a.merged_into_id IS NULL
         "#,
     )
     .bind(channel_account_id.0)
-    .bind(contact.tenant_id)
-    .bind(contact.workspace_id.as_str())
+    .bind(contact.tenant_id.0)
     .bind(channel.as_str())
     .fetch_optional(pool)
     .await
@@ -1433,19 +1377,17 @@ async fn resolve_contact_point_channel_account(
 fn contact_allows_channel_contact(contact: &ContactRef, account_contact_id: ContactId) -> bool {
     contact.contact_id == account_contact_id
         || contact.canonical_contact_id == Some(account_contact_id)
-        || contact.linked_contact_ids.contains(&account_contact_id)
 }
 
 async fn insert_contact_point(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: Uuid,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     contact_id: ContactId,
     point: ContactPointInput,
     verified: bool,
 ) -> Result<ContactPointRef, HandlerError> {
     let normalized = normalize_contact_point(point.kind, &point.value)?;
-    let normalized_hash = hash_contact_point(workspace_id, point.kind, &normalized)?;
+    let normalized_hash = hash_contact_point(tenant_id, point.kind, &normalized)?;
     let point_id = ContactPointId::new();
     let verified_at = verified.then(Utc::now);
     let row = sqlx::query(
@@ -1464,8 +1406,8 @@ async fn insert_contact_point(
     )
     .bind(point_id.0)
     .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
+    .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
     .bind(point.kind.as_str())
     .bind(&normalized_hash)
     .bind(point.display_value.as_deref())
@@ -1494,8 +1436,7 @@ async fn insert_contact_point(
 
 async fn upsert_verified_contact_point_channel_account(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: Uuid,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     contact_id: ContactId,
     point_id: ContactPointId,
     kind: ContactPointKind,
@@ -1513,16 +1454,14 @@ async fn upsert_verified_contact_point_channel_account(
             display_name = COALESCE($1, display_name),
             last_seen_at = NOW()
         WHERE tenant_id = $2
-          AND workspace_id = $3
-          AND contact_point_id = $4
-          AND channel = $5
+          AND contact_point_id = $3
+          AND channel = $4
           AND merged_into_id IS NULL
         RETURNING id, display_name
         "#,
     )
     .bind(display_name)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
     .bind(point_id.0)
     .bind(channel.as_str())
     .fetch_optional(&mut **tx)
@@ -1555,8 +1494,8 @@ async fn upsert_verified_contact_point_channel_account(
         "#,
     )
     .bind(account_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
+    .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
     .bind(contact_id.0)
     .bind(point_id.0)
     .bind(channel.as_str())
@@ -1575,18 +1514,16 @@ async fn upsert_verified_contact_point_channel_account(
     }))
 }
 
-async fn ensure_contact_in_workspace(
+async fn ensure_contact_in_tenant(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: &WorkspaceId,
-    tenant_id: Uuid,
+    tenant_id: TenantId,
     contact_id: ContactId,
 ) -> Result<(), HandlerError> {
     let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM contacts WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3)",
+        "SELECT EXISTS (SELECT 1 FROM contacts WHERE id = $1 AND tenant_id = $2)",
     )
     .bind(contact_id.0)
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
     .fetch_one(&mut **tx)
     .await
     .map_err(|error| db_handler_error("check contact workspace", error))?;
@@ -1600,15 +1537,15 @@ async fn ensure_contact_in_workspace(
 async fn validate_contact_session(
     store: &dyn SessionStore,
     session_id: moa_core::SessionId,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     contact_id: ContactId,
 ) -> Result<SessionMeta, HandlerError> {
     let meta = store
         .get_session(session_id)
         .await
         .map_err(session_store_handler_error)?;
-    if &meta.workspace_id != workspace_id {
-        return Err(TerminalError::new_with_code(403, "session workspace mismatch").into());
+    if meta.tenant_id != tenant_id {
+        return Err(TerminalError::new_with_code(403, "session tenant mismatch").into());
     }
     let Some(contact) = meta.contact.as_ref() else {
         return Err(TerminalError::new_with_code(403, "session has no contact binding").into());
@@ -1619,32 +1556,60 @@ async fn validate_contact_session(
     tracing::debug!(
         session_id = %session_id,
         contact_id = %contact_id,
-        workspace_id = %workspace_id,
+        tenant_id = %tenant_id,
         "validated contact session binding"
     );
     Ok(meta)
 }
 
-fn promoted_from_contact(
+async fn promoted_from_contact(
+    pool: &sqlx::PgPool,
     meta: &SessionMeta,
     contact: &ContactRef,
+    tenant_id: TenantId,
 ) -> Result<Option<ContactId>, HandlerError> {
     let Some(current) = meta.contact.as_ref() else {
         return Err(TerminalError::new_with_code(403, "session has no contact binding").into());
     };
-    if current.tenant_id != contact.tenant_id || current.workspace_id != contact.workspace_id {
+    if current.tenant_id != contact.tenant_id || current.tenant_id != tenant_id {
         return Err(TerminalError::new_with_code(403, "session contact boundary mismatch").into());
     }
     if current.contact_id == contact.contact_id {
         return Ok(None);
     }
-    if contact.linked_contact_ids.contains(&current.contact_id) {
+    if contact_is_merged_into(pool, tenant_id, current.contact_id, contact.contact_id).await? {
         return Ok(Some(current.contact_id));
     }
     Err(
         TerminalError::new_with_code(403, "session contact is not linked to verified contact")
             .into(),
     )
+}
+
+async fn contact_is_merged_into(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    contact_id: ContactId,
+    canonical_contact_id: ContactId,
+) -> Result<bool, HandlerError> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM contacts
+            WHERE id = $1
+              AND tenant_id = $2
+              AND canonical_contact_id = $3
+              AND state = 'merged'
+        )
+        "#,
+    )
+    .bind(contact_id.0)
+    .bind(tenant_id.0)
+    .bind(canonical_contact_id.0)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| db_handler_error("check promoted contact linkage", error))
 }
 
 async fn create_contact_token_grant(
@@ -1671,8 +1636,8 @@ async fn create_contact_token_grant(
     )
     .bind(Uuid::now_v7())
     .bind(&claims.jti)
-    .bind(claims.tenant_id)
-    .bind(claims.workspace_id.as_str())
+    .bind(claims.tenant_id.0)
+    .bind(storage_workspace_id_for_tenant(claims.tenant_id).as_str())
     .bind(contact_id.0)
     .bind(claims.state.as_str())
     .bind(&claims.scopes)
@@ -1700,17 +1665,15 @@ async fn ensure_contact_token_grant_active(
             FROM contact_token_grants
             WHERE token_jti = $1
               AND tenant_id = $2
-              AND workspace_id = $3
-              AND contact_id = $4
-              AND state = $5
+              AND contact_id = $3
+              AND state = $4
               AND revoked_at IS NULL
               AND expires_at > NOW()
         )
         "#,
     )
     .bind(&claims.jti)
-    .bind(claims.tenant_id)
-    .bind(claims.workspace_id.as_str())
+    .bind(claims.tenant_id.0)
     .bind(contact_id.0)
     .bind(claims.state.as_str())
     .fetch_one(pool)
@@ -1725,8 +1688,7 @@ async fn ensure_contact_token_grant_active(
 
 async fn existing_verified_contact(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: Uuid,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     kind: &str,
     normalized_hash: &str,
     excluded_contact_id: ContactId,
@@ -1736,16 +1698,14 @@ async fn existing_verified_contact(
         SELECT contact_id
         FROM contact_points
         WHERE tenant_id = $1
-          AND workspace_id = $2
-          AND kind = $3
-          AND normalized_hash = $4
+          AND kind = $2
+          AND normalized_hash = $3
           AND verified = TRUE
-          AND contact_id <> $5
+          AND contact_id <> $4
         LIMIT 1
         "#,
     )
-    .bind(tenant_id)
-    .bind(workspace_id.as_str())
+    .bind(tenant_id.0)
     .bind(kind)
     .bind(normalized_hash)
     .bind(excluded_contact_id.0)
@@ -1769,7 +1729,6 @@ fn contact_token_issuer()
 fn annotate_contact_operation_span(contact: &ContactRef, session_id: Option<moa_core::SessionId>) {
     let span = tracing::Span::current();
     span.set_attribute("moa.tenant.id", contact.tenant_id.to_string());
-    span.set_attribute("moa.workspace.id", contact.workspace_id.to_string());
     span.set_attribute("moa.contact.id", contact.contact_id.to_string());
     span.set_attribute("moa.contact.state", contact.state.as_str().to_string());
     if let Some(session_id) = session_id {
@@ -1783,7 +1742,6 @@ fn annotate_claim_contact_span(
 ) {
     let span = tracing::Span::current();
     span.set_attribute("moa.tenant.id", claims.tenant_id.to_string());
-    span.set_attribute("moa.workspace.id", claims.workspace_id.to_string());
     span.set_attribute("moa.contact.id", claims.sub.clone());
     span.set_attribute("moa.contact.state", claims.state.as_str().to_string());
     if let Some(session_id) = session_id {
@@ -1791,17 +1749,17 @@ fn annotate_claim_contact_span(
     }
 }
 
-async fn authorize_workspace_admin(
+async fn authorize_tenant_operator(
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         identity,
-        ObjectType::Workspace,
-        workspace_id,
-        Relation::Admin,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Operator,
     )
     .await
     .map_err(translate_authz_error)
@@ -1809,13 +1767,13 @@ async fn authorize_workspace_admin(
 
 fn verify_contact_token(
     token: &str,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<ContactTokenClaims, HandlerError> {
     let claims = contact_token_issuer()?
         .verify(token)
         .map_err(contact_token_handler_error)?;
-    if &claims.workspace_id != workspace_id {
-        return Err(TerminalError::new_with_code(403, "contact token workspace mismatch").into());
+    if claims.tenant_id != tenant_id {
+        return Err(TerminalError::new_with_code(403, "contact token tenant mismatch").into());
     }
     Ok(claims)
 }
@@ -1934,7 +1892,7 @@ fn normalize_phone(value: &str) -> Result<String, HandlerError> {
 }
 
 fn hash_contact_point(
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     kind: ContactPointKind,
     normalized: &str,
 ) -> Result<String, HandlerError> {
@@ -1963,7 +1921,7 @@ fn hash_contact_point(
     })?;
     Ok(blake3::keyed_hash(
         &key,
-        format!("{workspace_id}:{}:{normalized}", kind.as_str()).as_bytes(),
+        format!("{tenant_id}:{}:{normalized}", kind.as_str()).as_bytes(),
     )
     .to_hex()
     .to_string())
@@ -2056,70 +2014,12 @@ fn db_handler_error(context: &'static str, error: sqlx::Error) -> HandlerError {
 mod tests {
     use moa_core::{
         AgentSessionSelection, Channel, ContactId, ContactPointInput, ContactPointKind, ContactRef,
-        ContactTokenClaims, ContactVerificationState, SessionMeta, WorkspaceId,
+        ContactTokenClaims, ContactVerificationState, TenantId,
     };
 
     use super::{
-        contact_allows_channel_contact, contact_point_delivery, promoted_from_contact,
-        require_contact_agent_permission,
+        contact_allows_channel_contact, contact_point_delivery, require_contact_agent_permission,
     };
-
-    #[test]
-    fn promoted_from_contact_allows_linked_session_contact() {
-        // Pins: verified contact promotion can carry forward a linked anonymous contact's memory.
-        let tenant_id = uuid::Uuid::now_v7();
-        let workspace_id = WorkspaceId::new("workspace");
-        let linked_contact_id = ContactId::new();
-        let verified_contact_id = ContactId::new();
-        let linked = contact(
-            tenant_id,
-            workspace_id.clone(),
-            linked_contact_id,
-            Vec::new(),
-        );
-        let verified = contact(
-            tenant_id,
-            workspace_id.clone(),
-            verified_contact_id,
-            vec![linked_contact_id],
-        );
-        let meta = session_meta(linked);
-
-        let promoted_from =
-            promoted_from_contact(&meta, &verified).expect("linked contact should promote");
-
-        assert_eq!(promoted_from, Some(linked_contact_id));
-    }
-
-    #[test]
-    fn promoted_from_contact_rejects_unlinked_session_contact() {
-        // Pins: verified contact tokens cannot attach themselves to unrelated workspace sessions.
-        let tenant_id = uuid::Uuid::now_v7();
-        let workspace_id = WorkspaceId::new("workspace");
-        let unrelated_contact_id = ContactId::new();
-        let verified_contact_id = ContactId::new();
-        let unrelated = contact(
-            tenant_id,
-            workspace_id.clone(),
-            unrelated_contact_id,
-            Vec::new(),
-        );
-        let verified = contact(
-            tenant_id,
-            workspace_id.clone(),
-            verified_contact_id,
-            Vec::new(),
-        );
-        let meta = session_meta(unrelated);
-
-        let error = promoted_from_contact(&meta, &verified)
-            .expect_err("unlinked contact should not promote session");
-
-        assert!(
-            format!("{error:?}").contains("session contact is not linked to verified contact"),
-            "unexpected error: {error:?}"
-        );
-    }
 
     #[test]
     fn contact_agent_permission_allows_unbounded_token_with_single_selector() {
@@ -2155,25 +2055,14 @@ mod tests {
         );
     }
 
-    fn session_meta(contact: ContactRef) -> SessionMeta {
-        SessionMeta {
-            workspace_id: contact.workspace_id.clone(),
-            user_id: contact.contact_id.as_user_id(),
-            contact: Some(contact),
-            ..SessionMeta::default()
-        }
-    }
-
     fn contact(
-        tenant_id: uuid::Uuid,
-        workspace_id: WorkspaceId,
+        tenant_id: TenantId,
         contact_id: ContactId,
         linked_contact_ids: Vec<ContactId>,
     ) -> ContactRef {
         ContactRef {
             contact_id,
             tenant_id,
-            workspace_id,
             state: ContactVerificationState::Verified,
             canonical_contact_id: None,
             linked_contact_ids,
@@ -2194,8 +2083,7 @@ mod tests {
             iat: 0,
             nbf: 0,
             jti: uuid::Uuid::now_v7().to_string(),
-            tenant_id: uuid::Uuid::now_v7(),
-            workspace_id: WorkspaceId::new("workspace"),
+            tenant_id: TenantId::from(uuid::Uuid::now_v7()),
             state: ContactVerificationState::Unverified,
             scopes: vec!["agent:session:create".to_string()],
             permissions: serde_json::Value::Null,
@@ -2265,20 +2153,19 @@ mod tests {
     }
 
     #[test]
-    fn contact_allows_channel_accounts_for_self_canonical_and_linked_contacts() {
-        // Pins: channel-account validation may follow verified promotion links but rejects unrelated contacts.
-        let tenant_id = uuid::Uuid::now_v7();
-        let workspace_id = WorkspaceId::new("workspace");
+    fn contact_allows_channel_accounts_for_self_and_canonical_contacts_only() {
+        // Pins: channel-account validation does not follow linked contacts by default.
+        let tenant_id = TenantId::from(uuid::Uuid::now_v7());
         let contact_id = ContactId::new();
         let canonical_id = ContactId::new();
         let linked_id = ContactId::new();
         let unrelated_id = ContactId::new();
-        let mut contact = contact(tenant_id, workspace_id, contact_id, vec![linked_id]);
+        let mut contact = contact(tenant_id, contact_id, vec![linked_id]);
         contact.canonical_contact_id = Some(canonical_id);
 
         assert!(contact_allows_channel_contact(&contact, contact_id));
         assert!(contact_allows_channel_contact(&contact, canonical_id));
-        assert!(contact_allows_channel_contact(&contact, linked_id));
+        assert!(!contact_allows_channel_contact(&contact, linked_id));
         assert!(!contact_allows_channel_contact(&contact, unrelated_id));
     }
 }

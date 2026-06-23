@@ -7,7 +7,7 @@ use chrono::Utc;
 use moa_core::{
     AttributionEffect, AttributionSubjectType, CompletionRequest, Event, EventRecord,
     ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
+    SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata, WorkspaceId,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -166,9 +166,10 @@ pub async fn distill_skill_with_learning(
         });
     };
 
+    let workspace_id = tenant_workspace_id(session);
     let task_summary = extract_task_summary(events);
     let existing_skills = SkillRegistry::new(store.pool().clone())
-        .list_for_pipeline(&session.workspace_id)
+        .list_for_pipeline(&workspace_id)
         .await?;
 
     if let Some(existing) = find_similar_skill(&task_summary, &existing_skills) {
@@ -207,7 +208,7 @@ pub async fn distill_skill_with_learning(
     let markdown = render_skill_for_registry(&skill)?;
     let metadata = skill_metadata_from_document(path, &skill);
     let package = SkillPackage::from_skill_markdown(markdown).validate()?;
-    let generated_suite = generate_skill_test_suite_source(&session.workspace_id, &skill, events)?;
+    let generated_suite = generate_skill_test_suite_source(&workspace_id, &skill, events)?;
     let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,
@@ -245,9 +246,10 @@ pub async fn distill_skill_from_experience_with_learning(
         });
     };
 
+    let workspace_id = tenant_workspace_id(session);
     let task_summary = experience_similarity_text(&input.experience);
     let existing_skills = SkillRegistry::new(store.pool().clone())
-        .list_for_pipeline(&session.workspace_id)
+        .list_for_pipeline(&workspace_id)
         .await?;
     let source = SkillProposalSource {
         source_experience_ids: vec![input.experience.id],
@@ -293,8 +295,7 @@ pub async fn distill_skill_from_experience_with_learning(
     let markdown = render_skill_for_registry(&skill)?;
     let metadata = skill_metadata_from_document(path.clone(), &skill);
     let package = SkillPackage::from_skill_markdown(markdown).validate()?;
-    let generated_suite =
-        generate_skill_test_suite_source(&session.workspace_id, &skill, &input.events)?;
+    let generated_suite = generate_skill_test_suite_source(&workspace_id, &skill, &input.events)?;
     let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,
@@ -311,6 +312,10 @@ pub async fn distill_skill_from_experience_with_learning(
 
 fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
     crate::format::render_skill_markdown(skill)
+}
+
+fn tenant_workspace_id(session: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(session.tenant_id.to_string())
 }
 
 fn count_tool_calls(events: &[EventRecord]) -> usize {
@@ -516,7 +521,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use moa_core::{
         ExperienceRecord, SegmentEvidence, SegmentEvidenceKind, SegmentEvidencePolarity, SegmentId,
-        SessionId, TaskFacetSet, TaskFingerprint, UserId, WorkspaceId,
+        SessionId, TaskFacetSet, TaskFingerprint, TenantId, UserId, WorkspaceId,
     };
     use uuid::Uuid;
 
@@ -555,7 +560,7 @@ mod tests {
             id: Uuid::now_v7(),
             segment_id: SegmentId::new(),
             session_id: SessionId::new(),
-            tenant_id: "tenant".to_string(),
+            tenant_id: TenantId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             task_summary: Some("Fix auth regression".to_string()),
@@ -596,7 +601,7 @@ mod tests {
         ExperienceAttribution {
             id: Uuid::now_v7(),
             experience_id: experience.id,
-            tenant_id: experience.tenant_id.clone(),
+            tenant_id: experience.tenant_id,
             workspace_id: experience.workspace_id.clone(),
             user_id: Some(experience.user_id.clone()),
             subject_type: AttributionSubjectType::Verification,

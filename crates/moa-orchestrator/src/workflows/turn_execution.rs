@@ -551,8 +551,8 @@ async fn handle_tool_call(
             input: invocation.input.clone(),
             active_canary: active_canary.map(ToOwned::to_owned),
             session_id: Some(session_id),
-            workspace_id: meta.workspace_id.clone(),
-            user_id: meta.user_id.clone(),
+            tenant_id: meta.tenant_id,
+            user_id: storage_user_id(meta),
             idempotency_key: invocation.id.clone(),
         };
         if tool_input_leaks_canary(active_canary, &tool_request.input).map_err(to_handler_error)? {
@@ -570,7 +570,7 @@ async fn handle_tool_call(
             .await?;
         let output = ToolOutput::error(
             format!(
-                "Action is pending workspace admin review: {}: {}",
+                "Action is pending tenant admin review: {}: {}",
                 invocation.name, prepared_action.input_summary
             ),
             Duration::ZERO,
@@ -590,8 +590,8 @@ async fn handle_tool_call(
             input: invocation.input.clone(),
             active_canary: active_canary.map(ToOwned::to_owned),
             session_id: Some(session_id),
-            workspace_id: meta.workspace_id.clone(),
-            user_id: meta.user_id.clone(),
+            tenant_id: meta.tenant_id,
+            user_id: storage_user_id(meta),
             idempotency_key: invocation.id.clone(),
         }))
         .call()
@@ -673,7 +673,7 @@ async fn ensure_current_segment(
     if let Some(transition) = SegmentTracker::transition_from_metadata(
         &request.metadata,
         session_id,
-        meta.workspace_id.as_str(),
+        &tenant_key(meta),
         &active_segment,
         now,
     ) {
@@ -765,7 +765,7 @@ async fn assess_completed_segment_at_transition(
         (segment_events, next_user_message)
     };
     let rewrite = query_rewrite_from_metadata(metadata);
-    let baseline = load_segment_baseline(ctx, meta.workspace_id.as_str()).await?;
+    let baseline = load_segment_baseline(ctx, meta.tenant_id).await?;
     let phase = if next_user_message.is_some() {
         AssessmentPhase::Deferred
     } else {
@@ -783,13 +783,8 @@ async fn assess_completed_segment_at_transition(
         &[],
     );
 
-    record_segment_assessment_learning(
-        ctx,
-        meta.workspace_id.as_str(),
-        completed.segment_id,
-        &assessment,
-    )
-    .await?;
+    record_segment_assessment_learning(ctx, meta.tenant_id, completed.segment_id, &assessment)
+        .await?;
     ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
             segment_id: completed.segment_id,
@@ -850,7 +845,7 @@ async fn assess_current_active_segment(
         let events = load_session_events_fallback(ctx, session_id).await?;
         segment_events_for_assessment(&events, segment.id, None)
     };
-    let baseline = load_segment_baseline(ctx, meta.workspace_id.as_str()).await?;
+    let baseline = load_segment_baseline(ctx, meta.tenant_id).await?;
     let duration_ms = durable_utc_now(ctx)
         .await?
         .signed_duration_since(segment.started_at)
@@ -868,8 +863,7 @@ async fn assess_current_active_segment(
         overrides,
     );
 
-    record_segment_assessment_learning(ctx, meta.workspace_id.as_str(), segment.id, &assessment)
-        .await?;
+    record_segment_assessment_learning(ctx, meta.tenant_id, segment.id, &assessment).await?;
     ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
             segment_id: segment.id,
@@ -913,7 +907,7 @@ fn task_segment_from_completed(
     TaskSegment {
         id: completed.segment_id,
         session_id: meta.id,
-        tenant_id: meta.workspace_id.to_string(),
+        tenant_id: tenant_key(meta),
         segment_index: completed.segment_index,
         task_summary: completed.task_summary.clone(),
         started_at,
@@ -938,7 +932,7 @@ fn task_segment_from_active(
     TaskSegment {
         id: segment.id,
         session_id: meta.id,
-        tenant_id: meta.workspace_id.to_string(),
+        tenant_id: tenant_key(meta),
         segment_index: segment.segment_index,
         task_summary: segment.task_summary.clone(),
         started_at: segment.started_at,
@@ -951,6 +945,28 @@ fn task_segment_from_active(
         outcome: Some(assessment.outcome.as_str().to_string()),
         assessment: Some(assessment.clone()),
         outcome_confidence: Some(assessment.confidence),
+    }
+}
+
+fn tenant_key(meta: &SessionMeta) -> String {
+    meta.tenant_id.to_string()
+}
+
+fn storage_user_id(meta: &SessionMeta) -> moa_core::UserId {
+    let value = meta
+        .contact
+        .as_ref()
+        .map(|contact| contact.contact_id.to_string())
+        .or_else(|| meta.created_by.as_ref().map(session_actor_storage_id))
+        .unwrap_or_else(|| format!("tenant:{}", meta.tenant_id));
+    moa_core::UserId::new(value)
+}
+
+fn session_actor_storage_id(actor: &moa_core::SessionActorRef) -> String {
+    match actor {
+        moa_core::SessionActorRef::Identity { id } => format!("identity:{id}"),
+        moa_core::SessionActorRef::Contact { id } => id.to_string(),
+        moa_core::SessionActorRef::Anonymous => "anonymous".to_string(),
     }
 }
 
@@ -1066,12 +1082,11 @@ async fn dispatch_skill_learning_after_experience(
 
 async fn record_segment_assessment_learning(
     ctx: &WorkflowContext<'_>,
-    tenant_id: &str,
+    tenant_id: moa_core::TenantId,
     segment_id: SegmentId,
     assessment: &moa_core::SegmentAssessment,
 ) -> Result<(), HandlerError> {
     let session_store = OrchestratorCtx::current_session_store();
-    let tenant_id = tenant_id.to_string();
     let assessment = assessment.clone();
     ctx.run(|| async move {
         session_store
@@ -1285,13 +1300,11 @@ fn segment_assessment_to_seq(
 
 async fn load_segment_baseline(
     ctx: &WorkflowContext<'_>,
-    tenant_id: &str,
+    tenant_id: moa_core::TenantId,
 ) -> Result<Option<moa_core::SegmentBaseline>, HandlerError> {
     Ok(ctx
         .service_client::<RestateSessionStoreClient>()
-        .get_segment_baseline(Json(GetSegmentBaselineRequest {
-            tenant_id: tenant_id.to_string(),
-        }))
+        .get_segment_baseline(Json(GetSegmentBaselineRequest { tenant_id }))
         .call()
         .await?
         .into_inner())

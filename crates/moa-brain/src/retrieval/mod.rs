@@ -15,7 +15,7 @@ pub use hybrid::{
 };
 pub use legs::{GRAPH_WEIGHT, LEXICAL_WEIGHT, RRF_K, VECTOR_WEIGHT, rrf_fuse};
 pub use ranking::{
-    FeatureRanker, RANKING_PIPELINE_VERSION, RankingConfig, RankingMode, RankingWeights,
-    normalize_tokens, ranking_fingerprint,
+    FeatureRanker, RANKING_PIPELINE_VERSION, RankingConfig, RankingWeights, normalize_tokens,
+    ranking_fingerprint,
 };
 pub use reranker::{CohereReranker, NoopReranker, RerankHit, Reranker};

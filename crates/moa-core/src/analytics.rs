@@ -1,20 +1,20 @@
 //! Typed analytics reads over session summary, tool summary, and rollup views.
 
 use chrono::{DateTime, Duration, NaiveTime, Utc};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
-use crate::{MoaError, Result, SessionId, SessionStatus, UserId, WorkspaceId};
+use crate::{ContactId, MoaError, Result, ScopedConn, SessionId, SessionStatus, TenantId};
 
 /// One session-level analytics row sourced from the `session_summary` view.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionAnalyticsSummary {
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
-    /// User identifier.
-    pub user_id: UserId,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
+    /// Contact identifier, when the session is contact-backed.
+    pub contact_id: Option<ContactId>,
     /// Current persisted session status.
     pub status: SessionStatus,
     /// Number of completed assistant turns.
@@ -63,10 +63,10 @@ pub struct ToolCallSummary {
 pub struct SessionTurnMetric {
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
-    /// User identifier.
-    pub user_id: UserId,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
+    /// Contact identifier, when the turn is contact-backed.
+    pub contact_id: Option<ContactId>,
     /// One-based turn number within the session.
     pub turn_number: u64,
     /// Timestamp when the assistant turn completed.
@@ -95,11 +95,11 @@ pub struct SessionTurnMetric {
     pub cost_cents: u64,
 }
 
-/// Aggregate workspace metrics over a bounded recent time window.
+/// Aggregate tenant metrics over a bounded recent time window.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WorkspaceAnalyticsSummary {
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+pub struct TenantAnalyticsSummary {
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// Number of whole days included in the rollup window.
     pub days: u32,
     /// Session count across the window.
@@ -121,8 +121,8 @@ pub struct WorkspaceAnalyticsSummary {
 /// One daily cache trend point sourced from `daily_workspace_metrics`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheDailyMetric {
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Tenant identifier.
+    pub tenant_id: TenantId,
     /// UTC day bucket.
     pub day: DateTime<Utc>,
     /// Session count on the day.
@@ -150,7 +150,7 @@ pub async fn get_session_summary(
     let session_summary = qualified_relation(schema_name, "session_summary");
     let row = sqlx::query(&format!(
         "SELECT \
-             id, workspace_id, user_id, status, turn_count, event_count, \
+             id, tenant_id, contact_id, status, turn_count, event_count, \
              total_input_tokens, total_output_tokens, total_cost_cents, \
              main_cost_cents, auxiliary_cost_cents, \
              cache_hit_rate, duration_seconds, tool_call_count, error_count \
@@ -167,13 +167,13 @@ pub async fn get_session_summary(
     session_analytics_from_row(&row)
 }
 
-/// Lists per-tool summary rows, optionally restricted to one workspace.
+/// Lists per-tool summary rows, optionally restricted to one tenant.
 pub async fn list_tool_call_summaries(
     pool: &PgPool,
     schema_name: Option<&str>,
-    workspace_id: Option<&WorkspaceId>,
+    tenant_id: Option<&TenantId>,
 ) -> Result<Vec<ToolCallSummary>> {
-    let query = match workspace_id {
+    let query = match tenant_id {
         Some(_) => {
             let tool_call_analytics = qualified_relation(schema_name, "tool_call_analytics");
             format!(
@@ -201,10 +201,10 @@ pub async fn list_tool_call_summaries(
         }
     };
 
-    let rows = match workspace_id {
-        Some(workspace_id) => {
+    let rows = match tenant_id {
+        Some(tenant_id) => {
             sqlx::query(&query)
-                .bind(workspace_id.to_string())
+                .bind(tenant_id.to_string())
                 .fetch_all(pool)
                 .await
         }
@@ -224,7 +224,7 @@ pub async fn list_session_turn_metrics(
     let session_turn_metrics = qualified_relation(schema_name, "session_turn_metrics");
     let rows = sqlx::query(&format!(
         "SELECT \
-             session_id, workspace_id, user_id, turn_number, finished_at, model, \
+             session_id, tenant_id, contact_id, turn_number, finished_at, model, \
              pipeline_ms, llm_ms, tool_ms, tool_call_count, input_tokens_uncached, \
              input_tokens_cache_write, input_tokens_cache_read, total_input_tokens, \
              output_tokens, cost_cents \
@@ -240,13 +240,36 @@ pub async fn list_session_turn_metrics(
     rows.iter().map(session_turn_metric_from_row).collect()
 }
 
-/// Loads a recent workspace rollup from `daily_workspace_metrics`.
-pub async fn get_workspace_stats(
+/// Loads a recent tenant rollup from `daily_workspace_metrics`.
+pub async fn get_tenant_stats(
     pool: &PgPool,
     schema_name: Option<&str>,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     days: u32,
-) -> Result<WorkspaceAnalyticsSummary> {
+) -> Result<TenantAnalyticsSummary> {
+    let mut conn = pool.acquire().await.map_err(map_sqlx_error)?;
+    get_tenant_stats_with_conn(&mut conn, schema_name, tenant_id, days).await
+}
+
+/// Loads a recent tenant rollup through an explicit control-plane RLS scope.
+pub async fn get_tenant_stats_control_plane(
+    pool: &PgPool,
+    schema_name: Option<&str>,
+    tenant_id: &TenantId,
+    days: u32,
+) -> Result<TenantAnalyticsSummary> {
+    let mut conn = ScopedConn::begin_control_plane(pool).await?;
+    let summary = get_tenant_stats_with_conn(conn.as_mut(), schema_name, tenant_id, days).await?;
+    conn.commit().await?;
+    Ok(summary)
+}
+
+async fn get_tenant_stats_with_conn(
+    conn: &mut PgConnection,
+    schema_name: Option<&str>,
+    tenant_id: &TenantId,
+    days: u32,
+) -> Result<TenantAnalyticsSummary> {
     let daily_workspace_metrics = qualified_relation(schema_name, "daily_workspace_metrics");
     let start_day = analytics_window_start(days);
     let row = sqlx::query(&format!(
@@ -265,14 +288,14 @@ pub async fn get_workspace_stats(
          FROM {daily_workspace_metrics} \
          WHERE workspace_id = $1 AND day >= $2"
     ))
-    .bind(workspace_id.to_string())
+    .bind(tenant_id.to_string())
     .bind(start_day)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
-    Ok(WorkspaceAnalyticsSummary {
-        workspace_id: workspace_id.clone(),
+    Ok(TenantAnalyticsSummary {
+        tenant_id: *tenant_id,
         days: normalized_days(days),
         session_count: row
             .try_get::<i64, _>("session_count")
@@ -298,11 +321,35 @@ pub async fn get_workspace_stats(
     })
 }
 
-/// Lists daily cache metrics for one workspace over a recent window.
+/// Lists daily cache metrics for one tenant over a recent window.
 pub async fn list_cache_daily_metrics(
     pool: &PgPool,
     schema_name: Option<&str>,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
+    days: u32,
+) -> Result<Vec<CacheDailyMetric>> {
+    let mut conn = pool.acquire().await.map_err(map_sqlx_error)?;
+    list_cache_daily_metrics_with_conn(&mut conn, schema_name, tenant_id, days).await
+}
+
+/// Lists daily cache metrics through an explicit control-plane RLS scope.
+pub async fn list_cache_daily_metrics_control_plane(
+    pool: &PgPool,
+    schema_name: Option<&str>,
+    tenant_id: &TenantId,
+    days: u32,
+) -> Result<Vec<CacheDailyMetric>> {
+    let mut conn = ScopedConn::begin_control_plane(pool).await?;
+    let rows =
+        list_cache_daily_metrics_with_conn(conn.as_mut(), schema_name, tenant_id, days).await?;
+    conn.commit().await?;
+    Ok(rows)
+}
+
+async fn list_cache_daily_metrics_with_conn(
+    conn: &mut PgConnection,
+    schema_name: Option<&str>,
+    tenant_id: &TenantId,
     days: u32,
 ) -> Result<Vec<CacheDailyMetric>> {
     let daily_workspace_metrics = qualified_relation(schema_name, "daily_workspace_metrics");
@@ -315,9 +362,9 @@ pub async fn list_cache_daily_metrics(
          WHERE workspace_id = $1 AND day >= $2 \
          ORDER BY day ASC"
     ))
-    .bind(workspace_id.to_string())
+    .bind(tenant_id.to_string())
     .bind(start_day)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
@@ -337,14 +384,14 @@ fn normalized_days(days: u32) -> u32 {
 fn session_analytics_from_row(row: &PgRow) -> Result<SessionAnalyticsSummary> {
     Ok(SessionAnalyticsSummary {
         session_id: SessionId(row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?),
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
+        tenant_id: TenantId(
+            row.try_get::<Uuid, _>("tenant_id")
                 .map_err(map_sqlx_error)?,
         ),
-        user_id: UserId(
-            row.try_get::<String, _>("user_id")
-                .map_err(map_sqlx_error)?,
-        ),
+        contact_id: row
+            .try_get::<Option<Uuid>, _>("contact_id")
+            .map_err(map_sqlx_error)?
+            .map(ContactId),
         status: session_status_from_db(
             &row.try_get::<String, _>("status").map_err(map_sqlx_error)?,
         )?,
@@ -417,14 +464,14 @@ fn session_turn_metric_from_row(row: &PgRow) -> Result<SessionTurnMetric> {
             row.try_get::<Uuid, _>("session_id")
                 .map_err(map_sqlx_error)?,
         ),
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
+        tenant_id: TenantId(
+            row.try_get::<Uuid, _>("tenant_id")
                 .map_err(map_sqlx_error)?,
         ),
-        user_id: UserId(
-            row.try_get::<String, _>("user_id")
-                .map_err(map_sqlx_error)?,
-        ),
+        contact_id: row
+            .try_get::<Option<Uuid>, _>("contact_id")
+            .map_err(map_sqlx_error)?
+            .map(ContactId),
         turn_number: row
             .try_get::<i64, _>("turn_number")
             .map_err(map_sqlx_error)? as u64,
@@ -463,9 +510,13 @@ fn session_turn_metric_from_row(row: &PgRow) -> Result<SessionTurnMetric> {
 
 fn cache_daily_metric_from_row(row: &PgRow) -> Result<CacheDailyMetric> {
     Ok(CacheDailyMetric {
-        workspace_id: WorkspaceId(
+        tenant_id: TenantId(
             row.try_get::<String, _>("workspace_id")
-                .map_err(map_sqlx_error)?,
+                .map_err(map_sqlx_error)?
+                .parse()
+                .map_err(|error| {
+                    MoaError::StorageError(format!("invalid tenant id in analytics row: {error}"))
+                })?,
         ),
         day: row
             .try_get::<DateTime<Utc>, _>("day")

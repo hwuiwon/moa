@@ -12,11 +12,12 @@ use tokio::time::sleep;
 use crate::support::graph_ingest::wait_for_ingested_brain_responses;
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_workspace_member, register_deployment, reserve_orchestrator_ports, restate_admin_url,
+    grant_tenant_operator, register_deployment, reserve_orchestrator_ports, restate_admin_url,
     restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
+    workspace_id_from_meta,
 };
 use moa_test_support::postgres::test_database_url;
 
@@ -88,8 +89,10 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
     let client = reqwest::Client::new();
     let mut meta = test_session_meta("session-brain-e2e");
     meta.model = ModelId::new(model);
-    let identity = test_user_identity();
-    grant_workspace_member(&identity, &meta.workspace_id).await?;
+    let workspace_id = workspace_id_from_meta(&meta);
+    let mut identity = test_user_identity();
+    identity.tenant_id = meta.tenant_id;
+    grant_tenant_operator(&identity, &workspace_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
     let pool = PgPool::connect(&test_database_url())
         .await
@@ -153,7 +156,7 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
                 .any(|record| matches!(record.event, Event::BrainResponse { .. })),
             "expected a persisted BrainResponse event for session {session_id}"
         );
-        wait_for_ingested_brain_responses(&pool, &meta.workspace_id, session_id, &events).await?;
+        wait_for_ingested_brain_responses(&pool, &workspace_id, session_id, &events).await?;
 
         Ok(())
     }

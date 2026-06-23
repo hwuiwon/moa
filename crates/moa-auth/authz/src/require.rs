@@ -178,6 +178,7 @@ pub fn fga_subject(identity: &Identity) -> String {
 
     match identity.identity_type {
         IdentityType::User => format!("user:{}", identity.id),
+        IdentityType::Contact => format!("contact:{}", identity.id),
         IdentityType::Agent => format!("agent:{}", identity.id),
         IdentityType::Service => format!("service:{}", identity.id),
     }

@@ -2,7 +2,7 @@
 
 use moa_core::{
     CompletionContent, CompletionResponse, ContextMessage, EventRecord, LineageHandle, MessageRole,
-    SessionMeta, WorkingContext,
+    SessionMeta, UserId, WorkingContext, WorkspaceId,
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
@@ -38,8 +38,8 @@ pub fn emit_context_lineage(
     let record = ContextLineage {
         turn_id,
         session_id: session.id,
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
+        workspace_id: lineage_workspace_id(session),
+        user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
         chunks_in_window: chunks,
         truncations: Vec::new(),
@@ -64,8 +64,8 @@ pub fn emit_context_lineage(
         score_id: uuid::Uuid::now_v7(),
         ts: chrono::Utc::now(),
         target: ScoreTarget::Turn { turn_id },
-        workspace_id: session.workspace_id.clone(),
-        user_id: Some(session.user_id.clone()),
+        workspace_id: lineage_workspace_id(session),
+        user_id: Some(lineage_user_id(session)),
         name: "retrieval_recall_proxy".to_string(),
         value: ScoreValue::Numeric(recall_proxy),
         source: ScoreSource::OnlineJudge,
@@ -96,6 +96,26 @@ fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) ->
         role: format!("{:?}", message.role).to_ascii_lowercase(),
         source_refs: message.source_refs.clone(),
     }
+}
+
+fn lineage_workspace_id(session: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(session.tenant_id.to_string())
+}
+
+fn lineage_user_id(session: &SessionMeta) -> UserId {
+    let id = session
+        .contact
+        .as_ref()
+        .map(|contact| contact.contact_id.to_string())
+        .or_else(|| {
+            session.created_by.as_ref().map(|actor| match actor {
+                moa_core::SessionActorRef::Identity { id } => format!("identity:{id}"),
+                moa_core::SessionActorRef::Contact { id } => id.to_string(),
+                moa_core::SessionActorRef::Anonymous => "anonymous".to_string(),
+            })
+        })
+        .unwrap_or_else(|| format!("tenant:{}", session.tenant_id));
+    UserId::new(id)
 }
 
 struct SourceContextChunk<'a> {
@@ -154,8 +174,8 @@ pub async fn emit_generation_lineage(
     let record = GenerationLineage {
         turn_id,
         session_id: session.id,
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
+        workspace_id: lineage_workspace_id(session),
+        user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
         provider: provider.to_string(),
         request_model: request_model.to_string(),
@@ -189,8 +209,8 @@ pub async fn emit_generation_lineage(
         score_id: uuid::Uuid::now_v7(),
         ts: chrono::Utc::now(),
         target: ScoreTarget::Turn { turn_id },
-        workspace_id: session.workspace_id.clone(),
-        user_id: Some(session.user_id.clone()),
+        workspace_id: lineage_workspace_id(session),
+        user_id: Some(lineage_user_id(session)),
         name: "cost_micros".to_string(),
         value: ScoreValue::Numeric(record.cost_micros as f64),
         source: ScoreSource::OnlineJudge,
@@ -205,7 +225,7 @@ pub async fn emit_generation_lineage(
     }
     metrics::gauge!(
         "moa_cost_micros_per_turn",
-        "workspace_id" => session.workspace_id.to_string(),
+        "tenant_id" => session.tenant_id.to_string(),
         "provider" => provider.to_string()
     )
     .set(record.cost_micros as f64);
@@ -228,12 +248,12 @@ async fn build_citation_lineage(
 ) -> CitationLineage {
     metrics::histogram!(
         "moa_citation_source_count",
-        "workspace_id" => session.workspace_id.to_string()
+        "tenant_id" => session.tenant_id.to_string()
     )
     .record(citation_sources.len() as f64);
     metrics::histogram!(
         "moa_citation_answer_bytes",
-        "workspace_id" => session.workspace_id.to_string()
+        "tenant_id" => session.tenant_id.to_string()
     )
     .record(response.text.len() as f64);
     let answer_sentence_offsets = sentence_offsets(&response.text);
@@ -252,15 +272,15 @@ async fn build_citation_lineage(
     };
     metrics::histogram!(
         "moa_citation_verifier_seconds",
-        "workspace_id" => session.workspace_id.to_string()
+        "tenant_id" => session.tenant_id.to_string()
     )
     .record(verifier_started.elapsed().as_secs_f64());
 
     CitationLineage {
         turn_id,
         session_id: session.id,
-        workspace_id: session.workspace_id.clone(),
-        user_id: session.user_id.clone(),
+        workspace_id: lineage_workspace_id(session),
+        user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
         answer_text: response.text.clone(),
         answer_event_id: response_event.map(|record| record.id),
@@ -310,7 +330,7 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
         }
         metrics::gauge!(
             "moa_grounding_verified_rate",
-            "workspace_id" => citation.workspace_id.to_string()
+            "tenant_id" => citation.workspace_id.to_string()
         )
         .set(if source.verifier.verified { 1.0 } else { 0.0 });
 

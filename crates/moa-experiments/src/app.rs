@@ -18,9 +18,9 @@ use moa_core::wire::{
     ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
 use moa_core::{
-    CompletionRequest, ContextMessage, JsonResponseFormat, LearningCandidate,
-    LearningCandidateStatus, LearningCandidateType, LearningRiskClass, MemoryScope, MoaError,
-    ModelId, WorkspaceId, record_experiment_run, record_experiment_score_rows,
+    ActionRuleScope, CompletionRequest, ContextMessage, JsonResponseFormat, LearningCandidate,
+    LearningCandidateStatus, LearningCandidateType, LearningRiskClass, MoaError, ModelId, TenantId,
+    WorkspaceId, record_experiment_run, record_experiment_score_rows,
 };
 use moa_scoring::{
     ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
@@ -133,7 +133,7 @@ pub async fn store_generated_plan(
     let source_text = document.to_json().map_err(artifact_doc_error)?;
     let document_value =
         serde_json::to_value(&document).map_err(|error| serialization_error(error.to_string()))?;
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let stored = ArtifactRegistry::new(pool)
         .create_draft(
             &scope,
@@ -147,7 +147,7 @@ pub async fn store_generated_plan(
         .await?;
 
     Ok(ExperimentGeneratePlanResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         artifact_uid: stored.artifact_uid,
         revision_uid: stored.revision_uid,
         status: stored.status.to_string(),
@@ -164,7 +164,7 @@ pub async fn admit_run(
     request: ExperimentRunRequest,
     identity: Identity,
 ) -> Result<AdmittedExperimentRun> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let run_inputs = match request.plan_revision_uid {
         Some(plan_revision_uid) => {
             plan_run_inputs(
@@ -199,7 +199,7 @@ pub async fn admit_run(
     record_experiment_run(run.status.as_str(), run.target_kind.as_str());
 
     Ok(AdmittedExperimentRun {
-        response: run_response_from_record(request.workspace_id, &run),
+        response: run_response_from_record(request.tenant_id, &run),
         run_uid: run.run_uid,
         target: serialized_payload("target", &run.target)?,
         variant: serialized_payload("variant", &run.variant)?,
@@ -215,7 +215,7 @@ pub async fn list_runs(
     pool: sqlx::PgPool,
     request: ExperimentListRequest,
 ) -> Result<ExperimentListResponse> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let status = request.status.as_deref().map(parse_status).transpose()?;
     let limit = request
         .limit
@@ -230,7 +230,7 @@ pub async fn list_runs(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(ExperimentListResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         runs,
     })
 }
@@ -240,7 +240,7 @@ pub async fn list_trials(
     pool: sqlx::PgPool,
     request: ExperimentTrialsRequest,
 ) -> Result<ExperimentTrialsResponse> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let status = request
         .status
         .as_deref()
@@ -255,11 +255,11 @@ pub async fn list_trials(
         .list_trials(&scope, request.run_uid, status, limit)
         .await?
         .into_iter()
-        .map(|trial| trial_summary_from_record(request.workspace_id.clone(), &trial))
+        .map(|trial| trial_summary_from_record(request.tenant_id, &trial))
         .collect();
 
     Ok(ExperimentTrialsResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         run_uid: request.run_uid,
         trials,
     })
@@ -270,13 +270,13 @@ pub async fn trial_status(
     pool: sqlx::PgPool,
     request: ExperimentTrialStatusRequest,
 ) -> Result<ExperimentTrialStatusResponse> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let trial = ExperimentStore::new(pool)
         .load_trial(&scope, request.trial_uid)
         .await?
         .ok_or_else(|| trial_not_found(request.trial_uid))?;
     Ok(trial_status_response_from_summary(
-        trial_summary_from_record(request.workspace_id, &trial),
+        trial_summary_from_record(request.tenant_id, &trial),
     ))
 }
 
@@ -285,7 +285,7 @@ pub async fn cancel_run(
     pool: sqlx::PgPool,
     request: ExperimentCancelRequest,
 ) -> Result<ExperimentCancelResponse> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let reason = request
         .reason
         .filter(|reason| !reason.trim().is_empty())
@@ -294,7 +294,7 @@ pub async fn cancel_run(
     let existing = load_required_run(&store, &scope, request.run_uid).await?;
     if existing.status.is_terminal() {
         return Ok(ExperimentCancelResponse {
-            workspace_id: request.workspace_id,
+            tenant_id: request.tenant_id,
             run_uid: existing.run_uid,
             cancelled: false,
             status: existing.status.as_str().to_string(),
@@ -317,7 +317,7 @@ pub async fn cancel_run(
     record_experiment_run(run.status.as_str(), run.target_kind.as_str());
 
     Ok(ExperimentCancelResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         run_uid: run.run_uid,
         cancelled: true,
         status: run.status.as_str().to_string(),
@@ -329,9 +329,9 @@ pub async fn cancel_run(
 pub async fn propose_improvement_candidate(
     pool: sqlx::PgPool,
     request: ExperimentProposeImprovementsRequest,
-    tenant_id: String,
 ) -> Result<ExperimentImprovementProposal> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
+    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let run = load_required_run(&store, &scope, request.run_uid).await?;
     require_completed_run(&run)?;
@@ -352,7 +352,7 @@ pub async fn propose_improvement_candidate(
     let run_score_summary = score_summaries_for_workspace(
         &pool,
         ScoreRunRef {
-            workspace_id: request.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             run_id: run.score_run_id,
         },
     )
@@ -365,7 +365,7 @@ pub async fn propose_improvement_candidate(
     let trial_breakdown = experiment_score_breakdown_for_workspace(
         &pool,
         ExperimentRunScoreRef {
-            workspace_id: request.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             run_uid: run.run_uid,
         },
     )
@@ -374,8 +374,8 @@ pub async fn propose_improvement_candidate(
 
     let draft_artifact_revision_uids = Vec::new();
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
-        tenant_id,
-        workspace_id: request.workspace_id.clone(),
+        tenant_id: request.tenant_id,
+        workspace_id: workspace_id.clone(),
         run: &run,
         completed_trials: &completed_trials,
         run_score_summary: &run_score_summary,
@@ -388,7 +388,7 @@ pub async fn propose_improvement_candidate(
         now: Utc::now(),
     });
     let response = ExperimentProposeImprovementsResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         run_uid: run.run_uid,
         candidate_ids: vec![candidate.id],
         draft_artifact_revision_uids,
@@ -405,13 +405,14 @@ pub async fn scores(
     pool: sqlx::PgPool,
     request: ExperimentScoresRequest,
 ) -> Result<ExperimentScoresResponse> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
+    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let run =
         load_required_run(&ExperimentStore::new(pool.clone()), &scope, request.run_uid).await?;
     let score_response = score_summaries_for_workspace(
         &pool,
         ScoreRunRef {
-            workspace_id: request.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             run_id: run.score_run_id,
         },
     )
@@ -420,7 +421,7 @@ pub async fn scores(
     let trial_breakdown = experiment_score_breakdown_for_workspace(
         &pool,
         ExperimentRunScoreRef {
-            workspace_id: request.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             run_uid: run.run_uid,
         },
     )
@@ -447,7 +448,7 @@ pub async fn scores(
     );
 
     Ok(ExperimentScoresResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         run_uid: run.run_uid,
         score_run_id: run.score_run_id,
         rows: score_response
@@ -478,14 +479,15 @@ pub async fn compare_runs(
     pool: sqlx::PgPool,
     request: ExperimentCompareRequest,
 ) -> Result<ExperimentCompareResponse> {
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
+    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let base_run = load_required_run(&store, &scope, request.base_run_uid).await?;
     let new_run = load_required_run(&store, &scope, request.new_run_uid).await?;
     let compare_response = compare_score_runs_for_workspace(
         &pool,
         ScoreCompareRef {
-            workspace_id: request.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             base_run: base_run.score_run_id,
             new_run: new_run.score_run_id,
         },
@@ -495,7 +497,7 @@ pub async fn compare_runs(
     let breakdown_compare = compare_experiment_score_breakdown_for_workspace(
         &pool,
         ExperimentRunCompareRef {
-            workspace_id: request.workspace_id.clone(),
+            workspace_id: workspace_id.clone(),
             base_run_uid: base_run.run_uid,
             new_run_uid: new_run.run_uid,
         },
@@ -511,7 +513,7 @@ pub async fn compare_runs(
     );
 
     Ok(ExperimentCompareResponse {
-        workspace_id: request.workspace_id,
+        tenant_id: request.tenant_id,
         base_run_uid: base_run.run_uid,
         new_run_uid: new_run.run_uid,
         base_score_run_id: base_run.score_run_id,
@@ -537,8 +539,8 @@ pub async fn compare_runs(
 /// Evidence used to build one experiment-derived learning candidate.
 pub struct ExperimentLearningProposalEvidence<'a> {
     /// Tenant that owns the candidate review lifecycle.
-    pub tenant_id: String,
-    /// Workspace that owns the experiment run and candidate.
+    pub tenant_id: TenantId,
+    /// Storage workspace key that owns the experiment run and candidate.
     pub workspace_id: WorkspaceId,
     /// Completed experiment run that produced proposal evidence.
     pub run: &'a ExperimentRunRecord,
@@ -604,10 +606,28 @@ pub fn build_experiment_learning_candidate(
     }
 }
 
-/// Returns the tenant-visible memory scope used by behavior-lab runs.
+/// Returns the tenant override scope used by behavior-lab runs.
 #[must_use]
-pub fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace { workspace_id }
+pub fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
+    ActionRuleScope::Tenant { tenant_id }
+}
+
+fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
+}
+
+#[cfg(test)]
+fn tenant_id_from_str(value: &str) -> TenantId {
+    uuid::Uuid::parse_str(value)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| {
+            let hash = blake3::hash(value.as_bytes());
+            let mut bytes = [0_u8; 16];
+            bytes.copy_from_slice(&hash.as_bytes()[..16]);
+            bytes[6] = (bytes[6] & 0x0f) | 0x80;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            TenantId::from(uuid::Uuid::from_bytes(bytes))
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -644,7 +664,7 @@ fn single_target_run_inputs(
 
 async fn plan_run_inputs(
     pool: sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     plan_revision_uid: Uuid,
     run_name: &str,
     agent_revision_variants: &[AgentRevisionSimulationVariant],
@@ -682,7 +702,7 @@ async fn plan_run_inputs(
 
 async fn load_published_plan_revision(
     pool: sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     revision_uid: Uuid,
 ) -> Result<StoredArtifactRevision> {
     let revision = ArtifactRegistry::new(pool)
@@ -705,7 +725,7 @@ async fn load_published_plan_revision(
 
 async fn load_required_run(
     store: &ExperimentStore,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run_uid: Uuid,
 ) -> Result<ExperimentRunRecord> {
     store
@@ -726,7 +746,7 @@ fn require_completed_run(run: &ExperimentRunRecord) -> Result<()> {
 
 async fn require_proposal_enabled_plan(
     pool: sqlx::PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run: &ExperimentRunRecord,
 ) -> Result<Uuid> {
     let registry = ArtifactRegistry::new(pool);
@@ -754,7 +774,7 @@ async fn require_proposal_enabled_plan(
 
 async fn experiment_plan_revision_uid(
     registry: &ArtifactRegistry,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     run: &ExperimentRunRecord,
 ) -> Result<Uuid> {
     if let Some(plan_revision_uid) = run
@@ -818,7 +838,6 @@ fn experiment_learning_candidate_payload(
         "kind": "workflow_learning_proposal",
         "source": "Experiments/propose_improvements",
         "tenant_id": evidence.tenant_id,
-        "workspace_id": evidence.workspace_id,
         "experiment": {
             "run_uid": run.run_uid,
             "name": run.name,
@@ -1051,11 +1070,11 @@ fn identity_payload(identity: Identity) -> Result<Value> {
 }
 
 fn run_response_from_record(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run: &ExperimentRunRecord,
 ) -> ExperimentRunResponse {
     ExperimentRunResponse {
-        workspace_id,
+        tenant_id,
         run_uid: run.run_uid,
         status: run.status.as_str().to_string(),
         score_run_id: run.score_run_id,
@@ -1073,7 +1092,7 @@ fn trial_status_response_from_summary(
     summary: ExperimentTrialSummary,
 ) -> ExperimentTrialStatusResponse {
     ExperimentTrialStatusResponse {
-        workspace_id: summary.workspace_id,
+        tenant_id: summary.tenant_id,
         run_uid: summary.run_uid,
         trial_uid: summary.trial_uid,
         status: summary.status,
@@ -1092,11 +1111,11 @@ fn trial_status_response_from_summary(
 }
 
 fn trial_summary_from_record(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trial: &ExperimentTrialRecord,
 ) -> ExperimentTrialSummary {
     ExperimentTrialSummary {
-        workspace_id,
+        tenant_id,
         run_uid: trial.run_uid,
         trial_uid: trial.trial_uid,
         status: trial.status.as_str().to_string(),
@@ -1207,7 +1226,7 @@ fn plan_expansion_error(error: PlanExpansionError) -> ExperimentAppError {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use moa_core::{MemoryScope, ModelId, SessionId};
+    use moa_core::{ActionRuleScope, ModelId, SessionId};
     use serde_json::json;
 
     use super::*;
@@ -1245,7 +1264,7 @@ mod tests {
         };
 
         let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
-            tenant_id: "tenant-a".to_string(),
+            tenant_id: tenant_id_from_str("tenant-a"),
             workspace_id,
             run: &run,
             completed_trials: &trials,
@@ -1286,8 +1305,8 @@ mod tests {
 
     fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
         ExperimentRunRecord {
-            scope: MemoryScope::Workspace {
-                workspace_id: workspace_id.clone(),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id_from_str(workspace_id.as_str()),
             },
             run_uid: fixture_uuid(1),
             name: "support escalation comparison".to_string(),
@@ -1328,8 +1347,8 @@ mod tests {
 
     fn completed_trial_record(run_uid: Uuid) -> ExperimentTrialRecord {
         ExperimentTrialRecord {
-            scope: MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace-a"),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id_from_str("workspace-a"),
             },
             trial_uid: fixture_uuid(30),
             run_uid,

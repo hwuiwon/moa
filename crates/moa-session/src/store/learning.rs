@@ -13,7 +13,7 @@ impl PostgresSessionStore {
              VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(entry.id)
-        .bind(&entry.tenant_id)
+        .bind(entry.tenant_id.to_string())
         .bind(&entry.learning_type)
         .bind(&entry.target_id)
         .bind(entry.target_label.as_deref())
@@ -45,7 +45,7 @@ impl PostgresSessionStore {
              VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(entry.id)
-        .bind(&entry.tenant_id)
+        .bind(entry.tenant_id.to_string())
         .bind(&entry.learning_type)
         .bind(&entry.target_id)
         .bind(entry.target_label.as_deref())

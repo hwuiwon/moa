@@ -103,7 +103,7 @@ fn attribution(
     ExperienceAttribution {
         id: Uuid::now_v7(),
         experience_id: experience.id,
-        tenant_id: experience.tenant_id.clone(),
+        tenant_id: experience.tenant_id,
         workspace_id: experience.workspace_id.clone(),
         user_id: Some(UserId(experience.user_id.to_string())),
         subject_type,
@@ -164,7 +164,7 @@ mod tests {
     use chrono::TimeZone;
     use moa_core::{
         SegmentEvidence, SegmentEvidenceKind, SegmentEvidencePolarity, SegmentId, SessionId,
-        TaskFacetSet, TaskFingerprint, WorkspaceId,
+        TaskFacetSet, TaskFingerprint, TenantId, WorkspaceId,
     };
 
     use super::*;
@@ -180,7 +180,7 @@ mod tests {
             id: Uuid::now_v7(),
             segment_id: SegmentId::new(),
             session_id: SessionId::new(),
-            tenant_id: "tenant".to_string(),
+            tenant_id: TenantId::new(),
             workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             task_summary: Some("Fix tests".to_string()),

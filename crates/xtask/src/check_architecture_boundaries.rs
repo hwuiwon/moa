@@ -427,7 +427,7 @@ const ALLOWANCES: &[Allowance] = &[
         "crates/moa-orchestrator/src/services/memory.rs",
         "OrchestratorCtx::current_graph_pool",
         1,
-        "Memory handler still constructs graph stores directly for the legacy memory endpoint"
+        "Memory handler still constructs graph stores directly for the old memory endpoint"
     ),
     allow!(
         RuntimeContext,

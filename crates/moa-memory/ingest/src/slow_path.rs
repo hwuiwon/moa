@@ -6,9 +6,10 @@ use std::time::Duration;
 use crate::{
     ClassifiedFact, Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact,
     EntityResolutionRequest, EntityResolver, ExtractedFact, ExtractedFactScopeHint, FactExtractor,
-    HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, ResolvedEntity,
-    RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime, extraction_confidence_hint,
-    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
+    HeuristicFactExtractor, IngestApplyReport, IngestCtx, IngestDecision, IngestError,
+    ResolvedEntity, RrfPlusJudgeDetector, SessionTurn, chunk_turn, current_runtime,
+    extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
+    should_ingest_degraded,
 };
 use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{
@@ -319,7 +320,7 @@ pub async fn ingest_turn_direct_with_ctx(
 /// Builds the object key used to serialize ingestion per workspace/session.
 #[must_use]
 pub fn ingestion_object_key(turn: &SessionTurn) -> String {
-    format!("{}:{}", turn.workspace_id, turn.session_id)
+    format!("{}:{}", turn.tenant_id, turn.session_id)
 }
 
 /// Builds a finalized turn transcript from an LLM request and response.
@@ -504,7 +505,7 @@ async fn detect_contradictions_with(
     let mut decisions = Vec::with_capacity(embedded.len());
 
     for fact in embedded {
-        let scope = fact_scope(turn, fact);
+        let scope = fact_scope(turn, fact).map_err(HandlerError::from)?;
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let ctx = ContradictionContext::for_app_role(pool.clone(), scope, vector);
         let conflict = detector
@@ -525,19 +526,29 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
     }
 }
 
-fn decision_scope(turn: &SessionTurn, decision: &IngestDecision) -> ScopeContext {
-    decision_fact(decision)
-        .map(|fact| fact_scope(turn, fact))
-        .unwrap_or_else(|| ScopeContext::user(turn.workspace_id.clone(), turn.user_id.clone()))
+fn decision_scope(
+    turn: &SessionTurn,
+    decision: &IngestDecision,
+) -> Result<ScopeContext, IngestError> {
+    match decision_fact(decision) {
+        Some(fact) => fact_scope(turn, fact),
+        None => turn_contact_scope(turn),
+    }
 }
 
-fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> ScopeContext {
+fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> Result<ScopeContext, IngestError> {
     match fact.classified.fact.scope_hint {
-        ExtractedFactScopeHint::User => {
-            ScopeContext::user(turn.workspace_id.clone(), turn.user_id.clone())
-        }
-        ExtractedFactScopeHint::Workspace => ScopeContext::workspace(turn.workspace_id.clone()),
+        ExtractedFactScopeHint::Contact => turn_contact_scope(turn),
+        ExtractedFactScopeHint::Tenant => turn_tenant_scope(turn),
     }
+}
+
+fn turn_tenant_scope(turn: &SessionTurn) -> Result<ScopeContext, IngestError> {
+    Ok(ScopeContext::tenant(turn.tenant_id))
+}
+
+fn turn_contact_scope(turn: &SessionTurn) -> Result<ScopeContext, IngestError> {
+    Ok(ScopeContext::contact(turn.tenant_id, turn.contact_id))
 }
 
 async fn apply_decisions(
@@ -550,7 +561,7 @@ async fn apply_decisions(
     let mut report = IngestApplyReport::default();
 
     for decision in decisions {
-        let scope = decision_scope(turn, decision);
+        let scope = decision_scope(turn, decision).map_err(HandlerError::from)?;
         match apply_one_decision(
             pool,
             &scope,
@@ -626,7 +637,7 @@ async fn apply_one_decision_with_graph(
     }
 
     let entities = resolve_fact_entities(pool, scope, graph, entity_resolver, turn, fact).await?;
-    let fact_uid = scoped_fact_uid(&turn.workspace_id, &turn.session_id, turn.turn_seq, &hash);
+    let fact_uid = scoped_fact_uid(&turn.tenant_id, &turn.session_id, turn.turn_seq, &hash);
     match decision {
         IngestDecision::Insert { fact } => {
             let uid = graph
@@ -707,19 +718,17 @@ fn node_intent(
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
-        actor_id: turn.user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_id: turn.contact_id.to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
 fn scope_workspace_id(scope: &ScopeContext) -> Option<String> {
-    scope
-        .workspace_id()
-        .map(|workspace_id| workspace_id.to_string())
+    Some(scope.tenant_id().to_string())
 }
 
 fn scope_user_id(scope: &ScopeContext) -> Option<String> {
-    scope.user_id().map(|user_id| user_id.to_string())
+    scope.contact_id().map(|contact_id| contact_id.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -738,7 +747,7 @@ async fn resolve_fact_entities(
 ) -> Result<ResolvedFactEntities, HandlerError> {
     let extracted = &fact.classified.fact;
     let confidence = extracted_confidence(extracted);
-    let actor_id = turn.user_id.to_string();
+    let actor_id = turn.contact_id.to_string();
     let subject = entity_resolver
         .resolve(
             pool,
@@ -750,7 +759,7 @@ async fn resolve_fact_entities(
                 confidence,
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
-                actor_kind: "user",
+                actor_kind: "contact",
             },
         )
         .await
@@ -766,7 +775,7 @@ async fn resolve_fact_entities(
                 confidence,
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
-                actor_kind: "user",
+                actor_kind: "contact",
             },
         )
         .await
@@ -832,8 +841,8 @@ fn entity_fact_edge_intent(
         workspace_id: scope_workspace_id(scope),
         user_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
-        actor_id: turn.user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_id: turn.contact_id.to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
@@ -855,8 +864,8 @@ fn fact_entity_edge_intent(
         workspace_id: scope_workspace_id(scope),
         user_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
-        actor_id: turn.user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_id: turn.contact_id.to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
@@ -916,14 +925,14 @@ fn entity_edge_properties(
 }
 
 async fn workspace_degraded(pool: &PgPool, turn: &SessionTurn) -> Result<bool, HandlerError> {
-    let scope = ScopeContext::workspace(turn.workspace_id.clone());
+    let scope = turn_tenant_scope(turn).map_err(HandlerError::from)?;
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .map_err(HandlerError::from)?;
     let degraded = sqlx::query_scalar::<_, bool>(
         "SELECT slow_path_degraded FROM moa.workspace_state WHERE workspace_id = $1",
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(scope.tenant_id().to_string())
     .fetch_optional(conn.as_mut())
     .await
     .map_err(HandlerError::from)?
@@ -955,7 +964,7 @@ async fn dedup_fact_uid(
           AND (($6::text IS NULL AND user_id IS NULL) OR user_id = $6)
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(scope.tenant_id().to_string())
     .bind(turn.session_id.0)
     .bind(turn_seq)
     .bind(hash)
@@ -988,7 +997,7 @@ async fn insert_dedup(
         ON CONFLICT (workspace_id, session_id, turn_seq, fact_hash) DO NOTHING
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(scope.tenant_id().to_string())
     .bind(user_id.as_deref())
     .bind(turn.session_id.0)
     .bind(turn_seq)
@@ -1020,7 +1029,7 @@ async fn write_dlq(
         VALUES ($1, $2, $3, $4, $5, $6, now() + INTERVAL '5 minutes')
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(scope.tenant_id().to_string())
     .bind(user_id.as_deref())
     .bind(turn.session_id.0)
     .bind(turn_seq)
@@ -1070,13 +1079,13 @@ enum ApplyOutcome {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{ContextMessage, SessionId, UserId, WorkspaceId};
+    use moa_core::{ContactId, ContextMessage, SessionId, TenantId};
     use moa_memory_graph::{EdgeLabel, PiiClass};
     use moa_memory_pii::{PiiCategory, PiiResult, PiiSpan, classify_heuristic};
 
     use super::{
         entity_fact_edge_intent, fact_entity_edge_intent, fact_object_edge_label, redact_fact,
-        turn_transcript,
+        turn_tenant_scope, turn_transcript,
     };
     use crate::{ExtractedFact, ExtractedFactScopeHint, fact_hash};
 
@@ -1188,7 +1197,7 @@ mod tests {
     fn subject_edge_stays_relates_to_object_edge_gets_typed_label() {
         // Pins: predicate semantics live only on the Fact-to-object edge.
         let turn = test_turn();
-        let scope = moa_core::ScopeContext::workspace(turn.workspace_id.clone());
+        let scope = turn_tenant_scope(&turn).expect("test turn carries tenant UUID scope");
         let entity_uid = uuid::Uuid::now_v7();
         let fact_uid = uuid::Uuid::now_v7();
 
@@ -1236,7 +1245,7 @@ mod tests {
             object: "secret sk-live".to_string(),
             summary: summary.to_string(),
             source_chunk: 3,
-            scope_hint: ExtractedFactScopeHint::User,
+            scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.93),
         };
         let hash = fact_hash(&fact).expect("fact hashes");
@@ -1255,9 +1264,11 @@ mod tests {
     }
 
     fn test_turn() -> crate::SessionTurn {
+        let tenant_id = TenantId(uuid::Uuid::from_u128(0x1000));
+        let contact_id = ContactId(uuid::Uuid::from_u128(0x2000));
         crate::SessionTurn {
-            workspace_id: WorkspaceId::new("workspace-a"),
-            user_id: UserId::new("user-a"),
+            tenant_id,
+            contact_id,
             session_id: SessionId(uuid::Uuid::now_v7()),
             turn_seq: 1,
             transcript: "user: checkout-service depends on libfoo".to_string(),

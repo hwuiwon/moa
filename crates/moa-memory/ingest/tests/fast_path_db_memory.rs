@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, ScopedConn, UserId, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{ContactId, ScopeContext, ScopedConn, TenantId, traits::EmbeddingProvider};
 use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastPathCtx,
@@ -109,7 +109,7 @@ fn test_ctx(
     delay: Duration,
     pii_class: PiiClass,
 ) -> FastPathCtx {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
     test_ctx_for_scope(pool, scope, conflict, delay, pii_class)
 }
 
@@ -121,10 +121,7 @@ fn user_test_ctx(
     delay: Duration,
     pii_class: PiiClass,
 ) -> FastPathCtx {
-    let scope = ScopeContext::user(
-        WorkspaceId::new(workspace_id.to_string()),
-        UserId::new(user_id.to_string()),
-    );
+    let scope = ScopeContext::contact(TenantId::from(workspace_id), ContactId(user_id));
     test_ctx_for_scope(pool, scope, conflict, delay, pii_class)
 }
 
@@ -174,7 +171,7 @@ fn user_remember_request(workspace_id: Uuid, user_id: Uuid, text: &str) -> FastR
 }
 
 async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> ScopedConn<'a> {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .expect("begin scoped test transaction");
@@ -241,10 +238,7 @@ async fn node_valid_to_for_user(
     user_id: Uuid,
     uid: Uuid,
 ) -> Option<DateTime<Utc>> {
-    let scope = ScopeContext::user(
-        WorkspaceId::new(workspace_id.to_string()),
-        UserId::new(user_id.to_string()),
-    );
+    let scope = ScopeContext::contact(TenantId::from(workspace_id), ContactId(user_id));
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .expect("begin user scoped test transaction");

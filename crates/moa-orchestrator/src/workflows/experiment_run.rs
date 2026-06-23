@@ -13,8 +13,8 @@ use moa_core::wire::{
     QueueMessageRequest,
 };
 use moa_core::{
-    AgentSessionSelection, Channel, MemoryScope, MoaError, ModelId, SessionId, SessionMeta,
-    SessionStatus, SessionStore, UserId, WorkspaceId, record_experiment_run,
+    ActionRuleScope, AgentSessionSelection, Channel, MoaError, ModelId, SessionActorRef, SessionId,
+    SessionMeta, SessionStatus, SessionStore, TenantId, WorkspaceId, record_experiment_run,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTargetKind,
@@ -60,8 +60,8 @@ const PLAN_STATUS_POLL_MAX_INTERVAL: Duration = Duration::from_secs(8);
 /// Workflow input for one live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRunWorkflowRequest {
-    /// Workspace already authorized by `Experiments/run`.
-    pub workspace_id: WorkspaceId,
+    /// Tenant already authorized by `Experiments/run`.
+    pub tenant_id: TenantId,
     /// Durable experiment run identifier.
     pub run_uid: Uuid,
     /// Serialized experiment target payload.
@@ -112,7 +112,10 @@ impl ExperimentRun for ExperimentRunImpl {
             return Err(TerminalError::new_with_code(404, "experiment run id mismatch").into());
         }
 
-        ctx.set(K_WORKSPACE_ID, Json(request.workspace_id.clone()));
+        ctx.set(
+            K_WORKSPACE_ID,
+            Json(workspace_id_for_tenant(request.tenant_id)),
+        );
         ctx.set(K_RUN_UID, Json(request.run_uid));
         ctx.set(K_SCORE_RUN_ID, Json(request.score_run_id));
         ctx.set(K_STATUS, Json(ExperimentRunStatus::Running));
@@ -126,7 +129,7 @@ impl ExperimentRun for ExperimentRunImpl {
                 let failed_at = durable_utc_now(&ctx).await?;
                 if let Err(update_error) = persist_run_status(
                     &ctx,
-                    request.workspace_id,
+                    request.tenant_id,
                     request.run_uid,
                     ExperimentRunStatus::Failed,
                     Some(message),
@@ -206,14 +209,14 @@ async fn run_experiment_target(
 
 async fn persist_run_status(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_uid: Uuid,
     status: ExperimentRunStatus,
     error: Option<String>,
     completed_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<(), HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         update_run_status(pool, scope, run_uid, status, error, completed_at).await?;
         Ok::<_, HandlerError>(Json::from(()))
@@ -225,7 +228,7 @@ async fn persist_run_status(
 
 async fn persist_attached_session(
     ctx: &WorkflowContext<'_>,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     session_id: SessionId,
 ) -> Result<(), HandlerError> {
@@ -249,7 +252,7 @@ async fn durable_utc_now(ctx: &WorkflowContext<'_>) -> Result<chrono::DateTime<U
 
 async fn update_run_status(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     status: ExperimentRunStatus,
     error: Option<String>,
@@ -266,7 +269,7 @@ async fn update_run_status(
 
 async fn attach_session(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     session_id: SessionId,
 ) -> Result<ExperimentRunRecord, HandlerError> {
@@ -279,7 +282,7 @@ async fn attach_session(
 
 async fn attach_workflow_run(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     workflow_run_uid: Uuid,
 ) -> Result<ExperimentRunRecord, HandlerError> {
@@ -291,37 +294,38 @@ async fn attach_workflow_run(
 }
 
 fn new_session_meta(
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     model: ModelId,
     identity: &Identity,
 ) -> Result<SessionMeta, HandlerError> {
     let now = Utc::now();
     Ok(SessionMeta {
         id: SessionId::new(),
-        workspace_id,
-        user_id: session_user_id(identity)?,
+        tenant_id,
         title: Some("Experiment agent-loop run".to_string()),
         status: SessionStatus::Created,
         channel: Channel::Chat,
         model,
         created_at: now,
         updated_at: now,
+        created_by: Some(session_actor_ref(identity)?),
         ..SessionMeta::default()
     })
 }
 
-fn session_user_id(identity: &Identity) -> Result<UserId, HandlerError> {
+fn session_actor_ref(identity: &Identity) -> Result<SessionActorRef, HandlerError> {
     match identity.identity_type {
-        IdentityType::User => Ok(UserId::new(identity.id.to_string())),
-        IdentityType::Agent => Ok(UserId::new(
-            identity
-                .acting_on_behalf_of
-                .unwrap_or(identity.id)
-                .to_string(),
-        )),
+        IdentityType::User | IdentityType::Agent => Ok(SessionActorRef::Identity {
+            id: identity.acting_on_behalf_of.unwrap_or(identity.id),
+        }),
         IdentityType::Service => Err(TerminalError::new_with_code(
             403,
             "service identities cannot create agent-loop experiment sessions",
+        )
+        .into()),
+        IdentityType::Contact => Err(TerminalError::new_with_code(
+            403,
+            "contact identities cannot create agent-loop experiment sessions",
         )
         .into()),
     }
@@ -358,6 +362,7 @@ fn identity_type_header(identity_type: IdentityType) -> &'static str {
         IdentityType::User => "user",
         IdentityType::Agent => "agent",
         IdentityType::Service => "service",
+        IdentityType::Contact => "contact",
     }
 }
 
@@ -371,10 +376,7 @@ fn annotate_run_span(
 ) {
     let span = tracing::Span::current();
     span.set_attribute("moa.experiment.run_uid", request.run_uid.to_string());
-    span.set_attribute(
-        "moa.experiment.workspace_id",
-        request.workspace_id.to_string(),
-    );
+    span.set_attribute("moa.experiment.tenant_id", request.tenant_id.to_string());
     span.set_attribute(
         "moa.experiment.run_score_run_id",
         request.score_run_id.to_string(),
@@ -384,8 +386,12 @@ fn annotate_run_span(
     }
 }
 
-fn workspace_scope(workspace_id: WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace { workspace_id }
+fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
+    ActionRuleScope::Tenant { tenant_id }
+}
+
+fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
+    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>
@@ -563,8 +569,8 @@ mod tests {
     fn trial_record(trial_key: &str, status: ExperimentTrialStatus) -> ExperimentTrialRecord {
         let now = Utc::now();
         ExperimentTrialRecord {
-            scope: MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new("workspace-test"),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: TenantId::new(),
             },
             trial_uid: Uuid::now_v7(),
             run_uid: fixture_uuid(100),

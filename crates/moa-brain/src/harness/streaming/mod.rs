@@ -8,7 +8,7 @@ use std::time::Instant;
 use moa_core::{
     CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
     ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStore,
-    StopReason, TraceContext, WorkingContext, record_turn_llm_call_duration,
+    StopReason, TraceContext, WorkingContext, WorkspaceId, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
@@ -87,7 +87,9 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 moa.pipeline.total_tokens = tracing::field::Empty,
             );
             let workspace_root = match &tool_router {
-                Some(router) => router.workspace_root(&session.workspace_id).await,
+                Some(router) => router
+                    .workspace_root(&WorkspaceId::new(session.tenant_id.to_string()))
+                    .await,
                 None => None,
             };
             let (mut ctx, active_canary) = build_turn_context(BuildTurnContextOptions {
@@ -116,7 +118,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             enforce_workspace_budget(
                 &session_store,
                 &session_id,
-                &session.workspace_id,
+                &WorkspaceId::new(session.tenant_id.to_string()),
                 pipeline.daily_workspace_budget_cents(),
                 runtime_tx,
                 event_tx,
@@ -419,7 +421,7 @@ async fn register_selected_skill_files(
     router.set_trusted_sandbox_files(session, files).await;
     tracing::info!(
         session_id = %session.id,
-        workspace_id = %session.workspace_id,
+        tenant_id = %session.tenant_id,
         file_count,
         "registered selected skill package files for lazy sandbox installation"
     );

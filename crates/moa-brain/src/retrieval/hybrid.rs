@@ -23,7 +23,7 @@ use crate::retrieval::legs::{
     timed_leg, vector_leg as run_vector_leg, write_retrieval_lineage,
 };
 use crate::retrieval::ranking::{
-    FeatureRanker, RankingConfig, RankingMode, normalize_tokens, ranking_fingerprint,
+    FeatureRanker, RankingConfig, normalize_tokens, ranking_fingerprint,
 };
 use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
@@ -352,9 +352,7 @@ impl HybridRetriever {
             return Ok(Vec::new());
         }
 
-        let Some(workspace_id) = req.scope.workspace_id() else {
-            return run_vector_leg(self.vector.as_ref(), req).await;
-        };
+        let tenant_id = req.scope.tenant_id();
         let state = self.vector_backend_state(req).await?;
         if state.is_dual_read_active() {
             return self.dual_read_vector_leg(req).await;
@@ -373,8 +371,8 @@ impl HybridRetriever {
                 };
             }
             tracing::warn!(
-                workspace_id = %workspace_id,
-                "workspace is configured for Turbopuffer but no client is configured; falling back to pgvector"
+                tenant_id = %tenant_id,
+                "tenant is configured for Turbopuffer but no client is configured; falling back to pgvector"
             );
         }
 
@@ -383,9 +381,7 @@ impl HybridRetriever {
 
     async fn dual_read_vector_leg(&self, req: &RetrievalRequest) -> Result<Vec<LegCandidate>> {
         let Some(turbopuffer) = &self.turbopuffer else {
-            tracing::warn!(
-                "workspace is in vector dual-read but no Turbopuffer client is configured"
-            );
+            tracing::warn!("tenant is in vector dual-read but no Turbopuffer client is configured");
             return run_vector_leg(self.vector.as_ref(), req).await;
         };
 
@@ -419,22 +415,16 @@ impl HybridRetriever {
                 .execute(conn.as_mut())
                 .await?;
         }
-        let workspace_id = req.scope.workspace_id().map(|id| id.to_string());
-        let row = match workspace_id {
-            Some(workspace_id) => {
-                sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
-                    r#"
+        let row = sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
+            r#"
                 SELECT vector_backend, vector_backend_state, dual_read_until
                 FROM moa.workspace_state
-                WHERE workspace_id = $1
+                WHERE tenant_id = $1
                 "#,
-                )
-                .bind(workspace_id)
-                .fetch_optional(conn.as_mut())
-                .await?
-            }
-            None => None,
-        };
+        )
+        .bind(req.scope.tenant_id().0)
+        .fetch_optional(conn.as_mut())
+        .await?;
         conn.commit().await?;
         Ok(row
             .map(
@@ -645,10 +635,7 @@ fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> 
 }
 
 fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
-    match config.mode {
-        RankingMode::Legacy => apply_layer_bias(hits),
-        RankingMode::FeatureV1 => apply_feature_ranking(hits, config, req),
-    }
+    apply_feature_ranking(hits, config, req);
 }
 
 fn apply_feature_ranking(
@@ -679,47 +666,23 @@ fn apply_feature_ranking(
     });
 }
 
-pub(crate) fn apply_layer_bias(hits: &mut [RetrievalHit]) {
-    for hit in hits.iter_mut() {
-        hit.score *= match hit.node.scope.as_str() {
-            "user" => 1.3,
-            "workspace" => 1.1,
-            _ => 1.0,
-        };
-    }
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.uid.cmp(&right.uid))
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use moa_core::TenantId;
     use moa_memory_graph::PiiClass;
     use uuid::Uuid;
 
     use super::*;
     use crate::retrieval::reranker::{RerankHit, Reranker};
 
-    #[test]
-    fn layer_bias_prefers_user_over_workspace_for_matching_scores() {
-        let user_uid = Uuid::now_v7();
-        let workspace_uid = Uuid::now_v7();
-        let mut hits = vec![
-            hit(workspace_uid, "workspace", 1.0),
-            hit(user_uid, "user", 1.0),
-        ];
-
-        apply_layer_bias(&mut hits);
-
-        assert_eq!(hits[0].uid, user_uid);
-        assert!(hits[0].score > hits[1].score);
+    fn tenant_scope() -> MemoryScope {
+        MemoryScope::Tenant {
+            tenant_id: TenantId::from(Uuid::from_u128(0x100)),
+        }
     }
 
     #[tokio::test]
@@ -735,7 +698,7 @@ mod tests {
             seeds: Vec::new(),
             query_text: "deploy provider".to_string(),
             query_embedding: Vec::new(),
-            scope: MemoryScope::Global,
+            scope: tenant_scope(),
             label_filter: None,
             max_pii_class: PiiClass::Restricted,
             k_final: 1,
@@ -759,57 +722,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mode_preserves_apply_layer_bias_ordering() {
-        // Pins: Legacy remains a rollback path for the pre-FeatureV1 ordering.
-        let user_uid = Uuid::now_v7();
-        let workspace_uid = Uuid::now_v7();
-        let mut expected = vec![
-            hit(workspace_uid, "workspace", 1.0),
-            hit(user_uid, "user", 1.0),
-        ];
-        apply_layer_bias(&mut expected);
-
-        let mut ranked = vec![
-            hit(workspace_uid, "workspace", 1.0),
-            hit(user_uid, "user", 1.0),
-        ];
-        rank_hydrated_hits(
-            &mut ranked,
-            &RankingConfig {
-                mode: RankingMode::Legacy,
-                weights: Default::default(),
-            },
-            &RetrievalRequest {
-                seeds: Vec::new(),
-                query_text: "workspace fact".to_string(),
-                query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
-                label_filter: None,
-                max_pii_class: PiiClass::Restricted,
-                k_final: 2,
-                use_reranker: false,
-                strategy: None,
-                as_of: None,
-                ranking_reference_time: None,
-                lineage: None,
-                disable_leg_timeouts: false,
-                disable_graph_expansion: false,
-            },
-        );
-
-        assert_eq!(
-            ranked.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
-            expected.iter().map(|hit| hit.uid).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            ranked.iter().map(|hit| hit.score).collect::<Vec<_>>(),
-            expected.iter().map(|hit| hit.score).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn feature_mode_rescues_lexical_non_vector_hit_over_vector_noise() {
-        // Pins: FeatureV1 can promote exact lexical hits that vector retrieval missed.
+    fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
+        // Pins: deterministic ranking can promote exact lexical hits that vector retrieval missed.
         let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("test timestamp should parse")
             .with_timezone(&Utc);
@@ -846,7 +760,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "contact email".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,
@@ -864,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_mode_rescue_skips_graph_lexical_neighbors() {
+    fn feature_ranker_rescue_skips_graph_lexical_neighbors() {
         // Pins: lexical rescue is for lexical-only hits, not graph-expanded neighbors.
         let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("test timestamp should parse")
@@ -902,7 +816,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "regional network".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,
@@ -920,8 +834,8 @@ mod tests {
     }
 
     #[test]
-    fn feature_mode_rescues_graph_only_expansion_hit() {
-        // Pins: FeatureV1 can promote graph-only expansion hits that vector and lexical missed.
+    fn feature_ranker_rescues_graph_only_expansion_hit() {
+        // Pins: deterministic ranking can promote graph-only expansion hits that vector and lexical missed.
         let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("test timestamp should parse")
             .with_timezone(&Utc);
@@ -958,7 +872,7 @@ mod tests {
                 seeds: Vec::new(),
                 query_text: "library owner".to_string(),
                 query_embedding: Vec::new(),
-                scope: MemoryScope::Global,
+                scope: tenant_scope(),
                 label_filter: None,
                 max_pii_class: PiiClass::Restricted,
                 k_final: 2,

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use moa_core::{Attachment, MemoryScope, ModelId, SessionId, WorkspaceId};
+use moa_core::{ActionRuleScope, Attachment, ModelId, SessionId, TenantId};
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
     ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
@@ -139,8 +139,8 @@ fn trial_record_round_trips_through_public_model_offline() {
     let session_id = SessionId::new();
     let workflow_run_uid = Uuid::now_v7();
     let trial = ExperimentTrialRecord {
-        scope: MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace-test"),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: TenantId::from(Uuid::now_v7()),
         },
         trial_uid: Uuid::now_v7(),
         run_uid: Uuid::now_v7(),
@@ -200,8 +200,8 @@ fn record_for_target(
     let now = Utc::now();
 
     ExperimentRunRecord {
-        scope: MemoryScope::Workspace {
-            workspace_id: WorkspaceId::new("workspace-test"),
+        scope: ActionRuleScope::Tenant {
+            tenant_id: TenantId::from(Uuid::now_v7()),
         },
         run_uid: Uuid::now_v7(),
         name: "experiment run".to_string(),

@@ -1,6 +1,9 @@
 //! Integration tests for OCSF authentication event emission.
 
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::{
+    TenantId,
+    traits::{Identity, IdentityType},
+};
 use moa_ocsf::{emit_authn_success, signing};
 use uuid::Uuid;
 
@@ -15,7 +18,7 @@ async fn emit_authn_success_inserts_signed_security_event() {
     let identity = Identity {
         identity_type: IdentityType::User,
         id: user_id,
-        tenant_id,
+        tenant_id: TenantId::from(tenant_id),
         api_key_id: None,
         acting_on_behalf_of: None,
     };

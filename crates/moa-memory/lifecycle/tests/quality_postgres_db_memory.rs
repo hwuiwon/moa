@@ -1,7 +1,9 @@
 //! Postgres-backed checks for memory quality scoring and cache freshness.
 
 use chrono::Utc;
-use moa_core::{Channel, ModelId, SessionId, SessionMeta, SessionStore as _, UserId, WorkspaceId};
+use moa_core::{
+    Channel, ModelId, SessionId, SessionMeta, SessionStore as _, TenantId, UserId, WorkspaceId,
+};
 use moa_memory_lifecycle::compute_quality_scores;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
@@ -24,7 +26,8 @@ async fn quality_scores_use_task_segment_outcomes_and_bump_workspace_version_onc
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = WorkspaceId::new(format!("quality-{}", Uuid::now_v7().simple()));
+    let tenant_id = TenantId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new("quality-user");
     let session_id = SessionId::new();
     let node_uid = Uuid::now_v7();
@@ -34,8 +37,7 @@ async fn quality_scores_use_task_segment_outcomes_and_bump_workspace_version_onc
         .store()
         .create_session(SessionMeta {
             id: session_id,
-            workspace_id: workspace_id.clone(),
-            user_id: user_id.clone(),
+            tenant_id,
             channel: Channel::Chat,
             model: ModelId::new("mock"),
             ..SessionMeta::default()

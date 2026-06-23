@@ -354,8 +354,10 @@ mod tests {
             review_id,
             envelope: moa_core::ActionEnvelope {
                 review_id,
-                workspace_id: moa_core::WorkspaceId::new("workspace"),
-                user_id: moa_core::UserId::new("user"),
+                tenant_id: moa_core::TenantId::from(uuid::Uuid::from_u128(1)),
+                requested_by: moa_core::SessionActorRef::Identity {
+                    id: uuid::Uuid::from_u128(2),
+                },
                 session_id: Some(session_id),
                 sub_agent_id: None,
                 tool_call_id: moa_core::ToolCallId(review_id),

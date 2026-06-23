@@ -7,7 +7,8 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    CompletionRequest, Event, MessageRole, ModelCapabilities, Result, SessionMeta, SessionStore,
+    CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event, MessageRole,
+    ModelCapabilities, ModelId, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
     TokenPricing, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
@@ -36,10 +37,12 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
     let workspace_id = WorkspaceId::new("stable-prefix");
+    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new("stable-prefix-user");
     let router = Arc::new(ToolRouter::new_local(&workspace).await?);
     router
-        .remember_workspace_root(workspace_id.clone(), workspace.clone())
+        .remember_workspace_root(runtime_workspace_id, workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider());
@@ -60,12 +63,11 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     );
 
     let first_session_id = session_store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id: user_id.clone(),
-            model: config.models.main.clone().into(),
-            ..SessionMeta::default()
-        })
+        .create_session(session_meta(
+            tenant_id,
+            &user_id,
+            config.models.main.clone().into(),
+        ))
         .await?;
     session_store
         .emit_event(
@@ -89,12 +91,11 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
     );
 
     let second_session_id = session_store
-        .create_session(SessionMeta {
-            workspace_id,
-            user_id,
-            model: config.models.main.clone().into(),
-            ..SessionMeta::default()
-        })
+        .create_session(session_meta(
+            tenant_id,
+            &user_id,
+            config.models.main.clone().into(),
+        ))
         .await?;
     session_store
         .emit_event(
@@ -190,4 +191,51 @@ fn stable_prefix_bytes(request: &CompletionRequest) -> Result<Vec<u8>> {
         "tools": request.tools,
     }))
     .map_err(Into::into)
+}
+
+fn session_meta(tenant_id: TenantId, user_id: &UserId, model: ModelId) -> SessionMeta {
+    let contact_id = contact_id_from_user_id(user_id);
+    SessionMeta {
+        tenant_id,
+        contact: Some(contact_ref(tenant_id, contact_id)),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
+        model,
+        ..SessionMeta::default()
+    }
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    uuid::Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
+    uuid::Uuid::parse_str(user_id.as_str())
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> uuid::Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }
 }

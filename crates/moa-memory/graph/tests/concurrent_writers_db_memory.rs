@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ScopeContext, ScopedConn, WorkspaceId};
+use moa_core::{ScopeContext, ScopedConn, TenantId};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::strategy::{Strategy, ValueTree};
@@ -14,6 +14,30 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
+    let workspace_id = workspace_id.as_ref();
+    let tenant_id = Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+    ScopeContext::tenant(tenant_id)
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.as_bytes().iter().copied().enumerate() {
+        let slot = index % 16;
+        bytes[slot] = bytes[slot]
+            .wrapping_mul(31)
+            .wrapping_add(byte)
+            .wrapping_add(index as u8);
+        let mirror = (index * 7 + 3) % 16;
+        bytes[mirror] ^= byte.rotate_left((index % 8) as u32);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
 
 #[derive(Debug, Clone)]
 struct ChangelogEdge {
@@ -31,7 +55,7 @@ async fn configured_test_db() -> Option<TestDb> {
 }
 
 fn scope(workspace_id: &str) -> ScopeContext {
-    ScopeContext::workspace(WorkspaceId::new(workspace_id))
+    tenant_scope(workspace_id)
 }
 
 fn graph_store(test_db: &TestDb, workspace_id: &str) -> AgeGraphStore {

@@ -11,9 +11,9 @@ injection defenses, and audit._
 | Cloud API and messaging | Secure by default | Agents run persistently and users may be offline. |
 
 Usable local mode allows tool execution by default so local development keeps
-moving. Secure cloud mode requires explicit tool enablement per workspace,
-action-policy rules for deny or workspace-admin review, sandboxed code
-execution, and host-side credential access only.
+moving. Secure cloud mode requires explicit tool enablement per tenant,
+action-policy rules for deny or tenant-admin review, sandboxed code execution,
+and host-side credential access only.
 
 ## Identity And Authorization
 
@@ -32,12 +32,13 @@ deployments must keep the Restate handler port internal-only. See
 [Auth Architecture](auth/README.md) and
 [Architecture Policy](15-architecture-policy.md).
 
-Agent-facing contacts use MOA-issued contact JWTs, not trusted edge identity
-headers. Contact JWTs are bounded route/data credentials with explicit scopes,
-structured permissions, workspace id, contact id, and optional agent/session
-allowlists. Issuing a contact token is an admin/integration operation protected
-by normal caller authz; presenting a contact JWT cannot call admin/operator
-APIs or become an OpenFGA principal.
+Agent-facing contacts are end users and use MOA-issued contact JWTs, not
+trusted edge identity headers. Contact JWTs are bounded route/data credentials
+with explicit scopes, structured permissions, tenant id, contact id, and
+optional agent/session allowlists. Issuing a contact token is a tenant
+admin/operator or authorized integration operation protected by normal caller
+authz; presenting a contact JWT cannot call admin/operator APIs or become an
+admin/operator user principal.
 
 Identity verification can be initiated by workflows or skills, but the platform
 contact service enforces challenge creation, OTP-style completion, token
@@ -55,7 +56,7 @@ Supported patterns:
 
 | Pattern | Use | Boundary |
 |---|---|---|
-| Bundled resource access | Git clone/push, workspace setup | Host prepares access without exposing raw token to the model. |
+| Bundled resource access | Git clone/push and tenant setup | Host prepares access without exposing raw token to the model. |
 | MCP credential proxy | External tools and SaaS APIs | Host enriches MCP calls with real credentials. |
 | Token Vault provider | User OAuth tokens | Provider retrieves user-approved tokens for trusted host-side calls. |
 | Environment-backed provider keys | LLMs, embeddings, hand providers | Runtime constructs providers from env var names, not prompt-visible values. |
@@ -90,7 +91,7 @@ Current defenses:
 
 - The context pipeline preserves instruction precedence.
 - Tool output is wrapped so lower-authority text cannot override system,
-  workspace, user, or skill instructions.
+  workspace-default, tenant, contact/session, or skill instructions.
 - A per-turn canary is injected into tool-enabled requests.
 - Tool calls are blocked if they leak the active canary or any
   `moa_canary_*` marker.
@@ -106,11 +107,14 @@ Action-policy decisions are scoped to parsed tool intent, not raw command
 strings. Shell matching splits command chains so a rule for one command does not
 cover `&&`, `||`, `;`, or pipe-connected follow-up commands.
 
-Default tool policy is auto-mode `allow`. Workspace/global rules and config can
-return `allow`, `deny`, or `admin_review`. `admin_review` persists a
-workspace-action review row plus event, returns a pending-review tool result to
-the model, and does not block the root or sub-agent workflow. Workspace admins
-clear or deny the stored action later through the action-review service.
+Default tool policy is auto-mode `allow`. Workspace-level policy rows are
+inherited defaults for tenants, and tenant-level policy rows override those
+defaults. Rules and config can return `allow`, `deny`, or `admin_review`.
+`admin_review` persists a tenant action-review row plus event, returns a
+pending-review tool result to the model, and does not block the root or
+sub-agent workflow. Tenant admins clear or deny the stored action later through
+the action-review service; workspace admins manage inherited defaults through
+explicit control-plane operations.
 
 ## Security Audit
 

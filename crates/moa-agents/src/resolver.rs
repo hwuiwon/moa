@@ -11,10 +11,10 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifactRevision};
 use moa_core::{
-    AgentActionPolicy, AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode,
-    AgentModelPolicy, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
-    AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode, AgentWorkflowPolicy, LockedToolRef,
-    MemoryScope, MoaError, ResolvedArtifactRevisionRef, Result, ScopeContext, ScopedConn,
+    ActionRuleScope, AgentActionPolicy, AgentContext, AgentKnowledgePolicy,
+    AgentKnowledgeScopeMode, AgentModelPolicy, AgentPolicySnapshot, AgentRevisionLock,
+    AgentSkillPolicy, AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode,
+    AgentWorkflowPolicy, LockedToolRef, MoaError, ResolvedArtifactRevisionRef, Result, ScopedConn,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -39,7 +39,7 @@ impl AgentResolver {
     /// Resolves an active installation pointer to a pinned runtime policy.
     pub async fn resolve_installation(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         installation_uid: Uuid,
     ) -> Result<AgentRuntimePolicy> {
         let pointer = self
@@ -56,7 +56,7 @@ impl AgentResolver {
     /// Resolves an exact published agent revision without moving any deployment pointer.
     pub async fn resolve_exact_revision(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         revision_uid: Uuid,
     ) -> Result<AgentRuntimePolicy> {
         let revision = load_agent_revision(&self.pool, scope, revision_uid).await?;
@@ -65,7 +65,7 @@ impl AgentResolver {
 
     async fn resolve_revision_with_pointer(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         pointer: AgentInstallationPointer,
     ) -> Result<AgentRuntimePolicy> {
         let revision = load_agent_revision(&self.pool, scope, pointer.current_revision_uid).await?;
@@ -75,7 +75,7 @@ impl AgentResolver {
 
     async fn resolve_loaded_revision(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         revision: StoredArtifactRevision,
         pointer: Option<AgentInstallationPointer>,
     ) -> Result<AgentRuntimePolicy> {
@@ -178,10 +178,10 @@ impl AgentResolver {
 
     async fn load_installation_pointer(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         installation_uid: Uuid,
     ) -> Result<Option<AgentInstallationPointer>> {
-        let mut conn = ScopedConn::begin(&self.pool, &ScopeContext::from(scope.clone())).await?;
+        let mut conn = scoped_conn_for_artifact_scope(&self.pool, scope).await?;
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
@@ -217,7 +217,7 @@ impl AgentResolver {
 
     async fn resolve_artifact_dependencies(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         refs: &[(String, ArtifactRef)],
     ) -> Result<Vec<ResolvedArtifactRevisionRef>> {
         let registry = ArtifactRegistry::new(self.pool.clone());
@@ -264,7 +264,7 @@ impl AgentResolver {
 
 async fn load_dependency_revision(
     registry: &ArtifactRegistry,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     loaded_revisions: &mut BTreeMap<(String, String), StoredArtifactRevision>,
     kind: ArtifactKind,
     name: &str,
@@ -285,7 +285,7 @@ async fn load_dependency_revision(
 
 async fn load_agent_revision(
     pool: &PgPool,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     revision_uid: Uuid,
 ) -> Result<StoredArtifactRevision> {
     let registry = ArtifactRegistry::new(pool.clone());
@@ -310,6 +310,16 @@ async fn load_agent_revision(
         )));
     }
     Ok(revision)
+}
+
+async fn scoped_conn_for_artifact_scope<'p>(
+    pool: &'p PgPool,
+    scope: &ActionRuleScope,
+) -> Result<ScopedConn<'p>> {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopedConn::begin_control_plane(pool).await,
+        ActionRuleScope::Tenant { tenant_id } => ScopedConn::begin_tenant(pool, *tenant_id).await,
+    }
 }
 
 fn agent_definition(revision: &StoredArtifactRevision) -> Result<&AgentDefinition> {

@@ -17,6 +17,15 @@ string_id!(
     pub struct WorkspaceId
 );
 uuid_id!(
+    /// Identifier for a tenant runtime boundary.
+    pub struct TenantId
+);
+impl From<uuid::Uuid> for TenantId {
+    fn from(value: uuid::Uuid) -> Self {
+        Self(value)
+    }
+}
+uuid_id!(
     /// Identifier for a brain execution instance.
     pub struct BrainId
 );

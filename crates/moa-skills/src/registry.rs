@@ -7,8 +7,10 @@ use moa_artifacts::registry::{
     StoredArtifactRevision, insert_published_revision,
 };
 use moa_core::{
-    MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SkillMetadata, UserId, WorkspaceId,
+    ActionRuleScope, MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SkillMetadata,
+    TenantId, UserId, WorkspaceId,
 };
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -87,19 +89,19 @@ impl Skill {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSkill {
     /// Scope that owns the skill.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Submitted package files.
     pub package: SkillPackage,
 }
 
 impl NewSkill {
     /// Builds an insertable skill from a submitted package.
-    pub fn from_package(scope: MemoryScope, package: SkillPackage) -> Self {
+    pub fn from_package(scope: ActionRuleScope, package: SkillPackage) -> Self {
         Self { scope, package }
     }
 
     /// Builds an insertable one-file skill package from rendered `SKILL.md` markdown.
-    pub fn from_skill_markdown(scope: MemoryScope, markdown: String) -> Self {
+    pub fn from_skill_markdown(scope: ActionRuleScope, markdown: String) -> Self {
         Self {
             scope,
             package: SkillPackage::from_skill_markdown(markdown),
@@ -143,7 +145,7 @@ impl SkillRegistry {
     }
 
     /// Returns all visible published skills for the provided scope.
-    pub async fn load_for_scope(&self, scope: &MemoryScope) -> Result<Vec<Skill>> {
+    pub async fn load_for_scope(&self, scope: &ActionRuleScope) -> Result<Vec<Skill>> {
         let packages = self.load_packages_for_scope(scope).await?;
         Ok(packages.into_iter().map(|package| package.skill).collect())
     }
@@ -153,9 +155,7 @@ impl SkillRegistry {
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<Vec<SkillMetadata>> {
-        let scope = MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        };
+        let scope = workspace_artifact_scope(workspace_id);
         let mut metadata = self
             .load_for_scope(&scope)
             .await?
@@ -173,9 +173,8 @@ impl SkillRegistry {
 
     /// Loads the full rendered `SKILL.md` markdown for a named workspace skill.
     pub async fn load_full(&self, workspace_id: &WorkspaceId, skill_name: &str) -> Result<String> {
-        let scope = MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        };
+        let scope = workspace_artifact_scope(workspace_id);
+        let render_scope = workspace_memory_scope(workspace_id);
         let package = self
             .load_package_by_name(&scope, skill_name)
             .await?
@@ -184,7 +183,7 @@ impl SkillRegistry {
         crate::render::render(
             &package.skill,
             &skill_md,
-            &scope,
+            &render_scope,
             &crate::render::SkillRenderContext::new(self.pool.clone()),
         )
         .await
@@ -193,7 +192,7 @@ impl SkillRegistry {
     /// Loads the most specific visible published skill matching the provided name.
     pub async fn load_by_name(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         skill_name: &str,
     ) -> Result<Option<Skill>> {
         Ok(self
@@ -205,7 +204,7 @@ impl SkillRegistry {
     /// Loads the UTF-8 `SKILL.md` file for a visible skill artifact revision.
     pub async fn load_skill_markdown(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         skill_uid: Uuid,
     ) -> Result<String> {
         let package = self
@@ -218,7 +217,7 @@ impl SkillRegistry {
     /// Loads the most specific visible package matching the provided name.
     pub async fn load_package_by_name(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         skill_name: &str,
     ) -> Result<Option<StoredSkillPackage>> {
         let registry = ArtifactRegistry::new(self.pool.clone());
@@ -235,7 +234,7 @@ impl SkillRegistry {
     /// Loads a visible package by skill artifact revision id.
     pub async fn load_package_by_uid(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
         skill_uid: Uuid,
     ) -> Result<Option<StoredSkillPackage>> {
         let registry = ArtifactRegistry::new(self.pool.clone());
@@ -252,7 +251,7 @@ impl SkillRegistry {
     /// Loads all visible published packages from the provided scope.
     pub async fn load_packages_for_scope(
         &self,
-        scope: &MemoryScope,
+        scope: &ActionRuleScope,
     ) -> Result<Vec<StoredSkillPackage>> {
         let registry = ArtifactRegistry::new(self.pool.clone());
         let summaries = registry
@@ -299,7 +298,7 @@ impl SkillRegistry {
 }
 
 struct ValidatedNewSkill {
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     package: ValidatedSkillPackage,
 }
 
@@ -313,10 +312,41 @@ impl ValidatedNewSkill {
 }
 
 async fn publish_skill_revision(pool: &PgPool, skill: &ValidatedNewSkill) -> Result<Uuid> {
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::from(skill.scope.clone())).await?;
+    let mut conn = ScopedConn::begin(pool, &artifact_scope_context(&skill.scope)).await?;
     let revision_uid = insert_skill_artifact(conn.as_mut(), skill).await?;
     conn.commit().await?;
     Ok(revision_uid)
+}
+
+pub(crate) fn workspace_artifact_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+    ActionRuleScope::Tenant {
+        tenant_id: tenant_id_from_workspace(workspace_id),
+    }
+}
+
+fn workspace_memory_scope(workspace_id: &WorkspaceId) -> MemoryScope {
+    MemoryScope::Tenant {
+        tenant_id: tenant_id_from_workspace(workspace_id),
+    }
+}
+
+fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
+        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+    }
+}
+
+fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> TenantId {
+    if let Ok(uuid) = Uuid::parse_str(workspace_id.as_str()) {
+        return TenantId::from(uuid);
+    }
+    let digest = Sha256::digest(workspace_id.as_str().as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
 }
 
 async fn insert_skill_artifact(

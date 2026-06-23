@@ -8,8 +8,8 @@ use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, REGRESSED_SKILL, SESSION_WITH_5_TOOL_CALLS,
     active_semantic_version, artifact_revision_count, configured_test_db, learning_store,
-    load_session_fixture, scripted_router, seed_skill, skill_row_count, test_config,
-    workspace_scope,
+    load_session_fixture, scripted_router, seed_skill, session_workspace_id, skill_row_count,
+    test_config, workspace_scope,
 };
 
 #[tokio::test]
@@ -19,8 +19,9 @@ async fn improver_with_changed_body_bumps_minor_version() {
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
-    let existing = seed_skill(&test_db, scope.clone(), BASELINE_SKILL).await;
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
+    let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
 
     let result = improve_skill_with_learning(
         &config,
@@ -48,7 +49,7 @@ async fn improver_with_changed_body_bumps_minor_version() {
         "1.2"
     );
     assert_eq!(
-        skill_row_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
+        skill_row_count(&test_db, &workspace_id, "auth-flow").await,
         1
     );
 }
@@ -60,8 +61,9 @@ async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
-    let existing = seed_skill(&test_db, scope.clone(), BASELINE_SKILL).await;
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
+    let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
 
     let result = improve_skill_with_learning(
         &config,
@@ -80,7 +82,7 @@ async fn improver_with_unchanged_body_returns_unchanged_short_circuit() {
         "1.2"
     );
     assert_eq!(
-        skill_row_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
+        skill_row_count(&test_db, &workspace_id, "auth-flow").await,
         1
     );
 }
@@ -92,8 +94,9 @@ async fn improver_with_breaking_changes_to_skill_signature_bumps_major_version()
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
-    let existing = seed_skill(&test_db, scope.clone(), BASELINE_SKILL).await;
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
+    let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
 
     let result = improve_skill_with_learning(
         &config,
@@ -123,8 +126,9 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
-    let existing = seed_skill(&test_db, scope.clone(), BASELINE_SKILL).await;
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
+    let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
     let router = scripted_router([
         IMPROVED_SKILL,
         IMPROVED_SKILL,
@@ -187,11 +191,11 @@ async fn improver_concurrent_attempts_on_same_skill_reuse_draft_proposal() {
         "1.2"
     );
     assert_eq!(
-        skill_row_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
+        skill_row_count(&test_db, &workspace_id, "auth-flow").await,
         1
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &loaded.session.workspace_id, "auth-flow").await,
+        artifact_revision_count(&test_db, &workspace_id, "auth-flow").await,
         2
     );
 }
@@ -203,7 +207,8 @@ async fn improver_emits_review_candidate_with_lineage_payload() {
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let scope = workspace_scope(&loaded.session.workspace_id);
+    let workspace_id = session_workspace_id(&loaded.session);
+    let scope = workspace_scope(&workspace_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
     let store = learning_store(&test_db);
 
@@ -222,7 +227,7 @@ async fn improver_emits_review_candidate_with_lineage_payload() {
         panic!("expected improvement proposal");
     };
     let candidate = store
-        .get_learning_candidate(&loaded.session.workspace_id, proposal.candidate_id)
+        .get_learning_candidate(&workspace_id, proposal.candidate_id)
         .await
         .expect("load improvement candidate")
         .expect("candidate exists");

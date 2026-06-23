@@ -196,7 +196,7 @@ mod tests {
                 predicate: "uses".to_string(),
                 object: "JWT".to_string(),
                 summary: "auth uses JWT".to_string(),
-                scope_hint: ExtractedFactScopeHint::Workspace,
+                scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.87),
             }],
         };
@@ -211,7 +211,7 @@ mod tests {
 
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].source_chunk, 9);
-        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Workspace);
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Tenant);
         assert_eq!(facts[0].confidence, Some(0.87));
         let hash = fact_hash(&facts[0]).expect("hash replayed fact");
         assert_eq!(facts[0].uid, fact_uid_from_hash(&hash));
@@ -235,7 +235,7 @@ mod tests {
                 predicate: "prefers".to_string(),
                 object: "Linear".to_string(),
                 summary: "The user prefers Linear.".to_string(),
-                scope_hint: ExtractedFactScopeHint::User,
+                scope_hint: ExtractedFactScopeHint::Contact,
                 confidence: Some(0.9),
             }],
         };
@@ -275,7 +275,7 @@ mod tests {
                 predicate: "was busy".to_string(),
                 object: "user".to_string(),
                 summary: "The user had a busy week.".to_string(),
-                scope_hint: ExtractedFactScopeHint::User,
+                scope_hint: ExtractedFactScopeHint::Contact,
                 confidence: Some(0.8),
             }],
         };
@@ -309,7 +309,7 @@ mod tests {
                 predicate: "should use".to_string(),
                 object: "repo/control-plane".to_string(),
                 summary: "User 04 should use repo/control-plane.".to_string(),
-                scope_hint: ExtractedFactScopeHint::Workspace,
+                scope_hint: ExtractedFactScopeHint::Tenant,
                 confidence: Some(0.8),
             }],
         };
@@ -322,6 +322,6 @@ mod tests {
 
         let facts = extractor.extract(&[chunk]).await.expect("replay facts");
 
-        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::User);
+        assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Contact);
     }
 }

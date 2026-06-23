@@ -58,7 +58,7 @@ impl ToolRouter {
                 }
                 moa_core::ActionPolicyEffect::AdminReview => {
                     Err(MoaError::PermissionDenied(format!(
-                        "tool {} requires workspace admin review: {}",
+                        "tool {} requires tenant admin review: {}",
                         invocation.name,
                         prepared.input_summary()
                     )))
@@ -163,7 +163,7 @@ impl ToolRouter {
                 }
                 moa_core::ActionPolicyEffect::AdminReview => {
                     Err(MoaError::PermissionDenied(format!(
-                        "tool {} requires workspace admin review: {}",
+                        "tool {} requires tenant admin review: {}",
                         invocation.name,
                         prepared.input_summary()
                     )))

@@ -14,6 +14,7 @@ use crate::enums::{
 };
 use crate::signing;
 use chrono::{DateTime, Utc};
+use moa_core::TenantId;
 use moa_core::traits::{Identity, IdentityType};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -57,6 +58,7 @@ impl ActorInput {
     pub fn from_identity(identity: &Identity) -> Self {
         let prefix = match identity.identity_type {
             IdentityType::User => "user",
+            IdentityType::Contact => "contact",
             IdentityType::Agent => "agent",
             IdentityType::Service => "service",
         };
@@ -172,7 +174,7 @@ pub async fn emit_authn_failure(
 /// Emit an authorization decision event.
 pub async fn emit_authz_decision(
     pool: &PgPool,
-    tenant_id: Uuid,
+    tenant_id: TenantId,
     identity: &Identity,
     object_uid: &str,
     object_type: &str,
@@ -191,7 +193,7 @@ pub async fn emit_authz_decision(
             authz_activity::OTHER
         },
     );
-    insert_pool(pool, tenant_id, &event, Some(object_uid)).await
+    insert_pool(pool, tenant_id.0, &event, Some(object_uid)).await
 }
 
 /// Emit an API-key creation event.
@@ -816,8 +818,9 @@ fn metadata() -> Metadata {
 fn type_id_for_identity(identity_type: IdentityType) -> i32 {
     match identity_type {
         IdentityType::User => 1,
-        IdentityType::Agent => 2,
-        IdentityType::Service => 3,
+        IdentityType::Contact => 2,
+        IdentityType::Agent => 3,
+        IdentityType::Service => 4,
     }
 }
 

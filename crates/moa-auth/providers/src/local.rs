@@ -43,7 +43,7 @@ impl AuthProvider for LocalAuthProvider {
                 Ok(Identity {
                     identity_type,
                     id,
-                    tenant_id: resolved.tenant_id,
+                    tenant_id: moa_core::TenantId::from(resolved.tenant_id),
                     api_key_id: Some(resolved.id),
                     acting_on_behalf_of: None,
                 })

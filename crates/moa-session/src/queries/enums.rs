@@ -74,10 +74,16 @@ mod tests {
             from_db::<ActionPolicyEffect>("action policy effect", "deny").unwrap(),
             ActionPolicyEffect::Deny
         );
-        assert_eq!(ActionRuleScope::Global.as_str(), "global");
         assert_eq!(
-            from_db::<ActionRuleScope>("action policy scope", "workspace").unwrap(),
-            ActionRuleScope::Workspace
+            ActionRuleScope::WorkspaceDefault.as_str(),
+            "workspace_default"
+        );
+        assert_eq!(
+            ActionRuleScope::Tenant {
+                tenant_id: moa_core::TenantId::new()
+            }
+            .as_str(),
+            "tenant"
         );
 
         // Experience / segment enums (formerly hand-rolled in rows.rs).

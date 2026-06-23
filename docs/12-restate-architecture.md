@@ -37,7 +37,7 @@ product database.
 | Graph-memory ingestion | Virtual Object | ingestion key |
 | Memory consolidation | Workflow | `workspace_id:logical_date` |
 | Scheduled job | Virtual Object | job name |
-| Workspace action review | Service plus Postgres row/event | review id |
+| Tenant action review | Service plus Postgres row/event | review id |
 
 Sessions and sub-agents are virtual objects because they receive multiple
 messages over time. `TurnExecution` and `SubAgentTurnExecution` are workflows
@@ -106,7 +106,7 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Pending message queue | `Session` VO |
 | Current session turn progress | `TurnExecution` workflow |
 | Current sub-agent turn progress | `SubAgentTurnExecution` workflow |
-| Pending workspace action reviews | Postgres `workspace_action_reviews` rows |
+| Pending tenant action reviews | Postgres `workspace_action_reviews` rows |
 | Detached sub-agent result waiters | `SubAgent` VO, resolved by child terminal delivery |
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
@@ -139,17 +139,17 @@ pending-review tool result to the model, and continues:
 
 ```text
 tool call requires admin review
-  -> workflow stores workspace action review
+  -> workflow stores tenant action review
   -> action-review event is persisted
   -> pending-review tool result is appended
-  -> workspace admin decides later through ActionReviews
+  -> tenant admin decides later through ActionReviews
 ```
 
 Gateway processes never own pending review state. If a gateway restarts, it can
-reconstruct pending workspace action reviews from Postgres.
+reconstruct pending tenant action reviews from Postgres.
 
 Sub-agent tool calls use the same action-review path as root turns. A pending
-workspace-admin review records product state in Postgres and returns a
+tenant-admin review records product state in Postgres and returns a
 pending-review tool result to the child turn; it does not create a blocked
 sub-agent awakeable.
 
@@ -241,7 +241,7 @@ awakeables plus parent-cached terminal results instead of status polling.
 2. Sessions and sub-agents are virtual objects.
 3. Top-level turns run in `TurnExecution` workflows keyed by turn ID.
 4. Sub-agent turns run in `SubAgentTurnExecution` workflows keyed by turn ID.
-5. Workspace action reviews use the `ActionReviews` service plus Postgres rows
+5. Tenant action reviews use the `ActionReviews` service plus Postgres rows
    and events; they do not block turn workflows.
 6. Product-visible events, learning, memory, lineage, and audit stay in
    Postgres.

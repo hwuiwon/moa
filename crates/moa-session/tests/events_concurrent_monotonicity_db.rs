@@ -5,8 +5,8 @@ mod shared;
 use std::sync::Arc;
 
 use moa_core::{
-    Event, EventRange, MoaError, ModelId, Result, SequenceNum, SessionId, SessionMeta,
-    SessionStore, UserId, WorkspaceId,
+    Event, EventRange, MoaError, ModelId, Result, SequenceNum, SessionActorRef, SessionId,
+    SessionMeta, SessionStore, TenantId,
 };
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::prelude::*;
@@ -14,6 +14,7 @@ use proptest::test_runner::{
     Config as ProptestConfig, FileFailurePersistence, TestCaseError, TestRunner,
 };
 use tokio::sync::{Mutex, Semaphore};
+use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 const MAX_IN_FLIGHT_EMITS: usize = 64;
@@ -29,12 +30,24 @@ async fn configured_test_db() -> Option<TestDb> {
     )
 }
 
+fn tenant_id(label: &str) -> TenantId {
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in label.bytes().enumerate() {
+        bytes[index % 16] = bytes[index % 16].wrapping_mul(31).wrapping_add(byte);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    TenantId::from(Uuid::from_bytes(bytes))
+}
+
 async fn create_session(test_db: &TestDb, index: usize) -> Result<SessionId> {
     test_db
         .store()
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new(format!("events-monotonicity-{index}")),
-            user_id: UserId::new(format!("user-{index}")),
+            tenant_id: tenant_id(&format!("events-monotonicity-{index}")),
+            created_by: Some(SessionActorRef::Identity {
+                id: Uuid::from_u128(index as u128 + 1),
+            }),
             model: ModelId::new("test-model"),
             ..SessionMeta::default()
         })

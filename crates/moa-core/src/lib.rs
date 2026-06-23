@@ -21,8 +21,8 @@ pub mod wire;
 pub mod workspace;
 
 pub use analytics::{
-    CacheDailyMetric, SessionAnalyticsSummary, SessionTurnMetric, ToolCallSummary,
-    WorkspaceAnalyticsSummary, get_session_summary, get_workspace_stats, list_cache_daily_metrics,
+    CacheDailyMetric, SessionAnalyticsSummary, SessionTurnMetric, TenantAnalyticsSummary,
+    ToolCallSummary, get_session_summary, get_tenant_stats, list_cache_daily_metrics,
     list_session_turn_metrics, list_tool_call_summaries,
 };
 pub use config::{
@@ -30,11 +30,11 @@ pub use config::{
     CompactionConfig, ContextSnapshotConfig, DatabaseConfig, DatabaseNeonConfig,
     GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig, McpCredentialConfig,
     McpServerConfig, McpTransportConfig, MemoryConfig, MemoryDigestConfig, MemoryRankingConfig,
-    MemoryRankingMode, MemoryRankingWeights, MemoryRerankerMode, MemoryRetrievalConfig,
-    MemoryVectorConfig, MessagingConfig, MetricsConfig, MoaConfig, ModelsConfig,
-    ObservabilityConfig, OpenFgaConfig, OrchestratorConfig, OtlpProtocol, PermissionsConfig,
-    ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig, ResolutionConfig,
-    ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig, VectorEmbedderConfig,
+    MemoryRankingWeights, MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig,
+    MessagingConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OpenFgaConfig,
+    OrchestratorConfig, OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig,
+    QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig,
+    ToolOutputConfig, VectorEmbedderConfig,
 };
 pub use db::ScopedConn;
 pub use diff::compute_unified_diff;

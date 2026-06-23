@@ -4,8 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Tenant identifier used for team-level learning state.
-pub type TenantId = String;
+use super::identifiers::TenantId;
 
 /// Append-only learning-log entry for learned patterns and derived updates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

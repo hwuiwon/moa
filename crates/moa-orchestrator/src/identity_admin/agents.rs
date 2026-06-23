@@ -39,7 +39,7 @@ pub(crate) async fn register_agent(
     .map_err(|error| TerminalError::new(format!("register agent: {error}")))?;
 
     enqueue_agent_tuples(&mut transaction, TupleOp::Write, &agent).await?;
-    moa_ocsf::emit_agent_registered_tx(&mut transaction, identity.tenant_id, &identity, agent.id)
+    moa_ocsf::emit_agent_registered_tx(&mut transaction, identity.tenant_id.0, &identity, agent.id)
         .await
         .map_err(|error| TerminalError::new(format!("audit agent register: {error}")))?;
     transaction
@@ -81,7 +81,7 @@ pub(crate) async fn get_agent(
 ) -> Result<AgentSummary, HandlerError> {
     load_agent(&pool, agent_id)
         .await
-        .and_then(|agent| ensure_same_tenant(agent, identity.tenant_id))
+        .and_then(|agent| ensure_same_tenant(agent, identity.tenant_id.0))
 }
 
 /// Deactivate an agent and revoke its local API keys.
@@ -91,7 +91,7 @@ pub(crate) async fn deactivate_agent(
     agent_id: Uuid,
     can_act_as: Vec<FgaTuple>,
 ) -> Result<(), HandlerError> {
-    let agent = ensure_same_tenant(load_agent(&pool, agent_id).await?, identity.tenant_id)?;
+    let agent = ensure_same_tenant(load_agent(&pool, agent_id).await?, identity.tenant_id.0)?;
     let actor_user_id = actor_user_id(&identity);
     let actor = ActorInput::from_identity(&identity);
     let mut transaction = pool
@@ -162,7 +162,7 @@ async fn mutate_can_act_as(
 ) -> Result<(), HandlerError> {
     let agent = ensure_same_tenant(
         load_agent(&pool, request.agent_id).await?,
-        identity.tenant_id,
+        identity.tenant_id.0,
     )?;
     if agent.status != "active" {
         return Err(TerminalError::new_with_code(409, "agent is not active").into());
@@ -177,7 +177,7 @@ async fn mutate_can_act_as(
         &format!("user:{}", request.user_id),
         "can_act_as",
         &format!("agent:{}", request.agent_id),
-        Some(identity.tenant_id),
+        Some(identity.tenant_id.0),
     )
     .await
     .map_err(|error| TerminalError::new(format!("agent can_act_as outbox: {error}")))?;
@@ -185,7 +185,7 @@ async fn mutate_can_act_as(
         TupleOp::Write => {
             moa_ocsf::emit_delegation_granted_tx(
                 &mut transaction,
-                identity.tenant_id,
+                identity.tenant_id.0,
                 &identity,
                 request.agent_id,
                 request.user_id,
@@ -195,7 +195,7 @@ async fn mutate_can_act_as(
         TupleOp::Delete => {
             moa_ocsf::emit_delegation_revoked_tx(
                 &mut transaction,
-                identity.tenant_id,
+                identity.tenant_id.0,
                 &identity,
                 request.agent_id,
                 request.user_id,
@@ -347,7 +347,9 @@ fn required_operator_user_id(identity: &Identity) -> Result<Uuid, HandlerError> 
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
         IdentityType::User => Some(identity.id),
-        IdentityType::Agent | IdentityType::Service => identity.acting_on_behalf_of,
+        IdentityType::Agent | IdentityType::Service | IdentityType::Contact => {
+            identity.acting_on_behalf_of
+        }
     }
 }
 
@@ -363,8 +365,10 @@ mod tests {
         Identity {
             identity_type,
             id,
-            tenant_id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-                .expect("tenant fixture UUID should parse"),
+            tenant_id: moa_core::TenantId::from(
+                Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                    .expect("tenant fixture UUID should parse"),
+            ),
             api_key_id: None,
             acting_on_behalf_of,
         }

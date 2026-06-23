@@ -20,7 +20,8 @@ use moa_core::wire::{
     WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
 use moa_core::{
-    Event, EventRange, EventRecord, MemoryScope, ModelId, SessionId, SessionStatus, WorkspaceId,
+    ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, SessionStatus, TenantId,
+    WorkspaceId,
 };
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_test_support::postgres::test_database_url;
@@ -31,11 +32,12 @@ use uuid::Uuid;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, RESTATE_E2E_LOCK, deployment_endpoint_url, grant_session_participant,
-    grant_workspace_editor, register_deployment, reserve_orchestrator_ports, restate_admin_url,
+    grant_tenant_admin, register_deployment, reserve_orchestrator_ports, restate_admin_url,
     restate_ingress_url, test_user_identity, with_identity,
 };
 use crate::support::session_store_service::{
     get_events_request, init_session_vo_request, test_session_meta, user_message,
+    workspace_id_from_meta,
 };
 
 const REFUND_SKILL_PATH: &str = ".moa/skills/refund-triage/SKILL.md";
@@ -139,16 +141,18 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
+    let mut identity = test_user_identity();
     let mut meta = test_session_meta(&format!("agent-artifacts-skill-{}", Uuid::now_v7()));
     meta.model = ModelId::new("scripted-loadtest");
-    grant_workspace_editor(&identity, &meta.workspace_id).await?;
+    let workspace_id = workspace_id_from_meta(&meta);
+    identity.tenant_id = meta.tenant_id;
+    grant_tenant_admin(&identity, &workspace_id).await?;
     let mut orchestrator =
         spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_refund_skill(&client, ingress, &identity, &meta.workspace_id).await?;
+        import_refund_skill(&client, ingress, &identity, &workspace_id).await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
 
         let prompt = "A customer says their ramen order arrived spilled all over the bag. \
@@ -191,9 +195,10 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(format!("agent-artifacts-workflow-{}", Uuid::now_v7()));
-    grant_workspace_editor(&identity, &workspace_id).await?;
+    let mut identity = test_user_identity();
+    let workspace_id = WorkspaceId::new(Uuid::now_v7().to_string());
+    identity.tenant_id = tenant_id_from_workspace(&workspace_id)?;
+    grant_tenant_admin(&identity, &workspace_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, None)?;
 
     let result = async {
@@ -248,24 +253,26 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
+    let mut identity = test_user_identity();
     let mut meta = test_session_meta(&format!("agent-artifacts-mixed-{}", Uuid::now_v7()));
     meta.model = ModelId::new("scripted-loadtest");
-    grant_workspace_editor(&identity, &meta.workspace_id).await?;
+    let workspace_id = workspace_id_from_meta(&meta);
+    identity.tenant_id = meta.tenant_id;
+    grant_tenant_admin(&identity, &workspace_id).await?;
     let mut orchestrator =
         spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_refund_skill(&client, ingress, &identity, &meta.workspace_id).await?;
-        import_and_publish_damaged_food_workflow(&client, ingress, &identity, &meta.workspace_id)
+        import_refund_skill(&client, ingress, &identity, &workspace_id).await?;
+        import_and_publish_damaged_food_workflow(&client, ingress, &identity, &workspace_id)
             .await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
         let workflow_run = start_damaged_food_workflow(
             &client,
             ingress,
             &identity,
-            &meta.workspace_id,
+            &workspace_id,
             Some(session_id),
             "ORD-7002",
         )
@@ -293,7 +300,7 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
             &client,
             ingress,
             &identity,
-            &meta.workspace_id,
+            &workspace_id,
             workflow_run.run_id,
         )
         .await?;
@@ -321,10 +328,7 @@ async fn import_refund_skill(
     workspace_id: &WorkspaceId,
 ) -> Result<()> {
     let request = SkillImportRequest {
-        workspace_id: workspace_id.clone(),
-        scope: MemoryScope::Workspace {
-            workspace_id: workspace_id.clone(),
-        },
+        scope: tenant_scope(workspace_id)?,
         packages: vec![refund_skill_package()],
     };
     let import = post_json_with_identity(client, ingress, "Skills", "import", identity, &request)
@@ -342,12 +346,9 @@ async fn import_and_publish_damaged_food_workflow(
     identity: &Identity,
     workspace_id: &WorkspaceId,
 ) -> Result<ArtifactPublishResponse> {
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let scope = tenant_scope(workspace_id)?;
     let import_request = ArtifactImportRequest {
-        workspace_id: workspace_id.clone(),
-        scope: scope.clone(),
+        scope,
         source_format: "yaml".to_string(),
         source_text: damaged_food_workflow_source().to_string(),
         files: Vec::new(),
@@ -367,7 +368,6 @@ async fn import_and_publish_damaged_food_workflow(
     assert_eq!(imported.status, "draft");
 
     let publish_request = ArtifactPublishRequest {
-        workspace_id: workspace_id.clone(),
         scope,
         revision_uid: imported.revision_uid,
     };
@@ -388,6 +388,17 @@ async fn import_and_publish_damaged_food_workflow(
     Ok(published)
 }
 
+fn tenant_scope(workspace_id: &WorkspaceId) -> Result<ActionRuleScope> {
+    let tenant_id = tenant_id_from_workspace(workspace_id)?;
+    Ok(ActionRuleScope::Tenant { tenant_id })
+}
+
+fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .context("artifact e2e workspace id should be a tenant UUID")
+}
+
 async fn start_damaged_food_workflow(
     client: &reqwest::Client,
     ingress: &str,
@@ -397,7 +408,7 @@ async fn start_damaged_food_workflow(
     order_id: &str,
 ) -> Result<WorkflowRunResponse> {
     let request = WorkflowRunRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         workflow_ref: "workflow://damaged-food-replacement".to_string(),
         input: json!({
             "order_id": order_id,
@@ -422,7 +433,7 @@ async fn workflow_status(
     run_id: Uuid,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
-        workspace_id: workspace_id.clone(),
+        tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_id,
     };
     post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)

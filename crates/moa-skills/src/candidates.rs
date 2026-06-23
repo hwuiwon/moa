@@ -3,14 +3,14 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     LearningCandidate, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    SessionId, SessionMeta, SkillMetadata, TaskFacetSet, TaskFingerprint, WorkspaceId,
+    SessionId, SessionMeta, SkillMetadata, TaskFacetSet, TaskFingerprint, TenantId, WorkspaceId,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub(crate) fn deterministic_skill_candidate_id(
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     source_session_id: SessionId,
     source_experience_ids: &[Uuid],
     operation: &str,
@@ -25,7 +25,7 @@ pub(crate) fn deterministic_skill_candidate_id(
     let mut hasher = Sha256::new();
     for part in [
         "moa.skill.learning_candidate.v1",
-        workspace_id.as_str(),
+        &tenant_id.to_string(),
         operation,
         target_skill_name,
     ] {
@@ -67,8 +67,8 @@ pub(crate) fn skill_draft_candidate(
 ) -> LearningCandidate {
     LearningCandidate {
         id: input.candidate_id,
-        tenant_id: session.workspace_id.to_string(),
-        workspace_id: session.workspace_id.clone(),
+        tenant_id: session.tenant_id,
+        workspace_id: WorkspaceId::new(session.tenant_id.to_string()),
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
         status: LearningCandidateStatus::Proposed,

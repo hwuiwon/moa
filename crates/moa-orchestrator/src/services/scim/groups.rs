@@ -32,7 +32,7 @@ pub async fn list_groups(
         .map_err(|error| ScimResponseError::bad_request("invalidFilter", error))?;
     let (total, rows) = group_admin::fetch_groups_page(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         filter.as_ref(),
         start,
         count,
@@ -63,7 +63,7 @@ pub async fn create_group(
     validate_display_name(&request.display_name)?;
     let group_id = group_admin::create_group(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         ActorInput::from_identity(&identity),
         GroupWrite {
             display_name: request.display_name.trim().to_string(),
@@ -72,7 +72,7 @@ pub async fn create_group(
         },
     )
     .await?;
-    let body = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id, group_id)
+    let body = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id.0, group_id)
         .await?
         .map(|row| scim_group_from_record(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("group not found after create"))?;
@@ -86,7 +86,7 @@ pub async fn get_group(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ScimGroup>, ScimResponseError> {
     let identity = authenticate_scim(&state, &headers).await?;
-    let group = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id, id)
+    let group = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id.0, id)
         .await?
         .map(|row| scim_group_from_record(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("group not found"))?;
@@ -104,7 +104,7 @@ pub async fn put_group(
     validate_display_name(&request.display_name)?;
     group_admin::replace_group(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         id,
         ActorInput::from_identity(&identity),
         GroupWrite {
@@ -114,7 +114,7 @@ pub async fn put_group(
         },
     )
     .await?;
-    let body = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id, id)
+    let body = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id.0, id)
         .await?
         .map(|row| scim_group_from_record(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("group not found"))?;
@@ -135,7 +135,7 @@ pub async fn patch_group(
     }
     group_admin::patch_group(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         id,
         ActorInput::from_identity(&identity),
         GroupPatch {
@@ -153,7 +153,7 @@ pub async fn patch_group(
         },
     )
     .await?;
-    let body = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id, id)
+    let body = group_admin::fetch_group_by_id(&state.pool, identity.tenant_id.0, id)
         .await?
         .map(|row| scim_group_from_record(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("group not found"))?;
@@ -169,7 +169,7 @@ pub async fn delete_group(
     let identity = authenticate_scim(&state, &headers).await?;
     group_admin::delete_group(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         id,
         ActorInput::from_identity(&identity),
     )

@@ -2,8 +2,8 @@
 
 use moa_core::{
     ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField, ActionReviewFileDiff,
-    ActionReviewPreview, ActionRuleScope, MoaError, Result, SessionMeta, SubAgentId, ToolCallId,
-    ToolInvocation, ToolPolicyInput, UserId,
+    ActionReviewPreview, ActionRuleScope, MoaError, Result, SessionActorRef, SessionMeta,
+    SubAgentId, ToolCallId, ToolInvocation, ToolPolicyInput, UserId, WorkspaceId,
 };
 use uuid::Uuid;
 
@@ -67,8 +67,11 @@ impl PreparedActionInvocation {
     ) -> ActionEnvelope {
         ActionEnvelope {
             review_id,
-            workspace_id: session.workspace_id.clone(),
-            user_id: session.user_id.clone(),
+            tenant_id: session.tenant_id,
+            requested_by: session
+                .created_by
+                .clone()
+                .unwrap_or(SessionActorRef::Anonymous),
             session_id: Some(session.id),
             sub_agent_id,
             tool_call_id,
@@ -125,10 +128,12 @@ impl ToolRouter {
             .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
+            let policy_workspace_key = tenant_workspace_key(session);
+            let policy_actor = identity_actor_for_policy_lookup(session);
             rule_store
                 .list_action_policy_rules_for_tool(
-                    &session.workspace_id,
-                    &session.user_id,
+                    &policy_workspace_key,
+                    &policy_actor,
                     &invocation.name,
                 )
                 .await?
@@ -145,7 +150,7 @@ impl ToolRouter {
             self.workspace_roots
                 .read()
                 .await
-                .get(&session.workspace_id)
+                .get(&tenant_workspace_key(session))
                 .cloned()
                 .or_else(|| self.sandbox_root.clone())
         } else {
@@ -206,12 +211,12 @@ impl ToolRouter {
         rule_store
             .upsert_action_policy_rule(ActionPolicyRule {
                 id: Uuid::now_v7(),
-                workspace_id: session.workspace_id.clone(),
-                user_id: None,
                 tool: tool.to_string(),
                 pattern: pattern.to_string(),
                 effect,
-                scope: ActionRuleScope::Workspace,
+                scope: ActionRuleScope::Tenant {
+                    tenant_id: session.tenant_id,
+                },
                 reason: None,
                 created_by,
                 created_at: chrono::Utc::now(),
@@ -238,5 +243,16 @@ impl ToolRouter {
             default_effect: definition.policy.default_effect,
             action_class: definition.policy.action_class,
         })
+    }
+}
+
+fn tenant_workspace_key(session: &SessionMeta) -> WorkspaceId {
+    WorkspaceId::new(session.tenant_id.to_string())
+}
+
+fn identity_actor_for_policy_lookup(session: &SessionMeta) -> UserId {
+    match &session.created_by {
+        Some(SessionActorRef::Identity { id }) => UserId(id.to_string()),
+        _ => UserId(Uuid::nil().to_string()),
     }
 }

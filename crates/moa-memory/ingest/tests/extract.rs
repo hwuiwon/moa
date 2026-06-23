@@ -42,19 +42,19 @@ fn extract_emits_expected_facts_from_canonical_paragraph_describing_a_service() 
 }
 
 #[tokio::test]
-async fn heuristic_extractor_matches_legacy_extract_facts_output() {
-    // Pins: the default extractor preserves the legacy deterministic extraction API.
+async fn heuristic_extractor_matches_deterministic_extract_facts_output() {
+    // Pins: the default extractor preserves deterministic extraction behavior.
     let chunks = [chunk(
         "Fact: API runs_on_port 3000\nFact: worker_queue uses Redis",
     )];
-    let legacy = extract_facts(&chunks);
+    let expected = extract_facts(&chunks);
 
     let facts = HeuristicFactExtractor
         .extract(&chunks)
         .await
         .expect("heuristic extractor should not fail");
 
-    assert_eq!(facts, legacy);
+    assert_eq!(facts, expected);
 }
 
 #[tokio::test]
@@ -101,7 +101,7 @@ fn extract_handles_negation_correctly_in_emitted_facts() {
 fn extract_strips_marked_fact_is_connector_from_object() {
     // Pins: marked corpus facts connect dependency objects to ownership subjects through one entity.
     let facts = extract_facts(&[chunk(
-        "Fact: workspace shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
+        "Fact: tenant shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
     )]);
 
     assert_eq!(facts.len(), 1);

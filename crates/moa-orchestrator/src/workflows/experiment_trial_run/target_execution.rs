@@ -55,7 +55,7 @@ pub(super) async fn run_agent_loop_trial(
         if let Some(stop) = stop_for_session_status(&observation.status) {
             return stop_trial(
                 ctx,
-                request.workspace_id,
+                request.tenant_id,
                 trial.trial_uid,
                 stop.0,
                 stop.1,
@@ -76,7 +76,7 @@ pub(super) async fn run_agent_loop_trial(
         if simulator_done(&simulator_message) {
             return stop_trial(
                 ctx,
-                request.workspace_id,
+                request.tenant_id,
                 trial.trial_uid,
                 ExperimentTrialStatus::Completed,
                 ExperimentTrialStopReason::SimulatorDone,
@@ -97,7 +97,7 @@ pub(super) async fn run_agent_loop_trial(
         )
         .call()
         .await?;
-        increment_trial_turn(ctx, request.workspace_id.clone(), trial.trial_uid).await?;
+        increment_trial_turn(ctx, request.tenant_id, trial.trial_uid).await?;
         transcript.push(ContextMessage::user(simulator_message));
 
         let status = wait_for_target_after_turn(ctx, session_id).await?;
@@ -105,7 +105,7 @@ pub(super) async fn run_agent_loop_trial(
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
                 ctx,
-                request.workspace_id,
+                request.tenant_id,
                 trial.trial_uid,
                 stop.0,
                 stop.1,
@@ -117,7 +117,7 @@ pub(super) async fn run_agent_loop_trial(
 
     stop_trial(
         ctx,
-        request.workspace_id,
+        request.tenant_id,
         trial.trial_uid,
         ExperimentTrialStatus::Completed,
         ExperimentTrialStopReason::MaxTurns,
@@ -158,7 +158,7 @@ async fn ensure_agent_loop_session(
         ));
     }
 
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let session_id = match trial.session_id.or(target_session_id) {
         Some(session_id) => session_id,
         None => {
@@ -168,14 +168,8 @@ async fn ensure_agent_loop_session(
             let agent = target_agent.ok_or_else(|| {
                 bad_request("agent-loop simulator target requires an agent selector")
             })?;
-            let (session_id, meta) = create_new_session(
-                ctx,
-                request.workspace_id.clone(),
-                model,
-                &request.identity,
-                agent,
-            )
-            .await?;
+            let (session_id, meta) =
+                create_new_session(ctx, request.tenant_id, model, &request.identity, agent).await?;
             with_identity_headers(
                 ctx.object_client::<SessionClient>(session_id.to_string())
                     .set_meta(Json::from(meta)),
@@ -209,7 +203,7 @@ pub(super) async fn run_workflow_trial(
         ));
     };
 
-    let scope = workspace_scope(request.workspace_id.clone());
+    let scope = tenant_scope(request.tenant_id);
     let run = start_and_attach_workflow_run(
         ctx,
         scope,
@@ -227,7 +221,7 @@ pub(super) async fn run_workflow_trial(
     if let Some(stop) = run.stop {
         return stop_trial(
             ctx,
-            request.workspace_id,
+            request.tenant_id,
             trial.trial_uid,
             stop.status,
             stop.stop_reason,
@@ -236,12 +230,12 @@ pub(super) async fn run_workflow_trial(
         .await;
     }
 
-    status_response_from_record(request.workspace_id, run.trial)
+    status_response_from_record(request.tenant_id, run.trial)
 }
 
 async fn create_new_session(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     model: ModelId,
     identity: &Identity,
     agent: AgentSessionSelection,
@@ -250,7 +244,7 @@ async fn create_new_session(
     let identity = identity.clone();
     Ok(ctx
         .run(|| async move {
-            let mut meta = new_session_meta(workspace_id, model, &identity)?;
+            let mut meta = new_session_meta(tenant_id, model, &identity)?;
             let agent_context =
                 resolve_agent_context_for_session(store.as_ref(), &meta, &agent).await?;
             apply_agent_model_policy(&mut meta, &agent_context)?;
@@ -410,7 +404,7 @@ fn target_is_waiting_or_idle(status: &SessionStatus, snapshot: &SessionSnapshot)
 
 async fn start_and_attach_workflow_run(
     ctx: &WorkflowContext<'_>,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     trial_uid: Uuid,
     workflow_ref: String,
     input: Value,

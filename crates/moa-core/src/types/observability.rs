@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    Channel, CompletionRequest, ContactId, MessageRole, ModelId, SessionId, SessionMeta, UserId,
-    WorkspaceId, estimate_text_tokens,
+    Channel, CompletionRequest, ContactId, MessageRole, ModelId, SessionActorRef, SessionId,
+    SessionMeta, TenantId, estimate_text_tokens,
 };
 
 /// Durable summary of one provider request's cache plan and observed cache usage.
@@ -218,14 +218,14 @@ fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
 pub struct TraceContext {
     /// Session identifier used for Langfuse session grouping.
     pub session_id: SessionId,
-    /// User identifier used for per-user analytics.
-    pub user_id: UserId,
-    /// Workspace identifier for filterable metadata.
-    pub workspace_id: WorkspaceId,
+    /// Tenant runtime boundary for filterable metadata.
+    pub tenant_id: TenantId,
     /// Contact identifier for agent-facing contact sessions.
     pub contact_id: Option<ContactId>,
     /// Contact verification state for agent-facing contact sessions.
     pub contact_state: Option<String>,
+    /// Actor that created the session, when recorded.
+    pub created_by: Option<SessionActorRef>,
     /// Optional originating channel.
     pub channel: Option<Channel>,
     /// Active model identifier.
@@ -243,17 +243,17 @@ impl TraceContext {
     pub fn from_session_meta(session: &SessionMeta, prompt: Option<&str>) -> Self {
         Self {
             session_id: session.id,
-            user_id: session.user_id.clone(),
-            workspace_id: session.workspace_id.clone(),
+            tenant_id: session.tenant_id,
             contact_id: session.contact.as_ref().map(|contact| contact.contact_id),
             contact_state: session
                 .contact
                 .as_ref()
                 .map(|contact| contact.state.as_str().to_string()),
+            created_by: session.created_by.clone(),
             channel: Some(session.channel),
             model: session.model.clone(),
             trace_name: prompt.map(trace_name_from_message),
-            tags: generate_trace_tags(Some(&session.channel), &session.workspace_id),
+            tags: generate_trace_tags(Some(&session.channel), &session.tenant_id),
             environment: None,
         }
     }
@@ -276,21 +276,40 @@ impl TraceContext {
         );
         span.set_attribute(
             "langfuse.user.id",
-            sanitize_langfuse_id(self.user_id.as_str()),
+            sanitize_langfuse_id(&trace_subject_id(
+                self.session_id,
+                self.contact_id,
+                self.created_by.as_ref(),
+            )),
         );
         span.set_attribute(
-            "langfuse.trace.metadata.workspace_id",
-            self.workspace_id.to_string(),
+            "langfuse.trace.metadata.tenant_id",
+            self.tenant_id.to_string(),
         );
         let model = self.model.to_string();
         span.set_attribute("langfuse.trace.metadata.model", model.clone());
         span.set_attribute("moa.session.id", self.session_id.to_string());
-        span.set_attribute("moa.user.id", self.user_id.to_string());
-        span.set_attribute("moa.workspace.id", self.workspace_id.to_string());
+        span.set_attribute("moa.tenant.id", self.tenant_id.to_string());
         span.set_attribute("moa.model", model);
         if let Some(contact_id) = self.contact_id {
             span.set_attribute("moa.contact.id", contact_id.to_string());
             span.set_attribute("langfuse.trace.metadata.contact_id", contact_id.to_string());
+        }
+        if let Some(created_by) = self.created_by.as_ref() {
+            match created_by {
+                SessionActorRef::Identity { id } => {
+                    span.set_attribute("moa.actor.type", "identity");
+                    span.set_attribute("moa.actor.id", id.to_string());
+                    span.set_attribute("langfuse.trace.metadata.actor_id", id.to_string());
+                }
+                SessionActorRef::Contact { id } => {
+                    span.set_attribute("moa.actor.type", "contact");
+                    span.set_attribute("moa.actor.id", id.to_string());
+                }
+                SessionActorRef::Anonymous => {
+                    span.set_attribute("moa.actor.type", "anonymous");
+                }
+            }
         }
         if let Some(contact_state) = self.contact_state.as_ref() {
             span.set_attribute("moa.contact.state", contact_state.clone());
@@ -332,17 +351,30 @@ pub fn trace_name_from_message(message: &str) -> String {
     truncate_with_ellipsis(trimmed.lines().next().unwrap_or(trimmed), 200)
 }
 
-/// Derives Langfuse tags from channel and workspace identifiers.
-pub fn generate_trace_tags(channel: Option<&Channel>, workspace_id: &WorkspaceId) -> Vec<String> {
+/// Derives Langfuse tags from channel and tenant identifiers.
+pub fn generate_trace_tags(channel: Option<&Channel>, tenant_id: &TenantId) -> Vec<String> {
     let mut tags = Vec::new();
     if let Some(channel) = channel {
         tags.push(truncate_with_ellipsis(&channel.to_string(), 200));
     }
-    tags.push(truncate_with_ellipsis(
-        &format!("workspace:{workspace_id}"),
-        200,
-    ));
+    tags.push(truncate_with_ellipsis(&format!("tenant:{tenant_id}"), 200));
     tags
+}
+
+fn trace_subject_id(
+    session_id: SessionId,
+    contact_id: Option<ContactId>,
+    created_by: Option<&SessionActorRef>,
+) -> String {
+    if let Some(contact_id) = contact_id {
+        return format!("contact:{contact_id}");
+    }
+
+    match created_by {
+        Some(SessionActorRef::Identity { id }) => format!("identity:{id}"),
+        Some(SessionActorRef::Contact { id }) => format!("contact:{id}"),
+        Some(SessionActorRef::Anonymous) | None => format!("session:{session_id}"),
+    }
 }
 
 /// Truncates a string to the provided character limit with an ellipsis suffix.
@@ -391,7 +423,7 @@ mod tests {
         trace_name_from_message,
     };
     use crate::types::{
-        Channel, CompletionRequest, ContextMessage, SessionId, SessionMeta, UserId, WorkspaceId,
+        Channel, CompletionRequest, ContextMessage, SessionId, SessionMeta, TenantId,
     };
     use serde_json::json;
 
@@ -403,18 +435,18 @@ mod tests {
     }
 
     #[test]
-    fn tags_include_channel_and_workspace() {
-        let tags = generate_trace_tags(Some(&Channel::Slack), &WorkspaceId::new("myproject"));
+    fn tags_include_channel_and_tenant() {
+        let tenant_id = TenantId::from(uuid::Uuid::from_u128(1));
+        let tags = generate_trace_tags(Some(&Channel::Slack), &tenant_id);
         assert!(tags.contains(&"slack".to_string()));
-        assert!(tags.contains(&"workspace:myproject".to_string()));
+        assert!(tags.contains(&"tenant:00000000-0000-0000-0000-000000000001".to_string()));
     }
 
     #[test]
     fn trace_context_from_session_meta() {
         let meta = SessionMeta {
             id: SessionId::new(),
-            user_id: UserId::new("user-456"),
-            workspace_id: WorkspaceId::new("webapp"),
+            tenant_id: TenantId::from(uuid::Uuid::from_u128(2)),
             channel: Channel::Slack,
             model: "claude-sonnet-4-20250514".into(),
             ..SessionMeta::default()
@@ -422,7 +454,7 @@ mod tests {
         let ctx = TraceContext::from_session_meta(&meta, Some("Fix OAuth bug"));
         assert_eq!(ctx.trace_name.as_deref(), Some("Fix OAuth bug"));
         assert!(ctx.tags.contains(&"slack".to_string()));
-        assert_eq!(ctx.workspace_id, WorkspaceId::new("webapp"));
+        assert_eq!(ctx.tenant_id, TenantId::from(uuid::Uuid::from_u128(2)));
     }
 
     #[test]

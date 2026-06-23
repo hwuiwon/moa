@@ -1,10 +1,10 @@
-//! Action policy and workspace-admin review types.
+//! Action policy and tenant-admin review types.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{SessionId, SubAgentId, ToolCallId, UserId, WorkspaceId};
+use super::{SessionActorRef, SessionId, SubAgentId, TenantId, ToolCallId, UserId};
 
 /// Risk level assigned to one policy-facing action.
 #[derive(
@@ -102,7 +102,7 @@ pub enum ActionPolicyEffect {
     Allow,
     /// Reject the action without executing it.
     Deny,
-    /// Queue the action for workspace-admin review.
+    /// Queue the action for tenant-admin review.
     AdminReview,
 }
 
@@ -115,32 +115,26 @@ impl ActionPolicyEffect {
 }
 
 /// Scope an action-policy rule applies to.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    strum::IntoStaticStr,
-    strum::EnumString,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
 pub enum ActionRuleScope {
-    /// Rule applies globally across workspaces.
-    Global,
-    /// Rule applies within a single workspace.
-    Workspace,
+    /// Rule applies as the workspace-level inherited default.
+    WorkspaceDefault,
+    /// Rule overrides the workspace default inside one tenant.
+    Tenant {
+        /// Tenant that owns the override.
+        tenant_id: TenantId,
+    },
 }
 
 impl ActionRuleScope {
     /// Returns the stable database representation.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        self.into()
+        match self {
+            Self::WorkspaceDefault => "workspace_default",
+            Self::Tenant { .. } => "tenant",
+        }
     }
 }
 
@@ -162,19 +156,14 @@ pub struct ActionPolicyDecision {
 pub struct ActionPolicyRule {
     /// Stable rule identifier.
     pub id: Uuid,
-    /// Workspace the rule belongs to.
-    pub workspace_id: WorkspaceId,
-    /// Optional user the rule is narrowed to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<UserId>,
+    /// Inheritance scope the rule applies to.
+    pub scope: ActionRuleScope,
     /// Tool name this rule applies to.
     pub tool: String,
     /// Glob pattern used for matching normalized inputs.
     pub pattern: String,
     /// Effect to apply when the rule matches.
     pub effect: ActionPolicyEffect,
-    /// Scope the rule applies to.
-    pub scope: ActionRuleScope,
     /// Optional human-readable reason attached to the rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -187,12 +176,12 @@ pub struct ActionPolicyRule {
 /// Durable policy-facing description of one tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionEnvelope {
-    /// Workspace-admin review identifier.
+    /// Tenant-admin review identifier.
     pub review_id: Uuid,
-    /// Workspace that owns the action.
-    pub workspace_id: WorkspaceId,
-    /// User that requested the action.
-    pub user_id: UserId,
+    /// Tenant that owns the action.
+    pub tenant_id: TenantId,
+    /// Actor that requested the action.
+    pub requested_by: SessionActorRef,
     /// Session that owns the action, when present.
     pub session_id: Option<SessionId>,
     /// Sub-agent that requested the action, when present.
@@ -221,7 +210,7 @@ pub struct ActionEnvelope {
     pub created_at: DateTime<Utc>,
 }
 
-/// Human-readable action-review preview rendered to workspace admins.
+/// Human-readable action-review preview rendered to tenant admins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionReviewPreview {
     /// Structured fields rendered by review surfaces.
@@ -258,14 +247,14 @@ pub struct ActionReviewFileDiff {
 pub enum ActionReviewDecision {
     /// The action was cleared for later execution.
     Cleared,
-    /// The action was denied by a workspace admin.
+    /// The action was denied by a tenant admin.
     Denied {
         /// Optional human-readable denial reason.
         reason: Option<String>,
     },
 }
 
-/// Current status of a workspace action review.
+/// Current status of a tenant action review.
 #[derive(
     Debug,
     Clone,

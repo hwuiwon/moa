@@ -36,7 +36,7 @@ pub struct ConnectorActionDefinition {
     /// JSON schema for action outputs.
     #[serde(default = "empty_object")]
     pub output_schema: Value,
-    /// Whether this action should be routed to workspace-admin review.
+    /// Whether this action should be routed to tenant-admin review.
     #[serde(default)]
     pub admin_review_required: bool,
     /// Builder-owned UI metadata.

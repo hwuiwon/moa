@@ -1,11 +1,13 @@
 //! Query helpers for mapping `PostgreSQL` rows into MOA core types.
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActionPolicyRule, ContactId, ContactRef, ContactVerificationState, ExperienceAttribution,
-    ExperienceRecord, LearningCandidate, LearningEntry, MoaError, ModelId, Result,
-    SegmentAssessment, SegmentId, SessionActorRef, SessionChannelBindingId, SessionId, SessionMeta,
-    SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, UserId, WorkspaceId,
+    ActionPolicyRule, ActionRuleScope, ContactId, ContactRef, ContactVerificationState,
+    ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningEntry, MoaError, ModelId,
+    Result, SegmentAssessment, SegmentId, SessionActorRef, SessionChannelBindingId, SessionId,
+    SessionMeta, SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, TenantId,
+    UserId, WorkspaceId,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 

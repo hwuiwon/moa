@@ -156,16 +156,12 @@ pub(crate) async fn prepare_turn_request(
     .await;
     context.insert_metadata("_moa.session_id", serde_json::json!(session.id.to_string()));
     context.insert_metadata(
-        "_moa.user_id",
-        serde_json::json!(session.user_id.to_string()),
-    );
-    context.insert_metadata(
-        "_moa.workspace_id",
-        serde_json::json!(session.workspace_id.to_string()),
+        "_moa.tenant_id",
+        serde_json::json!(session.tenant_id.to_string()),
     );
     if let Some(contact) = session.contact.as_ref() {
         context.insert_metadata(
-            "_moa.contact.id",
+            "_moa.contact_id",
             serde_json::json!(contact.contact_id.to_string()),
         );
         context.insert_metadata(

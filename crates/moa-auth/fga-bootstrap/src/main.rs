@@ -1,7 +1,7 @@
 //! Idempotent OpenFGA bootstrap for MOA.
 //!
 //! On each run this binary ensures the configured store exists, writes the v1
-//! authorization model, runs smoke checks against a synthetic tenant/workspace
+//! authorization model, runs smoke checks against a synthetic workspace/tenant
 //! chain, and writes resolved authz env values to `.env.fga` for shell sourcing.
 
 use anyhow::{Context, Result, bail};
@@ -103,12 +103,12 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
         serde_json::json!({
             "user": format!("user:{user_id}"),
             "relation": "admin",
-            "object": format!("tenant:{tenant_id}"),
+            "object": format!("workspace:{workspace_id}"),
         }),
         serde_json::json!({
-            "user": format!("tenant:{tenant_id}"),
-            "relation": "tenant",
-            "object": format!("workspace:{workspace_id}"),
+            "user": format!("workspace:{workspace_id}"),
+            "relation": "workspace",
+            "object": format!("tenant:{tenant_id}"),
         }),
     ];
 
@@ -120,23 +120,23 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
         .await
         .context("write smoke tuples")?;
 
-    let workspace = format!("workspace:{workspace_id}");
+    let tenant = format!("tenant:{tenant_id}");
     let user = format!("user:{user_id}");
     let admin_check = client
-        .check(store_id, model_id, &user, "admin", &workspace)
+        .check(store_id, model_id, &user, "admin", &tenant)
         .await?;
     if !admin_check {
-        bail!("smoke Check failed: user expected to be workspace admin via tenant inheritance");
+        bail!("smoke Check failed: workspace admin expected to administer tenant");
     }
-    tracing::info!("smoke Check ok: user -> workspace admin via tenant");
+    tracing::info!("smoke Check ok: workspace admin -> tenant admin");
 
     let listed = client
-        .list_objects(store_id, model_id, "workspace", "admin", &user)
+        .list_objects(store_id, model_id, "tenant", "admin", &user)
         .await?;
-    if !listed.contains(&workspace) {
+    if !listed.contains(&tenant) {
         bail!(
             "smoke ListObjects failed: expected {} in {:?}",
-            workspace,
+            tenant,
             listed
         );
     }
@@ -147,8 +147,8 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
             store_id,
             model_id,
             &[
-                (user.clone(), "admin".to_string(), workspace.clone()),
-                (user, "member".to_string(), workspace),
+                (user.clone(), "admin".to_string(), tenant.clone()),
+                (user, "operator".to_string(), tenant),
             ],
         )
         .await?;

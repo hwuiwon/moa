@@ -37,7 +37,7 @@ materialize selected skill packages under `.moa/skills/<skill>/...`.
 1. Look up the tool in `ToolRegistry`.
 2. Normalize and budget tool input/output.
 3. Prepare `ToolPolicyInput`, the suggested action-policy pattern, and
-   workspace-admin review preview data.
+   tenant-admin review preview data.
 4. Evaluate action policy.
 5. Execute allowed actions through one of:
    - built-in tool handler,
@@ -67,7 +67,7 @@ Action-policy decisions are ordered:
    used when no rule or configured tool policy matches.
 
 `Deny` returns a tool error and the turn continues. `AdminReview` queues a
-workspace-admin action review through `ActionReviews/request`, writes an
+tenant-admin action review through `ActionReviews/request`, writes an
 `ActionReviewRequested` event for session history, returns a pending-review
 tool result to preserve LLM protocol continuity, and continues the root or
 sub-agent turn without moving the session into a waiting state. Workspace

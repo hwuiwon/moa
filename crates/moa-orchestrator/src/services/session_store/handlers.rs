@@ -29,9 +29,9 @@ impl RestateSessionStore for SessionStoreImpl {
         require_authz_with_delegation(
             &fga,
             &identity,
-            ObjectType::Workspace,
-            &meta.workspace_id,
-            Relation::Member,
+            ObjectType::Tenant,
+            meta.tenant_id,
+            Relation::Operator,
         )
         .await
         .map_err(translate_authz_error)?;
@@ -70,9 +70,9 @@ impl RestateSessionStore for SessionStoreImpl {
         require_authz_with_delegation(
             &fga,
             &identity,
-            ObjectType::Workspace,
-            &request.meta.workspace_id,
-            Relation::Member,
+            ObjectType::Tenant,
+            request.meta.tenant_id,
+            Relation::Operator,
         )
         .await
         .map_err(translate_authz_error)?;
@@ -182,6 +182,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "search_events");
         let store = self.store.clone();
         let request = request.into_inner();
+        authorize_event_search(&ctx, &request).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -199,6 +200,8 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "list_sessions");
         let store = self.store.clone();
         let request = request.into_inner();
+        let tenant_id = tenant_id_for_session_listing(&request)?;
+        authorize_tenant_admin(&ctx, tenant_id).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -208,19 +211,20 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn workspace_cost_since(
+    async fn tenant_cost_since(
         &self,
         ctx: Context<'_>,
-        request: Json<WorkspaceCostSinceRequest>,
+        request: Json<TenantCostSinceRequest>,
     ) -> Result<u32, HandlerError> {
-        annotate_restate_handler_span("SessionStore", "workspace_cost_since");
+        annotate_restate_handler_span("SessionStore", "tenant_cost_since");
         let store = self.store.clone();
         let request = request.into_inner();
+        authorize_tenant_read(&ctx, request.tenant_id).await?;
         let service = Self { store };
 
         Ok(ctx
-            .run(|| async move { service.workspace_cost_since_inner(request).await })
-            .name("workspace_cost_since")
+            .run(|| async move { service.tenant_cost_since_inner(request).await })
+            .name("tenant_cost_since")
             .await?)
     }
 
@@ -505,7 +509,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "get_learning_candidate");
         let store = self.store.clone();
         let request = request.into_inner();
-        authorize_workspace_read(&ctx, &request.workspace_id).await?;
+        authorize_tenant_read(&ctx, request.tenant_id).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -528,6 +532,7 @@ impl RestateSessionStore for SessionStoreImpl {
         annotate_restate_handler_span("SessionStore", "list_learning_candidates");
         let store = self.store.clone();
         let request = request.into_inner();
+        authorize_tenant_read(&ctx, request.tenant_id).await?;
         let service = Self { store };
 
         Ok(ctx
@@ -647,18 +652,58 @@ async fn authorize_session_read(
     .map_err(translate_authz_error)
 }
 
-async fn authorize_workspace_read(
+async fn authorize_event_search(
     ctx: &impl RequestHeaders,
-    workspace_id: &WorkspaceId,
+    request: &SearchEventsRequest,
+) -> Result<(), HandlerError> {
+    if let Some(session_id) = request.filter.session_id {
+        return authorize_session_read(ctx, session_id).await;
+    }
+
+    let tenant_id = request.filter.tenant_id.ok_or_else(|| {
+        TerminalError::new_with_code(400, "search_events requires session_id or tenant_id")
+    })?;
+    authorize_tenant_admin(ctx, tenant_id).await
+}
+
+async fn authorize_tenant_read(
+    ctx: &impl RequestHeaders,
+    tenant_id: moa_core::TenantId,
 ) -> Result<(), HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
-        ObjectType::Workspace,
-        workspace_id,
-        Relation::Member,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Operator,
+    )
+    .await
+    .map_err(translate_authz_error)
+}
+
+fn tenant_id_for_session_listing(
+    request: &ListSessionsRequest,
+) -> Result<moa_core::TenantId, HandlerError> {
+    request
+        .filter
+        .tenant_id
+        .ok_or_else(|| TerminalError::new_with_code(400, "list_sessions requires tenant_id").into())
+}
+
+async fn authorize_tenant_admin(
+    ctx: &impl RequestHeaders,
+    tenant_id: moa_core::TenantId,
+) -> Result<(), HandlerError> {
+    let identity = require_identity(ctx)?;
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        &identity,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
     )
     .await
     .map_err(translate_authz_error)
@@ -712,4 +757,37 @@ async fn ensure_session_authz_visible(
         object_id: session_id.to_string(),
         relation: Relation::Participant,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moa_core::{SessionFilter, TenantId};
+
+    #[test]
+    fn list_sessions_requires_explicit_tenant_id() {
+        // Pins: session listing never falls back to an unscoped cross-tenant read.
+        let request = ListSessionsRequest {
+            filter: SessionFilter::default(),
+        };
+
+        assert!(tenant_id_for_session_listing(&request).is_err());
+    }
+
+    #[test]
+    fn list_sessions_uses_request_tenant_for_authorization() {
+        // Pins: tenant-wide contact-session inspection is authorized on the requested tenant.
+        let tenant_id = TenantId::new();
+        let request = ListSessionsRequest {
+            filter: SessionFilter {
+                tenant_id: Some(tenant_id),
+                ..SessionFilter::default()
+            },
+        };
+
+        assert_eq!(
+            tenant_id_for_session_listing(&request).expect("tenant id should be accepted"),
+            tenant_id
+        );
+    }
 }

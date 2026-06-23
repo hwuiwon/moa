@@ -6,8 +6,8 @@ use moa_artifacts::registry::{ArtifactFile, ArtifactRegistry, StoredArtifactRevi
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, MemoryScope, MoaError, ScopeContext, ScopedConn,
+    ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    LearningCandidateType, LearningEntry, MoaError, ScopeContext, ScopedConn, TenantId,
     WorkspaceId,
 };
 use serde_json::{Value, json};
@@ -16,6 +16,8 @@ use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::registry::workspace_artifact_scope;
 
 /// Boxed store operation future used to keep transaction-borrow lifetimes explicit.
 pub type LearningReviewStoreFuture<'a, T> =
@@ -85,7 +87,7 @@ pub enum SkillReviewAction {
 #[derive(Debug, Clone)]
 pub struct PreparedSkillAcceptance {
     /// Workspace scope used for artifact publication and regression checks.
-    pub scope: MemoryScope,
+    pub scope: ActionRuleScope,
     /// Candidate being accepted.
     pub candidate: LearningCandidate,
     /// Draft skill artifact revision to publish.
@@ -111,8 +113,6 @@ pub struct SkillReviewOutcome {
     pub draft_artifact_revision_uid: Option<Uuid>,
     /// Published artifact revision created by acceptance, when any.
     pub published_artifact_revision_uid: Option<Uuid>,
-    /// Deprecated legacy materialized skill row. Canonical promotions leave this empty.
-    pub skill_uid: Option<Uuid>,
 }
 
 /// Error returned by skill candidate review helpers.
@@ -205,7 +205,6 @@ pub async fn reject_claimed_skill_candidate(
         artifact_uid: Some(prepared.draft.artifact_uid),
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: None,
-        skill_uid: None,
         regression_report: Some(regression_report),
     });
     finish_claimed_candidate_review(
@@ -229,7 +228,6 @@ pub async fn reject_claimed_skill_candidate(
         artifact_uid: Some(prepared.draft.artifact_uid),
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: None,
-        skill_uid: None,
     })
 }
 
@@ -241,7 +239,7 @@ pub async fn promote_claimed_skill_candidate(
     prepared: PreparedSkillAcceptance,
     regression_report: Value,
 ) -> Result<SkillReviewOutcome> {
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::from(prepared.scope.clone())).await?;
+    let mut conn = ScopedConn::begin(&pool, &artifact_scope_context(&prepared.scope)).await?;
     let published = ArtifactRegistry::publish_revision_in_tx(
         conn.as_mut(),
         prepared.draft_artifact_revision_uid,
@@ -255,7 +253,6 @@ pub async fn promote_claimed_skill_candidate(
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
-        skill_uid: None,
         regression_report: Some(regression_report),
     });
 
@@ -289,7 +286,6 @@ pub async fn promote_claimed_skill_candidate(
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
-        skill_uid: None,
     })
 }
 
@@ -309,7 +305,6 @@ pub async fn reject_learning_candidate(
         artifact_uid,
         draft_artifact_revision_uid,
         published_artifact_revision_uid: None,
-        skill_uid: None,
         regression_report: None,
     });
 
@@ -336,7 +331,6 @@ pub async fn reject_learning_candidate(
         artifact_uid,
         draft_artifact_revision_uid,
         published_artifact_revision_uid: None,
-        skill_uid: None,
     })
 }
 
@@ -351,9 +345,14 @@ async fn load_candidate(
         .ok_or_else(|| SkillReviewError::NotFound("learning candidate not found".to_string()))
 }
 
-fn workspace_scope(workspace_id: &WorkspaceId) -> MemoryScope {
-    MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
+fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+    workspace_artifact_scope(workspace_id)
+}
+
+fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+    match scope {
+        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
+        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }
 
@@ -493,7 +492,6 @@ struct ReviewEvaluationPayload<'a> {
     artifact_uid: Option<Uuid>,
     draft_artifact_revision_uid: Option<Uuid>,
     published_artifact_revision_uid: Option<Uuid>,
-    skill_uid: Option<Uuid>,
     regression_report: Option<Value>,
 }
 
@@ -511,7 +509,6 @@ fn review_evaluation_payload(input: ReviewEvaluationPayload<'_>) -> Value {
         "artifact_uid": input.artifact_uid,
         "draft_artifact_revision_uid": input.draft_artifact_revision_uid,
         "published_artifact_revision_uid": input.published_artifact_revision_uid,
-        "skill_uid": input.skill_uid,
         "regression_execution": regression_execution,
         "regression_report": input.regression_report,
     })
@@ -526,7 +523,7 @@ fn accepted_learning_entry(
     let learning_type = accepted_learning_type(candidate)?;
     Ok(LearningEntry {
         id: Uuid::now_v7(),
-        tenant_id: candidate.tenant_id.clone(),
+        tenant_id: candidate.tenant_id,
         learning_type,
         target_id: target_id(candidate, published),
         target_label: target_label(candidate),
@@ -616,14 +613,14 @@ fn bad_request(message: impl Into<String>) -> SkillReviewError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::{LearningRiskClass, WorkspaceId};
+    use moa_core::{LearningRiskClass, TenantId, WorkspaceId};
 
     #[test]
     fn accepted_learning_type_rejects_unknown_operations() {
         // Pins: review promotion only appends known skill learning-log operations.
         let candidate = LearningCandidate {
             id: Uuid::from_u128(1),
-            tenant_id: "tenant-a".to_string(),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
             workspace_id: WorkspaceId::new("workspace-a"),
             user_id: None,
             candidate_type: LearningCandidateType::Skill,

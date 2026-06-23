@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId};
+use moa_core::{ContactId, MemoryScope, ScopeContext, ScopedConn, SessionId, TenantId};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
@@ -28,16 +28,59 @@ use moa_brain::retrieval::{
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+fn tenant_id_from_workspace_id(workspace_id: &str) -> TenantId {
+    Uuid::parse_str(workspace_id)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)))
+}
+
+fn contact_id_from_user_id(user_id: &str) -> ContactId {
+    Uuid::parse_str(user_id)
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id)))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn tenant_scope(workspace_id: &str) -> ScopeContext {
+    ScopeContext::tenant(tenant_id_from_workspace_id(workspace_id))
+}
+
+fn contact_scope(workspace_id: &str, user_id: &str) -> ScopeContext {
+    ScopeContext::contact(
+        tenant_id_from_workspace_id(workspace_id),
+        contact_id_from_user_id(user_id),
+    )
+}
+
+fn tenant_memory_scope(workspace_id: &str) -> MemoryScope {
+    MemoryScope::Tenant {
+        tenant_id: tenant_id_from_workspace_id(workspace_id),
+    }
+}
+
+fn contact_memory_scope(workspace_id: &str, user_id: &str) -> MemoryScope {
+    MemoryScope::Contact {
+        tenant_id: tenant_id_from_workspace_id(workspace_id),
+        contact_id: contact_id_from_user_id(user_id),
+    }
+}
+
 #[tokio::test]
 async fn query_retrieval_ctx_defaults_reranker_off_and_requires_explicit_opt_in() {
     // Pins: query retrieval callers do not enable reranking unless they explicitly opt in.
     let pool = PgPool::connect_lazy("postgres://unused")
         .expect("lazy pool construction should not connect");
-    let workspace_id = WorkspaceId::new("reranker-default-workspace");
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
-    let scope_context = ScopeContext::workspace(workspace_id);
+    let workspace_id = "reranker-default-workspace";
+    let scope = tenant_memory_scope(workspace_id);
+    let scope_context = tenant_scope(workspace_id);
     let vector: Arc<dyn moa_memory_vector::VectorStore> = Arc::new(
         PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone()),
     );
@@ -121,13 +164,13 @@ fn utc(value: &str) -> DateTime<Utc> {
 }
 
 fn graph_store(pool: &PgPool, workspace_id: &str) -> AgeGraphStore {
-    let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let scope = tenant_scope(workspace_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
 fn user_graph_store(pool: &PgPool, workspace_id: &str, user_id: &str) -> AgeGraphStore {
-    let scope = ScopeContext::user(WorkspaceId::new(workspace_id), UserId::new(user_id));
+    let scope = contact_scope(workspace_id, user_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
@@ -140,7 +183,7 @@ fn scripted_user_fact(summary: &str) -> ExtractedFact {
         object: summary.to_string(),
         summary: summary.to_string(),
         source_chunk: 0,
-        scope_hint: ExtractedFactScopeHint::User,
+        scope_hint: ExtractedFactScopeHint::Contact,
         confidence: Some(0.92),
     };
     let hash = fact_hash(&fact).expect("scripted fact hashes");
@@ -182,7 +225,7 @@ fn node_intent(
 }
 
 async fn seed_filler_rows(pool: &PgPool, workspace_id: &str, prefix: &str, count: usize) {
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let ctx = tenant_scope(workspace_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin filler seed transaction");
@@ -220,7 +263,7 @@ async fn delete_filler_rows(pool: &PgPool, workspace_id: &str, prefix: &str) {
 }
 
 async fn set_workspace_vector_backend(pool: &PgPool, workspace_id: &str, backend: &str) {
-    let ctx = ScopeContext::workspace(WorkspaceId::new(workspace_id));
+    let ctx = tenant_scope(workspace_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin workspace_state transaction");
@@ -303,13 +346,9 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             .expect("create graph edge");
     }
 
-    let scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(workspace_id.clone()),
-    };
-    let vector = PgvectorStore::new_for_app_role(
-        session_store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
-    );
+    let scope = tenant_memory_scope(&workspace_id);
+    let vector =
+        PgvectorStore::new_for_app_role(session_store.pool().clone(), tenant_scope(&workspace_id));
     let retriever = HybridRetriever::new(
         session_store.pool().clone(),
         Arc::new(graph.clone()),
@@ -360,9 +399,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             seeds: vec![seed_uid],
             query_text: String::new(),
             query_embedding: Vec::new(),
-            scope: MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new(workspace_id.clone()),
-            },
+            scope: tenant_memory_scope(&workspace_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
@@ -389,9 +426,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
             seeds: vec![seed_uid],
             query_text: String::new(),
             query_embedding: Vec::new(),
-            scope: MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new(workspace_id.clone()),
-            },
+            scope: tenant_memory_scope(&workspace_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             max_pii_class: PiiClass::Restricted,
             k_final: 5,
@@ -423,7 +458,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 #[tokio::test]
 #[ignore = "requires Postgres test database"]
 async fn user_scope_fact_invisible_to_other_user_at_any_k() {
-    // Pins: user-scoped facts written by ingestion are structurally hidden from other users.
+    // Pins: contact-scoped facts written by ingestion are structurally hidden from other contacts.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -432,8 +467,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
     let workspace_id = format!("scope-isolation-{}", Uuid::now_v7().simple());
     let user_a = "user-scope-owner";
     let user_b = "user-scope-other";
-    let workspace = WorkspaceId::new(workspace_id.clone());
-    let workspace_scope = ScopeContext::workspace(workspace.clone());
+    let workspace_scope = tenant_scope(&workspace_id);
     let ingest_vector = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
         workspace_scope.clone(),
@@ -456,8 +490,8 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
     let report = ingest_turn_direct_with_ctx(
         ctx,
         SessionTurn {
-            workspace_id: workspace.clone(),
-            user_id: UserId::new(user_a),
+            tenant_id: tenant_id_from_workspace_id(&workspace_id),
+            contact_id: contact_id_from_user_id(user_a),
             session_id: SessionId::new(),
             turn_seq: 1,
             transcript: format!("user: {summary}"),
@@ -466,11 +500,11 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         },
     )
     .await
-    .expect("ingest user-scoped fact");
+    .expect("ingest contact-scoped fact");
     assert_eq!(report.inserted, 1);
 
     let owner_graph = user_graph_store(&pool, &workspace_id, user_a);
-    let owner_scope = ScopeContext::user(workspace.clone(), UserId::new(user_a));
+    let owner_scope = contact_scope(&workspace_id, user_a);
     let owner_vector = PgvectorStore::new_for_app_role(pool.clone(), owner_scope);
     let owner_hits =
         HybridRetriever::new(pool.clone(), Arc::new(owner_graph), Arc::new(owner_vector))
@@ -479,10 +513,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
                 query_embedding: deterministic_vector(summary),
-                scope: MemoryScope::User {
-                    workspace_id: workspace.clone(),
-                    user_id: UserId::new(user_a),
-                },
+                scope: contact_memory_scope(&workspace_id, user_a),
                 label_filter: Some(vec![NodeLabel::Fact]),
                 max_pii_class: PiiClass::Restricted,
                 k_final: 25,
@@ -504,7 +535,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
     );
 
     let other_graph = user_graph_store(&pool, &workspace_id, user_b);
-    let other_scope = ScopeContext::user(workspace.clone(), UserId::new(user_b));
+    let other_scope = contact_scope(&workspace_id, user_b);
     let other_vector = PgvectorStore::new_for_app_role(pool.clone(), other_scope);
     let other_hits =
         HybridRetriever::new(pool.clone(), Arc::new(other_graph), Arc::new(other_vector))
@@ -513,10 +544,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
                 seeds: Vec::new(),
                 query_text: summary.to_string(),
                 query_embedding: deterministic_vector(summary),
-                scope: MemoryScope::User {
-                    workspace_id: workspace,
-                    user_id: UserId::new(user_b),
-                },
+                scope: contact_memory_scope(&workspace_id, user_b),
                 label_filter: Some(vec![NodeLabel::Fact]),
                 max_pii_class: PiiClass::Restricted,
                 k_final: 25,
@@ -553,7 +581,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     let workspace_id = format!("hybrid-temporal-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
 
-    let old_name = "temporal-asof legacy gateway owner";
+    let old_name = "temporal-asof retired gateway owner";
     let mut old = node_intent(&workspace_id, NodeLabel::Fact, old_name, None);
     old.valid_from = utc("2026-02-01T00:00:00Z");
     let old_uid = graph.create_node(old).await.expect("create old fact");
@@ -570,19 +598,15 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
         .await
         .expect("supersede old fact");
 
-    let vector = PgvectorStore::new_for_app_role(
-        session_store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
-    );
+    let vector =
+        PgvectorStore::new_for_app_role(session_store.pool().clone(), tenant_scope(&workspace_id));
     let retriever = HybridRetriever::new(
         session_store.pool().clone(),
         Arc::new(graph.clone()),
         Arc::new(vector),
     )
     .with_assume_app_role(true);
-    let scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new(workspace_id.clone()),
-    };
+    let scope = tenant_memory_scope(&workspace_id);
     let historical = RetrievalRequest {
         seeds: Vec::new(),
         query_text: old_name.to_string(),
@@ -669,10 +693,8 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
     let fact_uid = graph.create_node(intent).await.expect("create vector fact");
     set_workspace_vector_backend(session_store.pool(), &workspace_id, "turbopuffer").await;
 
-    let vector = PgvectorStore::new_for_app_role(
-        session_store.pool().clone(),
-        ScopeContext::workspace(WorkspaceId::new(workspace_id.clone())),
-    );
+    let vector =
+        PgvectorStore::new_for_app_role(session_store.pool().clone(), tenant_scope(&workspace_id));
     let turbopuffer = TurbopufferStore::new(
         "http://127.0.0.1:9".to_string(),
         SecretString::from("unused-key"),
@@ -693,9 +715,7 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
             seeds: Vec::new(),
             query_text: String::new(),
             query_embedding: deterministic_vector(fact),
-            scope: MemoryScope::Workspace {
-                workspace_id: WorkspaceId::new(workspace_id.clone()),
-            },
+            scope: tenant_memory_scope(&workspace_id),
             label_filter: Some(vec![NodeLabel::Fact]),
             max_pii_class: PiiClass::Restricted,
             k_final: 5,

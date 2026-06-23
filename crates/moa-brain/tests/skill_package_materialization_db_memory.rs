@@ -10,9 +10,10 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
-    AgentToolPolicy, AgentToolPolicyMode, Event, EventRange, LockedToolRef, MemoryScope,
-    ModelCapabilities, ResolvedArtifactRevisionRef, Result, SessionMeta, SessionStore,
+    ActionRuleScope, AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
+    AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode, ContactId, ContactRef,
+    ContactVerificationState, Event, EventRange, LockedToolRef, ModelCapabilities, ModelId,
+    ResolvedArtifactRevisionRef, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
     TokenPricing, ToolCallFormat, ToolOutput, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
@@ -42,15 +43,17 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         "skill-package-materialization-{}",
         Uuid::now_v7().simple()
     ));
+    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new("skill-package-user");
     let skill_name = format!("db-backed-package-{}", Uuid::now_v7().simple());
     let session_id = session_store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id,
-            model: config.models.main.clone().into(),
-            ..SessionMeta::default()
-        })
+        .create_session(session_meta(
+            tenant_id,
+            &user_id,
+            config.models.main.clone().into(),
+            None,
+        ))
         .await?;
 
     let skill_document = skill_artifact_document(&skill_name);
@@ -58,9 +61,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let skill_files = skill_files();
     let skill_draft = ArtifactRegistry::new(graph_pool.clone())
         .create_draft(
-            &MemoryScope::Workspace {
-                workspace_id: workspace_id.clone(),
-            },
+            &ActionRuleScope::Tenant { tenant_id },
             NewArtifactDraft {
                 document: &skill_document,
                 source_format: "yaml",
@@ -71,9 +72,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
         .await?;
     ArtifactRegistry::new(graph_pool.clone())
         .publish_revision(
-            &MemoryScope::Workspace {
-                workspace_id: workspace_id.clone(),
-            },
+            &ActionRuleScope::Tenant { tenant_id },
             skill_draft.revision_uid,
             &validate_for_status(&skill_document, ArtifactStatus::Published),
         )
@@ -85,7 +84,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
             .with_policies(ActionPolicies::from_config(&config)),
     );
     router
-        .remember_workspace_root(workspace_id.clone(), workspace.clone())
+        .remember_workspace_root(runtime_workspace_id, workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider(&skill_name));
@@ -184,11 +183,11 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
     let workspace_id = WorkspaceId::new(format!("agent-locked-skill-{}", Uuid::now_v7().simple()));
+    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
     let user_id = UserId::new("agent-locked-skill-user");
     let skill_name = format!("agent-locked-skill-{}", Uuid::now_v7().simple());
-    let scope = MemoryScope::Workspace {
-        workspace_id: workspace_id.clone(),
-    };
+    let scope = ActionRuleScope::Tenant { tenant_id };
     let registry = ArtifactRegistry::new(graph_pool.clone());
 
     let skill_document = skill_artifact_document(&skill_name);
@@ -254,17 +253,16 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
         .await?;
 
     let session_id = session_store
-        .create_session(SessionMeta {
-            workspace_id: workspace_id.clone(),
-            user_id,
-            model: config.models.main.clone().into(),
-            agent_context: Some(agent_context_with_skill_revision(
+        .create_session(session_meta(
+            tenant_id,
+            &user_id,
+            config.models.main.clone().into(),
+            Some(agent_context_with_skill_revision(
                 &skill_name,
                 &first_revision,
                 agent_revision.revision_uid,
             )),
-            ..SessionMeta::default()
-        })
+        ))
         .await?;
 
     let router = Arc::new(
@@ -273,7 +271,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             .with_policies(ActionPolicies::from_config(&config)),
     );
     router
-        .remember_workspace_root(workspace_id.clone(), workspace.clone())
+        .remember_workspace_root(runtime_workspace_id, workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider_read_checklist(&skill_name));
@@ -547,6 +545,59 @@ fn capabilities() -> ModelCapabilities {
             cache_write_1h_per_mtok: None,
         },
         native_tools: Vec::new(),
+    }
+}
+
+fn session_meta(
+    tenant_id: TenantId,
+    user_id: &UserId,
+    model: ModelId,
+    agent_context: Option<AgentContext>,
+) -> SessionMeta {
+    let contact_id = contact_id_from_user_id(user_id);
+    SessionMeta {
+        tenant_id,
+        contact: Some(contact_ref(tenant_id, contact_id)),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
+        model,
+        agent_context,
+        ..SessionMeta::default()
+    }
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    Uuid::parse_str(workspace_id.as_str())
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
+    Uuid::parse_str(user_id.as_str())
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
     }
 }
 

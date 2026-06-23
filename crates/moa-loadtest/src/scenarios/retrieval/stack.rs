@@ -34,7 +34,8 @@ impl Stack {
         let mut fixtures = Vec::with_capacity(cfg.workspaces);
         for workspace_index in 0..cfg.workspaces {
             let workspace_id = Uuid::now_v7();
-            let scope = ScopeContext::workspace(WorkspaceId::new(workspace_id.to_string()));
+            let tenant_id = TenantId::from(workspace_id);
+            let scope = ScopeContext::tenant(tenant_id);
             let vector = Arc::new(PgvectorStore::new_for_app_role(
                 self.pool.clone(),
                 scope.clone(),
@@ -60,7 +61,7 @@ impl Stack {
                         label: NodeLabel::Fact,
                         workspace_id: Some(workspace_id.to_string()),
                         user_id: None,
-                        scope: "workspace".to_string(),
+                        scope: "tenant".to_string(),
                         name: text.clone(),
                         properties: json!({
                             "summary": text,
@@ -124,8 +125,8 @@ pub(super) struct WorkspaceRetriever {
 
 impl WorkspaceRetriever {
     fn new(pool: PgPool, workspace_id: Uuid) -> Self {
-        let workspace = WorkspaceId::new(workspace_id.to_string());
-        let scope_ctx = ScopeContext::workspace(workspace.clone());
+        let tenant_id = TenantId::from(workspace_id);
+        let scope_ctx = ScopeContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             pool.clone(),
             scope_ctx.clone(),
@@ -136,9 +137,7 @@ impl WorkspaceRetriever {
         );
         let hybrid = HybridRetriever::new(pool.clone(), graph, vector).with_assume_app_role(true);
         Self {
-            scope: MemoryScope::Workspace {
-                workspace_id: workspace,
-            },
+            scope: MemoryScope::Tenant { tenant_id },
             cache: CachedHybridRetriever::new_for_app_role(Arc::new(hybrid), pool),
         }
     }

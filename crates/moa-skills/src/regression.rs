@@ -96,7 +96,8 @@ pub async fn generate_skill_test_suite(
     skill: &SkillDocument,
     events: &[EventRecord],
 ) -> Result<PathBuf> {
-    let generated = generate_skill_test_suite_source(&session.workspace_id, skill, events)?;
+    let workspace_id = WorkspaceId::new(session.tenant_id.to_string());
+    let generated = generate_skill_test_suite_source(&workspace_id, skill, events)?;
     let suite_path = PathBuf::from(&config.local.memory_dir).join(&generated.relative_path);
     if let Some(parent) = suite_path.parent() {
         fs::create_dir_all(parent).await?;

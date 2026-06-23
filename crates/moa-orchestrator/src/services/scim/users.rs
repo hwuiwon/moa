@@ -29,7 +29,7 @@ pub async fn list_users(
         .map_err(|error| ScimResponseError::bad_request("invalidFilter", error))?;
     let (total, rows) = user_admin::fetch_users_page(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         filter.as_ref(),
         start,
         count,
@@ -60,7 +60,7 @@ pub async fn create_user(
     let email = primary_email(&request)?;
     let user_id = user_admin::create_user(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         ActorInput::from_identity(&identity),
         UserWrite {
             email,
@@ -78,7 +78,7 @@ pub async fn create_user(
         },
     )
     .await?;
-    let body = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id, user_id)
+    let body = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id.0, user_id)
         .await?
         .map(|row| scim_user_from_row(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("user not found after create"))?;
@@ -92,7 +92,7 @@ pub async fn get_user(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ScimUser>, ScimResponseError> {
     let identity = authenticate_scim(&state, &headers).await?;
-    let user = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id, id)
+    let user = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id.0, id)
         .await?
         .map(|row| scim_user_from_row(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("user not found"))?;
@@ -110,7 +110,7 @@ pub async fn put_user(
     let email = primary_email(&request)?;
     user_admin::replace_user(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         id,
         ActorInput::from_identity(&identity),
         UserWrite {
@@ -129,7 +129,7 @@ pub async fn put_user(
         },
     )
     .await?;
-    let body = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id, id)
+    let body = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id.0, id)
         .await?
         .map(|row| scim_user_from_row(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("user not found"))?;
@@ -148,13 +148,13 @@ pub async fn patch_user(
         .map_err(|error| ScimResponseError::bad_request("invalidSyntax", error))?;
     user_admin::patch_user(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         id,
         ActorInput::from_identity(&identity),
         user_patch(mutation),
     )
     .await?;
-    let body = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id, id)
+    let body = user_admin::fetch_user_by_id(&state.pool, identity.tenant_id.0, id)
         .await?
         .map(|row| scim_user_from_row(&state, row))
         .ok_or_else(|| ScimResponseError::not_found("user not found"))?;
@@ -170,7 +170,7 @@ pub async fn delete_user(
     let identity = authenticate_scim(&state, &headers).await?;
     user_admin::delete_user(
         &state.pool,
-        identity.tenant_id,
+        identity.tenant_id.0,
         id,
         ActorInput::from_identity(&identity),
     )

@@ -9,8 +9,7 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, UserId,
-    WorkspaceId,
+    Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, TenantId,
 };
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::testing;
@@ -31,8 +30,7 @@ async fn live_brain_turn_completes() -> Result<()> {
     let provider: Arc<dyn LLMProvider> = build_provider_from_config(&config)?;
     let session_id = store
         .create_session(SessionMeta {
-            workspace_id: WorkspaceId::new("live-brain-turn"),
-            user_id: UserId::new("integration-test"),
+            tenant_id: TenantId::new(),
             model: config.models.main.clone().into(),
             ..SessionMeta::default()
         })

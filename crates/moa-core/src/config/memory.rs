@@ -105,31 +105,16 @@ pub struct MemoryRetrievalConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryRankingConfig {
-    /// Ranking mode.
-    pub mode: MemoryRankingMode,
-    /// Feature weights used by FeatureV1.
+    /// Feature weights used by deterministic post-hydration ranking.
     pub weights: MemoryRankingWeights,
 }
 
 impl Default for MemoryRankingConfig {
     fn default() -> Self {
         Self {
-            mode: MemoryRankingMode::FeatureV1,
             weights: MemoryRankingWeights::default(),
         }
     }
-}
-
-/// Ranking mode for graph-memory retrieval.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum MemoryRankingMode {
-    /// Preserve the legacy RRF plus layer-bias ranking path.
-    Legacy,
-    /// Apply deterministic feature scoring after candidate hydration.
-    #[default]
-    FeatureV1,
 }
 
 /// Weights used by deterministic graph-memory ranking.
@@ -150,9 +135,9 @@ pub struct MemoryRankingWeights {
     pub graph_rescue: f64,
     /// Outcome-derived quality prior contribution.
     pub quality: f64,
-    /// Additive score for user-scoped rows.
+    /// Additive score for contact-scoped rows.
     pub scope_user: f64,
-    /// Additive score for workspace-scoped rows.
+    /// Additive score for tenant-scoped rows.
     pub scope_workspace: f64,
     /// Half-life in days for valid-from recency.
     pub recency_half_life_days: f64,

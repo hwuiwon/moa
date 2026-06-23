@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    Channel, ContextMessage, Event, EventFilter, EventRange, EventRecord, ModelCapabilities,
-    ModelId, Result, SequenceNum, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    SessionStore, SessionSummary, TokenPricing, ToolCallFormat, UserId, WorkingContext,
-    WorkspaceId,
+    Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, Event, EventFilter,
+    EventRange, EventRecord, ModelCapabilities, ModelId, Result, SequenceNum, SessionActorRef,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, TenantId,
+    TokenPricing, ToolCallFormat, WorkingContext, WorkspaceId,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -109,10 +109,11 @@ impl WorkingContextFixture {
     pub fn build(self) -> BuiltWorkingContextFixture {
         let tempdir = tempfile::tempdir().expect("pipeline fixture tempdir should be created");
         let workspace_root = tempdir.path().join(&self.workspace_id);
+        let tenant_id = tenant_id_from_label(&self.workspace_id);
+        let contact_id = contact_id_from_label(&self.user_id);
         let session = SessionMeta {
             id: SessionId(Uuid::from_u128(0x100)),
-            workspace_id: WorkspaceId::new(self.workspace_id.clone()),
-            user_id: UserId::new(self.user_id.clone()),
+            tenant_id,
             title: None,
             status: SessionStatus::Created,
             channel: Channel::Chat,
@@ -122,8 +123,8 @@ impl WorkingContextFixture {
             updated_at: self.clock_at,
             completed_at: None,
             parent_session_id: None,
-            contact: None,
-            created_by: None,
+            contact: Some(contact_ref(tenant_id, contact_id)),
+            created_by: Some(SessionActorRef::Contact { id: contact_id }),
             contact_promoted_from_id: None,
             agent_context: Some(moa_core::AgentContext::system_default()),
             total_input_tokens: 0,
@@ -375,7 +376,7 @@ impl SessionStore for MockSessionStore {
         since: DateTime<Utc>,
     ) -> Result<u32> {
         let session = self.session.lock().await.clone();
-        if &session.workspace_id != workspace_id {
+        if session.tenant_id != tenant_id_from_workspace_id(workspace_id) {
             return Ok(0);
         }
 
@@ -399,12 +400,57 @@ impl SessionStore for MockSessionStore {
 
 /// Builds session metadata for an offline brain test.
 pub fn session_meta(label: &str, model: &str) -> SessionMeta {
+    let workspace_label = format!("{label}-workspace");
+    let user_label = format!("{label}-user");
+    let tenant_id = tenant_id_from_label(&workspace_label);
+    let contact_id = contact_id_from_label(&user_label);
     SessionMeta {
         id: SessionId::new(),
-        workspace_id: WorkspaceId::new(format!("{label}-workspace")),
-        user_id: moa_core::UserId::new(format!("{label}-user")),
+        tenant_id,
+        contact: Some(contact_ref(tenant_id, contact_id)),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
         model: ModelId::new(model),
         ..SessionMeta::default()
+    }
+}
+
+fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
+    tenant_id_from_label(workspace_id.as_str())
+}
+
+fn tenant_id_from_label(label: &str) -> TenantId {
+    Uuid::parse_str(label)
+        .map(TenantId::from)
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(label)))
+}
+
+fn contact_id_from_label(label: &str) -> ContactId {
+    Uuid::parse_str(label)
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(label)))
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let hash = blake3::hash(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
     }
 }
 

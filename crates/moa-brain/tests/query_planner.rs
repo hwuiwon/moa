@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::{PlanningCtx, QueryPlanner, Strategy};
-use moa_core::{MemoryScope, WorkspaceId};
+use moa_core::{MemoryScope, TenantId};
 use moa_memory_graph::{
     EdgeLabel, EdgeWriteIntent, GraphError, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent,
     PiiClass,
@@ -17,8 +17,8 @@ async fn planner_classify_and_seed_dependency_query() {
         auth_uid,
         deploy_uid: Uuid::now_v7(),
     });
-    let scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new("planner-workspace"),
+    let scope = MemoryScope::Tenant {
+        tenant_id: TenantId::new(),
     };
     let ctx = PlanningCtx::new(scope.clone(), graph).with_seed_limit_per_span(3);
 
@@ -30,7 +30,7 @@ async fn planner_classify_and_seed_dependency_query() {
     assert_eq!(planned.strategy, Strategy::GraphFirst);
     assert_eq!(planned.seeds, vec![auth_uid]);
     assert_eq!(planned.scope, scope);
-    assert_eq!(planned.scope_ancestors.len(), 2);
+    assert_eq!(planned.scope_ancestors.len(), 1);
     assert!(planned.temporal_filter.is_none());
 }
 
@@ -40,8 +40,8 @@ async fn planner_classify_vector_query_and_builds_retrieval_request() {
         auth_uid: Uuid::now_v7(),
         deploy_uid: Uuid::now_v7(),
     });
-    let scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new("planner-workspace"),
+    let scope = MemoryScope::Tenant {
+        tenant_id: TenantId::new(),
     };
     let ctx = PlanningCtx::new(scope.clone(), graph);
 
@@ -67,8 +67,8 @@ async fn planner_classify_vector_query_and_builds_retrieval_request() {
 async fn planner_passes_temporal_filter_to_seed_lookup() {
     let historical_uid = Uuid::now_v7();
     let graph = std::sync::Arc::new(TemporalSeedGraph { historical_uid });
-    let scope = MemoryScope::Workspace {
-        workspace_id: WorkspaceId::new("planner-workspace"),
+    let scope = MemoryScope::Tenant {
+        tenant_id: TenantId::new(),
     };
     let ctx = PlanningCtx::new(scope, graph);
 

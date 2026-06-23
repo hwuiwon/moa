@@ -230,7 +230,7 @@ async fn require_tenant_member(identity: &Identity) -> Result<(), HandlerError> 
         identity,
         ObjectType::Tenant,
         identity.tenant_id,
-        Relation::Member,
+        Relation::Operator,
     )
     .await
     .map_err(translate_authz_error)
@@ -272,6 +272,8 @@ async fn require_agent_operator_or_tenant_admin(
 fn actor_user_id(identity: &Identity) -> Option<Uuid> {
     match identity.identity_type {
         IdentityType::User => Some(identity.id),
-        IdentityType::Agent | IdentityType::Service => identity.acting_on_behalf_of,
+        IdentityType::Agent | IdentityType::Service | IdentityType::Contact => {
+            identity.acting_on_behalf_of
+        }
     }
 }

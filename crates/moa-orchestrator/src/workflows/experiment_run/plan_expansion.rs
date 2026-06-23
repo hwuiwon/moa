@@ -10,7 +10,7 @@ pub(super) async fn run_experiment_plan(
 ) -> Result<ExperimentRunStatusResponse, HandlerError> {
     persist_run_status(
         ctx,
-        request.workspace_id.clone(),
+        request.tenant_id,
         request.run_uid,
         ExperimentRunStatus::Running,
         None,
@@ -19,14 +19,13 @@ pub(super) async fn run_experiment_plan(
     .await?;
     let expansion = load_plan_expansion(
         ctx,
-        request.workspace_id.clone(),
+        request.tenant_id,
         request.run_uid,
         plan_revision_uid,
         request.agent_revision_variants.clone(),
     )
     .await?;
-    let trials =
-        create_plan_trial_rows(ctx, request.workspace_id.clone(), expansion.trials).await?;
+    let trials = create_plan_trial_rows(ctx, request.tenant_id, expansion.trials).await?;
     dispatch_plan_trials(ctx, request, expansion.parallelism, trials).await
 }
 
@@ -43,12 +42,11 @@ async fn dispatch_plan_trials(
     let mut idle_polls = 0_u32;
 
     loop {
-        let aggregate =
-            aggregate_plan_status(ctx, request.workspace_id.clone(), request.run_uid).await?;
+        let aggregate = aggregate_plan_status(ctx, request.tenant_id, request.run_uid).await?;
         if aggregate.run.status == ExperimentRunStatus::Cancelled {
             cancel_active_plan_trials(
                 ctx,
-                request.workspace_id.clone(),
+                request.tenant_id,
                 request.run_uid,
                 aggregate
                     .run
@@ -60,7 +58,7 @@ async fn dispatch_plan_trials(
             return workflow_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
-                    workspace_id: request.workspace_id,
+                    tenant_id: request.tenant_id,
                     run_uid: request.run_uid,
                 },
             )
@@ -70,7 +68,7 @@ async fn dispatch_plan_trials(
         if run_status_is_terminal(aggregate.status) {
             persist_run_status(
                 ctx,
-                request.workspace_id.clone(),
+                request.tenant_id,
                 request.run_uid,
                 aggregate.status,
                 aggregate.error.clone(),
@@ -80,7 +78,7 @@ async fn dispatch_plan_trials(
             return workflow_status_response(
                 ctx,
                 ExperimentRunStatusRequest {
-                    workspace_id: request.workspace_id,
+                    tenant_id: request.tenant_id,
                     run_uid: request.run_uid,
                 },
             )
@@ -90,7 +88,7 @@ async fn dispatch_plan_trials(
         if aggregate.status != aggregate.run.status {
             persist_run_status(
                 ctx,
-                request.workspace_id.clone(),
+                request.tenant_id,
                 request.run_uid,
                 aggregate.status,
                 aggregate.error.clone(),
@@ -114,7 +112,7 @@ async fn dispatch_plan_trials(
         let had_ready_trials = !ready_trial_keys.is_empty();
         let claimed_trials = claim_plan_trial_dispatches(
             ctx,
-            request.workspace_id.clone(),
+            request.tenant_id,
             request.run_uid,
             ready_trial_keys,
             available_slots,
@@ -127,7 +125,7 @@ async fn dispatch_plan_trials(
             let key = trial_workflow_key(request.run_uid, &trial.trial.trial_key);
             ctx.workflow_client::<ExperimentTrialRunClient>(key)
                 .run(Json::from(ExperimentTrialRunWorkflowRequest {
-                    workspace_id: request.workspace_id.clone(),
+                    tenant_id: request.tenant_id,
                     trial: trial.trial.clone(),
                     target: trial.target.clone(),
                     variant: trial.variant.clone(),
@@ -169,13 +167,13 @@ pub(super) struct PlanStatusAggregate {
 
 async fn load_plan_expansion(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
 ) -> Result<PlanExpansion, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             expand_plan(
@@ -195,7 +193,7 @@ async fn load_plan_expansion(
 
 async fn expand_plan(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     run_uid: Uuid,
     plan_revision_uid: Uuid,
     agent_revision_variants: Vec<AgentRevisionSimulationVariant>,
@@ -272,7 +270,7 @@ fn definition_with_agent_revision_variants(
 
 async fn load_required_published_revision(
     registry: &ArtifactRegistry,
-    scope: &MemoryScope,
+    scope: &ActionRuleScope,
     revision_uid: Uuid,
     expected_kind: ArtifactKind,
 ) -> Result<StoredArtifactRevision, HandlerError> {
@@ -297,11 +295,11 @@ async fn load_required_published_revision(
 
 async fn create_plan_trial_rows(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     trials: Vec<ExpandedPlanTrial>,
 ) -> Result<Vec<PlanTrialDispatch>, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             let store = ExperimentStore::new(pool);
@@ -327,11 +325,11 @@ async fn create_plan_trial_rows(
 
 async fn aggregate_plan_status(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_uid: Uuid,
 ) -> Result<PlanStatusAggregate, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             aggregate_plan_status_from_store(pool, scope, run_uid)
@@ -345,7 +343,7 @@ async fn aggregate_plan_status(
 
 pub(super) async fn aggregate_plan_status_from_store(
     pool: sqlx::PgPool,
-    scope: MemoryScope,
+    scope: ActionRuleScope,
     run_uid: Uuid,
 ) -> Result<PlanStatusAggregate, HandlerError> {
     let store = ExperimentStore::new(pool);
@@ -433,12 +431,12 @@ pub(super) fn aggregate_error_for_trials(trials: &[ExperimentTrialRecord]) -> Op
 
 async fn cancel_active_plan_trials(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_uid: Uuid,
     reason: String,
 ) -> Result<(), HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     ctx.run(|| async move {
         ExperimentStore::new(pool)
             .cancel_active_trials(&scope, run_uid, reason)
@@ -453,7 +451,7 @@ async fn cancel_active_plan_trials(
 
 async fn claim_plan_trial_dispatches(
     ctx: &WorkflowContext<'_>,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     run_uid: Uuid,
     trial_keys: Vec<String>,
     available_slots: usize,
@@ -465,7 +463,7 @@ async fn claim_plan_trial_dispatches(
     let limit = i64::try_from(available_slots)
         .map_err(|_| TerminalError::new("experiment dispatch parallelism is too large"))?;
     let pool = OrchestratorCtx::current_graph_pool();
-    let scope = workspace_scope(workspace_id);
+    let scope = tenant_scope(tenant_id);
     Ok(ctx
         .run(|| async move {
             let mut trials = ExperimentStore::new(pool)

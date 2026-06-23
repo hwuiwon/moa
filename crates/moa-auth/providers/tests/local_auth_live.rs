@@ -3,6 +3,7 @@
 use moa_auth_providers::api_keys::{self, CreateApiKeyRequest, CreateApiKeyResponse, Env};
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::{ObjectType, Relation, TupleKey, TupleOp, UserType};
+use moa_core::TenantId;
 use moa_core::traits::{Identity, IdentityType};
 use uuid::Uuid;
 
@@ -24,7 +25,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
     let bootstrap_tuple = TupleKey::new(
         UserType::User,
         user_id,
-        Relation::Member,
+        Relation::Admin,
         ObjectType::Tenant,
         tenant_id,
     );
@@ -33,7 +34,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
     let direct_identity = Identity {
         identity_type: IdentityType::User,
         id: user_id,
-        tenant_id,
+        tenant_id: TenantId::from(tenant_id),
         api_key_id: None,
         acting_on_behalf_of: None,
     };
@@ -61,7 +62,7 @@ async fn create_present_validate_revoke() -> Result<(), Box<dyn std::error::Erro
     let identity = whoami.json::<Identity>().await?;
     assert_eq!(identity.identity_type, IdentityType::User);
     assert_eq!(identity.id, user_id);
-    assert_eq!(identity.tenant_id, tenant_id);
+    assert_eq!(identity.tenant_id, TenantId::from(tenant_id));
     assert_eq!(identity.api_key_id, Some(issued.id));
 
     post_orchestrator_void(

@@ -202,7 +202,7 @@ pub(super) async fn handle_tool_call(
             )
             .await?;
             let message = format!(
-                "tool {} requires workspace admin review, but the local brain harness does not have a durable action-review queue: {}",
+                "tool {} requires tenant admin review, but the local brain harness does not have a durable action-review queue: {}",
                 invocation.name, summary
             );
             append_event(
