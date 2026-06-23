@@ -98,7 +98,7 @@ pub fn emit_retrieval_attrs(span: &Span, record: &RetrievalLineage) {
 
 /// Emits OTel GenAI and OpenInference attributes for compiled-context lineage.
 pub fn emit_context_attrs(span: &Span, record: &ContextLineage) {
-    span.set_attribute("gen_ai.operation.name", Value::from("context_compile"));
+    span.set_attribute("moa.operation.name", Value::from("context_compile"));
     span.set_attribute("openinference.span.kind", Value::from("CHAIN"));
     span.set_attribute(
         "moa.context.chunks_in_window",

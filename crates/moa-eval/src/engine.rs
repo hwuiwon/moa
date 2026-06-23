@@ -239,7 +239,7 @@ impl EvalEngine {
             "eval_run",
             moa.eval.case = %case.name,
             moa.eval.config = %config.name,
-            langfuse.session.id = %environment.session_id,
+            moa.session.id = %environment.session_id,
         );
         let trace_id = extract_trace_id(&span);
         let engine_options = self.options.clone();

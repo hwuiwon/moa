@@ -5,7 +5,6 @@
 //! 2. execute provider transport with shared retry handling
 //! 3. normalize SSE events into `CompletionContent`
 //! 4. finalize one normalized `CompletionResponse`
-//! 5. record provider-private stream snapshots for tracing/debugging
 
 use std::env;
 use std::sync::Arc;
@@ -20,7 +19,7 @@ use moa_core::{
     estimate_text_tokens,
 };
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;

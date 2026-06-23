@@ -15,7 +15,5 @@ pub use collector::TrajectoryCollector;
 pub use engine::EvalEngine;
 pub use reporter::Reporter;
 pub use reporters::JsonReporter;
-#[cfg(feature = "langfuse")]
-pub use reporters::LangfuseReporter;
 pub use reporters::{ReporterOptions, TerminalReporter, build_reporters};
 pub use setup::{AgentEnvironment, EvalLineageHandle, build_agent_environment};

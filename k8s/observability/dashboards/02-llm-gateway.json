@@ -20,8 +20,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(moa_llm_requests_total[5m])) by (provider)",
-          "legendFormat": "{{provider}}",
+          "expr": "sum(rate(gen_ai_client_operation_duration_count[5m])) by (gen_ai_provider_name)",
+          "legendFormat": "{{gen_ai_provider_name}}",
           "refId": "A"
         }
       ],
@@ -37,8 +37,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(moa_tokens_input_uncached_total[5m]) + rate(moa_tokens_input_cached_total[5m]) + rate(moa_tokens_output_total[5m])) by (model)",
-          "legendFormat": "{{model}}",
+          "expr": "sum(rate(gen_ai_client_token_usage_sum[5m])) by (gen_ai_request_model, gen_ai_token_type)",
+          "legendFormat": "{{gen_ai_request_model}} {{gen_ai_token_type}}",
           "refId": "A"
         }
       ],
@@ -71,8 +71,8 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(moa_llm_ttft_seconds_bucket[5m])) by (le, provider, model))",
-          "legendFormat": "{{provider}} {{model}}",
+          "expr": "histogram_quantile(0.95, sum(rate(gen_ai_client_operation_time_to_first_chunk_bucket[5m])) by (le, gen_ai_provider_name, gen_ai_request_model))",
+          "legendFormat": "{{gen_ai_provider_name}} {{gen_ai_request_model}}",
           "refId": "A"
         }
       ],

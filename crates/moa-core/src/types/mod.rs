@@ -87,9 +87,9 @@ pub use learning::LearningEntry;
 pub use memory::{MemoryScope, ScopeContext, ScopeTier, SkillMetadata};
 pub use model::{Credential, ModelCapabilities, ProviderNativeTool, TokenPricing, ToolCallFormat};
 pub use observability::{
-    CacheReport, TraceContext, full_request_fingerprint, generate_trace_tags,
-    normalize_environment, sanitize_langfuse_id, stable_prefix_fingerprint,
-    trace_name_from_message, truncate_with_ellipsis,
+    CacheReport, TraceContext, full_request_fingerprint, genai_operation_name, genai_provider_name,
+    normalize_environment, stable_prefix_fingerprint, trace_name_from_message,
+    truncate_with_ellipsis,
 };
 pub use provider::{ModelTask, ModelTier};
 pub use query_rewrite::{QueryRewriteResult, RewriteReason, RewriteSource};

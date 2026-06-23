@@ -768,28 +768,6 @@ pub async fn hosted_eval_report_artifacts(
                     "run": run,
                 }
             }));
-        } else if spec == "langfuse" {
-            #[cfg(not(feature = "internal-eval-runner"))]
-            {
-                return Err(EvalServiceError::Runtime {
-                    message: "langfuse reports require the internal-eval-runner feature"
-                        .to_string(),
-                });
-            }
-            #[cfg(feature = "internal-eval-runner")]
-            {
-                let reporters = build_reporters(
-                    std::slice::from_ref(spec),
-                    &ReporterOptions {
-                        verbose,
-                        color: false,
-                        json_pretty: true,
-                    },
-                )?;
-                for reporter in reporters {
-                    reporter.report(suite, configs, run).await?;
-                }
-            }
         } else {
             return Err(moa_eval_core::EvalError::InvalidConfig(format!(
                 "unknown report target '{spec}'"

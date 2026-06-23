@@ -61,7 +61,7 @@ where
                         let ttft = started_at.elapsed();
                         record_turn_llm_ttft(ttft);
                         if let Some(span) = llm_call_span {
-                            span.record("gen_ai.response.first_token_at_ms", ttft.as_millis() as i64);
+                            span.record("gen_ai.response.time_to_first_chunk", ttft.as_secs_f64());
                         }
                         recorded_first_token = true;
                     }
@@ -122,7 +122,10 @@ where
                             let ttft = started_at.elapsed();
                             record_turn_llm_ttft(ttft);
                             if let Some(span) = llm_call_span {
-                                span.record("gen_ai.response.first_token_at_ms", ttft.as_millis() as i64);
+                                span.record(
+                                    "gen_ai.response.time_to_first_chunk",
+                                    ttft.as_secs_f64(),
+                                );
                             }
                             recorded_first_token = true;
                         }
@@ -160,7 +163,7 @@ where
                     let ttft = started_at.elapsed();
                     record_turn_llm_ttft(ttft);
                     if let Some(span) = llm_call_span {
-                        span.record("gen_ai.response.first_token_at_ms", ttft.as_millis() as i64);
+                        span.record("gen_ai.response.time_to_first_chunk", ttft.as_secs_f64());
                     }
                     recorded_first_token = true;
                 }

@@ -8,8 +8,8 @@ use std::time::Instant;
 use moa_core::{
     CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
     ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStore,
-    StopReason, TraceContext, WorkingContext, WorkspaceId, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration,
+    StopReason, TraceContext, WorkingContext, WorkspaceId, genai_operation_name,
+    genai_provider_name, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -131,18 +131,21 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| session.model.to_string());
+            let provider_name = genai_provider_name(llm_provider.name()).to_string();
+            let operation_name = genai_operation_name(llm_provider.name()).to_string();
             let cache_report = build_cache_report(&events, llm_provider.name(), &request);
             let llm_call_span = tracing::info_span!(
                 "llm_call",
                 otel.kind = "client",
-                gen_ai.operation.name = "chat",
-                gen_ai.request.model = %session.model,
+                gen_ai.operation.name = %operation_name,
+                gen_ai.provider.name = %provider_name,
+                gen_ai.request.model = %request_model,
+                gen_ai.response.model = tracing::field::Empty,
                 gen_ai.usage.input_tokens = tracing::field::Empty,
                 gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_write_tokens = tracing::field::Empty,
-                gen_ai.response.first_token_at_ms = tracing::field::Empty,
-                moa.llm.stream_duration_ms = tracing::field::Empty,
+                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
+                gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
+                gen_ai.response.time_to_first_chunk = tracing::field::Empty,
             );
             let llm_call_started = Instant::now();
             let streamed = if let Some(receiver) = signal_rx.as_deref_mut() {
@@ -179,7 +182,6 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
             };
             let llm_call_duration = llm_call_started.elapsed();
             record_turn_llm_call_duration(llm_call_duration);
-            llm_call_span.record("moa.llm.stream_duration_ms", llm_call_duration.as_millis() as i64);
             if streamed.cancelled {
                 record_turn_span_metrics(
                     &turn_span,
@@ -212,17 +214,18 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 None,
             )
             .await;
+            llm_call_span.record("gen_ai.response.model", tracing::field::display(&response.model));
             llm_call_span.record(
                 "gen_ai.usage.input_tokens",
                 response_usage.total_input_tokens() as i64,
             );
             llm_call_span.record("gen_ai.usage.output_tokens", response_usage.output_tokens as i64);
             llm_call_span.record(
-                "gen_ai.usage.cache_read_tokens",
+                "gen_ai.usage.cache_read.input_tokens",
                 response_usage.input_tokens_cache_read as i64,
             );
             llm_call_span.record(
-                "gen_ai.usage.cache_write_tokens",
+                "gen_ai.usage.cache_creation.input_tokens",
                 response_usage.input_tokens_cache_write as i64,
             );
             total_input_tokens += response_usage.total_input_tokens();

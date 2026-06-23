@@ -26,7 +26,7 @@ where
         let emitted = state.apply_event(&event)?;
 
         for block in emitted {
-            span_recorder.observe_block(block.clone());
+            span_recorder.observe_block(&block);
             if tx.send(Ok(block)).await.is_err() {
                 tracing::debug!("completion stream receiver dropped before the response finished");
                 break;
@@ -34,7 +34,6 @@ where
         }
     }
 
-    span_recorder.record_raw_response(&state.debug_snapshot());
     if !state.saw_message_stop {
         return Err(MoaError::StreamError(
             "Anthropic stream ended before the provider returned message_stop".to_string(),
@@ -43,17 +42,6 @@ where
     span_recorder.set_cached_input_tokens(state.cached_input_tokens);
     span_recorder.set_cache_creation_input_tokens(state.cache_creation_input_tokens);
     Ok(state.finish(started_at))
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicStreamDebugSnapshot {
-    model: String,
-    stop_reason: StopReason,
-    input_tokens: usize,
-    output_tokens: usize,
-    cached_input_tokens: usize,
-    cache_creation_input_tokens: usize,
-    content: Vec<CompletionContent>,
 }
 
 #[derive(Debug)]
@@ -355,18 +343,6 @@ impl AnthropicStreamState {
             },
             duration_ms: started_at.elapsed().as_millis() as u64,
             thought_signature: None,
-        }
-    }
-
-    fn debug_snapshot(&self) -> AnthropicStreamDebugSnapshot {
-        AnthropicStreamDebugSnapshot {
-            model: self.model.clone(),
-            stop_reason: self.stop_reason.clone(),
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cached_input_tokens: self.cached_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens,
-            content: self.completed_content.iter().flatten().cloned().collect(),
         }
     }
 

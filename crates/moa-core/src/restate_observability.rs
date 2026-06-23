@@ -89,7 +89,6 @@ pub fn session_turn_span(
         moa.turn.compaction_tier3 = tracing::field::Empty,
         moa.turn.compaction_tokens_reclaimed = tracing::field::Empty,
         moa.turn.compaction_messages_elided = tracing::field::Empty,
-        langfuse.trace.metadata.turn_number = turn_number,
     );
     apply_session_trace(&span, meta, prompt, environment);
     add_session_trace_link(&span, meta.id);
@@ -121,12 +120,16 @@ pub fn llm_call_span(meta: &SessionMeta) -> tracing::Span {
         Some(parent) => tracing::info_span!(
             parent: &parent,
             "llm_call",
+            otel.kind = "client",
+            gen_ai.operation.name = "chat",
             gen_ai.request.model = %meta.model,
             moa.session.id = %meta.id,
             moa.tenant.id = %meta.tenant_id,
         ),
         None => tracing::info_span!(
             "llm_call",
+            otel.kind = "client",
+            gen_ai.operation.name = "chat",
             gen_ai.request.model = %meta.model,
             moa.session.id = %meta.id,
             moa.tenant.id = %meta.tenant_id,

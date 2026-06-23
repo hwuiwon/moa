@@ -65,7 +65,7 @@ Loki:
   Query {service="moa-orchestrator"} |= "${SESSION_ID}"
 
 Prometheus:
-  Check moa_turns_total, moa_turn_latency_seconds, and moa_llm_requests_total
+  Check moa_turns_total, moa_turn_latency_seconds, and gen_ai_client_operation_duration_count
 
 Grafana dashboards:
   - MOA Session Health

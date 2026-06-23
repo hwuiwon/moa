@@ -1912,7 +1912,7 @@ pub struct EvalRunRequest {
     /// Logical config source paths or URIs.
     #[serde(default)]
     pub config_sources: Vec<String>,
-    /// Report sink specs such as `terminal`, `json:<path>`, or `langfuse`.
+    /// Report sink specs such as `terminal` or `json:<path>`.
     #[serde(default)]
     pub reports: Vec<String>,
     /// Maximum concurrent eval executions.

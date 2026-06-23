@@ -34,16 +34,14 @@ where
         };
 
         for block in state.apply_event(&event)? {
-            span_recorder.observe_block(block.clone());
+            span_recorder.observe_block(&block);
             if tx.send(Ok(block)).await.is_err() {
                 tracing::debug!("completion stream receiver dropped before the response finished");
-                span_recorder.record_raw_response(&state.debug_snapshot());
                 return Ok(state.finish(started_at));
             }
         }
     }
 
-    span_recorder.record_raw_response(&state.debug_snapshot());
     if !state.saw_terminal_finish {
         return Err(MoaError::StreamError(
             "Gemini stream ended before the provider returned a terminal finishReason".to_string(),
@@ -199,29 +197,4 @@ impl GeminiStreamState {
             thought_signature: self.thought_signature,
         }
     }
-
-    fn debug_snapshot(&self) -> GeminiStreamDebugSnapshot {
-        GeminiStreamDebugSnapshot {
-            model: self.model.clone(),
-            stop_reason: self.stop_reason.clone(),
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cached_input_tokens: self.cached_input_tokens,
-            thought_signature: self.thought_signature.clone(),
-            content: self.content.clone(),
-            last_raw_response: self.last_raw_response.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiStreamDebugSnapshot {
-    model: String,
-    stop_reason: StopReason,
-    input_tokens: usize,
-    output_tokens: usize,
-    cached_input_tokens: usize,
-    thought_signature: Option<String>,
-    content: Vec<CompletionContent>,
-    last_raw_response: Option<GeminiGenerateContentResponse>,
 }

@@ -8,7 +8,7 @@ use moa_core::wire::AppendEventRequest;
 use moa_core::{
     CompletionRequest, CompletionResponse, ContactId, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event,
     MoaError, ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage,
-    record_llm_cost_cents,
+    genai_operation_name, genai_provider_name, record_llm_cost_cents,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_providers::ProviderRegistry;
@@ -94,16 +94,31 @@ impl LLMGateway for LLMGatewayImpl {
             moa_core::StopReason::Cancelled => "cancelled",
             moa_core::StopReason::Other(_) => "other",
         };
+        let provider_name = genai_provider_name(provider_kind.as_str());
+        let operation_name = genai_operation_name(provider_kind.as_str());
         let span = tracing::Span::current();
-        span.set_attribute("gen_ai.system", provider_kind.as_str().to_string());
+        span.set_attribute("gen_ai.operation.name", operation_name);
+        span.set_attribute("gen_ai.provider.name", provider_name.to_string());
         span.set_attribute("gen_ai.request.model", response.model.to_string());
         span.set_attribute("gen_ai.response.model", response.model.to_string());
         span.set_attribute("gen_ai.response.finish_reasons", finish_reason.to_string());
         span.set_attribute(
             "gen_ai.usage.input_tokens",
-            usage.input_tokens_uncached as i64,
+            usage.total_input_tokens() as i64,
         );
         span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens as i64);
+        if usage.input_tokens_cache_read > 0 {
+            span.set_attribute(
+                "gen_ai.usage.cache_read.input_tokens",
+                usage.input_tokens_cache_read as i64,
+            );
+        }
+        if usage.input_tokens_cache_write > 0 {
+            span.set_attribute(
+                "gen_ai.usage.cache_creation.input_tokens",
+                usage.input_tokens_cache_write as i64,
+            );
+        }
         record_llm_cost_cents(
             provider_kind.as_str(),
             response.model.as_str(),

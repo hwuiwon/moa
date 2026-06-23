@@ -43,10 +43,10 @@ pub(super) fn record_tool_invocation_metadata(
         ToolExecution::Mcp { .. } => ("mcp", "external"),
     };
 
-    span.set_attribute("langfuse.observation.metadata.tool_category", category);
-    span.set_attribute("langfuse.observation.metadata.sandbox_tier", sandbox_tier);
+    span.set_attribute("moa.tool.category", category);
+    span.set_attribute("moa.sandbox.tier", sandbox_tier);
     span.set_attribute(
-        "langfuse.observation.metadata.action_review_required",
+        "moa.tool.action_review_required",
         matches!(effect, ActionPolicyEffect::AdminReview),
     );
 }

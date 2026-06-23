@@ -204,11 +204,9 @@ fn build_resource(config: &ObservabilityConfig) -> Resource {
 
     if let Some(environment) = &config.environment {
         attributes.push(KeyValue::new("deployment.environment", environment.clone()));
-        attributes.push(KeyValue::new("langfuse.environment", environment.clone()));
     }
     if let Some(release) = &config.release {
         attributes.push(KeyValue::new("service.version", release.clone()));
-        attributes.push(KeyValue::new("langfuse.release", release.clone()));
     }
 
     Resource::builder()
@@ -278,14 +276,6 @@ mod tests {
             resource.get(&Key::new("service.version")),
             Some(Value::from("v1.2.3"))
         );
-        assert_eq!(
-            resource.get(&Key::new("langfuse.environment")),
-            Some(Value::from("production"))
-        );
-        assert_eq!(
-            resource.get(&Key::new("langfuse.release")),
-            Some(Value::from("v1.2.3"))
-        );
     }
 
     #[test]
@@ -303,11 +293,11 @@ mod tests {
                 "authorization".to_string(),
                 "Basic cGstbGYteHh4eHg6c2stbGYteHh4eHg=".to_string(),
             ),
-            ("x-langfuse-ingestion-version".to_string(), "4".to_string()),
+            ("x-moa-tenant".to_string(), "tenant-a".to_string()),
         ]))
         .expect("metadata should build");
 
         assert!(metadata.get("authorization").is_some());
-        assert!(metadata.get("x-langfuse-ingestion-version").is_some());
+        assert!(metadata.get("x-moa-tenant").is_some());
     }
 }

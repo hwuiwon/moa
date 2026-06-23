@@ -61,15 +61,13 @@ pub(crate) fn messaging_receive_span(message: &InboundMessage) -> tracing::Span 
     let trace_name = trace_name_from_message(&message.text);
     let channel = message.channel.as_str();
     let route = messaging_channel_label(&message.channel_ref);
-    let tags = format!("[\"{channel}\"]");
     tracing::info_span!(
         "messaging_receive",
         otel.name = %trace_name,
-        langfuse.trace.name = %trace_name,
-        langfuse.trace.tags = %tags,
-        langfuse.trace.metadata.channel = %channel,
-        langfuse.trace.metadata.channel_route = %route,
-        langfuse.trace.metadata.channel_actor_id = %message.actor.external_id,
+        moa.trace.name = %trace_name,
+        moa.channel = %channel,
+        moa.channel.route = %route,
+        moa.channel.actor_id = %message.actor.external_id,
     )
 }
 

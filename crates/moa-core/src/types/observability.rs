@@ -216,7 +216,7 @@ fn stable_prefix_message_count(request: &CompletionRequest) -> usize {
 /// Context attributes propagated across spans in one logical turn trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceContext {
-    /// Session identifier used for Langfuse session grouping.
+    /// Session identifier used for trace grouping.
     pub session_id: SessionId,
     /// Tenant runtime boundary for filterable metadata.
     pub tenant_id: TenantId,
@@ -232,8 +232,6 @@ pub struct TraceContext {
     pub model: ModelId,
     /// Human-readable trace name derived from the user prompt.
     pub trace_name: Option<String>,
-    /// Filterable Langfuse tags serialized on the root span.
-    pub tags: Vec<String>,
     /// Optional deployment environment.
     pub environment: Option<String>,
 }
@@ -253,7 +251,6 @@ impl TraceContext {
             channel: Some(session.channel),
             model: session.model.clone(),
             trace_name: prompt.map(trace_name_from_message),
-            tags: generate_trace_tags(Some(&session.channel), &session.tenant_id),
             environment: None,
         }
     }
@@ -268,39 +265,20 @@ impl TraceContext {
         self
     }
 
-    /// Sets Langfuse and MOA span attributes on the provided tracing span.
+    /// Sets MOA span attributes on the provided tracing span.
     pub fn apply_to_span(&self, span: &tracing::Span) {
-        span.set_attribute(
-            "langfuse.session.id",
-            sanitize_langfuse_id(&self.session_id.to_string()),
-        );
-        span.set_attribute(
-            "langfuse.user.id",
-            sanitize_langfuse_id(&trace_subject_id(
-                self.session_id,
-                self.contact_id,
-                self.created_by.as_ref(),
-            )),
-        );
-        span.set_attribute(
-            "langfuse.trace.metadata.tenant_id",
-            self.tenant_id.to_string(),
-        );
         let model = self.model.to_string();
-        span.set_attribute("langfuse.trace.metadata.model", model.clone());
         span.set_attribute("moa.session.id", self.session_id.to_string());
         span.set_attribute("moa.tenant.id", self.tenant_id.to_string());
         span.set_attribute("moa.model", model);
         if let Some(contact_id) = self.contact_id {
             span.set_attribute("moa.contact.id", contact_id.to_string());
-            span.set_attribute("langfuse.trace.metadata.contact_id", contact_id.to_string());
         }
         if let Some(created_by) = self.created_by.as_ref() {
             match created_by {
                 SessionActorRef::Identity { id } => {
                     span.set_attribute("moa.actor.type", "identity");
                     span.set_attribute("moa.actor.id", id.to_string());
-                    span.set_attribute("langfuse.trace.metadata.actor_id", id.to_string());
                 }
                 SessionActorRef::Contact { id } => {
                     span.set_attribute("moa.actor.type", "contact");
@@ -313,30 +291,19 @@ impl TraceContext {
         }
         if let Some(contact_state) = self.contact_state.as_ref() {
             span.set_attribute("moa.contact.state", contact_state.clone());
-            span.set_attribute(
-                "langfuse.trace.metadata.contact_state",
-                contact_state.clone(),
-            );
         }
 
         if let Some(channel) = self.channel.as_ref() {
             let value = channel.to_string();
-            span.set_attribute("langfuse.trace.metadata.channel", value.clone());
             span.set_attribute("moa.channel", value);
         }
 
         if let Some(trace_name) = self.trace_name.as_ref() {
-            span.set_attribute("langfuse.trace.name", trace_name.clone());
-        }
-
-        if !self.tags.is_empty()
-            && let Ok(tags) = serde_json::to_string(&self.tags)
-        {
-            span.set_attribute("langfuse.trace.tags", tags);
+            span.set_attribute("moa.trace.name", trace_name.clone());
         }
 
         if let Some(environment) = self.environment.as_ref() {
-            span.set_attribute("langfuse.environment", environment.clone());
+            span.set_attribute("moa.environment", environment.clone());
         }
     }
 }
@@ -351,29 +318,21 @@ pub fn trace_name_from_message(message: &str) -> String {
     truncate_with_ellipsis(trimmed.lines().next().unwrap_or(trimmed), 200)
 }
 
-/// Derives Langfuse tags from channel and tenant identifiers.
-pub fn generate_trace_tags(channel: Option<&Channel>, tenant_id: &TenantId) -> Vec<String> {
-    let mut tags = Vec::new();
-    if let Some(channel) = channel {
-        tags.push(truncate_with_ellipsis(&channel.to_string(), 200));
+/// Returns the OpenTelemetry GenAI provider name for a MOA provider key.
+#[must_use]
+pub fn genai_provider_name(provider: &str) -> &str {
+    match provider {
+        "google" | "gemini" => "gcp.gemini",
+        other => other,
     }
-    tags.push(truncate_with_ellipsis(&format!("tenant:{tenant_id}"), 200));
-    tags
 }
 
-fn trace_subject_id(
-    session_id: SessionId,
-    contact_id: Option<ContactId>,
-    created_by: Option<&SessionActorRef>,
-) -> String {
-    if let Some(contact_id) = contact_id {
-        return format!("contact:{contact_id}");
-    }
-
-    match created_by {
-        Some(SessionActorRef::Identity { id }) => format!("identity:{id}"),
-        Some(SessionActorRef::Contact { id }) => format!("contact:{id}"),
-        Some(SessionActorRef::Anonymous) | None => format!("session:{session_id}"),
+/// Returns the OpenTelemetry GenAI operation name for a MOA provider key.
+#[must_use]
+pub fn genai_operation_name(provider: &str) -> &'static str {
+    match genai_provider_name(provider) {
+        "gcp.gemini" => "generate_content",
+        _ => "chat",
     }
 }
 
@@ -389,18 +348,9 @@ pub fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     format!("{truncated}...")
 }
 
-/// Replaces non-ASCII characters and enforces Langfuse identifier length limits.
-pub fn sanitize_langfuse_id(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|ch| if ch.is_ascii() { ch } else { '_' })
-        .collect::<String>();
-    truncate_with_ellipsis(&sanitized, 200)
-}
-
-/// Normalizes an environment label for Langfuse compatibility.
+/// Normalizes an environment label for trace attributes.
 pub fn normalize_environment(value: &str) -> String {
-    let mut normalized = value
+    let normalized = value
         .chars()
         .map(|ch| match ch {
             'a'..='z' | '0'..='9' | '-' | '_' => ch,
@@ -409,18 +359,13 @@ pub fn normalize_environment(value: &str) -> String {
         })
         .collect::<String>();
 
-    if normalized.starts_with("langfuse") {
-        normalized = format!("env-{normalized}");
-    }
-
     truncate_with_ellipsis(&normalized, 40)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        TraceContext, full_request_fingerprint, generate_trace_tags, stable_prefix_fingerprint,
-        trace_name_from_message,
+        TraceContext, full_request_fingerprint, stable_prefix_fingerprint, trace_name_from_message,
     };
     use crate::types::{
         Channel, CompletionRequest, ContextMessage, SessionId, SessionMeta, TenantId,
@@ -435,14 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn tags_include_channel_and_tenant() {
-        let tenant_id = TenantId::from(uuid::Uuid::from_u128(1));
-        let tags = generate_trace_tags(Some(&Channel::Slack), &tenant_id);
-        assert!(tags.contains(&"slack".to_string()));
-        assert!(tags.contains(&"tenant:00000000-0000-0000-0000-000000000001".to_string()));
-    }
-
-    #[test]
     fn trace_context_from_session_meta() {
         let meta = SessionMeta {
             id: SessionId::new(),
@@ -453,7 +390,6 @@ mod tests {
         };
         let ctx = TraceContext::from_session_meta(&meta, Some("Fix OAuth bug"));
         assert_eq!(ctx.trace_name.as_deref(), Some("Fix OAuth bug"));
-        assert!(ctx.tags.contains(&"slack".to_string()));
         assert_eq!(ctx.tenant_id, TenantId::from(uuid::Uuid::from_u128(2)));
     }
 

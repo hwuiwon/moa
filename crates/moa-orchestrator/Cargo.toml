@@ -16,7 +16,6 @@ internal-eval-runner = [
     "moa-brain/eval-harness",
     "moa-skills/regression",
 ]
-langfuse = ["internal-eval-runner", "moa-eval/langfuse"]
 
 [[bin]]
 name = "moa-orchestrator-bin"

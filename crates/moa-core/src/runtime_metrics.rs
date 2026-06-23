@@ -15,11 +15,21 @@ use crate::config::MetricsConfig;
 use crate::error::{MoaError, Result};
 use crate::types::{
     ActionClass, ActionPolicyEffect, ActionReviewStatus, ModelId, ModelTier, SessionStatus,
-    TenantId,
+    TenantId, genai_operation_name, genai_provider_name,
 };
 
 const LATENCY_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
 const CACHE_HIT_RATE_BUCKETS: &[f64] = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
+const GENAI_CLIENT_DURATION_BUCKETS: &[f64] = &[
+    0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
+];
+const GENAI_CLIENT_TOKEN_BUCKETS: &[f64] = &[
+    1.0, 4.0, 16.0, 64.0, 256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0, 4194304.0,
+    16777216.0, 67108864.0,
+];
+const GENAI_CLIENT_TOKEN_USAGE_METRIC: &str = "gen_ai.client.token.usage";
+const GENAI_CLIENT_OPERATION_DURATION_METRIC: &str = "gen_ai.client.operation.duration";
+const GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC: &str = "gen_ai.client.operation.time_to_first_chunk";
 #[cfg(tokio_unstable)]
 const TOKIO_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -91,6 +101,21 @@ pub fn init_metrics(config: &MetricsConfig) -> Result<()> {
                 Matcher::Full("moa_cache_hit_rate".to_string()),
                 CACHE_HIT_RATE_BUCKETS,
             )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full(GENAI_CLIENT_OPERATION_DURATION_METRIC.to_string()),
+                GENAI_CLIENT_DURATION_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full(GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC.to_string()),
+                GENAI_CLIENT_DURATION_BUCKETS,
+            )
+            .map_err(|error| MoaError::ConfigError(error.to_string()))?
+            .set_buckets_for_metric(
+                Matcher::Full(GENAI_CLIENT_TOKEN_USAGE_METRIC.to_string()),
+                GENAI_CLIENT_TOKEN_BUCKETS,
+            )
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
 
         builder
@@ -138,108 +163,108 @@ pub fn record_turn_completed(model: &ModelId, model_tier: ModelTier) {
     .increment(1);
 }
 
-/// Records one outbound LLM API request.
-pub fn record_llm_request(provider: &str, model: &str) {
-    counter!(
-        "moa_llm_requests_total",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
-    )
-    .increment(1);
+/// Records GenAI client operation duration.
+pub fn record_genai_client_operation_duration(
+    provider: &str,
+    request_model: &str,
+    response_model: Option<&str>,
+    error_type: Option<&str>,
+    duration: Duration,
+) {
+    let provider = genai_provider_name(provider).to_string();
+    let operation = genai_operation_name(&provider).to_string();
+    match (response_model, error_type) {
+        (Some(response_model), Some(error_type)) => {
+            histogram!(
+                GENAI_CLIENT_OPERATION_DURATION_METRIC,
+                "gen_ai.operation.name" => operation,
+                "gen_ai.provider.name" => provider,
+                "gen_ai.request.model" => request_model.to_string(),
+                "gen_ai.response.model" => response_model.to_string(),
+                "error.type" => error_type.to_string()
+            )
+            .record(duration.as_secs_f64());
+        }
+        (Some(response_model), None) => {
+            histogram!(
+                GENAI_CLIENT_OPERATION_DURATION_METRIC,
+                "gen_ai.operation.name" => operation,
+                "gen_ai.provider.name" => provider,
+                "gen_ai.request.model" => request_model.to_string(),
+                "gen_ai.response.model" => response_model.to_string()
+            )
+            .record(duration.as_secs_f64());
+        }
+        (None, Some(error_type)) => {
+            histogram!(
+                GENAI_CLIENT_OPERATION_DURATION_METRIC,
+                "gen_ai.operation.name" => operation,
+                "gen_ai.provider.name" => provider,
+                "gen_ai.request.model" => request_model.to_string(),
+                "error.type" => error_type.to_string()
+            )
+            .record(duration.as_secs_f64());
+        }
+        (None, None) => {
+            histogram!(
+                GENAI_CLIENT_OPERATION_DURATION_METRIC,
+                "gen_ai.operation.name" => operation,
+                "gen_ai.provider.name" => provider,
+                "gen_ai.request.model" => request_model.to_string()
+            )
+            .record(duration.as_secs_f64());
+        }
+    }
 }
 
-/// Records one completed LLM request duration sample.
-pub fn record_llm_request_duration(provider: &str, model: &str, status: &str, duration: Duration) {
+/// Records GenAI client token usage when provider-reported counts are available.
+pub fn record_genai_client_token_usage(
+    provider: &str,
+    request_model: &str,
+    response_model: &str,
+    token_type: &str,
+    tokens: u64,
+) {
+    if tokens == 0 {
+        return;
+    }
+
     histogram!(
-        "moa_llm_request_duration_seconds",
-        "provider" => provider.to_string(),
-        "model" => model.to_string(),
-        "status" => status.to_string()
+        GENAI_CLIENT_TOKEN_USAGE_METRIC,
+        "gen_ai.operation.name" => genai_operation_name(provider).to_string(),
+        "gen_ai.provider.name" => genai_provider_name(provider).to_string(),
+        "gen_ai.request.model" => request_model.to_string(),
+        "gen_ai.response.model" => response_model.to_string(),
+        "gen_ai.token.type" => token_type.to_string()
+    )
+    .record(tokens as f64);
+}
+
+/// Records time to first streamed GenAI response chunk.
+pub fn record_genai_client_time_to_first_chunk(
+    provider: &str,
+    request_model: &str,
+    response_model: &str,
+    duration: Duration,
+) {
+    histogram!(
+        GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC,
+        "gen_ai.operation.name" => genai_operation_name(provider).to_string(),
+        "gen_ai.provider.name" => genai_provider_name(provider).to_string(),
+        "gen_ai.request.model" => request_model.to_string(),
+        "gen_ai.response.model" => response_model.to_string()
     )
     .record(duration.as_secs_f64());
-}
-
-/// Records one failed LLM request by bounded error class.
-pub fn record_llm_failure(provider: &str, model: &str, class: &str) {
-    counter!(
-        "moa_llm_failures_total",
-        "provider" => provider.to_string(),
-        "model" => model.to_string(),
-        "class" => class.to_string()
-    )
-    .increment(1);
-}
-
-/// Records uncached input tokens, including cache-write prompt tokens.
-pub fn record_tokens_input_uncached(provider: &str, model: &str, tokens: u64) {
-    if tokens == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_tokens_input_uncached_total",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
-    )
-    .increment(tokens);
-}
-
-/// Records cached input tokens served from provider-side prefix caches.
-pub fn record_tokens_input_cached(provider: &str, model: &str, tokens: u64) {
-    if tokens == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_tokens_input_cached_total",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
-    )
-    .increment(tokens);
-}
-
-/// Records output tokens emitted by an LLM response.
-pub fn record_tokens_output(provider: &str, model: &str, tokens: u64) {
-    if tokens == 0 {
-        return;
-    }
-
-    counter!(
-        "moa_tokens_output_total",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
-    )
-    .increment(tokens);
 }
 
 /// Records the ratio of input tokens that were served from cache for one request.
 pub fn record_cache_hit_rate(provider: &str, model: &str, ratio: f64) {
     histogram!(
         "moa_cache_hit_rate",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
+        "gen_ai.provider.name" => genai_provider_name(provider).to_string(),
+        "gen_ai.request.model" => model.to_string()
     )
     .record(ratio.clamp(0.0, 1.0));
-}
-
-/// Records the time to first token for one LLM request.
-pub fn record_llm_ttft(provider: &str, model: &str, duration: Duration) {
-    histogram!(
-        "moa_llm_ttft_seconds",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
-    )
-    .record(duration.as_secs_f64());
-}
-
-/// Records the total streaming duration for one LLM request.
-pub fn record_llm_streaming_duration(provider: &str, model: &str, duration: Duration) {
-    histogram!(
-        "moa_llm_streaming_seconds",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
-    )
-    .record(duration.as_secs_f64());
 }
 
 /// Records one LLM completion cost sample in cents.
@@ -250,8 +275,8 @@ pub fn record_llm_cost_cents(provider: &str, model: &str, cost_cents: u64) {
 
     counter!(
         "moa_llm_cost_cents_total",
-        "provider" => provider.to_string(),
-        "model" => model.to_string()
+        "gen_ai.provider.name" => genai_provider_name(provider).to_string(),
+        "gen_ai.request.model" => model.to_string()
     )
     .increment(cost_cents);
 }
@@ -708,29 +733,17 @@ fn register_metric_descriptions() {
         "moa_turns_total",
         "Total assistant turns completed, labeled by model and routing tier."
     );
-    describe_counter!(
-        "moa_llm_requests_total",
-        "Total outbound LLM API requests, labeled by provider and model."
-    );
-    describe_counter!(
-        "moa_llm_failures_total",
-        "Total failed outbound LLM API requests, labeled by provider, model, and bounded error class."
+    describe_histogram!(
+        GENAI_CLIENT_OPERATION_DURATION_METRIC,
+        "GenAI client operation duration in seconds."
     );
     describe_histogram!(
-        "moa_llm_request_duration_seconds",
-        "Total outbound LLM request duration in seconds, labeled by provider, model, and status."
+        GENAI_CLIENT_TIME_TO_FIRST_CHUNK_METRIC,
+        "Time to first streamed GenAI response chunk in seconds."
     );
-    describe_counter!(
-        "moa_tokens_input_cached_total",
-        "Total cached input tokens served from provider-side caches."
-    );
-    describe_counter!(
-        "moa_tokens_input_uncached_total",
-        "Total non-cached input tokens, including cache-write prompt tokens."
-    );
-    describe_counter!(
-        "moa_tokens_output_total",
-        "Total output tokens emitted by provider responses."
+    describe_histogram!(
+        GENAI_CLIENT_TOKEN_USAGE_METRIC,
+        "Provider-reported GenAI client token usage."
     );
     describe_counter!(
         "moa_tool_calls_total",
@@ -815,14 +828,6 @@ fn register_metric_descriptions() {
     describe_histogram!(
         "moa_turn_workflow_latency_seconds",
         "End-to-end turn workflow latency in seconds, labeled by scope, result, and model tier."
-    );
-    describe_histogram!(
-        "moa_llm_ttft_seconds",
-        "Time to first token for LLM requests in seconds."
-    );
-    describe_histogram!(
-        "moa_llm_streaming_seconds",
-        "Total LLM request streaming duration in seconds."
     );
     describe_histogram!(
         "moa_tool_call_duration_seconds",
@@ -988,9 +993,21 @@ mod tests {
         };
         init_metrics(&config).expect("metrics exporter should initialize");
 
-        record_llm_request("mock", "gpt-5.4");
-        record_tokens_input_uncached("mock", "gpt-5.4", 8);
-        record_tokens_output("mock", "gpt-5.4", 4);
+        record_genai_client_operation_duration(
+            "mock",
+            "gpt-5.4",
+            Some("gpt-5.4"),
+            None,
+            Duration::from_millis(20),
+        );
+        record_genai_client_token_usage("mock", "gpt-5.4", "gpt-5.4", "input", 8);
+        record_genai_client_token_usage("mock", "gpt-5.4", "gpt-5.4", "output", 4);
+        record_genai_client_time_to_first_chunk(
+            "mock",
+            "gpt-5.4",
+            "gpt-5.4",
+            Duration::from_millis(5),
+        );
         record_cache_hit_rate("mock", "gpt-5.4", 0.5);
         record_turn_latency(Duration::from_millis(25));
         record_turn_step_duration(TurnLatencyStep::PipelineCompile, Duration::from_millis(10));
@@ -1033,9 +1050,9 @@ mod tests {
             }
         };
 
-        assert!(scrape.contains("moa_llm_requests_total"));
-        assert!(scrape.contains("moa_tokens_input_uncached_total"));
-        assert!(scrape.contains("moa_tokens_output_total"));
+        assert!(scrape.contains("gen_ai_client_operation_duration"));
+        assert!(scrape.contains("gen_ai_client_token_usage"));
+        assert!(scrape.contains("gen_ai_client_operation_time_to_first_chunk"));
         assert!(scrape.contains("moa_cache_hit_rate"));
         assert!(scrape.contains("moa_turn_latency_seconds"));
         assert!(scrape.contains("moa_turn_step_duration_seconds"));

@@ -143,7 +143,7 @@ async fn consume_responses_stream_once(
                 text.push_str(&event.delta);
                 let block = CompletionContent::Text(event.delta);
                 content.push(block.clone());
-                span_recorder.observe_block(block.clone());
+                span_recorder.observe_block(&block);
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -194,7 +194,7 @@ async fn consume_responses_stream_once(
                 });
                 emitted_function_items.insert(event.item_id);
                 content.push(call.clone());
-                span_recorder.observe_block(call.clone());
+                span_recorder.observe_block(&call);
                 emitted_content = true;
                 if tx.send(Ok(call)).await.is_err() {
                     break;
@@ -204,7 +204,7 @@ async fn consume_responses_stream_once(
             | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {
                 let block = web_search_started_block();
                 content.push(block.clone());
-                span_recorder.observe_block(block.clone());
+                span_recorder.observe_block(&block);
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -213,7 +213,7 @@ async fn consume_responses_stream_once(
             ResponseStreamEvent::ResponseWebSearchCallCompleted(_) => {
                 let block = web_search_completed_block();
                 content.push(block.clone());
-                span_recorder.observe_block(block.clone());
+                span_recorder.observe_block(&block);
                 emitted_content = true;
                 if tx.send(Ok(block)).await.is_err() {
                     break;
@@ -267,7 +267,6 @@ async fn consume_responses_stream_once(
         .map(token_usage_from_openai_usage)
         .unwrap_or_default();
     span_recorder.set_cached_input_tokens(token_usage.input_tokens_cache_read);
-    span_recorder.record_raw_response(&response);
 
     Ok(CompletionResponse {
         text,

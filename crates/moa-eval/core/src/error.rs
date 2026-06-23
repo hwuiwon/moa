@@ -51,8 +51,4 @@ pub enum EvalError {
         /// Tool name that required approval.
         tool: String,
     },
-    /// HTTP reporting failed.
-    #[cfg(feature = "langfuse")]
-    #[error(transparent)]
-    Http(#[from] reqwest::Error),
 }

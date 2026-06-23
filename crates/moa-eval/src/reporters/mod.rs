@@ -1,8 +1,6 @@
-//! Built-in reporters for terminal, JSON, and optional Langfuse output.
+//! Built-in reporters for terminal and JSON output.
 
 mod json;
-#[cfg(feature = "langfuse")]
-mod langfuse;
 mod terminal;
 
 use std::io::IsTerminal;
@@ -13,8 +11,6 @@ use moa_eval_core::{EvalError, Result};
 use crate::Reporter;
 
 pub use json::JsonReporter;
-#[cfg(feature = "langfuse")]
-pub use langfuse::LangfuseReporter;
 pub use terminal::TerminalReporter;
 
 /// Options that influence reporter construction.
@@ -62,19 +58,6 @@ pub fn build_reporters(
             continue;
         }
 
-        #[cfg(feature = "langfuse")]
-        if spec == "langfuse" {
-            reporters.push(Box::new(LangfuseReporter::from_env()?));
-            continue;
-        }
-
-        #[cfg(not(feature = "langfuse"))]
-        if spec == "langfuse" {
-            return Err(EvalError::InvalidConfig(
-                "langfuse reporter requires the 'langfuse' feature".to_string(),
-            ));
-        }
-
         return Err(EvalError::InvalidConfig(format!(
             "unknown report target '{spec}'"
         )));
@@ -88,14 +71,4 @@ pub fn build_reporters(
     }
 
     Ok(reporters)
-}
-
-#[cfg(feature = "langfuse")]
-use std::env;
-
-#[cfg(feature = "langfuse")]
-fn required_env_var(key: &str) -> Result<String> {
-    env::var(key).map_err(|_| {
-        EvalError::InvalidConfig(format!("missing required environment variable {key}"))
-    })
 }

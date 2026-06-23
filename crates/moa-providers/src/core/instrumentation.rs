@@ -1,29 +1,26 @@
 //! Shared tracing helpers for provider-level LLM completion spans.
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, TokenPricing, TokenUsage,
-    record_cache_hit_rate, record_llm_failure, record_llm_request, record_llm_request_duration,
-    record_llm_streaming_duration, record_llm_ttft, record_tokens_input_cached,
-    record_tokens_input_uncached, record_tokens_output,
+    genai_operation_name, genai_provider_name, record_cache_hit_rate,
+    record_genai_client_operation_duration, record_genai_client_time_to_first_chunk,
+    record_genai_client_token_usage,
 };
 use opentelemetry::trace::Status;
-use serde::Serialize;
 use serde_json::Value;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-const OPERATION_CHAT: &str = "chat";
-const ATTRIBUTE_VALUE_LIMIT: usize = 32 * 1024;
 
 /// Attributes recorded on one `GenAI` completion span.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LLMSpanAttributes {
-    /// Provider system identifier.
-    pub system: Option<&'static str>,
-    /// `GenAI` operation name.
+    /// OpenTelemetry GenAI provider name.
+    pub provider: Option<&'static str>,
+    /// OpenTelemetry GenAI operation name.
     pub operation: Option<&'static str>,
+    /// Whether the provider request streams responses.
+    pub stream: Option<bool>,
     /// Requested model identifier.
     pub request_model: Option<String>,
     /// Response model identifier.
@@ -36,30 +33,12 @@ pub(crate) struct LLMSpanAttributes {
     pub input_tokens: Option<usize>,
     /// Completion token count.
     pub output_tokens: Option<usize>,
-    /// Total token count.
-    pub total_tokens: Option<usize>,
     /// Request cost in dollars.
-    pub cost: Option<f64>,
-    /// Time the first output block arrived.
-    pub completion_start_time: Option<DateTime<Utc>>,
-    /// Serialized input content.
-    pub input_content: Option<String>,
-    /// Serialized output content.
-    pub output_content: Option<String>,
-    /// Session identifier for Langfuse session grouping.
-    pub session_id: Option<String>,
-    /// User identifier for Langfuse user analytics.
-    pub user_id: Option<String>,
-    /// Workspace identifier for filterable metadata.
-    pub workspace_id: Option<String>,
-    /// Originating communication channel name.
-    pub channel: Option<String>,
-    /// Human-readable trace name.
-    pub trace_name: Option<String>,
-    /// Total compiled context tokens for the request.
-    pub context_tokens: Option<usize>,
-    /// Prefix cache hit ratio for the request.
-    pub cache_hit_ratio: Option<f64>,
+    pub cost_usd: Option<f64>,
+    /// Time to first streamed output block.
+    pub time_to_first_chunk: Option<Duration>,
+    /// Session identifier for standard GenAI conversation grouping.
+    pub conversation_id: Option<String>,
     /// Explicit prompt cache read tokens reported by the provider.
     pub cache_read_tokens: Option<usize>,
     /// Explicit prompt cache creation tokens reported by the provider.
@@ -78,9 +57,7 @@ pub(crate) struct LLMSpanRecorder {
     cached_input_tokens: usize,
     cache_creation_input_tokens: usize,
     started_at: Instant,
-    first_output_at: Option<DateTime<Utc>>,
-    first_output_elapsed: Option<std::time::Duration>,
-    streamed_output: Vec<CompletionContent>,
+    first_output_elapsed: Option<Duration>,
 }
 
 impl LLMSpanRecorder {
@@ -93,29 +70,24 @@ impl LLMSpanRecorder {
         pricing: TokenPricing,
     ) -> Self {
         let request_model = request_model.into();
-        let span_name = llm_span_name(OPERATION_CHAT, system, &request_model);
+        let provider = genai_provider_name(system);
+        let operation = genai_operation_name(system);
+        let span_name = llm_span_name(operation, &request_model);
         let span = tracing::info_span!("llm_completion", otel.name = %span_name);
 
         record_llm_span_attributes(
             &span,
             &LLMSpanAttributes {
-                system: Some(system),
-                operation: Some(OPERATION_CHAT),
+                provider: Some(provider),
+                operation: Some(operation),
+                stream: Some(true),
                 request_model: Some(request_model.clone()),
                 temperature: request.temperature.map(f64::from),
                 max_tokens,
-                input_content: serialize_input_content(request),
-                session_id: metadata_string(request, "_moa.session_id"),
-                user_id: metadata_string(request, "_moa.contact_id"),
-                workspace_id: metadata_string(request, "_moa.tenant_id"),
-                channel: metadata_string(request, "_moa.channel"),
-                trace_name: metadata_string(request, "_moa.trace_name"),
-                context_tokens: metadata_usize(request, "_moa.context_tokens"),
-                cache_hit_ratio: metadata_f64(request, "_moa.cache_ratio"),
+                conversation_id: metadata_string(request, "_moa.session_id"),
                 ..LLMSpanAttributes::default()
             },
         );
-        record_llm_request(system, &request_model);
 
         Self {
             span,
@@ -125,9 +97,7 @@ impl LLMSpanRecorder {
             cached_input_tokens: 0,
             cache_creation_input_tokens: 0,
             started_at: Instant::now(),
-            first_output_at: None,
             first_output_elapsed: None,
-            streamed_output: Vec::new(),
         }
     }
 
@@ -138,8 +108,7 @@ impl LLMSpanRecorder {
 
     /// Records the current internal provider phase on the active span.
     pub(crate) fn set_phase(&self, phase: &'static str) {
-        self.span
-            .set_attribute("langfuse.observation.metadata.provider_phase", phase);
+        self.span.set_attribute("moa.provider.phase", phase);
     }
 
     /// Records the cached prompt token count used to price the request accurately.
@@ -152,50 +121,28 @@ impl LLMSpanRecorder {
         self.cache_creation_input_tokens = cache_creation_input_tokens;
     }
 
-    /// Records a provider-private debug payload on the active span.
-    pub(crate) fn record_raw_response<T>(&self, payload: &T)
-    where
-        T: Serialize,
-    {
-        if let Some(serialized) = serialize_provider_debug_payload(payload) {
-            self.span.set_attribute(
-                "langfuse.observation.metadata.provider_raw_response",
-                serialized,
-            );
-        }
-    }
-
-    /// Observes one streamed output block, capturing TTFT and partial output.
-    pub(crate) fn observe_block(&mut self, block: CompletionContent) {
-        if !has_meaningful_output(&block) {
+    /// Observes one streamed output block, capturing TTFT.
+    pub(crate) fn observe_block(&mut self, block: &CompletionContent) {
+        if !has_meaningful_output(block) {
             return;
         }
 
-        if self.first_output_at.is_none() {
-            let now = Utc::now();
-            self.first_output_at = Some(now);
-            self.first_output_elapsed = Some(self.started_at.elapsed());
+        if self.first_output_elapsed.is_none() {
+            let elapsed = self.started_at.elapsed();
+            self.first_output_elapsed = Some(elapsed);
             record_llm_span_attributes(
                 &self.span,
                 &LLMSpanAttributes {
-                    completion_start_time: Some(now),
+                    time_to_first_chunk: Some(elapsed),
                     ..LLMSpanAttributes::default()
                 },
             );
         }
-
-        self.streamed_output.push(block);
     }
 
     /// Finalizes the span with usage, cost, and response content.
     pub(crate) fn finish(&self, response: &CompletionResponse) {
         let usage = self.merged_usage(response);
-        let total_tokens = usage.total_input_tokens() + usage.output_tokens;
-        let output_content = if response.content.is_empty() {
-            serialize_output_text(&response.text)
-        } else {
-            serialize_output_content(&response.content)
-        };
         let cost = calculate_cost_with_cached(
             usage.total_input_tokens(),
             usage.input_tokens_cache_read,
@@ -211,12 +158,10 @@ impl LLMSpanRecorder {
                 response_model: Some(response.model.to_string()),
                 input_tokens: Some(usage.total_input_tokens()),
                 output_tokens: Some(usage.output_tokens),
-                total_tokens: Some(total_tokens),
-                cost: Some(cost),
+                cost_usd: Some(cost),
                 cache_read_tokens: Some(usage.input_tokens_cache_read),
                 cache_creation_tokens: Some(usage.input_tokens_cache_write),
                 provider_cache_hit_rate: Some(provider_cache_hit_rate),
-                output_content,
                 ..LLMSpanAttributes::default()
             },
         );
@@ -231,38 +176,43 @@ impl LLMSpanRecorder {
             "completion received"
         );
         let provider = self.system;
+        let request_model = self.request_model.as_str();
         let model = response.model.to_string();
-        record_llm_request_duration(provider, &model, "success", self.started_at.elapsed());
-        record_tokens_input_uncached(
+        record_genai_client_operation_duration(
             provider,
-            &model,
-            (usage.input_tokens_uncached + usage.input_tokens_cache_write) as u64,
+            request_model,
+            Some(&model),
+            None,
+            self.started_at.elapsed(),
         );
-        record_tokens_input_cached(provider, &model, usage.input_tokens_cache_read as u64);
-        record_tokens_output(provider, &model, usage.output_tokens as u64);
+        record_genai_client_token_usage(
+            provider,
+            request_model,
+            &model,
+            "input",
+            usage.total_input_tokens() as u64,
+        );
+        record_genai_client_token_usage(
+            provider,
+            request_model,
+            &model,
+            "output",
+            usage.output_tokens as u64,
+        );
         record_cache_hit_rate(provider, &model, provider_cache_hit_rate);
-        record_llm_streaming_duration(provider, &model, self.started_at.elapsed());
         if let Some(ttft) = self.first_output_elapsed {
-            record_llm_ttft(provider, &model, ttft);
+            record_genai_client_time_to_first_chunk(provider, request_model, &model, ttft);
         }
     }
 
     fn fail_with_class(&self, class: &'static str, error: &impl std::fmt::Display) {
         self.span.set_status(Status::error(error.to_string()));
-        if !self.streamed_output.is_empty() {
-            record_llm_span_attributes(
-                &self.span,
-                &LLMSpanAttributes {
-                    output_content: serialize_output_content(&self.streamed_output),
-                    ..LLMSpanAttributes::default()
-                },
-            );
-        }
-        record_llm_failure(self.system, &self.request_model, class);
-        record_llm_request_duration(
+        self.span.set_attribute("error.type", class);
+        record_genai_client_operation_duration(
             self.system,
             &self.request_model,
-            "error",
+            None,
+            Some(class),
             self.started_at.elapsed(),
         );
     }
@@ -287,11 +237,14 @@ impl LLMSpanRecorder {
 
 /// Records `GenAI` semantic-convention attributes on a tracing span.
 pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes) {
-    if let Some(system) = attrs.system {
-        span.set_attribute("gen_ai.system", system);
+    if let Some(provider) = attrs.provider {
+        span.set_attribute("gen_ai.provider.name", provider);
     }
     if let Some(operation) = attrs.operation {
         span.set_attribute("gen_ai.operation.name", operation);
+    }
+    if let Some(stream) = attrs.stream {
+        span.set_attribute("gen_ai.request.stream", stream);
     }
     if let Some(model) = attrs.request_model.as_ref() {
         span.set_attribute("gen_ai.request.model", model.clone());
@@ -307,67 +260,31 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
     }
     if let Some(input_tokens) = attrs.input_tokens {
         span.set_attribute("gen_ai.usage.input_tokens", input_tokens as i64);
-        span.set_attribute("gen_ai.usage.prompt_tokens", input_tokens as i64);
     }
     if let Some(output_tokens) = attrs.output_tokens {
         span.set_attribute("gen_ai.usage.output_tokens", output_tokens as i64);
-        span.set_attribute("gen_ai.usage.completion_tokens", output_tokens as i64);
     }
-    if let Some(total_tokens) = attrs.total_tokens {
-        span.set_attribute("gen_ai.usage.total_tokens", total_tokens as i64);
+    if let Some(cost) = attrs.cost_usd {
+        span.set_attribute("moa.llm.cost_usd", cost);
     }
-    if let Some(cost) = attrs.cost {
-        span.set_attribute("gen_ai.usage.cost", cost);
-    }
-    if let Some(start_time) = attrs.completion_start_time {
+    if let Some(time_to_first_chunk) = attrs.time_to_first_chunk {
         span.set_attribute(
-            "langfuse.observation.completion_start_time",
-            start_time.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "gen_ai.response.time_to_first_chunk",
+            time_to_first_chunk.as_secs_f64(),
         );
     }
-    if let Some(input) = attrs.input_content.as_ref() {
-        span.set_attribute("langfuse.observation.input", input.clone());
-    }
-    if let Some(output) = attrs.output_content.as_ref() {
-        span.set_attribute("langfuse.observation.output", output.clone());
-    }
-    if let Some(session_id) = attrs.session_id.as_ref() {
-        span.set_attribute("langfuse.session.id", session_id.clone());
-    }
-    if let Some(user_id) = attrs.user_id.as_ref() {
-        span.set_attribute("langfuse.user.id", user_id.clone());
-    }
-    if let Some(workspace_id) = attrs.workspace_id.as_ref() {
-        span.set_attribute("langfuse.trace.metadata.workspace_id", workspace_id.clone());
-    }
-    if let Some(platform) = attrs.channel.as_ref() {
-        span.set_attribute("langfuse.trace.metadata.channel", platform.clone());
-    }
-    if let Some(trace_name) = attrs.trace_name.as_ref() {
-        span.set_attribute("langfuse.trace.name", trace_name.clone());
-    }
-    if let Some(context_tokens) = attrs.context_tokens {
-        span.set_attribute(
-            "langfuse.observation.metadata.context_tokens",
-            context_tokens as i64,
-        );
-    }
-    if let Some(cache_hit_ratio) = attrs.cache_hit_ratio {
-        span.set_attribute(
-            "langfuse.observation.metadata.cache_hit_ratio",
-            cache_hit_ratio,
-        );
+    if let Some(conversation_id) = attrs.conversation_id.as_ref() {
+        span.set_attribute("gen_ai.conversation.id", conversation_id.clone());
     }
     if let Some(cache_read_tokens) = attrs.cache_read_tokens {
-        span.set_attribute("gen_ai.usage.cache_read_tokens", cache_read_tokens as i64);
+        span.set_attribute(
+            "gen_ai.usage.cache_read.input_tokens",
+            cache_read_tokens as i64,
+        );
     }
     if let Some(cache_creation_tokens) = attrs.cache_creation_tokens {
         span.set_attribute(
-            "gen_ai.usage.cache_write_tokens",
-            cache_creation_tokens as i64,
-        );
-        span.set_attribute(
-            "gen_ai.usage.cache_creation_tokens",
+            "gen_ai.usage.cache_creation.input_tokens",
             cache_creation_tokens as i64,
         );
     }
@@ -377,8 +294,8 @@ pub(crate) fn record_llm_span_attributes(span: &Span, attrs: &LLMSpanAttributes)
 }
 
 /// Builds the exported span name for an LLM completion call.
-pub(crate) fn llm_span_name(operation: &str, system: &str, model: &str) -> String {
-    format!("{operation} {system}/{model}")
+pub(crate) fn llm_span_name(operation: &str, model: &str) -> String {
+    format!("{operation} {model}")
 }
 
 /// Calculates request cost in dollars using uncached pricing only.
@@ -424,20 +341,6 @@ fn has_meaningful_output(block: &CompletionContent) -> bool {
     }
 }
 
-fn serialize_input_content(request: &CompletionRequest) -> Option<String> {
-    serde_json::to_string(&request.messages)
-        .ok()
-        .map(truncate_attribute_value)
-}
-
-fn serialize_output_text(text: &str) -> Option<String> {
-    if text.is_empty() {
-        None
-    } else {
-        Some(truncate_attribute_value(text.to_string()))
-    }
-}
-
 fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
     request
         .metadata
@@ -446,63 +349,17 @@ fn metadata_string(request: &CompletionRequest, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn metadata_usize(request: &CompletionRequest, key: &str) -> Option<usize> {
-    request
-        .metadata
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|value| value as usize)
-}
-
-fn metadata_f64(request: &CompletionRequest, key: &str) -> Option<f64> {
-    request.metadata.get(key).and_then(Value::as_f64)
-}
-
-fn serialize_output_content(content: &[CompletionContent]) -> Option<String> {
-    serde_json::to_string(content)
-        .ok()
-        .map(truncate_attribute_value)
-}
-
-fn truncate_attribute_value(mut value: String) -> String {
-    if value.len() <= ATTRIBUTE_VALUE_LIMIT {
-        return value;
-    }
-
-    let mut truncate_at = ATTRIBUTE_VALUE_LIMIT;
-    while !value.is_char_boundary(truncate_at) {
-        truncate_at -= 1;
-    }
-    value.truncate(truncate_at);
-    value.push('…');
-    value
-}
-
-fn serialize_provider_debug_payload<T>(payload: &T) -> Option<String>
-where
-    T: Serialize,
-{
-    serde_json::to_string(payload)
-        .ok()
-        .map(truncate_attribute_value)
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use moa_core::TokenPricing;
 
-    use super::{
-        calculate_cost, calculate_cost_with_cached, llm_span_name,
-        serialize_provider_debug_payload, truncate_attribute_value,
-    };
+    use super::{calculate_cost, calculate_cost_with_cached, llm_span_name};
 
     #[test]
     fn llm_span_name_format() {
         assert_eq!(
-            llm_span_name("chat", "anthropic", "claude-sonnet-4-6"),
-            "chat anthropic/claude-sonnet-4-6"
+            llm_span_name("chat", "claude-sonnet-4-6"),
+            "chat claude-sonnet-4-6"
         );
     }
 
@@ -534,31 +391,5 @@ mod tests {
         let cost = calculate_cost_with_cached(1_000, 200, 300, 100, &pricing);
 
         assert!((cost - 0.004185).abs() < 1e-10);
-    }
-
-    #[test]
-    fn provider_debug_payload_is_serialized_and_truncated() {
-        let payload = json!({
-            "kind": "response",
-            "body": "x".repeat(40_000),
-        });
-
-        let serialized =
-            serialize_provider_debug_payload(&payload).expect("payload should serialize");
-
-        assert!(serialized.starts_with('{'));
-        assert!(serialized.len() > 100);
-        assert!(serialized.ends_with('…'));
-    }
-
-    #[test]
-    fn attribute_truncation_preserves_utf8_boundaries() {
-        // Pins: exported prompt/output/debug attributes stay valid UTF-8 when truncated.
-        let value = "가".repeat(20_000);
-
-        let truncated = truncate_attribute_value(value);
-
-        assert!(truncated.ends_with('…'));
-        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }

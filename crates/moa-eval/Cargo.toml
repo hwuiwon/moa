@@ -6,7 +6,6 @@ license.workspace = true
 
 [features]
 default = []
-langfuse = ["dep:reqwest", "moa-eval-core/langfuse"]
 
 [dependencies]
 async-trait.workspace = true
@@ -27,7 +26,6 @@ moa-security = { workspace = true }
 moa-session = { workspace = true }
 opentelemetry.workspace = true
 regex.workspace = true
-reqwest = { workspace = true, optional = true }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

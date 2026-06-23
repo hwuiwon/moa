@@ -29,8 +29,9 @@ The `session_turn` root span records:
 - `moa.turn.event_persist_ms`
 - `moa.turn.llm_ttft_ms`
 
-The `llm_call` span records model, usage, cache token counts, first-token time,
-and stream duration through `gen_ai.*` and `moa.llm.*` attributes.
+The `llm_call` span records GenAI provider, operation, request/response model,
+usage, cache token counts, and time to first chunk through `gen_ai.*`
+attributes. MOA-specific cost and cache-rate details stay under `moa.*`.
 
 Healthy trace shape:
 
