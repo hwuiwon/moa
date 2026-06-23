@@ -15,7 +15,7 @@ The implementation lives in `crates/moa-brain/src/pipeline/`.
 
 ## Current Stage Order
 
-The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains ten processors:
+The code reports fixed stage numbers through each `ContextProcessor`. With query rewriting and memory digests enabled, the default graph-backed pipeline contains eleven processors:
 
 | Stage | Processor | Cache role | Purpose |
 |---|---|---|---|

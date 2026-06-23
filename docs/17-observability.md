@@ -39,12 +39,16 @@ Healthy trace shape:
 session_turn
 ├── pipeline_compile
 │   ├── identity_processor
+│   ├── agent_instruction_processor
 │   ├── instruction_processor
 │   ├── tool_definition_processor
+│   ├── query_rewrite
 │   ├── skill_injector
+│   ├── digest_processor
 │   ├── memory_retriever
 │   ├── history_compiler
-│   └── cache_optimizer
+│   ├── runtime_context
+│   └── compactor
 ├── llm_call
 ├── tool_dispatch
 └── event_persist

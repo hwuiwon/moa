@@ -187,7 +187,7 @@ Postgres / Neon
   lineage, scores, compliance audit tables
 ```
 
-The context pipeline is byte-stable where possible for prompt caching. With query rewriting enabled, the current processors are: identity, instructions, tools, skills, query rewrite, memory, history, runtime context, compactor, and cache optimizer.
+The context pipeline is byte-stable where possible for prompt caching. With query rewriting and memory digests enabled, the current processors are: identity, agent instructions, instructions, tools, query rewrite, skills, digest, memory, history, runtime context, and compactor.
 
 ## Memory
 
