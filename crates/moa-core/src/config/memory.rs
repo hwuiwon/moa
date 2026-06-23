@@ -102,19 +102,11 @@ pub struct MemoryRetrievalConfig {
 }
 
 /// Deterministic ranking configuration for graph-memory retrieval.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryRankingConfig {
     /// Feature weights used by deterministic post-hydration ranking.
     pub weights: MemoryRankingWeights,
-}
-
-impl Default for MemoryRankingConfig {
-    fn default() -> Self {
-        Self {
-            weights: MemoryRankingWeights::default(),
-        }
-    }
 }
 
 /// Weights used by deterministic graph-memory ranking.

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::guardrails::AgentGuardrailPolicy;
+
 /// Built-in global default agent artifact identifier.
 pub const SYSTEM_DEFAULT_AGENT_ARTIFACT_UID: Uuid =
     Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0a01);
@@ -235,6 +237,9 @@ pub struct AgentPolicySnapshot {
     /// Runtime tool filter.
     #[serde(default)]
     pub tool_policy: AgentToolPolicy,
+    /// Runtime input and output guardrail policy.
+    #[serde(default)]
+    pub guardrail_policy: AgentGuardrailPolicy,
     /// Reproducibility lock used for this session or simulation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_lock: Option<AgentRevisionLock>,
@@ -290,6 +295,7 @@ impl AgentContext {
             workflow_policy: AgentWorkflowPolicy::default(),
             action_policy: AgentActionPolicy::default(),
             tool_policy: AgentToolPolicy::default(),
+            guardrail_policy: AgentGuardrailPolicy::default(),
             revision_lock: Some(revision_lock),
         };
         Self {

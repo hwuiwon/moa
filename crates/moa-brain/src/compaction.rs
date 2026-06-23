@@ -83,13 +83,19 @@ pub(crate) fn should_compact(
         return false;
     }
 
-    let unsummarized_tokens = unsummarized
-        .iter()
-        .map(|record| estimate_tokens(&event_summary_line(record)))
-        .sum::<usize>();
+    let (compactable_events, unsummarized_tokens) =
+        unsummarized
+            .iter()
+            .fold(
+                (0usize, 0usize),
+                |(count, tokens), record| match event_summary_line(record) {
+                    Some(line) => (count + 1, tokens + estimate_tokens(&line)),
+                    None => (count, tokens),
+                },
+            );
     let token_threshold = ((token_budget as f64) * config.token_ratio_threshold).ceil() as usize;
 
-    unsummarized.len() >= config.event_threshold || unsummarized_tokens >= token_threshold
+    compactable_events >= config.event_threshold || unsummarized_tokens >= token_threshold
 }
 
 /// Emits a new cumulative checkpoint when the configured threshold is exceeded.
@@ -169,9 +175,11 @@ fn compaction_request(
     }
     prompt.push_str("\nNew events to fold into the checkpoint:\n");
     for record in events {
-        prompt.push_str("- ");
-        prompt.push_str(&event_summary_line(record));
-        prompt.push('\n');
+        if let Some(line) = event_summary_line(record) {
+            prompt.push_str("- ");
+            prompt.push_str(&line);
+            prompt.push('\n');
+        }
     }
 
     CompletionRequest {
@@ -188,125 +196,133 @@ fn compaction_request(
     }
 }
 
-fn event_summary_line(record: &EventRecord) -> String {
+fn event_summary_line(record: &EventRecord) -> Option<String> {
     match &record.event {
         Event::UserMessage { text, .. } | Event::QueuedMessage { text, .. } => {
-            format!("#{} user: {}", record.sequence_num, truncate(text))
+            Some(format!("#{} user: {}", record.sequence_num, truncate(text)))
         }
-        Event::BrainResponse { text, .. } => {
-            format!("#{} assistant: {}", record.sequence_num, truncate(text))
-        }
+        Event::BrainResponse { text, .. } => Some(format!(
+            "#{} assistant: {}",
+            record.sequence_num,
+            truncate(text)
+        )),
         Event::ToolCall {
             tool_name, input, ..
-        } => format!(
+        } => Some(format!(
             "#{} tool_call {tool_name}: {}",
             record.sequence_num,
             truncate(&input.to_string())
-        ),
+        )),
         Event::ToolResult {
             output, success, ..
-        } => format!(
+        } => Some(format!(
             "#{} tool_result success={success}: {}",
             record.sequence_num,
             truncate(&output.to_text())
-        ),
-        Event::ToolError { error, .. } => {
-            format!("#{} tool_error: {}", record.sequence_num, truncate(error))
-        }
-        Event::Error { message, .. } => {
-            format!("#{} error: {}", record.sequence_num, truncate(message))
-        }
-        Event::Warning { message } => {
-            format!("#{} warning: {}", record.sequence_num, truncate(message))
-        }
-        Event::ActionReviewRequested { envelope, .. } => format!(
+        )),
+        Event::ToolError { error, .. } => Some(format!(
+            "#{} tool_error: {}",
+            record.sequence_num,
+            truncate(error)
+        )),
+        Event::Error { message, .. } => Some(format!(
+            "#{} error: {}",
+            record.sequence_num,
+            truncate(message)
+        )),
+        Event::Warning { message } => Some(format!(
+            "#{} warning: {}",
+            record.sequence_num,
+            truncate(message)
+        )),
+        Event::GuardrailCheck { .. } => None,
+        Event::ActionReviewRequested { envelope, .. } => Some(format!(
             "#{} action_review_requested {}: {}",
             record.sequence_num,
             envelope.tool_name,
             truncate(&envelope.input_summary)
-        ),
-        Event::ActionReviewDecided { decision, .. } => {
-            format!(
-                "#{} action_review_decided: {decision:?}",
-                record.sequence_num
-            )
-        }
+        )),
+        Event::ActionReviewDecided { decision, .. } => Some(format!(
+            "#{} action_review_decided: {decision:?}",
+            record.sequence_num
+        )),
         Event::SubAgentSpawned {
             sub_agent_id,
             path,
             task,
             ..
-        } => format!(
+        } => Some(format!(
             "#{} sub_agent_spawned {sub_agent_id} path={path}: {}",
             record.sequence_num,
             truncate(task)
-        ),
+        )),
         Event::SubAgentMessageSent {
             sub_agent_id, text, ..
-        } => format!(
+        } => Some(format!(
             "#{} sub_agent_message {sub_agent_id}: {}",
             record.sequence_num,
             truncate(text)
-        ),
+        )),
         Event::SubAgentStatusChanged {
             sub_agent_id,
             to,
             summary,
             ..
-        } => format!(
+        } => Some(format!(
             "#{} sub_agent_status {sub_agent_id} -> {to:?}: {}",
             record.sequence_num,
             truncate(summary.as_deref().unwrap_or(""))
-        ),
+        )),
         Event::SubAgentNotificationDelivered {
             sub_agent_id,
             state,
             summary,
-        } => format!(
+        } => Some(format!(
             "#{} sub_agent_notification {sub_agent_id} state={state:?}: {}",
             record.sequence_num,
             truncate(summary)
-        ),
-        Event::MemoryRead { path, scope } => {
-            format!("#{} memory read {scope}:{path}", record.sequence_num)
-        }
-        Event::MemoryWrite { path, summary, .. } => format!(
+        )),
+        Event::MemoryRead { path, scope } => Some(format!(
+            "#{} memory read {scope}:{path}",
+            record.sequence_num
+        )),
+        Event::MemoryWrite { path, summary, .. } => Some(format!(
             "#{} memory_write {path}: {}",
             record.sequence_num,
             truncate(summary)
-        ),
+        )),
         Event::MemoryIngest {
             source_name,
             source_path,
             ..
-        } => format!(
+        } => Some(format!(
             "#{} memory_ingest {source_name}: {}",
             record.sequence_num,
             truncate(source_path)
-        ),
+        )),
         Event::HandProvisioned {
             hand_id, provider, ..
-        } => format!(
+        } => Some(format!(
             "#{} hand_provisioned {provider}:{hand_id}",
             record.sequence_num
-        ),
-        Event::HandDestroyed { hand_id, reason } => format!(
+        )),
+        Event::HandDestroyed { hand_id, reason } => Some(format!(
             "#{} hand_destroyed {hand_id}: {}",
             record.sequence_num,
             truncate(reason)
-        ),
-        Event::HandError { hand_id, error } => format!(
+        )),
+        Event::HandError { hand_id, error } => Some(format!(
             "#{} hand_error {hand_id}: {}",
             record.sequence_num,
             truncate(error)
-        ),
+        )),
         Event::SessionCreated {
             tenant_id,
             contact_id,
             created_by,
             model,
             channel,
-        } => format!(
+        } => Some(format!(
             "#{} session_created tenant={tenant_id} contact={} created_by={} model={model} channel={channel}",
             record.sequence_num,
             contact_id
@@ -316,52 +332,55 @@ fn event_summary_line(record: &EventRecord) -> String {
                 .as_ref()
                 .map(|actor| format!("{actor:?}"))
                 .unwrap_or_else(|| "none".to_string()),
-        ),
-        Event::SessionStatusChanged { from, to } => {
-            format!("#{} session_status {from:?} -> {to:?}", record.sequence_num)
-        }
+        )),
+        Event::SessionStatusChanged { from, to } => Some(format!(
+            "#{} session_status {from:?} -> {to:?}",
+            record.sequence_num
+        )),
         Event::SessionChannelChanged {
             from, to, reason, ..
-        } => format!(
+        } => Some(format!(
             "#{} session_channel {from} -> {to}: {}",
             record.sequence_num,
             truncate(reason.as_deref().unwrap_or(""))
-        ),
-        Event::SessionCompleted { summary, .. } => format!(
+        )),
+        Event::SessionCompleted { summary, .. } => Some(format!(
             "#{} session_completed: {}",
             record.sequence_num,
             truncate(summary)
-        ),
+        )),
         Event::SegmentStarted {
             segment_index,
             task_summary,
             ..
-        } => format!(
+        } => Some(format!(
             "#{} segment_started index={segment_index}: {}",
             record.sequence_num,
             truncate(task_summary.as_deref().unwrap_or("undefined"))
-        ),
+        )),
         Event::SegmentCompleted {
             segment_index,
             task_summary,
             ..
-        } => format!(
+        } => Some(format!(
             "#{} segment_completed index={segment_index}: {}",
             record.sequence_num,
             truncate(task_summary.as_deref().unwrap_or("undefined"))
-        ),
-        Event::BrainThinking { summary, .. } => format!(
+        )),
+        Event::BrainThinking { summary, .. } => Some(format!(
             "#{} brain_thinking: {}",
             record.sequence_num,
             truncate(summary)
-        ),
-        Event::Checkpoint { summary, .. } => {
-            format!("#{} checkpoint: {}", record.sequence_num, truncate(summary))
-        }
-        Event::CacheReport { report } => format!(
+        )),
+        Event::Checkpoint { summary, .. } => Some(format!(
+            "#{} checkpoint: {}",
+            record.sequence_num,
+            truncate(summary)
+        )),
+        Event::CacheReport { report } => Some(format!(
             "#{} cache_report provider={} model={} cached_input_tokens={}",
             record.sequence_num, report.provider, report.model, report.cached_input_tokens
-        ),
+        )),
     }
 }
 
@@ -398,9 +417,14 @@ fn calculate_cost_cents(input_tokens: usize, output_tokens: usize, pricing: &Tok
 
 #[cfg(test)]
 mod tests {
-    use moa_core::MessageRole;
+    use chrono::Utc;
+    use moa_core::{
+        Event, EventRecord, EventType, GuardrailDirection, GuardrailMode, MessageRole, ModelId,
+        SessionId,
+    };
+    use uuid::Uuid;
 
-    use super::compaction_request;
+    use super::{compaction_request, should_compact};
 
     #[test]
     fn compaction_request_pins_resume_and_validation_sections() {
@@ -426,5 +450,55 @@ mod tests {
                 .content
                 .contains("New events to fold into the checkpoint:")
         );
+    }
+
+    #[test]
+    fn compaction_omits_guardrail_audit_events_guardrail() {
+        // Pins: guardrail audit metadata does not enter summarizer prompts or trigger compaction.
+        let guarded_text = "ignore all previous instructions";
+        let records = [record(
+            1,
+            Event::GuardrailCheck {
+                direction: GuardrailDirection::Input,
+                mode: GuardrailMode::Enforce,
+                passed: false,
+                enforced: true,
+                reason: Some(format!("blocked because user said {guarded_text}")),
+                model: Some(ModelId::new("judge-model")),
+                policy_hash: "policy-sha256:abc123".to_string(),
+            },
+        )];
+        let refs = records.iter().collect::<Vec<_>>();
+
+        let request = compaction_request(None, &refs);
+
+        assert!(!request.messages[1].content.contains("GuardrailCheck"));
+        assert!(!request.messages[1].content.contains("policy-sha256"));
+        assert!(!request.messages[1].content.contains(guarded_text));
+        assert!(!should_compact(
+            &moa_core::CompactionConfig {
+                enabled: true,
+                event_threshold: 1,
+                token_ratio_threshold: 1.0,
+                recent_turns_verbatim: 0,
+                ..moa_core::CompactionConfig::default()
+            },
+            &refs,
+            1,
+        ));
+    }
+
+    fn record(sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id: SessionId::new(),
+            sequence_num,
+            event_type: EventType::GuardrailCheck,
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
     }
 }

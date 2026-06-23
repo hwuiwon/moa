@@ -11,6 +11,7 @@ mod contact;
 mod context;
 mod events_stream;
 mod experience;
+mod guardrails;
 mod hands;
 mod identifiers;
 mod learning;
@@ -46,8 +47,9 @@ pub use channel::{
     MessageId, OutboundMessage, SessionChannelBindingId, ToolStatus,
 };
 pub use completion::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, JsonResponseFormat,
-    ProviderToolCallMetadata, StopReason, TokenUsage, ToolCallContent, ToolInvocation,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+    DEFER_BRAIN_RESPONSE_METADATA_KEY, JsonResponseFormat, ProviderToolCallMetadata, StopReason,
+    TokenUsage, ToolCallContent, ToolInvocation,
 };
 pub use contact::{
     ContactId, ContactPointId, ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
@@ -69,6 +71,10 @@ pub use experience::{
     ExperienceResource, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
     LearningCandidateType, LearningRiskClass, TaskFacetSet, TaskFingerprint,
     TaskStrategySuccessRate,
+};
+pub use guardrails::{
+    AgentGuardrailPolicy, AgentGuardrailStagePolicy, GuardrailDecision, GuardrailDirection,
+    GuardrailJudgeOutcome, GuardrailMode,
 };
 pub use hands::{
     HandHandle, HandResources, HandSpec, HandStatus, SandboxFile, SandboxTier,

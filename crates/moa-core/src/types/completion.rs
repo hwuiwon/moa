@@ -13,6 +13,9 @@ use crate::error::{MoaError, Result};
 
 use super::{ContextMessage, ModelId};
 
+/// Request metadata key that asks `LLMGateway` to return without appending a `BrainResponse`.
+pub const DEFER_BRAIN_RESPONSE_METADATA_KEY: &str = "_moa.defer_brain_response";
+
 /// Single tool invocation emitted by a provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolInvocation {

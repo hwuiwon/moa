@@ -59,16 +59,34 @@ The query rewrite result is not an intent router. The old advisory tool, freshne
 
 Configured-agent sessions pin an `AgentContext` at session creation. Context
 compilation reads only that pinned snapshot, so new deployments do not change
-running sessions. The pinned snapshot can:
+running sessions. The agent artifact JSON can include an optional
+`guardrail_policy`; resolution copies it into `AgentPolicySnapshot` and pins it
+in `session_agent_context` with the rest of the runtime policy. The pinned
+snapshot can:
 
 - inject agent-specific stable-prefix instructions
 - filter prompt-visible tool schemas
 - constrain skill selection by `auto`, `allowlist`, `pinned`, or `denylist`
 - constrain graph-memory retrieval mode, filters, budget, and PII floor
 - expose allowed workflow affordances without starting workflows implicitly
+- configure input and output LLM-judge text guardrails
 
 Durable execution still enforces policy again in the orchestrator tool/action
 paths; prompt filtering is not treated as a security boundary.
+
+## Guardrails
+
+Guardrails are durable turn gates, not context processors. Input guardrails run
+in `TurnExecution` before `Event::UserMessage`, so blocked user text does not
+enter the event history as a user message. Output guardrails run after the main
+model response is buffered and before the visible `Event::BrainResponse`, so the
+persisted visible response is the allowed text or the configured block message.
+
+V1 guardrails are LLM-judge text policies only. They do not implement PII,
+response-schema, or tool input/output guardrails, and they do not replace action
+or tool policy enforcement. `GuardrailCheck` events are metadata/audit records
+for the decision and policy hash; they must not be treated as storage for the
+raw guarded text.
 
 ## Skill Injection
 

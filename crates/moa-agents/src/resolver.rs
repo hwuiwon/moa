@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::agent::{
-    ActionPolicy, AgentDefinition, KnowledgeScopeMode, ModelPolicy, SkillPolicy, SkillPolicyMode,
+    ActionPolicy, AgentDefinition, GuardrailMode as ArtifactGuardrailMode, GuardrailPolicy,
+    GuardrailStagePolicy, KnowledgeScopeMode, ModelPolicy, SkillPolicy, SkillPolicyMode,
     ToolPolicyMode, WorkflowPolicy,
 };
 use moa_artifacts::canonical::canonical_hash;
@@ -11,10 +12,11 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::reference::ArtifactRef;
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifactRevision};
 use moa_core::{
-    ActionRuleScope, AgentActionPolicy, AgentContext, AgentKnowledgePolicy,
-    AgentKnowledgeScopeMode, AgentModelPolicy, AgentPolicySnapshot, AgentRevisionLock,
-    AgentSkillPolicy, AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode,
-    AgentWorkflowPolicy, LockedToolRef, MoaError, ResolvedArtifactRevisionRef, Result, ScopedConn,
+    ActionRuleScope, AgentActionPolicy, AgentContext, AgentGuardrailPolicy,
+    AgentGuardrailStagePolicy, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentModelPolicy,
+    AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
+    AgentToolPolicy, AgentToolPolicyMode, AgentWorkflowPolicy, GuardrailMode, LockedToolRef,
+    MoaError, ModelId, ResolvedArtifactRevisionRef, Result, ScopedConn,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -86,6 +88,7 @@ impl AgentResolver {
         let skill_policy = skill_policy_from_definition(&definition.skill_policy);
         let workflow_policy = workflow_policy_from_definition(&definition.workflow_policy);
         let action_policy = action_policy_from_definition(&definition.action_policy);
+        let guardrail_policy = guardrail_policy_from_definition(&definition.guardrail_policy);
         let instructions = instructions_from_definition(definition);
         let resolved_policy = ResolvedHashPolicy {
             instructions: &instructions,
@@ -95,6 +98,7 @@ impl AgentResolver {
             workflow_policy: &workflow_policy,
             action_policy: &action_policy,
             tool_policy: &tool_policy,
+            guardrail_policy: &guardrail_policy,
         };
         let revision_lock = match pointer.as_ref() {
             Some(pointer) => pointer.revision_lock.clone(),
@@ -130,6 +134,7 @@ impl AgentResolver {
             workflow_policy: workflow_policy.clone(),
             action_policy: action_policy.clone(),
             tool_policy: tool_policy.clone(),
+            guardrail_policy: guardrail_policy.clone(),
             revision_lock: Some(revision_lock.clone()),
         };
         let policy_snapshot = serde_json::to_value(&snapshot)
@@ -173,6 +178,7 @@ impl AgentResolver {
             workflow_policy,
             action_policy,
             tool_policy,
+            guardrail_policy,
         })
     }
 
@@ -414,6 +420,38 @@ fn tool_policy_from_definition(definition: &AgentDefinition) -> AgentToolPolicy 
     }
 }
 
+fn guardrail_policy_from_definition(definition: &GuardrailPolicy) -> AgentGuardrailPolicy {
+    AgentGuardrailPolicy {
+        input: definition
+            .input
+            .as_ref()
+            .map(guardrail_stage_policy_from_definition),
+        output: definition
+            .output
+            .as_ref()
+            .map(guardrail_stage_policy_from_definition),
+    }
+}
+
+fn guardrail_stage_policy_from_definition(
+    definition: &GuardrailStagePolicy,
+) -> AgentGuardrailStagePolicy {
+    AgentGuardrailStagePolicy {
+        enabled: definition.enabled,
+        mode: guardrail_mode_from_definition(definition.mode),
+        model: definition.model.as_deref().map(ModelId::new),
+        policy_prompt: definition.policy_prompt.clone(),
+        block_message: definition.block_message.clone(),
+    }
+}
+
+fn guardrail_mode_from_definition(mode: ArtifactGuardrailMode) -> GuardrailMode {
+    match mode {
+        ArtifactGuardrailMode::Shadow => GuardrailMode::Shadow,
+        ArtifactGuardrailMode::Enforce => GuardrailMode::Enforce,
+    }
+}
+
 fn skill_mode_from_definition(mode: SkillPolicyMode) -> AgentSkillPolicyMode {
     match mode {
         SkillPolicyMode::Auto => AgentSkillPolicyMode::Auto,
@@ -491,6 +529,7 @@ fn policy_hash_for(
         workflow_policy: &'a AgentWorkflowPolicy,
         action_policy: &'a AgentActionPolicy,
         tool_policy: &'a AgentToolPolicy,
+        guardrail_policy: &'a AgentGuardrailPolicy,
     }
 
     let digest = canonical_hash(&HashInput {
@@ -504,6 +543,7 @@ fn policy_hash_for(
         workflow_policy: policy.workflow_policy,
         action_policy: policy.action_policy,
         tool_policy: policy.tool_policy,
+        guardrail_policy: policy.guardrail_policy,
     })
     .map_err(|error| MoaError::SerializationError(error.to_string()))?;
     Ok(hex::encode(digest))
@@ -537,6 +577,7 @@ struct ResolvedHashPolicy<'a> {
     workflow_policy: &'a AgentWorkflowPolicy,
     action_policy: &'a AgentActionPolicy,
     tool_policy: &'a AgentToolPolicy,
+    guardrail_policy: &'a AgentGuardrailPolicy,
 }
 
 fn validate_revision_lock(

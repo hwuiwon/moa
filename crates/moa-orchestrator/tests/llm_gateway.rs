@@ -4,12 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use moa_core::{
-    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, LLMProvider,
-    MoaError, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+    CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
+    DEFER_BRAIN_RESPONSE_METADATA_KEY, LLMProvider, MoaError, SessionId, StopReason, TokenPricing,
+    TokenUsage, ToolCallFormat,
 };
-use moa_orchestrator::services::llm_gateway::{LLMGatewayImpl, compute_cost_cents};
+use moa_orchestrator::services::llm_gateway::{
+    LLMGatewayImpl, compute_cost_cents, should_defer_brain_response,
+};
 use moa_providers::ProviderRegistry;
 use moa_test_support::pricing::PricingTable;
+use serde_json::json;
 
 const CENTS_PER_DOLLAR: f64 = 100.0;
 
@@ -174,6 +178,22 @@ async fn llm_gateway_complete_normalizes_explicit_provider_prefix() {
     );
 }
 
+#[test]
+fn llm_gateway_guardrail_direct_session_request_without_defer_keeps_persistence_enabled() {
+    // Pins: direct LLMGateway callers with only session metadata keep the BrainResponse write path.
+    let request = request_with_session_metadata(false);
+
+    assert!(!should_defer_brain_response(&request));
+}
+
+#[test]
+fn llm_gateway_guardrail_direct_session_request_with_defer_skips_gateway_persistence() {
+    // Pins: TurnExecution can buffer output for guardrails by setting the explicit defer flag.
+    let request = request_with_session_metadata(true);
+
+    assert!(should_defer_brain_response(&request));
+}
+
 fn token_pricing_from_fixture(provider: &str, model: &str) -> TokenPricing {
     let table = PricingTable::load_v1();
     let pricing = table
@@ -188,6 +208,20 @@ fn token_pricing_from_fixture(provider: &str, model: &str) -> TokenPricing {
         cache_write_5m_per_mtok: None,
         cache_write_1h_per_mtok: None,
     }
+}
+
+fn request_with_session_metadata(defer_brain_response: bool) -> CompletionRequest {
+    let mut request = CompletionRequest::simple("hello").with_model("gpt-5.4");
+    request.metadata.insert(
+        "_moa.session_id".to_string(),
+        json!(SessionId::new().to_string()),
+    );
+    if defer_brain_response {
+        request
+            .metadata
+            .insert(DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(), json!(true));
+    }
+    request
 }
 
 trait CompletionRequestExt {

@@ -57,18 +57,10 @@ impl Default for RankingWeights {
 }
 
 /// Ranking configuration applied after candidate hydration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RankingConfig {
     /// Feature weights used by deterministic post-hydration ranking.
     pub weights: RankingWeights,
-}
-
-impl Default for RankingConfig {
-    fn default() -> Self {
-        Self {
-            weights: RankingWeights::default(),
-        }
-    }
 }
 
 impl From<&MemoryRankingConfig> for RankingConfig {

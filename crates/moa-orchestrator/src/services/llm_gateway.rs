@@ -6,8 +6,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
-    CompletionRequest, CompletionResponse, ContactId, Event, MoaError, ModelId, ModelTier,
-    SessionId, TenantId, TokenPricing, TokenUsage, record_llm_cost_cents,
+    CompletionRequest, CompletionResponse, ContactId, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event,
+    MoaError, ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage,
+    record_llm_cost_cents,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_providers::ProviderRegistry;
@@ -109,7 +110,9 @@ impl LLMGateway for LLMGatewayImpl {
             cost_cents as u64,
         );
 
-        if let Some(session_id) = session_id_from_request(&request) {
+        if !should_defer_brain_response(&request)
+            && let Some(session_id) = session_id_from_request(&request)
+        {
             let event = Event::BrainResponse {
                 text: response.text.clone(),
                 thought_signature: response.thought_signature.clone(),
@@ -144,6 +147,15 @@ impl LLMGateway for LLMGatewayImpl {
 
         Ok(Json::from(response))
     }
+}
+
+/// Returns whether a completion request defers visible `BrainResponse` persistence to its caller.
+#[must_use]
+pub fn should_defer_brain_response(request: &CompletionRequest) -> bool {
+    matches!(
+        request.metadata.get(DEFER_BRAIN_RESPONSE_METADATA_KEY),
+        Some(Value::Bool(true))
+    )
 }
 
 /// Computes the normalized completion cost in cents for one model response.
@@ -208,7 +220,7 @@ fn turn_scope_from_request(request: &CompletionRequest) -> Option<(TenantId, Con
     Some((tenant_id, contact_id))
 }
 
-fn session_turn_from_completion_request(
+pub(crate) fn session_turn_from_completion_request(
     request: &CompletionRequest,
     response_text: &str,
     session_id: SessionId,
