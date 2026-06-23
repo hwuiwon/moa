@@ -168,7 +168,7 @@ pub struct SimulationScenarioDefinition {
     /// Maximum target-agent turns in one trial.
     #[serde(default)]
     pub max_turns: u32,
-    /// Behavior when the target enters workspace-admin review.
+    /// Behavior when the target enters tenant-admin review.
     #[serde(default)]
     pub admin_review_behavior: SimulationReviewBehavior,
     /// Optional scoring rubric used by a judge.

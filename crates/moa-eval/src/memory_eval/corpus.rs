@@ -61,7 +61,7 @@ pub enum CorpusProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptStyle {
-    /// Legacy marker-heavy transcripts optimized for the heuristic extractor.
+    /// Marker-heavy transcripts optimized for the heuristic extractor.
     #[default]
     Marked,
     /// Conversational transcripts with no fact or scope markers.
@@ -589,7 +589,7 @@ mod tests {
             "expected_redacted": false
         });
 
-        let fact: LedgerFact = serde_json::from_value(raw).expect("legacy ledger fact parses");
+        let fact: LedgerFact = serde_json::from_value(raw).expect("ledger fact parses");
 
         assert_eq!(fact.restates, None);
         assert_eq!(fact.prior_uses, None);

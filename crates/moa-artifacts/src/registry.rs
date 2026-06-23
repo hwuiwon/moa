@@ -13,12 +13,14 @@ use crate::canonical::canonical_hash;
 use crate::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use crate::validation::{ValidationReport, validate_for_status};
 
-/// Legacy artifact storage columns derived from artifact inheritance scope.
+/// Artifact storage columns derived from artifact inheritance scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactScopeParts {
-    /// Legacy column used to store tenant override ownership.
+    /// Tenant override owner used by RLS for tenant-owned artifacts.
+    pub tenant_id: Option<Uuid>,
+    /// Storage column used to route tenant-owned artifacts.
     pub workspace_id: Option<String>,
-    /// Legacy column retained for schema compatibility; artifact defaults no longer use users.
+    /// User ownership column; canonical artifact defaults do not use users.
     pub user_id: Option<String>,
 }
 
@@ -28,10 +30,12 @@ impl ArtifactScopeParts {
     pub fn from_scope(scope: &ActionRuleScope) -> Self {
         match scope {
             ActionRuleScope::WorkspaceDefault => Self {
+                tenant_id: None,
                 workspace_id: None,
                 user_id: None,
             },
             ActionRuleScope::Tenant { tenant_id } => Self {
+                tenant_id: Some(tenant_id.0),
                 workspace_id: Some(tenant_id.to_string()),
                 user_id: None,
             },
@@ -196,7 +200,7 @@ pub enum ArtifactRunStatus {
     Queued,
     /// Run is actively executing.
     Running,
-    /// Run is pending workspace-admin action review.
+    /// Run is pending tenant-admin action review.
     PendingReview,
     /// Run completed successfully.
     Completed,
@@ -228,7 +232,7 @@ pub enum ArtifactNodeRunStatus {
     Queued,
     /// Node run is actively executing.
     Running,
-    /// Node run is pending workspace-admin action review.
+    /// Node run is pending tenant-admin action review.
     PendingReview,
     /// Node run completed successfully.
     Completed,
@@ -373,15 +377,16 @@ impl ArtifactRegistry {
         sqlx::query(
             r#"
             INSERT INTO moa.artifact_revision (
-                revision_uid, artifact_uid, workspace_id, user_id, definition,
+                revision_uid, artifact_uid, tenant_id, workspace_id, user_id, definition,
                 canonical_hash, source_format, source_text, status,
                 validation_report, version
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'draft', $10, $11)
             "#,
         )
         .bind(revision_uid)
         .bind(artifact_uid)
+        .bind(parts.tenant_id)
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(definition)
@@ -605,17 +610,18 @@ impl ArtifactRegistry {
         let row = sqlx::query(
             r#"
             INSERT INTO moa.artifact_run (
-                run_uid, artifact_uid, revision_uid, workspace_id, user_id, session_id,
+                run_uid, artifact_uid, revision_uid, tenant_id, workspace_id, user_id, session_id,
                 workflow_ref, status, current_node_id, input, state, output,
                 error, idempotency_key
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING run_uid, session_id, status, current_node_id, output, error, started_at, completed_at
             "#,
         )
         .bind(run_uid)
         .bind(run.artifact_uid)
         .bind(run.revision_uid)
+        .bind(parts.tenant_id)
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run.session_id.map(|session_id| session_id.0))
@@ -712,14 +718,15 @@ impl ArtifactRegistry {
         sqlx::query(
             r#"
             INSERT INTO moa.artifact_node_run (
-                node_run_uid, run_uid, workspace_id, user_id, node_id, status,
+                node_run_uid, run_uid, tenant_id, workspace_id, user_id, node_id, status,
                 input, output, error, completed_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(node_run_uid)
         .bind(node_run.run_uid)
+        .bind(parts.tenant_id)
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(&node_run.node_id)
@@ -764,15 +771,16 @@ pub async fn insert_published_revision(
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, workspace_id, user_id, definition,
+            revision_uid, artifact_uid, tenant_id, workspace_id, user_id, definition,
             canonical_hash, source_format, source_text, status, validation_report,
             version, published_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'published', $9, $10, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'published', $10, $11, now())
         "#,
     )
     .bind(revision_uid)
     .bind(artifact_uid)
+    .bind(parts.tenant_id)
     .bind(parts.workspace_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(definition)
@@ -889,12 +897,13 @@ async fn ensure_artifact(
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, workspace_id, user_id, kind, name, description, tags
+            artifact_uid, tenant_id, workspace_id, user_id, kind, name, description, tags
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(artifact_uid)
+    .bind(parts.tenant_id)
     .bind(parts.workspace_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(document.kind.to_string())
@@ -936,16 +945,17 @@ async fn insert_files(
         sqlx::query(
             r#"
             INSERT INTO moa.artifact_file (
-                file_uid, artifact_uid, revision_uid, workspace_id, user_id,
+                file_uid, artifact_uid, revision_uid, tenant_id, workspace_id, user_id,
                 path, content, content_sha256, content_type, executable,
                 file_size_bytes
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(Uuid::now_v7())
         .bind(artifact_uid)
         .bind(revision_uid)
+        .bind(parts.tenant_id)
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(&file.path)

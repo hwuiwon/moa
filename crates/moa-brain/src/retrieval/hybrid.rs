@@ -23,7 +23,7 @@ use crate::retrieval::legs::{
     timed_leg, vector_leg as run_vector_leg, write_retrieval_lineage,
 };
 use crate::retrieval::ranking::{
-    FeatureRanker, RankingConfig, RankingMode, normalize_tokens, ranking_fingerprint,
+    FeatureRanker, RankingConfig, normalize_tokens, ranking_fingerprint,
 };
 use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
@@ -635,10 +635,7 @@ fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> 
 }
 
 fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
-    match config.mode {
-        RankingMode::Legacy => apply_layer_bias(hits),
-        RankingMode::FeatureV1 => apply_feature_ranking(hits, config, req),
-    }
+    apply_feature_ranking(hits, config, req);
 }
 
 fn apply_feature_ranking(
@@ -669,22 +666,6 @@ fn apply_feature_ranking(
     });
 }
 
-pub(crate) fn apply_layer_bias(hits: &mut [RetrievalHit]) {
-    for hit in hits.iter_mut() {
-        hit.score *= match hit.node.scope.as_str() {
-            "user" => 1.3,
-            "workspace" => 1.1,
-            _ => 1.0,
-        };
-    }
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.uid.cmp(&right.uid))
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -702,21 +683,6 @@ mod tests {
         MemoryScope::Tenant {
             tenant_id: TenantId::from(Uuid::from_u128(0x100)),
         }
-    }
-
-    #[test]
-    fn layer_bias_prefers_user_over_workspace_for_matching_scores() {
-        let user_uid = Uuid::now_v7();
-        let workspace_uid = Uuid::now_v7();
-        let mut hits = vec![
-            hit(workspace_uid, "workspace", 1.0),
-            hit(user_uid, "user", 1.0),
-        ];
-
-        apply_layer_bias(&mut hits);
-
-        assert_eq!(hits[0].uid, user_uid);
-        assert!(hits[0].score > hits[1].score);
     }
 
     #[tokio::test]
@@ -756,57 +722,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mode_preserves_apply_layer_bias_ordering() {
-        // Pins: Legacy remains a rollback path for the pre-FeatureV1 ordering.
-        let user_uid = Uuid::now_v7();
-        let workspace_uid = Uuid::now_v7();
-        let mut expected = vec![
-            hit(workspace_uid, "workspace", 1.0),
-            hit(user_uid, "user", 1.0),
-        ];
-        apply_layer_bias(&mut expected);
-
-        let mut ranked = vec![
-            hit(workspace_uid, "workspace", 1.0),
-            hit(user_uid, "user", 1.0),
-        ];
-        rank_hydrated_hits(
-            &mut ranked,
-            &RankingConfig {
-                mode: RankingMode::Legacy,
-                weights: Default::default(),
-            },
-            &RetrievalRequest {
-                seeds: Vec::new(),
-                query_text: "workspace fact".to_string(),
-                query_embedding: Vec::new(),
-                scope: tenant_scope(),
-                label_filter: None,
-                max_pii_class: PiiClass::Restricted,
-                k_final: 2,
-                use_reranker: false,
-                strategy: None,
-                as_of: None,
-                ranking_reference_time: None,
-                lineage: None,
-                disable_leg_timeouts: false,
-                disable_graph_expansion: false,
-            },
-        );
-
-        assert_eq!(
-            ranked.iter().map(|hit| hit.uid).collect::<Vec<_>>(),
-            expected.iter().map(|hit| hit.uid).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            ranked.iter().map(|hit| hit.score).collect::<Vec<_>>(),
-            expected.iter().map(|hit| hit.score).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn feature_mode_rescues_lexical_non_vector_hit_over_vector_noise() {
-        // Pins: FeatureV1 can promote exact lexical hits that vector retrieval missed.
+    fn feature_ranker_rescues_lexical_non_vector_hit_over_vector_noise() {
+        // Pins: deterministic ranking can promote exact lexical hits that vector retrieval missed.
         let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("test timestamp should parse")
             .with_timezone(&Utc);
@@ -861,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_mode_rescue_skips_graph_lexical_neighbors() {
+    fn feature_ranker_rescue_skips_graph_lexical_neighbors() {
         // Pins: lexical rescue is for lexical-only hits, not graph-expanded neighbors.
         let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("test timestamp should parse")
@@ -917,8 +834,8 @@ mod tests {
     }
 
     #[test]
-    fn feature_mode_rescues_graph_only_expansion_hit() {
-        // Pins: FeatureV1 can promote graph-only expansion hits that vector and lexical missed.
+    fn feature_ranker_rescues_graph_only_expansion_hit() {
+        // Pins: deterministic ranking can promote graph-only expansion hits that vector and lexical missed.
         let reference_time = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("test timestamp should parse")
             .with_timezone(&Utc);

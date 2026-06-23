@@ -112,15 +112,14 @@ impl Memory for MemoryImpl {
         let started = Instant::now();
         let mut results = Vec::with_capacity(request.documents.len());
         for (index, document) in request.documents.into_iter().enumerate() {
-            let workspace_id = WorkspaceId::new(request.tenant_id.to_string());
-            let turn_user_id = UserId::new(contact_id.to_string());
             let source_name = document.source_name.clone();
             let content = document.content.clone();
+            let tenant_id = request.tenant_id;
             let turn = ctx
                 .run(|| async move {
                     Ok(Json(SessionTurn {
-                        workspace_id,
-                        user_id: turn_user_id,
+                        tenant_id,
+                        contact_id,
                         session_id: SessionId::new(),
                         turn_seq: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
                         transcript: ingest_transcript(&source_name, &content),

@@ -2,7 +2,7 @@
 
 The default `async_authz.provider = "builtin"` configuration uses an in-app
 challenge workflow. Builtin async-authz requests are stored in
-`builtin_pending_approvals` and are separate from workspace action reviews.
+`builtin_pending_approvals` and are separate from tenant action reviews.
 
 ```sh
 curl -H "Authorization: Bearer <key>" http://localhost:10080/v1/authz-challenges

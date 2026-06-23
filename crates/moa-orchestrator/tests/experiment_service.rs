@@ -535,7 +535,7 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
         candidate.payload["evidence_refs"]["experiment_run_uid"],
         run.run_uid.to_string()
     );
-    assert_eq!(candidate.payload["tenant_id"], "tenant-a");
+    assert_eq!(candidate.payload["tenant_id"], tenant_id.to_string());
     assert_eq!(
         candidate.payload["evidence_refs"]["run_score_run_id"],
         run.score_run_id.to_string()

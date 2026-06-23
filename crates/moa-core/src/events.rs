@@ -190,18 +190,18 @@ pub enum Event {
         /// Whether the failure is retryable.
         retryable: bool,
     },
-    /// A tool call was queued for workspace-admin action review.
+    /// A tool call was queued for tenant-admin action review.
     ActionReviewRequested {
-        /// Workspace-admin review identifier.
+        /// Tenant-admin review identifier.
         review_id: Uuid,
         /// Durable policy-facing action envelope.
         envelope: ActionEnvelope,
         /// Human-readable review preview.
         preview: ActionReviewPreview,
     },
-    /// A workspace-admin action review was decided.
+    /// A tenant-admin action review was decided.
     ActionReviewDecided {
-        /// Workspace-admin review identifier.
+        /// Tenant-admin review identifier.
         review_id: Uuid,
         /// Review decision.
         decision: ActionReviewDecision,
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn action_review_requested_event_round_trips_full_payload() {
-        // Pins: workspace-admin action-review events preserve policy envelope and preview details.
+        // Pins: tenant-admin action-review events preserve policy envelope and preview details.
         let review_id = Uuid::now_v7();
         let event = Event::ActionReviewRequested {
             review_id,

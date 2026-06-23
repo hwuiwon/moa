@@ -251,6 +251,7 @@ BEGIN
             USING ERRCODE = 'P0001';
     END IF;
 
+    SET CONSTRAINTS ALL IMMEDIATE;
     EXECUTE format('ALTER TABLE %s ALTER COLUMN tenant_id SET NOT NULL', target_table);
 END;
 $$;
@@ -266,7 +267,11 @@ BEGIN
     EXECUTE format(
         'ALTER TABLE %s ADD CONSTRAINT %I CHECK (
              tenant_id IS NOT NULL
-             OR (tenant_id IS NULL AND user_id IS NULL AND COALESCE(scope, '''') = ''global'')
+             OR (
+                 tenant_id IS NULL
+                 AND user_id IS NULL
+                 AND COALESCE(scope, '''') IN (''workspace_default'', ''global'')
+             )
          )',
         target_table,
         constraint_name
@@ -287,8 +292,10 @@ BEGIN
                 INTO session_tenant, session_contact
                 USING NEW.session_id;
             NEW.tenant_id := session_tenant;
-            IF TG_TABLE_NAME = 'events' AND NEW.contact_id IS NULL THEN
-                NEW.contact_id := session_contact;
+            IF TG_TABLE_NAME = 'events' THEN
+                IF NEW.contact_id IS NULL THEN
+                    NEW.contact_id := session_contact;
+                END IF;
             END IF;
         ELSE
             NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
@@ -299,6 +306,14 @@ BEGIN
                 ELSE moa.workspace_text_to_tenant_uuid(NEW.workspace_id, TG_TABLE_NAME)
             END);
         END IF;
+    END IF;
+
+    IF moa.current_tenant_id() IS NOT NULL
+       AND NEW.workspace_id IS NOT NULL
+       AND NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       AND NEW.workspace_id::UUID <> moa.current_tenant_id() THEN
+        RAISE EXCEPTION 'workspace_id % does not match current tenant %', NEW.workspace_id, moa.current_tenant_id()
+            USING ERRCODE = '42501';
     END IF;
 
     RETURN NEW;
@@ -339,6 +354,14 @@ BEGIN
         END IF;
     END IF;
 
+    IF moa.current_tenant_id() IS NOT NULL
+       AND NEW.workspace_id IS NOT NULL
+       AND NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       AND NEW.workspace_id::UUID <> moa.current_tenant_id() THEN
+        RAISE EXCEPTION 'workspace_id % does not match current tenant %', NEW.workspace_id, moa.current_tenant_id()
+            USING ERRCODE = '42501';
+    END IF;
+
     RETURN NEW;
 END;
 $$;
@@ -373,6 +396,169 @@ CREATE TRIGGER events_set_tenant_columns
     BEFORE INSERT OR UPDATE ON events
     FOR EACH ROW
     EXECUTE FUNCTION moa.set_runtime_tenant_columns();
+
+DROP VIEW IF EXISTS session_summary;
+CREATE VIEW session_summary AS
+SELECT
+    s.id,
+    s.tenant_id,
+    s.workspace_id,
+    s.contact_id,
+    s.user_id,
+    s.status,
+    s.turn_count,
+    s.event_count,
+    s.total_input_tokens,
+    s.total_output_tokens,
+    s.total_cost_cents,
+    s.cache_hit_rate,
+    s.created_at,
+    s.updated_at,
+    EXTRACT(EPOCH FROM (s.updated_at - s.created_at))::DOUBLE PRECISION AS duration_seconds,
+    COALESCE(tool_counts.tool_call_count, 0)::BIGINT AS tool_call_count,
+    COALESCE(error_counts.error_count, 0)::BIGINT AS error_count,
+    COALESCE(tier_costs.main_cost_cents, 0)::BIGINT AS main_cost_cents,
+    COALESCE(tier_costs.auxiliary_cost_cents, 0)::BIGINT AS auxiliary_cost_cents
+FROM sessions s
+LEFT JOIN (
+    SELECT session_id, COUNT(*)::BIGINT AS tool_call_count
+    FROM events
+    WHERE event_type = 'ToolCall'
+    GROUP BY session_id
+) tool_counts
+    ON tool_counts.session_id = s.id
+LEFT JOIN (
+    SELECT session_id, COUNT(*)::BIGINT AS error_count
+    FROM events
+    WHERE event_type = 'Error'
+    GROUP BY session_id
+) error_counts
+    ON error_counts.session_id = s.id
+LEFT JOIN (
+    SELECT
+        e.session_id,
+        SUM(
+            CASE
+                WHEN COALESCE(
+                    e.payload -> 'data' ->> 'model_tier',
+                    CASE
+                        WHEN e.event_type = 'Checkpoint' THEN 'auxiliary'
+                        ELSE 'main'
+                    END
+                ) = 'main' THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
+                ELSE 0
+            END
+        )::BIGINT AS main_cost_cents,
+        SUM(
+            CASE
+                WHEN COALESCE(
+                    e.payload -> 'data' ->> 'model_tier',
+                    CASE
+                        WHEN e.event_type = 'Checkpoint' THEN 'auxiliary'
+                        ELSE 'main'
+                    END
+                ) = 'auxiliary' THEN COALESCE((e.payload -> 'data' ->> 'cost_cents')::BIGINT, 0)
+                ELSE 0
+            END
+        )::BIGINT AS auxiliary_cost_cents
+    FROM events e
+    WHERE e.event_type IN ('BrainResponse', 'Checkpoint')
+    GROUP BY e.session_id
+) tier_costs
+    ON tier_costs.session_id = s.id;
+
+DROP MATERIALIZED VIEW IF EXISTS session_turn_metrics;
+CREATE MATERIALIZED VIEW session_turn_metrics AS
+WITH brain_turns AS (
+    SELECT
+        e.session_id,
+        e.sequence_num AS response_sequence_num,
+        ROW_NUMBER() OVER (
+            PARTITION BY e.session_id
+            ORDER BY e.sequence_num
+        )::BIGINT AS turn_number,
+        LAG(e.sequence_num, 1, -1) OVER (
+            PARTITION BY e.session_id
+            ORDER BY e.sequence_num
+        )::BIGINT AS previous_response_sequence_num,
+        e.timestamp AS finished_at,
+        e.payload -> 'data' AS response_data
+    FROM events e
+    WHERE e.event_type = 'BrainResponse'
+),
+tool_metrics AS (
+    SELECT
+        bt.session_id,
+        bt.turn_number,
+        COUNT(tc.id)::BIGINT AS tool_call_count,
+        COALESCE(SUM(
+            CASE
+                WHEN tr.id IS NOT NULL THEN COALESCE(
+                    (tr.payload -> 'data' ->> 'duration_ms')::DOUBLE PRECISION,
+                    EXTRACT(EPOCH FROM (tr.timestamp - tc.timestamp)) * 1000.0
+                )
+                WHEN te.id IS NOT NULL THEN EXTRACT(EPOCH FROM (te.timestamp - tc.timestamp)) * 1000.0
+                ELSE 0.0
+            END
+        ), 0.0)::DOUBLE PRECISION AS tool_ms
+    FROM brain_turns bt
+    LEFT JOIN events tc
+        ON tc.session_id = bt.session_id
+       AND tc.event_type = 'ToolCall'
+       AND tc.sequence_num > bt.previous_response_sequence_num
+       AND tc.sequence_num < bt.response_sequence_num
+    LEFT JOIN LATERAL (
+        SELECT e.id, e.payload, e.timestamp
+        FROM events e
+        WHERE e.session_id = tc.session_id
+          AND e.event_type = 'ToolResult'
+          AND (e.payload -> 'data' ->> 'tool_id') = (tc.payload -> 'data' ->> 'tool_id')
+        ORDER BY e.sequence_num ASC
+        LIMIT 1
+    ) tr ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT e.id, e.payload, e.timestamp
+        FROM events e
+        WHERE e.session_id = tc.session_id
+          AND e.event_type = 'ToolError'
+          AND (e.payload -> 'data' ->> 'tool_id') = (tc.payload -> 'data' ->> 'tool_id')
+        ORDER BY e.sequence_num ASC
+        LIMIT 1
+    ) te ON TRUE
+    GROUP BY bt.session_id, bt.turn_number
+)
+SELECT
+    s.tenant_id,
+    s.workspace_id,
+    s.contact_id,
+    s.user_id,
+    bt.session_id,
+    bt.turn_number,
+    bt.finished_at,
+    bt.response_data ->> 'model' AS model,
+    NULL::DOUBLE PRECISION AS pipeline_ms,
+    COALESCE((bt.response_data ->> 'duration_ms')::DOUBLE PRECISION, 0.0) AS llm_ms,
+    COALESCE(tm.tool_ms, 0.0) AS tool_ms,
+    COALESCE(tm.tool_call_count, 0)::BIGINT AS tool_call_count,
+    COALESCE((bt.response_data ->> 'input_tokens_uncached')::BIGINT, 0)::BIGINT AS input_tokens_uncached,
+    COALESCE((bt.response_data ->> 'input_tokens_cache_write')::BIGINT, 0)::BIGINT AS input_tokens_cache_write,
+    COALESCE((bt.response_data ->> 'input_tokens_cache_read')::BIGINT, 0)::BIGINT AS input_tokens_cache_read,
+    (
+        COALESCE((bt.response_data ->> 'input_tokens_uncached')::BIGINT, 0)
+        + COALESCE((bt.response_data ->> 'input_tokens_cache_write')::BIGINT, 0)
+        + COALESCE((bt.response_data ->> 'input_tokens_cache_read')::BIGINT, 0)
+    )::BIGINT AS total_input_tokens,
+    COALESCE((bt.response_data ->> 'output_tokens')::BIGINT, 0)::BIGINT AS output_tokens,
+    COALESCE((bt.response_data ->> 'cost_cents')::BIGINT, 0)::BIGINT AS cost_cents
+FROM brain_turns bt
+JOIN sessions s
+    ON s.id = bt.session_id
+LEFT JOIN tool_metrics tm
+    ON tm.session_id = bt.session_id
+   AND tm.turn_number = bt.turn_number;
+
+CREATE UNIQUE INDEX idx_session_turn_metrics_session_turn
+    ON session_turn_metrics(session_id, turn_number);
 
 ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS tenant_id UUID;
 UPDATE pending_signals p
@@ -418,6 +604,11 @@ CREATE TRIGGER session_agent_context_set_tenant_columns
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS contact_id UUID;
 UPDATE contacts SET contact_id = id WHERE contact_id IS NULL;
 ALTER TABLE contacts ALTER COLUMN contact_id SET NOT NULL;
+
+ALTER TABLE moa.graph_changelog DROP CONSTRAINT IF EXISTS graph_changelog_actor_kind_check;
+ALTER TABLE moa.graph_changelog
+    ADD CONSTRAINT graph_changelog_actor_kind_check
+        CHECK (actor_kind IN ('user', 'contact', 'agent', 'system', 'promoter', 'admin'));
 
 ALTER TABLE moa.node_index
     ADD COLUMN IF NOT EXISTS tenant_id UUID,
@@ -562,6 +753,13 @@ BEGIN
           AND workspace_id <> 'global';
     END IF;
 END $$;
+ALTER TABLE action_policy_rules
+    DROP CONSTRAINT IF EXISTS action_policy_rules_global_workspace_check;
+ALTER TABLE action_policy_rules
+    DROP CONSTRAINT IF EXISTS action_policy_rules_scope_check;
+ALTER TABLE action_policy_rules
+    ADD CONSTRAINT action_policy_rules_scope_check
+        CHECK (scope IN ('workspace_default', 'tenant', 'global'));
 SELECT moa.apply_workspace_default_tenant_constraint(
     'action_policy_rules'::REGCLASS,
     'action_policy_rules_tenant_or_workspace_default_check'
@@ -623,6 +821,7 @@ BEGIN
                     table_name
                 );
             END IF;
+            SET CONSTRAINTS ALL IMMEDIATE;
             PERFORM moa.apply_workspace_default_tenant_constraint(
                 table_name::REGCLASS,
                 replace(table_name, '.', '_') || '_tenant_or_workspace_default_check'

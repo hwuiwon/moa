@@ -35,7 +35,7 @@ impl BuiltInTool for MemoryRememberTool {
             "properties": {
                 "text": { "type": "string", "description": "Free-form fact text to remember." },
                 "label": { "type": "string", "enum": ["Fact", "Decision", "Lesson", "Entity", "Concept", "Incident", "Source"], "default": "Fact" },
-                "scope": { "type": "string", "enum": ["workspace", "user"], "default": "workspace" },
+                "scope": { "type": "string", "enum": ["tenant", "contact"], "default": "tenant" },
                 "supersedes_specific": { "type": "string", "description": "Optional UUID of the graph node this fact explicitly supersedes." }
             },
             "required": ["text"],
@@ -70,7 +70,7 @@ impl BuiltInTool for MemoryForgetTool {
     }
 
     fn description(&self) -> &'static str {
-        "Synchronously soft-forget graph memory by node UUID, exact projected name, or all active user-scoped nodes for a user."
+        "Synchronously soft-forget graph memory by node UUID, exact projected name, or all active contact-scoped nodes for a contact."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -79,7 +79,7 @@ impl BuiltInTool for MemoryForgetTool {
             "properties": {
                 "uid": { "type": "string", "description": "Exact graph node UUID to soft-invalidate." },
                 "name": { "type": "string", "description": "Exact projected node name to soft-invalidate." },
-                "soft_all_user_id": { "type": "string", "description": "User UUID whose active user-scoped nodes should be soft-invalidated." }
+                "soft_all_user_id": { "type": "string", "description": "Contact UUID whose active contact-scoped nodes should be soft-invalidated." }
             },
             "additionalProperties": false
         })
@@ -122,7 +122,7 @@ impl BuiltInTool for MemorySupersedeTool {
                 "old_uid": { "type": "string", "description": "UUID of the active node being superseded." },
                 "new_text": { "type": "string", "description": "Replacement fact text." },
                 "label": { "type": "string", "enum": ["Fact", "Decision", "Lesson", "Entity", "Concept", "Incident", "Source"], "default": "Fact" },
-                "scope": { "type": "string", "enum": ["workspace", "user"], "default": "workspace" }
+                "scope": { "type": "string", "enum": ["tenant", "contact"], "default": "tenant" }
             },
             "required": ["old_uid", "new_text"],
             "additionalProperties": false

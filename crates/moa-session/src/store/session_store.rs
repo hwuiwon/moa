@@ -841,13 +841,13 @@ impl SessionStore for PostgresSessionStore {
             query.push(" AND e.session_id = ");
             query.push_bind(session_id.0);
         }
-        if let Some(workspace_id) = filter.workspace_id {
-            query.push(" AND s.workspace_id = ");
-            query.push_bind(workspace_id.to_string());
+        if let Some(tenant_id) = filter.tenant_id {
+            query.push(" AND e.tenant_id = ");
+            query.push_bind(tenant_id.0);
         }
-        if let Some(user_id) = filter.user_id {
-            query.push(" AND s.user_id = ");
-            query.push_bind(user_id.to_string());
+        if let Some(contact_id) = filter.contact_id {
+            query.push(" AND e.contact_id = ");
+            query.push_bind(contact_id.0);
         }
         if let Some(from_time) = filter.from_time {
             query.push(" AND e.timestamp >= ");

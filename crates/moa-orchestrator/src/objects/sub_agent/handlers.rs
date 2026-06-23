@@ -411,12 +411,12 @@ async fn prepare_turn_inner(
         json!(parent_session.to_string()),
     );
     request.metadata.insert(
-        "_moa.workspace_id".to_string(),
+        "_moa.tenant_id".to_string(),
         json!(workspace_id.to_string()),
     );
     request
         .metadata
-        .insert("_moa.user_id".to_string(), json!(user_id.to_string()));
+        .insert("_moa.contact_id".to_string(), json!(user_id.to_string()));
     request
         .metadata
         .insert("_moa.model".to_string(), json!(model.as_str()));

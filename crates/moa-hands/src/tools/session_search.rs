@@ -71,8 +71,8 @@ impl BuiltInTool for SessionSearchTool {
         let limit = params.last_n.unwrap_or(5).clamp(1, 20);
         let filter = EventFilter {
             session_id: Some(ctx.session.id),
-            workspace_id: None,
-            user_id: None,
+            tenant_id: None,
+            contact_id: None,
             event_types: params.event_type.event_types(),
             from_time: None,
             to_time: None,

@@ -647,13 +647,16 @@ async fn issue_contact(
         .map_err(|error| db_handler_error("begin contact issuance", error))?;
     sqlx::query(
         r#"
-        INSERT INTO contacts (id, tenant_id, workspace_id, state, display_name, profile, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO contacts (
+            id, tenant_id, workspace_id, contact_id, state, display_name, profile, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(contact_id.0)
     .bind(tenant_id.0)
     .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
+    .bind(contact_id.0)
     .bind(state.as_str())
     .bind(request.display_name.as_deref())
     .bind(&request.profile)

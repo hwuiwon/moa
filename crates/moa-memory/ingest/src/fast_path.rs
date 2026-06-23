@@ -60,7 +60,7 @@ pub enum ForgetPattern {
     Uid(Uuid),
     /// Forget all active nodes whose projected name exactly matches this value.
     NameMatch(String),
-    /// Forget all active user-scoped nodes for this user in the current workspace.
+    /// Forget all active contact-scoped nodes for this contact in the current tenant.
     SoftAll(Uuid),
 }
 
@@ -327,13 +327,13 @@ fn validate_remember_request(req: &FastRememberRequest) -> Result<(), FastError>
         return Err(FastError::Invalid("empty text".to_string()));
     }
     match req.scope.as_str() {
-        "workspace" if req.user_id.is_none() => Ok(()),
-        "user" if req.user_id.is_some() => Ok(()),
-        "workspace" => Err(FastError::Invalid(
-            "workspace scope must not include user_id".to_string(),
+        "tenant" if req.user_id.is_none() => Ok(()),
+        "contact" if req.user_id.is_some() => Ok(()),
+        "tenant" => Err(FastError::Invalid(
+            "tenant scope must not include user_id".to_string(),
         )),
-        "user" => Err(FastError::Invalid(
-            "user scope requires user_id".to_string(),
+        "contact" => Err(FastError::Invalid(
+            "contact scope requires user_id".to_string(),
         )),
         "global" => Err(FastError::Invalid(
             "fast memory writes cannot target global scope".to_string(),
@@ -573,8 +573,8 @@ fn runtime_ctx_for_scope(
 ) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
     let workspace_id = tenant_uuid(session);
     let user_id = match scope {
-        "tenant" | "workspace" => None,
-        "contact" | "user" => Some(session_contact_uuid(session)?),
+        "tenant" => None,
+        "contact" => Some(session_contact_uuid(session)?),
         other => {
             return Err(FastError::Invalid(format!(
                 "unsupported memory scope `{other}`"

@@ -192,7 +192,7 @@ async fn tenant_rls_blocks_cross_tenant_event_reads_db() {
 #[tokio::test]
 #[ignore]
 async fn tenant_rls_blocks_cross_tenant_ingest_dedup_reads_db() {
-    // Pins: ingest dedup runtime rows use tenant_id RLS, not legacy workspace/user GUCs.
+    // Pins: ingest dedup runtime rows use tenant_id RLS, not old workspace/user GUCs.
     let test_db = bootstrap_test_db().await.expect("bootstrap test db");
     let tenant_a = tenant_id();
     let tenant_b = tenant_id();

@@ -73,6 +73,11 @@ fn contact_user_id(contact_id: Uuid) -> String {
     format!("contact:{contact_id}")
 }
 
+fn tenant_workspace() -> (Uuid, String) {
+    let tenant_id = Uuid::now_v7();
+    (tenant_id, tenant_id.to_string())
+}
+
 fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> AgeGraphStore {
     let scope = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
@@ -85,7 +90,7 @@ fn erase_test_intent(workspace_id: &str, user_id: &str, name: &str) -> NodeWrite
         label: NodeLabel::Fact,
         workspace_id: Some(workspace_id.to_string()),
         user_id: Some(user_id.to_string()),
-        scope: "user".to_string(),
+        scope: "contact".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "user_id": user_id, "source": "privacy_erase_test" }),
         pii_class: PiiClass::Phi,
@@ -95,7 +100,7 @@ fn erase_test_intent(workspace_id: &str, user_id: &str, name: &str) -> NodeWrite
         embedding_model: Some("test-model".to_string()),
         embedding_model_version: Some(1),
         actor_id: user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
@@ -126,13 +131,14 @@ async fn seed_contact(
 ) {
     sqlx::query(
         r#"
-        INSERT INTO contacts (id, tenant_id, workspace_id, state)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO contacts (id, tenant_id, workspace_id, contact_id, state)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(contact_id)
     .bind(tenant_id)
     .bind(workspace_id)
+    .bind(contact_id)
     .bind(state)
     .execute(pool)
     .await
@@ -148,13 +154,16 @@ async fn seed_merged_contact(
 ) {
     sqlx::query(
         r#"
-        INSERT INTO contacts (id, tenant_id, workspace_id, state, canonical_contact_id, merged_at)
-        VALUES ($1, $2, $3, 'merged', $4, NOW())
+        INSERT INTO contacts (
+            id, tenant_id, workspace_id, contact_id, state, canonical_contact_id, merged_at
+        )
+        VALUES ($1, $2, $3, $4, 'merged', $5, NOW())
         "#,
     )
     .bind(merged_contact_id)
     .bind(tenant_id)
     .bind(workspace_id)
+    .bind(merged_contact_id)
     .bind(canonical_contact_id)
     .execute(pool)
     .await
@@ -297,11 +306,11 @@ async fn privacy_erase_dry_run() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let workspace_id = format!("privacy-erase-dry-{}", Uuid::now_v7().simple());
+    let (tenant_id, workspace_id) = tenant_workspace();
     let subject = Uuid::now_v7();
     let uid = create_erase_test_node(
         store.pool(),
-        Uuid::nil(),
+        tenant_id,
         subject,
         &workspace_id,
         &subject.to_string(),
@@ -311,7 +320,7 @@ async fn privacy_erase_dry_run() {
     let before_changelog = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: TenantId::from(Uuid::nil()),
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -347,11 +356,11 @@ async fn privacy_erase_basic() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let workspace_id = format!("privacy-erase-basic-{}", Uuid::now_v7().simple());
+    let (tenant_id, workspace_id) = tenant_workspace();
     let subject = Uuid::now_v7();
     let uid = create_erase_test_node(
         store.pool(),
-        Uuid::nil(),
+        tenant_id,
         subject,
         &workspace_id,
         &subject.to_string(),
@@ -362,7 +371,7 @@ async fn privacy_erase_basic() {
     assert_eq!(embedding_count(store.pool(), uid).await, 1);
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: TenantId::from(Uuid::nil()),
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -405,11 +414,11 @@ async fn privacy_erase_idempotent() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let workspace_id = format!("privacy-erase-idem-{}", Uuid::now_v7().simple());
+    let (tenant_id, workspace_id) = tenant_workspace();
     let subject = Uuid::now_v7();
     create_erase_test_node(
         store.pool(),
-        Uuid::nil(),
+        tenant_id,
         subject,
         &workspace_id,
         &subject.to_string(),
@@ -418,7 +427,7 @@ async fn privacy_erase_idempotent() {
     .await;
     let first = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: TenantId::from(Uuid::nil()),
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -432,7 +441,7 @@ async fn privacy_erase_idempotent() {
     let after_first = total_erase_changelog_count(store.pool(), &workspace_id).await;
     let second = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: TenantId::from(Uuid::nil()),
+        tenant_id: TenantId::from(tenant_id),
         workspace_id: workspace_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -465,12 +474,12 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let workspace_a = format!("privacy-erase-a-{}", Uuid::now_v7().simple());
-    let workspace_b = format!("privacy-erase-b-{}", Uuid::now_v7().simple());
+    let (tenant_a, workspace_a) = tenant_workspace();
+    let (tenant_b, workspace_b) = tenant_workspace();
     let subject = Uuid::now_v7();
     let uid_b = create_erase_test_node(
         store.pool(),
-        Uuid::nil(),
+        tenant_b,
         subject,
         &workspace_b,
         &subject.to_string(),
@@ -479,7 +488,7 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     .await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
-        tenant_id: TenantId::from(Uuid::nil()),
+        tenant_id: TenantId::from(tenant_a),
         workspace_id: workspace_a.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
@@ -514,8 +523,7 @@ async fn privacy_erase_contact_requires_explicit_scope() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let tenant_id = Uuid::now_v7();
-    let workspace_id = format!("privacy-contact-scope-{}", Uuid::now_v7().simple());
+    let (tenant_id, workspace_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     seed_contact(
         store.pool(),
@@ -566,8 +574,7 @@ async fn privacy_erase_unverified_contact_only() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let tenant_id = Uuid::now_v7();
-    let workspace_id = format!("privacy-contact-only-{}", Uuid::now_v7().simple());
+    let (tenant_id, workspace_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let other_contact_id = Uuid::now_v7();
     seed_contact(
@@ -637,8 +644,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let tenant_id = Uuid::now_v7();
-    let workspace_id = format!("privacy-contact-linked-{}", Uuid::now_v7().simple());
+    let (tenant_id, workspace_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let linked_contact_id = Uuid::now_v7();
     seed_contact(
@@ -717,8 +723,7 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let workspace_id = format!("privacy-contact-export-{}", Uuid::now_v7().simple());
-    let tenant_id = Uuid::now_v7();
+    let (tenant_id, workspace_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let linked_contact_id = Uuid::now_v7();
     create_erase_test_node(
@@ -793,7 +798,7 @@ async fn privacy_erase_unknown_op_rejected() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let workspace_id = format!("privacy-erase-check-{}", Uuid::now_v7().simple());
+    let (_tenant_id, workspace_id) = tenant_workspace();
     let mut tx = begin_app_scoped_tx(store.pool(), &workspace_id, &Uuid::now_v7().to_string())
         .await
         .expect("begin app tx");
@@ -803,7 +808,7 @@ async fn privacy_erase_unknown_op_rejected() {
         INSERT INTO moa.graph_changelog
             (workspace_id, actor_id, actor_kind, op, target_kind, target_label,
              target_uid, payload, pii_class)
-        VALUES ($1, 'ops-admin', 'admin', 'deferred_encryption', 'user', 'User',
+        VALUES ($1, 'ops-admin', 'admin', 'deferred_encryption', 'contact', 'Contact',
                 $2, '{}'::jsonb, 'phi')
         "#,
     )
@@ -849,11 +854,12 @@ async fn privacy_export_archive_round_trip() {
         .await
         .expect("write changelog");
 
-    let claims = valid_claims(subject);
+    let (tenant_id, workspace_id) = tenant_workspace();
+    let claims = valid_claims_for(subject, &workspace_id, "export");
     let ctx = PrivacyExportContext {
         pool: PgPool::connect_lazy("postgres://unused").expect("lazy pool"),
-        tenant_id: TenantId::from(Uuid::nil()),
-        workspace: Some("workspace-a".to_string()),
+        tenant_id: TenantId::from(tenant_id),
+        workspace: Some(workspace_id),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         subjects: vec![PrivacySubject::primary(subject.to_string(), subject)],

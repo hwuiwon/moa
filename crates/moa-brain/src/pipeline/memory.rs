@@ -895,8 +895,8 @@ mod tests {
     }
 
     #[test]
-    fn unverified_contact_memory_uses_only_session_scope() {
-        // Pins: low-assurance contacts cannot fan out into linked memory scopes.
+    fn unverified_contact_memory_uses_only_current_contact_scope() {
+        // Pins: low-assurance contacts read only their current contact memory.
         let contact_id = ContactId::new();
         let linked_contact_id = ContactId::new();
         let session = contact_session(
@@ -916,8 +916,8 @@ mod tests {
     }
 
     #[test]
-    fn verified_contact_memory_includes_linked_contact_scopes_once() {
-        // Pins: verified contacts retrieve linked unverified memory by user-scope fanout.
+    fn verified_contact_memory_ignores_linked_contact_scopes() {
+        // Pins: verified contacts do not inherit linked-contact memory by default.
         let contact_id = ContactId::new();
         let linked_contact_id = ContactId::new();
         let session = contact_session(

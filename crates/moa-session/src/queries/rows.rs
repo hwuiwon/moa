@@ -229,7 +229,7 @@ fn tenant_id_from_storage(value: String) -> TenantId {
 fn action_rule_scope_from_columns(scope: &str, workspace_id: &str) -> ActionRuleScope {
     match scope {
         "global" | "workspace_default" => ActionRuleScope::WorkspaceDefault,
-        "workspace" | "tenant" => ActionRuleScope::Tenant {
+        "tenant" => ActionRuleScope::Tenant {
             tenant_id: tenant_id_from_storage(workspace_id.to_string()),
         },
         _ => ActionRuleScope::WorkspaceDefault,

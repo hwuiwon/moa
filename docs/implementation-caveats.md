@@ -16,7 +16,7 @@ Messaging adapters normalize channel-specific callback payloads into text contro
 - The core `ChannelAdapter` trait still only emits `InboundMessage`.
 - The adapter converts current interactive actions into normalized text commands.
 - If adapters need richer structured callbacks later, `InboundMessage.text`
-  should stop carrying control commands. Workspace action review decisions and
+  should stop carrying control commands. Tenant action review decisions and
   builtin async-authz challenge decisions should remain distinct callback types
   rather than sharing a generic control-message path.
 

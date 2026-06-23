@@ -664,7 +664,7 @@ mod tests {
 
         assert_eq!(
             session_id.0.to_string(),
-            "d69e7597-867f-4211-925d-8343bafa1617"
+            "be49b430-9b14-407d-9e03-1e2a81dc8d8c"
         );
         assert_eq!(session_id.0.get_version_num(), 4);
         assert_eq!(session_id.0.get_variant(), uuid::Variant::RFC4122);

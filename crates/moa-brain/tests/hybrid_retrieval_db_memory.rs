@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{
-    ContactId, MemoryScope, ScopeContext, ScopedConn, SessionId, TenantId, UserId, WorkspaceId,
-};
+use moa_core::{ContactId, MemoryScope, ScopeContext, ScopedConn, SessionId, TenantId};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
@@ -185,7 +183,7 @@ fn scripted_user_fact(summary: &str) -> ExtractedFact {
         object: summary.to_string(),
         summary: summary.to_string(),
         source_chunk: 0,
-        scope_hint: ExtractedFactScopeHint::User,
+        scope_hint: ExtractedFactScopeHint::Contact,
         confidence: Some(0.92),
     };
     let hash = fact_hash(&fact).expect("scripted fact hashes");
@@ -460,7 +458,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
 #[tokio::test]
 #[ignore = "requires Postgres test database"]
 async fn user_scope_fact_invisible_to_other_user_at_any_k() {
-    // Pins: user-scoped facts written by ingestion are structurally hidden from other users.
+    // Pins: contact-scoped facts written by ingestion are structurally hidden from other contacts.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
@@ -469,7 +467,6 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
     let workspace_id = format!("scope-isolation-{}", Uuid::now_v7().simple());
     let user_a = "user-scope-owner";
     let user_b = "user-scope-other";
-    let workspace = WorkspaceId::new(workspace_id.clone());
     let workspace_scope = tenant_scope(&workspace_id);
     let ingest_vector = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
@@ -493,8 +490,8 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
     let report = ingest_turn_direct_with_ctx(
         ctx,
         SessionTurn {
-            workspace_id: workspace.clone(),
-            user_id: UserId::new(user_a),
+            tenant_id: tenant_id_from_workspace_id(&workspace_id),
+            contact_id: contact_id_from_user_id(user_a),
             session_id: SessionId::new(),
             turn_seq: 1,
             transcript: format!("user: {summary}"),
@@ -503,7 +500,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         },
     )
     .await
-    .expect("ingest user-scoped fact");
+    .expect("ingest contact-scoped fact");
     assert_eq!(report.inserted, 1);
 
     let owner_graph = user_graph_store(&pool, &workspace_id, user_a);
@@ -584,7 +581,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     let workspace_id = format!("hybrid-temporal-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
 
-    let old_name = "temporal-asof legacy gateway owner";
+    let old_name = "temporal-asof retired gateway owner";
     let mut old = node_intent(&workspace_id, NodeLabel::Fact, old_name, None);
     old.valid_from = utc("2026-02-01T00:00:00Z");
     let old_uid = graph.create_node(old).await.expect("create old fact");

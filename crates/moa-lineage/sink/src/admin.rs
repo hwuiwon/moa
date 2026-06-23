@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 
-/// Loads lineage records for one workspace-scoped session or turn id.
+/// Loads lineage records for one tenant-scoped session or turn id.
 pub async fn explain_records(
     pool: &PgPool,
     workspace_id: &WorkspaceId,

@@ -113,8 +113,6 @@ pub struct SkillReviewOutcome {
     pub draft_artifact_revision_uid: Option<Uuid>,
     /// Published artifact revision created by acceptance, when any.
     pub published_artifact_revision_uid: Option<Uuid>,
-    /// Deprecated legacy materialized skill row. Canonical promotions leave this empty.
-    pub skill_uid: Option<Uuid>,
 }
 
 /// Error returned by skill candidate review helpers.
@@ -207,7 +205,6 @@ pub async fn reject_claimed_skill_candidate(
         artifact_uid: Some(prepared.draft.artifact_uid),
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: None,
-        skill_uid: None,
         regression_report: Some(regression_report),
     });
     finish_claimed_candidate_review(
@@ -231,7 +228,6 @@ pub async fn reject_claimed_skill_candidate(
         artifact_uid: Some(prepared.draft.artifact_uid),
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: None,
-        skill_uid: None,
     })
 }
 
@@ -257,7 +253,6 @@ pub async fn promote_claimed_skill_candidate(
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
-        skill_uid: None,
         regression_report: Some(regression_report),
     });
 
@@ -291,7 +286,6 @@ pub async fn promote_claimed_skill_candidate(
         artifact_uid,
         draft_artifact_revision_uid: Some(prepared.draft_artifact_revision_uid),
         published_artifact_revision_uid: Some(published.revision_uid),
-        skill_uid: None,
     })
 }
 
@@ -311,7 +305,6 @@ pub async fn reject_learning_candidate(
         artifact_uid,
         draft_artifact_revision_uid,
         published_artifact_revision_uid: None,
-        skill_uid: None,
         regression_report: None,
     });
 
@@ -338,7 +331,6 @@ pub async fn reject_learning_candidate(
         artifact_uid,
         draft_artifact_revision_uid,
         published_artifact_revision_uid: None,
-        skill_uid: None,
     })
 }
 
@@ -500,7 +492,6 @@ struct ReviewEvaluationPayload<'a> {
     artifact_uid: Option<Uuid>,
     draft_artifact_revision_uid: Option<Uuid>,
     published_artifact_revision_uid: Option<Uuid>,
-    skill_uid: Option<Uuid>,
     regression_report: Option<Value>,
 }
 
@@ -518,7 +509,6 @@ fn review_evaluation_payload(input: ReviewEvaluationPayload<'_>) -> Value {
         "artifact_uid": input.artifact_uid,
         "draft_artifact_revision_uid": input.draft_artifact_revision_uid,
         "published_artifact_revision_uid": input.published_artifact_revision_uid,
-        "skill_uid": input.skill_uid,
         "regression_execution": regression_execution,
         "regression_report": input.regression_report,
     })

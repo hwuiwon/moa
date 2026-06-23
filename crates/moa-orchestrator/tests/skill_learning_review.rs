@@ -93,7 +93,6 @@ mod skill_learning_review {
             response.published_artifact_revision_uid,
             Some(draft.revision_uid)
         );
-        assert_eq!(response.skill_uid, None);
 
         let published = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
@@ -120,7 +119,7 @@ mod skill_learning_review {
             evaluation["published_artifact_revision_uid"],
             draft.revision_uid.to_string()
         );
-        assert_eq!(evaluation["skill_uid"], serde_json::Value::Null);
+        assert!(evaluation.get("skill_uid").is_none());
         #[cfg(feature = "internal-eval-runner")]
         {
             assert_eq!(evaluation["regression_execution"], "skipped");
@@ -199,7 +198,6 @@ mod skill_learning_review {
             Some(draft.revision_uid)
         );
         assert_eq!(response.published_artifact_revision_uid, None);
-        assert_eq!(response.skill_uid, None);
 
         let preserved = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft.revision_uid)
@@ -537,8 +535,8 @@ mod skill_learning_review {
         Arc::new(moa_providers::ProviderRegistry::default())
     }
 
-    fn unique_workspace(prefix: &str) -> WorkspaceId {
-        WorkspaceId::new(format!("{prefix}-{}", short_uuid()))
+    fn unique_workspace(_prefix: &str) -> WorkspaceId {
+        WorkspaceId::new(Uuid::now_v7().to_string())
     }
 
     fn unique_skill_name(prefix: &str) -> String {

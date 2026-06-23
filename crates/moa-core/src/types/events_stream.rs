@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::events::Event;
 
-use super::{BrainId, SessionId, UserId, WorkspaceId};
+use super::{BrainId, ContactId, SessionId, TenantId};
 
 /// Monotonic event sequence number within a session.
 pub type SequenceNum = u64;
@@ -144,10 +144,10 @@ pub struct ClaimCheck {
 pub struct EventFilter {
     /// Restrict to a single session.
     pub session_id: Option<SessionId>,
-    /// Restrict to a workspace.
-    pub workspace_id: Option<WorkspaceId>,
-    /// Restrict to a user.
-    pub user_id: Option<UserId>,
+    /// Restrict to a single tenant runtime boundary.
+    pub tenant_id: Option<TenantId>,
+    /// Restrict to a single agent-facing contact.
+    pub contact_id: Option<ContactId>,
     /// Restrict to event types.
     pub event_types: Option<Vec<EventType>>,
     /// Lower timestamp bound.

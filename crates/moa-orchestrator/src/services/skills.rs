@@ -7,9 +7,10 @@ use moa_authz_schema::{ObjectType, Relation};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
-    SkillBootstrapGlobalRequest, SkillBootstrapGlobalResponse, SkillExportRequest,
-    SkillExportResponse, SkillImportRequest, SkillImportResponse, SkillListRequest,
-    SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile, SkillSummary,
+    SkillBootstrapWorkspaceDefaultRequest, SkillBootstrapWorkspaceDefaultResponse,
+    SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
+    SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
+    SkillSummary,
 };
 use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
 use moa_skills::package::{SkillPackage, SkillPackageFile};
@@ -38,10 +39,10 @@ pub trait Skills {
     async fn list(request: Json<SkillListRequest>)
     -> Result<Json<SkillListResponse>, HandlerError>;
 
-    /// Imports deployment-global skill packages after a service-operator check.
-    async fn bootstrap_global(
-        request: Json<SkillBootstrapGlobalRequest>,
-    ) -> Result<Json<SkillBootstrapGlobalResponse>, HandlerError>;
+    /// Imports workspace-default skill packages after a service-operator check.
+    async fn bootstrap_workspace_default(
+        request: Json<SkillBootstrapWorkspaceDefaultRequest>,
+    ) -> Result<Json<SkillBootstrapWorkspaceDefaultResponse>, HandlerError>;
 }
 
 /// Concrete skill service implementation.
@@ -99,23 +100,23 @@ impl Skills for SkillsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn bootstrap_global(
+    async fn bootstrap_workspace_default(
         &self,
         ctx: Context<'_>,
-        request: Json<SkillBootstrapGlobalRequest>,
-    ) -> Result<Json<SkillBootstrapGlobalResponse>, HandlerError> {
-        annotate_restate_handler_span("Skills", "bootstrap_global");
+        request: Json<SkillBootstrapWorkspaceDefaultRequest>,
+    ) -> Result<Json<SkillBootstrapWorkspaceDefaultResponse>, HandlerError> {
+        annotate_restate_handler_span("Skills", "bootstrap_workspace_default");
         authorize_deployment_skill_admin(&ctx).await?;
         let packages = request.into_inner().packages;
 
         Ok(ctx
             .run(|| async move {
                 let response = import_inner(ActionRuleScope::WorkspaceDefault, packages).await?;
-                Ok(Json(SkillBootstrapGlobalResponse {
+                Ok(Json(SkillBootstrapWorkspaceDefaultResponse {
                     imported: response.imported,
                 }))
             })
-            .name("skills_bootstrap_global")
+            .name("skills_bootstrap_workspace_default")
             .await?)
     }
 }
@@ -264,7 +265,7 @@ fn tenant_id_from_stored_workspace_id(workspace_id: WorkspaceId) -> Result<Tenan
 }
 
 fn reject_user_scoped_skill() -> HandlerError {
-    TerminalError::new_with_code(500, "user-scoped skill rows are no longer supported").into()
+    TerminalError::new_with_code(500, "contact-scoped skill rows are not supported").into()
 }
 
 fn skill_scope_from_stored_parts(

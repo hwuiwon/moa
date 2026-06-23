@@ -4,7 +4,7 @@ use moa_orchestrator::services::lineage_admin::prepare_lineage_sql;
 
 #[test]
 fn prepare_lineage_sql_scopes_logical_source_to_workspace_and_since() {
-    // Pins: LineageAdmin query rewrites the logical source to a workspace-scoped hot-store subquery.
+    // Pins: LineageAdmin query rewrites the logical source to a tenant-scoped hot-store subquery.
     let sql = prepare_lineage_sql("SELECT count(*) FROM lineage WHERE record_kind = 4")
         .expect("lineage query should prepare");
 

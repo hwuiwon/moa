@@ -1,4 +1,4 @@
-//! Application rules for workspace action reviews.
+//! Application rules for tenant action reviews.
 
 use chrono::{DateTime, Utc};
 use moa_core::{
@@ -15,7 +15,7 @@ use crate::services::action_reviews::{
     ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest, RequestActionReview,
 };
 
-/// Result of requesting a workspace action review.
+/// Result of requesting a tenant action review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RequestedReview {
     /// Stored review DTO rendered by the service.
@@ -26,7 +26,7 @@ pub(crate) struct RequestedReview {
     pub(crate) newly_inserted: bool,
 }
 
-/// Result of deciding a workspace action review.
+/// Result of deciding a tenant action review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DecidedReview {
     /// Review identifier.
@@ -69,7 +69,7 @@ pub(crate) fn requested_event(request: &RequestActionReview) -> Event {
     }
 }
 
-/// Insert or load one workspace action review.
+/// Insert or load one tenant action review.
 pub(crate) async fn request_review(
     pool: sqlx::PgPool,
     request: RequestActionReview,
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn validate_review_transition_rejects_cross_terminal_decision() {
-        // Pins: a cleared workspace action review cannot later be denied.
+        // Pins: a cleared tenant action review cannot later be denied.
         let error =
             validate_review_transition(ActionReviewStatus::Cleared, ActionReviewStatus::Denied)
                 .expect_err("cleared review should reject a later deny decision");
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn execution_tool_request_for_clear_uses_fresh_tool_id() {
-        // Pins: clearing a workspace action review executes a new provider-detached tool request.
+        // Pins: clearing a tenant action review executes a new provider-detached tool request.
         let original_tool_id = ToolCallId::new();
         let execution_tool_id = Uuid::now_v7();
         let row = ReviewDecisionRow {
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn prepare_request_rejects_canary_leak() {
-        // Pins: workspace action review storage rejects tool input that leaks the active canary.
+        // Pins: tenant action review storage rejects tool input that leaks the active canary.
         let request = ToolCallRequest {
             tool_call_id: ToolCallId::new(),
             provider_tool_use_id: None,

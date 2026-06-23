@@ -12,8 +12,8 @@ use moa_brain::planning::{
     PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
 };
 use moa_brain::retrieval::{
-    CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig,
-    RankingMode, Reranker, RetrievalHit,
+    CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig, Reranker,
+    RetrievalHit,
 };
 use moa_core::{
     ContactId, MemoryDigestConfig, MemoryScope, ScopeContext, ScopeTier, TenantId, UserId,
@@ -123,13 +123,6 @@ impl MemoryRetrievalEvalOptions {
         self
     }
 
-    /// Overrides the deterministic ranking mode used by the eval run.
-    #[must_use]
-    pub fn with_ranking_mode(mut self, ranking_mode: RankingMode) -> Self {
-        self.ranking_config.mode = ranking_mode;
-        self
-    }
-
     /// Overrides the full deterministic ranking configuration used by the eval run.
     #[must_use]
     pub fn with_ranking_config(mut self, ranking_config: RankingConfig) -> Self {
@@ -223,12 +216,6 @@ impl MemoryRetrievalEvalOptions {
     #[must_use]
     pub fn reranker_enabled(&self) -> bool {
         self.reranker_enabled
-    }
-
-    /// Returns the configured deterministic ranking mode.
-    #[must_use]
-    pub fn ranking_mode(&self) -> RankingMode {
-        self.ranking_config.mode
     }
 
     /// Returns the configured deterministic ranking config.
@@ -2143,9 +2130,9 @@ async fn digest_context_by_user(
         let user_id: Option<String> = row.try_get("user_id")?;
         let scope: String = row.try_get("scope")?;
         let content: String = row.try_get("content")?;
-        if scope == "workspace" {
+        if scope == "tenant" {
             workspace_content.insert(workspace_id, content);
-        } else if scope == "user"
+        } else if scope == "contact"
             && let Some(user_id) = user_id
         {
             user_content.insert((workspace_id, user_id), content);
@@ -2311,8 +2298,8 @@ async fn extracted_embedding_texts(
     for session in sessions {
         for turn in &session.turns {
             let session_turn = SessionTurn {
-                workspace_id: session.workspace_id.clone(),
-                user_id: session.user_id.clone(),
+                tenant_id: tenant_id_from_workspace_id(&session.workspace_id),
+                contact_id: contact_id_from_user_id(&session.user_id),
                 session_id: session.session_id,
                 turn_seq: turn.turn_seq,
                 transcript: turn.transcript.clone(),

@@ -111,7 +111,7 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
 
 #[tokio::test]
 async fn registry_loads_published_skill_artifact_without_duplicate_revision() -> Result<()> {
-    // Pins: review acceptance publishes one skill artifact revision without writing a legacy mirror.
+    // Pins: review acceptance publishes one canonical skill artifact revision.
     let _guard = GRAPH_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;

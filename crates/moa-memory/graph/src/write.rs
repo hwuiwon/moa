@@ -557,11 +557,11 @@ fn validate_scope_shape(
 ) -> Result<()> {
     let expected = match (workspace_id, user_id) {
         (None, None) => "global",
-        (Some(_), None) => "workspace",
-        (Some(_), Some(_)) => "user",
+        (Some(_), None) => "tenant",
+        (Some(_), Some(_)) => "contact",
         (None, Some(_)) => {
             return Err(GraphError::Conflict(
-                "user scope requires workspace_id".to_string(),
+                "contact scope requires workspace_id".to_string(),
             ));
         }
     };

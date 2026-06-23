@@ -11,9 +11,7 @@ use crate::{
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
-use moa_core::{
-    ContactId, MoaConfig, MoaError, ScopeContext, ScopedConn, TenantId, traits::EmbeddingProvider,
-};
+use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent,
 };
@@ -26,7 +24,6 @@ use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 const DONE_KEY_PREFIX: &str = "done";
 const CHUNK_TARGET_TOKENS: usize = 700;
@@ -323,7 +320,7 @@ pub async fn ingest_turn_direct_with_ctx(
 /// Builds the object key used to serialize ingestion per workspace/session.
 #[must_use]
 pub fn ingestion_object_key(turn: &SessionTurn) -> String {
-    format!("{}:{}", turn.workspace_id, turn.session_id)
+    format!("{}:{}", turn.tenant_id, turn.session_id)
 }
 
 /// Builds a finalized turn transcript from an LLM request and response.
@@ -541,40 +538,17 @@ fn decision_scope(
 
 fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> Result<ScopeContext, IngestError> {
     match fact.classified.fact.scope_hint {
-        ExtractedFactScopeHint::User => turn_contact_scope(turn),
-        ExtractedFactScopeHint::Workspace => turn_tenant_scope(turn),
+        ExtractedFactScopeHint::Contact => turn_contact_scope(turn),
+        ExtractedFactScopeHint::Tenant => turn_tenant_scope(turn),
     }
 }
 
 fn turn_tenant_scope(turn: &SessionTurn) -> Result<ScopeContext, IngestError> {
-    Ok(ScopeContext::tenant(turn_tenant_id(turn)?))
+    Ok(ScopeContext::tenant(turn.tenant_id))
 }
 
 fn turn_contact_scope(turn: &SessionTurn) -> Result<ScopeContext, IngestError> {
-    Ok(ScopeContext::contact(
-        turn_tenant_id(turn)?,
-        turn_contact_id(turn)?,
-    ))
-}
-
-fn turn_tenant_id(turn: &SessionTurn) -> Result<TenantId, IngestError> {
-    Uuid::parse_str(turn.workspace_id.as_str())
-        .map(TenantId::from)
-        .map_err(|error| {
-            IngestError::Scope(MoaError::ValidationError(format!(
-                "slow-path turn workspace_id must be a tenant UUID: {error}"
-            )))
-        })
-}
-
-fn turn_contact_id(turn: &SessionTurn) -> Result<ContactId, IngestError> {
-    Uuid::parse_str(turn.user_id.as_str())
-        .map(ContactId)
-        .map_err(|error| {
-            IngestError::Scope(MoaError::ValidationError(format!(
-                "slow-path turn user_id must be a contact UUID: {error}"
-            )))
-        })
+    Ok(ScopeContext::contact(turn.tenant_id, turn.contact_id))
 }
 
 async fn apply_decisions(
@@ -663,7 +637,7 @@ async fn apply_one_decision_with_graph(
     }
 
     let entities = resolve_fact_entities(pool, scope, graph, entity_resolver, turn, fact).await?;
-    let fact_uid = scoped_fact_uid(&turn.workspace_id, &turn.session_id, turn.turn_seq, &hash);
+    let fact_uid = scoped_fact_uid(&turn.tenant_id, &turn.session_id, turn.turn_seq, &hash);
     match decision {
         IngestDecision::Insert { fact } => {
             let uid = graph
@@ -744,8 +718,8 @@ fn node_intent(
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
-        actor_id: turn.user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_id: turn.contact_id.to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
@@ -773,7 +747,7 @@ async fn resolve_fact_entities(
 ) -> Result<ResolvedFactEntities, HandlerError> {
     let extracted = &fact.classified.fact;
     let confidence = extracted_confidence(extracted);
-    let actor_id = turn.user_id.to_string();
+    let actor_id = turn.contact_id.to_string();
     let subject = entity_resolver
         .resolve(
             pool,
@@ -785,7 +759,7 @@ async fn resolve_fact_entities(
                 confidence,
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
-                actor_kind: "user",
+                actor_kind: "contact",
             },
         )
         .await
@@ -801,7 +775,7 @@ async fn resolve_fact_entities(
                 confidence,
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
-                actor_kind: "user",
+                actor_kind: "contact",
             },
         )
         .await
@@ -867,8 +841,8 @@ fn entity_fact_edge_intent(
         workspace_id: scope_workspace_id(scope),
         user_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
-        actor_id: turn.user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_id: turn.contact_id.to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
@@ -890,8 +864,8 @@ fn fact_entity_edge_intent(
         workspace_id: scope_workspace_id(scope),
         user_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
-        actor_id: turn.user_id.to_string(),
-        actor_kind: "user".to_string(),
+        actor_id: turn.contact_id.to_string(),
+        actor_kind: "contact".to_string(),
     }
 }
 
@@ -1105,7 +1079,7 @@ enum ApplyOutcome {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{ContextMessage, SessionId, UserId, WorkspaceId};
+    use moa_core::{ContactId, ContextMessage, SessionId, TenantId};
     use moa_memory_graph::{EdgeLabel, PiiClass};
     use moa_memory_pii::{PiiCategory, PiiResult, PiiSpan, classify_heuristic};
 
@@ -1271,7 +1245,7 @@ mod tests {
             object: "secret sk-live".to_string(),
             summary: summary.to_string(),
             source_chunk: 3,
-            scope_hint: ExtractedFactScopeHint::User,
+            scope_hint: ExtractedFactScopeHint::Contact,
             confidence: Some(0.93),
         };
         let hash = fact_hash(&fact).expect("fact hashes");
@@ -1290,11 +1264,11 @@ mod tests {
     }
 
     fn test_turn() -> crate::SessionTurn {
-        let tenant_id = uuid::Uuid::from_u128(0x1000);
-        let contact_id = uuid::Uuid::from_u128(0x2000);
+        let tenant_id = TenantId(uuid::Uuid::from_u128(0x1000));
+        let contact_id = ContactId(uuid::Uuid::from_u128(0x2000));
         crate::SessionTurn {
-            workspace_id: WorkspaceId::new(tenant_id.to_string()),
-            user_id: UserId::new(contact_id.to_string()),
+            tenant_id,
+            contact_id,
             session_id: SessionId(uuid::Uuid::now_v7()),
             turn_seq: 1,
             transcript: "user: checkout-service depends on libfoo".to_string(),

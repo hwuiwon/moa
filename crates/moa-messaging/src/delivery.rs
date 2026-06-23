@@ -22,7 +22,7 @@ use crate::twilio::{
     TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SID_ENV, TWILIO_API_KEY_SID_SERVICE,
     TWILIO_AUTH_TOKEN_ENV, TWILIO_AUTH_TOKEN_SERVICE, TWILIO_FROM_NUMBER_ENV,
     TWILIO_FROM_NUMBER_SERVICE, TWILIO_MESSAGING_SERVICE_SID_ENV,
-    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TWILIO_SID_ENV, TwilioSmsClient, TwilioSmsMessage,
+    TWILIO_MESSAGING_SERVICE_SID_SERVICE, TwilioSmsClient, TwilioSmsMessage,
 };
 
 /// Delivery use case used for routing, metadata, and provider tags.
@@ -307,9 +307,7 @@ impl CredentialVault for EnvironmentDeliveryCredentialVault {
             #[cfg(feature = "postmark")]
             POSTMARK_SERVER_TOKEN_SERVICE => required_env(POSTMARK_SERVER_API_TOKEN_ENV)?,
             #[cfg(feature = "twilio")]
-            TWILIO_ACCOUNT_SID_SERVICE => {
-                required_any_env(&[TWILIO_ACCOUNT_SID_ENV, TWILIO_SID_ENV])?
-            }
+            TWILIO_ACCOUNT_SID_SERVICE => required_env(TWILIO_ACCOUNT_SID_ENV)?,
             #[cfg(feature = "twilio")]
             TWILIO_AUTH_TOKEN_SERVICE => required_env(TWILIO_AUTH_TOKEN_ENV)?,
             #[cfg(feature = "twilio")]
@@ -347,10 +345,7 @@ impl CredentialVault for EnvironmentDeliveryCredentialVault {
         }
         #[cfg(feature = "twilio")]
         {
-            if optional_env(TWILIO_ACCOUNT_SID_ENV)
-                .or_else(|| optional_env(TWILIO_SID_ENV))
-                .is_some()
-            {
+            if optional_env(TWILIO_ACCOUNT_SID_ENV).is_some() {
                 services.push(TWILIO_ACCOUNT_SID_SERVICE.to_string());
             }
             for (service, env_name) in [
@@ -400,13 +395,6 @@ async fn optional_twilio_client(
 
 fn required_env(name: &str) -> Result<String> {
     optional_env(name).ok_or_else(|| MoaError::MissingEnvironmentVariable(name.to_string()))
-}
-
-fn required_any_env(names: &[&str]) -> Result<String> {
-    names
-        .iter()
-        .find_map(|name| optional_env(name))
-        .ok_or_else(|| MoaError::MissingEnvironmentVariable(names.join(" or ")))
 }
 
 fn optional_env(name: &str) -> Option<String> {

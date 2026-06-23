@@ -43,14 +43,14 @@ CREATE TABLE IF NOT EXISTS action_policy_rules (
     tool TEXT NOT NULL,
     pattern TEXT NOT NULL,
     effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny', 'admin_review')),
-    scope TEXT NOT NULL CHECK (scope IN ('global', 'workspace')),
+    scope TEXT NOT NULL CHECK (scope IN ('global', 'tenant')),
     reason TEXT,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT action_policy_rules_global_workspace_check
         CHECK (
             (scope = 'global' AND workspace_id = 'global')
-            OR (scope = 'workspace' AND workspace_id <> 'global')
+            OR (scope = 'tenant' AND workspace_id <> 'global')
         )
 );
 

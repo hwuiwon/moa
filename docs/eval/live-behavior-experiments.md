@@ -60,8 +60,8 @@ Public experiment score APIs are experiment-run centric:
 - `Experiments/scores` accepts `run_uid`, resolves the scoped
   `score_run_id`, then reads `analytics.scores`.
 - `Experiments/compare` accepts `base_run_uid` and `new_run_uid`, resolves both
-  score run IDs, then reuses the same workspace-scoped score comparison helper
-  as internal eval and scoring surfaces.
+  score run IDs, then reuses the same tenant-scoped score comparison helper as
+  internal eval and scoring surfaces.
 
 ## Public Product Routes
 
@@ -88,7 +88,7 @@ Do not document `/v1/experiments/run` as public; the public admission route is
 
 Live behavior experiments use the normal action-policy engine. Agent-loop
 experiments do not enter a blocking review status; an admin-review decision
-records a workspace action review and the target session continues. Workflow
+records a tenant action review and the target session continues. Workflow
 experiment status mirrors the linked artifact workflow run when a workflow run
 has been attached.
 

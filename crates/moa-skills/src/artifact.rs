@@ -1,4 +1,4 @@
-//! Conversion between legacy skill packages and canonical skill artifacts.
+//! Conversion between skill packages and canonical skill artifacts.
 
 use moa_artifacts::document::{
     ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactMetadata, ArtifactStatus,

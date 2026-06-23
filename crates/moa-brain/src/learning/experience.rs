@@ -532,7 +532,7 @@ mod tests {
         let segment = TaskSegment {
             id: segment_id,
             session_id,
-            tenant_id: "workspace".to_string(),
+            tenant_id: "tenant".to_string(),
             segment_index: 0,
             task_summary: Some("Fix Rust auth migration".to_string()),
             started_at: now,

@@ -141,10 +141,11 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
+    let mut identity = test_user_identity();
     let mut meta = test_session_meta(&format!("agent-artifacts-skill-{}", Uuid::now_v7()));
     meta.model = ModelId::new("scripted-loadtest");
     let workspace_id = workspace_id_from_meta(&meta);
+    identity.tenant_id = meta.tenant_id;
     grant_tenant_admin(&identity, &workspace_id).await?;
     let mut orchestrator =
         spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
@@ -194,8 +195,9 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
+    let mut identity = test_user_identity();
     let workspace_id = WorkspaceId::new(Uuid::now_v7().to_string());
+    identity.tenant_id = tenant_id_from_workspace(&workspace_id)?;
     grant_tenant_admin(&identity, &workspace_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, None)?;
 
@@ -251,10 +253,11 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
-    let identity = test_user_identity();
+    let mut identity = test_user_identity();
     let mut meta = test_session_meta(&format!("agent-artifacts-mixed-{}", Uuid::now_v7()));
     meta.model = ModelId::new("scripted-loadtest");
     let workspace_id = workspace_id_from_meta(&meta);
+    identity.tenant_id = meta.tenant_id;
     grant_tenant_admin(&identity, &workspace_id).await?;
     let mut orchestrator =
         spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;

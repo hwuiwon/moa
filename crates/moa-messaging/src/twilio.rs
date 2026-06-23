@@ -32,8 +32,6 @@ pub const TWILIO_MESSAGING_SERVICE_SID_SERVICE: &str = "platform.twilio.messagin
 
 /// Local environment variable for the Twilio account SID.
 pub const TWILIO_ACCOUNT_SID_ENV: &str = "TWILIO_ACCOUNT_SID";
-/// Legacy local environment variable commonly used for the Twilio account SID.
-pub const TWILIO_SID_ENV: &str = "TWILIO_SID";
 /// Local environment variable for the Twilio account auth token.
 pub const TWILIO_AUTH_TOKEN_ENV: &str = "TWILIO_AUTH_TOKEN";
 /// Local environment variable for the Twilio API key SID.

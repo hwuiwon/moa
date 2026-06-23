@@ -9,9 +9,10 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    CompletionRequest, Event, EventRange, EventRecord, ModelCapabilities, Result, SessionMeta,
-    SessionStore, TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolOutput,
-    TurnReplayCounters, TurnReplaySnapshot, WorkspaceId, scope_turn_replay_counters,
+    CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event, EventRange,
+    EventRecord, ModelCapabilities, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
+    TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, TurnReplayCounters, TurnReplaySnapshot,
+    WorkspaceId, scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
@@ -72,11 +73,13 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let graph_pool = session_store.pool().clone();
     let session_store = Arc::new(session_store);
     let dyn_session_store: Arc<dyn SessionStore> = session_store.clone();
-    let workspace_id = WorkspaceId::new("brain-turn-cache-replay");
-    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let tenant_id = TenantId::from(uuid::Uuid::now_v7());
+    let contact_id = ContactId::new();
     let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
     let session = SessionMeta {
         tenant_id,
+        contact: Some(contact_ref(tenant_id, contact_id)),
+        created_by: Some(SessionActorRef::Contact { id: contact_id }),
         model: config.models.main.clone().into(),
         ..SessionMeta::default()
     };
@@ -629,12 +632,12 @@ fn assert_replay_flattening(replay_snapshots: &[TurnReplaySnapshot]) {
         "first turn should call get_events at least once"
     );
     assert!(
-        replay_snapshots[3].events_replayed <= replay_snapshots[2].events_replayed + 8,
-        "snapshot replay should stop growing linearly once the session tail is bounded"
+        replay_snapshots[6].events_replayed < replay_snapshots[5].events_replayed,
+        "final turn should reuse the persisted snapshot instead of replaying the full log"
     );
     assert!(
-        replay_snapshots[5].events_replayed <= replay_snapshots[3].events_replayed,
-        "later turns should reuse the bounded replay window instead of re-reading the full log"
+        replay_snapshots[6].get_events_calls < replay_snapshots[5].get_events_calls,
+        "snapshot reuse should reduce event-log reads on the final turn"
     );
     assert!(
         replay_snapshots
@@ -659,19 +662,19 @@ fn assert_turn_latency_spans(span_recorder: &SpanRecorder) {
     }
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    uuid::Uuid::parse_str(workspace_id.as_str())
-        .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
-}
-
-fn stable_uuid_from_label(label: &str) -> uuid::Uuid {
-    let hash = blake3::hash(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(bytes)
+fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
+    ContactRef {
+        contact_id,
+        tenant_id,
+        state: ContactVerificationState::Verified,
+        canonical_contact_id: None,
+        linked_contact_ids: Vec::new(),
+        scopes: Vec::new(),
+        permissions: serde_json::Value::Null,
+        agent_ids: Vec::new(),
+        session_ids: Vec::new(),
+        verified_contact_point_ids: Vec::new(),
+    }
 }
 
 #[derive(Clone, Default)]

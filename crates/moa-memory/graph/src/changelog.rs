@@ -17,7 +17,7 @@ pub struct ChangelogRecord {
     pub scope: String,
     /// Principal identifier that triggered the change.
     pub actor_id: Option<String>,
-    /// Principal kind: `user`, `agent`, `system`, `promoter`, or `admin`.
+    /// Principal kind: `user`, `contact`, `agent`, `system`, `promoter`, or `admin`.
     pub actor_kind: String,
     /// Mutation operation such as `create`, `update`, or `erase`.
     pub op: String,
@@ -76,8 +76,8 @@ pub async fn write_and_bump(conn: &mut PgConnection, rec: ChangelogRecord) -> Re
 fn validate_scope(rec: &ChangelogRecord) -> Result<()> {
     let expected = match (&rec.workspace_id, &rec.user_id) {
         (None, None) => "global",
-        (Some(_), None) => "workspace",
-        (Some(_), Some(_)) => "user",
+        (Some(_), None) => "tenant",
+        (Some(_), Some(_)) => "contact",
         (None, Some(_)) => return Err(GraphError::InvalidChangelogScope),
     };
 

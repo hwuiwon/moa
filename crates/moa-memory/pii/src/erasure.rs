@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+const CONTACT_SUBJECT_PREFIX: &str = "contact:";
 const ERASE_CHUNK_SIZE: usize = 1000;
 
 /// Result type returned by memory erasure helpers.
@@ -120,7 +121,7 @@ pub async fn begin_app_scoped_tx<'a>(
     workspace_id: &str,
     subject_user_id: &str,
 ) -> Result<ScopedConn<'a>> {
-    let scope = contact_scope_from_legacy_subject(workspace_id, subject_user_id)?;
+    let scope = contact_scope_from_subject(workspace_id, subject_user_id)?;
     let mut tx = ScopedConn::begin(pool, &scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(tx.as_mut())
@@ -133,24 +134,24 @@ fn erase_graph_store(
     workspace_id: &str,
     subject_user_id: &str,
 ) -> Result<AgeGraphStore> {
-    let scope = contact_scope_from_legacy_subject(workspace_id, subject_user_id)?;
+    let scope = contact_scope_from_subject(workspace_id, subject_user_id)?;
     Ok(AgeGraphStore::scoped_for_app_role(pool.clone(), scope))
 }
 
-fn contact_scope_from_legacy_subject(
-    workspace_id: &str,
-    subject_user_id: &str,
-) -> Result<ScopeContext> {
+fn contact_scope_from_subject(workspace_id: &str, subject_user_id: &str) -> Result<ScopeContext> {
     let tenant_id = Uuid::parse_str(workspace_id).map(TenantId::from).map_err(|error| {
         ErasureError::Scope(MoaError::ValidationError(format!(
             "privacy erasure workspace_id must be a tenant UUID for tenant-scoped memory: {error}"
         )))
     })?;
-    let contact_id = Uuid::parse_str(subject_user_id)
+    let contact_subject = subject_user_id
+        .strip_prefix(CONTACT_SUBJECT_PREFIX)
+        .unwrap_or(subject_user_id);
+    let contact_id = Uuid::parse_str(contact_subject)
         .map(ContactId)
         .map_err(|error| {
             ErasureError::Scope(MoaError::ValidationError(format!(
-                "privacy erasure subject_user_id must be a contact UUID for contact-scoped memory: {error}"
+                "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"
             )))
         })?;
     Ok(ScopeContext::contact(tenant_id, contact_id))
@@ -178,11 +179,11 @@ async fn emit_erase_summary(
         ChangelogRecord {
             workspace_id: Some(audit.workspace_id.clone()),
             user_id: None,
-            scope: "workspace".to_string(),
+            scope: "tenant".to_string(),
             actor_id: Some(audit.approver_id.clone()),
             actor_kind: "admin".to_string(),
             op: "erase".to_string(),
-            target_kind: "user".to_string(),
+            target_kind: "contact".to_string(),
             target_label: "User".to_string(),
             target_uid: audit.subject_user,
             payload: json!({

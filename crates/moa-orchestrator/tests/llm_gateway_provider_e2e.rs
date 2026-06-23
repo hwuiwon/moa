@@ -107,10 +107,13 @@ async fn llm_gateway_round_trip_through_restate() -> Result<()> {
         let mut metadata = HashMap::new();
         metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
         metadata.insert(
-            "_moa.workspace_id".to_string(),
+            "_moa.tenant_id".to_string(),
             json!(workspace_id.to_string()),
         );
-        metadata.insert("_moa.user_id".to_string(), json!(identity.id.to_string()));
+        metadata.insert(
+            "_moa.contact_id".to_string(),
+            json!(identity.id.to_string()),
+        );
         metadata.insert("_moa.channel".to_string(), json!(meta.channel.as_str()));
 
         let request = CompletionRequest {

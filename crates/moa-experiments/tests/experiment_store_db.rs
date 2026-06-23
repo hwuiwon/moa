@@ -19,7 +19,7 @@ static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
 async fn workspace_scoped_run_insert_load_round_trip_db() -> Result<()> {
-    // Pins: workspace-scoped experiment metadata persists and loads through the scoped store.
+    // Pins: tenant-scoped experiment metadata persists and loads through the scoped store.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());

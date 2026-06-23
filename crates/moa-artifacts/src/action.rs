@@ -25,7 +25,7 @@ pub struct ActionDefinition {
     /// JSON schema for action outputs.
     #[serde(default = "empty_object")]
     pub output_schema: Value,
-    /// Whether this action should be routed through workspace-admin review.
+    /// Whether this action should be routed through tenant-admin review.
     #[serde(default)]
     pub admin_review_required: bool,
     /// Builder-owned UI metadata.

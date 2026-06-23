@@ -11,7 +11,7 @@ use super::{ActionEnvelope, ActionReviewPreview};
 pub enum ToolCardStatus {
     /// The tool call is known but not yet executed.
     Pending,
-    /// The tool is pending workspace-admin review.
+    /// The tool is pending tenant-admin review.
     PendingReview,
     /// The tool is actively executing.
     Running,
@@ -51,7 +51,7 @@ pub enum RuntimeEvent {
     },
     /// A tool card should be inserted or updated.
     ToolUpdate(ToolUpdate),
-    /// Workspace-admin action review was requested for a tool.
+    /// Tenant-admin action review was requested for a tool.
     ActionReviewRequested {
         /// Durable policy-facing action envelope.
         envelope: Box<ActionEnvelope>,

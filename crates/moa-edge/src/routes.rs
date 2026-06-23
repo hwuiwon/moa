@@ -977,10 +977,10 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
-            "/v1/skills/bootstrap-global" => {
+            "/v1/skills/bootstrap-workspace-default" => {
                 return RouteTranslation::Forward {
                     method: Method::POST,
-                    path: "/Skills/bootstrap_global".to_string(),
+                    path: "/Skills/bootstrap_workspace_default".to_string(),
                     body: body.to_vec(),
                 };
             }
@@ -1448,7 +1448,7 @@ mod tests {
 
     #[test]
     fn action_review_public_routes_translate_to_restate_handlers() {
-        // Pins: workspace-admin action-review routes forward to the internal ActionReviews service.
+        // Pins: tenant-admin action-review routes forward to the internal ActionReviews service.
         let list_uri = "/v1/workspaces/workspace-a/action-reviews"
             .parse::<Uri>()
             .expect("route path should parse");
@@ -2122,8 +2122,8 @@ mod tests {
                 r#"{"workspace_id":"workspace-a"}"#,
             ),
             (
-                "/v1/skills/bootstrap-global",
-                "/Skills/bootstrap_global",
+                "/v1/skills/bootstrap-workspace-default",
+                "/Skills/bootstrap_workspace_default",
                 r#"{"documents":[]}"#,
             ),
         ];

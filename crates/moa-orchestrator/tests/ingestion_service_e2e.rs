@@ -5,14 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_core::{ContactId, SessionId, TenantId};
 use moa_memory_ingest::{IngestApplyReport, SessionTurn, should_ingest_degraded};
 use moa_test_support::postgres::test_database_url;
 use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use uuid::Uuid;
 
 use crate::support::restate_runtime::{
     OrchestratorPorts, deployment_endpoint_url, register_deployment, reserve_orchestrator_ports,
@@ -133,14 +132,14 @@ fn restate_ingress_url() -> String {
 fn object_url(ingress: &str, turn: &SessionTurn) -> String {
     format!(
         "{ingress}/IngestionVO/{}:{}/ingest_turn",
-        turn.workspace_id, turn.session_id
+        turn.tenant_id, turn.session_id
     )
 }
 
 fn realistic_turn() -> SessionTurn {
     SessionTurn {
-        workspace_id: WorkspaceId::new(format!("ingestion-e2e-{}", Uuid::now_v7().simple())),
-        user_id: UserId::new("ingestion-e2e-user"),
+        tenant_id: TenantId::new(),
+        contact_id: ContactId::new(),
         session_id: SessionId::new(),
         turn_seq: 42,
         transcript: [
@@ -160,10 +159,10 @@ fn realistic_turn() -> SessionTurn {
     }
 }
 
-fn same_fact_turn(workspace_id: WorkspaceId, session_id: SessionId, turn_seq: u64) -> SessionTurn {
+fn same_fact_turn(tenant_id: TenantId, session_id: SessionId, turn_seq: u64) -> SessionTurn {
     SessionTurn {
-        workspace_id,
-        user_id: UserId::new("ingestion-e2e-user"),
+        tenant_id,
+        contact_id: ContactId::new(),
         session_id,
         turn_seq,
         transcript: [
@@ -178,12 +177,13 @@ fn same_fact_turn(workspace_id: WorkspaceId, session_id: SessionId, turn_seq: u6
 }
 
 fn low_pii_degraded_skip_turn() -> SessionTurn {
-    let workspace_id = WorkspaceId::new(format!("ingestion-degraded-{}", Uuid::now_v7().simple()));
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
     let session_id = SessionId::new();
     for turn_seq in 1..=512 {
         let turn = SessionTurn {
-            workspace_id: workspace_id.clone(),
-            user_id: UserId::new("ingestion-e2e-user"),
+            tenant_id,
+            contact_id,
             session_id,
             turn_seq,
             transcript: [
@@ -204,8 +204,8 @@ fn low_pii_degraded_skip_turn() -> SessionTurn {
 
 fn sensitive_degraded_turn() -> SessionTurn {
     SessionTurn {
-        workspace_id: WorkspaceId::new(format!("ingestion-sensitive-{}", Uuid::now_v7().simple())),
-        user_id: UserId::new("ingestion-e2e-user"),
+        tenant_id: TenantId::new(),
+        contact_id: ContactId::new(),
         session_id: SessionId::new(),
         turn_seq: 7,
         transcript: [
@@ -258,7 +258,7 @@ async fn fact_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
           AND properties_summary->>'source_session_id' = $2
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(turn.tenant_id.to_string())
     .bind(turn.session_id.to_string())
     .fetch_one(pool)
     .await
@@ -276,7 +276,7 @@ async fn pii_fact_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
           AND properties_summary->>'source_session_id' = $2
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(turn.tenant_id.to_string())
     .bind(turn.session_id.to_string())
     .fetch_one(pool)
     .await
@@ -293,7 +293,7 @@ async fn dedup_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
           AND turn_seq = $3
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(turn.tenant_id.to_string())
     .bind(turn.session_id.0)
     .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
     .fetch_one(pool)
@@ -311,7 +311,7 @@ async fn dlq_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
           AND turn_seq = $3
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(turn.tenant_id.to_string())
     .bind(turn.session_id.0)
     .bind(i64::try_from(turn.turn_seq).context("turn sequence fits i64")?)
     .fetch_one(pool)
@@ -330,7 +330,7 @@ async fn changelog_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
           AND payload->'after'->>'source_session_id' = $2
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(turn.tenant_id.to_string())
     .bind(turn.session_id.to_string())
     .fetch_one(pool)
     .await
@@ -348,18 +348,14 @@ async fn fact_summaries(pool: &PgPool, turn: &SessionTurn) -> Result<Vec<String>
         ORDER BY properties_summary->>'summary'
         "#,
     )
-    .bind(turn.workspace_id.to_string())
+    .bind(turn.tenant_id.to_string())
     .bind(turn.session_id.to_string())
     .fetch_all(pool)
     .await
     .context("load fact summaries")
 }
 
-async fn set_slow_path_degraded(
-    pool: &PgPool,
-    workspace_id: &WorkspaceId,
-    degraded: bool,
-) -> Result<()> {
+async fn set_slow_path_degraded(pool: &PgPool, tenant_id: TenantId, degraded: bool) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO moa.workspace_state (workspace_id, slow_path_degraded)
@@ -369,7 +365,7 @@ async fn set_slow_path_degraded(
                 updated_at = now()
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(tenant_id.to_string())
     .bind(degraded)
     .execute(pool)
     .await
@@ -426,9 +422,9 @@ async fn complex_ingestion_turn_writes_facts_pii_changelog_and_dedup() -> Result
 async fn repeated_fact_text_in_new_sessions_does_not_collide_on_node_uid() -> Result<()> {
     let _guard = LIVE_E2E_LOCK.lock().await;
     let harness = LiveIngestionHarness::start().await?;
-    let workspace_id = WorkspaceId::new(format!("ingestion-repeat-{}", Uuid::now_v7().simple()));
-    let first_turn = same_fact_turn(workspace_id.clone(), SessionId::new(), 10);
-    let second_turn = same_fact_turn(workspace_id, SessionId::new(), 10);
+    let tenant_id = TenantId::new();
+    let first_turn = same_fact_turn(tenant_id, SessionId::new(), 10);
+    let second_turn = same_fact_turn(tenant_id, SessionId::new(), 10);
 
     let result = async {
         let first = harness.ingest(&first_turn).await?;
@@ -462,7 +458,7 @@ async fn degraded_workspace_skips_sampled_low_pii_turn_without_side_effects() ->
     let turn = low_pii_degraded_skip_turn();
 
     let result = async {
-        set_slow_path_degraded(&harness.pool, &turn.workspace_id, true).await?;
+        set_slow_path_degraded(&harness.pool, turn.tenant_id, true).await?;
 
         let report = harness.ingest(&turn).await?;
         ensure!(
@@ -494,7 +490,7 @@ async fn degraded_workspace_still_ingests_sensitive_turn() -> Result<()> {
     let turn = sensitive_degraded_turn();
 
     let result = async {
-        set_slow_path_degraded(&harness.pool, &turn.workspace_id, true).await?;
+        set_slow_path_degraded(&harness.pool, turn.tenant_id, true).await?;
 
         let report = harness.ingest(&turn).await?;
         ensure!(
@@ -526,11 +522,7 @@ async fn degraded_workspace_still_ingests_sensitive_turn() -> Result<()> {
 async fn ingestion_turn_round_trip_through_restate_is_idempotent() -> Result<()> {
     let _guard = LIVE_E2E_LOCK.lock().await;
     let harness = LiveIngestionHarness::start().await?;
-    let turn = same_fact_turn(
-        WorkspaceId::new(format!("ingestion-e2e-{}", Uuid::now_v7().simple())),
-        SessionId::new(),
-        42,
-    );
+    let turn = same_fact_turn(TenantId::new(), SessionId::new(), 42);
 
     let result = async {
         let first = harness.ingest(&turn).await?;

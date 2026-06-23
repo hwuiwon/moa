@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use moa_eval::memory_eval::{
     EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, QueryRewritePolicy,
-    RankingConfig, RankingMode, run_memory_retrieval_eval,
+    RankingConfig, run_memory_retrieval_eval,
 };
 
 /// Runs the hermetic memory retrieval evaluation command.
@@ -44,11 +44,10 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{:?}", options.extractor_mode));
     println!(
-        "wrote memory retrieval eval report: output={} probes={} lane={:?} ranking={:?} rewrite_policy={:?} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
+        "wrote memory retrieval eval report: output={} probes={} lane={:?} rewrite_policy={:?} rewrite_calls={} rewrite_skips={} rewrite_call_rate={:.3} reranker={} extractor={} consolidate={} digests={} merged={} duplicates_remaining={} digests_rebuilt={} est_usd={:.4} aborted_over_budget={} pre_recall_at_4={:.3} pre_recall_at_25={:.3} post_recall_at_4={:.3} ndcg_at_4={:.3} preference_context_rate={:.3} p95_retrieval_latency_ms={} retrieval_plus_rewrite_p95_latency_ms={}",
         options.output.display(),
         report.probe_results.len(),
         options.lane,
-        options.ranking_config.mode,
         options.rewrite_policy,
         report.query_rewrite_call_count,
         report.query_rewrite_skip_count,
@@ -156,12 +155,6 @@ impl Options {
                 "--invert-quality-priors" => {
                     invert_quality_priors = true;
                 }
-                "--ranking" => {
-                    let value = args
-                        .next()
-                        .context("--ranking requires legacy|feature_v1")?;
-                    ranking_config.mode = parse_ranking_mode(&value)?;
-                }
                 "--extractor" => {
                     let value = args
                         .next()
@@ -265,7 +258,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking legacy|feature_v1] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
+    "usage: cargo run -p xtask -- run-memory-retrieval-eval --corpus <path> --output <path> [--lane pr|live] [--budget-usd N] [--extractor heuristic|recorded] [--extractions <path>] [--merges <path>] [--consolidate] [--digests] [--invert-quality-priors] [--rewrite-policy off|always|gated] [--reranker off|on] [--ranking-rrf N] [--ranking-subject-match N] [--ranking-recency N] [--ranking-access N] [--ranking-overlap N] [--quality-weight N] [--ranking-scope-user N] [--ranking-recency-half-life-days N]"
 }
 
 fn parse_reranker(value: &str) -> Result<bool> {
@@ -273,14 +266,6 @@ fn parse_reranker(value: &str) -> Result<bool> {
         "off" => Ok(false),
         "on" => Ok(true),
         other => bail!("unsupported --reranker value `{other}`; expected off|on"),
-    }
-}
-
-fn parse_ranking_mode(value: &str) -> Result<RankingMode> {
-    match value {
-        "legacy" => Ok(RankingMode::Legacy),
-        "feature_v1" => Ok(RankingMode::FeatureV1),
-        other => bail!("unsupported --ranking value `{other}`; expected legacy|feature_v1"),
     }
 }
 

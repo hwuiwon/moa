@@ -17,7 +17,7 @@ use moa_core::wire::{
 use moa_core::{
     CacheDailyMetric, Event, EventFilter, EventRecord, LearningCandidateStatus,
     LearningCandidateType, LearningRiskClass, MoaError, ScopeContext, ScopedConn, SessionActorRef,
-    SessionAnalyticsSummary, TenantAnalyticsSummary, TenantId, ToolCallSummary, WorkspaceId,
+    SessionAnalyticsSummary, TenantAnalyticsSummary, TenantId, ToolCallSummary,
 };
 use regex::Regex;
 use restate_sdk::prelude::*;
@@ -260,8 +260,8 @@ impl Analytics for AnalyticsImpl {
                         &request.query,
                         EventFilter {
                             session_id: None,
-                            workspace_id: Some(WorkspaceId::new(request.tenant_id.to_string())),
-                            user_id: None,
+                            tenant_id: Some(request.tenant_id),
+                            contact_id: None,
                             event_types: request.event_types.clone(),
                             from_time: request.from_time,
                             to_time: request.to_time,

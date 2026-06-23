@@ -430,7 +430,7 @@ impl From<moa_eval_core::EvalError> for EvalServiceError {
     }
 }
 
-/// Dataset item prepared for workspace-scoped registration.
+/// Dataset item prepared for tenant-scoped registration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalDatasetItemInsert {
     /// Dataset item identifier.

@@ -2,14 +2,17 @@
 
 use chrono::{Duration, Utc};
 use moa_core::{
-    Event, EventFilter, EventRange, EventType, ModelId, SessionFilter, SessionMeta, SessionStatus,
-    SessionStore, TenantId, WorkspaceId,
+    Event, EventFilter, EventRange, EventType, ModelId, SessionActorRef, SessionFilter,
+    SessionMeta, SessionStatus, SessionStore, TenantId, WorkspaceId,
 };
 use uuid::Uuid;
 
 fn test_session_meta(workspace: &str) -> SessionMeta {
     SessionMeta {
         tenant_id: tenant_id_for_label(workspace),
+        created_by: Some(SessionActorRef::Identity {
+            id: Uuid::from_u128(1),
+        }),
         model: ModelId::new("test-model"),
         ..SessionMeta::default()
     }

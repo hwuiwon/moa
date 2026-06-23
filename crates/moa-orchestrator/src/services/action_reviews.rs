@@ -103,21 +103,21 @@ pub enum ActionReviewDecisionKind {
     Denied,
 }
 
-/// Restate service surface for workspace-admin action reviews.
+/// Restate service surface for tenant-admin action reviews.
 #[restate_sdk::service]
 #[name = "ActionReviews"]
 pub trait ActionReviews {
-    /// Queue one action for workspace-admin review.
+    /// Queue one action for tenant-admin review.
     async fn request(
         request: Json<RequestActionReview>,
     ) -> Result<Json<ActionReviewSummary>, HandlerError>;
 
-    /// List pending workspace action reviews.
+    /// List pending tenant action reviews.
     async fn list_pending(
         request: Json<ListActionReviewsRequest>,
     ) -> Result<Json<Vec<ActionReviewSummary>>, HandlerError>;
 
-    /// Decide one workspace action review.
+    /// Decide one tenant action review.
     async fn decide(request: Json<DecideActionReviewRequest>) -> Result<(), HandlerError>;
 }
 

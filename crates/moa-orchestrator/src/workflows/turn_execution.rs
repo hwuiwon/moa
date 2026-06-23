@@ -570,7 +570,7 @@ async fn handle_tool_call(
             .await?;
         let output = ToolOutput::error(
             format!(
-                "Action is pending workspace admin review: {}: {}",
+                "Action is pending tenant admin review: {}: {}",
                 invocation.name, prepared_action.input_summary
             ),
             Duration::ZERO,

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, TenantId, WorkspaceId};
+use moa_core::{ContactId, ScopeContext, TenantId, UserId, WorkspaceId};
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
@@ -101,13 +101,13 @@ pub struct ScopeMatchBreakdown {
     pub overall_matches: usize,
     /// Resolved records with any expected scope.
     pub overall_total: usize,
-    /// Resolved records expected to be user-scoped and stored as user-scoped.
+    /// Resolved records expected to be contact-scoped and stored as contact-scoped.
     pub user_matches: usize,
-    /// Resolved records expected to be user-scoped.
+    /// Resolved records expected to be contact-scoped.
     pub user_total: usize,
-    /// Resolved records expected to be workspace-scoped and stored as workspace-scoped.
+    /// Resolved records expected to be tenant-scoped and stored as tenant-scoped.
     pub workspace_matches: usize,
-    /// Resolved records expected to be workspace-scoped.
+    /// Resolved records expected to be tenant-scoped.
     pub workspace_total: usize,
 }
 
@@ -544,8 +544,8 @@ async fn expected_fact_hashes(
     source: &FactSource<'_>,
 ) -> Result<BTreeSet<String>> {
     let turn = SessionTurn {
-        workspace_id: source.session.workspace_id.clone(),
-        user_id: source.session.user_id.clone(),
+        tenant_id: tenant_id_from_workspace_id(&source.session.workspace_id),
+        contact_id: contact_id_from_user_id(&source.session.user_id),
         session_id: source.session.session_id,
         turn_seq: source.turn.turn_seq,
         transcript: source.turn.transcript.clone(),
@@ -656,7 +656,7 @@ fn record_for_fact(
 }
 
 fn ingest_ctx_for_turn(base: &IngestCtx, turn: &SessionTurn) -> IngestCtx {
-    let scope = ScopeContext::tenant(tenant_id_from_workspace_id(&turn.workspace_id));
+    let scope = ScopeContext::tenant(turn.tenant_id);
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         base.pool.clone(),
         scope.clone(),
@@ -860,8 +860,8 @@ pub(crate) fn session_turn(
     facts: &HashMap<&str, &LedgerFact>,
 ) -> Result<SessionTurn> {
     Ok(SessionTurn {
-        workspace_id: source.session.workspace_id.clone(),
-        user_id: source.session.user_id.clone(),
+        tenant_id: tenant_id_from_workspace_id(&source.session.workspace_id),
+        contact_id: contact_id_from_user_id(&source.session.user_id),
         session_id: source.session.session_id,
         turn_seq: source.turn.turn_seq,
         transcript: source.turn.transcript.clone(),
@@ -985,6 +985,12 @@ fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
     uuid::Uuid::parse_str(workspace_id.as_str())
         .map(TenantId::from)
         .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+}
+
+fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
+    uuid::Uuid::parse_str(user_id.as_str())
+        .map(ContactId)
+        .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
 }
 
 fn stable_uuid_from_label(label: &str) -> Uuid {
@@ -1284,7 +1290,7 @@ mod tests {
             label: NodeLabel::Fact,
             workspace_id: Some("workspace-test".to_string()),
             user_id: None,
-            scope: "workspace".to_string(),
+            scope: "tenant".to_string(),
             name: summary.to_string(),
             pii_class: PiiClass::None,
             valid_to: None,

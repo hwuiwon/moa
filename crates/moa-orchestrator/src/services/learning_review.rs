@@ -349,7 +349,6 @@ fn review_response_from_outcome(outcome: SkillReviewOutcome) -> LearningCandidat
         artifact_uid: outcome.artifact_uid,
         draft_artifact_revision_uid: outcome.draft_artifact_revision_uid,
         published_artifact_revision_uid: outcome.published_artifact_revision_uid,
-        skill_uid: outcome.skill_uid,
     }
 }
 

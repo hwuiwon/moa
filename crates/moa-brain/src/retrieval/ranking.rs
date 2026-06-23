@@ -3,23 +3,12 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights, MemoryScope};
+use moa_core::{MemoryRankingConfig, MemoryRankingWeights, MemoryScope};
 use moa_memory_graph::NodeIndexRow;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.
-pub const RANKING_PIPELINE_VERSION: u32 = 6;
-
-/// Ranking mode for hydrated hybrid retrieval candidates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RankingMode {
-    /// Preserve the legacy RRF plus layer-bias ranking path.
-    Legacy,
-    /// Apply deterministic feature scoring after candidate hydration.
-    #[default]
-    FeatureV1,
-}
+pub const RANKING_PIPELINE_VERSION: u32 = 7;
 
 /// Weights used by the FeatureV1 deterministic scorer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +28,9 @@ pub struct RankingWeights {
     pub graph_rescue: f64,
     /// Outcome-derived quality prior contribution.
     pub quality: f64,
-    /// Additive score for user-scoped rows.
+    /// Additive score for contact-scoped rows.
     pub scope_user: f64,
-    /// Additive score for workspace-scoped rows.
+    /// Additive score for tenant-scoped rows.
     pub scope_workspace: f64,
     /// Half-life in days for valid-from recency.
     pub recency_half_life_days: f64,
@@ -70,16 +59,13 @@ impl Default for RankingWeights {
 /// Ranking configuration applied after candidate hydration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankingConfig {
-    /// Ranking mode.
-    pub mode: RankingMode,
-    /// Feature weights used when `mode` is `FeatureV1`.
+    /// Feature weights used by deterministic post-hydration ranking.
     pub weights: RankingWeights,
 }
 
 impl Default for RankingConfig {
     fn default() -> Self {
         Self {
-            mode: RankingMode::FeatureV1,
             weights: RankingWeights::default(),
         }
     }
@@ -88,10 +74,6 @@ impl Default for RankingConfig {
 impl From<&MemoryRankingConfig> for RankingConfig {
     fn from(value: &MemoryRankingConfig) -> Self {
         Self {
-            mode: match value.mode {
-                MemoryRankingMode::Legacy => RankingMode::Legacy,
-                MemoryRankingMode::FeatureV1 => RankingMode::FeatureV1,
-            },
             weights: RankingWeights::from(&value.weights),
         }
     }

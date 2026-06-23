@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct PermissionsConfig {
     /// Default effect when neither persisted rules nor tool-specific config match.
     pub default_effect: ActionPolicyEffect,
-    /// Tools that require workspace-admin review.
+    /// Tools that require tenant-admin review.
     pub admin_review: Vec<String>,
     /// Tools always denied.
     pub always_deny: Vec<String>,

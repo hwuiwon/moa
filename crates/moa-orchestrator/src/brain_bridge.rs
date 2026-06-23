@@ -161,7 +161,7 @@ pub(crate) async fn prepare_turn_request(
     );
     if let Some(contact) = session.contact.as_ref() {
         context.insert_metadata(
-            "_moa.contact.id",
+            "_moa.contact_id",
             serde_json::json!(contact.contact_id.to_string()),
         );
         context.insert_metadata(

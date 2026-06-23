@@ -27,27 +27,27 @@ const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
 #[restate_sdk::service]
 #[name = "LineageAdmin"]
 pub trait LineageAdmin {
-    /// Explains lineage records for one workspace-scoped session or turn.
+    /// Explains lineage records for one tenant-scoped session or turn.
     async fn explain(
         request: Json<LineageExplainRequest>,
     ) -> Result<Json<LineageExplainResponse>, HandlerError>;
 
-    /// Runs a read-only workspace-scoped lineage query.
+    /// Runs a read-only tenant-scoped lineage query.
     async fn query(
         request: Json<LineageQueryRequest>,
     ) -> Result<Json<LineageQueryResponse>, HandlerError>;
 
-    /// Exports a workspace-scoped lineage DSAR bundle.
+    /// Exports a tenant-scoped lineage DSAR bundle.
     async fn export(
         request: Json<LineageExportRequest>,
     ) -> Result<Json<LineageExportResponse>, HandlerError>;
 
-    /// Verifies workspace-scoped lineage hash-chain integrity.
+    /// Verifies tenant-scoped lineage hash-chain integrity.
     async fn verify(
         request: Json<LineageVerifyRequest>,
     ) -> Result<Json<LineageVerifyResponse>, HandlerError>;
 
-    /// Marks a workspace-scoped lineage subject pseudonym as erased.
+    /// Marks a tenant-scoped lineage subject pseudonym as erased.
     async fn erase(
         request: Json<LineageEraseRequest>,
     ) -> Result<Json<LineageEraseResponse>, HandlerError>;

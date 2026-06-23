@@ -127,11 +127,10 @@ Promote the kernel to a separate crate only when a second suite needs it.
 `CachedHybridRetriever` caches final ranked hits. Its key includes scope, query
 text and embedding fingerprint, cutoff, reranker flag, temporal filter, ranking
 reference time, and a stable ranking fingerprint made from the ranking config
-plus `RANKING_PIPELINE_VERSION` 6. Version 6 stems pure-alphabetic ranking
-tokens with Snowball, doubles the caller's user-scope term for first-person
-queries, gives graph-only expansion finds a dedicated `graph_rescue` weight,
-and switches the lexical leg to an OR `to_tsquery` over extracted terms plus
-their stems so conversational queries can match short fact names.
+plus `RANKING_PIPELINE_VERSION` 7. Version 7 removes the ranking-mode switch
+from the fingerprinted config shape while retaining the stemmed token features,
+first-person scope boost, graph-rescue weight, and OR lexical leg behavior from
+version 6.
 
 The memory eval runner still uses the production planner, cache, and hybrid
 retriever, but its default ranking config is time-neutral. Recorded extraction
@@ -156,10 +155,9 @@ The budget gate treats `cross_user_leak_count != 0` and
 `pii_unredacted_count != 0` as hard blockers. These failures block regardless
 of improvements to recall, MRR, or nDCG.
 
-PR runs use the deterministic `FeatureV1` ranking mode by default. Pass
-`--ranking legacy` to `run-memory-retrieval-eval` only for A/B comparison. In
-PR runs without Cohere credentials, the reranker is `Noop`, so the post-rerank
-top 4 equals the pre-rerank top 4.
+PR runs use deterministic post-hydration ranking. In PR runs without Cohere
+credentials, the reranker is `Noop`, so the post-rerank top 4 equals the
+pre-rerank top 4.
 
 ## Transcript styles
 
@@ -167,13 +165,13 @@ Corpus size and transcript realism are separate axes. `--profile pr|full`
 controls size, and `--transcript-style marked|natural` controls source-turn
 rendering.
 
-`marked` is the deterministic heuristic regression style. It keeps the legacy
+`marked` is the deterministic heuristic regression style. It keeps explicit
 `Fact:` and scope markers so retrieval and ranking changes can be validated
 without depending on model extraction.
 
 `natural` is the recorded extractor and merge-verifier gate. It renders
 conversational deterministic sentences, includes at least one distractor turn
-per session, and contains no `Fact:`, `workspace shared`, or `user private`
+per session, and contains no `Fact:`, `tenant shared`, or `contact private`
 markers. CI replays committed extraction and merge fixtures with no provider
 credentials and gates `ingestion_coverage >= 0.85`,
 `scope_match_rate >= 0.90`, `extraction_precision >= 0.80`,
@@ -457,12 +455,12 @@ and a Benjamini-Hochberg-adjusted McNemar p-value below 0.05. MRR and nDCG
 should move in the same direction, and `recall_at_25` should stay unchanged
 unless the change intentionally alters candidate generation.
 
-Run legacy and candidate reports on the same corpus, then compare them:
+Run baseline and candidate reports on the same corpus, then compare them:
 
 ```bash
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking legacy --output target/memory-eval/legacy.json
-cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking feature_v1 --output target/memory-eval/feature_v1.json
-cargo run -p xtask -- compare-eval-reports --baseline target/memory-eval/legacy.json --candidate target/memory-eval/feature_v1.json
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --output target/memory-eval/baseline.json
+cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr --ranking-subject-match 0.6 --output target/memory-eval/candidate.json
+cargo run -p xtask -- compare-eval-reports --baseline target/memory-eval/baseline.json --candidate target/memory-eval/candidate.json
 ```
 
 Query rewrite policy A/B uses the same corpus and retrieval metrics. PR runs are
@@ -487,17 +485,17 @@ The comparison refuses cross-corpus inputs with exit code 2. It checks corpus
 identity, seeds, final cutoff, and exact probe-id set equality before computing
 paired statistics.
 
-For the `FeatureV1` default selected in this change, the PR-profile sweep picked
-`overlap = 0.35` and `subject_match = 0.5`: it improved `recall_at_4` by +0.098
-over legacy on the current corpus with CI `[+0.059,+0.142]` and adjusted p-value
-`0.010`.
+For the current deterministic scorer, the PR-profile sweep picked `overlap =
+0.35` and `subject_match = 0.5`: it improved `recall_at_4` by +0.098 over the
+previous baseline on the current corpus with CI `[+0.059,+0.142]` and adjusted
+p-value `0.010`.
 
-With ranking pipeline version 6 (stemmed tokens, first-person scope boost,
-graph rescue weight, OR lexical leg) on the era-linked marked corpus, FeatureV1
-improves `recall_at_4` by +0.187 over legacy with CI `[+0.154,+0.239]` and
-adjusted p-value `0.000`. The remaining hermetic top-4 gap is concentrated in
-multi-hop probes, where both chain facts must fit the final window; that slice
-is reranker territory and should be judged in the live lane.
+With stemmed tokens, first-person scope boost, graph-rescue weight, and the OR
+lexical leg on the era-linked marked corpus, the deterministic scorer improved
+`recall_at_4` by +0.187 over the previous baseline with CI `[+0.154,+0.239]`
+and adjusted p-value `0.000`. The remaining hermetic top-4 gap is concentrated
+in multi-hop probes, where both chain facts must fit the final window; that
+slice is reranker territory and should be judged in the live lane.
 
 ## Nightly And Manual Scale Check
 

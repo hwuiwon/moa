@@ -166,7 +166,7 @@ pub async fn distill_skill_with_learning(
         });
     };
 
-    let workspace_id = legacy_workspace_id(session);
+    let workspace_id = tenant_workspace_id(session);
     let task_summary = extract_task_summary(events);
     let existing_skills = SkillRegistry::new(store.pool().clone())
         .list_for_pipeline(&workspace_id)
@@ -246,7 +246,7 @@ pub async fn distill_skill_from_experience_with_learning(
         });
     };
 
-    let workspace_id = legacy_workspace_id(session);
+    let workspace_id = tenant_workspace_id(session);
     let task_summary = experience_similarity_text(&input.experience);
     let existing_skills = SkillRegistry::new(store.pool().clone())
         .list_for_pipeline(&workspace_id)
@@ -314,7 +314,7 @@ fn render_skill_for_registry(skill: &SkillDocument) -> Result<String> {
     crate::format::render_skill_markdown(skill)
 }
 
-fn legacy_workspace_id(session: &SessionMeta) -> WorkspaceId {
+fn tenant_workspace_id(session: &SessionMeta) -> WorkspaceId {
     WorkspaceId::new(session.tenant_id.to_string())
 }
 

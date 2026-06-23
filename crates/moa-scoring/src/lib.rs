@@ -420,7 +420,7 @@ pub struct ExperimentScoreBreakdownCompare {
     pub variant_deltas: Vec<VariantScoreDeltaRow>,
 }
 
-/// Reads workspace-scoped score summaries for one score run.
+/// Reads tenant-scoped score summaries for one score run.
 pub async fn score_summaries_for_workspace(
     pool: &PgPool,
     request: ScoreRunRef,
@@ -451,7 +451,7 @@ pub async fn score_summaries_for_workspace(
     })
 }
 
-/// Reads workspace-scoped trial-aware score summaries for one experiment run.
+/// Reads tenant-scoped trial-aware score summaries for one experiment run.
 pub async fn experiment_score_breakdown_for_workspace(
     pool: &PgPool,
     request: ExperimentRunScoreRef,
@@ -481,7 +481,7 @@ pub async fn experiment_score_breakdown_for_workspace(
     })
 }
 
-/// Compares workspace-scoped numeric scores between two score runs.
+/// Compares tenant-scoped numeric scores between two score runs.
 pub async fn compare_score_runs_for_workspace(
     pool: &PgPool,
     request: ScoreCompareRef,
@@ -511,7 +511,7 @@ pub async fn compare_score_runs_for_workspace(
     })
 }
 
-/// Compares workspace-scoped trial-aware numeric scores between two experiment runs.
+/// Compares tenant-scoped trial-aware numeric scores between two experiment runs.
 pub async fn compare_experiment_score_breakdown_for_workspace(
     pool: &PgPool,
     request: ExperimentRunCompareRef,
@@ -793,7 +793,7 @@ mod tests {
             );
             assert!(
                 sql.contains("trial.user_id IS NULL"),
-                "workspace experiment score SQL must not leak user-scoped trials: {sql}"
+                "tenant experiment score SQL must not leak contact-scoped trials: {sql}"
             );
         }
     }
@@ -823,7 +823,7 @@ mod tests {
             assert_eq!(
                 sql.matches("trial.user_id IS NULL").count(),
                 2,
-                "workspace compare SQL must exclude user-scoped trial rows: {sql}"
+                "tenant compare SQL must exclude contact-scoped trial rows: {sql}"
             );
         }
         assert!(

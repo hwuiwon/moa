@@ -1,4 +1,4 @@
-//! Restate service for workspace-scoped action-policy checks.
+//! Restate service for tenant action-policy checks.
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use moa_core::restate_observability::annotate_restate_handler_span;
 /// Request payload for `WorkspaceStore/prepare_action_review`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrepareActionReviewRequest {
-    /// Session metadata used for workspace-scoped policy evaluation.
+    /// Session metadata used for tenant-scoped policy evaluation.
     pub session: SessionMeta,
     /// Tool invocation that is about to execute.
     pub invocation: ToolInvocation,
@@ -60,7 +60,7 @@ pub struct PreparedActionReview {
     pub preview: ActionReviewPreview,
 }
 
-/// Restate service surface for workspace-scoped action-policy operations.
+/// Restate service surface for tenant-scoped action-policy operations.
 #[restate_sdk::service]
 pub trait WorkspaceStore {
     /// Evaluates policy for one tool invocation and prepares an action-review payload.

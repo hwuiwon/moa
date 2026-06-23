@@ -62,7 +62,7 @@ pub struct WorkspaceStatus {
     pub pages_count: u64,
 }
 
-/// Request payload for storing a workspace-scoped action-policy rule.
+/// Request payload for storing a workspace-default action-policy rule.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceActionPolicyRuleInput {
     /// Tool name the rule applies to.
@@ -174,7 +174,7 @@ pub trait WorkspaceObject {
     /// Initializes the workspace object with its persisted config and schedules the first run.
     async fn init(config: Json<WorkspaceConfig>) -> Result<(), HandlerError>;
 
-    /// Returns the current workspace-scoped action-policy rules mirrored into Restate state.
+    /// Returns the current workspace-default action-policy rules mirrored into Restate state.
     #[shared]
     async fn get_action_policy() -> Result<Json<WorkspaceActionPolicy>, HandlerError>;
 
@@ -245,7 +245,8 @@ impl WorkspaceObject for WorkspaceImpl {
         annotate_restate_handler_span("Workspace", "add_action_policy_rule");
         let pattern = pattern.into_inner();
         let workspace_id = parse_workspace_key(ctx.key());
-        let identity = require_workspace_admin(&ctx, &workspace_id).await?;
+        let tenant_id = tenant_id_from_workspace_id(&workspace_id)?;
+        let identity = require_tenant_admin(&ctx, tenant_id).await?;
         let created_at = durable_utc_now(&ctx).await?;
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
         let _ = state.ensure_initialized()?;
@@ -255,7 +256,7 @@ impl WorkspaceObject for WorkspaceImpl {
             tool: pattern.tool_name.clone(),
             pattern: pattern.pattern.clone(),
             effect: pattern.effect,
-            scope: ActionRuleScope::WorkspaceDefault,
+            scope: ActionRuleScope::Tenant { tenant_id },
             reason: pattern.reason,
             created_by: UserId::new(identity.id.to_string()),
             created_at,
@@ -345,17 +346,17 @@ impl WorkspaceObject for WorkspaceImpl {
     }
 }
 
-async fn require_workspace_admin(
+async fn require_tenant_admin(
     ctx: &ObjectContext<'_>,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<moa_core::traits::Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(
         &fga,
         &identity,
-        ObjectType::Workspace,
-        workspace_id,
+        ObjectType::Tenant,
+        tenant_id,
         Relation::Admin,
     )
     .await

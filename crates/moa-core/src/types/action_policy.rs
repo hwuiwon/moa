@@ -1,4 +1,4 @@
-//! Action policy and workspace-admin review types.
+//! Action policy and tenant-admin review types.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ pub enum ActionPolicyEffect {
     Allow,
     /// Reject the action without executing it.
     Deny,
-    /// Queue the action for workspace-admin review.
+    /// Queue the action for tenant-admin review.
     AdminReview,
 }
 
@@ -176,7 +176,7 @@ pub struct ActionPolicyRule {
 /// Durable policy-facing description of one tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionEnvelope {
-    /// Workspace-admin review identifier.
+    /// Tenant-admin review identifier.
     pub review_id: Uuid,
     /// Tenant that owns the action.
     pub tenant_id: TenantId,
@@ -210,7 +210,7 @@ pub struct ActionEnvelope {
     pub created_at: DateTime<Utc>,
 }
 
-/// Human-readable action-review preview rendered to workspace admins.
+/// Human-readable action-review preview rendered to tenant admins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionReviewPreview {
     /// Structured fields rendered by review surfaces.
@@ -247,14 +247,14 @@ pub struct ActionReviewFileDiff {
 pub enum ActionReviewDecision {
     /// The action was cleared for later execution.
     Cleared,
-    /// The action was denied by a workspace admin.
+    /// The action was denied by a tenant admin.
     Denied {
         /// Optional human-readable denial reason.
         reason: Option<String>,
     },
 }
 
-/// Current status of a workspace action review.
+/// Current status of a tenant action review.
 #[derive(
     Debug,
     Clone,

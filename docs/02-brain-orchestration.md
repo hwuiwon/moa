@@ -72,7 +72,7 @@ serialized by Restate's single-writer-per-key semantics, but they stay fast:
 the VO mutates K/V state and sends a durable workflow invocation. The
 long-running LLM/tool loop lives in `TurnExecution`, so concurrent `snapshot`,
 `queue_message`, and `request_cancel` calls do not wait behind a running turn.
-There is no legacy session-local turn runner; `TurnExecution` owns the durable
+There is no previous session-local turn runner; `TurnExecution` owns the durable
 turn loop.
 
 `TurnExecution` owns the turn mechanics:
@@ -132,10 +132,10 @@ Tool call
   -> evaluate ActionPolicies
   -> Allow: execute ToolExecutor
   -> Deny: record ToolError and continue
-  -> AdminReview: persist workspace action review, return pending-review tool result, continue
+  -> AdminReview: persist tenant action review, return pending-review tool result, continue
 ```
 
-Workspace action reviews are decided by workspace admins through `ActionReviews`; conversation clients do not unblock turns.
+Tenant action reviews are decided by tenant admins through `ActionReviews`; conversation clients do not unblock turns.
 
 ## Sub-Agents
 

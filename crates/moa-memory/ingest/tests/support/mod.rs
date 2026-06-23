@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ContactId, ScopeContext, ScopedConn, SessionId, TenantId, UserId, WorkspaceId,
-    traits::EmbeddingProvider,
+    ContactId, ScopeContext, ScopedConn, SessionId, TenantId, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{
     AgeGraphStore, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, cypher,
@@ -24,7 +23,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 pub(crate) static TEST_LOCK: Mutex<()> = Mutex::const_new(());
-pub(crate) const SLOW_PATH_USER_ID: &str = "slow-path-user";
+pub(crate) const SLOW_PATH_CONTACT_ID: &str = "00000000-0000-0000-0000-0000000510a7";
 
 #[derive(Debug, Clone)]
 pub(crate) struct MockEmbedder;
@@ -155,8 +154,8 @@ pub(crate) fn turn(
     turn_seq: u64,
 ) -> SessionTurn {
     SessionTurn {
-        workspace_id: WorkspaceId::new(workspace_id.to_string()),
-        user_id: UserId::new(SLOW_PATH_USER_ID),
+        tenant_id: TenantId::from(workspace_id),
+        contact_id: slow_path_contact_id(),
         session_id: SessionId::new(),
         turn_seq,
         transcript: transcript.into(),
@@ -185,7 +184,7 @@ pub(crate) fn fact_intent(
         label: NodeLabel::Fact,
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({
             "summary": name,
@@ -256,7 +255,7 @@ pub(crate) async fn workspace_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Ve
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND label = 'Fact' AND scope = 'workspace' \
+         WHERE workspace_id = $1 AND label = 'Fact' AND scope = 'tenant' \
          ORDER BY name",
     )
     .bind(workspace_id.to_string())
@@ -273,11 +272,11 @@ pub(crate) async fn user_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<Nod
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND user_id = $2 AND label = 'Fact' AND scope = 'user' \
+         WHERE workspace_id = $1 AND user_id = $2 AND label = 'Fact' AND scope = 'contact' \
          ORDER BY name",
     )
     .bind(workspace_id.to_string())
-    .bind(SLOW_PATH_USER_ID)
+    .bind(SLOW_PATH_CONTACT_ID)
     .fetch_all(conn.as_mut())
     .await
     .expect("read user fact rows");
@@ -295,7 +294,7 @@ pub(crate) async fn workspace_entity_rows(pool: &PgPool, workspace_id: Uuid) -> 
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND label = 'Entity' AND scope = 'workspace' \
+         WHERE workspace_id = $1 AND label = 'Entity' AND scope = 'tenant' \
          ORDER BY name",
     )
     .bind(workspace_id.to_string())
@@ -312,11 +311,11 @@ pub(crate) async fn user_entity_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<N
         "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND user_id = $2 AND label = 'Entity' AND scope = 'user' \
+         WHERE workspace_id = $1 AND user_id = $2 AND label = 'Entity' AND scope = 'contact' \
          ORDER BY name",
     )
     .bind(workspace_id.to_string())
-    .bind(SLOW_PATH_USER_ID)
+    .bind(SLOW_PATH_CONTACT_ID)
     .fetch_all(conn.as_mut())
     .await
     .expect("read user entity rows");

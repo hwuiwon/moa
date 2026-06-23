@@ -50,8 +50,8 @@ LANGUAGE SQL IMMUTABLE
 AS $$
     SELECT CASE
         WHEN workspace_id IS NULL AND user_id IS NULL THEN 'global'
-        WHEN workspace_id IS NOT NULL AND user_id IS NOT NULL THEN 'user'
-        WHEN workspace_id IS NOT NULL AND user_id IS NULL THEN 'workspace'
+        WHEN workspace_id IS NOT NULL AND user_id IS NOT NULL THEN 'contact'
+        WHEN workspace_id IS NOT NULL AND user_id IS NULL THEN 'tenant'
         ELSE NULL
     END;
 $$;
@@ -103,12 +103,12 @@ BEGIN
     );
     EXECUTE format(
         'CREATE POLICY rd_workspace ON %s FOR SELECT TO moa_app
-         USING (scope = ''workspace'' AND workspace_id = moa.current_workspace())',
+         USING (scope = ''tenant'' AND workspace_id = moa.current_workspace())',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY rd_user ON %s FOR SELECT TO moa_app
-         USING (scope = ''user''
+         USING (scope = ''contact''
                 AND workspace_id = moa.current_workspace()
                 AND user_id = moa.current_user_id())',
         target_table
@@ -125,16 +125,16 @@ BEGIN
 
     EXECUTE format(
         'CREATE POLICY wr_workspace ON %s FOR ALL TO moa_app
-         USING (scope = ''workspace'' AND workspace_id = moa.current_workspace())
-         WITH CHECK (scope = ''workspace'' AND workspace_id = moa.current_workspace())',
+         USING (scope = ''tenant'' AND workspace_id = moa.current_workspace())
+         WITH CHECK (scope = ''tenant'' AND workspace_id = moa.current_workspace())',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY wr_user ON %s FOR ALL TO moa_app
-         USING (scope = ''user''
+         USING (scope = ''contact''
                 AND workspace_id = moa.current_workspace()
                 AND user_id = moa.current_user_id())
-         WITH CHECK (scope = ''user''
+         WITH CHECK (scope = ''contact''
                      AND workspace_id = moa.current_workspace()
                      AND user_id = moa.current_user_id())',
         target_table
@@ -966,14 +966,14 @@ BEGIN
     );
     EXECUTE format(
         'CREATE POLICY rd_workspace ON %s FOR SELECT TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"workspace"''::ag_catalog.agtype
+         USING (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
                 AND moa.age_property(properties, ''workspace_id'')
                     = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype)',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY rd_user ON %s FOR SELECT TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"user"''::ag_catalog.agtype
+         USING (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
                 AND moa.age_property(properties, ''workspace_id'')
                     = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype
                 AND moa.age_property(properties, ''user_id'')
@@ -982,22 +982,22 @@ BEGIN
     );
     EXECUTE format(
         'CREATE POLICY wr_workspace ON %s FOR ALL TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"workspace"''::ag_catalog.agtype
+         USING (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
                 AND moa.age_property(properties, ''workspace_id'')
                     = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype)
-         WITH CHECK (moa.age_property(properties, ''scope'') = ''"workspace"''::ag_catalog.agtype
+         WITH CHECK (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
                      AND moa.age_property(properties, ''workspace_id'')
                          = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype)',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY wr_user ON %s FOR ALL TO moa_app
-         USING (moa.age_property(properties, ''scope'') = ''"user"''::ag_catalog.agtype
+         USING (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
                 AND moa.age_property(properties, ''workspace_id'')
                     = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype
                 AND moa.age_property(properties, ''user_id'')
                     = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)
-         WITH CHECK (moa.age_property(properties, ''scope'') = ''"user"''::ag_catalog.agtype
+         WITH CHECK (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
                      AND moa.age_property(properties, ''workspace_id'')
                          = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype
                      AND moa.age_property(properties, ''user_id'')
@@ -1251,7 +1251,7 @@ CREATE TABLE IF NOT EXISTS moa.graph_changelog (
             'invalidate',
             'erase'
         )),
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('node', 'edge')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('node', 'edge', 'contact')),
     target_label TEXT NOT NULL
         CHECK (
             target_label = ANY(moa.age_vertex_labels())
@@ -1322,7 +1322,7 @@ CREATE TABLE IF NOT EXISTS moa.workspace_state (
         CHECK (hipaa_tier IN ('standard', 'hipaa', 'restricted')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (user_id IS NULL),
-    CHECK (scope = 'workspace')
+    CHECK (scope = 'tenant')
 );
 
 ALTER TABLE moa.workspace_state
@@ -1376,13 +1376,13 @@ CREATE POLICY rd_auditor ON moa.graph_changelog
 CREATE POLICY ins_app_workspace ON moa.graph_changelog
     FOR INSERT TO moa_app
     WITH CHECK (
-        scope = 'workspace'
+        scope = 'tenant'
         AND workspace_id = moa.current_workspace()
     );
 CREATE POLICY ins_app_user ON moa.graph_changelog
     FOR INSERT TO moa_app
     WITH CHECK (
-        scope = 'user'
+        scope = 'contact'
         AND workspace_id = moa.current_workspace()
         AND user_id = moa.current_user_id()
     );
@@ -1574,7 +1574,7 @@ ALTER TABLE moa.graph_changelog
     DROP CONSTRAINT IF EXISTS graph_changelog_target_kind_check;
 ALTER TABLE moa.graph_changelog
     ADD CONSTRAINT graph_changelog_target_kind_check
-    CHECK (target_kind IN ('node', 'edge', 'user'));
+    CHECK (target_kind IN ('node', 'edge', 'contact'));
 
 ALTER TABLE moa.graph_changelog
     DROP CONSTRAINT IF EXISTS graph_changelog_target_label_check;
@@ -2072,7 +2072,7 @@ CREATE TABLE IF NOT EXISTS moa.memory_digests (
     source_fact_uids JSONB NOT NULL DEFAULT '[]'::jsonb,
     version INTEGER NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
-    CHECK (scope IN ('user', 'workspace')),
+    CHECK (scope IN ('contact', 'tenant')),
     CHECK (scope IS NOT NULL)
 );
 
@@ -2100,7 +2100,7 @@ CREATE TABLE IF NOT EXISTS moa.retrieval_lineage (
     uid UUID NOT NULL,
     rank INTEGER NOT NULL CHECK (rank > 0),
     retrieved_at TIMESTAMPTZ NOT NULL,
-    CHECK (scope = 'user')
+    CHECK (scope = 'contact')
 );
 
 CREATE INDEX IF NOT EXISTS retrieval_lineage_ws_time
@@ -2898,7 +2898,7 @@ ALTER TABLE moa.experiment_trial
 
 -- Source: V000044__session_behavior_lab_trial_plan_revision_index.sql
 
--- `plan_revision_uid` deliberately has no FK because legacy/non-plan trials can
+-- `plan_revision_uid` deliberately has no FK because non-plan trials can
 -- use the nil sentinel during forward migration, but plan-scoped reads still
 -- need an index.
 CREATE INDEX IF NOT EXISTS experiment_trial_plan_revision_idx

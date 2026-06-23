@@ -449,7 +449,7 @@ pub fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
     }
 }
 
-/// Returns the legacy storage key for session-scoped learning rows.
+/// Returns the tenant storage key for session-scoped learning rows.
 pub fn session_workspace_id(session: &SessionMeta) -> WorkspaceId {
     WorkspaceId::new(session.tenant_id.to_string())
 }

@@ -37,9 +37,8 @@ pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
 pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
-    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingMode, MemoryRankingWeights,
-    MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig,
-    VectorEmbedderConfig,
+    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRerankerMode,
+    MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;

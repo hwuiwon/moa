@@ -161,7 +161,7 @@ impl ActionPolicies {
         {
             return Some((
                 ActionPolicyEffect::AdminReview,
-                "tool requires workspace admin review by config".to_string(),
+                "tool requires tenant admin review by config".to_string(),
             ));
         }
 

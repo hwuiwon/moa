@@ -1,4 +1,4 @@
-//! End-to-end action-policy and workspace-admin review coverage.
+//! End-to-end action-policy and tenant-admin review coverage.
 
 use std::time::Duration;
 
@@ -62,7 +62,7 @@ async fn action_policy_auto_mode_executes_shell_without_user_approval(
 async fn admin_review_policy_records_pending_review_and_turn_continues(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
-    // Pins: admin-review policy records a pending workspace action review without blocking.
+    // Pins: admin-review policy records a pending tenant action review without blocking.
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-pending").await?;
     let meta = test.client().get_session(session_id).await?;
@@ -110,7 +110,7 @@ async fn admin_review_policy_records_pending_review_and_turn_continues(
 async fn workspace_admin_clear_executes_stored_review_action(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
-    // Pins: clearing a workspace action review executes the stored request with a fresh tool id.
+    // Pins: clearing a tenant action review executes the stored request with a fresh tool id.
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-clear").await?;
     let meta = test.client().get_session(session_id).await?;
@@ -180,7 +180,7 @@ async fn workspace_admin_clear_executes_stored_review_action(
 async fn workspace_admin_deny_does_not_execute_stored_review_action(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
-    // Pins: denying a workspace action review records the decision without executing the stored action.
+    // Pins: denying a tenant action review records the decision without executing the stored action.
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-deny").await?;
     let meta = test.client().get_session(session_id).await?;

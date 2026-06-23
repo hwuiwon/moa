@@ -7,7 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
 use moa_core::{
-    MemoryScope, ScopeContext, SessionId, TenantId, UserId, WorkspaceId, traits::EmbeddingProvider,
+    ContactId, MemoryScope, ScopeContext, SessionId, TenantId, WorkspaceId,
+    traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
@@ -81,8 +82,8 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let scope = ScopeContext::tenant(tenant_id);
     let transcript = news_transcript().await?;
     let turn = SessionTurn {
-        workspace_id: workspace_id.clone(),
-        user_id: UserId::new("live-news-user"),
+        tenant_id,
+        contact_id: ContactId::new(),
         session_id: SessionId::new(),
         turn_seq: 1,
         transcript,

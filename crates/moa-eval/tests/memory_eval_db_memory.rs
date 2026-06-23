@@ -290,9 +290,9 @@ fn manifest_round_trips_transcript_style_and_defaults_to_marked() -> TestResult 
     // Pins: prompt-02-era manifests remain readable and new manifests preserve transcript style.
     let old_manifest = serde_json::json!({
         "version": CORPUS_SCHEMA_VERSION,
-        "corpus_id": "memory-eval-pr-legacy",
+        "corpus_id": "memory-eval-pr-minimal",
         "profile": "pr",
-        "description": "legacy manifest without transcript style",
+        "description": "manifest without transcript style",
         "seeds": [1, 2, 3]
     });
     let parsed_old: CorpusManifest = serde_json::from_value(old_manifest)?;
@@ -322,7 +322,7 @@ fn natural_transcripts_contain_no_fact_markers() {
     .expect("generate natural PR corpus");
 
     for turn in corpus.sessions.iter().flat_map(|session| &session.turns) {
-        for forbidden in ["Fact:", "workspace shared", "user private"] {
+        for forbidden in ["Fact:", "tenant shared", "contact private"] {
             assert!(
                 !turn.transcript.contains(forbidden),
                 "natural transcript should not contain marker `{forbidden}`: {}",
@@ -1739,7 +1739,7 @@ fn explicit_gold_resolution_corpus(
         turns: vec![
             SyntheticTurn {
                 turn_seq: 1,
-                transcript: "Fact: workspace shared runtime uses restate.".to_string(),
+                transcript: "Fact: tenant shared runtime uses restate.".to_string(),
                 fact_ids: vec!["fact-explicit-runtime".to_string()],
             },
             SyntheticTurn {

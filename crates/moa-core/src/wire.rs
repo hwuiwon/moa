@@ -418,8 +418,6 @@ pub struct LearningCandidateReviewResponse {
     pub draft_artifact_revision_uid: Option<Uuid>,
     /// Published artifact revision created by acceptance, when applicable.
     pub published_artifact_revision_uid: Option<Uuid>,
-    /// Materialized skill row created by acceptance, when applicable.
-    pub skill_uid: Option<Uuid>,
 }
 
 /// Request payload for recording active-segment tool usage.
@@ -766,7 +764,7 @@ pub struct LearningCandidateSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Request payload for workspace-scoped session event search.
+/// Request payload for tenant-scoped session event search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSearchRequest {
     /// Tenant whose sessions should be searched.
@@ -1332,18 +1330,18 @@ pub struct SkillSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Request payload for bootstrapping global skills.
+/// Request payload for bootstrapping workspace-default skills.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillBootstrapGlobalRequest {
-    /// Authored global skill packages to import.
+pub struct SkillBootstrapWorkspaceDefaultRequest {
+    /// Authored workspace-default skill packages to import.
     #[serde(default)]
     pub packages: Vec<SkillPackageDocument>,
 }
 
-/// Response payload for bootstrapping global skills.
+/// Response payload for bootstrapping workspace-default skills.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillBootstrapGlobalResponse {
-    /// Number of global skill documents imported.
+pub struct SkillBootstrapWorkspaceDefaultResponse {
+    /// Number of workspace-default skill documents imported.
     pub imported: u64,
 }
 

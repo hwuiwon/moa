@@ -6,8 +6,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
-    CompletionRequest, CompletionResponse, Event, MoaError, ModelId, ModelTier, SessionId,
-    TokenPricing, TokenUsage, UserId, WorkspaceId, record_llm_cost_cents,
+    CompletionRequest, CompletionResponse, ContactId, Event, MoaError, ModelId, ModelTier,
+    SessionId, TenantId, TokenPricing, TokenUsage, record_llm_cost_cents,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
 use moa_providers::ProviderRegistry;
@@ -202,10 +202,10 @@ fn session_id_from_request(request: &CompletionRequest) -> Option<SessionId> {
     }
 }
 
-fn turn_scope_from_request(request: &CompletionRequest) -> Option<(WorkspaceId, UserId)> {
-    let workspace_id = string_metadata(request, "_moa.workspace_id").map(WorkspaceId::new)?;
-    let user_id = string_metadata(request, "_moa.user_id").map(UserId::new)?;
-    Some((workspace_id, user_id))
+fn turn_scope_from_request(request: &CompletionRequest) -> Option<(TenantId, ContactId)> {
+    let tenant_id = uuid_metadata(request, "_moa.tenant_id").map(TenantId)?;
+    let contact_id = uuid_metadata(request, "_moa.contact_id").map(ContactId)?;
+    Some((tenant_id, contact_id))
 }
 
 fn session_turn_from_completion_request(
@@ -215,15 +215,14 @@ fn session_turn_from_completion_request(
     turn_seq: u64,
     finalized_at: DateTime<Utc>,
 ) -> Option<SessionTurn> {
-    let (workspace_id, user_id) = turn_scope_from_request(request)?;
-    validate_turn_author_scope(request, &user_id);
+    let (tenant_id, contact_id) = turn_scope_from_request(request)?;
     let transcript = turn_transcript(&request.messages, response_text);
     if transcript.trim().is_empty() {
         return None;
     }
     Some(SessionTurn {
-        workspace_id,
-        user_id,
+        tenant_id,
+        contact_id,
         session_id,
         turn_seq,
         dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
@@ -232,28 +231,22 @@ fn session_turn_from_completion_request(
     })
 }
 
-fn validate_turn_author_scope(request: &CompletionRequest, turn_user_id: &UserId) {
-    let Some(author_user_id) = string_metadata(request, "_moa.user_id").map(UserId::new) else {
-        return;
-    };
-    if author_user_id != *turn_user_id {
-        debug_assert_eq!(
-            author_user_id, *turn_user_id,
-            "SessionTurn.user_id must match the current turn author"
-        );
-        tracing::warn!(
-            author_user_id = %author_user_id,
-            turn_user_id = %turn_user_id,
-            "SessionTurn user attribution mismatch"
-        );
-    }
-}
-
 fn string_metadata<'a>(request: &'a CompletionRequest, key: &str) -> Option<&'a str> {
     match request.metadata.get(key)? {
         Value::String(raw) => Some(raw.as_str()),
         other => {
             tracing::warn!(metadata = %other, key, "ignoring non-string request metadata");
+            None
+        }
+    }
+}
+
+fn uuid_metadata(request: &CompletionRequest, key: &str) -> Option<Uuid> {
+    let raw = string_metadata(request, key)?;
+    match Uuid::parse_str(raw) {
+        Ok(id) => Some(id),
+        Err(error) => {
+            tracing::warn!(metadata = raw, key, error = %error, "ignoring invalid UUID metadata");
             None
         }
     }
@@ -289,22 +282,24 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{DateTime, Utc};
-    use moa_core::{CompletionRequest, ContextMessage, SessionId, UserId, WorkspaceId};
+    use moa_core::{CompletionRequest, ContactId, ContextMessage, SessionId, TenantId};
     use serde_json::json;
 
     use super::session_turn_from_completion_request;
 
     #[test]
-    fn session_turn_user_id_matches_turn_author() {
-        // Pins: finalized LLM turns stamp memory ingestion with the current request's user metadata.
+    fn session_turn_contact_id_matches_turn_author() {
+        // Pins: finalized LLM turns stamp memory ingestion with the current request's contact metadata.
         let session_id = SessionId::new();
+        let tenant_id = TenantId::new();
+        let contact_id = ContactId::new();
         let finalized_at = DateTime::parse_from_rfc3339("2026-05-07T12:00:00Z")
             .expect("test timestamp parses")
             .with_timezone(&Utc);
         let mut metadata = HashMap::new();
         metadata.insert("_moa.session_id".to_string(), json!(session_id.to_string()));
-        metadata.insert("_moa.workspace_id".to_string(), json!("workspace-alpha"));
-        metadata.insert("_moa.user_id".to_string(), json!("user-alpha"));
+        metadata.insert("_moa.tenant_id".to_string(), json!(tenant_id.to_string()));
+        metadata.insert("_moa.contact_id".to_string(), json!(contact_id.to_string()));
         let request = CompletionRequest {
             model: None,
             messages: vec![
@@ -328,8 +323,8 @@ mod tests {
         )
         .expect("request metadata should produce an ingestable turn");
 
-        assert_eq!(turn.workspace_id, WorkspaceId::new("workspace-alpha"));
-        assert_eq!(turn.user_id, UserId::new("user-alpha"));
+        assert_eq!(turn.tenant_id, tenant_id);
+        assert_eq!(turn.contact_id, contact_id);
         assert_eq!(turn.session_id, session_id);
         assert_eq!(turn.turn_seq, 42);
         assert_eq!(turn.finalized_at, finalized_at);

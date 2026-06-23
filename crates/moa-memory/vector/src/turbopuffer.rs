@@ -317,9 +317,9 @@ impl VectorStore for TurbopufferStore {
 fn upsert_row(item: &VectorItem) -> Result<Value> {
     let pii_rank = pii_rank(&item.pii_class)?;
     let scope = if item.user_id.is_some() {
-        "user"
+        "contact"
     } else {
-        "workspace"
+        "tenant"
     };
     Ok(json!({
         "id": item.uid.to_string(),

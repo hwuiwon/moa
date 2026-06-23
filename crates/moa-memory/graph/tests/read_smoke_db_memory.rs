@@ -52,7 +52,7 @@ async fn cypher_template_create_uses_bound_params() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-template-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let uid = format!("entity-{run_id}");
     let ctx = tenant_scope(workspace_id.clone());
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
@@ -220,7 +220,7 @@ async fn read_smoke_get_node_and_lookup_seeds() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-read-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
     let name = format!("auth service graph smoke {run_id}");
     seed_node(store.pool(), &workspace_id, uid, &name).await;
@@ -258,8 +258,7 @@ async fn lookup_seeds_prefers_exact_name_over_same_shape_siblings() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-seed-exact-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let exact_uid = Uuid::now_v7();
     let sibling_uid = Uuid::now_v7();
     seed_node(
@@ -304,7 +303,7 @@ async fn graph_neighbors_with_no_as_of_returns_active_rows_only() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-neighbor-active-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(workspace_id.clone()),
@@ -335,7 +334,7 @@ async fn graph_neighbors_as_of_returns_superseded_node_inside_window() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-neighbor-as-of-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(workspace_id.clone()),
@@ -370,7 +369,7 @@ async fn lookup_seeds_as_of_includes_invalidated_node_inside_window() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-seed-as-of-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(workspace_id.clone()),
@@ -411,7 +410,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-expand-two-hop-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(workspace_id.clone()),
@@ -493,7 +492,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = format!("graph-expand-validity-{run_id}");
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
         tenant_scope(workspace_id.clone()),

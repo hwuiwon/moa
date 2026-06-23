@@ -80,7 +80,7 @@ pub enum WorkflowNodeKind {
     Action,
     /// Evaluate a condition against workflow state.
     Condition,
-    /// Wait for a workspace-admin review decision.
+    /// Wait for a tenant-admin review decision.
     Review,
     /// Dispatch to the existing autonomous agent loop.
     Agent,

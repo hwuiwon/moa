@@ -607,7 +607,7 @@ pub fn record_experiment_learning_candidates(status: &str, count: u64) {
     .increment(count);
 }
 
-/// Records that action policy queued a workspace-admin review.
+/// Records that action policy queued a tenant-admin review.
 pub fn record_action_review_requested(effect: ActionPolicyEffect, action_class: ActionClass) {
     counter!(
         "moa_action_review_requests_total",
@@ -617,7 +617,7 @@ pub fn record_action_review_requested(effect: ActionPolicyEffect, action_class: 
     .increment(1);
 }
 
-/// Records a workspace-admin action-review decision.
+/// Records a tenant-admin action-review decision.
 pub fn record_action_review_decision(status: ActionReviewStatus, action_class: ActionClass) {
     counter!(
         "moa_action_review_decisions_total",

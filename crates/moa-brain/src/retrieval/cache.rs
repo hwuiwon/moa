@@ -378,9 +378,7 @@ mod tests {
     use super::*;
     use crate::planning::Strategy;
     use crate::retrieval::LegSources;
-    use crate::retrieval::ranking::{
-        RANKING_PIPELINE_VERSION, RankingConfig, RankingMode, ranking_fingerprint,
-    };
+    use crate::retrieval::ranking::{RANKING_PIPELINE_VERSION, RankingConfig, ranking_fingerprint};
 
     #[tokio::test]
     async fn cache_hit_reuses_successful_workspace_retrieval() {
@@ -538,25 +536,23 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_ranking_fingerprint() {
-        // Pins: final ranked hits cannot be reused across ranking modes.
+        // Pins: final ranked hits cannot be reused across ranking-weight changes.
         let planned = planned_query(workspace_scope(), "auth service");
         let req = request(&planned, "what owns auth?");
-        let legacy = RankingConfig {
-            mode: RankingMode::Legacy,
-            weights: Default::default(),
-        };
-        let feature = RankingConfig::default();
+        let baseline = RankingConfig::default();
+        let mut tuned = RankingConfig::default();
+        tuned.weights.subject_match += 0.1;
 
         assert_ne!(
-            fingerprint(&planned, &req, ranking_fingerprint(&legacy)),
-            fingerprint(&planned, &req, ranking_fingerprint(&feature))
+            fingerprint(&planned, &req, ranking_fingerprint(&baseline)),
+            fingerprint(&planned, &req, ranking_fingerprint(&tuned))
         );
     }
 
     #[test]
     fn cache_key_changes_with_pipeline_version_bump() {
-        // Pins: stemmed ranking tokens and graph-activation scoring require version 6.
-        assert_eq!(RANKING_PIPELINE_VERSION, 6);
+        // Pins: single-mode ranking config shape requires version 7.
+        assert_eq!(RANKING_PIPELINE_VERSION, 7);
     }
 
     #[derive(Default)]

@@ -42,7 +42,7 @@ const COMPONENTS: &[&str] = &[
 ];
 const DEPLOY_TARGETS: &[(&str, &str)] = &[
     ("staging", "production-canary"),
-    ("legacy-cluster", "gke-primary"),
+    ("retired-cluster", "gke-primary"),
     ("blue", "green"),
     ("us-central1", "us-east1"),
 ];

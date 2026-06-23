@@ -177,10 +177,10 @@ fn gemini_preview_model_ids_pass_through_unchanged() {
 }
 
 #[test]
-fn legacy_gemini_models_are_rejected() {
-    let legacy = format!("gemini-{}.{}-flash", 2, 5);
-    let error = canonical_model_id(&legacy).expect_err("legacy model should be rejected");
-    assert!(error.to_string().contains("legacy Gemini 2 models"));
+fn unsupported_gemini_2_models_are_rejected() {
+    let unsupported = format!("gemini-{}.{}-flash", 2, 5);
+    let error = canonical_model_id(&unsupported).expect_err("unsupported model should be rejected");
+    assert!(error.to_string().contains("Gemini 2 models"));
 }
 
 #[test]
