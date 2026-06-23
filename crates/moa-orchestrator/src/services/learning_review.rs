@@ -92,14 +92,26 @@ impl LearningReview for LearningReviewImpl {
         let providers = runtime.provider_registry();
 
         #[cfg(feature = "internal-eval-runner")]
-        let response =
-            accept_skill_candidate_after_authz_on_runtime(store, config, providers, request)
-                .await?;
+        let response = ctx
+            .run(move || async move {
+                accept_skill_candidate_after_authz_on_runtime(store, config, providers, request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("learning_review_accept_skill")
+            .await?;
 
         #[cfg(not(feature = "internal-eval-runner"))]
-        let response = accept_skill_candidate_after_authz(store, config, request).await?;
+        let response = ctx
+            .run(move || async move {
+                accept_skill_candidate_after_authz(store, config, request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("learning_review_accept_skill")
+            .await?;
 
-        Ok(Json::from(response))
+        Ok(response)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -261,18 +273,7 @@ async fn accept_skill_candidate_after_authz_on_runtime(
     providers: Arc<moa_providers::ProviderRegistry>,
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
-    let handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        handle.block_on(async move {
-            accept_skill_candidate_after_authz(store, config, providers, request).await
-        })
-    })
-    .await
-    .map_err(|error| {
-        HandlerError::from(TerminalError::new(format!(
-            "join skill acceptance task: {error}"
-        )))
-    })?
+    accept_skill_candidate_after_authz(store, config, providers, request).await
 }
 
 /// Rejects one candidate after the caller has authorized tenant operator access.

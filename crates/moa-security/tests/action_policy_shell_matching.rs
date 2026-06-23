@@ -6,11 +6,13 @@ use moa_security::parse_and_match_command;
 fn shell_chain_after_matching_prefix_does_not_satisfy_simple_glob() {
     // Pins: action-policy matching rejects chained commands when any segment fails the glob.
     assert!(
-        !parse_and_match_command("npm test && rm -rf /", "npm test*"),
+        !parse_and_match_command("npm test && rm -rf /", "npm test*")
+            .expect("valid action-policy glob should evaluate"),
         "bash action-policy matching must reject chained commands when any segment fails the glob"
     );
     assert!(
-        parse_and_match_command("npm test -- --watch", "npm test*"),
+        parse_and_match_command("npm test -- --watch", "npm test*")
+            .expect("valid action-policy glob should evaluate"),
         "the same glob should still allow a single matching npm test command"
     );
 }
@@ -27,7 +29,8 @@ fn shell_evaluation_syntax_does_not_satisfy_simple_glob() {
         "npm test < /tmp/in",
     ] {
         assert!(
-            !parse_and_match_command(command, "npm *"),
+            !parse_and_match_command(command, "npm *")
+                .expect("valid action-policy glob should evaluate"),
             "bash action-policy matching must reject unsafe shell syntax: {command}"
         );
     }

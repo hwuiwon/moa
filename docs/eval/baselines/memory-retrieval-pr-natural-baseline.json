@@ -89,12 +89,12 @@
       "denominator": 160,
       "value": 0.99375
     },
-    "scope_match_rate_user": {
+    "scope_match_rate_contact": {
       "numerator": 44.0,
       "denominator": 45,
       "value": 0.9777777777777777
     },
-    "scope_match_rate_workspace": {
+    "scope_match_rate_tenant": {
       "numerator": 115.0,
       "denominator": 115,
       "value": 1.0

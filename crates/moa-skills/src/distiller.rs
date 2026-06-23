@@ -325,11 +325,8 @@ fn count_tool_calls(events: &[EventRecord]) -> usize {
         .count()
 }
 
-fn session_failed(session: &SessionMeta, events: &[EventRecord]) -> bool {
+fn session_failed(session: &SessionMeta, _events: &[EventRecord]) -> bool {
     session.status == moa_core::SessionStatus::Failed
-        || events
-            .iter()
-            .any(|record| matches!(record.event, Event::ToolError { .. } | Event::Error { .. }))
 }
 
 fn extract_task_summary(events: &[EventRecord]) -> String {
@@ -520,8 +517,9 @@ fn normalize_new_skill(session: &SessionMeta, skill: &mut SkillDocument) {
 mod tests {
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        ExperienceRecord, SegmentEvidence, SegmentEvidenceKind, SegmentEvidencePolarity, SegmentId,
-        SessionId, TaskFacetSet, TaskFingerprint, TenantId, UserId, WorkspaceId,
+        Event, EventRecord, ExperienceRecord, SegmentEvidence, SegmentEvidenceKind,
+        SegmentEvidencePolarity, SegmentId, SessionId, SessionMeta, SessionStatus, TaskFacetSet,
+        TaskFingerprint, TenantId, ToolCallId, UserId, WorkspaceId,
     };
     use uuid::Uuid;
 
@@ -549,6 +547,33 @@ mod tests {
         )];
 
         assert!(experience_is_learnable(&experience, &attributions));
+    }
+
+    #[test]
+    fn session_distillation_failure_uses_final_status_not_historical_tool_errors() {
+        // Pins: retry-heavy successful sessions can still seed skill distillation.
+        let session = SessionMeta {
+            status: SessionStatus::Completed,
+            ..SessionMeta::default()
+        };
+        let events = vec![event_record(
+            session.id,
+            Event::ToolError {
+                tool_id: ToolCallId::new(),
+                provider_tool_use_id: None,
+                tool_name: "bash".to_string(),
+                error: "transient timeout".to_string(),
+                retryable: true,
+            },
+        )];
+
+        assert!(!session_failed(&session, &events));
+
+        let failed = SessionMeta {
+            status: SessionStatus::Failed,
+            ..session
+        };
+        assert!(session_failed(&failed, &events));
     }
 
     fn experience(outcome: SegmentOutcome, confidence: f64) -> ExperienceRecord {
@@ -591,6 +616,20 @@ mod tests {
             assessment_policy_version: "assessment_v1".to_string(),
             extraction_policy_version: "experience_v1".to_string(),
             created_at: now,
+        }
+    }
+
+    fn event_record(session_id: SessionId, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id,
+            sequence_num: 1,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
         }
     }
 

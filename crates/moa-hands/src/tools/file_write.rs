@@ -14,20 +14,17 @@ use crate::tools::docker_file::{
     resolve_container_workspace_path,
 };
 use crate::tools::edit_output::{ExistingFileContent, build_file_write_output};
-use crate::tools::file_read::resolve_sandbox_path;
+use crate::tools::file_read::resolve_writable_sandbox_path;
 
 /// Executes the `file_write` tool against a sandbox directory.
 pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: FileWriteInput = serde_json::from_str(input)?;
-    let path = resolve_sandbox_path(sandbox_dir, &params.path)?;
-    let existing = read_existing_file_content(&path).await?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    fs::write(&path, &params.content).await?;
+    let resolved = resolve_writable_sandbox_path(sandbox_dir, &params.path).await?;
+    let existing = read_existing_file_content(&resolved.path).await?;
+    fs::write(&resolved.path, &params.content).await?;
 
     Ok(build_file_write_output(
-        &display_path(sandbox_dir, &path),
+        &resolved.display_path,
         &existing,
         &params.content,
         Duration::default(),
@@ -79,12 +76,9 @@ pub(crate) async fn execute_docker_bind_mount(
     let params: FileWriteInput = serde_json::from_str(input)?;
     let container_path = resolve_container_workspace_path(workspace_root, &params.path)?;
     let display_path = display_container_relative_path(workspace_root, &container_path);
-    let path = host_workspace_root.join(&display_path);
-    let existing = read_existing_file_content(&path).await?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    fs::write(&path, &params.content).await?;
+    let resolved = resolve_writable_sandbox_path(host_workspace_root, &display_path).await?;
+    let existing = read_existing_file_content(&resolved.path).await?;
+    fs::write(&resolved.path, &params.content).await?;
 
     Ok(build_file_write_output(
         &display_path,
@@ -103,13 +97,6 @@ async fn read_existing_file_content(path: &Path) -> Result<ExistingFileContent> 
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(ExistingFileContent::Missing),
         Err(error) => Err(error.into()),
     }
-}
-
-fn display_path(sandbox_dir: &Path, path: &Path) -> String {
-    path.strip_prefix(sandbox_dir)
-        .unwrap_or(path)
-        .display()
-        .to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,5 +161,61 @@ mod tests {
             .expect("file_write");
 
         assert_eq!(output.to_text(), "[binary file written: logo.bin, 4 bytes]");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_write_rejects_symlink_escape() {
+        // Pins: host-local writes must not overwrite files outside the sandbox through symlinks.
+        let dir = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "keep me")
+            .await
+            .expect("write outside file");
+        std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt"))
+            .expect("create symlink");
+
+        let error = execute(dir.path(), r#"{"path":"link.txt","content":"escape"}"#)
+            .await
+            .expect_err("symlink escape should be rejected");
+
+        assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+        assert_eq!(
+            fs::read_to_string(&outside_file)
+                .await
+                .expect("read outside file"),
+            "keep me"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn docker_bind_mount_write_rejects_symlink_escape() {
+        // Pins: Docker bind-mounted writes must not follow host symlinks outside the workspace.
+        let dir = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "keep me")
+            .await
+            .expect("write outside file");
+        std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt"))
+            .expect("create symlink");
+
+        let error = execute_docker_bind_mount(
+            dir.path(),
+            "/workspace",
+            r#"{"path":"link.txt","content":"escape"}"#,
+        )
+        .await
+        .expect_err("bind-mounted symlink escape should be rejected");
+
+        assert!(matches!(error, moa_core::MoaError::PermissionDenied(_)));
+        assert_eq!(
+            fs::read_to_string(&outside_file)
+                .await
+                .expect("read outside file"),
+            "keep me"
+        );
     }
 }

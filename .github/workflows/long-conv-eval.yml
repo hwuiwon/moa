@@ -115,6 +115,8 @@ jobs:
             --memory-eval-report target/memory-eval/natural-recorded.json \
             --min-metric ingestion_coverage=0.85 \
             --min-metric scope_match_rate=0.90 \
+            --min-metric scope_match_rate_contact=0.90 \
+            --min-metric scope_match_rate_tenant=0.90 \
             --min-metric extraction_precision=0.80 \
             --min-metric entity_fragmentation=0.90
 

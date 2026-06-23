@@ -349,6 +349,10 @@ mod skill_learning_review {
             2,
             "mutating handlers must derive reviewer_subject from authenticated identity"
         );
+        assert!(
+            source.contains(".name(\"learning_review_accept_skill\")"),
+            "accept_skill must run promotion and regression work in a named durable step"
+        );
     }
 
     #[tokio::test]

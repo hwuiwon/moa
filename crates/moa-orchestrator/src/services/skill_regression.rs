@@ -6,6 +6,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "internal-eval-runner")]
 use std::sync::Arc;
+#[cfg(feature = "internal-eval-runner")]
+use std::{future::Future, pin::Pin};
 
 use moa_artifacts::registry::ArtifactFile;
 use moa_core::{ActionRuleScope, LearningCandidate, MoaConfig, Result};
@@ -40,6 +42,9 @@ use uuid::Uuid;
 const DEFAULT_SKILL_TEST_BUDGET_DOLLARS: f64 = 0.50;
 #[cfg(feature = "internal-eval-runner")]
 const DEFAULT_SKILL_EVALUATORS: &[&str] = &["trajectory", "output", "tool_success"];
+
+#[cfg(feature = "internal-eval-runner")]
+type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Outcome of review-time regression evaluation for a skill proposal.
 #[derive(Debug, Clone, PartialEq)]
@@ -327,6 +332,30 @@ async fn execute_previous_and_candidate(
     candidate_markdown: String,
     provider: Arc<dyn LLMProvider>,
 ) -> Result<ExecutedRegressionRuns> {
+    let join = tokio::task::spawn_blocking(move || {
+        block_on_current_thread(Box::pin(execute_previous_and_candidate_inner(
+            config,
+            suite,
+            skill_name,
+            previous_markdown,
+            candidate_markdown,
+            provider,
+        )))
+    })
+    .await
+    .map_err(|error| MoaError::StorageError(error.to_string()))?;
+    join.map_err(MoaError::StorageError)?
+}
+
+#[cfg(feature = "internal-eval-runner")]
+async fn execute_previous_and_candidate_inner(
+    config: MoaConfig,
+    suite: TestSuite,
+    skill_name: String,
+    previous_markdown: String,
+    candidate_markdown: String,
+    provider: Arc<dyn LLMProvider>,
+) -> Result<ExecutedRegressionRuns> {
     let temp_root = std::env::temp_dir().join(format!("moa-skill-review-{}", Uuid::now_v7()));
     let previous_dir = materialize_skill_dir(
         temp_root.join("previous"),
@@ -371,6 +400,15 @@ async fn execute_previous_and_candidate(
 
     let _ = remove_dir_if_exists(&temp_root).await;
     candidate
+}
+
+#[cfg(feature = "internal-eval-runner")]
+fn block_on_current_thread<T>(future: LocalBoxFuture<T>) -> std::result::Result<T, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(runtime.block_on(future))
 }
 
 #[cfg(feature = "internal-eval-runner")]

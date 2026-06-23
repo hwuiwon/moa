@@ -36,7 +36,6 @@ fn stable_uuid_from_label(label: &str) -> Uuid {
 }
 
 async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_DATABASE_URL")?;
     Some(
         bootstrap_test_db()
             .await
@@ -147,6 +146,7 @@ fn query(workspace_id: &str, embedding: Vec<f32>) -> VectorQuery {
 
 #[tokio::test]
 async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
+    // Pins: KNN rejects a workspace whose configured embedder dimension no longer matches pgvector.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
@@ -154,6 +154,14 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
     let workspace_id = format!("embedder-mismatch-{}", Uuid::now_v7().simple());
     let uid = Uuid::now_v7();
     seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    set_embedder_state(
+        test_db.store().pool(),
+        &workspace_id,
+        "cohere-embed-v4",
+        1024,
+        "steady",
+    )
+    .await;
     let store = store(&test_db, &workspace_id);
     store
         .upsert(&[item(
@@ -191,6 +199,7 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
 
 #[tokio::test]
 async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomically() {
+    // Pins: after explicit state migration, same-model writes can replace old vectors atomically.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
@@ -198,6 +207,14 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
     let workspace_id = format!("embedder-reembed-{}", Uuid::now_v7().simple());
     let uid = Uuid::now_v7();
     seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    set_embedder_state(
+        test_db.store().pool(),
+        &workspace_id,
+        "cohere-embed-v4",
+        1024,
+        "steady",
+    )
+    .await;
     let store = store(&test_db, &workspace_id);
     store
         .upsert(&[item(
@@ -258,6 +275,7 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
 
 #[tokio::test]
 async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete() {
+    // Pins: re-embedding state blocks reads even when matching vectors already exist.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
@@ -265,6 +283,14 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
     let workspace_id = format!("embedder-progress-{}", Uuid::now_v7().simple());
     let uid = Uuid::now_v7();
     seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    set_embedder_state(
+        test_db.store().pool(),
+        &workspace_id,
+        "cohere-embed-v4",
+        1024,
+        "steady",
+    )
+    .await;
     let store = store(&test_db, &workspace_id);
     store
         .upsert(&[item(
@@ -293,14 +319,23 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
 }
 
 #[tokio::test]
-async fn workspace_with_no_configured_embedder_falls_back_to_default_with_warning() {
+async fn configured_workspace_embedder_allows_same_model_vector_write() {
+    // Pins: embedding writes succeed only after explicit workspace embedder state exists.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-default-{}", Uuid::now_v7().simple());
+    let workspace_id = format!("embedder-same-model-{}", Uuid::now_v7().simple());
     let uid = Uuid::now_v7();
     seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    set_embedder_state(
+        test_db.store().pool(),
+        &workspace_id,
+        "cohere-embed-v4",
+        1024,
+        "steady",
+    )
+    .await;
 
     let store = store(&test_db, &workspace_id);
     store
@@ -312,32 +347,103 @@ async fn workspace_with_no_configured_embedder_falls_back_to_default_with_warnin
             1,
         )])
         .await
-        .expect("upsert with default embedder fallback");
+        .expect("upsert with configured embedder");
 
     let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
     let row = sqlx::query(
-        "SELECT embedding_model, embedding_dimension, reembed_state \
-         FROM moa.workspace_state WHERE workspace_id = $1",
+        "SELECT embedding_model, embedding_model_version FROM moa.embeddings WHERE uid = $1",
     )
-    .bind(&workspace_id)
+    .bind(uid)
     .fetch_one(conn.as_mut())
     .await
-    .expect("read default workspace embedder state");
-    conn.commit().await.expect("commit default embedder read");
+    .expect("read inserted embedding");
+    conn.commit().await.expect("commit embedding read");
 
     assert_eq!(
         row.try_get::<String, _>("embedding_model")
-            .expect("decode default model"),
+            .expect("decode embedding model"),
         "cohere-embed-v4"
     );
     assert_eq!(
-        row.try_get::<i32, _>("embedding_dimension")
-            .expect("decode default dimension"),
-        i32::try_from(VECTOR_DIMENSION).expect("dimension fits i32")
+        row.try_get::<i32, _>("embedding_model_version")
+            .expect("decode embedding model version"),
+        1
     );
-    assert_eq!(
-        row.try_get::<String, _>("reembed_state")
-            .expect("decode reembed state"),
-        "steady"
-    );
+}
+
+#[tokio::test]
+async fn missing_workspace_embedder_state_rejects_vector_write() {
+    // Pins: direct vector writes fail closed when workspace_state has not been explicitly seeded.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let workspace_id = format!("embedder-missing-{}", Uuid::now_v7().simple());
+    let uid = Uuid::now_v7();
+    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+
+    let store = store(&test_db, &workspace_id);
+    let error = store
+        .upsert(&[item(
+            uid,
+            &workspace_id,
+            basis_vector(0),
+            "cohere-embed-v4",
+            1,
+        )])
+        .await
+        .expect_err("missing workspace_state must reject vector writes");
+    assert!(matches!(error, Error::WorkspaceEmbedderStateMissing { .. }));
+
+    let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
+    let row_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.embeddings WHERE workspace_id = $1 AND uid = $2",
+    )
+    .bind(&workspace_id)
+    .bind(uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count rejected embedding rows");
+    conn.commit().await.expect("commit rejected embedding read");
+    assert_eq!(row_count, 0);
+}
+
+#[tokio::test]
+async fn configured_workspace_embedder_rejects_mixed_model_vector_write() {
+    // Pins: a workspace cannot mix vector spaces during embedding writes.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let workspace_id = format!("embedder-mixed-{}", Uuid::now_v7().simple());
+    let uid = Uuid::now_v7();
+    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    set_embedder_state(
+        test_db.store().pool(),
+        &workspace_id,
+        "cohere-embed-v4",
+        1024,
+        "steady",
+    )
+    .await;
+
+    let store = store(&test_db, &workspace_id);
+    let error = store
+        .upsert(&[item(
+            uid,
+            &workspace_id,
+            basis_vector(0),
+            "replacement-embedder",
+            1,
+        )])
+        .await
+        .expect_err("mixed embedder model must reject vector writes");
+    assert!(matches!(
+        error,
+        Error::EmbedderModelMismatch {
+            configured_model,
+            requested_model,
+            ..
+        } if configured_model == "cohere-embed-v4" && requested_model == "replacement-embedder"
+    ));
 }

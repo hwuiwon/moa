@@ -88,7 +88,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
-            .with_policies(ActionPolicies::from_config(&config))
+            .with_policies(ActionPolicies::from_config(&config)?)
             .with_session_store(session_store.clone()),
     );
     router
@@ -106,6 +106,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
             shared_skill_injector: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
+            identity_prompt_override: None,
             discovered_workspace_instructions: None,
             tool_schemas: extend_tool_schemas(router.tool_schemas()),
             lineage: Arc::new(moa_core::NullLineageHandle),

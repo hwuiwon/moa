@@ -61,7 +61,7 @@ Action-policy decisions are ordered:
 
 1. Workspace-visible persistent rules match by tool name and normalized input;
    the strictest matching rule wins.
-2. Configured `always_deny` and `admin_review` tool names can tighten the
+2. Configured `always_deny` and `admin_review` tool-name globs can tighten the
    matched rule result.
 3. The stricter of the tool's default effect and the global default effect is
    used when no rule or configured tool policy matches.

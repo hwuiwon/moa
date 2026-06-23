@@ -88,6 +88,35 @@ async fn insert_node_index_rows(pool: &PgPool, workspace_id: &str, items: &[Vect
         .expect("commit node_index seed transaction");
 }
 
+async fn set_workspace_embedder_state(pool: &PgPool, workspace_id: &str, model: &str) {
+    let ctx = tenant_scope(workspace_id);
+    let mut conn = ScopedConn::begin(pool, &ctx)
+        .await
+        .expect("begin workspace_state seed transaction");
+    set_app_role(conn.as_mut()).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, 1, 1024)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(model)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed workspace embedder state");
+
+    conn.commit()
+        .await
+        .expect("commit workspace_state seed transaction");
+}
+
 async fn insert_node_index_row_with_validity(
     pool: &PgPool,
     workspace_id: &str,
@@ -142,6 +171,7 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
         .collect();
     let uids: Vec<_> = items.iter().map(|item| item.uid).collect();
     insert_node_index_rows(session_store.pool(), &workspace_id, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
 
     let store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
@@ -189,6 +219,8 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
         std::slice::from_ref(&item_a),
     )
     .await;
+    set_workspace_embedder_state(session_store.pool(), &workspace_a, "test-model").await;
+    set_workspace_embedder_state(session_store.pool(), &workspace_b, "test-model").await;
 
     let store_a = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
@@ -256,6 +288,7 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
         None,
     )
     .await;
+    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
 
     let store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),

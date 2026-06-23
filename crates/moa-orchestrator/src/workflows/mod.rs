@@ -1,6 +1,7 @@
 //! Restate workflow modules hosted by the orchestrator binary.
 
 pub mod consolidate;
+#[cfg(feature = "internal-eval-runner")]
 pub mod eval_run;
 pub mod experiment_run;
 pub mod experiment_trial_run;

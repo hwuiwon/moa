@@ -65,7 +65,7 @@ fn node_intent(
         label,
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "write_protocol" }),
         pii_class: PiiClass::None,
@@ -94,7 +94,7 @@ fn edge_intent(
         properties: json!({ "kind": "test-edge", "index": index }),
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
@@ -123,6 +123,29 @@ async fn workspace_version(pool: &PgPool, workspace_id: &str) -> i64 {
     .expect("read workspace_state version");
     conn.commit().await.expect("commit version read");
     version
+}
+
+async fn seed_workspace_embedder_state(pool: &PgPool, workspace_id: &str) {
+    let mut conn = scoped_conn(pool, workspace_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, 'test-model', 1, 1024)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed workspace embedder state");
+    conn.commit()
+        .await
+        .expect("commit workspace embedder state");
 }
 
 async fn vector_count(pool: &PgPool, workspace_id: &str, uid: Uuid) -> i64 {
@@ -213,6 +236,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         .expect("create isolated Postgres store");
     let workspace_id = format!("write-protocol-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
+    seed_workspace_embedder_state(session_store.pool(), &workspace_id).await;
 
     let t0 = Utc::now() - Duration::minutes(5);
     let old = node_intent(
@@ -430,6 +454,7 @@ async fn rollback_on_failure_removes_age_and_sidecar_rows() {
         .expect("create isolated Postgres store");
     let workspace_id = format!("write-rollback-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
+    seed_workspace_embedder_state(session_store.pool(), &workspace_id).await;
     let bad = node_intent(
         &workspace_id,
         NodeLabel::Entity,

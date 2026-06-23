@@ -1,11 +1,15 @@
 //! Memory service authorization-scope helper coverage.
 
 use moa_core::traits::{Identity, IdentityType};
+use moa_core::wire::MemoryIngestDocument;
 use moa_core::{ContactId, MemoryScope, TenantId, UserId};
 use moa_orchestrator::services::memory::{
-    UserScopeError, checked_ingest_contact_id, checked_memory_scope, effective_user_id,
+    UserScopeError, checked_ingest_contact_id, checked_memory_scope, document_ingest_session_id,
+    effective_user_id,
 };
+use serde_json::json;
 use uuid::Uuid;
+use uuid::Variant;
 
 fn user_identity(user_id: Uuid) -> Identity {
     Identity {
@@ -120,5 +124,65 @@ fn checked_ingest_contact_id_rejects_payload_contact_mismatch() {
             requested: UserId::new(requested.to_string()),
             effective: user_id.to_string(),
         }
+    );
+}
+
+#[test]
+fn document_ingest_session_id_is_stable_for_client_retries() {
+    // Pins: retried document-ingest requests address the same ingestion object.
+    let tenant_id =
+        TenantId(Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("tenant id"));
+    let contact_id =
+        ContactId(Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").expect("contact id"));
+    let document = MemoryIngestDocument {
+        source_name: "runbook.md".to_string(),
+        content: "rotate API keys quarterly".to_string(),
+        source_uri: Some("s3://docs/runbook.md".to_string()),
+        metadata: json!({"ignored_for_identity": true}),
+    };
+
+    let first = document_ingest_session_id(tenant_id, contact_id, 0, &document);
+    let retry = document_ingest_session_id(tenant_id, contact_id, 0, &document);
+
+    assert_eq!(first, retry);
+    assert_eq!(first.0.get_variant(), Variant::RFC4122);
+    assert_eq!(first.0.get_version_num(), 8);
+}
+
+#[test]
+fn document_ingest_session_id_separates_source_content_and_index() {
+    // Pins: distinct documents in one ingest request do not share an ingestion object key.
+    let tenant_id =
+        TenantId(Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("tenant id"));
+    let contact_id =
+        ContactId(Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").expect("contact id"));
+    let document = MemoryIngestDocument {
+        source_name: "runbook.md".to_string(),
+        content: "rotate API keys quarterly".to_string(),
+        source_uri: Some("s3://docs/runbook.md".to_string()),
+        metadata: json!({}),
+    };
+    let changed_content = MemoryIngestDocument {
+        content: "rotate API keys monthly".to_string(),
+        ..document.clone()
+    };
+    let changed_source = MemoryIngestDocument {
+        source_uri: Some("s3://docs/other.md".to_string()),
+        ..document.clone()
+    };
+
+    let baseline = document_ingest_session_id(tenant_id, contact_id, 0, &document);
+
+    assert_ne!(
+        baseline,
+        document_ingest_session_id(tenant_id, contact_id, 0, &changed_content)
+    );
+    assert_ne!(
+        baseline,
+        document_ingest_session_id(tenant_id, contact_id, 0, &changed_source)
+    );
+    assert_ne!(
+        baseline,
+        document_ingest_session_id(tenant_id, contact_id, 1, &document)
     );
 }

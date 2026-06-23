@@ -35,11 +35,11 @@ const SUPERSEDE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Request for an explicit fast-path memory write.
 #[derive(Debug, Clone)]
 pub struct FastRememberRequest {
-    /// Workspace that owns the memory row.
-    pub workspace_id: Uuid,
-    /// Optional user owner inside the workspace.
-    pub user_id: Option<Uuid>,
-    /// Scope tier string: `workspace` or `user`.
+    /// Tenant that owns the memory row.
+    pub tenant_id: Uuid,
+    /// Optional contact owner inside the tenant.
+    pub contact_id: Option<Uuid>,
+    /// Scope tier string: `tenant` or `contact`.
     pub scope: String,
     /// Free-form fact or decision text.
     pub text: String,
@@ -145,6 +145,12 @@ pub enum FastError {
     /// PII classifier setup failed.
     #[error("pii: {0}")]
     Pii(#[from] PiiError),
+    /// PII classification failed closed before safe text could be produced.
+    #[error("pii classification unavailable for fast memory write: {model_version}")]
+    PiiClassificationUnavailable {
+        /// Classifier model or fallback marker that produced the fail-closed result.
+        model_version: String,
+    },
     /// Postgres query failed.
     #[error("postgres: {0}")]
     Sqlx(#[from] sqlx::Error),
@@ -250,7 +256,7 @@ async fn fast_remember_inner(
             PiiResult::fail_closed("fast-path-fallback")
         }
     };
-    let redacted_text = redact_text(&req.text, &pii.spans);
+    let redacted_text = safe_fast_path_text(&req.text, &pii)?;
     let embed_input = vec![redacted_text.clone()];
     let embedding = ctx
         .embedder
@@ -276,6 +282,7 @@ async fn fast_remember_inner(
                 &redacted_text,
                 &embedding,
                 req.label,
+                pii.class,
                 &contradiction_ctx,
             ),
         )
@@ -327,13 +334,13 @@ fn validate_remember_request(req: &FastRememberRequest) -> Result<(), FastError>
         return Err(FastError::Invalid("empty text".to_string()));
     }
     match req.scope.as_str() {
-        "tenant" if req.user_id.is_none() => Ok(()),
-        "contact" if req.user_id.is_some() => Ok(()),
+        "tenant" if req.contact_id.is_none() => Ok(()),
+        "contact" if req.contact_id.is_some() => Ok(()),
         "tenant" => Err(FastError::Invalid(
-            "tenant scope must not include user_id".to_string(),
+            "tenant scope must not include contact_id".to_string(),
         )),
         "contact" => Err(FastError::Invalid(
-            "contact scope requires user_id".to_string(),
+            "contact scope requires contact_id".to_string(),
         )),
         "global" => Err(FastError::Invalid(
             "fast memory writes cannot target global scope".to_string(),
@@ -342,6 +349,15 @@ fn validate_remember_request(req: &FastRememberRequest) -> Result<(), FastError>
             "unsupported memory scope `{other}`"
         ))),
     }
+}
+
+fn safe_fast_path_text(text: &str, pii: &PiiResult) -> Result<String, FastError> {
+    if pii.abstained && pii.spans.is_empty() {
+        return Err(FastError::PiiClassificationUnavailable {
+            model_version: pii.model_version.clone(),
+        });
+    }
+    Ok(redact_text(text, &pii.spans))
 }
 
 fn build_intent(
@@ -356,8 +372,8 @@ fn build_intent(
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: req.label,
-        workspace_id: Some(req.workspace_id.to_string()),
-        user_id: req.user_id.map(|user_id| user_id.to_string()),
+        workspace_id: Some(req.tenant_id.to_string()),
+        user_id: req.contact_id.map(|contact_id| contact_id.to_string()),
         scope: req.scope.clone(),
         name: short_name(redacted_text),
         properties: json!({
@@ -397,10 +413,10 @@ async fn active_uids_for_pattern(
             .fetch_all(conn.as_mut())
             .await?
         }
-        ForgetPattern::SoftAll(user_id) => sqlx::query_scalar::<_, Uuid>(
+        ForgetPattern::SoftAll(contact_id) => sqlx::query_scalar::<_, Uuid>(
             "SELECT uid FROM moa.node_index WHERE user_id = $1 AND valid_to IS NULL ORDER BY uid",
         )
-        .bind(user_id.to_string())
+        .bind(contact_id.to_string())
         .fetch_all(conn.as_mut())
         .await?,
     };
@@ -471,8 +487,8 @@ struct ForgetToolInput {
     uid: Option<Uuid>,
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    soft_all_user_id: Option<Uuid>,
+    #[serde(default, rename = "soft_all_user_id")]
+    soft_all_contact_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,12 +509,12 @@ async fn execute_remember_tool(
     let params: RememberToolInput = serde_json::from_value(input.clone())?;
     let label = parse_node_label(params.label.as_deref())?;
     let scope = params.scope.unwrap_or_else(|| "tenant".to_string());
-    let (ctx, workspace_id, user_id) = runtime_ctx_for_scope(session, &scope)?;
+    let (ctx, tenant_id, contact_id) = runtime_ctx_for_scope(session, &scope)?;
     let actor_id = actor_id_from_session(session);
     let uid = fast_remember(
         FastRememberRequest {
-            workspace_id,
-            user_id,
+            tenant_id,
+            contact_id,
             scope,
             text: params.text,
             label,
@@ -522,7 +538,7 @@ async fn execute_forget_tool(
     started: Instant,
 ) -> Result<ToolOutput, FastError> {
     let params: ForgetToolInput = serde_json::from_value(input.clone())?;
-    let count = match (params.uid, params.name, params.soft_all_user_id) {
+    let count = match (params.uid, params.name, params.soft_all_contact_id) {
         (Some(uid), None, None) => {
             let ctx = runtime_ctx_for_visible_session_scope(session)?;
             fast_forget(ForgetPattern::Uid(uid), &ctx).await?
@@ -531,9 +547,9 @@ async fn execute_forget_tool(
             let ctx = runtime_ctx_for_visible_session_scope(session)?;
             fast_forget(ForgetPattern::NameMatch(name), &ctx).await?
         }
-        (None, None, Some(user_id)) => {
-            let ctx = runtime_ctx_for_user(session, user_id)?;
-            fast_forget(ForgetPattern::SoftAll(user_id), &ctx).await?
+        (None, None, Some(contact_id)) => {
+            let ctx = runtime_ctx_for_contact(session, contact_id)?;
+            fast_forget(ForgetPattern::SoftAll(contact_id), &ctx).await?
         }
         _ => {
             return Err(FastError::Invalid(
@@ -571,8 +587,8 @@ fn runtime_ctx_for_scope(
     session: &SessionMeta,
     scope: &str,
 ) -> Result<(FastPathCtx, Uuid, Option<Uuid>), FastError> {
-    let workspace_id = tenant_uuid(session);
-    let user_id = match scope {
+    let tenant_id = tenant_uuid(session);
+    let contact_id = match scope {
         "tenant" => None,
         "contact" => Some(session_contact_uuid(session)?),
         other => {
@@ -581,22 +597,25 @@ fn runtime_ctx_for_scope(
             )));
         }
     };
-    let scope_ctx = match user_id {
-        Some(user_id) => ScopeContext::contact(TenantId::from(workspace_id), ContactId(user_id)),
-        None => ScopeContext::tenant(TenantId::from(workspace_id)),
+    let scope_ctx = match contact_id {
+        Some(contact_id) => ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id)),
+        None => ScopeContext::tenant(TenantId::from(tenant_id)),
     };
-    Ok((runtime_fast_ctx(scope_ctx)?, workspace_id, user_id))
+    Ok((runtime_fast_ctx(scope_ctx)?, tenant_id, contact_id))
 }
 
-fn runtime_ctx_for_user(session: &SessionMeta, user_id: Uuid) -> Result<FastPathCtx, FastError> {
-    let workspace_id = tenant_uuid(session);
-    let scope_ctx = ScopeContext::contact(TenantId::from(workspace_id), ContactId(user_id));
+fn runtime_ctx_for_contact(
+    session: &SessionMeta,
+    contact_id: Uuid,
+) -> Result<FastPathCtx, FastError> {
+    let tenant_id = tenant_uuid(session);
+    let scope_ctx = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     runtime_fast_ctx(scope_ctx)
 }
 
 fn runtime_ctx_for_visible_session_scope(session: &SessionMeta) -> Result<FastPathCtx, FastError> {
     if let Some(contact) = &session.contact {
-        runtime_ctx_for_user(session, contact.contact_id.0)
+        runtime_ctx_for_contact(session, contact.contact_id.0)
     } else {
         let (ctx, _, _) = runtime_ctx_for_scope(session, "tenant")?;
         Ok(ctx)

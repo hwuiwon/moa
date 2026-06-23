@@ -1,5 +1,6 @@
 //! `file_read` tool implementation.
 
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -19,13 +20,12 @@ const LARGE_FILE_HINT_LINES: usize = 200;
 /// Executes the `file_read` tool against a sandbox directory.
 pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     let params: FileReadInput = serde_json::from_str(input)?;
-    let path = resolve_sandbox_path(sandbox_dir, &params.path)?;
-    let content = fs::read_to_string(&path).await?;
-    let display_path = path.strip_prefix(sandbox_dir).unwrap_or(&path).display();
+    let resolved = resolve_existing_sandbox_path(sandbox_dir, &params.path).await?;
+    let content = fs::read_to_string(&resolved.path).await?;
 
     Ok(render_file_read_output(
         &content,
-        &display_path.to_string(),
+        &resolved.display_path,
         &params,
     ))
 }
@@ -43,6 +43,28 @@ pub async fn execute_docker(
     let content = docker_file_read(container_id, &path, timeout, hard_cancel_token).await?;
     let display_path = display_container_relative_path(workspace_root, &path);
     Ok(render_file_read_output(&content, &display_path, &params))
+}
+
+/// Executes the `file_read` tool against a Docker sandbox bind mount.
+pub(crate) async fn execute_docker_bind_mount(
+    host_workspace_root: &Path,
+    workspace_root: &str,
+    input: &str,
+) -> Result<ToolOutput> {
+    let params: FileReadInput = serde_json::from_str(input)?;
+    let container_path = resolve_container_workspace_path(workspace_root, &params.path)?;
+    let display_path = display_container_relative_path(workspace_root, &container_path);
+    let resolved = resolve_existing_sandbox_path(host_workspace_root, &display_path).await?;
+    let content = fs::read_to_string(&resolved.path).await?;
+    Ok(render_file_read_output(&content, &display_path, &params))
+}
+
+/// A sandbox path resolved to a canonical host path and stable display path.
+pub(crate) struct ResolvedSandboxPath {
+    /// Canonical host path that passed sandbox containment checks.
+    pub(crate) path: PathBuf,
+    /// Workspace-relative path to show in tool output.
+    pub(crate) display_path: String,
 }
 
 /// Resolves a user-provided relative path inside a sandbox root.
@@ -66,6 +88,124 @@ pub fn resolve_sandbox_path(sandbox_dir: &Path, raw_path: &str) -> Result<PathBu
     }
 
     Ok(sandbox_dir.join(logical_path))
+}
+
+/// Resolves an existing sandbox file and rejects symlink escapes.
+pub(crate) async fn resolve_existing_sandbox_path(
+    sandbox_dir: &Path,
+    raw_path: &str,
+) -> Result<ResolvedSandboxPath> {
+    let candidate = resolve_sandbox_path(sandbox_dir, raw_path)?;
+    let display_path = sandbox_display_path(raw_path);
+    let root = fs::canonicalize(sandbox_dir).await?;
+    let canonical = fs::canonicalize(&candidate).await?;
+    ensure_inside_sandbox(&root, &canonical, raw_path)?;
+    Ok(ResolvedSandboxPath {
+        path: canonical,
+        display_path,
+    })
+}
+
+/// Resolves a writable sandbox file and rejects symlink escapes.
+pub(crate) async fn resolve_writable_sandbox_path(
+    sandbox_dir: &Path,
+    raw_path: &str,
+) -> Result<ResolvedSandboxPath> {
+    let candidate = resolve_sandbox_path(sandbox_dir, raw_path)?;
+    let display_path = sandbox_display_path(raw_path);
+    let root = fs::canonicalize(sandbox_dir).await?;
+
+    match fs::canonicalize(&candidate).await {
+        Ok(canonical) => {
+            ensure_inside_sandbox(&root, &canonical, raw_path)?;
+            return Ok(ResolvedSandboxPath {
+                path: canonical,
+                display_path,
+            });
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            reject_existing_symlink(&candidate, raw_path).await?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let parent = candidate.parent().ok_or_else(|| {
+        MoaError::PermissionDenied(format!("path must stay within the sandbox: {raw_path}"))
+    })?;
+    let _ = canonicalize_existing_ancestor(parent, &root, raw_path).await?;
+    fs::create_dir_all(parent).await?;
+    let canonical_parent = fs::canonicalize(parent).await?;
+    ensure_inside_sandbox(&root, &canonical_parent, raw_path)?;
+    let file_name = candidate.file_name().ok_or_else(|| {
+        MoaError::PermissionDenied(format!(
+            "path must identify a file inside the sandbox: {raw_path}"
+        ))
+    })?;
+
+    Ok(ResolvedSandboxPath {
+        path: canonical_parent.join(file_name),
+        display_path,
+    })
+}
+
+async fn reject_existing_symlink(path: &Path, raw_path: &str) -> Result<()> {
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(MoaError::PermissionDenied(
+            format!("symlink escapes are not allowed in sandbox paths: {raw_path}"),
+        )),
+        Ok(_) => Err(MoaError::PermissionDenied(format!(
+            "path could not be resolved inside the sandbox: {raw_path}"
+        ))),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn canonicalize_existing_ancestor(
+    path: &Path,
+    sandbox_root: &Path,
+    raw_path: &str,
+) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::canonicalize(&current).await {
+            Ok(canonical) => {
+                ensure_inside_sandbox(sandbox_root, &canonical, raw_path)?;
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                reject_existing_symlink(&current, raw_path).await?;
+                if !current.pop() {
+                    return Err(error.into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn ensure_inside_sandbox(sandbox_root: &Path, path: &Path, raw_path: &str) -> Result<()> {
+    if path.starts_with(sandbox_root) {
+        return Ok(());
+    }
+    Err(MoaError::PermissionDenied(format!(
+        "path resolves outside the sandbox: {raw_path}"
+    )))
+}
+
+fn sandbox_display_path(raw_path: &str) -> String {
+    let mut display = PathBuf::new();
+    for component in Path::new(raw_path).components() {
+        if let Component::Normal(segment) = component {
+            display.push(segment);
+        }
+    }
+    let display = display.display().to_string();
+    if display.is_empty() {
+        ".".to_string()
+    } else {
+        display
+    }
 }
 
 fn render_file_read_output(
@@ -320,5 +460,27 @@ mod tests {
         assert!(text.contains("1\tline 1"));
         assert!(text.contains("3\tline 3"));
         assert!(!text.contains("4\tline 4"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_rejects_symlink_escape() {
+        // Pins: host-local file reads must not follow sandbox symlinks to outside files.
+        let dir = tempdir().expect("tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        fs::write(outside.path().join("secret.txt"), "do not read")
+            .await
+            .expect("write outside file");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("link.txt"),
+        )
+        .expect("create symlink");
+
+        let error = execute(dir.path(), r#"{"path":"link.txt"}"#)
+            .await
+            .expect_err("symlink escape should be rejected");
+
+        assert!(matches!(error, MoaError::PermissionDenied(_)));
     }
 }

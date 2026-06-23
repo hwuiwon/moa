@@ -80,6 +80,12 @@ mod tests {
                     reason: Some("accepted".to_string()),
                     model: Some(ModelId::new("anthropic:claude-haiku-4-5")),
                     policy_hash: "policy-sha256:abc123".to_string(),
+                    input_tokens_uncached: 0,
+                    input_tokens_cache_write: 0,
+                    input_tokens_cache_read: 0,
+                    output_tokens: 0,
+                    cost_cents: 0,
+                    duration_ms: 0,
                 },
             ),
         ];
@@ -102,6 +108,12 @@ mod tests {
                 reason: Some("blocked".to_string()),
                 model: None,
                 policy_hash: "policy-sha256:def456".to_string(),
+                input_tokens_uncached: 0,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 0,
+                cost_cents: 0,
+                duration_ms: 0,
             },
         )];
 

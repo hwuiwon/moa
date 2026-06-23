@@ -29,6 +29,18 @@ pub struct GuardrailEvaluation {
     pub model: ModelId,
     /// Concise block or parser reason when one is available.
     pub reason: Option<String>,
+    /// Input tokens billed at the provider's standard uncached rate.
+    pub input_tokens_uncached: usize,
+    /// Input tokens billed to create or refresh a cache entry.
+    pub input_tokens_cache_write: usize,
+    /// Input tokens served from cache.
+    pub input_tokens_cache_read: usize,
+    /// Output token count.
+    pub output_tokens: usize,
+    /// Cost in cents.
+    pub cost_cents: u32,
+    /// Duration in milliseconds.
+    pub duration_ms: u64,
 }
 
 impl GuardrailEvaluation {
@@ -49,6 +61,12 @@ impl GuardrailEvaluation {
             reason: self.reason.clone(),
             model: Some(self.model.clone()),
             policy_hash: self.policy_hash.clone(),
+            input_tokens_uncached: self.input_tokens_uncached,
+            input_tokens_cache_write: self.input_tokens_cache_write,
+            input_tokens_cache_read: self.input_tokens_cache_read,
+            output_tokens: self.output_tokens,
+            cost_cents: self.cost_cents,
+            duration_ms: self.duration_ms,
         }
     }
 }
@@ -92,6 +110,9 @@ pub fn evaluate_guardrail_response(
     response: &CompletionResponse,
 ) -> GuardrailEvaluation {
     let (outcome, reason) = parse_judge_output(&response.text);
+    let usage = response.token_usage();
+    let cost_cents =
+        crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), usage);
     let decision = if matches!(stage.mode, GuardrailMode::Enforce)
         && !matches!(outcome, GuardrailJudgeOutcome::Pass)
     {
@@ -108,6 +129,12 @@ pub fn evaluate_guardrail_response(
         outcome,
         model: response.model.clone(),
         reason,
+        input_tokens_uncached: usage.input_tokens_uncached,
+        input_tokens_cache_write: usage.input_tokens_cache_write,
+        input_tokens_cache_read: usage.input_tokens_cache_read,
+        output_tokens: usage.output_tokens,
+        cost_cents,
+        duration_ms: response.duration_ms,
     }
 }
 
@@ -143,7 +170,7 @@ fn guardrail_direction_label(direction: GuardrailDirection) -> &'static str {
 
 fn parse_judge_output(text: &str) -> (GuardrailJudgeOutcome, Option<String>) {
     let trimmed = text.trim();
-    if trimmed == "PASS" {
+    if first_verdict_token(trimmed) == Some("PASS") {
         return (GuardrailJudgeOutcome::Pass, None);
     }
 
@@ -164,6 +191,16 @@ fn parse_judge_output(text: &str) -> (GuardrailJudgeOutcome, Option<String>) {
         GuardrailJudgeOutcome::Invalid,
         Some("guardrail judge returned malformed output".to_string()),
     )
+}
+
+fn first_verdict_token(trimmed: &str) -> Option<&str> {
+    let first_token = trimmed
+        .split_once(char::is_whitespace)
+        .map_or(trimmed, |(token, _)| token);
+    let token = first_token
+        .split_once(':')
+        .map_or(first_token, |(token, _)| token);
+    (!token.is_empty()).then_some(token)
 }
 
 #[cfg(test)]
@@ -191,6 +228,20 @@ mod tests {
         assert_eq!(evaluation.policy_hash, "policy-hash-pass");
         assert_eq!(evaluation.direction, GuardrailDirection::Input);
         assert!(evaluation.passed());
+    }
+
+    #[test]
+    fn guardrail_runner_allows_first_token_pass_with_explanation_guardrail() {
+        // Pins: benign judge explanations after a leading PASS do not fail closed.
+        let evaluation = evaluate_guardrail_response(
+            "policy-hash-pass",
+            GuardrailDirection::Input,
+            &stage(GuardrailMode::Enforce, None),
+            &response("PASS\nThe text is allowed by policy.", "judge-model"),
+        );
+
+        assert_eq!(evaluation.decision, GuardrailDecision::Allow);
+        assert_eq!(evaluation.outcome, GuardrailJudgeOutcome::Pass);
     }
 
     #[test]
@@ -225,6 +276,20 @@ mod tests {
             evaluation.reason.as_deref(),
             Some("guardrail judge returned malformed output")
         );
+    }
+
+    #[test]
+    fn guardrail_runner_rejects_non_initial_pass_token_guardrail() {
+        // Pins: only a first-token PASS is accepted; chatty preambles still fail closed.
+        let evaluation = evaluate_guardrail_response(
+            "policy-hash-malformed",
+            GuardrailDirection::Input,
+            &stage(GuardrailMode::Enforce, None),
+            &response("The answer is PASS", "judge-model"),
+        );
+
+        assert_eq!(evaluation.decision, GuardrailDecision::Block);
+        assert_eq!(evaluation.outcome, GuardrailJudgeOutcome::Invalid);
     }
 
     #[test]
@@ -324,6 +389,31 @@ mod tests {
         let encoded = serde_json::to_string(&event).expect("serialize guardrail event");
         assert_eq!(evaluation.reason.as_deref(), Some(super::SAFE_BLOCK_REASON));
         assert!(!encoded.contains(guarded_text));
+    }
+
+    #[test]
+    fn guardrail_runner_attributes_judge_usage_to_event_guardrail() {
+        // Pins: guardrail judge tokens and cost are session-visible, not dropped as zero.
+        let mut response = response("PASS", "gpt-5-mini");
+        response.usage = TokenUsage {
+            input_tokens_uncached: 20,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 5,
+            output_tokens: 7,
+        };
+        response.duration_ms = 123;
+
+        let evaluation = evaluate_guardrail_response(
+            "policy-hash-usage",
+            GuardrailDirection::Input,
+            &stage(GuardrailMode::Enforce, None),
+            &response,
+        );
+        let event = evaluation.to_event();
+
+        assert_eq!(event.input_tokens(), 25);
+        assert_eq!(event.output_tokens(), 7);
+        assert_eq!(event.cost_cents(), evaluation.cost_cents);
     }
 
     #[test]

@@ -198,7 +198,9 @@ async fn replay_pending(
         .map(|(_, payload)| decode_pending_row(payload))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
-    if let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last()) {
+    if should_ack_journal(disposition)
+        && let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last())
+    {
         journal.ack_range(*lo, *hi)?;
     }
     if disposition == WriteDisposition::Written {
@@ -234,12 +236,18 @@ async fn flush_events(
     record_journal_depth(stats, journal.approximate_len() as u64);
 
     let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
-    journal.ack_range(start_seq, end_seq)?;
+    if should_ack_journal(disposition) {
+        journal.ack_range(start_seq, end_seq)?;
+    }
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
     record_journal_depth(stats, journal.approximate_len() as u64);
     Ok(())
+}
+
+fn should_ack_journal(disposition: WriteDisposition) -> bool {
+    disposition == WriteDisposition::Written
 }
 
 async fn write_pending_rows_or_dead_letter(
@@ -305,7 +313,7 @@ async fn write_dead_letter_batch(
     rows: &[PendingRow],
     failure: &WriteFailure,
 ) -> Result<Uuid> {
-    let dead_letter_id = Uuid::now_v7();
+    let dead_letter_id = stable_dead_letter_id(rows)?;
     let summary = dead_letter_summary(rows);
     let attempts = i32::try_from(failure.attempts)
         .map_err(|_| Error::Invalid("dead-letter attempt count overflow".to_string()))?;
@@ -326,6 +334,14 @@ async fn write_dead_letter_batch(
             rows
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (dead_letter_id) DO UPDATE
+        SET error = EXCLUDED.error,
+            attempts = EXCLUDED.attempts,
+            row_count = EXCLUDED.row_count,
+            first_workspace_id = EXCLUDED.first_workspace_id,
+            first_session_id = EXCLUDED.first_session_id,
+            first_turn_id = EXCLUDED.first_turn_id,
+            rows = EXCLUDED.rows
         "#,
     )
     .bind(dead_letter_id)
@@ -341,6 +357,14 @@ async fn write_dead_letter_batch(
 
     metrics::counter!("moa_lineage_dead_lettered_total").increment(summary.row_count as u64);
     Ok(dead_letter_id)
+}
+
+fn stable_dead_letter_id(rows: &[PendingRow]) -> Result<Uuid> {
+    let rows_json = serde_json::to_vec(rows)?;
+    let hash = blake3::hash(&rows_json);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    Ok(Uuid::from_bytes(bytes))
 }
 
 fn dead_letter_summary(rows: &[PendingRow]) -> DeadLetterSummary {
@@ -1098,5 +1122,37 @@ mod tests {
         assert_eq!(summary.first_workspace_id.as_deref(), Some("workspace-1"));
         assert_eq!(summary.first_session_id, Some(session_id));
         assert_eq!(summary.first_turn_id, Some(turn_id));
+    }
+
+    #[test]
+    fn dead_letter_disposition_does_not_ack_journal() {
+        // Pins: poison batches remain pending so compliance verification can see the gap.
+        assert!(super::should_ack_journal(super::WriteDisposition::Written));
+        assert!(!super::should_ack_journal(
+            super::WriteDisposition::DeadLettered
+        ));
+    }
+
+    #[test]
+    fn stable_dead_letter_id_dedupes_replayed_poison_batch() {
+        // Pins: leaving a poison batch pending does not create unbounded duplicate dead letters.
+        let row = super::PendingRow::Lineage(super::LineageRow {
+            turn_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            user_id: "user-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            ts: Utc::now(),
+            tier: 1,
+            record_kind: 1,
+            payload: serde_json::json!({"kind": "test"}),
+            integrity_hash: vec![7; 32],
+            prev_hash: None,
+        });
+
+        let first = super::stable_dead_letter_id(std::slice::from_ref(&row))
+            .expect("dead-letter id should compute");
+        let second = super::stable_dead_letter_id(&[row]).expect("dead-letter id should compute");
+
+        assert_eq!(first, second);
     }
 }

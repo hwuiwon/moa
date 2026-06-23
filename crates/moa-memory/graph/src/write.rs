@@ -863,7 +863,7 @@ async fn fetch_current_supersession_target(
 }
 
 async fn delete_age_node(conn: &mut PgConnection, label: NodeLabel, uid: Uuid) -> Result<()> {
-    let vertex_table = age_table(label.as_str());
+    let vertex_table = age_vertex_table(label);
     for edge_label in EdgeLabel::ALL {
         let sql = format!(
             r#"
@@ -878,7 +878,7 @@ async fn delete_age_node(conn: &mut PgConnection, label: NodeLabel, uid: Uuid) -
             WHERE edge_row.start_id = victim.id
                OR edge_row.end_id = victim.id
             "#,
-            edge_table = age_table(edge_label.as_str()),
+            edge_table = age_edge_table(edge_label),
         );
         sqlx::query(&sql)
             .bind(uid.to_string())
@@ -900,8 +900,31 @@ async fn delete_age_node(conn: &mut PgConnection, label: NodeLabel, uid: Uuid) -
     Ok(())
 }
 
-fn age_table(label: &str) -> String {
-    format!(r#"moa_graph."{label}""#)
+fn age_vertex_table(label: NodeLabel) -> &'static str {
+    match label {
+        NodeLabel::Entity => r#"moa_graph."Entity""#,
+        NodeLabel::Concept => r#"moa_graph."Concept""#,
+        NodeLabel::Decision => r#"moa_graph."Decision""#,
+        NodeLabel::Incident => r#"moa_graph."Incident""#,
+        NodeLabel::Lesson => r#"moa_graph."Lesson""#,
+        NodeLabel::Fact => r#"moa_graph."Fact""#,
+        NodeLabel::Source => r#"moa_graph."Source""#,
+    }
+}
+
+fn age_edge_table(label: EdgeLabel) -> &'static str {
+    match label {
+        EdgeLabel::RelatesTo => r#"moa_graph."RELATES_TO""#,
+        EdgeLabel::DependsOn => r#"moa_graph."DEPENDS_ON""#,
+        EdgeLabel::OwnedBy => r#"moa_graph."OWNED_BY""#,
+        EdgeLabel::Supersedes => r#"moa_graph."SUPERSEDES""#,
+        EdgeLabel::Contradicts => r#"moa_graph."CONTRADICTS""#,
+        EdgeLabel::DerivedFrom => r#"moa_graph."DERIVED_FROM""#,
+        EdgeLabel::MentionedIn => r#"moa_graph."MENTIONED_IN""#,
+        EdgeLabel::Caused => r#"moa_graph."CAUSED""#,
+        EdgeLabel::LearnedFrom => r#"moa_graph."LEARNED_FROM""#,
+        EdgeLabel::AppliesTo => r#"moa_graph."APPLIES_TO""#,
+    }
 }
 
 fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {

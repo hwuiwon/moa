@@ -88,7 +88,10 @@ impl AgentResolver {
         let skill_policy = skill_policy_from_definition(&definition.skill_policy);
         let workflow_policy = workflow_policy_from_definition(&definition.workflow_policy);
         let action_policy = action_policy_from_definition(&definition.action_policy);
-        let guardrail_policy = guardrail_policy_from_definition(&definition.guardrail_policy);
+        let guardrail_policy = guardrail_policy_from_definition(
+            &definition.guardrail_policy,
+            model_policy.fallback_model.as_deref(),
+        );
         let instructions = instructions_from_definition(definition);
         let resolved_policy = ResolvedHashPolicy {
             instructions: &instructions,
@@ -420,26 +423,34 @@ fn tool_policy_from_definition(definition: &AgentDefinition) -> AgentToolPolicy 
     }
 }
 
-fn guardrail_policy_from_definition(definition: &GuardrailPolicy) -> AgentGuardrailPolicy {
+fn guardrail_policy_from_definition(
+    definition: &GuardrailPolicy,
+    fallback_model: Option<&str>,
+) -> AgentGuardrailPolicy {
     AgentGuardrailPolicy {
         input: definition
             .input
             .as_ref()
-            .map(guardrail_stage_policy_from_definition),
+            .map(|stage| guardrail_stage_policy_from_definition(stage, fallback_model)),
         output: definition
             .output
             .as_ref()
-            .map(guardrail_stage_policy_from_definition),
+            .map(|stage| guardrail_stage_policy_from_definition(stage, fallback_model)),
     }
 }
 
 fn guardrail_stage_policy_from_definition(
     definition: &GuardrailStagePolicy,
+    fallback_model: Option<&str>,
 ) -> AgentGuardrailStagePolicy {
+    let effective_model = definition
+        .model
+        .as_deref()
+        .or_else(|| definition.enabled.then_some(fallback_model).flatten());
     AgentGuardrailStagePolicy {
         enabled: definition.enabled,
         mode: guardrail_mode_from_definition(definition.mode),
-        model: definition.model.as_deref().map(ModelId::new),
+        model: effective_model.map(ModelId::new),
         policy_prompt: definition.policy_prompt.clone(),
         block_message: definition.block_message.clone(),
     }
@@ -479,23 +490,33 @@ fn locked_tools_from_definition(
     definition: &AgentDefinition,
     refs: &[(String, ArtifactRef)],
 ) -> Vec<LockedToolRef> {
+    let denied_tools = definition
+        .tool_policy
+        .denied_tools
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut tools = definition
         .tool_policy
         .tools
         .iter()
-        .chain(definition.tool_policy.denied_tools.iter())
         .cloned()
         .chain(
             refs.iter()
-                .filter_map(|(_, artifact_ref)| match artifact_ref {
-                    ArtifactRef::Tool { name } => Some(name.clone()),
+                .filter_map(|(path, artifact_ref)| match artifact_ref {
+                    ArtifactRef::Tool { name }
+                        if !path.contains(".denied_tools") && !denied_tools.contains(name) =>
+                    {
+                        Some(name.clone())
+                    }
                     ArtifactRef::Artifact { .. } | ArtifactRef::Action { .. } => None,
+                    ArtifactRef::Tool { .. } => None,
                 }),
         )
         .map(|name| LockedToolRef {
-            schema_hash: stable_tool_hash(&name),
+            schema_hash: stable_tool_hash(&name, "builtin"),
             name,
-            provider: None,
+            provider: Some("builtin".to_string()),
         })
         .collect::<Vec<_>>();
     tools.sort_by(|left, right| left.name.cmp(&right.name));
@@ -503,9 +524,11 @@ fn locked_tools_from_definition(
     tools
 }
 
-fn stable_tool_hash(name: &str) -> String {
+fn stable_tool_hash(name: &str, provider: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"moa.tool-lock.v1");
+    hasher.update(b"moa.tool-lock.v2");
+    hasher.update((provider.len() as u64).to_be_bytes());
+    hasher.update(provider.as_bytes());
     hasher.update((name.len() as u64).to_be_bytes());
     hasher.update(name.as_bytes());
     hex::encode(hasher.finalize())
@@ -644,4 +667,88 @@ fn pointer_from_row(row: &sqlx::postgres::PgRow) -> Result<AgentInstallationPoin
 
 fn map_sqlx_error(error: sqlx::Error) -> MoaError {
     MoaError::StorageError(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_artifacts::agent::{AgentPurpose, ToolPolicy};
+
+    use super::*;
+
+    #[test]
+    fn enabled_guardrail_stage_snapshots_effective_fallback_model() {
+        // Pins: enabled guardrail model fallback is resolved into the pinned policy hash input.
+        let definition = AgentDefinition {
+            model_policy: ModelPolicy {
+                fallback_model: Some("anthropic:claude-haiku-4-5".to_string()),
+                ..ModelPolicy::default()
+            },
+            guardrail_policy: GuardrailPolicy {
+                input: Some(GuardrailStagePolicy {
+                    enabled: true,
+                    mode: ArtifactGuardrailMode::Shadow,
+                    model: None,
+                    policy_prompt: "Flag unsafe requests.".to_string(),
+                    block_message: None,
+                }),
+                output: None,
+            },
+            ..agent_definition()
+        };
+
+        let policy = guardrail_policy_from_definition(
+            &definition.guardrail_policy,
+            definition.model_policy.fallback_model.as_deref(),
+        );
+
+        assert_eq!(
+            policy
+                .input
+                .as_ref()
+                .and_then(|stage| stage.model.as_ref())
+                .map(ModelId::as_str),
+            Some("anthropic:claude-haiku-4-5")
+        );
+    }
+
+    #[test]
+    fn locked_tools_excludes_denied_tools_and_records_provider_identity() {
+        // Pins: denied tools do not inflate the dependency lock for effective allowed tools.
+        let definition = AgentDefinition {
+            tool_policy: ToolPolicy {
+                mode: ToolPolicyMode::Allowlist,
+                tools: vec!["file_read".to_string()],
+                denied_tools: vec!["shell".to_string()],
+            },
+            ..agent_definition()
+        };
+        let refs = definition.reference_paths();
+
+        let locked = locked_tools_from_definition(&definition, &refs);
+
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].name, "file_read");
+        assert_eq!(locked[0].provider.as_deref(), Some("builtin"));
+        assert_eq!(
+            locked[0].schema_hash,
+            stable_tool_hash("file_read", "builtin")
+        );
+    }
+
+    fn agent_definition() -> AgentDefinition {
+        AgentDefinition {
+            display_name: "Support".to_string(),
+            purpose: AgentPurpose::default(),
+            model_policy: ModelPolicy::default(),
+            instruction_policy: Default::default(),
+            knowledge_policy: Default::default(),
+            skill_policy: Default::default(),
+            workflow_policy: Default::default(),
+            action_policy: Default::default(),
+            tool_policy: Default::default(),
+            guardrail_policy: Default::default(),
+            revision_note: None,
+            metadata: serde_json::json!({}),
+        }
+    }
 }

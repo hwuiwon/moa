@@ -108,6 +108,7 @@ pub(crate) async fn prepare_turn_request(
             shared_skill_injector: Some(ctx.skill_injector()),
             compaction_llm_provider: None,
             query_rewrite_llm_provider: query_rewrite_provider,
+            identity_prompt_override: None,
             discovered_workspace_instructions: None,
             tool_schemas: ctx.tool_schemas().as_ref().clone(),
             lineage: lineage.clone(),

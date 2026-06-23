@@ -74,7 +74,7 @@ fn node_intent(
         label: NodeLabel::Fact,
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: name.into(),
         properties: json!({ "value": value.into() }),
         pii_class: PiiClass::None,

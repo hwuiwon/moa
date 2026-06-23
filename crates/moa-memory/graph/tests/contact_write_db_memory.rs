@@ -13,7 +13,7 @@ fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
         label: NodeLabel::Fact,
         workspace_id: Some(tenant_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "contact_write_db_memory" }),
         pii_class: PiiClass::None,

@@ -7,8 +7,7 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, MoaError, ScopeContext, ScopedConn, TenantId,
-    WorkspaceId,
+    LearningCandidateType, LearningEntry, MoaError, ScopeContext, ScopedConn, WorkspaceId,
 };
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -137,7 +136,7 @@ pub type Result<T> = std::result::Result<T, SkillReviewError>;
 
 /// Loads one candidate after the caller has authorized workspace editor access.
 pub async fn get_learning_candidate_for_review(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     workspace_id: &WorkspaceId,
     candidate_id: Uuid,
 ) -> Result<LearningCandidate> {
@@ -146,7 +145,7 @@ pub async fn get_learning_candidate_for_review(
 
 /// Claims and validates a proposed skill candidate before review-time regression execution.
 pub async fn prepare_skill_acceptance(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     pool: sqlx::PgPool,
     request: &SkillReviewRequest,
 ) -> Result<PreparedSkillAcceptance> {
@@ -193,7 +192,7 @@ pub async fn prepare_skill_acceptance(
 
 /// Rejects a claimed skill candidate after a review-time promotion gate fails.
 pub async fn reject_claimed_skill_candidate(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     request: &SkillReviewRequest,
     prepared: &PreparedSkillAcceptance,
     regression_report: Value,
@@ -233,13 +232,14 @@ pub async fn reject_claimed_skill_candidate(
 
 /// Publishes a claimed skill candidate and records promoted learning.
 pub async fn promote_claimed_skill_candidate(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     pool: sqlx::PgPool,
     request: &SkillReviewRequest,
     prepared: PreparedSkillAcceptance,
     regression_report: Value,
 ) -> Result<SkillReviewOutcome> {
-    let mut conn = ScopedConn::begin(&pool, &artifact_scope_context(&prepared.scope)).await?;
+    let scope_context = artifact_scope_context(&prepared.scope)?;
+    let mut conn = ScopedConn::begin(&pool, &scope_context).await?;
     let published = ArtifactRegistry::publish_revision_in_tx(
         conn.as_mut(),
         prepared.draft_artifact_revision_uid,
@@ -291,7 +291,7 @@ pub async fn promote_claimed_skill_candidate(
 
 /// Rejects a proposed learning candidate while preserving linked draft artifacts.
 pub async fn reject_learning_candidate(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     request: &SkillReviewRequest,
 ) -> Result<SkillReviewOutcome> {
     let candidate = load_candidate(store, &request.workspace_id, request.candidate_id).await?;
@@ -335,7 +335,7 @@ pub async fn reject_learning_candidate(
 }
 
 async fn load_candidate(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     workspace_id: &WorkspaceId,
     candidate_id: Uuid,
 ) -> Result<LearningCandidate> {
@@ -349,10 +349,12 @@ fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
     workspace_artifact_scope(workspace_id)
 }
 
-fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+fn artifact_scope_context(scope: &ActionRuleScope) -> Result<ScopeContext> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
-        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+        ActionRuleScope::WorkspaceDefault => Err(bad_request(
+            "skill review cannot promote WorkspaceDefault-scoped artifacts",
+        )),
+        ActionRuleScope::Tenant { tenant_id } => Ok(ScopeContext::tenant(*tenant_id)),
     }
 }
 
@@ -395,7 +397,7 @@ fn ensure_workspace_skill_draft(
 }
 
 async fn claim_candidate_for_acceptance(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     candidate_id: Uuid,
 ) -> Result<()> {
     finish_candidate_review_from(
@@ -413,21 +415,21 @@ async fn claim_candidate_for_acceptance(
 }
 
 async fn finish_proposed_candidate_review(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     update: LearningCandidateStatusUpdate,
 ) -> Result<()> {
     finish_candidate_review_from(store, update, LearningCandidateStatus::Proposed).await
 }
 
 async fn finish_claimed_candidate_review(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     update: LearningCandidateStatusUpdate,
 ) -> Result<()> {
     finish_candidate_review_from(store, update, LearningCandidateStatus::Evaluating).await
 }
 
 async fn finish_claimed_candidate_review_in_tx(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     conn: &mut PgConnection,
     update: LearningCandidateStatusUpdate,
 ) -> Result<()> {
@@ -436,7 +438,7 @@ async fn finish_claimed_candidate_review_in_tx(
 }
 
 async fn finish_candidate_review_from(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     update: LearningCandidateStatusUpdate,
     expected_status: LearningCandidateStatus,
 ) -> Result<()> {
@@ -452,7 +454,7 @@ async fn finish_candidate_review_from(
 }
 
 async fn finish_candidate_review_from_in_tx(
-    store: &(dyn LearningReviewStore + Send + Sync),
+    store: &(impl LearningReviewStore + ?Sized),
     conn: &mut PgConnection,
     update: LearningCandidateStatusUpdate,
     expected_status: LearningCandidateStatus,
@@ -644,6 +646,19 @@ mod tests {
         assert!(
             accepted_learning_type(&candidate).is_err(),
             "skill review must not append unsupported learning-log operation types"
+        );
+    }
+
+    #[test]
+    fn review_artifact_scope_rejects_workspace_default() {
+        // Pins: review promotion never maps workspace defaults to a nil tenant.
+        let error = artifact_scope_context(&ActionRuleScope::WorkspaceDefault)
+            .expect_err("workspace default review scope should fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("WorkspaceDefault-scoped artifacts")
         );
     }
 }

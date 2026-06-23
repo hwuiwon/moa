@@ -139,7 +139,7 @@ fn node_intent(
         label,
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "read_smoke" }),
         pii_class: PiiClass::None,
@@ -203,7 +203,7 @@ async fn create_superseded_neighbor_case(
             properties: json!({ "kind": "read_smoke" }),
             workspace_id: Some(workspace_id.to_string()),
             user_id: None,
-            scope: "workspace".to_string(),
+            scope: "tenant".to_string(),
             actor_id: Uuid::now_v7().to_string(),
             actor_kind: "system".to_string(),
         })
@@ -597,7 +597,7 @@ async fn create_edge(
             properties: json!({ "role": role, "source": "read_smoke_expand" }),
             workspace_id: Some(workspace_id.to_string()),
             user_id: None,
-            scope: "workspace".to_string(),
+            scope: "tenant".to_string(),
             actor_id: Uuid::now_v7().to_string(),
             actor_kind: "system".to_string(),
         })

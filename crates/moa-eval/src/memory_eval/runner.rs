@@ -41,12 +41,12 @@ use uuid::Uuid;
 
 use super::{
     BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, ClusterBootstrapReport,
-    CorpusManifest, DEFAULT_BOOTSTRAP_RESAMPLES, EmbeddingInput, ExtractionPrecisionCounts,
-    GoldPiiStatus, GoldResolutionReport, LedgerFact, Probe, ProbeResult, ProbeType,
-    RetrievalMetrics, RetrievedCandidate, SyntheticSession, candidates_from_retrieval_hits,
-    embedding_text_hash, read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl,
-    read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
-    validate_corpus,
+    CorpusManifest, DEFAULT_BOOTSTRAP_RESAMPLES, DeterministicJudge, EmbeddingInput,
+    ExtractionPrecisionCounts, GoldPiiStatus, GoldResolutionReport, JudgeInput, JudgeOutcome,
+    LedgerFact, Probe, ProbeResult, ProbeType, RetrievalMetrics, RetrievedCandidate,
+    SyntheticSession, candidates_from_retrieval_hits, embedding_text_hash,
+    read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json,
+    read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
 };
 use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
@@ -650,7 +650,7 @@ async fn run_memory_retrieval_eval_in_store(
             retrieval.retrieval_latency_ms,
             &gold_records_by_fact_id,
             preference_context_hit,
-        ));
+        )?);
         if options.lane == EvalLane::Live
             && (probe_index + 1) % 10 == 0
             && let Err(error) = check_budget(&providers.ledger).await
@@ -1610,7 +1610,7 @@ fn probe_result_for(
     retrieval_latency_ms: u64,
     gold_records_by_fact_id: &HashMap<String, super::GoldNodeRecord>,
     preference_context_hit: Option<bool>,
-) -> ProbeResult {
+) -> Result<ProbeResult> {
     let final_candidates = post_rerank_candidates.as_deref().unwrap_or(&candidates);
     let expected_found_at_4 = all_expected_found_at_k(
         final_candidates,
@@ -1623,11 +1623,29 @@ fn probe_result_for(
         RETRIEVAL_EVAL_CANDIDATE_K,
     );
     let pii_redacted = pii_redacted_for_probe(probe, gold_records_by_fact_id);
-    let answer_faithful =
-        answer_faithful_for_probe(probe, expected_found_at_4, blocked_leaked, pii_redacted);
+    let judge_outcome = deterministic_judge_outcome_for_probe(
+        probe,
+        expected_found_at_4,
+        blocked_leaked,
+        pii_redacted,
+    )?;
+    let answer_faithful = judge_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.answer_faithful)
+        .or_else(|| retrieval_answer_faithful_for_probe(probe, expected_found_at_4));
+    let abstention_correct = judge_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.abstention_correct);
+    let pii_redacted = judge_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.pii_redacted)
+        .or(pii_redacted);
+    let temporal_as_of_correct = judge_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.temporal_as_of_correct);
     let (temporal_filter_parsed, temporal_filter_matches_as_of) = temporal_parse_diagnostics(probe);
 
-    ProbeResult {
+    Ok(ProbeResult {
         probe_id: probe.probe_id.clone(),
         user_id: probe.user_id.as_str().to_string(),
         probe_type: probe.probe_type,
@@ -1637,41 +1655,76 @@ fn probe_result_for(
         post_rerank_candidates,
         retrieval_latency_ms,
         answer_faithful,
-        abstention_correct: abstention_correct_for_probe(probe, blocked_leaked),
+        abstention_correct,
         pii_redacted,
-        temporal_as_of_correct: temporal_as_of_correct_for_probe(probe, expected_found_at_4),
+        temporal_as_of_correct,
         temporal_filter_parsed,
         temporal_filter_matches_as_of,
         preference_context_hit,
-    }
+    })
 }
 
-fn answer_faithful_for_probe(
-    probe: &Probe,
-    expected_found_at_4: bool,
-    blocked_leaked: bool,
-    pii_redacted: Option<bool>,
-) -> Option<bool> {
+fn retrieval_answer_faithful_for_probe(probe: &Probe, expected_found_at_4: bool) -> Option<bool> {
     match probe.probe_type {
-        ProbeType::Abstention | ProbeType::CrossUserIsolation => Some(!blocked_leaked),
-        ProbeType::PiiRedaction => pii_redacted.map(|redacted| redacted && expected_found_at_4),
         _ if probe.expected_fact_ids.is_empty() => None,
         _ => Some(expected_found_at_4),
     }
 }
 
-fn abstention_correct_for_probe(probe: &Probe, blocked_leaked: bool) -> Option<bool> {
-    match probe.probe_type {
-        ProbeType::Abstention | ProbeType::CrossUserIsolation => Some(!blocked_leaked),
-        _ => None,
+fn deterministic_judge_outcome_for_probe(
+    probe: &Probe,
+    expected_found_at_4: bool,
+    blocked_leaked: bool,
+    pii_redacted: Option<bool>,
+) -> Result<Option<JudgeOutcome>> {
+    if !deterministic_judge_supports(probe.probe_type) {
+        return Ok(None);
     }
+
+    let mut input = JudgeInput::new(
+        probe.probe_type,
+        probe.answer.clone(),
+        candidate_answer_for_deterministic_judge(probe, expected_found_at_4, blocked_leaked),
+    )
+    .with_query(probe.query.clone());
+
+    if matches!(
+        probe.probe_type,
+        ProbeType::Abstention | ProbeType::CrossUserIsolation
+    ) {
+        input = input.with_abstained(!blocked_leaked);
+    }
+    if probe.probe_type == ProbeType::PiiRedaction {
+        input = input.with_expected_redacted(probe.expected_redacted);
+        if let Some(redacted) = pii_redacted {
+            input = input.with_pii_redacted(redacted);
+        }
+    }
+
+    DeterministicJudge::new().judge_sync(&input).map(Some)
 }
 
-fn temporal_as_of_correct_for_probe(probe: &Probe, expected_found_at_4: bool) -> Option<bool> {
-    if probe.probe_type == ProbeType::TemporalAsOf {
-        Some(expected_found_at_4)
-    } else {
-        None
+fn deterministic_judge_supports(probe_type: ProbeType) -> bool {
+    !matches!(
+        probe_type,
+        ProbeType::MultiHop | ProbeType::PreferenceApplication
+    )
+}
+
+fn candidate_answer_for_deterministic_judge(
+    probe: &Probe,
+    expected_found_at_4: bool,
+    blocked_leaked: bool,
+) -> String {
+    match probe.probe_type {
+        ProbeType::Abstention | ProbeType::CrossUserIsolation if !blocked_leaked => {
+            "I do not have enough information to answer.".to_string()
+        }
+        ProbeType::Abstention | ProbeType::CrossUserIsolation => {
+            "blocked memory leaked".to_string()
+        }
+        _ if expected_found_at_4 => probe.answer.clone(),
+        _ => String::new(),
     }
 }
 
@@ -2514,6 +2567,7 @@ impl ContradictionDetector for InsertOnlyContradictionDetector {
         _fact_text: &str,
         _embedding: &[f32],
         _label: moa_memory_graph::NodeLabel,
+        _pii_class: PiiClass,
         _ctx: &ContradictionContext,
     ) -> std::result::Result<Conflict, IngestError> {
         Ok(Conflict::Insert)
@@ -2631,6 +2685,38 @@ mod tests {
                 .call_count,
             0
         );
+    }
+
+    #[test]
+    fn retrieval_runner_scores_policy_probes_through_deterministic_judge() {
+        // Pins: hermetic retrieval eval reuses the memory-eval judge policy for answer outcomes.
+        let probe = Probe {
+            probe_id: "probe-pii".to_string(),
+            probe_type: ProbeType::PiiRedaction,
+            workspace_id: WorkspaceId::new("workspace"),
+            user_id: moa_core::UserId::new("user"),
+            query: "What is Alice's phone?".to_string(),
+            rewrite_query: None,
+            expected_rewrite: None,
+            query_class: None,
+            answer: "Alice's phone is [PHONE].".to_string(),
+            expected_fact_ids: vec!["fact-phone".to_string()],
+            blocked_fact_ids: Vec::new(),
+            as_of: None,
+            expected_redacted: true,
+        };
+
+        let unredacted = deterministic_judge_outcome_for_probe(&probe, true, false, Some(false))
+            .expect("judge should score deterministic PII probe")
+            .expect("PII probe should be deterministic");
+        let redacted = deterministic_judge_outcome_for_probe(&probe, true, false, Some(true))
+            .expect("judge should score deterministic PII probe")
+            .expect("PII probe should be deterministic");
+
+        assert_eq!(unredacted.answer_faithful, Some(false));
+        assert_eq!(unredacted.pii_redacted, Some(false));
+        assert_eq!(redacted.answer_faithful, Some(true));
+        assert_eq!(redacted.pii_redacted, Some(true));
     }
 
     #[tokio::test]

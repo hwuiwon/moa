@@ -466,6 +466,12 @@ mod tests {
                 reason: Some(format!("blocked because user said {guarded_text}")),
                 model: Some(ModelId::new("judge-model")),
                 policy_hash: "policy-sha256:abc123".to_string(),
+                input_tokens_uncached: 0,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 0,
+                cost_cents: 0,
+                duration_ms: 0,
             },
         )];
         let refs = records.iter().collect::<Vec<_>>();

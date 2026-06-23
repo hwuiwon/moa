@@ -161,6 +161,24 @@ pub enum Event {
         model: Option<ModelId>,
         /// Pinned policy hash that selected this guardrail check.
         policy_hash: String,
+        /// Input tokens billed at the provider's standard uncached rate.
+        #[serde(default)]
+        input_tokens_uncached: usize,
+        /// Input tokens billed to create or refresh a cache entry.
+        #[serde(default)]
+        input_tokens_cache_write: usize,
+        /// Input tokens served from cache.
+        #[serde(default)]
+        input_tokens_cache_read: usize,
+        /// Output token count.
+        #[serde(default)]
+        output_tokens: usize,
+        /// Cost in cents.
+        #[serde(default)]
+        cost_cents: u32,
+        /// Duration in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
     },
     /// A tool call was issued.
     ToolCall {
@@ -445,6 +463,12 @@ impl Event {
                 input_tokens_cache_write,
                 input_tokens_cache_read,
                 ..
+            }
+            | Self::GuardrailCheck {
+                input_tokens_uncached,
+                input_tokens_cache_write,
+                input_tokens_cache_read,
+                ..
             } => input_tokens_uncached + input_tokens_cache_write + input_tokens_cache_read,
             Self::Checkpoint { input_tokens, .. } => *input_tokens,
             _ => 0,
@@ -455,6 +479,10 @@ impl Event {
     pub fn input_tokens_uncached(&self) -> usize {
         match self {
             Self::BrainResponse {
+                input_tokens_uncached,
+                ..
+            }
+            | Self::GuardrailCheck {
                 input_tokens_uncached,
                 ..
             }
@@ -472,6 +500,10 @@ impl Event {
             Self::BrainResponse {
                 input_tokens_cache_write,
                 ..
+            }
+            | Self::GuardrailCheck {
+                input_tokens_cache_write,
+                ..
             } => *input_tokens_cache_write,
             _ => 0,
         }
@@ -483,6 +515,10 @@ impl Event {
             Self::BrainResponse {
                 input_tokens_cache_read,
                 ..
+            }
+            | Self::GuardrailCheck {
+                input_tokens_cache_read,
+                ..
             } => *input_tokens_cache_read,
             _ => 0,
         }
@@ -491,9 +527,9 @@ impl Event {
     /// Returns output tokens attributed to the event.
     pub fn output_tokens(&self) -> usize {
         match self {
-            Self::BrainResponse { output_tokens, .. } | Self::Checkpoint { output_tokens, .. } => {
-                *output_tokens
-            }
+            Self::BrainResponse { output_tokens, .. }
+            | Self::GuardrailCheck { output_tokens, .. }
+            | Self::Checkpoint { output_tokens, .. } => *output_tokens,
             _ => 0,
         }
     }
@@ -501,9 +537,9 @@ impl Event {
     /// Returns cost in cents attributed to the event.
     pub fn cost_cents(&self) -> u32 {
         match self {
-            Self::BrainResponse { cost_cents, .. } | Self::Checkpoint { cost_cents, .. } => {
-                *cost_cents
-            }
+            Self::BrainResponse { cost_cents, .. }
+            | Self::GuardrailCheck { cost_cents, .. }
+            | Self::Checkpoint { cost_cents, .. } => *cost_cents,
             _ => 0,
         }
     }
@@ -673,10 +709,19 @@ mod tests {
             reason: Some("blocked jailbreak attempt".to_string()),
             model: Some(ModelId::new("anthropic:claude-haiku-4-5")),
             policy_hash: "policy-sha256:abc123".to_string(),
+            input_tokens_uncached: 12,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 3,
+            output_tokens: 4,
+            cost_cents: 1,
+            duration_ms: 50,
         };
 
         assert_eq!(event.event_type(), EventType::GuardrailCheck);
         assert_eq!(event.type_name(), "GuardrailCheck");
+        assert_eq!(event.input_tokens(), 15);
+        assert_eq!(event.output_tokens(), 4);
+        assert_eq!(event.cost_cents(), 1);
 
         let json = serde_json::to_string(&event).expect("serialize guardrail check");
         assert!(json.contains("\"type\":\"GuardrailCheck\""));

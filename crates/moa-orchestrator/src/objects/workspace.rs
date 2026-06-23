@@ -213,6 +213,8 @@ impl WorkspaceObject for WorkspaceImpl {
         let config = config.into_inner();
         validate_workspace_key(ctx.key(), &config.id)?;
         validate_consolidation_hour(config.consolidation_hour_utc)?;
+        moa_security::validate_action_policy_rules(&config.action_policy.rules)
+            .map_err(to_handler_error)?;
 
         let mut state = WorkspaceVoState::load_from(&ctx).await?;
         state.config = Some(config.clone());
@@ -261,6 +263,7 @@ impl WorkspaceObject for WorkspaceImpl {
             created_by: UserId::new(identity.id.to_string()),
             created_at,
         };
+        moa_security::validate_action_policy_rule(&rule).map_err(to_handler_error)?;
 
         if let Some(existing) = state
             .action_policy

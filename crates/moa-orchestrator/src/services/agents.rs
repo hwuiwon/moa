@@ -151,13 +151,22 @@ impl Agents for AgentsImpl {
         require_agent_operator_or_tenant_admin(&identity, agent_id).await?;
         let fga = require_fga_client()?;
         let agent_wire = format!("agent:{agent_id}");
-        let can_act_as = fga
-            .read(None, Some("can_act_as"), Some(&agent_wire))
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "read agent can_act_as tuples failed");
-                TerminalError::new_with_code(503, "authorization engine unavailable")
-            })?;
+        let can_act_as = ctx
+            .run(|| async move {
+                fga.read(None, Some("can_act_as"), Some(agent_wire.as_str()))
+                    .await
+                    .map(Json::from)
+                    .map_err(|error| {
+                        tracing::error!(error = %error, "read agent can_act_as tuples failed");
+                        HandlerError::from(TerminalError::new_with_code(
+                            503,
+                            "authorization engine unavailable",
+                        ))
+                    })
+            })
+            .name("agents_deactivate_read_can_act_as")
+            .await?
+            .into_inner();
         let pool = OrchestratorCtx::current_graph_pool();
 
         Ok(ctx

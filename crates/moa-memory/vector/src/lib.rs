@@ -77,6 +77,24 @@ pub enum Error {
         /// Dimensionality required by the active vector index.
         required_dimension: usize,
     },
+    /// The workspace has no persisted embedder state row.
+    #[error("workspace {workspace_id} has no configured embedder state")]
+    WorkspaceEmbedderStateMissing {
+        /// Workspace missing embedder state.
+        workspace_id: String,
+    },
+    /// A write attempted to mix embedding models inside one workspace vector space.
+    #[error(
+        "workspace {workspace_id} embedder `{configured_model}` cannot accept `{requested_model}` vectors"
+    )]
+    EmbedderModelMismatch {
+        /// Workspace with the mismatched embedder model.
+        workspace_id: String,
+        /// Configured embedder model.
+        configured_model: String,
+        /// Model used by the embedding write.
+        requested_model: String,
+    },
     /// The workspace is being re-embedded and cannot serve stale KNN reads.
     #[error("workspace {workspace_id} re-embedding is in progress")]
     ReembedInProgress {

@@ -5,21 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use moa_brain::{
-    ContextPipeline,
-    pipeline::{
-        history::HistoryCompiler,
-        identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor},
-        instructions::InstructionProcessor,
-        memory::GraphMemoryRetriever,
-        query_rewrite::QueryRewriter,
-        runtime_context::RuntimeContextProcessor,
-        skills::SkillInjector,
-        tools::ToolDefinitionProcessor,
-    },
+    ContextPipeline, GraphMemoryPipelineOptions,
+    build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
+    pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
 use moa_core::{
-    ActionPolicyEffect, ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionActorRef,
-    SessionMeta, SessionStore, TenantId, UserId, WorkspaceId,
+    ActionPolicyEffect, LLMProvider, LineageHandle, MoaConfig, SessionActorRef, SessionMeta,
+    SessionStore, TenantId, UserId, WorkspaceId,
 };
 use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
 use moa_hands::ToolRouter;
@@ -169,13 +161,23 @@ pub(crate) async fn build_agent_environment_with_provider(
 }
 
 async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Result<()> {
+    if let Some(path) = &agent_config.memory.tenant_memory_path {
+        return Err(EvalError::InvalidConfig(format!(
+            "tenant memory fixture seeding is not implemented for {}",
+            path.display()
+        )));
+    }
+    if let Some(path) = &agent_config.memory.user_memory_path {
+        return Err(EvalError::InvalidConfig(format!(
+            "user memory fixture seeding is not implemented for {}",
+            path.display()
+        )));
+    }
     if !agent_config.memory.clear_defaults
         && let Some(default_root) = configured_default_memory_root(base_config)?
     {
         let _ = default_root;
     }
-    let _ = &agent_config.memory.user_memory_path;
-    let _ = &agent_config.memory.tenant_memory_path;
     Ok(())
 }
 
@@ -196,7 +198,7 @@ async fn build_tool_router(
     }
 
     let enabled_tools = resolve_enabled_tools(&available_tools, agent_config);
-    let policies = build_eval_policies(base_config, &agent_config.permissions, &enabled_tools);
+    let policies = build_eval_policies(base_config, &agent_config.permissions, &enabled_tools)?;
 
     Ok(router
         .with_enabled_tools(enabled_tools)
@@ -214,47 +216,33 @@ async fn build_pipeline(
     tool_router: &ToolRouter,
     lineage: Arc<dyn LineageHandle>,
 ) -> Result<ContextPipeline> {
-    let identity_prompt = compose_identity_prompt(&agent_config.instructions);
     let workspace_instructions =
         load_workspace_instructions(base_config, &agent_config.instructions).await?;
     let user_instructions = base_config.general.user_instructions.clone();
     let tool_schemas = tool_router.tool_schemas();
     let query_rewrite_provider = resolve_eval_rewriter_provider(base_config, llm_provider.clone());
-    let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
-        Box::new(IdentityProcessor::new(identity_prompt)),
-        Box::new(InstructionProcessor::new(
-            workspace_instructions,
-            user_instructions,
-            None,
-        )),
-        Box::new(ToolDefinitionProcessor::new(tool_schemas)),
-    ];
-    if let Some(query_rewrite_provider) = query_rewrite_provider {
-        stages.push(Box::new(
-            QueryRewriter::new(base_config.query_rewrite.clone(), query_rewrite_provider)
-                .with_session_store(session_store.clone())
-                .with_retrieval_availability(true, false),
-        ));
-    }
-    stages.push(Box::new(
-        SkillInjector::new(graph_pool.clone())
-            .with_session_store(session_store.clone())
-            .with_budget_config(base_config.skill_budget.clone()),
-    ));
-    stages.extend([
-        Box::new(
-            GraphMemoryRetriever::new_with_config(base_config.clone(), graph_pool, None)
-                .with_lineage(lineage),
-        ) as Box<dyn ContextProcessor>,
-        Box::new(HistoryCompiler::with_compaction(
-            session_store.clone(),
-            llm_provider,
-            base_config.compaction.clone(),
-        )) as Box<dyn ContextProcessor>,
-        Box::new(RuntimeContextProcessor::default()) as Box<dyn ContextProcessor>,
-    ]);
+    let mut eval_config = base_config.clone();
+    eval_config.general.workspace_instructions = workspace_instructions;
+    eval_config.general.user_instructions = user_instructions;
 
-    Ok(ContextPipeline::new(stages))
+    Ok(
+        build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
+            &eval_config,
+            session_store,
+            GraphMemoryPipelineOptions {
+                graph_pool,
+                shared_graph_memory_retriever: None,
+                retrieval_embedder: None,
+                shared_skill_injector: None,
+                compaction_llm_provider: Some(llm_provider),
+                query_rewrite_llm_provider: query_rewrite_provider,
+                identity_prompt_override: Some(compose_identity_prompt(&agent_config.instructions)),
+                discovered_workspace_instructions: None,
+                tool_schemas,
+                lineage,
+            },
+        ),
+    )
 }
 
 fn resolve_eval_rewriter_provider(
@@ -323,7 +311,7 @@ fn build_eval_policies(
     base_config: &MoaConfig,
     permissions: &ActionPolicyOverride,
     enabled_tools: &[String],
-) -> ActionPolicies {
+) -> Result<ActionPolicies> {
     let mut config = base_config.clone();
     config.permissions.default_effect = permissions
         .default_effect
@@ -333,7 +321,7 @@ fn build_eval_policies(
     }
     config.permissions.admin_review = permissions.admin_review.clone();
     config.permissions.always_deny = permissions.always_deny.clone();
-    ActionPolicies::from_config(&config)
+    Ok(ActionPolicies::from_config(&config)?)
 }
 
 fn resolve_enabled_tools(available_tools: &[String], agent_config: &AgentConfig) -> Vec<String> {
@@ -411,8 +399,8 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::build_agent_environment_with_provider;
-    use moa_eval_core::{ActionPolicyOverride, AgentConfig, ToolOverride};
+    use super::{build_agent_environment_with_provider, seed_memory};
+    use moa_eval_core::{ActionPolicyOverride, AgentConfig, MemoryOverride, ToolOverride};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
         TokenUsage {
@@ -496,6 +484,29 @@ mod tests {
         assert!(!environment.tool_router.has_tool("bash"));
         uuid::Uuid::parse_str(environment.workspace_id.as_str())
             .expect("eval workspace id should be the tenant UUID string");
+    }
+
+    #[tokio::test]
+    async fn setup_rejects_unimplemented_memory_seed_paths() {
+        // Pins: eval configs cannot silently ignore explicit memory fixture paths.
+        let moa_config = test_moa_config();
+        let config = AgentConfig {
+            memory: MemoryOverride {
+                tenant_memory_path: Some("tenant-memory.jsonl".into()),
+                ..MemoryOverride::default()
+            },
+            ..AgentConfig::default()
+        };
+
+        let error = seed_memory(&moa_config, &config)
+            .await
+            .expect_err("tenant fixture path should fail until seeding is implemented");
+
+        assert!(
+            error
+                .to_string()
+                .contains("tenant memory fixture seeding is not implemented")
+        );
     }
 
     fn test_moa_config() -> MoaConfig {

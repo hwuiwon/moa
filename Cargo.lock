@@ -3444,6 +3444,7 @@ name = "moa-lineage-sink"
 version = "0.1.0"
 dependencies = [
  "backon",
+ "blake3",
  "chrono",
  "fjall",
  "metrics",

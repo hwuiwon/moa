@@ -1,11 +1,11 @@
 //! Tool action-policy evaluation, command matching, and rule storage.
 
 use async_trait::async_trait;
-use globset::Glob;
+use globset::{Glob, GlobMatcher};
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, Result, SessionMeta,
-    TenantId, ToolPolicyInput, UserId, WorkspaceId,
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, MoaError, Result,
+    SessionMeta, TenantId, ToolPolicyInput, UserId, WorkspaceId,
 };
 
 /// Persistent action-policy rule storage used by policy-aware tool routing.
@@ -19,7 +19,7 @@ pub trait ActionPolicyRuleStore: Send + Sync {
         tool: &str,
     ) -> Result<Vec<ActionPolicyRule>>;
 
-    /// Creates or updates an action-policy rule.
+    /// Creates or updates an action-policy rule after validating its glob pattern.
     async fn upsert_action_policy_rule(&self, rule: ActionPolicyRule) -> Result<()>;
 
     /// Deletes an action-policy rule by tool and pattern.
@@ -69,12 +69,14 @@ pub struct ActionPolicies {
 
 impl ActionPolicies {
     /// Creates policies from the loaded MOA config.
-    pub fn from_config(config: &MoaConfig) -> Self {
-        Self {
+    pub fn from_config(config: &MoaConfig) -> Result<Self> {
+        let policies = Self {
             default_effect: config.permissions.default_effect,
             admin_review: config.permissions.admin_review.clone(),
             always_deny: config.permissions.always_deny.clone(),
-        }
+        };
+        policies.validate_config()?;
+        Ok(policies)
     }
 
     /// Evaluates a tool invocation using persistent rules, config defaults, and tool metadata.
@@ -84,6 +86,9 @@ impl ActionPolicies {
         ctx: &ActionPolicyContext,
         rules: &[ActionPolicyRule],
     ) -> Result<ActionPolicyCheck> {
+        self.validate_config()?;
+        validate_action_policy_rules(rules)?;
+
         let mut matched_rule: Option<ActionPolicyRule> = None;
         for rule in rules {
             if !rule_visible_to_context(rule, ctx) {
@@ -92,7 +97,7 @@ impl ActionPolicies {
             if rule.tool != input.tool_name {
                 continue;
             }
-            if rule_matches(rule, &input.tool_name, &input.normalized_input) {
+            if rule_matches(rule, &input.tool_name, &input.normalized_input)? {
                 matched_rule = Some(match matched_rule {
                     Some(current)
                         if stricter_effect(current.effect, rule.effect) == current.effect =>
@@ -104,7 +109,7 @@ impl ActionPolicies {
             }
         }
 
-        let configured = self.configured_tool_effect(&input.tool_name);
+        let configured = self.configured_tool_effect(&input.tool_name)?;
         if let Some(rule) = matched_rule {
             let (effect, reason) = match configured {
                 Some((configured_effect, configured_reason)) => {
@@ -142,62 +147,128 @@ impl ActionPolicies {
         })
     }
 
-    fn configured_tool_effect(&self, tool_name: &str) -> Option<(ActionPolicyEffect, String)> {
-        if self
-            .always_deny
-            .iter()
-            .any(|candidate| candidate == tool_name)
-        {
-            return Some((
-                ActionPolicyEffect::Deny,
-                "tool is denied by action-policy config".to_string(),
-            ));
+    fn configured_tool_effect(
+        &self,
+        tool_name: &str,
+    ) -> Result<Option<(ActionPolicyEffect, String)>> {
+        for candidate in &self.always_deny {
+            if config_glob_matches("permissions.always_deny", candidate, tool_name)? {
+                return Ok(Some((
+                    ActionPolicyEffect::Deny,
+                    "tool is denied by action-policy config".to_string(),
+                )));
+            }
         }
 
-        if self
-            .admin_review
-            .iter()
-            .any(|candidate| candidate == tool_name)
-        {
-            return Some((
-                ActionPolicyEffect::AdminReview,
-                "tool requires tenant admin review by config".to_string(),
-            ));
+        for candidate in &self.admin_review {
+            if config_glob_matches("permissions.admin_review", candidate, tool_name)? {
+                return Ok(Some((
+                    ActionPolicyEffect::AdminReview,
+                    "tool requires tenant admin review by config".to_string(),
+                )));
+            }
         }
 
-        None
+        Ok(None)
+    }
+
+    fn validate_config(&self) -> Result<()> {
+        for pattern in &self.always_deny {
+            validate_config_policy_glob("permissions.always_deny", pattern)?;
+        }
+        for pattern in &self.admin_review {
+            validate_config_policy_glob("permissions.admin_review", pattern)?;
+        }
+        Ok(())
     }
 }
 
 impl Default for ActionPolicies {
     fn default() -> Self {
-        Self::from_config(&MoaConfig::default())
+        Self {
+            default_effect: ActionPolicyEffect::Allow,
+            admin_review: Vec::new(),
+            always_deny: Vec::new(),
+        }
     }
 }
 
+/// Validates an action-policy glob pattern before persistence or evaluation.
+pub fn validate_policy_glob(pattern: &str) -> Result<()> {
+    compile_policy_glob(pattern).map(|_| ())
+}
+
+/// Validates one persisted action-policy rule before it is stored or evaluated.
+pub fn validate_action_policy_rule(rule: &ActionPolicyRule) -> Result<()> {
+    Glob::new(&rule.pattern).map(|_| ()).map_err(|error| {
+        MoaError::ValidationError(format!(
+            "invalid action-policy {} glob for tool `{}`: `{}` ({error})",
+            rule.effect.as_str(),
+            rule.tool,
+            rule.pattern
+        ))
+    })
+}
+
+/// Validates persisted action-policy rules before they are stored or evaluated.
+pub fn validate_action_policy_rules(rules: &[ActionPolicyRule]) -> Result<()> {
+    for rule in rules {
+        validate_action_policy_rule(rule)?;
+    }
+    Ok(())
+}
+
 /// Performs glob matching against a normalized tool input string.
-pub fn glob_match(pattern: &str, candidate: &str) -> bool {
+pub fn glob_match(pattern: &str, candidate: &str) -> Result<bool> {
+    Ok(compile_policy_glob(pattern)?.is_match(candidate))
+}
+
+fn compile_policy_glob(pattern: &str) -> Result<GlobMatcher> {
+    Glob::new(pattern)
+        .map(|glob| glob.compile_matcher())
+        .map_err(|error| {
+            MoaError::ValidationError(format!(
+                "invalid action-policy glob pattern `{pattern}`: {error}"
+            ))
+        })
+}
+
+fn validate_config_policy_glob(field: &str, pattern: &str) -> Result<()> {
+    Glob::new(pattern).map(|_| ()).map_err(|error| {
+        MoaError::ConfigError(format!(
+            "invalid action-policy config {field} glob pattern `{pattern}`: {error}"
+        ))
+    })
+}
+
+fn config_glob_matches(field: &str, pattern: &str, candidate: &str) -> Result<bool> {
     Glob::new(pattern)
         .map(|glob| glob.compile_matcher().is_match(candidate))
-        .unwrap_or(false)
+        .map_err(|error| {
+            MoaError::ConfigError(format!(
+                "invalid action-policy config {field} glob pattern `{pattern}`: {error}"
+            ))
+        })
 }
 
 /// Parses a shell command and matches it against a rule pattern.
-pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> bool {
+pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> Result<bool> {
+    let matcher = compile_policy_glob(rule_pattern)?;
+
     if has_action_policy_unsafe_shell_syntax(command) {
-        return false;
+        return Ok(false);
     }
 
     let sub_commands = split_shell_chain(command);
     if sub_commands.len() > 1 {
-        return sub_commands
+        return Ok(sub_commands
             .iter()
-            .all(|sub_command| glob_match(rule_pattern, sub_command));
+            .all(|sub_command| matcher.is_match(sub_command)));
     }
 
-    shell_words::split(command)
-        .map(|tokens| glob_match(rule_pattern, &tokens.join(" ")))
-        .unwrap_or_else(|_| glob_match(rule_pattern, command.trim()))
+    Ok(shell_words::split(command)
+        .map(|tokens| matcher.is_match(tokens.join(" ")))
+        .unwrap_or_else(|_| matcher.is_match(command.trim())))
 }
 
 fn rule_visible_to_context(rule: &ActionPolicyRule, ctx: &ActionPolicyContext) -> bool {
@@ -219,7 +290,7 @@ pub fn stricter_effect(left: ActionPolicyEffect, right: ActionPolicyEffect) -> A
     }
 }
 
-fn rule_matches(rule: &ActionPolicyRule, tool: &str, normalized_input: &str) -> bool {
+fn rule_matches(rule: &ActionPolicyRule, tool: &str, normalized_input: &str) -> Result<bool> {
     if tool == "bash" {
         return parse_and_match_command(normalized_input, &rule.pattern);
     }
@@ -232,12 +303,15 @@ mod tests {
     use chrono::Utc;
     use moa_core::shell::split_shell_chain;
     use moa_core::{
-        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, ModelId, RiskLevel, SessionMeta,
-        TenantId, ToolPolicyInput, UserId,
+        ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, MoaError, ModelId,
+        RiskLevel, SessionMeta, TenantId, ToolPolicyInput, UserId,
     };
     use uuid::Uuid;
 
-    use super::{ActionPolicies, ActionPolicyContext, parse_and_match_command};
+    use super::{
+        ActionPolicies, ActionPolicyContext, glob_match, parse_and_match_command,
+        validate_action_policy_rule,
+    };
 
     fn tenant_id() -> TenantId {
         TenantId::from(Uuid::from_u128(42))
@@ -330,6 +404,163 @@ mod tests {
         assert_eq!(check.effect, ActionPolicyEffect::AdminReview);
         assert_eq!(check.reason.as_deref(), Some("review source edits"));
         assert!(check.matched_rule.is_some());
+    }
+
+    #[test]
+    fn malformed_policy_glob_match_returns_error() {
+        // Pins: glob syntax errors are policy errors, not false non-matches.
+        let error = glob_match("[", "src/lib.rs")
+            .expect_err("malformed policy glob should return an error");
+
+        assert!(
+            matches!(error, MoaError::ValidationError(message) if message.contains("invalid action-policy glob pattern"))
+        );
+    }
+
+    #[test]
+    fn malformed_deny_rule_glob_is_policy_error_before_matching() {
+        // Pins: malformed deny globs fail closed instead of silently missing and allowing the action.
+        let policies = ActionPolicies::default();
+        let ctx = ActionPolicyContext::from_session(&session());
+        let rule = ActionPolicyRule {
+            id: Uuid::now_v7(),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id(),
+            },
+            tool: "file_write".to_string(),
+            pattern: "[".to_string(),
+            effect: ActionPolicyEffect::Deny,
+            reason: Some("deny source edits".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: Utc::now(),
+        };
+        let validation_error = validate_action_policy_rule(&rule)
+            .expect_err("malformed deny glob should be rejected before upsert");
+        assert!(
+            matches!(validation_error, MoaError::ValidationError(message) if message.contains("deny") && message.contains("file_write"))
+        );
+
+        let check = policies
+            .check(
+                &ToolPolicyInput {
+                    tool_name: "file_write".to_string(),
+                    normalized_input: "src/lib.rs".to_string(),
+                    input_summary: "Path: src/lib.rs".to_string(),
+                    risk_level: RiskLevel::Medium,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: moa_core::ActionClass::LocalWrite,
+                },
+                &ctx,
+                &[rule],
+            )
+            .expect_err("malformed deny glob should fail policy evaluation");
+
+        assert!(
+            matches!(check, MoaError::ValidationError(message) if message.contains("deny") && message.contains("file_write"))
+        );
+    }
+
+    #[test]
+    fn malformed_review_rule_glob_is_policy_error_before_matching() {
+        // Pins: malformed admin-review globs fail closed instead of silently skipping review.
+        let policies = ActionPolicies::default();
+        let ctx = ActionPolicyContext::from_session(&session());
+        let rule = ActionPolicyRule {
+            id: Uuid::now_v7(),
+            scope: ActionRuleScope::Tenant {
+                tenant_id: tenant_id(),
+            },
+            tool: "bash".to_string(),
+            pattern: "[".to_string(),
+            effect: ActionPolicyEffect::AdminReview,
+            reason: Some("review deploys".to_string()),
+            created_by: UserId::new("admin"),
+            created_at: Utc::now(),
+        };
+        let validation_error = validate_action_policy_rule(&rule)
+            .expect_err("malformed admin-review glob should be rejected before upsert");
+        assert!(
+            matches!(validation_error, MoaError::ValidationError(message) if message.contains("admin_review") && message.contains("bash"))
+        );
+
+        let check = policies
+            .check(
+                &ToolPolicyInput {
+                    tool_name: "bash".to_string(),
+                    normalized_input: "cargo test".to_string(),
+                    input_summary: "Command: cargo test".to_string(),
+                    risk_level: RiskLevel::High,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: moa_core::ActionClass::CommandExecution,
+                },
+                &ctx,
+                &[rule],
+            )
+            .expect_err("malformed admin-review glob should fail policy evaluation");
+
+        assert!(
+            matches!(check, MoaError::ValidationError(message) if message.contains("admin_review") && message.contains("bash"))
+        );
+    }
+
+    #[test]
+    fn malformed_deny_config_glob_is_rejected_at_policy_construction() {
+        // Pins: deployment deny config is validated before a policy engine is built.
+        let mut config = MoaConfig::default();
+        config.permissions.always_deny = vec!["[".to_string()];
+
+        let error = ActionPolicies::from_config(&config)
+            .expect_err("malformed deny config glob should fail policy construction");
+
+        assert!(
+            matches!(error, MoaError::ConfigError(message) if message.contains("permissions.always_deny"))
+        );
+    }
+
+    #[test]
+    fn malformed_review_config_glob_is_rejected_at_policy_construction() {
+        // Pins: deployment admin-review config is validated before a policy engine is built.
+        let mut config = MoaConfig::default();
+        config.permissions.admin_review = vec!["[".to_string()];
+
+        let error = ActionPolicies::from_config(&config)
+            .expect_err("malformed review config glob should fail policy construction");
+
+        assert!(
+            matches!(error, MoaError::ConfigError(message) if message.contains("permissions.admin_review"))
+        );
+    }
+
+    #[test]
+    fn configured_tool_policy_uses_valid_glob_patterns() {
+        // Pins: deployment-level deny config can use a valid tool-name glob.
+        let mut config = MoaConfig::default();
+        config.permissions.always_deny = vec!["file_*".to_string()];
+        let policies = ActionPolicies::from_config(&config)
+            .expect("valid config glob should build an action policy");
+        let ctx = ActionPolicyContext::from_session(&session());
+
+        let check = policies
+            .check(
+                &ToolPolicyInput {
+                    tool_name: "file_write".to_string(),
+                    normalized_input: "src/lib.rs".to_string(),
+                    input_summary: "Path: src/lib.rs".to_string(),
+                    risk_level: RiskLevel::Medium,
+                    default_effect: ActionPolicyEffect::Allow,
+                    action_class: moa_core::ActionClass::LocalWrite,
+                },
+                &ctx,
+                &[],
+            )
+            .expect("valid config glob should evaluate");
+
+        assert_eq!(check.effect, ActionPolicyEffect::Deny);
+        assert_eq!(
+            check.reason.as_deref(),
+            Some("tool is denied by action-policy config")
+        );
+        assert!(check.matched_rule.is_none());
     }
 
     #[test]
@@ -614,11 +845,14 @@ mod tests {
             split_shell_chain("npm test && rm -rf /"),
             vec!["npm test".to_string(), "rm -rf /".to_string()]
         );
-        assert!(!parse_and_match_command(
-            "npm test && rm -rf /",
-            "npm test*"
-        ));
-        assert!(parse_and_match_command("npm test -- --watch", "npm test*"));
+        assert!(
+            !parse_and_match_command("npm test && rm -rf /", "npm test*")
+                .expect("valid action-policy glob should evaluate")
+        );
+        assert!(
+            parse_and_match_command("npm test -- --watch", "npm test*")
+                .expect("valid action-policy glob should evaluate")
+        );
     }
 
     #[test]
@@ -632,7 +866,8 @@ mod tests {
             "npm test < /tmp/in",
         ] {
             assert!(
-                !parse_and_match_command(command, "npm *"),
+                !parse_and_match_command(command, "npm *")
+                    .expect("valid action-policy glob should evaluate"),
                 "{command} must not satisfy an action-policy bash glob"
             );
         }

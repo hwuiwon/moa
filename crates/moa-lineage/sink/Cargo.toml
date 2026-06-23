@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 backon.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 fjall = "3"
 metrics.workspace = true

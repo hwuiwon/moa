@@ -95,7 +95,7 @@ impl LocalHandProvider {
         let sandbox_dir = self.work_dir.join(format!("sandbox-{}", Uuid::now_v7()));
         fs::create_dir_all(&sandbox_dir).await?;
         #[cfg(unix)]
-        fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o777)).await?;
+        fs::set_permissions(&sandbox_dir, std::fs::Permissions::from_mode(0o770)).await?;
         Ok(sandbox_dir)
     }
 
@@ -266,12 +266,10 @@ impl LocalHandProvider {
                 .await
             }
             "file_read" => {
-                file_read::execute_docker(
-                    container_id,
+                file_read::execute_docker_bind_mount(
+                    &sandbox.sandbox_dir,
                     &sandbox.workspace_mount,
                     input,
-                    self.command_timeout,
-                    hard_cancel_token,
                 )
                 .await
             }
@@ -315,6 +313,17 @@ impl LocalHandProvider {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn cleanup_failed_sandbox_dir(&self, sandbox_dir: &Path, reason: &str) {
+        if let Err(error) = self.destroy_local_sandbox(sandbox_dir).await {
+            tracing::warn!(
+                %error,
+                %reason,
+                sandbox_dir = %sandbox_dir.display(),
+                "failed to clean up local sandbox directory after provisioning failure"
+            );
         }
     }
 
@@ -391,24 +400,25 @@ impl HandProvider for LocalHandProvider {
     }
 
     async fn provision(&self, spec: HandSpec) -> Result<HandHandle> {
-        let sandbox_dir = self.create_sandbox_dir().await?;
         match spec.sandbox_tier {
             SandboxTier::None | SandboxTier::Local => {
+                let sandbox_dir = self.create_sandbox_dir().await?;
                 self.provision_local(&spec, sandbox_dir).await
             }
             SandboxTier::Container if self.docker_available => {
+                let sandbox_dir = self.create_sandbox_dir().await?;
                 match self.provision_docker(&spec, &sandbox_dir).await {
                     Ok(handle) => Ok(handle),
                     Err(error) => {
-                        tracing::warn!(%error, "docker sandbox provisioning failed, falling back to local execution");
-                        self.provision_local(&spec, sandbox_dir).await
+                        self.cleanup_failed_sandbox_dir(&sandbox_dir, "docker provisioning failed")
+                            .await;
+                        Err(error)
                     }
                 }
             }
-            SandboxTier::Container => {
-                tracing::warn!("docker not available, falling back to local sandbox");
-                self.provision_local(&spec, sandbox_dir).await
-            }
+            SandboxTier::Container => Err(MoaError::ProviderError(
+                "container sandbox requested but Docker is unavailable".to_string(),
+            )),
             SandboxTier::MicroVM => Err(MoaError::Unsupported(
                 "microvm sandboxes are not supported by the local hand provider".to_string(),
             )),
@@ -680,5 +690,86 @@ pub fn classify_error(
             classify_tool_error(error, consecutive_timeouts)
         }
         _ => classify_tool_error(error, consecutive_timeouts),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use moa_core::{HandProvider, HandResources, HandSpec, MoaError, SandboxTier};
+    use tempfile::tempdir;
+
+    use super::LocalHandProvider;
+
+    fn hand_spec(tier: SandboxTier) -> HandSpec {
+        HandSpec {
+            sandbox_tier: tier,
+            image: None,
+            resources: HandResources::default(),
+            env: HashMap::new(),
+            workspace_mount: None,
+            idle_timeout: Duration::from_secs(300),
+            max_lifetime: Duration::from_secs(300),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_container_tier_fails_when_docker_is_unavailable() {
+        // Pins: requested container isolation must not silently become host-local execution.
+        let dir = tempdir().expect("create tempdir");
+        let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
+            .await
+            .expect("create local hand provider");
+
+        let error = provider
+            .provision(hand_spec(SandboxTier::Container))
+            .await
+            .expect_err("container tier should fail when Docker is unavailable");
+
+        assert!(
+            matches!(error, MoaError::ProviderError(message) if message.contains("Docker is unavailable"))
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("read sandbox root")
+                .count(),
+            0,
+            "failed container provisioning should not leave a local fallback sandbox"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_sandbox_directory_is_owner_group_restricted() {
+        // Pins: local sandbox directories must not grant world access.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("create tempdir");
+        let provider = LocalHandProvider::new_with_docker_detection(dir.path(), false)
+            .await
+            .expect("create local hand provider");
+
+        let handle = provider
+            .provision(hand_spec(SandboxTier::Local))
+            .await
+            .expect("provision local sandbox");
+        let sandbox_dir = match &handle {
+            moa_core::HandHandle::Local { sandbox_dir } => sandbox_dir,
+            other => panic!("expected local hand, got {other:?}"),
+        };
+        let mode = std::fs::metadata(sandbox_dir)
+            .expect("read sandbox metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o770);
+
+        provider
+            .destroy(&handle)
+            .await
+            .expect("destroy local sandbox");
     }
 }

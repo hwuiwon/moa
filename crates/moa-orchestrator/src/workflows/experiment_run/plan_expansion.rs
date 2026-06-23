@@ -40,9 +40,16 @@ async fn dispatch_plan_trials(
         .map(|trial| (trial.trial.trial_key.clone(), trial))
         .collect::<BTreeMap<_, _>>();
     let mut idle_polls = 0_u32;
+    let mut last_progress = None;
 
     loop {
         let aggregate = aggregate_plan_status(ctx, request.tenant_id, request.run_uid).await?;
+        let progress = plan_progress_fingerprint(&aggregate);
+        let state_changed = last_progress
+            .as_ref()
+            .is_none_or(|previous| previous != &progress);
+        last_progress = Some(progress);
+
         if aggregate.run.status == ExperimentRunStatus::Cancelled {
             cancel_active_plan_trials(
                 ctx,
@@ -109,7 +116,6 @@ async fn dispatch_plan_trials(
             .take(available_slots)
             .map(|trial| trial.trial_key.clone())
             .collect::<Vec<_>>();
-        let had_ready_trials = !ready_trial_keys.is_empty();
         let claimed_trials = claim_plan_trial_dispatches(
             ctx,
             request.tenant_id,
@@ -118,6 +124,7 @@ async fn dispatch_plan_trials(
             available_slots,
         )
         .await?;
+        let claimed_any_trials = !claimed_trials.is_empty();
         for claimed_trial in claimed_trials {
             let Some(trial) = dispatch_index.get(&claimed_trial.trial_key) else {
                 continue;
@@ -134,10 +141,30 @@ async fn dispatch_plan_trials(
                 .send();
         }
 
-        if available_slots == 0 || had_ready_trials {
-            idle_polls = 0;
-        } else {
-            idle_polls = idle_polls.saturating_add(1);
+        idle_polls = next_plan_idle_polls(idle_polls, state_changed || claimed_any_trials);
+        if plan_idle_limit_exceeded(idle_polls) {
+            let reason = format!(
+                "experiment plan polling made no progress for {PLAN_STATUS_MAX_IDLE_POLLS} consecutive polls"
+            );
+            cancel_active_plan_trials(ctx, request.tenant_id, request.run_uid, reason.clone())
+                .await?;
+            persist_run_status(
+                ctx,
+                request.tenant_id,
+                request.run_uid,
+                ExperimentRunStatus::Failed,
+                Some(reason),
+                Some(durable_utc_now(ctx).await?),
+            )
+            .await?;
+            return workflow_status_response(
+                ctx,
+                ExperimentRunStatusRequest {
+                    tenant_id: request.tenant_id,
+                    run_uid: request.run_uid,
+                },
+            )
+            .await;
         }
         ctx.sleep(plan_status_poll_interval(idle_polls)).await?;
     }
@@ -415,6 +442,31 @@ pub(super) fn plan_status_poll_interval(idle_polls: u32) -> Duration {
         _ => PLAN_STATUS_POLL_MAX_INTERVAL.as_secs(),
     };
     Duration::from_secs(seconds.min(PLAN_STATUS_POLL_MAX_INTERVAL.as_secs()))
+}
+
+pub(super) fn next_plan_idle_polls(current: u32, made_progress: bool) -> u32 {
+    if made_progress {
+        0
+    } else {
+        current.saturating_add(1)
+    }
+}
+
+pub(super) fn plan_idle_limit_exceeded(idle_polls: u32) -> bool {
+    idle_polls >= PLAN_STATUS_MAX_IDLE_POLLS
+}
+
+fn plan_progress_fingerprint(
+    aggregate: &PlanStatusAggregate,
+) -> (ExperimentRunStatus, Vec<(String, ExperimentTrialStatus)>) {
+    (
+        aggregate.run.status,
+        aggregate
+            .trials
+            .iter()
+            .map(|trial| (trial.trial_key.clone(), trial.status))
+            .collect(),
+    )
 }
 
 pub(super) fn aggregate_error_for_trials(trials: &[ExperimentTrialRecord]) -> Option<String> {

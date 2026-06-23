@@ -170,9 +170,10 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .context("deserialize restarted status response")?;
         assert_eq!(status_after_restart, SessionStatus::Paused);
 
-        client
+        let cancel_request = client
             .post(object_url(ingress, session_id, "cancel"))
-            .json(&CancelMode::Soft)
+            .json(&CancelMode::Soft);
+        with_identity(cancel_request, &identity)
             .send()
             .await
             .context("call Session/cancel")?

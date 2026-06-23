@@ -102,13 +102,17 @@ pub struct ScopeMatchBreakdown {
     /// Resolved records with any expected scope.
     pub overall_total: usize,
     /// Resolved records expected to be contact-scoped and stored as contact-scoped.
-    pub user_matches: usize,
+    #[serde(alias = "user_matches")]
+    pub contact_matches: usize,
     /// Resolved records expected to be contact-scoped.
-    pub user_total: usize,
+    #[serde(alias = "user_total")]
+    pub contact_total: usize,
     /// Resolved records expected to be tenant-scoped and stored as tenant-scoped.
-    pub workspace_matches: usize,
+    #[serde(alias = "workspace_matches")]
+    pub tenant_matches: usize,
     /// Resolved records expected to be tenant-scoped.
-    pub workspace_total: usize,
+    #[serde(alias = "workspace_total")]
+    pub tenant_total: usize,
 }
 
 impl ScopeMatchBreakdown {
@@ -124,16 +128,16 @@ impl ScopeMatchBreakdown {
                 breakdown.overall_matches += 1;
             }
             match record.expected_scope.as_str() {
-                "user" => {
-                    breakdown.user_total += 1;
+                "contact" => {
+                    breakdown.contact_total += 1;
                     if matched {
-                        breakdown.user_matches += 1;
+                        breakdown.contact_matches += 1;
                     }
                 }
-                "workspace" => {
-                    breakdown.workspace_total += 1;
+                "tenant" => {
+                    breakdown.tenant_total += 1;
                     if matched {
-                        breakdown.workspace_matches += 1;
+                        breakdown.tenant_matches += 1;
                     }
                 }
                 _ => {}
@@ -1204,21 +1208,21 @@ mod tests {
             ingest_reports: Vec::new(),
             records: vec![
                 gold_record(
-                    "fact-workspace",
-                    Some("workspace"),
-                    "workspace",
+                    "fact-tenant",
+                    Some("tenant"),
+                    "tenant",
                     GoldResolutionStatus::Resolved,
                 ),
                 gold_record(
                     "fact-mixed",
                     Some("mixed"),
-                    "user",
+                    "contact",
                     GoldResolutionStatus::Duplicate,
                 ),
                 gold_record(
                     "fact-missing",
                     None,
-                    "user",
+                    "contact",
                     GoldResolutionStatus::Unresolved,
                 ),
             ],

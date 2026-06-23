@@ -11,6 +11,7 @@ use moa_core::wire::{
     LineageVerifyRequest, LineageVerifyResponse,
 };
 use moa_core::{TenantId, WorkspaceId};
+use moa_lineage_audit::SigningKey;
 use moa_lineage_audit::admin as lineage_audit_admin;
 use moa_lineage_sink::admin as lineage_sink_admin;
 use restate_sdk::prelude::*;
@@ -22,6 +23,10 @@ use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 
 const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
+const PRIVACY_EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
+const PRIVACY_EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
+const LINEAGE_AUDIT_SIGNING_KEY_ENV: &str = "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX";
+const LINEAGE_AUDIT_SIGNING_KEY_ID_ENV: &str = "MOA_LINEAGE_AUDIT_SIGNING_KEY_ID";
 
 /// Restate service surface for protected lineage administration.
 #[restate_sdk::service]
@@ -212,6 +217,7 @@ async fn export_inner(
     pool: PgPool,
     request: LineageExportRequest,
 ) -> Result<LineageExportResponse, HandlerError> {
+    let signing = configured_lineage_dsar_signing_key()?;
     let workspace_id = storage_workspace_id(request.tenant_id);
     let records =
         lineage_sink_admin::load_dsar_export_records(&pool, &workspace_id, &request.subject)
@@ -220,6 +226,7 @@ async fn export_inner(
     let export_dir = create_temp_dir("moa-lineage-export").await?;
     let bundle_path = export_dir.join("lineage-dsar.zip");
     let bundle = lineage_audit_admin::export_dsar_bundle(
+        signing,
         workspace_id.as_str(),
         &request.subject,
         records,
@@ -253,15 +260,20 @@ async fn verify_inner(
         .map_err(handler_error)?;
         let report =
             lineage_audit_admin::verify_compliance_rows(rows, None).map_err(handler_error)?;
+        let dead_letters =
+            lineage_audit_admin::count_lineage_dead_letter_rows(&pool, workspace_id.as_str(), None)
+                .await
+                .map_err(handler_error)?;
         return Ok(LineageVerifyResponse {
             tenant_id: request.tenant_id,
             records: usize_to_u64(report.records),
             root_checked: false,
-            status: "ok".to_string(),
+            status: verification_status(dead_letters),
             root_id: None,
         });
     }
 
+    let signing = configured_audit_root_signing_key()?;
     let root = lineage_audit_admin::load_audit_root(&pool, workspace_id.as_str(), &request.window)
         .await
         .map_err(handler_error)?;
@@ -273,13 +285,20 @@ async fn verify_inner(
     )
     .await
     .map_err(handler_error)?;
-    let report = lineage_audit_admin::verify_compliance_rows(rows, Some(root.merkle_root))
+    let dead_letters = lineage_audit_admin::count_lineage_dead_letter_rows(
+        &pool,
+        workspace_id.as_str(),
+        Some((root.window_start, root.window_end)),
+    )
+    .await
+    .map_err(handler_error)?;
+    let report = lineage_audit_admin::verify_audit_root_window(rows, &root, &signing)
         .map_err(handler_error)?;
     Ok(LineageVerifyResponse {
         tenant_id: request.tenant_id,
         records: usize_to_u64(report.records),
         root_checked: true,
-        status: "ok".to_string(),
+        status: verification_status(dead_letters),
         root_id: Some(root.root_id),
     })
 }
@@ -359,6 +378,90 @@ fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
         .transpose()
 }
 
+fn configured_lineage_dsar_signing_key() -> Result<SigningKey, HandlerError> {
+    configured_signing_key_from_env(
+        PRIVACY_EXPORT_SIGNING_KEY_ENV,
+        PRIVACY_EXPORT_SIGNING_KEY_ID_ENV,
+        "moa-privacy-export-ops",
+    )
+}
+
+fn configured_audit_root_signing_key() -> Result<SigningKey, HandlerError> {
+    configured_signing_key_from_env(
+        LINEAGE_AUDIT_SIGNING_KEY_ENV,
+        LINEAGE_AUDIT_SIGNING_KEY_ID_ENV,
+        "moa-lineage-audit-ops",
+    )
+}
+
+fn configured_signing_key_from_env(
+    key_env: &str,
+    label_env: &str,
+    default_label: &str,
+) -> Result<SigningKey, HandlerError> {
+    configured_signing_key_from_lookup(key_env, label_env, default_label, |name| {
+        std::env::var(name).ok()
+    })
+}
+
+fn configured_signing_key_from_lookup(
+    key_env: &str,
+    label_env: &str,
+    default_label: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<SigningKey, HandlerError> {
+    let raw =
+        lookup(key_env).ok_or_else(|| TerminalError::new(format!("{key_env} is required")))?;
+    let label = lookup(label_env).unwrap_or_else(|| default_label.to_string());
+    signing_key_from_material(key_env, label, &raw)
+}
+
+fn signing_key_from_material(
+    key_env: &str,
+    label: String,
+    raw: &str,
+) -> Result<SigningKey, HandlerError> {
+    let bytes = decode_signing_key_material(key_env, raw)?;
+    let seed = match bytes.len() {
+        32 => bytes,
+        64 => bytes[..32].to_vec(),
+        len => {
+            return Err(TerminalError::new_with_code(
+                400,
+                format!("{key_env} must be 32 or 64 bytes, got {len}"),
+            )
+            .into());
+        }
+    };
+    let seed: [u8; 32] = seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| TerminalError::new_with_code(400, format!("{key_env} must be 32 bytes")))?;
+    Ok(SigningKey::from_seed(label, seed))
+}
+
+fn decode_signing_key_material(key_env: &str, raw: &str) -> Result<Vec<u8>, HandlerError> {
+    let trimmed = raw.trim();
+    if let Ok(bytes) = hex::decode(trimmed) {
+        return Ok(bytes);
+    }
+    BASE64_STANDARD.decode(trimmed).map_err(|error| {
+        TerminalError::new_with_code(
+            400,
+            format!("{key_env} must be hex or standard base64 key material: {error}"),
+        )
+        .into()
+    })
+}
+
+fn verification_status(dead_letter_rows: u64) -> String {
+    if dead_letter_rows > 0 {
+        "incomplete".to_string()
+    } else {
+        "ok".to_string()
+    }
+}
+
 async fn create_temp_dir(prefix: &str) -> Result<std::path::PathBuf, HandlerError> {
     let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7()));
     tokio::fs::create_dir_all(&path)
@@ -379,4 +482,56 @@ fn usize_to_u64(value: usize) -> u64 {
 
 fn handler_error(error: impl std::fmt::Display) -> HandlerError {
     TerminalError::new(error.to_string()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        configured_signing_key_from_lookup, signing_key_from_material, verification_status,
+    };
+
+    #[test]
+    fn configured_signing_key_reports_missing_material() {
+        // Pins: lineage DSAR export fails before DB work when signing material is unset.
+        let result = configured_signing_key_from_lookup(
+            "MOA_TEST_KEY",
+            "MOA_TEST_KEY_ID",
+            "default",
+            |_| None,
+        );
+        let Err(error) = result else {
+            panic!("missing key material should fail");
+        };
+
+        assert!(format!("{error:?}").contains("MOA_TEST_KEY is required"));
+    }
+
+    #[test]
+    fn configured_signing_key_rejects_malformed_material() {
+        // Pins: malformed configured signing material fails before bundle creation.
+        let result =
+            signing_key_from_material("MOA_TEST_KEY", "test-key".to_string(), "not hex or base64!");
+        let Err(error) = result else {
+            panic!("malformed key material should fail");
+        };
+
+        assert!(format!("{error:?}").contains("hex or standard base64"));
+    }
+
+    #[test]
+    fn configured_signing_key_accepts_hex_seed_and_label() {
+        // Pins: the service can adapt configured Ed25519 seed material into lineage audit keys.
+        let key =
+            signing_key_from_material("MOA_TEST_KEY", "lineage-test".to_string(), &"07".repeat(32))
+                .expect("hex seed should decode");
+
+        assert_eq!(key.label(), "lineage-test");
+    }
+
+    #[test]
+    fn verification_status_marks_visible_dead_letters_incomplete() {
+        // Pins: verification responses do not report ok while visible dead letters exist.
+        assert_eq!(verification_status(0), "ok");
+        assert_eq!(verification_status(1), "incomplete");
+    }
 }

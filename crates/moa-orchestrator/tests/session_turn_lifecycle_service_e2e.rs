@@ -176,9 +176,12 @@ async fn request_cancel(
         .context("deserialize Session request_cancel response")
 }
 
-async fn snapshot(client: &reqwest::Client, session_id: &str) -> Result<SessionSnapshot> {
-    client
-        .post(session_url(session_id, "snapshot"))
+async fn snapshot(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+) -> Result<SessionSnapshot> {
+    let request = client.post(session_url(&session.id, "snapshot"));
+    with_identity(request, &session.identity)
         .send()
         .await
         .context("send Session snapshot")?
@@ -228,7 +231,7 @@ async fn await_turn_phase(
 
 async fn await_snapshot_matching<F>(
     client: &reqwest::Client,
-    session_id: &str,
+    session: &InitializedSession,
     timeout: Duration,
     matches: F,
 ) -> Result<SessionSnapshot>
@@ -238,7 +241,7 @@ where
     let deadline = Instant::now() + timeout;
     let mut last_snapshot = None;
     while Instant::now() < deadline {
-        let current = snapshot(client, session_id).await?;
+        let current = snapshot(client, session).await?;
         if matches(&current) {
             return Ok(current);
         }
@@ -247,7 +250,8 @@ where
     }
 
     bail!(
-        "session {session_id} did not reach expected snapshot within {:?}; last snapshot: {:?}",
+        "session {} did not reach expected snapshot within {:?}; last snapshot: {:?}",
+        session.id,
         timeout,
         last_snapshot
     )
@@ -273,7 +277,7 @@ async fn start_turn_returns_turn_id_immediately() -> Result<()> {
         .expect("start_turn should return the started turn ID");
     assert!(!response.queued);
 
-    let current = snapshot(&client, &session.id).await?;
+    let current = snapshot(&client, &session).await?;
     assert_eq!(current.session_id, session.id);
     assert_eq!(current.active_turn_id.as_deref(), Some(turn_id.as_str()));
     assert_eq!(current.pending_message_count, 0);
@@ -297,7 +301,7 @@ async fn queue_message_during_active_turn_is_drained_after_completion() -> Resul
     assert!(queued.queued);
     assert!(queued.started_turn_id.is_none());
 
-    let queued_snapshot = snapshot(&client, &session.id).await?;
+    let queued_snapshot = snapshot(&client, &session).await?;
     assert_eq!(
         queued_snapshot.active_turn_id.as_deref(),
         Some(first_turn_id.as_str())
@@ -305,7 +309,7 @@ async fn queue_message_during_active_turn_is_drained_after_completion() -> Resul
     assert_eq!(queued_snapshot.pending_message_count, 1);
 
     let drained_after_first_completion =
-        await_snapshot_matching(&client, &session.id, Duration::from_secs(45), |current| {
+        await_snapshot_matching(&client, &session, Duration::from_secs(45), |current| {
             current.pending_message_count == 0
                 && current.active_turn_id.as_deref() != Some(first_turn_id.as_str())
                 && current
@@ -350,7 +354,7 @@ async fn request_cancel_forwards_to_turn_execution() -> Result<()> {
     assert_eq!(cancelled.cancel_reason.as_deref(), Some("user-requested"));
 
     let final_snapshot =
-        await_snapshot_matching(&client, &session.id, Duration::from_secs(10), |current| {
+        await_snapshot_matching(&client, &session, Duration::from_secs(10), |current| {
             current.active_turn_id.is_none()
                 && current.last_outcome.as_ref().is_some_and(|outcome| {
                     outcome.turn_id == turn_id && outcome.kind == "Cancelled"

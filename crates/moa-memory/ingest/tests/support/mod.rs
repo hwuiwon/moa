@@ -118,7 +118,7 @@ pub(crate) fn deterministic_vector(text: &str) -> Vec<f32> {
     vector
 }
 
-pub(crate) fn ingest_ctx(pool: &PgPool, workspace_id: Uuid) -> IngestCtx {
+pub(crate) async fn ingest_ctx(pool: &PgPool, workspace_id: Uuid) -> IngestCtx {
     ingest_ctx_with_pii(
         pool,
         workspace_id,
@@ -126,13 +126,15 @@ pub(crate) fn ingest_ctx(pool: &PgPool, workspace_id: Uuid) -> IngestCtx {
             class: PiiClass::None,
         }),
     )
+    .await
 }
 
-pub(crate) fn ingest_ctx_with_pii(
+pub(crate) async fn ingest_ctx_with_pii(
     pool: &PgPool,
     workspace_id: Uuid,
     pii: Arc<dyn PiiClassifier>,
 ) -> IngestCtx {
+    seed_workspace_embedder_state(pool, workspace_id).await;
     let scope = ScopeContext::tenant(TenantId::from(workspace_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
@@ -210,6 +212,7 @@ pub(crate) async fn create_fact(
     name: &str,
     valid_from: DateTime<Utc>,
 ) -> Uuid {
+    seed_workspace_embedder_state(pool, workspace_id).await;
     let ctx = ScopeContext::tenant(TenantId::from(workspace_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), ctx.clone());
     let graph =
@@ -218,6 +221,30 @@ pub(crate) async fn create_fact(
         .create_node(fact_intent(workspace_id, name, valid_from))
         .await
         .expect("seed fact node")
+}
+
+async fn seed_workspace_embedder_state(pool: &PgPool, workspace_id: Uuid) {
+    let mut conn = scoped_conn(pool, workspace_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, 'mock-slow-embedder', 11, $2)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id.to_string())
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed workspace embedder state");
+    conn.commit()
+        .await
+        .expect("commit workspace embedder state");
 }
 
 pub(crate) async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> ScopedConn<'a> {

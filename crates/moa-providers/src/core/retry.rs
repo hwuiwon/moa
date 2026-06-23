@@ -8,6 +8,7 @@ use reqwest::{
     RequestBuilder, Response, StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
+use serde_json::Value;
 
 /// Shared retry policy for provider HTTP requests.
 #[derive(Debug, Clone)]
@@ -131,7 +132,7 @@ impl RetryPolicy {
     }
 
     fn is_retryable_transport_error(&self, error: &reqwest::Error) -> bool {
-        error.is_timeout() || error.is_connect() || error.is_request()
+        error.is_connect()
     }
 
     fn jitter_seed(&self) -> f64 {
@@ -152,8 +153,76 @@ fn retry_after_delay(status: StatusCode, headers: Option<&HeaderMap>) -> Option<
     parse_retry_after(value)
 }
 
-fn retry_after_delay_from_message(_message: &str) -> Option<Duration> {
+fn retry_after_delay_from_message(message: &str) -> Option<Duration> {
+    serde_json::from_str::<Value>(message)
+        .ok()
+        .and_then(|value| retry_after_delay_from_json(&value))
+        .or_else(|| retry_after_delay_from_text(message))
+}
+
+fn retry_after_delay_from_json(value: &Value) -> Option<Duration> {
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "retry_after",
+                "retry_after_seconds",
+                "retryAfter",
+                "retry_after_ms",
+                "retryAfterMs",
+            ] {
+                let parser = if key.ends_with("_ms") || key.ends_with("Ms") {
+                    retry_after_millis_from_json_scalar
+                } else {
+                    retry_after_delay_from_json_scalar
+                };
+                if let Some(delay) = map.get(key).and_then(parser) {
+                    return Some(delay);
+                }
+            }
+            map.values().find_map(retry_after_delay_from_json)
+        }
+        Value::Array(values) => values.iter().find_map(retry_after_delay_from_json),
+        _ => None,
+    }
+}
+
+fn retry_after_delay_from_json_scalar(value: &Value) -> Option<Duration> {
+    match value {
+        Value::Number(number) => number.as_u64().map(Duration::from_secs),
+        Value::String(value) => parse_retry_after(value),
+        _ => None,
+    }
+}
+
+fn retry_after_millis_from_json_scalar(value: &Value) -> Option<Duration> {
+    match value {
+        Value::Number(number) => number.as_u64().map(Duration::from_millis),
+        Value::String(value) => parse_retry_after_millis_or_seconds(value),
+        _ => None,
+    }
+}
+
+fn retry_after_delay_from_text(message: &str) -> Option<Duration> {
+    for marker in ["retry-after=", "retry_after=", "retryAfter="] {
+        if let Some((_, rest)) = message.split_once(marker) {
+            let value = rest
+                .split(|ch: char| ch.is_whitespace() || ch == ')' || ch == ',' || ch == ';')
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if let Some(delay) = parse_retry_after_millis_or_seconds(value) {
+                return Some(delay);
+            }
+        }
+    }
     None
+}
+
+fn parse_retry_after_millis_or_seconds(value: &str) -> Option<Duration> {
+    if let Some(ms) = value.strip_suffix("ms") {
+        return ms.trim().parse::<u64>().ok().map(Duration::from_millis);
+    }
+    parse_retry_after(value)
 }
 
 fn parse_retry_after(value: &str) -> Option<Duration> {
@@ -191,11 +260,12 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::RetryPolicy;
+    use super::{RetryPolicy, retry_after_delay_from_message};
 
     #[tokio::test]
     async fn retries_on_rate_limit() {
@@ -235,5 +305,59 @@ mod tests {
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_after_ambiguous_post_transport_failure() {
+        // Pins: POST failures after the request reaches the server are not replayed blindly.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let request_count_task = Arc::clone(&request_count);
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                request_count_task.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = vec![0_u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/ambiguous-post");
+        let policy = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            backoff_factor: 1.0,
+        };
+
+        let result = policy.send(|| client.post(&url).body("payload")).await;
+
+        assert!(result.is_err());
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+        server.abort();
+    }
+
+    #[test]
+    fn retry_after_delay_from_message_parses_structured_seconds() {
+        // Pins: provider body hints can drive retry delay when Retry-After headers are absent.
+        let delay = retry_after_delay_from_message(
+            r#"{"error":{"message":"rate limited","retry_after":3}}"#,
+        );
+
+        assert_eq!(delay, Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn retry_after_delay_from_message_parses_embedded_milliseconds() {
+        // Pins: existing response-text annotations are parsed instead of ignored.
+        let delay = retry_after_delay_from_message("rate limited (retry-after=250ms)");
+
+        assert_eq!(delay, Some(Duration::from_millis(250)));
     }
 }

@@ -125,7 +125,7 @@ impl ToolRouter {
         }
         .with_tool_output_config(config.tool_output.clone())
         .with_tool_budgets(config.tool_budgets.clone())
-        .with_policies(ActionPolicies::from_config(config));
+        .with_policies(ActionPolicies::from_config(config)?);
 
         if !config.mcp_servers.is_empty() {
             router.load_mcp_servers(config).await?;

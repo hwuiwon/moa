@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use moa_core::{
-    HandHandle, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition, ToolFailureClass,
-    ToolInvocation, ToolOutput, classify_tool_error, record_tool_failure, record_tool_reprovision,
-    record_tool_retry,
+    HandHandle, IdempotencyClass, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition,
+    ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error, record_tool_failure,
+    record_tool_reprovision, record_tool_retry,
 };
 use tracing::Instrument;
 
@@ -20,9 +20,22 @@ const MAX_TOOL_REPROVISIONS: u32 = 2;
 struct HandFailureContext<'a> {
     session: &'a SessionMeta,
     invocation: &'a ToolInvocation,
+    tool_definition: &'a ToolDefinition,
     provider: &'a str,
     tier: &'a SandboxTier,
     hand: &'a HandHandle,
+}
+
+struct McpFailureContext<'a> {
+    invocation: &'a ToolInvocation,
+    server_name: &'a str,
+    idempotency_class: IdempotencyClass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryStage {
+    BeforeExecution,
+    AfterUncertainExecution,
 }
 
 impl ToolRouter {
@@ -104,11 +117,13 @@ impl ToolRouter {
                             HandFailureContext {
                                 session,
                                 invocation,
+                                tool_definition,
                                 provider,
                                 tier,
                                 hand: &hand,
                             },
                             class,
+                            RecoveryStage::BeforeExecution,
                             retry_attempts,
                             reprovisions,
                         )
@@ -142,11 +157,13 @@ impl ToolRouter {
                             HandFailureContext {
                                 session,
                                 invocation,
+                                tool_definition,
                                 provider,
                                 tier,
                                 hand: &hand,
                             },
                             class,
+                            RecoveryStage::BeforeExecution,
                             retry_attempts,
                             reprovisions,
                         )
@@ -199,11 +216,13 @@ impl ToolRouter {
                             HandFailureContext {
                                 session,
                                 invocation,
+                                tool_definition,
                                 provider,
                                 tier,
                                 hand: &hand,
                             },
                             class,
+                            RecoveryStage::AfterUncertainExecution,
                             retry_attempts,
                             reprovisions,
                         )
@@ -255,9 +274,13 @@ impl ToolRouter {
                     };
                     if let Some(result) = self
                         .handle_mcp_failure(
-                            invocation,
-                            server_name,
+                            McpFailureContext {
+                                invocation,
+                                server_name,
+                                idempotency_class: tool_definition.idempotency_class,
+                            },
                             class,
+                            RecoveryStage::BeforeExecution,
                             retry_attempts,
                             reprovisions,
                         )
@@ -286,9 +309,13 @@ impl ToolRouter {
                     let retried_in_place = matches!(class, ToolFailureClass::Retryable { .. });
                     if let Some(result) = self
                         .handle_mcp_failure(
-                            invocation,
-                            server_name,
+                            McpFailureContext {
+                                invocation,
+                                server_name,
+                                idempotency_class: tool_definition.idempotency_class,
+                            },
                             class,
+                            RecoveryStage::BeforeExecution,
                             retry_attempts,
                             reprovisions,
                         )
@@ -336,9 +363,13 @@ impl ToolRouter {
                     let retried_in_place = matches!(class, ToolFailureClass::Retryable { .. });
                     if let Some(result) = self
                         .handle_mcp_failure(
-                            invocation,
-                            server_name,
+                            McpFailureContext {
+                                invocation,
+                                server_name,
+                                idempotency_class: tool_definition.idempotency_class,
+                            },
                             class,
+                            RecoveryStage::AfterUncertainExecution,
                             retry_attempts,
                             reprovisions,
                         )
@@ -372,6 +403,7 @@ impl ToolRouter {
         &self,
         ctx: HandFailureContext<'_>,
         class: ToolFailureClass,
+        stage: RecoveryStage,
         retry_attempts: u32,
         reprovisions: u32,
     ) -> Result<Option<(Option<String>, ToolOutput)>> {
@@ -385,6 +417,11 @@ impl ToolRouter {
             reason = %class.reason(),
             "tool execution failed"
         );
+
+        if should_block_automatic_recovery(&class, stage, ctx.tool_definition.idempotency_class) {
+            let class = idempotency_blocked_failure(class, ctx.tool_definition.idempotency_class);
+            return Ok(Some((Some(hand_id(ctx.hand)), ToolOutput::from(class))));
+        }
 
         match class.clone() {
             ToolFailureClass::Fatal { .. } => {
@@ -422,16 +459,16 @@ impl ToolRouter {
 
     async fn handle_mcp_failure(
         &self,
-        invocation: &ToolInvocation,
-        server_name: &str,
+        ctx: McpFailureContext<'_>,
         class: ToolFailureClass,
+        stage: RecoveryStage,
         retry_attempts: u32,
         reprovisions: u32,
     ) -> Result<Option<(Option<String>, ToolOutput)>> {
-        record_tool_failure(server_name, &invocation.name, class.label());
+        record_tool_failure(ctx.server_name, &ctx.invocation.name, class.label());
         tracing::warn!(
-            provider = server_name,
-            tool = %invocation.name,
+            provider = ctx.server_name,
+            tool = %ctx.invocation.name,
             class = class.label(),
             retry_attempts,
             reprovisions,
@@ -439,14 +476,19 @@ impl ToolRouter {
             "MCP tool execution failed"
         );
 
+        if should_block_automatic_recovery(&class, stage, ctx.idempotency_class) {
+            let class = idempotency_blocked_failure(class, ctx.idempotency_class);
+            return Ok(Some((None, ToolOutput::from(class))));
+        }
+
         match class.clone() {
             ToolFailureClass::Fatal { .. } => Ok(Some((None, ToolOutput::from(class)))),
             ToolFailureClass::Retryable { backoff_hint, .. }
                 if retry_attempts + 1 < MAX_TOOL_RETRIES =>
             {
                 self.retry_tool(
-                    server_name,
-                    &invocation.name,
+                    ctx.server_name,
+                    &ctx.invocation.name,
                     retry_attempts + 1,
                     backoff_hint,
                 )
@@ -454,13 +496,13 @@ impl ToolRouter {
                 Ok(None)
             }
             ToolFailureClass::ReProvision { .. } if reprovisions < MAX_TOOL_REPROVISIONS => {
-                if let Err(error) = self.reconnect_mcp_client(server_name).await {
+                if let Err(error) = self.reconnect_mcp_client(ctx.server_name).await {
                     return Ok(Some((
                         None,
                         ToolOutput::from(classify_tool_error(&error, 0)),
                     )));
                 }
-                self.record_reprovision(server_name, &invocation.name, class.reason())
+                self.record_reprovision(ctx.server_name, &ctx.invocation.name, class.reason())
                     .await;
                 Ok(None)
             }
@@ -517,6 +559,47 @@ fn is_gateway_unavailable_error(error: &MoaError) -> bool {
             ..
         }
     )
+}
+
+fn should_block_automatic_recovery(
+    class: &ToolFailureClass,
+    stage: RecoveryStage,
+    idempotency_class: IdempotencyClass,
+) -> bool {
+    if matches!(class, ToolFailureClass::Fatal { .. }) {
+        return false;
+    }
+    if stage == RecoveryStage::BeforeExecution {
+        return false;
+    }
+    !matches!(idempotency_class, IdempotencyClass::Idempotent)
+}
+
+fn idempotency_blocked_failure(
+    class: ToolFailureClass,
+    idempotency_class: IdempotencyClass,
+) -> ToolFailureClass {
+    let reason = class.reason().to_string();
+    let operation = match &class {
+        ToolFailureClass::Retryable { .. } => "retry",
+        ToolFailureClass::ReProvision { .. } => "re-provision",
+        ToolFailureClass::Fatal { .. } => return class,
+    };
+    ToolFailureClass::Fatal {
+        reason: format!(
+            "automatic {operation} is disabled for {} tools after uncertain execution: {}",
+            idempotency_class_label(idempotency_class),
+            reason
+        ),
+    }
+}
+
+fn idempotency_class_label(idempotency_class: IdempotencyClass) -> &'static str {
+    match idempotency_class {
+        IdempotencyClass::Idempotent => "idempotent",
+        IdempotencyClass::IdempotentWithKey => "idempotent_with_key",
+        IdempotencyClass::NonIdempotent => "non_idempotent",
+    }
 }
 
 #[cfg(test)]

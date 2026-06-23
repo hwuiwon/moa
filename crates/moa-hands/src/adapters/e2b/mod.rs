@@ -47,6 +47,7 @@ pub struct E2BHandProvider {
     api_url: String,
     sandbox_domain: String,
     default_template: String,
+    allow_internet_access: bool,
     sandbox_base_url_override: Option<String>,
     sandboxes: RwLock<HashMap<String, ConnectedSandbox>>,
 }
@@ -106,9 +107,17 @@ impl E2BHandProvider {
             api_url: api_url.into().trim_end_matches('/').to_string(),
             sandbox_domain: sandbox_domain.into(),
             default_template: default_template.into(),
+            allow_internet_access: false,
             sandbox_base_url_override: None,
             sandboxes: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Explicitly configures E2B sandbox internet access.
+    #[must_use]
+    pub fn with_allow_internet_access(mut self, allow_internet_access: bool) -> Self {
+        self.allow_internet_access = allow_internet_access;
+        self
     }
 
     /// Overrides the computed envd sandbox base URL. Intended for tests and local proxies.
@@ -127,7 +136,7 @@ impl E2BHandProvider {
                 "envVars": spec.env,
                 "timeout": spec.idle_timeout.as_secs().max(60),
                 "secure": true,
-                "allow_internet_access": true,
+                "allow_internet_access": self.allow_internet_access,
                 "autoPause": true,
                 "autoResume": { "enabled": true },
             }))

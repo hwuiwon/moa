@@ -419,6 +419,7 @@ fn assert_guardrail_check(
             reason,
             model,
             policy_hash,
+            ..
         } => {
             assert_eq!(*direction, expected_direction);
             assert_eq!(*mode, expected_mode);

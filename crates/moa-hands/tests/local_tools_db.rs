@@ -19,7 +19,10 @@ async fn admin_review_router(sandbox_root: impl AsRef<Path>) -> ToolRouter {
     ToolRouter::new_local(sandbox_root)
         .await
         .unwrap()
-        .with_policies(moa_security::ActionPolicies::from_config(&config))
+        .with_policies(
+            moa_security::ActionPolicies::from_config(&config)
+                .expect("admin-review test policy config should be valid"),
+        )
 }
 
 fn docker_mountable_tempdir() -> TempDir {

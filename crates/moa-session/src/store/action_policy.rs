@@ -38,6 +38,8 @@ impl PostgresSessionStore {
 
     /// Creates or updates an action-policy rule.
     pub async fn upsert_action_policy_rule(&self, rule: ActionPolicyRule) -> Result<()> {
+        moa_security::validate_action_policy_rule(&rule)?;
+
         let action_policy_rules = self.table_name("action_policy_rules");
         let workspace_id = stored_workspace_id_for_rule(&rule);
         let tenant_id = stored_tenant_id_for_rule(&rule);

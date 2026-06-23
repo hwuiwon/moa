@@ -30,8 +30,8 @@ The metric surface is:
 
 - `ingestion_coverage`
 - `scope_match_rate`
-- `scope_match_rate_user`
-- `scope_match_rate_workspace`
+- `scope_match_rate_contact`
+- `scope_match_rate_tenant`
 - `extraction_precision`
 - `entity_fragmentation`
 - `recall_at_4`
@@ -100,7 +100,7 @@ were retained.
 
 `scope_match_rate` is the fraction of resolved gold facts whose stored scope
 matches the ledger scope; `mixed` counts as a mismatch.
-`scope_match_rate_user` and `scope_match_rate_workspace` split that tally by
+`scope_match_rate_contact` and `scope_match_rate_tenant` split that tally by
 expected ledger scope so a one-sided privacy or recall drift cannot hide behind
 the overall rate. `extraction_precision` is the fraction of stored `Fact` nodes
 in the eval workspaces that map back to a ledger fact, including superseded
@@ -174,7 +174,8 @@ conversational deterministic sentences, includes at least one distractor turn
 per session, and contains no `Fact:`, `tenant shared`, or `contact private`
 markers. CI replays committed extraction and merge fixtures with no provider
 credentials and gates `ingestion_coverage >= 0.85`,
-`scope_match_rate >= 0.90`, `extraction_precision >= 0.80`,
+`scope_match_rate >= 0.90`, `scope_match_rate_contact >= 0.90`,
+`scope_match_rate_tenant >= 0.90`, `extraction_precision >= 0.80`,
 `entity_fragmentation >= 0.90`, plus the hard blockers
 `cross_user_leak_count == 0` and `pii_unredacted_count == 0`.
 
@@ -327,6 +328,8 @@ cargo run -p xtask -- check-eval-budgets --suite memory_retrieval \
   --memory-eval-report target/memory-eval/natural-recorded.json \
   --min-metric ingestion_coverage=0.85 \
   --min-metric scope_match_rate=0.90 \
+  --min-metric scope_match_rate_contact=0.90 \
+  --min-metric scope_match_rate_tenant=0.90 \
   --min-metric extraction_precision=0.80 \
   --min-metric entity_fragmentation=0.90
 ```
@@ -580,7 +583,7 @@ When the budget gate fails, triage in this order:
 1. Hard blockers: fix any `cross_user_leak_count != 0` or
    `pii_unredacted_count != 0` before reading quality metrics.
 2. Ingestion: inspect `ingestion_coverage`, `scope_match_rate`,
-   `scope_match_rate_user`, `scope_match_rate_workspace`,
+   `scope_match_rate_contact`, `scope_match_rate_tenant`,
    `extraction_precision`, and the gold-resolution section.
 3. Retrieval: inspect `recall_at_4`, `recall_at_25`, `mrr`, `ndcg_at_4`,
    `zero_recall_rate`, and `per_leg_recall`.

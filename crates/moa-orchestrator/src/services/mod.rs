@@ -12,6 +12,7 @@ pub mod authz_admin;
 pub mod authz_challenges;
 pub mod authz_challenges_reaper;
 pub mod contacts;
+#[cfg(feature = "internal-eval-runner")]
 pub mod eval;
 pub mod experiments;
 pub mod graph_memory_maint;

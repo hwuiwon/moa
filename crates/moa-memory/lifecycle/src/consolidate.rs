@@ -170,7 +170,7 @@ pub async fn consolidate_workspace(
     })
 }
 
-/// Merges active exact-duplicate facts by `(workspace, user, scope, fact_hash)`.
+/// Merges active exact-duplicate facts by `(tenant, contact, scope, fact_hash)`.
 pub async fn merge_duplicates(
     pool: &PgPool,
     workspace_id: &WorkspaceId,
@@ -367,8 +367,8 @@ fn duplicate_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>> {
         };
         groups
             .entry(DuplicateKey {
-                workspace_id: row.workspace_id.clone(),
-                user_id: row.user_id.clone(),
+                tenant_id: row.tenant_id,
+                contact_id: row.contact_id,
                 scope: row.scope.clone(),
                 fact_hash,
             })
@@ -403,8 +403,8 @@ fn contradiction_groups(rows: &[LifecycleNodeRow]) -> Vec<Vec<LifecycleNodeRow>>
         }
         groups
             .entry(ContradictionKey {
-                workspace_id: row.workspace_id.clone(),
-                user_id: row.user_id.clone(),
+                tenant_id: row.tenant_id,
+                contact_id: row.contact_id,
                 scope: row.scope.clone(),
                 subject,
                 predicate,
@@ -702,8 +702,8 @@ fn normalized_entity_name(entity: &LifecycleNodeRow) -> String {
 fn duplicate_group_key(group: &[LifecycleNodeRow]) -> DuplicateKey {
     let row = &group[0];
     DuplicateKey {
-        workspace_id: row.workspace_id.clone(),
-        user_id: row.user_id.clone(),
+        tenant_id: row.tenant_id,
+        contact_id: row.contact_id,
         scope: row.scope.clone(),
         fact_hash: row.property_text("fact_hash").unwrap_or_default(),
     }
@@ -712,8 +712,8 @@ fn duplicate_group_key(group: &[LifecycleNodeRow]) -> DuplicateKey {
 fn contradiction_group_key(group: &[LifecycleNodeRow]) -> ContradictionKey {
     let row = &group[0];
     ContradictionKey {
-        workspace_id: row.workspace_id.clone(),
-        user_id: row.user_id.clone(),
+        tenant_id: row.tenant_id,
+        contact_id: row.contact_id,
         scope: row.scope.clone(),
         subject: row.property_text("subject").unwrap_or_default(),
         predicate: row.property_text("predicate").unwrap_or_default(),
@@ -772,16 +772,16 @@ impl LifecycleNodeRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct DuplicateKey {
-    workspace_id: Option<String>,
-    user_id: Option<String>,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
     scope: String,
     fact_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ContradictionKey {
-    workspace_id: Option<String>,
-    user_id: Option<String>,
+    tenant_id: Uuid,
+    contact_id: Option<Uuid>,
     scope: String,
     subject: String,
     predicate: String,
@@ -796,13 +796,35 @@ mod tests {
 
     #[test]
     fn merge_groups_by_scope_ownership_and_fact_hash() {
-        // Pins: exact duplicate grouping never crosses user or workspace scope.
+        // Pins: exact duplicate grouping never crosses tenant or contact ownership.
         let rows = vec![
-            scoped_fact("a", None, "workspace", "hash-1", 0),
-            scoped_fact("b", None, "workspace", "hash-1", 1),
-            scoped_fact("c", Some("user-a"), "user", "hash-1", 2),
-            scoped_fact("d", Some("user-a"), "user", "hash-1", 3),
-            scoped_fact("e", Some("user-b"), "user", "hash-1", 4),
+            scoped_fact("a", Uuid::from_u128(0x100), None, "tenant", "hash-1", 0),
+            scoped_fact("b", Uuid::from_u128(0x100), None, "tenant", "hash-1", 1),
+            scoped_fact(
+                "c",
+                Uuid::from_u128(0x100),
+                Some(Uuid::from_u128(0x101)),
+                "contact",
+                "hash-1",
+                2,
+            ),
+            scoped_fact(
+                "d",
+                Uuid::from_u128(0x100),
+                Some(Uuid::from_u128(0x101)),
+                "contact",
+                "hash-1",
+                3,
+            ),
+            scoped_fact(
+                "e",
+                Uuid::from_u128(0x100),
+                Some(Uuid::from_u128(0x102)),
+                "contact",
+                "hash-1",
+                4,
+            ),
+            scoped_fact("f", Uuid::from_u128(0x200), None, "tenant", "hash-1", 5),
         ];
 
         let groups = duplicate_groups(&rows);
@@ -817,22 +839,25 @@ mod tests {
         // Pins: exact duplicate canonical selection is stable across database row order.
         let earliest = scoped_fact(
             "00000000-0000-8000-8000-000000000002",
+            Uuid::from_u128(0x100),
             None,
-            "workspace",
+            "tenant",
             "h",
             0,
         );
         let uid_tiebreak = scoped_fact(
             "00000000-0000-8000-8000-000000000001",
+            Uuid::from_u128(0x100),
             None,
-            "workspace",
+            "tenant",
             "h",
             0,
         );
         let later = scoped_fact(
             "00000000-0000-8000-8000-000000000003",
+            Uuid::from_u128(0x100),
             None,
-            "workspace",
+            "tenant",
             "h",
             2,
         );
@@ -851,7 +876,7 @@ mod tests {
         // Pins: rerunning decay at the same instant computes the same anchored target.
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 0, 0, 0).unwrap();
         let opts = ConsolidationOptions::default();
-        let mut row = scoped_fact("a", None, "workspace", "h", -240);
+        let mut row = scoped_fact("a", Uuid::from_u128(0x100), None, "tenant", "h", -240);
         row.confidence = Some(0.8);
 
         let first = decay_target(&row, 0.8, now, &opts).expect("target for idle fact");
@@ -876,7 +901,7 @@ mod tests {
             decay_floor: 0.25,
             ..ConsolidationOptions::default()
         };
-        let mut row = scoped_fact("a", None, "workspace", "h", -720);
+        let mut row = scoped_fact("a", Uuid::from_u128(0x100), None, "tenant", "h", -720);
         row.confidence = Some(0.5);
 
         let target = decay_target(&row, 0.5, now, &opts).expect("target for idle fact");
@@ -907,8 +932,9 @@ mod tests {
         // Pins: broad extraction verbs do not let unrelated user preferences supersede each other.
         let style = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000001",
-            user_id: Some("user-a"),
-            scope: "user",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: Some(Uuid::from_u128(0x101)),
+            scope: "contact",
             fact_hash: "style",
             subject: "User 02",
             predicate: "switched to",
@@ -917,8 +943,9 @@ mod tests {
         });
         let contact = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000002",
-            user_id: Some("user-a"),
-            scope: "user",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: Some(Uuid::from_u128(0x101)),
+            scope: "contact",
             fact_hash: "contact",
             subject: "User 02",
             predicate: "switched to",
@@ -934,8 +961,9 @@ mod tests {
         // Pins: corpus dependency and owner facts are multi-valued evidence, not v1 contradictions.
         let dependency_a = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000001",
-            user_id: Some("user-a"),
-            scope: "user",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: Some(Uuid::from_u128(0x101)),
+            scope: "contact",
             fact_hash: "dependency-a",
             subject: "checkout-service",
             predicate: "depends_on",
@@ -944,8 +972,9 @@ mod tests {
         });
         let dependency_b = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000002",
-            user_id: Some("user-a"),
-            scope: "user",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: Some(Uuid::from_u128(0x101)),
+            scope: "contact",
             fact_hash: "dependency-b",
             subject: "checkout-service",
             predicate: "depends_on",
@@ -954,8 +983,9 @@ mod tests {
         });
         let owner_a = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000003",
-            user_id: None,
-            scope: "workspace",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: None,
+            scope: "tenant",
             fact_hash: "owner-a",
             subject: "lib-auth",
             predicate: "owned_by",
@@ -964,8 +994,9 @@ mod tests {
         });
         let owner_b = fact(FactSpec {
             uid_suffix: "00000000-0000-8000-8000-000000000004",
-            user_id: None,
-            scope: "workspace",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: None,
+            scope: "tenant",
             fact_hash: "owner-b",
             subject: "lib-auth",
             predicate: "owned_by",
@@ -982,14 +1013,16 @@ mod tests {
 
     fn scoped_fact(
         uid_suffix: &str,
-        user_id: Option<&str>,
+        tenant_id: Uuid,
+        contact_id: Option<Uuid>,
         scope: &str,
         fact_hash: &str,
         day_offset: i64,
     ) -> LifecycleNodeRow {
         fact(FactSpec {
             uid_suffix,
-            user_id,
+            tenant_id,
+            contact_id,
             scope,
             fact_hash,
             subject: "s",
@@ -1002,8 +1035,9 @@ mod tests {
     fn contradiction_fact(uid_suffix: &str, object: &str, day_offset: i64) -> LifecycleNodeRow {
         fact(FactSpec {
             uid_suffix,
-            user_id: None,
-            scope: "workspace",
+            tenant_id: Uuid::from_u128(0x100),
+            contact_id: None,
+            scope: "tenant",
             fact_hash: uid_suffix,
             subject: "service",
             predicate: "cache_backend_conflict",
@@ -1014,7 +1048,8 @@ mod tests {
 
     struct FactSpec<'a> {
         uid_suffix: &'a str,
-        user_id: Option<&'a str>,
+        tenant_id: Uuid,
+        contact_id: Option<Uuid>,
         scope: &'a str,
         fact_hash: &'a str,
         subject: &'a str,
@@ -1027,10 +1062,10 @@ mod tests {
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         LifecycleNodeRow {
             uid: uuid(spec.uid_suffix),
-            workspace_id: Some("ws".to_string()),
-            user_id: spec.user_id.map(ToOwned::to_owned),
-            tenant_id: Uuid::from_u128(0x100),
-            contact_id: spec.user_id.map(|_| Uuid::from_u128(0x101)),
+            workspace_id: Some(spec.tenant_id.to_string()),
+            user_id: spec.contact_id.map(|contact_id| contact_id.to_string()),
+            tenant_id: spec.tenant_id,
+            contact_id: spec.contact_id,
             scope: spec.scope.to_string(),
             name: spec.subject.to_string(),
             pii_class: PiiClass::None,

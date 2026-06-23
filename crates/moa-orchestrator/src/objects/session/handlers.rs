@@ -1,12 +1,14 @@
 //! Restate handlers for the Session VO.
 
 use super::*;
+use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 
 impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx, meta))]
+    // SAFETY: internal SessionStore initialization only; mirrors persisted session metadata into VO hot state.
     async fn set_meta(
         &self,
         ctx: ObjectContext<'_>,
@@ -47,6 +49,8 @@ impl Session for SessionImpl {
         mode: Json<CancelMode>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "cancel");
+        let session_id = parse_session_key(ctx.key())?;
+        require_session_participant(&ctx, session_id).await?;
         let mut state = SessionVoState::load_from(&ctx).await?;
         state.set_cancel_flag(mode.into_inner());
         let children = state.children.clone();
@@ -202,6 +206,8 @@ impl Session for SessionImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<SessionSnapshot>, HandlerError> {
         annotate_restate_handler_span("Session", "snapshot");
+        let session_id = parse_session_key(ctx.key())?;
+        require_session_participant(&ctx, session_id).await?;
         let pending_state = load_pending_state(&ctx).await?;
         Ok(Json::from(SessionSnapshot {
             session_id: ctx.key().to_string(),
@@ -296,8 +302,8 @@ async fn start_turn_inner(
     ctx: &mut ObjectContext<'_>,
     request: StartTurnRequest,
 ) -> Result<StartTurnResponse, HandlerError> {
-    let identity = require_session_participant(ctx).await?;
     let session_id = parse_session_key(ctx.key())?;
+    let identity = require_session_participant(ctx, session_id).await?;
     let mut state = SessionVoState::load_from(ctx).await?;
     let meta = state.ensure_initialized().map_err(to_handler_error)?;
     let contact = admitted_contact_for_turn(request.contact, meta)?;
@@ -357,11 +363,11 @@ fn admitted_contact_for_turn(
 }
 
 async fn require_session_participant(
-    ctx: &ObjectContext<'_>,
+    ctx: &impl RequestHeaders,
+    session_id: SessionId,
 ) -> Result<moa_core::traits::Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    let session_id = parse_session_key(ctx.key())?;
     require_authz_with_delegation(
         &fga,
         &identity,

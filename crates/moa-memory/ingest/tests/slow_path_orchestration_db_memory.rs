@@ -44,7 +44,7 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
         return;
     };
     let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
     let expected: ExpectedFacts =
         serde_json::from_str(include_str!("support/fixtures/expected_facts_simple.json"))
             .expect("expected facts parse");
@@ -120,7 +120,7 @@ async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
         return;
     };
     let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
@@ -191,7 +191,7 @@ async fn slow_path_ingests_document_with_contradictions_and_uses_supersedes_edge
         fixed_time() - Duration::days(1),
     )
     .await;
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
@@ -254,7 +254,7 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
         fixed_time() - Duration::days(1),
     )
     .await;
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
@@ -326,7 +326,7 @@ async fn slow_path_skips_chunks_that_yield_no_extractable_facts() {
         return;
     };
     let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
@@ -369,9 +369,11 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
         token_estimate: 10,
     }]);
     assert_eq!(heuristic_probe, Vec::new());
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).with_extractor(Arc::new(
-        ScriptedFactExtractor::from_summaries(["handoff note names standup owner"]),
-    ));
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id)
+        .await
+        .with_extractor(Arc::new(ScriptedFactExtractor::from_summaries([
+            "handoff note names standup owner",
+        ])));
 
     let report = ingest_turn_direct_with_ctx(ctx, turn(workspace_id, transcript, 7))
         .await
@@ -403,6 +405,7 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
     };
     let workspace_id = Uuid::now_v7();
     let ctx = ingest_ctx(test_db.store().pool(), workspace_id)
+        .await
         .with_entity_merge_verifier(Arc::new(DeterministicEntityMergeVerifier));
 
     let first = ingest_turn_direct_with_ctx(
@@ -479,7 +482,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
         return;
     };
     let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
     let graph = ctx.graph.clone();
 
     let dependency = ingest_turn_direct_with_ctx(
@@ -545,7 +548,8 @@ async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
         test_db.store().pool(),
         workspace_id,
         Arc::new(support::FailOnNthPiiClassifier::new(2)),
-    );
+    )
+    .await;
 
     let error = ingest_turn_direct_with_ctx(
         ctx,
@@ -582,7 +586,7 @@ async fn slow_path_emits_lineage_events_for_each_extracted_fact() {
         return;
     };
     let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id);
+    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
     let session_turn = turn(
         workspace_id,
         include_str!("support/fixtures/document_simple.md"),

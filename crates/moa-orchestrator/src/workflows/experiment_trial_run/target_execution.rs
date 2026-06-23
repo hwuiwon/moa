@@ -100,7 +100,7 @@ pub(super) async fn run_agent_loop_trial(
         increment_trial_turn(ctx, request.tenant_id, trial.trial_uid).await?;
         transcript.push(ContextMessage::user(simulator_message));
 
-        let status = wait_for_target_after_turn(ctx, session_id).await?;
+        let status = wait_for_target_after_turn(ctx, session_id, &request.identity).await?;
         record_target_usage_after(ctx, session_id, &mut target_usage_sequence).await?;
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
@@ -300,6 +300,7 @@ async fn load_session_events(
 async fn wait_for_target_after_turn(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    identity: &Identity,
 ) -> Result<SessionStatus, HandlerError> {
     for _ in 0..TARGET_WAIT_ATTEMPTS {
         let status = ctx
@@ -308,12 +309,14 @@ async fn wait_for_target_after_turn(
             .call()
             .await?
             .into_inner();
-        let snapshot = ctx
-            .object_client::<SessionClient>(session_id.to_string())
-            .snapshot()
-            .call()
-            .await?
-            .into_inner();
+        let snapshot = with_identity_headers(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .snapshot(),
+            identity,
+        )
+        .call()
+        .await?
+        .into_inner();
         if target_is_waiting_or_idle(&status, &snapshot) {
             return Ok(status);
         }
@@ -478,8 +481,8 @@ fn trial_stop_for_workflow_status(
     match status {
         ArtifactRunStatus::Queued
         | ArtifactRunStatus::Running
-        | ArtifactRunStatus::PendingReview
-        | ArtifactRunStatus::Completed => Some((
+        | ArtifactRunStatus::PendingReview => None,
+        ArtifactRunStatus::Completed => Some((
             ExperimentTrialStatus::Completed,
             ExperimentTrialStopReason::TargetTerminal,
         )),
@@ -544,28 +547,19 @@ mod tests {
     }
 
     #[test]
-    fn workflow_pending_review_and_active_statuses_stop_trials_offline() {
-        // Pins: workflow runtime start is currently fire-and-forget, so non-failed/non-cancelled run states must release experiment dispatch slots.
+    fn workflow_status_stops_trials_only_after_terminal_states_offline() {
+        // Pins: workflow-backed trials do not report success while target work is still active.
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::Queued),
-            Some((
-                ExperimentTrialStatus::Completed,
-                ExperimentTrialStopReason::TargetTerminal,
-            ))
+            None
         );
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::Running),
-            Some((
-                ExperimentTrialStatus::Completed,
-                ExperimentTrialStopReason::TargetTerminal,
-            ))
+            None
         );
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::PendingReview),
-            Some((
-                ExperimentTrialStatus::Completed,
-                ExperimentTrialStopReason::TargetTerminal,
-            ))
+            None
         );
         assert_eq!(
             trial_stop_for_workflow_status(&ArtifactRunStatus::Completed),

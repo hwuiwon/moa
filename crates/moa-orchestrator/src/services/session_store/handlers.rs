@@ -104,6 +104,7 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal Restate workflows/services call this via service_client; public edge routes do not expose SessionStore/append_event.
     async fn append_event(
         &self,
         ctx: Context<'_>,
@@ -157,6 +158,7 @@ impl RestateSessionStore for SessionStoreImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Session VOs sync status via internal service_client calls; public edge routes do not expose SessionStore/update_status.
     async fn update_status(
         &self,
         ctx: Context<'_>,

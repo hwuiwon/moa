@@ -45,6 +45,7 @@ async fn live_brain_turn_completes() -> Result<()> {
             shared_skill_injector: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
+            identity_prompt_override: None,
             discovered_workspace_instructions: None,
             tool_schemas: Vec::new(),
             lineage: Arc::new(moa_core::NullLineageHandle),

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{MoaConfig, ScopeContext, ScopedConn};
-use moa_memory_graph::{NodeIndexRow, NodeLabel};
+use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
 use moka::future::Cache;
 use reqwest::Client;
@@ -119,6 +119,7 @@ pub trait ContradictionDetector: Send + Sync {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
+        pii_class: PiiClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict>;
 
@@ -424,9 +425,11 @@ impl RrfPlusJudgeDetector {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
+        pii_class: PiiClass,
         ctx: &ContradictionContext,
     ) -> Result<Vec<NodeIndexRow>> {
-        let vector_hits = vector_candidate_uids(fact_text, embedding, label, ctx).await?;
+        let vector_hits =
+            vector_candidate_uids(fact_text, embedding, label, pii_class, ctx).await?;
         let lexical_hits = lexical_candidate_uids(fact_text, label, ctx).await?;
         let ranked = rrf_fuse(
             &vector_hits,
@@ -507,9 +510,12 @@ impl RrfPlusJudgeDetector {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
+        pii_class: PiiClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
-        let candidates = self.candidates(fact_text, embedding, label, ctx).await?;
+        let candidates = self
+            .candidates(fact_text, embedding, label, pii_class, ctx)
+            .await?;
         let candidates = self.rerank_top5(fact_text, &candidates).await?;
         self.judge_candidates(fact_text, &candidates).await
     }
@@ -528,9 +534,15 @@ impl ContradictionDetector for RrfPlusJudgeDetector {
         fact_text: &str,
         embedding: &[f32],
         label: NodeLabel,
+        pii_class: PiiClass,
         ctx: &ContradictionContext,
     ) -> Result<Conflict> {
-        match timeout(self.fast_budget, self.run(fact_text, embedding, label, ctx)).await {
+        match timeout(
+            self.fast_budget,
+            self.run(fact_text, embedding, label, pii_class, ctx),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Ok(Conflict::Indeterminate),
         }
@@ -546,7 +558,13 @@ impl ContradictionDetector for RrfPlusJudgeDetector {
         let embedding = fact.embedding.as_deref().unwrap_or(&empty_embedding);
         match timeout(
             self.slow_budget,
-            self.run(fact_text, embedding, NodeLabel::Fact, ctx),
+            self.run(
+                fact_text,
+                embedding,
+                NodeLabel::Fact,
+                fact.classified.pii_class,
+                ctx,
+            ),
         )
         .await
         {
@@ -594,6 +612,7 @@ async fn vector_candidate_uids(
     fact_text: &str,
     embedding: &[f32],
     label: NodeLabel,
+    pii_class: PiiClass,
     ctx: &ContradictionContext,
 ) -> Result<Vec<Uuid>> {
     let _ = fact_text;
@@ -614,12 +633,16 @@ async fn vector_candidate_uids(
             embedding: embedding.to_vec(),
             k: VECTOR_K,
             label_filter: Some(vec![label.as_str().to_string()]),
-            max_pii_class: "phi".to_string(),
+            max_pii_class: contradiction_candidate_max_pii_class(pii_class).to_string(),
             include_global: true,
             as_of: None,
         })
         .await?;
     Ok(hits.into_iter().map(|hit| hit.uid).collect())
+}
+
+fn contradiction_candidate_max_pii_class(pii_class: PiiClass) -> &'static str {
+    pii_class.as_str()
 }
 
 async fn lexical_candidate_uids(
@@ -970,6 +993,21 @@ mod tests {
             .expect("judge empty candidates");
 
         assert_eq!(conflict, Conflict::Insert);
+    }
+
+    #[test]
+    fn contradiction_candidate_query_uses_fact_pii_class() {
+        // Pins: contradiction candidate retrieval does not widen beyond the fact's own PII class.
+        assert_eq!(
+            contradiction_candidate_max_pii_class(PiiClass::None),
+            "none"
+        );
+        assert_eq!(contradiction_candidate_max_pii_class(PiiClass::Pii), "pii");
+        assert_eq!(contradiction_candidate_max_pii_class(PiiClass::Phi), "phi");
+        assert_eq!(
+            contradiction_candidate_max_pii_class(PiiClass::Restricted),
+            "restricted"
+        );
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use super::agent_instructions::AgentInstructionProcessor;
 use super::compactor::Compactor;
 use super::digest::DigestProcessor;
 use super::history::HistoryCompiler;
-use super::identity::IdentityProcessor;
+use super::identity::{DEFAULT_IDENTITY_PROMPT, IdentityProcessor};
 use super::instructions::InstructionProcessor;
 use super::memory::{GraphMemoryRetriever, SharedGraphMemoryRetriever};
 use super::query_rewrite::QueryRewriter;
@@ -89,6 +89,8 @@ pub struct GraphMemoryPipelineOptions {
     pub compaction_llm_provider: Option<Arc<dyn LLMProvider>>,
     /// Optional LLM provider used by query rewriting.
     pub query_rewrite_llm_provider: Option<Arc<dyn LLMProvider>>,
+    /// Optional identity prompt override for eval and harness runs.
+    pub identity_prompt_override: Option<String>,
     /// Workspace instruction text discovered from the active repository.
     pub discovered_workspace_instructions: Option<String>,
     /// Tool schemas to expose to the model.
@@ -155,6 +157,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         shared_skill_injector,
         compaction_llm_provider,
         query_rewrite_llm_provider,
+        identity_prompt_override,
         discovered_workspace_instructions,
         tool_schemas,
         lineage,
@@ -208,9 +211,11 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
     };
     let graph_memory: Box<dyn ContextProcessor> =
         Box::new(SharedGraphMemoryRetriever::new(graph_memory_retriever));
+    let identity_prompt =
+        identity_prompt_override.unwrap_or_else(|| DEFAULT_IDENTITY_PROMPT.to_string());
 
     let mut stages: Vec<Box<dyn ContextProcessor>> = vec![
-        Box::new(IdentityProcessor::default()),
+        Box::new(IdentityProcessor::new(identity_prompt)),
         Box::new(AgentInstructionProcessor::new()),
         Box::new(InstructionProcessor::new(
             config.general.workspace_instructions.clone(),

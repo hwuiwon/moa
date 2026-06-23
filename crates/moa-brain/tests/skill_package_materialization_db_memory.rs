@@ -81,7 +81,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
-            .with_policies(ActionPolicies::from_config(&config)),
+            .with_policies(ActionPolicies::from_config(&config)?),
     );
     router
         .remember_workspace_root(runtime_workspace_id, workspace.clone())
@@ -98,6 +98,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
             shared_skill_injector: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
+            identity_prompt_override: None,
             discovered_workspace_instructions: None,
             tool_schemas: router.tool_schemas(),
             lineage: Arc::new(moa_core::NullLineageHandle),
@@ -268,7 +269,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     let router = Arc::new(
         ToolRouter::new_local(&workspace)
             .await?
-            .with_policies(ActionPolicies::from_config(&config)),
+            .with_policies(ActionPolicies::from_config(&config)?),
     );
     router
         .remember_workspace_root(runtime_workspace_id, workspace.clone())
@@ -285,6 +286,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             shared_skill_injector: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
+            identity_prompt_override: None,
             discovered_workspace_instructions: None,
             tool_schemas: router.tool_schemas(),
             lineage: Arc::new(moa_core::NullLineageHandle),

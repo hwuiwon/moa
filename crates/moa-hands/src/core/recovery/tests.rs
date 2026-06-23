@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::{
-    HandHandle, HandProvider, HandSpec, HandStatus, MoaError, Result, SandboxTier, SessionId,
-    SessionMeta, TenantId, ToolFailureClass, ToolInvocation, ToolOutput,
+    ActionClass, ActionPolicyEffect, HandHandle, HandProvider, HandSpec, HandStatus,
+    IdempotencyClass, MoaError, Result, RiskLevel, SandboxTier, SessionId, SessionMeta, TenantId,
+    ToolDiffStrategy, ToolFailureClass, ToolInputShape, ToolInvocation, ToolOutput, ToolPolicySpec,
 };
 use serde_json::json;
 
@@ -116,7 +117,33 @@ impl HandProvider for MockHandProvider {
 }
 
 async fn router_with_provider(provider: Arc<dyn HandProvider>) -> ToolRouter {
+    router_with_provider_and_idempotency(provider, IdempotencyClass::NonIdempotent).await
+}
+
+async fn router_with_provider_and_idempotency(
+    provider: Arc<dyn HandProvider>,
+    idempotency_class: IdempotencyClass,
+) -> ToolRouter {
     let mut registry = ToolRegistry::default_local();
+    registry.register_hand(
+        "bash",
+        "test shell command",
+        json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string" }
+            },
+            "required": ["cmd"]
+        }),
+        ToolPolicySpec {
+            risk_level: RiskLevel::High,
+            default_effect: ActionPolicyEffect::Allow,
+            action_class: ActionClass::CommandExecution,
+            input_shape: ToolInputShape::Json,
+            diff_strategy: ToolDiffStrategy::None,
+        },
+        idempotency_class,
+    );
     registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
     registry.retain_only(["bash"]);
     let mut providers = HashMap::new();
@@ -167,7 +194,8 @@ async fn recovery_retries_retryable_failures_up_to_three_attempts() {
             ..MockProviderState::default()
         },
     ));
-    let router = router_with_provider(provider.clone()).await;
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
         .execute_authorized_with_recovery(&session(), &bash_invocation())
@@ -201,7 +229,8 @@ async fn recovery_reprovisions_and_succeeds_after_transient_sandbox_death() {
             ..MockProviderState::default()
         },
     ));
-    let router = router_with_provider(provider.clone()).await;
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
         .execute_authorized_with_recovery(&session(), &bash_invocation())
@@ -230,7 +259,8 @@ async fn recovery_returns_fatal_failures_immediately() {
             ..MockProviderState::default()
         },
     ));
-    let router = router_with_provider(provider.clone()).await;
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
         .execute_authorized_with_recovery(&session(), &bash_invocation())
@@ -269,7 +299,8 @@ async fn recovery_caps_reprovision_attempts_per_session() {
             ..MockProviderState::default()
         },
     ));
-    let router = router_with_provider(provider.clone()).await;
+    let router =
+        router_with_provider_and_idempotency(provider.clone(), IdempotencyClass::Idempotent).await;
 
     let (_hand_id, output) = router
         .execute_authorized_with_recovery(&session(), &bash_invocation())
@@ -282,4 +313,99 @@ async fn recovery_caps_reprovision_attempts_per_session() {
     assert_eq!(snapshot.execute_calls, 3);
     assert_eq!(snapshot.provision_calls, 3);
     assert_eq!(snapshot.destroy_calls, 2);
+}
+
+#[tokio::test]
+async fn recovery_does_not_retry_non_idempotent_execution_failure() {
+    let provider = Arc::new(MockHandProvider::new(
+        "mock-non-idempotent-retry",
+        MockProviderState {
+            execute_results: VecDeque::from([Err(MoaError::ProviderError(
+                "temporary outage after command started".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::Retryable {
+                reason: "temporary outage after command started".to_string(),
+                backoff_hint: Duration::ZERO,
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_provider(provider.clone()).await;
+
+    let (_hand_id, output) = router
+        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .await
+        .expect("recovery path should return a tool output");
+
+    assert!(output.is_error);
+    assert!(
+        output
+            .to_text()
+            .contains("automatic retry is disabled for non_idempotent tools")
+    );
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.execute_calls, 1);
+    assert_eq!(snapshot.provision_calls, 1);
+    assert_eq!(snapshot.destroy_calls, 0);
+}
+
+#[tokio::test]
+async fn recovery_does_not_reprovision_non_idempotent_execution_failure() {
+    let provider = Arc::new(MockHandProvider::new(
+        "mock-non-idempotent-reprovision",
+        MockProviderState {
+            execute_results: VecDeque::from([Err(MoaError::ProviderError(
+                "sandbox died after command started".to_string(),
+            ))]),
+            classifications: VecDeque::from([ToolFailureClass::ReProvision {
+                reason: "sandbox died after command started".to_string(),
+            }]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_provider(provider.clone()).await;
+
+    let (_hand_id, output) = router
+        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .await
+        .expect("recovery path should return a tool output");
+
+    assert!(output.is_error);
+    assert!(
+        output
+            .to_text()
+            .contains("automatic re-provision is disabled for non_idempotent tools")
+    );
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.execute_calls, 1);
+    assert_eq!(snapshot.provision_calls, 1);
+    assert_eq!(snapshot.destroy_calls, 0);
+}
+
+#[tokio::test]
+async fn recovery_reprovisions_non_idempotent_before_execution() {
+    let provider = Arc::new(MockHandProvider::new(
+        "mock-non-idempotent-health",
+        MockProviderState {
+            health_checks: VecDeque::from([Ok(false), Ok(true)]),
+            execute_results: VecDeque::from([Ok(ToolOutput::text(
+                "ran once",
+                Duration::from_millis(1),
+            ))]),
+            ..MockProviderState::default()
+        },
+    ));
+    let router = router_with_provider(provider.clone()).await;
+
+    let (_hand_id, output) = router
+        .execute_authorized_with_recovery(&session(), &bash_invocation())
+        .await
+        .expect("recovery path should return a tool output");
+
+    assert!(!output.is_error);
+    assert_eq!(output.to_text(), "ran once");
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.execute_calls, 1);
+    assert_eq!(snapshot.provision_calls, 2);
+    assert_eq!(snapshot.destroy_calls, 1);
 }

@@ -120,6 +120,7 @@ impl ContradictionDetector for InsertOnlyDetector {
         _fact_text: &str,
         _embedding: &[f32],
         _label: NodeLabel,
+        _pii_class: PiiClass,
         _ctx: &ContradictionContext,
     ) -> Result<Conflict, IngestError> {
         Ok(Conflict::Insert)
@@ -278,8 +279,8 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
         uid_by_alias.insert(format!("{alias}-pre"), old_uid);
         let new_uid = fast_remember(
             FastRememberRequest {
-                workspace_id: stack.workspace_uuid,
-                user_id: None,
+                tenant_id: stack.workspace_uuid,
+                contact_id: None,
                 scope: "tenant".to_string(),
                 text: superseded_text(old_summary),
                 label: NodeLabel::Fact,

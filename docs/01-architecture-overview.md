@@ -385,7 +385,12 @@ Compliance mode and development uses a separate bucket, usually Governance mode
 with short retention. Signing keys are local PKCS#8/seed files for development
 and should be HSM-backed KMS Ed25519 keys in production. Switching signing keys
 starts new windows with the new label; old verifying keys remain required for
-old audit roots.
+old audit roots. The hosted lineage root verifier is fail-closed: audit-root
+window verification requires `MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX` and a matching
+`MOA_LINEAGE_AUDIT_SIGNING_KEY_ID` for the root's stored signing-key label.
+Lineage DSAR bundle export uses the privacy export signing key contract,
+`MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX` plus optional
+`MOA_PRIVACY_EXPORT_SIGNING_KEY_ID`.
 
 **ATTESTATION GATE - DO NOT REPRESENT THIS AS COMPLIANCE EVIDENCE TO REGULATORS
 OR CUSTOMERS UNTIL EXTERNAL CRYPTOGRAPHIC REVIEW IS COMPLETE.** The

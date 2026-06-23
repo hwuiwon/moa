@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::{AuditError, Result};
-use crate::signing::SigningKey;
+use crate::signing::{AuditRootSignaturePayload, SigningKey};
 
 /// Object Lock mode used when publishing audit manifests.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,9 +184,18 @@ impl MerkleRootPublisher {
             window_end.ok_or_else(|| AuditError::Invalid("empty root window".to_string()))?;
         let retain_until = Utc::now()
             + chrono::Duration::days(i64::from(self.cfg.retention_years).saturating_mul(365));
-        let signature = self
-            .signing
-            .sign_root(root.as_bytes(), &self.workspace_id)?;
+        let signature_payload = AuditRootSignaturePayload::new(
+            root_id,
+            self.workspace_id.clone(),
+            window_start,
+            window_end,
+            leaves.len() as u64,
+            root.as_bytes(),
+            retain_until,
+            self.cfg.object_lock_mode.as_str(),
+            self.signing.label(),
+        );
+        let signature = self.signing.sign_audit_root(&signature_payload)?;
         let manifest = AuditRootManifest {
             version: "1".to_string(),
             root_id,

@@ -254,12 +254,14 @@ pub struct RetrievalMetrics {
     /// Fraction of resolved ledger facts stored with the expected scope.
     #[serde(default)]
     pub scope_match_rate: MetricSummary,
-    /// Fraction of resolved user-expected ledger facts stored with user scope.
+    /// Fraction of resolved contact-expected ledger facts stored with contact scope.
     #[serde(default)]
-    pub scope_match_rate_user: MetricSummary,
-    /// Fraction of resolved workspace-expected ledger facts stored with workspace scope.
+    #[serde(alias = "scope_match_rate_user")]
+    pub scope_match_rate_contact: MetricSummary,
+    /// Fraction of resolved tenant-expected ledger facts stored with tenant scope.
     #[serde(default)]
-    pub scope_match_rate_workspace: MetricSummary,
+    #[serde(alias = "scope_match_rate_workspace")]
+    pub scope_match_rate_tenant: MetricSummary,
     /// Fraction of stored Fact nodes that mapped back to a ledger fact.
     #[serde(default)]
     pub extraction_precision: MetricSummary,
@@ -453,10 +455,10 @@ pub fn aggregate_retrieval_eval_from_diagnostic_counts(
     let scope_breakdown = ScopeMatchBreakdown {
         overall_matches: scope_matched_facts,
         overall_total: scope_resolved_facts,
-        user_matches: 0,
-        user_total: 0,
-        workspace_matches: 0,
-        workspace_total: 0,
+        contact_matches: 0,
+        contact_total: 0,
+        tenant_matches: 0,
+        tenant_total: 0,
     };
     aggregate_retrieval_eval_from_scope_counts(
         resolved_facts,
@@ -535,13 +537,13 @@ fn aggregate_metrics(
             scope_breakdown.overall_matches,
             scope_breakdown.overall_total,
         ),
-        scope_match_rate_user: MetricSummary::from_counts(
-            scope_breakdown.user_matches,
-            scope_breakdown.user_total,
+        scope_match_rate_contact: MetricSummary::from_counts(
+            scope_breakdown.contact_matches,
+            scope_breakdown.contact_total,
         ),
-        scope_match_rate_workspace: MetricSummary::from_counts(
-            scope_breakdown.workspace_matches,
-            scope_breakdown.workspace_total,
+        scope_match_rate_tenant: MetricSummary::from_counts(
+            scope_breakdown.tenant_matches,
+            scope_breakdown.tenant_total,
         ),
         extraction_precision: MetricSummary::from_counts(
             extraction_precision.mapped_fact_nodes,

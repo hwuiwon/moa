@@ -1710,7 +1710,10 @@ async fn run_brain_turn_uses_tool_result_search_for_artifact_backed_output() {
         ToolRouter::new_local(sandbox_dir.path())
             .await
             .unwrap()
-            .with_policies(ActionPolicies::from_config(&config))
+            .with_policies(
+                ActionPolicies::from_config(&config)
+                    .expect("default test policy config should be valid"),
+            )
             .with_session_store(store.clone()),
     );
     let pipeline =
@@ -1806,7 +1809,10 @@ async fn run_brain_turn_reads_stderr_stream_from_artifact_backed_output() {
         ToolRouter::new_local(sandbox_dir.path())
             .await
             .unwrap()
-            .with_policies(ActionPolicies::from_config(&config))
+            .with_policies(
+                ActionPolicies::from_config(&config)
+                    .expect("default test policy config should be valid"),
+            )
             .with_session_store(store.clone()),
     );
     let pipeline =

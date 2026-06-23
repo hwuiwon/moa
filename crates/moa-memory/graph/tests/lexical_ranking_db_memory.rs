@@ -69,7 +69,7 @@ fn fact(
         label: NodeLabel::Fact,
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: "ranking alpha memory".to_string(),
         properties: json!({
             "summary": format!("ranking alpha memory {uid}"),

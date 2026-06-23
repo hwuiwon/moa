@@ -11,7 +11,7 @@ use moa_brain::retrieval::{HybridRetriever, RetrievalHit, RetrievalRequest};
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
-    MemoryHit, MemoryIngestRequest, MemoryIngestResponse, MemoryIngestResult,
+    MemoryHit, MemoryIngestDocument, MemoryIngestRequest, MemoryIngestResponse, MemoryIngestResult,
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
@@ -27,7 +27,7 @@ use moa_memory_ingest::{IngestApplyReport, IngestionVOClient, SessionTurn, inges
 use moa_memory_vector::PgvectorStore;
 use restate_sdk::prelude::*;
 use serde_json::Value;
-use uuid::Uuid;
+use uuid::{Builder as UuidBuilder, Uuid, Variant, Version};
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
@@ -115,12 +115,13 @@ impl Memory for MemoryImpl {
             let source_name = document.source_name.clone();
             let content = document.content.clone();
             let tenant_id = request.tenant_id;
+            let session_id = document_ingest_session_id(tenant_id, contact_id, index, &document);
             let turn = ctx
                 .run(|| async move {
                     Ok(Json(SessionTurn {
                         tenant_id,
                         contact_id,
-                        session_id: SessionId::new(),
+                        session_id,
                         turn_seq: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
                         transcript: ingest_transcript(&source_name, &content),
                         dominant_pii_class: "none".to_string(),
@@ -583,6 +584,46 @@ fn node_snippet(node: &NodeIndexRow) -> String {
 
 fn ingest_transcript(source_name: &str, content: &str) -> String {
     format!("source: {source_name}\n\n{content}")
+}
+
+/// Derives the synthetic session id for one document-ingestion turn.
+#[must_use]
+pub fn document_ingest_session_id(
+    tenant_id: moa_core::TenantId,
+    contact_id: ContactId,
+    index: usize,
+    document: &MemoryIngestDocument,
+) -> SessionId {
+    let mut hasher = blake3::Hasher::new();
+    update_hash_field(&mut hasher, "kind", "memory_ingest_document:v1");
+    update_hash_field(&mut hasher, "tenant_id", &tenant_id.to_string());
+    update_hash_field(&mut hasher, "contact_id", &contact_id.to_string());
+    update_hash_field(&mut hasher, "index", &index.to_string());
+    update_hash_field(&mut hasher, "source_name", &document.source_name);
+    update_hash_field(
+        &mut hasher,
+        "source_uri",
+        document.source_uri.as_deref().unwrap_or(""),
+    );
+    update_hash_field(&mut hasher, "content", &document.content);
+
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    let uuid = UuidBuilder::from_bytes(bytes)
+        .with_variant(Variant::RFC4122)
+        .with_version(Version::Custom)
+        .into_uuid();
+    SessionId(uuid)
+}
+
+fn update_hash_field(hasher: &mut blake3::Hasher, key: &str, value: &str) {
+    hasher.update(key.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(&[0]);
+    hasher.update(value.as_bytes());
+    hasher.update(&[0xff]);
 }
 
 fn ingest_result_from_report(source_name: String, report: IngestApplyReport) -> MemoryIngestResult {

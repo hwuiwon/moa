@@ -210,7 +210,7 @@ fn node_intent(
         label,
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "summary": name, "source": "hybrid_retrieval_test" }),
         pii_class: PiiClass::None,
@@ -290,6 +290,38 @@ async fn set_workspace_vector_backend(pool: &PgPool, workspace_id: &str, backend
         .expect("commit workspace_state transaction");
 }
 
+async fn set_workspace_embedder_state(pool: &PgPool, workspace_id: &str, model: &str) {
+    let ctx = tenant_scope(workspace_id);
+    let mut conn = ScopedConn::begin(pool, &ctx)
+        .await
+        .expect("begin workspace embedder transaction");
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .expect("set app role");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, 1, $3)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(model)
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(conn.as_mut())
+    .await
+    .expect("set workspace embedder state");
+    conn.commit()
+        .await
+        .expect("commit workspace embedder transaction");
+}
+
 #[tokio::test]
 async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     let _guard = TEST_LOCK.lock().await;
@@ -300,6 +332,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     let prefix = format!("hybrid-e2e-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
 
+    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
     seed_filler_rows(session_store.pool(), &workspace_id, &prefix, 1_000).await;
 
     let seed = node_intent(
@@ -338,7 +371,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
                 properties: json!({ "source": "hybrid_retrieval_test" }),
                 workspace_id: Some(workspace_id.clone()),
                 user_id: None,
-                scope: "workspace".to_string(),
+                scope: "tenant".to_string(),
                 actor_id: Uuid::now_v7().to_string(),
                 actor_kind: "system".to_string(),
             })
@@ -682,6 +715,7 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
         .expect("create isolated Postgres store");
     let workspace_id = format!("hybrid-tp-asof-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
+    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
     let fact = "temporal turbopuffer fallback pgvector fact";
     let mut intent = node_intent(
         &workspace_id,

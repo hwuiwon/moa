@@ -8,7 +8,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::{
-    AuditError, DsarBundle, DsarExporter, PiiVault, Result, SigningKey, blake3_merkle_root,
+    AuditError, AuditRootSignaturePayload, DsarBundle, DsarExporter, PiiVault, Result, SigningKey,
+    blake3_merkle_root,
 };
 use moa_lineage_core::chain::{HashChain, hash_from_slice};
 
@@ -49,6 +50,36 @@ pub struct AuditRootRow {
     pub window_end: DateTime<Utc>,
     /// Stored Merkle root bytes.
     pub merkle_root: Vec<u8>,
+    /// Number of records covered by the root.
+    pub record_count: u64,
+    /// Stored audit-root signature bytes.
+    pub signature: Vec<u8>,
+    /// Signing key label recorded for this root.
+    pub signing_key_label: String,
+    /// Stored manifest hash or object ETag recorded at publish time.
+    pub s3_object_etag: String,
+    /// Object Lock mode recorded for the root manifest.
+    pub object_lock_mode: String,
+    /// Retain-until timestamp recorded for the root manifest.
+    pub retain_until: DateTime<Utc>,
+}
+
+impl AuditRootRow {
+    /// Returns the canonical signature payload represented by this row.
+    #[must_use]
+    pub fn signature_payload(&self) -> AuditRootSignaturePayload {
+        AuditRootSignaturePayload::new(
+            self.root_id,
+            self.workspace_id.clone(),
+            self.window_start,
+            self.window_end,
+            self.record_count,
+            &self.merkle_root,
+            self.retain_until,
+            self.object_lock_mode.clone(),
+            self.signing_key_label.clone(),
+        )
+    }
 }
 
 /// Loads a published audit root by root UUID or S3 object URI.
@@ -60,7 +91,9 @@ pub async fn load_audit_root(
     let row = if let Ok(root_id) = Uuid::parse_str(id_or_uri) {
         sqlx::query(
             r#"
-            SELECT root_id, workspace_id, window_start, window_end, merkle_root
+            SELECT root_id, workspace_id, window_start, window_end, record_count,
+                   merkle_root, signature, signing_key_label, s3_object_etag,
+                   object_lock_mode, retain_until
             FROM analytics.audit_roots
             WHERE workspace_id = $1 AND root_id = $2
             "#,
@@ -72,7 +105,9 @@ pub async fn load_audit_root(
     } else {
         sqlx::query(
             r#"
-            SELECT root_id, workspace_id, window_start, window_end, merkle_root
+            SELECT root_id, workspace_id, window_start, window_end, record_count,
+                   merkle_root, signature, signing_key_label, s3_object_etag,
+                   object_lock_mode, retain_until
             FROM analytics.audit_roots
             WHERE workspace_id = $1 AND s3_object_uri = $2
             "#,
@@ -82,12 +117,21 @@ pub async fn load_audit_root(
         .fetch_one(pool)
         .await?
     };
+    let record_count: i64 = row.try_get("record_count")?;
+    let record_count = u64::try_from(record_count)
+        .map_err(|_| AuditError::Invalid("audit root record_count is negative".to_string()))?;
     Ok(AuditRootRow {
         root_id: row.try_get("root_id")?,
         workspace_id: row.try_get("workspace_id")?,
         window_start: row.try_get("window_start")?,
         window_end: row.try_get("window_end")?,
         merkle_root: row.try_get("merkle_root")?,
+        record_count,
+        signature: row.try_get("signature")?,
+        signing_key_label: row.try_get("signing_key_label")?,
+        s3_object_etag: row.try_get("s3_object_etag")?,
+        object_lock_mode: row.try_get("object_lock_mode")?,
+        retain_until: row.try_get("retain_until")?,
     })
 }
 
@@ -142,6 +186,45 @@ pub async fn load_compliance_rows_for_window(
     )
 }
 
+/// Counts visible dead-lettered lineage rows for one workspace and optional root window.
+pub async fn count_lineage_dead_letter_rows(
+    pool: &PgPool,
+    workspace_id: &str,
+    window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Result<u64> {
+    let (window_start, window_end) = match window {
+        Some((start, end)) => (Some(start), Some(end)),
+        None => (None, None),
+    };
+    let count: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM analytics.lineage_dead_letters dead
+        CROSS JOIN LATERAL jsonb_array_elements(dead.rows) AS pending(row_json)
+        WHERE COALESCE(
+            pending.row_json -> 'row' ->> 'workspace_id',
+            dead.first_workspace_id
+        ) = $1
+          AND (
+            $2::timestamptz IS NULL
+            OR NULLIF(pending.row_json -> 'row' ->> 'ts', '')::timestamptz >= $2
+          )
+          AND (
+            $3::timestamptz IS NULL
+            OR NULLIF(pending.row_json -> 'row' ->> 'ts', '')::timestamptz <= $3
+          )
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(window_start)
+    .bind(window_end)
+    .fetch_one(pool)
+    .await?;
+    let count = count.unwrap_or_default();
+    u64::try_from(count)
+        .map_err(|_| AuditError::Invalid("dead-letter row count is negative".to_string()))
+}
+
 /// Verifies hash-chain links and an optional Merkle root for compliance rows.
 pub fn verify_compliance_rows(
     rows: Vec<ComplianceRow>,
@@ -188,14 +271,51 @@ pub fn verify_compliance_rows(
     })
 }
 
+/// Verifies compliance rows against a stored audit root and its signature.
+pub fn verify_audit_root_window(
+    rows: Vec<ComplianceRow>,
+    root: &AuditRootRow,
+    signing: &SigningKey,
+) -> Result<VerificationReport> {
+    if root.signing_key_label != signing.label() {
+        return Err(AuditError::Invalid(format!(
+            "audit root signing key label mismatch: stored={}, configured={}",
+            root.signing_key_label,
+            signing.label()
+        )));
+    }
+    if root.object_lock_mode.trim().is_empty() {
+        return Err(AuditError::Invalid(
+            "audit root object_lock_mode is empty".to_string(),
+        ));
+    }
+    if root.s3_object_etag.trim().is_empty() {
+        return Err(AuditError::Invalid(
+            "audit root manifest hash/etag is empty".to_string(),
+        ));
+    }
+
+    let report = verify_compliance_rows(rows, Some(root.merkle_root.clone()))?;
+    let verified_count = u64::try_from(report.records)
+        .map_err(|_| AuditError::Invalid("verified record count overflow".to_string()))?;
+    if verified_count != root.record_count {
+        return Err(AuditError::Invalid(format!(
+            "audit root record count mismatch: stored={}, verified={verified_count}",
+            root.record_count
+        )));
+    }
+    signing.verify_audit_root(&root.signature_payload(), &root.signature)?;
+    Ok(report)
+}
+
 /// Writes a DSAR bundle from already-collected lineage records.
 pub async fn export_dsar_bundle(
+    signing: SigningKey,
     workspace_id: &str,
     subject: &str,
     records: Vec<Value>,
     bundle_path: &Path,
 ) -> Result<DsarBundle> {
-    let signing = local_service_signing_key("dsar-export");
     let exporter = DsarExporter::new(signing);
     exporter
         .export_records(
@@ -220,15 +340,6 @@ pub async fn erase_subject_pseudonym(
     vault.erase_subject(workspace_id, subject_pseudonym).await
 }
 
-/// Builds the deterministic local service signing key for admin exports.
-#[must_use]
-pub fn local_service_signing_key(label: &str) -> SigningKey {
-    SigningKey::from_seed(
-        label.to_string(),
-        *blake3::hash(format!("moa-orchestrator-local-signing:{label}").as_bytes()).as_bytes(),
-    )
-}
-
 fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<ComplianceRow>> {
     rows.into_iter()
         .map(|row| {
@@ -246,7 +357,7 @@ fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Complian
 
 #[cfg(test)]
 mod tests {
-    use super::{ComplianceRow, verify_compliance_rows};
+    use super::{AuditRootRow, ComplianceRow, verify_audit_root_window, verify_compliance_rows};
     use crate::blake3_merkle_root;
     use chrono::Utc;
     use moa_lineage_core::chain::HashChain;
@@ -324,5 +435,88 @@ mod tests {
             .expect_err("broken chain link should fail verification");
 
         assert!(error.to_string().contains("chain link mismatch"));
+    }
+
+    #[test]
+    fn verify_audit_root_window_rejects_record_count_mismatch() {
+        // Pins: audit-root verification checks the signed/stored record count, not just Merkle bytes.
+        let key = crate::SigningKey::from_seed("audit-root", [5_u8; 32]);
+        let payload = json!({"record": {"kind": "only"}});
+        let (hash, prev_hash) = HashChain::link(None, &payload).expect("hash should compute");
+        let root_hash =
+            blake3_merkle_root(&[hash.as_bytes().to_vec()]).expect("root should compute");
+        let now = Utc::now();
+        let mut root = AuditRootRow {
+            root_id: Uuid::now_v7(),
+            workspace_id: "workspace".to_string(),
+            window_start: now,
+            window_end: now,
+            merkle_root: root_hash.as_bytes().to_vec(),
+            record_count: 2,
+            signature: Vec::new(),
+            signing_key_label: key.label().to_string(),
+            s3_object_etag: "manifest-hash".to_string(),
+            object_lock_mode: "COMPLIANCE".to_string(),
+            retain_until: now,
+        };
+        root.signature = key
+            .sign_audit_root(&root.signature_payload())
+            .expect("signature should compute");
+
+        let rows = vec![ComplianceRow {
+            turn_id: Uuid::now_v7(),
+            record_kind: 1,
+            ts: now,
+            payload,
+            integrity_hash: hash.as_bytes().to_vec(),
+            prev_hash: prev_hash.map(|hash| hash.as_bytes().to_vec()),
+        }];
+
+        let error = verify_audit_root_window(rows, &root, &key)
+            .expect_err("record-count mismatch should fail");
+
+        assert!(error.to_string().contains("record count mismatch"));
+    }
+
+    #[test]
+    fn verify_audit_root_window_rejects_metadata_signature_tampering() {
+        // Pins: audit-root signature verification covers object-lock metadata.
+        let key = crate::SigningKey::from_seed("audit-root", [6_u8; 32]);
+        let payload = json!({"record": {"kind": "only"}});
+        let (hash, prev_hash) = HashChain::link(None, &payload).expect("hash should compute");
+        let root_hash =
+            blake3_merkle_root(&[hash.as_bytes().to_vec()]).expect("root should compute");
+        let now = Utc::now();
+        let mut root = AuditRootRow {
+            root_id: Uuid::now_v7(),
+            workspace_id: "workspace".to_string(),
+            window_start: now,
+            window_end: now,
+            merkle_root: root_hash.as_bytes().to_vec(),
+            record_count: 1,
+            signature: Vec::new(),
+            signing_key_label: key.label().to_string(),
+            s3_object_etag: "manifest-hash".to_string(),
+            object_lock_mode: "COMPLIANCE".to_string(),
+            retain_until: now,
+        };
+        root.signature = key
+            .sign_audit_root(&root.signature_payload())
+            .expect("signature should compute");
+        root.object_lock_mode = "GOVERNANCE".to_string();
+
+        let rows = vec![ComplianceRow {
+            turn_id: Uuid::now_v7(),
+            record_kind: 1,
+            ts: now,
+            payload,
+            integrity_hash: hash.as_bytes().to_vec(),
+            prev_hash: prev_hash.map(|hash| hash.as_bytes().to_vec()),
+        }];
+
+        let error = verify_audit_root_window(rows, &root, &key)
+            .expect_err("metadata tampering should fail");
+
+        assert!(matches!(error, crate::AuditError::Signature));
     }
 }

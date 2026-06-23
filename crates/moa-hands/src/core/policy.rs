@@ -208,20 +208,21 @@ impl ToolRouter {
             ));
         };
 
-        rule_store
-            .upsert_action_policy_rule(ActionPolicyRule {
-                id: Uuid::now_v7(),
-                tool: tool.to_string(),
-                pattern: pattern.to_string(),
-                effect,
-                scope: ActionRuleScope::Tenant {
-                    tenant_id: session.tenant_id,
-                },
-                reason: None,
-                created_by,
-                created_at: chrono::Utc::now(),
-            })
-            .await
+        let rule = ActionPolicyRule {
+            id: Uuid::now_v7(),
+            tool: tool.to_string(),
+            pattern: pattern.to_string(),
+            effect,
+            scope: ActionRuleScope::Tenant {
+                tenant_id: session.tenant_id,
+            },
+            reason: None,
+            created_by,
+            created_at: chrono::Utc::now(),
+        };
+        moa_security::validate_action_policy_rule(&rule)?;
+
+        rule_store.upsert_action_policy_rule(rule).await
     }
 
     fn describe_invocation(

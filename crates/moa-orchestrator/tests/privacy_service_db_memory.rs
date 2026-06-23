@@ -112,6 +112,7 @@ async fn create_erase_test_node(
     user_id: &str,
     name: &str,
 ) -> Uuid {
+    seed_workspace_embedder_state(pool, workspace_id, user_id, "test-model").await;
     let graph = erase_test_graph(pool, tenant_id, contact_id);
     let intent = erase_test_intent(workspace_id, user_id, name);
     let uid = intent.uid;
@@ -120,6 +121,35 @@ async fn create_erase_test_node(
         .await
         .expect("create erase fixture");
     uid
+}
+
+async fn seed_workspace_embedder_state(
+    pool: &PgPool,
+    workspace_id: &str,
+    subject_user_id: &str,
+    model: &str,
+) {
+    let mut conn = begin_app_scoped_tx(pool, workspace_id, subject_user_id)
+        .await
+        .expect("begin workspace embedder seed transaction");
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, 1, 1024)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(model)
+    .execute(conn.as_mut())
+    .await
+    .expect("seed workspace embedder state");
+    conn.commit().await.expect("commit workspace embedder seed");
 }
 
 async fn seed_contact(

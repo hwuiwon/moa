@@ -1223,7 +1223,7 @@ fn build_score_card(
             task_completed: error_count == 0,
             turn_count,
             error_count,
-            errors_preserved: true,
+            errors_preserved: errors_preserved_strict,
         },
         latency_ms: LatencyScores {
             first_token_p50_ms: execution.metrics.latency_ms,
@@ -1427,7 +1427,7 @@ async fn cleanup_workspace(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{CacheReport, EventType, ModelId};
+    use moa_core::{CacheReport, EventType, ModelId, ModelTier};
 
     use super::*;
     use moa_eval_core::EvalMetrics;
@@ -1505,6 +1505,62 @@ mod tests {
         assert_eq!(score_card.cost.input_tokens, 200);
         assert_eq!(score_card.cost.cached_input_tokens, 40);
         assert_eq!(score_card.cache.input_cached_ratio, 0.2);
+    }
+
+    fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id,
+            sequence_num,
+            event_type: event.event_type(),
+            event,
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
+    #[test]
+    fn score_card_reports_functional_error_preservation_from_context_signal() {
+        let session_id = SessionId::new();
+        let records = vec![
+            event_record(
+                session_id,
+                1,
+                Event::Error {
+                    message: "tool failure before compaction".to_string(),
+                    recoverable: true,
+                },
+            ),
+            event_record(
+                session_id,
+                2,
+                Event::Checkpoint {
+                    summary: "summary without the error".to_string(),
+                    events_summarized: 1,
+                    token_count: 8,
+                    model: ModelId::new("recorded-scripted"),
+                    model_tier: ModelTier::Auxiliary,
+                    input_tokens: 42,
+                    output_tokens: 8,
+                    cost_cents: 0,
+                },
+            ),
+        ];
+        let case = TestCase {
+            name: "missing-error-preservation".to_string(),
+            metadata: HashMap::from([("errors_preserved".to_string(), serde_json::json!(0))]),
+            ..TestCase::default()
+        };
+        let execution = CollectedExecution::default();
+
+        let score_card = build_score_card(&case, "recorded", 1, &records, &execution, Utc::now());
+
+        assert_eq!(score_card.context.errors_total_pre_compaction, 1);
+        assert_eq!(score_card.context.errors_preserved, 0);
+        assert!(!score_card.context.errors_preserved_strict);
+        assert!(!score_card.functional.errors_preserved);
     }
 
     #[test]

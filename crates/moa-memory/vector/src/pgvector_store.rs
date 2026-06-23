@@ -1,5 +1,7 @@
 //! pgvector-backed graph-memory vector store.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use moa_core::{ScopeContext, ScopedConn};
 use pgvector::HalfVector;
@@ -84,14 +86,14 @@ impl VectorStore for PgvectorStore {
 
     async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
         let mut conn = self.begin().await?;
-        ensure_default_workspace_embedder(conn.as_mut(), items).await?;
+        guard_workspace_embedder_for_write(conn.as_mut(), items).await?;
         upsert_items(conn.as_mut(), items).await?;
         conn.commit().await?;
         Ok(())
     }
 
     async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
-        ensure_default_workspace_embedder(conn, items).await?;
+        guard_workspace_embedder_for_write(conn, items).await?;
         upsert_items(conn, items).await
     }
 
@@ -190,31 +192,45 @@ impl VectorStore for PgvectorStore {
     }
 }
 
-async fn ensure_default_workspace_embedder(
+struct WorkspaceEmbedderState {
+    embedding_model: String,
+    embedding_dimension: usize,
+    reembed_state: String,
+}
+
+async fn guard_workspace_embedder_for_write(
     conn: &mut PgConnection,
     items: &[VectorItem],
 ) -> Result<()> {
+    let mut workspace_ids = Vec::new();
     for workspace_id in items.iter().filter_map(|item| item.workspace_id.as_deref()) {
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO moa.workspace_state
-                (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
-            VALUES ($1, 'cohere-embed-v4', 1, $2)
-            ON CONFLICT (workspace_id) DO NOTHING
-            "#,
-        )
-        .bind(workspace_id)
-        .bind(i32::try_from(VECTOR_DIMENSION).unwrap_or(i32::MAX))
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
-        if inserted > 0 {
-            tracing::warn!(
-                workspace_id,
-                embedding_model = "cohere-embed-v4",
-                embedding_dimension = VECTOR_DIMENSION,
-                "workspace had no embedder configuration; using default embedder"
-            );
+        if !workspace_ids.iter().any(|seen| seen == workspace_id) {
+            workspace_ids.push(workspace_id.to_string());
+        }
+    }
+
+    let mut states = HashMap::with_capacity(workspace_ids.len());
+    for workspace_id in workspace_ids {
+        let state = load_workspace_embedder_state(conn, &workspace_id).await?;
+        guard_workspace_dimension(&workspace_id, &state)?;
+        states.insert(workspace_id, state);
+    }
+
+    for item in items {
+        let Some(workspace_id) = item.workspace_id.as_deref() else {
+            continue;
+        };
+        let Some(state) = states.get(workspace_id) else {
+            return Err(Error::WorkspaceEmbedderStateMissing {
+                workspace_id: workspace_id.to_string(),
+            });
+        };
+        if state.embedding_model != item.embedding_model {
+            return Err(Error::EmbedderModelMismatch {
+                workspace_id: workspace_id.to_string(),
+                configured_model: state.embedding_model.clone(),
+                requested_model: item.embedding_model.clone(),
+            });
         }
     }
     Ok(())
@@ -224,6 +240,20 @@ async fn guard_workspace_embedder(conn: &mut PgConnection, query: &VectorQuery) 
     let Some(workspace_id) = query.workspace_id.as_deref() else {
         return Ok(());
     };
+    let state = load_workspace_embedder_state(conn, workspace_id).await?;
+    if state.reembed_state == "in_progress" {
+        return Err(Error::ReembedInProgress {
+            workspace_id: workspace_id.to_string(),
+        });
+    }
+
+    guard_workspace_dimension(workspace_id, &state)
+}
+
+async fn load_workspace_embedder_state(
+    conn: &mut PgConnection,
+    workspace_id: &str,
+) -> Result<WorkspaceEmbedderState> {
     let row = sqlx::query(
         r#"
         SELECT embedding_model, embedding_dimension, reembed_state
@@ -235,35 +265,27 @@ async fn guard_workspace_embedder(conn: &mut PgConnection, query: &VectorQuery) 
     .fetch_optional(&mut *conn)
     .await?;
 
-    let Some(row) = row else {
-        tracing::warn!(
-            workspace_id,
-            embedding_model = "cohere-embed-v4",
-            embedding_dimension = VECTOR_DIMENSION,
-            "workspace had no embedder configuration; falling back to default embedder"
-        );
-        return Ok(());
-    };
-
-    let reembed_state: String = row.try_get("reembed_state")?;
-    if reembed_state == "in_progress" {
-        return Err(Error::ReembedInProgress {
-            workspace_id: workspace_id.to_string(),
-        });
-    }
-
-    let configured_model: String = row.try_get("embedding_model")?;
+    let row = row.ok_or_else(|| Error::WorkspaceEmbedderStateMissing {
+        workspace_id: workspace_id.to_string(),
+    })?;
     let configured_dimension: i32 = row.try_get("embedding_dimension")?;
-    let configured_dimension = usize::try_from(configured_dimension).unwrap_or(0);
-    if configured_dimension != VECTOR_DIMENSION {
+    let embedding_dimension = usize::try_from(configured_dimension).unwrap_or_default();
+    Ok(WorkspaceEmbedderState {
+        embedding_model: row.try_get("embedding_model")?,
+        embedding_dimension,
+        reembed_state: row.try_get("reembed_state")?,
+    })
+}
+
+fn guard_workspace_dimension(workspace_id: &str, state: &WorkspaceEmbedderState) -> Result<()> {
+    if state.embedding_dimension != VECTOR_DIMENSION {
         return Err(Error::EmbedderMismatch {
             workspace_id: workspace_id.to_string(),
-            configured_model,
-            configured_dimension,
+            configured_model: state.embedding_model.clone(),
+            configured_dimension: state.embedding_dimension,
             required_dimension: VECTOR_DIMENSION,
         });
     }
-
     Ok(())
 }
 
