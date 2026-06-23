@@ -6,6 +6,7 @@ mod brain_bridge;
 pub mod config;
 pub mod ctx;
 mod delegation;
+pub mod guardrails;
 pub mod handlers;
 pub(crate) mod identity_admin;
 pub mod lineage;

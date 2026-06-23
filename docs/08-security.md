@@ -101,6 +101,25 @@ If a model repeatedly emits malicious tool calls after receiving blocked-tool
 feedback, the remaining control point is the turn retry/circuit-breaker policy.
 Do not treat prompt filtering as a complete security boundary.
 
+## Agent Guardrails
+
+Configured agents may define optional input and output guardrail policy in the
+DB-backed agent artifact JSON. At session creation, resolution pins that policy
+into `session_agent_context` as part of the `AgentPolicySnapshot`.
+
+V1 guardrails are LLM-judge text policies. Input guardrails run before
+`UserMessage` is appended to the session event log. Output guardrails run after
+the main model response text is buffered and before the visible `BrainResponse`
+is appended. `GuardrailCheck` events record metadata such as direction, mode,
+decision, model, and policy hash for audit; they do not store the raw guarded
+text.
+
+PII detection/redaction guardrails, response-schema guardrails, and tool
+input/output guardrails are explicitly out of scope for V1. Guardrails are also
+not a replacement for action or tool policy: tool visibility, authorization,
+approval, and deny/review decisions remain enforced by the orchestrator
+tool/action paths.
+
 ## Action Policy
 
 Action-policy decisions are scoped to parsed tool intent, not raw command

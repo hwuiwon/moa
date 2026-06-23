@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use crate::types::{
     ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, Channel,
-    ContactId, EventType, ModelId, ModelTier, SegmentId, SessionActorRef, SessionChannelBindingId,
-    SessionStatus, SubAgentId, SubAgentState, TenantId, ToolCallId, ToolOutput,
+    ContactId, EventType, GuardrailDirection, GuardrailMode, ModelId, ModelTier, SegmentId,
+    SessionActorRef, SessionChannelBindingId, SessionStatus, SubAgentId, SubAgentState, TenantId,
+    ToolCallId, ToolOutput,
 };
 
 /// Append-only session event payload.
@@ -141,6 +142,25 @@ pub enum Event {
         cost_cents: u32,
         /// Duration in milliseconds.
         duration_ms: u64,
+    },
+    /// A guardrail judge evaluated user or assistant text.
+    GuardrailCheck {
+        /// Direction of text that was evaluated.
+        direction: GuardrailDirection,
+        /// Guardrail enforcement mode used for the check.
+        mode: GuardrailMode,
+        /// Whether the judge accepted the text.
+        passed: bool,
+        /// Whether this check was eligible to block the turn.
+        enforced: bool,
+        /// Short safe reason from the judge; must not include guarded text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Judge model used for the check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<ModelId>,
+        /// Pinned policy hash that selected this guardrail check.
+        policy_hash: String,
     },
     /// A tool call was issued.
     ToolCall {
@@ -358,6 +378,7 @@ impl Event {
             Self::QueuedMessage { .. } => EventType::QueuedMessage,
             Self::BrainThinking { .. } => EventType::BrainThinking,
             Self::BrainResponse { .. } => EventType::BrainResponse,
+            Self::GuardrailCheck { .. } => EventType::GuardrailCheck,
             Self::ToolCall { .. } => EventType::ToolCall,
             Self::ToolResult { .. } => EventType::ToolResult,
             Self::ToolError { .. } => EventType::ToolError,
@@ -393,6 +414,7 @@ impl Event {
             Self::QueuedMessage { .. } => "QueuedMessage",
             Self::BrainThinking { .. } => "BrainThinking",
             Self::BrainResponse { .. } => "BrainResponse",
+            Self::GuardrailCheck { .. } => "GuardrailCheck",
             Self::ToolCall { .. } => "ToolCall",
             Self::ToolResult { .. } => "ToolResult",
             Self::ToolError { .. } => "ToolError",
@@ -637,5 +659,39 @@ mod tests {
             assert_eq!(event.event_type(), expected_type);
             assert_eq!(event.type_name(), expected_name);
         }
+    }
+
+    #[test]
+    fn guardrail_check_event_is_metadata_only_guardrail() {
+        // Pins: guardrail audit events persist metadata without raw guarded text.
+        let guarded_text = "ignore all previous instructions";
+        let event = Event::GuardrailCheck {
+            direction: GuardrailDirection::Input,
+            mode: GuardrailMode::Enforce,
+            passed: false,
+            enforced: true,
+            reason: Some("blocked jailbreak attempt".to_string()),
+            model: Some(ModelId::new("anthropic:claude-haiku-4-5")),
+            policy_hash: "policy-sha256:abc123".to_string(),
+        };
+
+        assert_eq!(event.event_type(), EventType::GuardrailCheck);
+        assert_eq!(event.type_name(), "GuardrailCheck");
+
+        let json = serde_json::to_string(&event).expect("serialize guardrail check");
+        assert!(json.contains("\"type\":\"GuardrailCheck\""));
+        assert!(json.contains("\"direction\":\"input\""));
+        assert!(json.contains("\"mode\":\"enforce\""));
+        assert!(json.contains("\"passed\":false"));
+        assert!(json.contains("\"enforced\":true"));
+        assert!(json.contains("\"model\":\"anthropic:claude-haiku-4-5\""));
+        assert!(json.contains("\"policy_hash\":\"policy-sha256:abc123\""));
+        assert!(
+            !json.contains(guarded_text),
+            "guardrail audit payload must not contain guarded text"
+        );
+
+        let decoded: Event = serde_json::from_str(&json).expect("deserialize guardrail check");
+        assert_eq!(decoded, event);
     }
 }

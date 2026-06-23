@@ -55,9 +55,12 @@ admin/operator actor, and uses a pinned agent revision. The session row owns the
 tenant, contact, and creator attribution, while the `session_agent_context`
 sidecar stores the selected agent artifact revision, deployment pointers when
 present, policy hash, locked artifact/tool dependencies, and serialized runtime
-policy snapshot. The context pipeline still ranks visible published skill
-artifact revisions and materializes selected artifact files for the tool router,
-but that selection now runs inside the configured agent policy for the session.
+policy snapshot. Per-agent guardrail policy is stored in the DB-backed agent
+artifact JSON and pinned into this `session_agent_context` snapshot as
+`guardrail_policy`. The context pipeline still ranks visible published skill
+artifact revisions and materializes selected artifact files for the tool
+router, but that selection now runs inside the configured agent policy for the
+session.
 Artifact-backed workflows are explicit product operations through the
 `Workflows` API; a run may be associated with a session for UI/history, but the
 open-ended agent loop does not yet select or interpret workflow nodes
@@ -166,6 +169,7 @@ approvals, or code execution.
 
 ```text
 User message
+  -> Input guardrail evaluates configured-agent text policy
   -> SessionStore emits `UserMessage`
   -> Session VO prepares a turn
   -> Context pipeline runs
@@ -183,6 +187,7 @@ User message
   -> SegmentTracker opens or rolls a task segment
   -> LLM response is streamed/collected
   -> Tool calls route through ToolExecutor and ToolRouter
+  -> Output guardrail evaluates buffered visible text
   -> BrainResponse and tool events are persisted
   -> Segment counters are updated
   -> SegmentAssessor assesses completed or idle segments
@@ -192,6 +197,15 @@ User message
 ```
 
 If query rewriting is disabled, stage 5 is omitted and the remaining processors still report their configured stage numbers.
+
+V1 guardrails are optional configured-agent LLM-judge text policies. Input
+guardrails run before a `UserMessage` event is appended; output guardrails run
+after the main model response text is buffered and before the visible
+`BrainResponse` event is appended. `GuardrailCheck` events record decision
+metadata for audit without storing the raw guarded text. PII guardrails,
+response-schema guardrails, and tool input/output guardrails are explicitly out
+of scope for V1, and guardrails are not a replacement for action or tool
+policy.
 
 ## Storage Overview
 

@@ -34,17 +34,20 @@ use moa_core::wire::{
     UpdateSegmentAssessmentRequest,
 };
 use moa_core::{
-    ActionPolicyEffect, ActiveSegment, AssessmentPhase, CompletionRequest, CompletionResponse,
-    Event, EventRange, EventRecord, EventType, LearningEntry, MoaError, ModelTier,
-    QueryRewriteResult, SandboxFile, SegmentId, SessionId, SessionMeta, SessionStore as _,
-    TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation, ToolOutput,
-    TurnLatencyCounters, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
-    is_delegation_tool_name, record_session_error, record_turn_event_persist_duration,
-    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
-    record_turn_workflow_outcome, scope_turn_latency_counters, scope_turn_replay_counters,
+    ActionPolicyEffect, ActiveSegment, AgentContext, AssessmentPhase, CompletionContent,
+    CompletionRequest, CompletionResponse, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event, EventRange,
+    EventRecord, EventType, GuardrailDecision, GuardrailDirection, LearningEntry, MoaError,
+    ModelTier, QueryRewriteResult, SandboxFile, SegmentId, SessionId, SessionMeta,
+    SessionStore as _, StopReason, TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest,
+    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
+    TurnReplayCounters, is_delegation_tool_name, record_session_error,
+    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
+    record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
+    scope_turn_replay_counters,
 };
 use moa_lineage_citation::ChunkRef;
 use moa_lineage_core::TurnId;
+use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
@@ -225,6 +228,13 @@ async fn execute_turn_inside_workflow(
         });
     }
 
+    let meta = load_session_meta(ctx, session_id).await?;
+    if let Some(outcome) =
+        evaluate_input_guardrail(ctx, session_id, &meta, &request.user_message).await?
+    {
+        return Ok(outcome);
+    }
+
     let user_sequence_num = append_session_event(
         ctx,
         session_id,
@@ -326,6 +336,179 @@ async fn execute_turn_inside_workflow(
     })
 }
 
+async fn evaluate_input_guardrail(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    user_message: &str,
+) -> Result<Option<BodyOutcome>, HandlerError> {
+    let Some(agent_context) = meta.agent_context.as_ref() else {
+        return Ok(None);
+    };
+    let policy = AgentContext::parsed_policy_snapshot(agent_context).map_err(to_handler_error)?;
+    let Some(stage) = policy.guardrail_policy.stage(GuardrailDirection::Input) else {
+        return Ok(None);
+    };
+    if !stage.is_active() {
+        return Ok(None);
+    }
+
+    let guardrail_request = crate::guardrails::guardrail_completion_request(
+        &OrchestratorCtx::current_config(),
+        GuardrailDirection::Input,
+        stage,
+        user_message,
+    );
+    let response = ctx
+        .service_client::<LLMGatewayClient>()
+        .complete(Json::from(guardrail_request))
+        .call()
+        .await?
+        .into_inner();
+    let evaluation = crate::guardrails::evaluate_guardrail_response(
+        &agent_context.policy_hash,
+        GuardrailDirection::Input,
+        stage,
+        &response,
+    );
+    append_session_event(ctx, session_id, evaluation.to_event()).await?;
+
+    if matches!(evaluation.decision, GuardrailDecision::Block) {
+        let text = stage
+            .block_message
+            .clone()
+            .unwrap_or_else(|| "I can't help with that request.".to_string());
+        append_session_event(
+            ctx,
+            session_id,
+            Event::BrainResponse {
+                text,
+                thought_signature: None,
+                model: evaluation.model.clone(),
+                model_tier: ModelTier::Auxiliary,
+                input_tokens_uncached: 0,
+                input_tokens_cache_write: 0,
+                input_tokens_cache_read: 0,
+                output_tokens: 0,
+                cost_cents: 0,
+                duration_ms: 0,
+            },
+        )
+        .await?;
+        return Ok(Some(BodyOutcome {
+            kind: TurnOutcomeKind::Completed,
+            message: "input guardrail blocked".to_string(),
+        }));
+    }
+
+    Ok(None)
+}
+
+async fn visible_response_after_output_guardrail(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    response: &CompletionResponse,
+) -> Result<(CompletionResponse, bool), HandlerError> {
+    if response.text.is_empty() {
+        return Ok((response.clone(), false));
+    }
+    let Some(agent_context) = meta.agent_context.as_ref() else {
+        return Ok((response.clone(), false));
+    };
+    let policy = AgentContext::parsed_policy_snapshot(agent_context).map_err(to_handler_error)?;
+    let Some(stage) = policy.guardrail_policy.stage(GuardrailDirection::Output) else {
+        return Ok((response.clone(), false));
+    };
+    if !stage.is_active() {
+        return Ok((response.clone(), false));
+    }
+
+    let guardrail_request = crate::guardrails::guardrail_completion_request(
+        &OrchestratorCtx::current_config(),
+        GuardrailDirection::Output,
+        stage,
+        &response.text,
+    );
+    let judge_response = ctx
+        .service_client::<LLMGatewayClient>()
+        .complete(Json::from(guardrail_request))
+        .call()
+        .await?
+        .into_inner();
+    let evaluation = crate::guardrails::evaluate_guardrail_response(
+        &agent_context.policy_hash,
+        GuardrailDirection::Output,
+        stage,
+        &judge_response,
+    );
+    append_session_event(ctx, session_id, evaluation.to_event()).await?;
+
+    if matches!(evaluation.decision, GuardrailDecision::Block) {
+        let text = stage
+            .block_message
+            .clone()
+            .unwrap_or_else(|| "I can't return that response.".to_string());
+        let mut visible_response = response.clone();
+        visible_response.text = text.clone();
+        visible_response.content = vec![CompletionContent::Text(text)];
+        visible_response.stop_reason = StopReason::EndTurn;
+        visible_response.thought_signature = None;
+        return Ok((visible_response, true));
+    }
+
+    Ok((response.clone(), false))
+}
+
+async fn append_brain_response_from_completion(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    response: &CompletionResponse,
+) -> Result<u64, HandlerError> {
+    let usage = response.token_usage();
+    let cost_cents =
+        crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), usage);
+    append_session_event(
+        ctx,
+        session_id,
+        Event::BrainResponse {
+            text: response.text.clone(),
+            thought_signature: response.thought_signature.clone(),
+            model: response.model.clone(),
+            model_tier: ModelTier::Main,
+            input_tokens_uncached: usage.input_tokens_uncached,
+            input_tokens_cache_write: usage.input_tokens_cache_write,
+            input_tokens_cache_read: usage.input_tokens_cache_read,
+            output_tokens: usage.output_tokens,
+            cost_cents,
+            duration_ms: response.duration_ms,
+        },
+    )
+    .await
+}
+
+async fn ingest_deferred_session_turn(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    request: &CompletionRequest,
+    response: &CompletionResponse,
+    response_sequence_num: u64,
+) -> Result<(), HandlerError> {
+    let finalized_at = durable_utc_now(ctx).await?;
+    if let Some(turn) = crate::services::llm_gateway::session_turn_from_completion_request(
+        request,
+        &response.text,
+        session_id,
+        response_sequence_num,
+        finalized_at,
+    ) {
+        ctx.object_client::<IngestionVOClient>(ingestion_object_key(&turn))
+            .ingest_turn(Json(turn))
+            .send();
+    }
+    Ok(())
+}
+
 async fn run_once_inside_workflow(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -369,6 +552,10 @@ async fn run_once_inside_workflow(
         );
     }
     ensure_delegation_tool_schemas(&mut request);
+    request.metadata.insert(
+        DEFER_BRAIN_RESPONSE_METADATA_KEY.to_string(),
+        serde_json::json!(true),
+    );
     let allowed_tools = allowed_tool_names(&request);
     let request_model = request
         .model
@@ -390,7 +577,7 @@ async fn run_once_inside_workflow(
             },
             response = ctx
                 .service_client::<LLMGatewayClient>()
-                .complete(Json::from(request))
+                .complete(Json::from(request.clone()))
                 .call() => {
                     response?.into_inner()
             }
@@ -398,11 +585,25 @@ async fn run_once_inside_workflow(
     };
     let llm_call_duration = llm_started.elapsed();
     record_turn_llm_call_duration(llm_call_duration);
-    let response_usage = response.token_usage();
-    let response_cost_cents =
-        crate::services::llm_gateway::compute_cost_cents(response.model.as_str(), response_usage);
+    let (visible_response, output_blocked) =
+        visible_response_after_output_guardrail(ctx, session_id, &meta, &response).await?;
+    let response_usage = visible_response.token_usage();
+    let response_cost_cents = crate::services::llm_gateway::compute_cost_cents(
+        visible_response.model.as_str(),
+        response_usage,
+    );
+    let response_sequence_num =
+        append_brain_response_from_completion(ctx, session_id, &visible_response).await?;
+    ingest_deferred_session_turn(
+        ctx,
+        session_id,
+        &request,
+        &visible_response,
+        response_sequence_num,
+    )
+    .await?;
     let response_event =
-        latest_matching_brain_response_event(ctx, session_id, identity, &response).await?;
+        latest_matching_brain_response_event(ctx, session_id, identity, &visible_response).await?;
     let lineage = OrchestratorCtx::current_lineage();
     emit_generation_lineage(
         lineage.as_ref(),
@@ -410,7 +611,7 @@ async fn run_once_inside_workflow(
         &meta,
         "llm_gateway",
         &request_model,
-        &response,
+        &visible_response,
         &citation_sources,
         response_cost_cents,
         llm_call_duration,
@@ -419,9 +620,16 @@ async fn run_once_inside_workflow(
     )
     .await;
 
-    record_response(ctx, session_id, &response, last_summary).await?;
+    record_response(ctx, session_id, &visible_response, last_summary).await?;
 
-    for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
+    if output_blocked {
+        return Ok(CoreTurnOutcome::Idle);
+    }
+
+    for (index, tool_call) in response_tool_calls(&visible_response)
+        .into_iter()
+        .enumerate()
+    {
         if let Some(reason) = cancel_requested(ctx).await? {
             *last_summary = Some(reason);
             return Ok(CoreTurnOutcome::Cancelled);
@@ -438,7 +646,7 @@ async fn run_once_inside_workflow(
         .await?;
     }
 
-    Ok(turn_outcome_for_response(&response))
+    Ok(turn_outcome_for_response(&visible_response))
 }
 
 async fn build_request_inside_workflow(

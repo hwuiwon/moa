@@ -33,6 +33,9 @@ pub struct AgentDefinition {
     /// Built-in and MCP tool visibility policy.
     #[serde(default)]
     pub tool_policy: ToolPolicy,
+    /// Optional input and output guardrails for this agent.
+    #[serde(default)]
+    pub guardrail_policy: GuardrailPolicy,
     /// Optional admin-facing revision note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_note: Option<String>,
@@ -267,6 +270,48 @@ impl ToolPolicy {
             }))
             .collect()
     }
+}
+
+/// Optional input and output guardrails configured on an agent artifact.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GuardrailPolicy {
+    /// Optional guardrail applied to user text before agent processing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<GuardrailStagePolicy>,
+    /// Optional guardrail applied to assistant text before user delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<GuardrailStagePolicy>,
+}
+
+/// Authoring policy for one guardrail direction.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GuardrailStagePolicy {
+    /// Whether this stage should call the configured judge.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether blocking judge results are enforced or only recorded.
+    #[serde(default)]
+    pub mode: GuardrailMode,
+    /// Optional model override for the guardrail judge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Instructions the judge uses to decide whether text passes this guardrail.
+    #[serde(default)]
+    pub policy_prompt: String,
+    /// Optional message returned when an enforced guardrail blocks text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_message: Option<String>,
+}
+
+/// Runtime behavior for a configured guardrail stage.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailMode {
+    /// Record judge results without blocking the turn.
+    Shadow,
+    /// Apply blocking judge results to the turn.
+    #[default]
+    Enforce,
 }
 
 fn named_ref_paths(field: &str, refs: &[ArtifactRef]) -> Vec<(String, ArtifactRef)> {

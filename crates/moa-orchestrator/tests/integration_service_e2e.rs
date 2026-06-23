@@ -6,6 +6,8 @@ mod action_policy_flow_e2e;
 mod agent_artifacts_e2e;
 #[path = "integration/consolidate_e2e.rs"]
 mod consolidate_e2e;
+#[path = "integration/guardrails_e2e.rs"]
+mod guardrails_e2e;
 #[path = "integration/session_brain_e2e.rs"]
 mod session_brain_e2e;
 #[path = "integration/session_store_e2e.rs"]
