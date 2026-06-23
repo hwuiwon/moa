@@ -99,6 +99,19 @@ pub struct ExperimentImprovementProposal {
     pub response: ExperimentProposeImprovementsResponse,
 }
 
+const PLAN_GENERATION_SYSTEM_PROMPT: &str = "\
+Generate one canonical behavior-lab experiment_plan artifact document as JSON. Return only the \
+JSON object. Do not start, run, publish, or execute the plan.
+
+Create a draft artifact document with api_version `moa.artifact/v1`, kind `experiment_plan`, \
+status `draft`, and definition.type `experiment_plan`.
+
+The document must validate as a draft experiment_plan artifact. Put scenarios, personas, profiles, \
+and optional data_bundles inside definition.spec.simulation as embedded objects with stable `id` \
+fields. Include at least one scenario, persona, profile, target variant, simulator_model, \
+parallelism, trials_per_combination, and budget.max_total_cents. Use stable snake_case or \
+kebab-case names in metadata.name, simulation IDs, and target variant keys.";
+
 /// Builds the structured provider request for behavior-lab plan generation.
 pub fn plan_generation_request(
     request: &ExperimentGeneratePlanRequest,
@@ -108,13 +121,9 @@ pub fn plan_generation_request(
     }
 
     let mut completion = CompletionRequest::new(plan_generation_user_prompt(request));
-    completion.messages.insert(
-        0,
-        ContextMessage::system(
-            "Generate one canonical MOA behavior-lab experiment_plan artifact document as JSON. \
-             Return only the JSON object. Do not start, run, publish, or execute the plan.",
-        ),
-    );
+    completion
+        .messages
+        .insert(0, ContextMessage::system(PLAN_GENERATION_SYSTEM_PROMPT));
     completion.model = request.model.as_ref().map(ModelId::new);
     completion.max_output_tokens = Some(4096);
     completion.temperature = Some(0.2);
@@ -977,15 +986,7 @@ fn plan_generation_user_prompt(request: &ExperimentGeneratePlanRequest) -> Strin
     };
 
     format!(
-        "Create a draft MOA artifact document with api_version `moa.artifact/v1`, kind \
-         `experiment_plan`, status `draft`, and definition.type `experiment_plan`.\n\n\
-         The document must validate as a draft experiment_plan artifact. Put scenarios, personas, \
-         profiles, and optional data_bundles inside definition.spec.simulation as embedded objects \
-         with stable `id` fields. Include at least one scenario, persona, profile, target variant, \
-         simulator_model, parallelism, trials_per_combination, and budget.max_total_cents. Use \
-         stable snake_case or kebab-case names in metadata.name, simulation IDs, and target variant \
-         keys.\n\n\
-         Plan description:\n{}\n\n{}",
+        "Plan description:\n{}\n\n{}",
         request.description.trim(),
         refs
     )
@@ -994,7 +995,7 @@ fn plan_generation_user_prompt(request: &ExperimentGeneratePlanRequest) -> Strin
 fn experiment_plan_response_format() -> JsonResponseFormat {
     JsonResponseFormat::strict_json_schema(
         "moa_experiment_plan_artifact",
-        "A MOA artifact document whose kind and definition type are both experiment_plan.",
+        "An artifact document whose kind and definition type are both experiment_plan.",
         experiment_plan_response_schema(),
     )
 }
@@ -1226,13 +1227,50 @@ fn plan_expansion_error(error: PlanExpansionError) -> ExperimentAppError {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use moa_core::{ActionRuleScope, ModelId, SessionId};
+    use moa_core::{ActionRuleScope, MessageRole, ModelId, SessionId};
     use serde_json::json;
 
     use super::*;
     use crate::model::{
         ExperimentSimulatorConfig, ExperimentTargetKind, ExperimentTrialStopReason,
     };
+
+    #[test]
+    fn plan_generation_request_keeps_description_out_of_system_prompt() {
+        // Pins: behavior-lab generation keeps reusable artifact rules cacheable.
+        let request = ExperimentGeneratePlanRequest {
+            tenant_id: TenantId::new(),
+            description: "Compare the refund agent against a stricter escalation policy."
+                .to_string(),
+            model: Some("gpt-5.4-mini".to_string()),
+            artifact_refs: vec!["agent:refund-baseline@1".to_string()],
+        };
+
+        let completion =
+            plan_generation_request(&request).expect("valid plan-generation request should build");
+
+        assert_eq!(completion.messages.len(), 2);
+        assert_eq!(completion.messages[0].role, MessageRole::System);
+        assert_eq!(completion.messages[1].role, MessageRole::User);
+        assert!(
+            completion.messages[0]
+                .content
+                .contains("experiment_plan artifact document")
+        );
+        assert!(!completion.messages[0].content.contains("refund agent"));
+        assert!(
+            completion.messages[1]
+                .content
+                .contains("Compare the refund agent")
+        );
+        assert!(
+            completion.messages[1]
+                .content
+                .contains("agent:refund-baseline@1")
+        );
+        assert_eq!(completion.model, Some(ModelId::new("gpt-5.4-mini")));
+        assert!(completion.response_format.is_some());
+    }
 
     #[test]
     fn experiment_proposal_candidate_stays_review_only() {

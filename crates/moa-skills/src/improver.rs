@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    ActionRuleScope, CompletionRequest, Event, EventRecord, MoaConfig, ModelTask, Result,
-    SessionMeta, SkillMetadata, WorkspaceId,
+    ActionRuleScope, CompletionRequest, ContextMessage, Event, EventRecord, MoaConfig, ModelTask,
+    Result, SessionMeta, SkillMetadata, WorkspaceId,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -138,10 +138,9 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let stored_markdown = stored_package.skill_markdown()?;
     let current = parse_skill_markdown(stored_markdown)?;
     let current_markdown = render_skill_markdown(&current)?;
-    let prompt = build_improvement_prompt(&current_markdown, events);
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
     let response = llm
-        .complete(CompletionRequest::simple(prompt))
+        .complete(build_improvement_request(&current_markdown, events))
         .await?
         .collect()
         .await?;
@@ -325,16 +324,33 @@ fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_use
     ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
 }
 
-fn build_improvement_prompt(current_skill: &str, events: &[EventRecord]) -> String {
+const SKILL_IMPROVEMENT_SYSTEM_PROMPT: &str = "\
+You are improving an existing Agent Skill.
+Compare the current skill document with the successful execution provided by the user.
+If the execution shows a better reusable approach, output the complete updated SKILL.md using the \
+Agent Skills format from agentskills.io.
+Keep spec-compatible top-level frontmatter fields and preserve project-specific bookkeeping in the \
+`metadata` map with `moa-` prefixes.
+If the existing skill is still correct, output exactly UNCHANGED.";
+
+fn build_improvement_request(current_skill: &str, events: &[EventRecord]) -> CompletionRequest {
+    CompletionRequest {
+        model: None,
+        messages: vec![
+            ContextMessage::system(SKILL_IMPROVEMENT_SYSTEM_PROMPT),
+            ContextMessage::user(build_improvement_user_prompt(current_skill, events)),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: None,
+        temperature: None,
+        response_format: None,
+        metadata: Default::default(),
+    }
+}
+
+fn build_improvement_user_prompt(current_skill: &str, events: &[EventRecord]) -> String {
     format!(
-        "You are improving an existing MOA Agent Skill.\n\
-         Compare the current skill document with the successful execution below.\n\
-         If the execution shows a better reusable approach, output the complete updated SKILL.md using the \
-         Agent Skills format from agentskills.io.\n\
-         Keep spec-compatible top-level frontmatter fields and preserve MOA-specific bookkeeping in the \
-         `metadata` map with `moa-` prefixes.\n\
-         If the existing skill is still correct, output exactly UNCHANGED.\n\n\
-         Current skill:\n{current_skill}\n\n\
+        "Current skill:\n{current_skill}\n\n\
          Actual execution:\n{}",
         format_events_for_learning(events)
     )
@@ -363,4 +379,33 @@ pub(crate) fn format_events_for_learning(events: &[EventRecord]) -> String {
         }
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::MessageRole;
+
+    use super::*;
+
+    #[test]
+    fn skill_improvement_request_keeps_current_skill_out_of_system_prompt() {
+        // Pins: skill-improvement evidence is dynamic so the stable judge instructions remain cacheable.
+        let request = build_improvement_request("# Existing Skill\n", &[]);
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        assert_eq!(request.messages[1].role, MessageRole::User);
+        assert!(
+            request.messages[0]
+                .content
+                .contains("output exactly UNCHANGED")
+        );
+        assert!(!request.messages[0].content.contains("# Existing Skill"));
+        assert!(
+            request.messages[1]
+                .content
+                .contains("Current skill:\n# Existing Skill")
+        );
+        assert!(request.messages[1].content.contains("Actual execution:"));
+    }
 }

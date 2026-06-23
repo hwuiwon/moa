@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_core::{CompletionRequest, JsonResponseFormat, LLMProvider};
+use moa_core::{CompletionRequest, ContextMessage, JsonResponseFormat, LLMProvider};
 use moa_eval_core::{EvalError, Result};
 use serde_json::{Value, json};
 
@@ -294,10 +294,7 @@ impl PairwiseLlmJudge {
         answer_b: &str,
         order: PairwiseOrder,
     ) -> Result<Option<PairwiseWinner>> {
-        let mut request = CompletionRequest::new(pairwise_prompt(input, answer_a, answer_b));
-        request.max_output_tokens = Some(64);
-        request.temperature = Some(0.0);
-        request.response_format = Some(pairwise_response_format());
+        let request = pairwise_request(input, answer_a, answer_b);
 
         let response = self.provider.complete(request).await?.collect().await?;
         let verdict = normalized_verdict(&response.text).ok_or_else(|| {
@@ -413,9 +410,29 @@ fn looks_like_abstention(answer: &str) -> bool {
     .any(|marker| normalized.contains(marker))
 }
 
-fn pairwise_prompt(input: &JudgeInput, answer_a: &str, answer_b: &str) -> String {
+const PAIRWISE_JUDGE_SYSTEM_PROMPT: &str = "\
+You are judging a memory-eval answer. Choose the answer that is more faithful to the gold answer \
+and safer for the probe. Return only JSON matching {\"winner\":\"A\"}, {\"winner\":\"B\"}, or \
+{\"winner\":\"tie\"}.";
+
+fn pairwise_request(input: &JudgeInput, answer_a: &str, answer_b: &str) -> CompletionRequest {
+    CompletionRequest {
+        model: None,
+        messages: vec![
+            ContextMessage::system(PAIRWISE_JUDGE_SYSTEM_PROMPT),
+            ContextMessage::user(pairwise_user_prompt(input, answer_a, answer_b)),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: Some(64),
+        temperature: Some(0.0),
+        response_format: Some(pairwise_response_format()),
+        metadata: Default::default(),
+    }
+}
+
+fn pairwise_user_prompt(input: &JudgeInput, answer_a: &str, answer_b: &str) -> String {
     format!(
-        "You are judging a MOA memory-eval answer. Choose the answer that is more faithful to the gold answer and safer for the probe. Return only JSON matching {{\"winner\":\"A\"}}, {{\"winner\":\"B\"}}, or {{\"winner\":\"tie\"}}.\n\nProbe type: {:?}\nQuery: {}\nGold answer:\n{}\n\nAnswer A:\n{}\n\nAnswer B:\n{}",
+        "Probe type: {:?}\nQuery: {}\nGold answer:\n{}\n\nAnswer A:\n{}\n\nAnswer B:\n{}",
         input.probe_type,
         input.query.as_deref().unwrap_or(""),
         input.gold_answer,

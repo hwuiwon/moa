@@ -72,19 +72,21 @@ async fn build_simulator_context(
 
     let max_turns = effective_max_turns(trial.simulator.max_turns, selection.scenario.max_turns);
     Ok(SimulatorContext {
-        prompt: simulator_system_prompt(&selection, trial.seed.as_deref())?,
+        prompt: simulator_context_prompt(&selection, trial.seed.as_deref())?,
         max_turns,
     })
 }
 
-fn simulator_system_prompt(
+const SIMULATOR_SYSTEM_PROMPT: &str = "\
+You are the simulated user in a behavior-lab trial.
+Return only the next user-visible message to send to the target agent. Do not call tools. Return \
+DONE when the simulated user should stop.";
+
+fn simulator_context_prompt(
     selection: &PlanSimulationSelection,
     seed: Option<&str>,
 ) -> Result<String, HandlerError> {
-    let mut sections = vec![
-        "You are the simulated user in a MOA behavior-lab trial.".to_string(),
-        "Return only the next user-visible message to send to the target agent. Do not call tools. Return DONE when the simulated user should stop.".to_string(),
-    ];
+    let mut sections = Vec::new();
     if let Some(seed) = seed {
         sections.push(format!("Deterministic seed: {seed}"));
     }
@@ -130,7 +132,10 @@ pub(super) async fn simulator_next_user_message(
     request.tools = Vec::new();
     request
         .messages
-        .insert(0, ContextMessage::system(simulator_context.prompt.clone()));
+        .insert(0, ContextMessage::user(simulator_context.prompt.clone()));
+    request
+        .messages
+        .insert(0, ContextMessage::system(SIMULATOR_SYSTEM_PROMPT));
     request.messages.extend(transcript.iter().cloned());
 
     Ok(ctx

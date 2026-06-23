@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_core::{
-    AttributionEffect, AttributionSubjectType, CompletionRequest, Event, EventRecord,
-    ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata, WorkspaceId,
+    AttributionEffect, AttributionSubjectType, CompletionRequest, ContextMessage, Event,
+    EventRecord, ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result,
+    SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionMeta, SkillMetadata,
+    WorkspaceId,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -195,9 +196,8 @@ pub async fn distill_skill_with_learning(
     }
 
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
-    let prompt = build_distillation_prompt(&task_summary, events);
     let response = llm
-        .complete(CompletionRequest::simple(prompt))
+        .complete(build_distillation_request(&task_summary, events))
         .await?
         .collect()
         .await?;
@@ -282,9 +282,8 @@ pub async fn distill_skill_from_experience_with_learning(
     }
 
     let llm = model_router.provider_for(ModelTask::SkillDistillation);
-    let prompt = build_experience_distillation_prompt(&input);
     let response = llm
-        .complete(CompletionRequest::simple(prompt))
+        .complete(build_experience_distillation_request(&input))
         .await?
         .collect()
         .await?;
@@ -343,33 +342,59 @@ fn extract_task_summary(events: &[EventRecord]) -> String {
         .unwrap_or_else(|| "distilled session workflow".to_string())
 }
 
-fn build_distillation_prompt(task_summary: &str, events: &[EventRecord]) -> String {
+const SKILL_DISTILLATION_SYSTEM_PROMPT: &str = "\
+Distill task evidence into a reusable Agent Skill.
+Output only a complete SKILL.md document using the Agent Skills format from agentskills.io.
+Use spec-compatible top-level frontmatter fields such as `name`, `description`, optional \
+`compatibility`, optional `allowed-tools`, and a `metadata` map for project-specific bookkeeping.
+Store project-specific fields inside `metadata` using `moa-` prefixes, including at least \
+`moa-version`, `moa-one-liner`, `moa-tags`, and `moa-estimated-tokens`.
+The skill should include when-to-use guidance, a numbered procedure, pitfalls, and verification steps.
+Learn only durable workflow structure. Do not copy secrets, transient IDs, or one-off paths unless \
+the path is essential to the workflow.";
+
+fn build_distillation_request(task_summary: &str, events: &[EventRecord]) -> CompletionRequest {
+    CompletionRequest {
+        model: None,
+        messages: vec![
+            ContextMessage::system(SKILL_DISTILLATION_SYSTEM_PROMPT),
+            ContextMessage::user(build_distillation_user_prompt(task_summary, events)),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: None,
+        temperature: None,
+        response_format: None,
+        metadata: Default::default(),
+    }
+}
+
+fn build_distillation_user_prompt(task_summary: &str, events: &[EventRecord]) -> String {
     format!(
-        "Distill the following successful MOA session into a reusable Agent Skill.\n\
-         Output only a complete SKILL.md document using the Agent Skills format from agentskills.io.\n\
-         Use spec-compatible top-level frontmatter fields such as `name`, `description`, optional \
-         `compatibility`, optional `allowed-tools`, and a `metadata` map for MOA-specific bookkeeping.\n\
-         Store MOA-specific fields inside `metadata` using `moa-` prefixes, including at least \
-         `moa-version`, `moa-one-liner`, `moa-tags`, and `moa-estimated-tokens`.\n\
-         The skill should include when-to-use guidance, a numbered procedure, pitfalls, and verification steps.\n\
-         Task summary: {task_summary}\n\n\
+        "Task summary: {task_summary}\n\n\
          Session events:\n{}",
         format_events_for_learning(events)
     )
 }
 
-fn build_experience_distillation_prompt(input: &ExperienceDistillationInput) -> String {
+fn build_experience_distillation_request(input: &ExperienceDistillationInput) -> CompletionRequest {
+    CompletionRequest {
+        model: None,
+        messages: vec![
+            ContextMessage::system(SKILL_DISTILLATION_SYSTEM_PROMPT),
+            ContextMessage::user(build_experience_distillation_user_prompt(input)),
+        ],
+        tools: Vec::new(),
+        max_output_tokens: None,
+        temperature: None,
+        response_format: None,
+        metadata: Default::default(),
+    }
+}
+
+fn build_experience_distillation_user_prompt(input: &ExperienceDistillationInput) -> String {
     let experience = &input.experience;
     format!(
-        "Distill the following assessed MOA task experience into a reusable Agent Skill.\n\
-         Output only a complete SKILL.md document using the Agent Skills format from agentskills.io.\n\
-         Use top-level frontmatter fields such as `name`, `description`, optional `compatibility`, \
-         optional `allowed-tools`, and a `metadata` map for MOA-specific bookkeeping.\n\
-         Store MOA-specific fields inside `metadata` using `moa-` prefixes, including at least \
-         `moa-version`, `moa-one-liner`, `moa-tags`, and `moa-estimated-tokens`.\n\
-         Learn only durable workflow structure. Do not copy secrets, transient IDs, or one-off paths unless \
-         the path is essential to the workflow.\n\n\
-         Task summary: {}\n\
+        "Task summary: {}\n\
          Outcome: {} (confidence {:.3})\n\
          Task fingerprint: {}\n\
          Task facets: {}\n\
@@ -517,7 +542,7 @@ fn normalize_new_skill(session: &SessionMeta, skill: &mut SkillDocument) {
 mod tests {
     use chrono::{TimeZone, Utc};
     use moa_core::{
-        Event, EventRecord, ExperienceRecord, SegmentEvidence, SegmentEvidenceKind,
+        Event, EventRecord, ExperienceRecord, MessageRole, SegmentEvidence, SegmentEvidenceKind,
         SegmentEvidencePolarity, SegmentId, SessionId, SessionMeta, SessionStatus, TaskFacetSet,
         TaskFingerprint, TenantId, ToolCallId, UserId, WorkspaceId,
     };
@@ -574,6 +599,24 @@ mod tests {
             ..session
         };
         assert!(session_failed(&failed, &events));
+    }
+
+    #[test]
+    fn skill_distillation_request_keeps_session_evidence_out_of_system_prompt() {
+        // Pins: learned-skill generation reuses static instructions while session evidence stays dynamic.
+        let request = build_distillation_request("Fix auth regression", &[]);
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        assert_eq!(request.messages[1].role, MessageRole::User);
+        assert!(request.messages[0].content.contains("Agent Skills format"));
+        assert!(!request.messages[0].content.contains("Fix auth regression"));
+        assert!(
+            request.messages[1]
+                .content
+                .contains("Task summary: Fix auth regression")
+        );
+        assert!(request.messages[1].content.contains("Session events:"));
     }
 
     fn experience(outcome: SegmentOutcome, confidence: f64) -> ExperienceRecord {

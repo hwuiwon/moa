@@ -170,8 +170,8 @@ async fn pairwise_llm_judge_declares_candidate_win_only_when_swapped_orders_agre
     assert!(
         requests[0]
             .messages
-            .first()
-            .expect("first judge request has a prompt")
+            .get(1)
+            .expect("first judge request has a dynamic user prompt")
             .content
             .contains("Answer A:\nDeploy to prod-us-east and use RUNBOOK-42."),
         "first request should put candidate answer in slot A"
@@ -179,11 +179,15 @@ async fn pairwise_llm_judge_declares_candidate_win_only_when_swapped_orders_agre
     assert!(
         requests[1]
             .messages
-            .first()
-            .expect("second judge request has a prompt")
+            .get(1)
+            .expect("second judge request has a dynamic user prompt")
             .content
             .contains("Answer B:\nDeploy to prod-us-east and use RUNBOOK-42."),
         "swapped request should put candidate answer in slot B"
+    );
+    assert_eq!(
+        requests[0].messages[0].content, requests[1].messages[0].content,
+        "pairwise judge should reuse a stable system prompt across A/B orderings"
     );
 
     Ok(())

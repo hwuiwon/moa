@@ -385,7 +385,7 @@ impl LLMProvider for AuditedProvider {
 
 fn is_query_rewrite_request(request: &CompletionRequest) -> bool {
     request.tools.is_empty()
-        && request.messages.len() == 1
+        && request.messages.len() == 2
         && request.messages[0]
             .content
             .starts_with("You are a query rewriter for an AI agent system.")

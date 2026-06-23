@@ -13,7 +13,10 @@ pub(super) fn build_completion_request(
     let max_output_tokens = clamp_sub_agent_max_output(&capabilities, state.budget_remaining);
     let mut request = CompletionRequest {
         model: Some(model),
-        messages: vec![ContextMessage::system(sub_agent_system_prompt(state))],
+        messages: vec![
+            ContextMessage::system(SUB_AGENT_SYSTEM_PROMPT),
+            ContextMessage::user(sub_agent_context_prompt(state)),
+        ],
         tools: filtered_tool_schemas(&state.tool_subset)?,
         max_output_tokens: Some(max_output_tokens),
         temperature: None,
@@ -101,7 +104,18 @@ fn tenant_id_from_workspace_id(
         })
 }
 
-fn sub_agent_system_prompt(state: &SubAgentVoState) -> String {
+const SUB_AGENT_SYSTEM_PROMPT: &str = "\
+You are a specialist sub-agent working for a parent agent session.
+Complete only the delegated task and do not broaden scope without a parent follow-up.
+Use tools only when they materially advance the delegated task.
+Do not perform destructive or write-heavy work unless the task explicitly authorizes it.
+
+Final result to parent:
+- State the outcome and the evidence that supports it.
+- Include relevant file paths, command results, or unresolved questions.
+- Summarize; do not return raw logs unless the parent specifically requested them.";
+
+fn sub_agent_context_prompt(state: &SubAgentVoState) -> String {
     let task = state
         .task
         .as_deref()
@@ -112,17 +126,9 @@ fn sub_agent_system_prompt(state: &SubAgentVoState) -> String {
         format!("Allowed tools: {}", state.tool_subset.join(", "))
     };
     format!(
-        "You are a specialist sub-agent working for a parent MOA session.\n\
-         Complete only the delegated task and do not broaden scope without a parent follow-up.\n\n\
-         Task:\n{task}\n\n\
+        "Task:\n{task}\n\n\
          Tool policy:\n\
-         - {tools}\n\
-         - Use tools only when they materially advance the delegated task.\n\
-         - Do not perform destructive or write-heavy work unless the task explicitly authorizes it.\n\n\
-         Final result to parent:\n\
-         - State the outcome and the evidence that supports it.\n\
-         - Include relevant file paths, command results, or unresolved questions.\n\
-         - Summarize; do not return raw logs unless the parent specifically requested them."
+         - {tools}"
     )
 }
 
@@ -131,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sub_agent_system_prompt_pins_scope_tools_and_evidence_contract() {
+    fn sub_agent_request_keeps_task_context_out_of_stable_system_prompt() {
         // Pins: delegated sub-agent prompts preserve scope, allowed tools, and evidence-bearing final output.
         let state = SubAgentVoState {
             task: Some("Inspect auth.rs for token refresh races.".to_string()),
@@ -139,14 +145,15 @@ mod tests {
             ..SubAgentVoState::default()
         };
 
-        let prompt = sub_agent_system_prompt(&state);
+        assert!(SUB_AGENT_SYSTEM_PROMPT.contains("Complete only the delegated task"));
+        assert!(SUB_AGENT_SYSTEM_PROMPT.contains("State the outcome and the evidence"));
+        assert!(SUB_AGENT_SYSTEM_PROMPT.contains("do not return raw logs"));
+        assert!(!SUB_AGENT_SYSTEM_PROMPT.contains("Inspect auth.rs"));
+        assert!(!SUB_AGENT_SYSTEM_PROMPT.contains("Allowed tools: grep"));
 
-        assert!(prompt.contains("Complete only the delegated task"));
+        let prompt = sub_agent_context_prompt(&state);
         assert!(prompt.contains("Inspect auth.rs for token refresh races."));
         assert!(prompt.contains("Allowed tools: grep, file_read"));
-        assert!(prompt.contains("State the outcome and the evidence that supports it."));
-        assert!(prompt.contains("unresolved questions"));
-        assert!(prompt.contains("do not return raw logs"));
     }
 
     #[test]
