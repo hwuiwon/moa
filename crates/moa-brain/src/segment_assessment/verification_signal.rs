@@ -61,11 +61,16 @@ pub fn override_for_events(events: &[EventRecord]) -> Option<AssessmentOverride>
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VerificationKind {
+/// Coarse category of a command treated as a verification attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VerificationKind {
+    /// Test-suite execution such as `cargo test`, `pytest`, or `npm test`.
     Test,
+    /// Build or static-check execution such as `cargo build` or `cargo clippy`.
     Build,
+    /// External health check execution such as `curl` or `wget`.
     Health,
+    /// Explicit observation command such as checking exit status or filesystem state.
     Explicit,
 }
 
@@ -98,8 +103,7 @@ fn verification_attempts(events: &[EventRecord]) -> Vec<VerificationAttempt> {
         .iter()
         .filter_map(|record| match &record.event {
             Event::ToolCall { tool_id, input, .. } => {
-                let command = command_text(input);
-                classify_command(&command).map(|kind| VerificationAttempt {
+                classify_tool_input(input).map(|kind| VerificationAttempt {
                     kind,
                     success: statuses.get(tool_id).copied().unwrap_or(false),
                 })
@@ -107,6 +111,13 @@ fn verification_attempts(events: &[EventRecord]) -> Vec<VerificationAttempt> {
             _ => None,
         })
         .collect::<Vec<_>>()
+}
+
+/// Classifies a tool input payload as a verification attempt, when it contains one.
+#[must_use]
+pub fn classify_tool_input(input: &serde_json::Value) -> Option<VerificationKind> {
+    let command = command_text(input);
+    classify_command(&command)
 }
 
 fn command_text(input: &serde_json::Value) -> String {
@@ -159,7 +170,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::score;
+    use super::{VerificationKind, classify_tool_input, score};
 
     fn record(sequence_num: u64, event: Event) -> EventRecord {
         EventRecord {
@@ -226,5 +237,18 @@ mod tests {
     #[test]
     fn no_verification_command_is_neutral() {
         assert_eq!(score(&tool_pair(0, "git status", true)), Some(0.5));
+    }
+
+    #[test]
+    fn classify_tool_input_recognizes_verification_commands() {
+        assert_eq!(
+            classify_tool_input(&json!({"cmd": "cargo test -p moa-orchestrator"})),
+            Some(VerificationKind::Test)
+        );
+        assert_eq!(
+            classify_tool_input(&json!({"command": "cargo clippy -p moa-brain"})),
+            Some(VerificationKind::Build)
+        );
+        assert_eq!(classify_tool_input(&json!({"cmd": "git status"})), None);
     }
 }

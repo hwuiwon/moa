@@ -199,10 +199,6 @@ pub struct ResolutionConfig {
     pub enabled: bool,
     /// Signal weights used by the composite assessor.
     pub weights: ResolutionWeights,
-    /// Whether ambiguous agent self-assessment should use an LLM fallback.
-    pub use_llm_self_assessment: bool,
-    /// Timeout for optional LLM self-assessment.
-    pub self_assessment_timeout_ms: u64,
     /// Similarity threshold above which a later user message is treated as a rephrase.
     pub rephrase_similarity_threshold: f64,
     /// Minimum historical sample count before structural baselines are used.
@@ -216,8 +212,6 @@ impl Default for ResolutionConfig {
         Self {
             enabled: true,
             weights: ResolutionWeights::default(),
-            use_llm_self_assessment: false,
-            self_assessment_timeout_ms: 300,
             rephrase_similarity_threshold: 0.85,
             structural_min_samples: 20,
             idle_timeout_minutes: 30,

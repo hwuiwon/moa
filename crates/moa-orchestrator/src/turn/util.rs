@@ -1,11 +1,13 @@
 //! Pure turn helpers shared by the durable session and sub-agent runners.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use moa_brain::segment_assessment::verification_signal::{self, VerificationKind};
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, ContextMessage, Result, SessionId,
-    StopReason, ToolCallContent, ToolCallId, ToolOutput, TurnOutcome, delegation_tool_schemas,
+    StopReason, ToolCallContent, ToolCallId, ToolInvocation, ToolOutput, TurnOutcome,
+    delegation_tool_schemas,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use uuid::Uuid;
@@ -56,6 +58,119 @@ pub(crate) fn turn_outcome_for_response(response: &CompletionResponse) -> TurnOu
     }
 
     TurnOutcome::Idle
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TurnEvidence {
+    failed_verifications: BTreeMap<VerificationKind, VerificationFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerificationFailure {
+    pub(crate) kind: VerificationKind,
+    pub(crate) tool_name: String,
+    pub(crate) command: Option<String>,
+    pub(crate) exit_code: Option<i32>,
+}
+
+impl VerificationFailure {
+    fn annotation(&self) -> String {
+        let subject = self.command.as_deref().unwrap_or(&self.tool_name);
+        if let Some(exit_code) = self.exit_code {
+            return format!(
+                "Verification not green: {subject} exited {exit_code} this turn and was not rerun successfully."
+            );
+        }
+
+        format!(
+            "Verification not green: {subject} failed this turn and was not rerun successfully."
+        )
+    }
+}
+
+impl TurnEvidence {
+    /// Records whether one completed tool call changed the turn's verification state.
+    pub(crate) fn record_tool_result(&mut self, invocation: &ToolInvocation, output: &ToolOutput) {
+        let Some(kind) = verification_signal::classify_tool_input(&invocation.input) else {
+            return;
+        };
+
+        if output.is_error {
+            self.failed_verifications.insert(
+                kind,
+                VerificationFailure {
+                    kind,
+                    tool_name: invocation.name.clone(),
+                    command: verification_command_summary(&invocation.input),
+                    exit_code: output.process_exit_code(),
+                },
+            );
+            return;
+        }
+
+        // This is intentionally coarse: any later success in the same verification class clears
+        // an earlier failure of that class.
+        self.failed_verifications.remove(&kind);
+    }
+
+    pub(crate) fn failed_verification(&self) -> Option<&VerificationFailure> {
+        self.failed_verifications.values().next()
+    }
+}
+
+/// Appends unresolved verification evidence to an idle response without replacing the response.
+pub(crate) fn annotate_unresolved_verification(
+    response: &CompletionResponse,
+    evidence: &TurnEvidence,
+) -> (CompletionResponse, bool) {
+    if turn_outcome_for_response(response) != TurnOutcome::Idle {
+        return (response.clone(), false);
+    }
+    let Some(failure) = evidence.failed_verification() else {
+        return (response.clone(), false);
+    };
+
+    let note = failure.annotation();
+    let mut annotated = response.clone();
+    annotated.text = append_verification_note(&response.text, &note);
+    annotated.content.push(CompletionContent::Text(note));
+    annotated.thought_signature = None;
+    (annotated, true)
+}
+
+fn append_verification_note(text: &str, note: &str) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return note.to_string();
+    }
+
+    format!("{trimmed}\n\n{note}")
+}
+
+fn verification_command_summary(input: &serde_json::Value) -> Option<String> {
+    let raw = input
+        .get("cmd")
+        .or_else(|| input.get("command"))
+        .or_else(|| input.get("input"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| input.to_string());
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(truncate_chars(&normalized, 160))
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 /// Produces a short summary string from visible assistant text.
@@ -217,9 +332,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        allowed_tool_names, disallowed_tool_output, ensure_delegation_tool_schemas,
-        meaningful_cancel_reason, stable_tool_call_id, summarize_response_text,
-        tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
+        TurnEvidence, allowed_tool_names, annotate_unresolved_verification, disallowed_tool_output,
+        ensure_delegation_tool_schemas, meaningful_cancel_reason, stable_tool_call_id,
+        summarize_response_text, tool_call_is_allowed, tool_input_leaks_canary,
+        turn_outcome_for_response,
     };
 
     fn completion_response(
@@ -254,6 +370,138 @@ mod tests {
         );
 
         assert_eq!(turn_outcome_for_response(&response), TurnOutcome::Continue);
+    }
+
+    #[test]
+    fn turn_evidence_records_failed_verification() {
+        // Pins: failed deterministic checks retain detail for later response annotation.
+        let mut evidence = TurnEvidence::default();
+        evidence.record_tool_result(
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({"cmd": "cargo test -p moa-orchestrator"}),
+            },
+            &moa_core::ToolOutput::from_process(
+                String::new(),
+                "test failed".to_string(),
+                1,
+                std::time::Duration::ZERO,
+            ),
+        );
+
+        let failure = evidence
+            .failed_verification()
+            .expect("failed verification should be retained");
+        assert_eq!(failure.tool_name, "bash");
+        assert_eq!(
+            failure.command.as_deref(),
+            Some("cargo test -p moa-orchestrator")
+        );
+        assert_eq!(failure.exit_code, Some(1));
+    }
+
+    #[test]
+    fn idle_response_with_failed_verification_is_annotated() {
+        // Pins: unresolved failed verification adds a factual note without replacing the response.
+        let mut evidence = TurnEvidence::default();
+        evidence.record_tool_result(
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({"cmd": "cargo test -p moa-orchestrator"}),
+            },
+            &moa_core::ToolOutput::from_process(
+                String::new(),
+                "test failed".to_string(),
+                1,
+                std::time::Duration::ZERO,
+            ),
+        );
+        let response = completion_response(
+            "I couldn't finish the fix.",
+            vec![CompletionContent::Text(
+                "I couldn't finish the fix.".to_string(),
+            )],
+            moa_core::StopReason::EndTurn,
+        );
+
+        let (visible, annotated) = annotate_unresolved_verification(&response, &evidence);
+
+        assert!(annotated);
+        assert_eq!(
+            visible.text,
+            "I couldn't finish the fix.\n\nVerification not green: cargo test -p moa-orchestrator exited 1 this turn and was not rerun successfully."
+        );
+        assert_eq!(visible.stop_reason, moa_core::StopReason::EndTurn);
+        assert_eq!(visible.thought_signature, None);
+    }
+
+    #[test]
+    fn tool_call_response_with_failed_verification_is_not_annotated() {
+        // Pins: the deterministic gate never suppresses a response that continues with tools.
+        let mut evidence = TurnEvidence::default();
+        evidence.record_tool_result(
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({"cmd": "cargo test"}),
+            },
+            &moa_core::ToolOutput::from_process(
+                String::new(),
+                String::new(),
+                1,
+                std::time::Duration::ZERO,
+            ),
+        );
+        let response = completion_response(
+            "I'll rerun it.",
+            vec![CompletionContent::ToolCall(moa_core::ToolCallContent {
+                invocation: ToolInvocation {
+                    id: Some("provider-tool-id".to_string()),
+                    name: "bash".to_string(),
+                    input: json!({"cmd":"cargo test"}),
+                },
+                provider_metadata: None,
+            })],
+            moa_core::StopReason::ToolUse,
+        );
+
+        let (visible, annotated) = annotate_unresolved_verification(&response, &evidence);
+
+        assert!(!annotated);
+        assert_eq!(visible, response);
+    }
+
+    #[test]
+    fn later_success_clears_same_kind_failed_verification() {
+        // Pins: agents may claim completion after rerunning the failed class of verification successfully.
+        let mut evidence = TurnEvidence::default();
+        let invocation = ToolInvocation {
+            id: None,
+            name: "bash".to_string(),
+            input: json!({"cmd": "cargo test"}),
+        };
+        evidence.record_tool_result(
+            &invocation,
+            &moa_core::ToolOutput::from_process(
+                String::new(),
+                String::new(),
+                1,
+                std::time::Duration::ZERO,
+            ),
+        );
+        evidence.record_tool_result(
+            &invocation,
+            &moa_core::ToolOutput::from_process(
+                "ok".to_string(),
+                String::new(),
+                0,
+                std::time::Duration::ZERO,
+            ),
+        );
+
+        assert_eq!(evidence.failed_verification(), None);
     }
 
     #[test]

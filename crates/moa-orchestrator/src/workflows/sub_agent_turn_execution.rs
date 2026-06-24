@@ -36,9 +36,9 @@ use crate::services::{
     workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient},
 };
 use crate::turn::util::{
-    allowed_tool_names, blocked_canary_tool_output, denied_tool_output, disallowed_tool_output,
-    meaningful_cancel_reason, response_tool_calls, stable_tool_call_id, tool_call_is_allowed,
-    tool_input_leaks_canary, turn_outcome_for_response,
+    TurnEvidence, allowed_tool_names, annotate_unresolved_verification, blocked_canary_tool_output,
+    denied_tool_output, disallowed_tool_output, meaningful_cancel_reason, response_tool_calls,
+    stable_tool_call_id, tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
 };
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
@@ -163,6 +163,7 @@ async fn run_sub_agent_inside_workflow(
             });
         }
     };
+    let mut turn_evidence = TurnEvidence::default();
     for turn_number in 1..=max_turns {
         if let Some(reason) = cancel_requested(ctx).await? {
             ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
@@ -207,6 +208,7 @@ async fn run_sub_agent_inside_workflow(
             active_canary,
             meta,
             parent_session,
+            &mut turn_evidence,
         )
         .instrument(turn_span)
         .await?;
@@ -258,6 +260,7 @@ async fn run_sub_agent_iteration(
     active_canary: Option<String>,
     meta: SessionMeta,
     parent_session: SessionId,
+    turn_evidence: &mut TurnEvidence,
 ) -> Result<SubAgentIterationOutcome, HandlerError> {
     attach_active_segment_metadata(ctx, parent_session, &mut completion_request).await?;
     let allowed_tools = allowed_tool_names(&completion_request);
@@ -284,6 +287,8 @@ async fn run_sub_agent_iteration(
         }
     };
     record_turn_llm_call_duration(llm_started.elapsed());
+    let (response, verification_annotated) =
+        annotate_unresolved_verification(&response, turn_evidence);
 
     ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
         .record_response(Json::from(SubAgentTurnResponseRecord {
@@ -292,6 +297,18 @@ async fn run_sub_agent_iteration(
         }))
         .call()
         .await?;
+
+    if verification_annotated {
+        let outcome = CoreTurnOutcome::Idle;
+        ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+            .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
+                turn_id: request.turn_id.clone(),
+                outcome,
+            }))
+            .call()
+            .await?;
+        return Ok(SubAgentIterationOutcome::Core(outcome));
+    }
 
     for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
         if let Some(reason) = cancel_requested(ctx).await? {
@@ -307,7 +324,15 @@ async fn run_sub_agent_iteration(
             session_id: parent_session,
             active_canary: active_canary.as_deref(),
         };
-        handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
+        handle_tool_call(
+            ctx,
+            tool_context,
+            &allowed_tools,
+            index,
+            tool_call,
+            turn_evidence,
+        )
+        .await?;
     }
 
     let outcome = turn_outcome_for_response(&response);
@@ -361,6 +386,7 @@ async fn handle_tool_call(
     allowed_tools: &BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
+    turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
     ctx.set(K_PHASE, Json::from(TurnPhase::Tooling));
     let sub_agent_id = tool_context.sub_agent_id;
@@ -382,6 +408,7 @@ async fn handle_tool_call(
             &output,
         )
         .await?;
+        turn_evidence.record_tool_result(&invocation, &output);
         return Ok(());
     }
 
@@ -393,6 +420,7 @@ async fn handle_tool_call(
             session_id,
             tool_id,
             tool_call,
+            turn_evidence,
         )
         .await?;
         return Ok(());
@@ -436,6 +464,7 @@ async fn handle_tool_call(
             &output,
         )
         .await?;
+        turn_evidence.record_tool_result(&invocation, &output);
         return Ok(());
     }
 
@@ -465,6 +494,7 @@ async fn handle_tool_call(
                 &output,
             )
             .await?;
+            turn_evidence.record_tool_result(&invocation, &output);
             return Ok(());
         }
         ctx.service_client::<ActionReviewsClient>()
@@ -492,6 +522,7 @@ async fn handle_tool_call(
             &output,
         )
         .await?;
+        turn_evidence.record_tool_result(&invocation, &output);
         return Ok(());
     }
 
@@ -525,6 +556,7 @@ async fn handle_tool_call(
         &output,
     )
     .await?;
+    turn_evidence.record_tool_result(&invocation, &output);
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
@@ -538,6 +570,7 @@ async fn handle_delegation_tool(
     session_id: SessionId,
     tool_id: ToolCallId,
     tool_call: &ToolCallContent,
+    turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
@@ -573,6 +606,7 @@ async fn handle_delegation_tool(
         &output,
     )
     .await?;
+    turn_evidence.record_tool_result(&invocation, &output);
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }

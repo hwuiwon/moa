@@ -345,10 +345,6 @@ pub struct MoaEnvOverlay {
     pub resolution_weights_self_assessment: Option<f64>,
     /// `MOA_RESOLUTION_WEIGHTS_STRUCTURAL`.
     pub resolution_weights_structural: Option<f64>,
-    /// `MOA_RESOLUTION_USE_LLM_SELF_ASSESSMENT`.
-    pub resolution_use_llm_self_assessment: Option<bool>,
-    /// `MOA_RESOLUTION_SELF_ASSESSMENT_TIMEOUT_MS`.
-    pub resolution_self_assessment_timeout_ms: Option<u64>,
     /// `MOA_RESOLUTION_REPHRASE_SIMILARITY_THRESHOLD`.
     pub resolution_rephrase_similarity_threshold: Option<f64>,
     /// `MOA_RESOLUTION_STRUCTURAL_MIN_SAMPLES`.
@@ -1096,14 +1092,6 @@ impl MoaEnvOverlay {
         set_copy_if_some(
             &mut config.resolution.weights.structural,
             self.resolution_weights_structural,
-        );
-        set_copy_if_some(
-            &mut config.resolution.use_llm_self_assessment,
-            self.resolution_use_llm_self_assessment,
-        );
-        set_copy_if_some(
-            &mut config.resolution.self_assessment_timeout_ms,
-            self.resolution_self_assessment_timeout_ms,
         );
         set_copy_if_some(
             &mut config.resolution.rephrase_similarity_threshold,

@@ -63,10 +63,10 @@ use crate::services::{
     workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient},
 };
 use crate::turn::util::{
-    allowed_tool_names, blocked_canary_tool_output, denied_tool_output, disallowed_tool_output,
-    ensure_delegation_tool_schemas, meaningful_cancel_reason, response_tool_calls,
-    stable_tool_call_id, summarize_response_text, tool_call_is_allowed, tool_input_leaks_canary,
-    turn_outcome_for_response,
+    TurnEvidence, allowed_tool_names, annotate_unresolved_verification, blocked_canary_tool_output,
+    denied_tool_output, disallowed_tool_output, ensure_delegation_tool_schemas,
+    meaningful_cancel_reason, response_tool_calls, stable_tool_call_id, summarize_response_text,
+    tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
 };
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
@@ -252,6 +252,7 @@ async fn execute_turn_inside_workflow(
         OrchestratorCtx::current_config().session_limits.max_turns,
     );
     let mut last_summary = None;
+    let mut turn_evidence = TurnEvidence::default();
 
     for turn_number in 1..=max_turns {
         if let Some(reason) = cancel_requested(ctx).await? {
@@ -278,6 +279,7 @@ async fn execute_turn_inside_workflow(
                     turn_id,
                     &request.identity,
                     &mut last_summary,
+                    &mut turn_evidence,
                 )
                 .instrument(turn_root_span.clone())
                 .await
@@ -522,6 +524,7 @@ async fn run_once_inside_workflow(
     turn_id: TurnId,
     identity: &moa_core::traits::Identity,
     last_summary: &mut Option<String>,
+    turn_evidence: &mut TurnEvidence,
 ) -> Result<CoreTurnOutcome, HandlerError> {
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
@@ -594,6 +597,8 @@ async fn run_once_inside_workflow(
     record_turn_llm_call_duration(llm_call_duration);
     let (visible_response, output_blocked) =
         visible_response_after_output_guardrail(ctx, session_id, &meta, &response).await?;
+    let (visible_response, verification_annotated) =
+        annotate_unresolved_verification(&visible_response, turn_evidence);
     let response_usage = visible_response.token_usage();
     let response_cost_cents = crate::services::llm_gateway::compute_cost_cents(
         visible_response.model.as_str(),
@@ -629,7 +634,7 @@ async fn run_once_inside_workflow(
 
     record_response(ctx, session_id, &visible_response, last_summary).await?;
 
-    if output_blocked {
+    if output_blocked || verification_annotated {
         return Ok(CoreTurnOutcome::Idle);
     }
 
@@ -641,16 +646,13 @@ async fn run_once_inside_workflow(
             *last_summary = Some(reason);
             return Ok(CoreTurnOutcome::Cancelled);
         }
-        handle_tool_call(
-            ctx,
-            &meta,
+        let tool_context = RootToolContext {
+            meta: &meta,
             session_id,
-            &allowed_tools,
-            index,
-            tool_call,
-            active_canary.as_deref(),
-        )
-        .await?;
+            active_canary: active_canary.as_deref(),
+            turn_evidence,
+        };
+        handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
     }
 
     Ok(turn_outcome_for_response(&visible_response))
@@ -701,16 +703,25 @@ async fn build_request_inside_workflow(
     })
 }
 
+struct RootToolContext<'a> {
+    meta: &'a SessionMeta,
+    session_id: SessionId,
+    active_canary: Option<&'a str>,
+    turn_evidence: &'a mut TurnEvidence,
+}
+
 async fn handle_tool_call(
     ctx: &WorkflowContext<'_>,
-    meta: &SessionMeta,
-    session_id: SessionId,
+    tool_context: RootToolContext<'_>,
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
-    active_canary: Option<&str>,
 ) -> Result<(), HandlerError> {
     ctx.set(K_PHASE, Json::from(TurnPhase::Tooling));
+    let meta = tool_context.meta;
+    let session_id = tool_context.session_id;
+    let active_canary = tool_context.active_canary;
+    let turn_evidence = tool_context.turn_evidence;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
     let invocation = tool_call.invocation.clone();
 
@@ -718,11 +729,12 @@ async fn handle_tool_call(
         append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
         let output = disallowed_tool_output(&invocation.name);
         append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+        turn_evidence.record_tool_result(&invocation, &output);
         return Ok(());
     }
 
     if is_delegation_tool_name(&invocation.name) {
-        handle_delegation_tool(ctx, meta, session_id, tool_id, tool_call).await?;
+        handle_delegation_tool(ctx, meta, session_id, tool_id, tool_call, turn_evidence).await?;
         return Ok(());
     }
 
@@ -755,6 +767,7 @@ async fn handle_tool_call(
             invocation.name
         ));
         append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+        turn_evidence.record_tool_result(&invocation, &output);
         return Ok(());
     }
 
@@ -773,6 +786,7 @@ async fn handle_tool_call(
         if tool_input_leaks_canary(active_canary, &tool_request.input).map_err(to_handler_error)? {
             let output = blocked_canary_tool_output(&invocation.name);
             append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+            turn_evidence.record_tool_result(&invocation, &output);
             return Ok(());
         }
         ctx.service_client::<ActionReviewsClient>()
@@ -791,6 +805,7 @@ async fn handle_tool_call(
             Duration::ZERO,
         );
         append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
+        turn_evidence.record_tool_result(&invocation, &output);
         return Ok(());
     }
 
@@ -814,6 +829,7 @@ async fn handle_tool_call(
         .await?
         .into_inner();
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
+    turn_evidence.record_tool_result(&invocation, &output);
 
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
@@ -827,6 +843,7 @@ async fn handle_delegation_tool(
     session_id: SessionId,
     tool_id: ToolCallId,
     tool_call: &ToolCallContent,
+    turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
@@ -862,6 +879,7 @@ async fn handle_delegation_tool(
         },
     )
     .await?;
+    turn_evidence.record_tool_result(&invocation, &output);
 
     if !output.is_error {
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
