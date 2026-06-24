@@ -16,6 +16,7 @@ pub(super) const K_TOOL_SUBSET: &str = "tool_subset";
 pub(super) const K_WORKSPACE_ID: &str = "workspace_id";
 pub(super) const K_USER_ID: &str = "user_id";
 pub(super) const K_MODEL: &str = "model";
+pub(super) const K_MAX_TURNS: &str = "max_turns";
 pub(super) const K_HISTORY: &str = "history";
 pub(super) const K_TOOLS_INVOKED: &str = "tools_invoked";
 pub(super) const K_CANCEL_REASON: &str = "cancel_reason";
@@ -50,6 +51,8 @@ pub struct SubAgentVoState {
     pub user_id: Option<UserId>,
     /// Model inherited from the parent.
     pub model: Option<ModelId>,
+    /// Optional maximum autonomous turns for this child.
+    pub max_turns: Option<u32>,
     /// Buffered parent messages waiting for the next turn.
     pub pending: Vec<UserMessage>,
     /// Buffered conversation history carried across turns.
@@ -79,6 +82,7 @@ impl SubAgentVoState {
             task,
             tool_subset,
             budget_tokens,
+            max_turns,
             parent_session,
             parent_sub_agent,
             depth,
@@ -91,6 +95,11 @@ impl SubAgentVoState {
                 "sub-agent initialization requires an InitialTask message".to_string(),
             ));
         };
+        if matches!(max_turns, Some(0)) {
+            return Err(MoaError::ValidationError(
+                "sub-agent max_turns must be at least 1".to_string(),
+            ));
+        }
 
         self.status = Some(SubAgentState::Running);
         self.parent_session = Some(*parent_session);
@@ -103,6 +112,7 @@ impl SubAgentVoState {
         self.workspace_id = Some(workspace_id.clone());
         self.user_id = Some(user_id.clone());
         self.model = Some(model.clone());
+        self.max_turns = *max_turns;
         self.pending = vec![UserMessage {
             text: task.clone(),
             attachments: Vec::new(),
@@ -283,6 +293,7 @@ impl VoState for SubAgentVoState {
             workspace_id: reader.get_json(K_WORKSPACE_ID).await?,
             user_id: reader.get_json(K_USER_ID).await?,
             model: reader.get_json(K_MODEL).await?,
+            max_turns: reader.get_json(K_MAX_TURNS).await?,
             pending: reader.get_json(K_PENDING).await?.unwrap_or_default(),
             history: reader.get_json(K_HISTORY).await?.unwrap_or_default(),
             children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
@@ -311,6 +322,7 @@ impl VoState for SubAgentVoState {
         set_or_clear_opt(ctx, K_WORKSPACE_ID, self.workspace_id.as_ref());
         set_or_clear_opt(ctx, K_USER_ID, self.user_id.as_ref());
         set_or_clear_opt(ctx, K_MODEL, self.model.as_ref());
+        set_or_clear_opt(ctx, K_MAX_TURNS, self.max_turns.as_ref());
         set_or_clear_vec(ctx, K_PENDING, &self.pending);
         set_or_clear_vec(ctx, K_HISTORY, &self.history);
         set_or_clear_vec(ctx, K_CHILDREN, &self.children);
@@ -415,6 +427,7 @@ mod tests {
             task: "summarize repo status".to_string(),
             tool_subset: vec!["web_fetch".to_string()],
             budget_tokens: 512,
+            max_turns: Some(3),
             parent_session: SessionId::new(),
             parent_sub_agent: None,
             depth: 1,
@@ -435,6 +448,23 @@ mod tests {
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.tool_subset, vec!["web_fetch".to_string()]);
         assert_eq!(state.budget_remaining, 512);
+        assert_eq!(state.max_turns, Some(3));
+    }
+
+    #[test]
+    fn initial_task_rejects_zero_max_turns() {
+        // Pins: max_turns is a real execution cap and zero is never treated as unlimited.
+        let mut message = initial_task();
+        let SubAgentMessage::InitialTask { max_turns, .. } = &mut message else {
+            panic!("helper should build initial task");
+        };
+        *max_turns = Some(0);
+
+        let error = SubAgentVoState::default()
+            .initialize(&message)
+            .expect_err("zero max_turns should fail closed");
+
+        assert!(error.to_string().contains("max_turns must be at least 1"));
     }
 
     #[test]

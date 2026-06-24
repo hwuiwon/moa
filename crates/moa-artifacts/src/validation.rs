@@ -22,7 +22,7 @@ use crate::simulation::{
     SimulationPersonaDefinition, SimulationProfileDefinition, SimulationScenarioDefinition,
 };
 use crate::skill::SkillDefinition;
-use crate::workflow::{WorkflowDefinition, WorkflowNodeKind};
+use crate::workflow::{WorkflowDefinition, WorkflowNode, WorkflowNodeKind};
 
 /// A single semantic validation error.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -689,6 +689,7 @@ fn validate_workflow(definition: &WorkflowDefinition, report: &mut ValidationRep
         } else if !node_ids.insert(node.id.as_str()) {
             report.push_error(id_path, "duplicate workflow node id");
         }
+        validate_workflow_node(index, node, report);
 
         saw_start |= node.kind == WorkflowNodeKind::Start;
         saw_end |= node.kind == WorkflowNodeKind::End;
@@ -718,6 +719,51 @@ fn validate_workflow(definition: &WorkflowDefinition, report: &mut ValidationRep
             );
         }
     }
+}
+
+fn validate_workflow_node(index: usize, node: &WorkflowNode, report: &mut ValidationReport) {
+    let path = format!("definition.spec.nodes[{index}]");
+    match node.kind {
+        WorkflowNodeKind::Action | WorkflowNodeKind::SkillAction => {
+            validate_workflow_action_node(&path, node, report);
+        }
+        WorkflowNodeKind::Tool => validate_workflow_tool_node(&path, node, report),
+        _ => {}
+    }
+}
+
+fn validate_workflow_action_node(path: &str, node: &WorkflowNode, report: &mut ValidationReport) {
+    if let Some(artifact_ref) = &node.artifact_ref {
+        validate_single_action_ref(&format!("{path}.ref"), artifact_ref, report);
+        return;
+    }
+    if !workflow_input_tool_target_present(&node.input) {
+        report.push_error(
+            path,
+            "workflow action node must specify ref, input.tool_name, or input.tool",
+        );
+    }
+}
+
+fn validate_workflow_tool_node(path: &str, node: &WorkflowNode, report: &mut ValidationReport) {
+    validate_tool_refs(&format!("{path}.tool_refs"), &node.tool_refs, report);
+    if workflow_input_tool_target_present(&node.input) {
+        return;
+    }
+    if node.tool_refs.len() != 1 {
+        report.push_error(
+            path,
+            "workflow tool node must specify exactly one tool_ref, input.tool_name, or input.tool",
+        );
+    }
+}
+
+fn workflow_input_tool_target_present(input: &Value) -> bool {
+    input
+        .get("tool_name")
+        .or_else(|| input.get("tool"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn require_non_empty(
@@ -820,6 +866,55 @@ fn validate_action_refs(path: &str, refs: &[ArtifactRef], report: &mut Validatio
                 item_path,
                 "action reference must use action:// or connector.action action syntax",
             ),
+        }
+    }
+}
+
+fn validate_single_action_ref(
+    path: &str,
+    artifact_ref: &ArtifactRef,
+    report: &mut ValidationReport,
+) {
+    if artifact_ref.target_name().trim().is_empty() {
+        report.push_error(
+            path.to_string(),
+            "action reference target must not be empty",
+        );
+    }
+    if artifact_ref
+        .action_name()
+        .is_some_and(|action| action.trim().is_empty())
+    {
+        report.push_error(
+            path.to_string(),
+            "action reference action must not be empty",
+        );
+    }
+    match artifact_ref {
+        ArtifactRef::Artifact {
+            kind: ArtifactKind::Action,
+            ..
+        }
+        | ArtifactRef::Action { .. } => {}
+        _ => report.push_error(
+            path.to_string(),
+            "action reference must use action:// or connector.action action syntax",
+        ),
+    }
+}
+
+fn validate_tool_refs(path: &str, refs: &[ArtifactRef], report: &mut ValidationReport) {
+    let mut seen = HashSet::new();
+    for (index, artifact_ref) in refs.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        if artifact_ref.target_name().trim().is_empty() {
+            report.push_error(item_path.clone(), "tool reference target must not be empty");
+        }
+        if !seen.insert(artifact_ref.to_string()) {
+            report.push_error(item_path.clone(), "duplicate tool reference");
+        }
+        if !matches!(artifact_ref, ArtifactRef::Tool { .. }) {
+            report.push_error(item_path, "tool reference must use tool://");
         }
     }
 }

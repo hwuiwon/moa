@@ -1,0 +1,97 @@
+api_version: moa.artifact/v1
+kind: workflow
+metadata:
+  name: parallel-review
+  description: Deterministic skill with parallel evidence gathering and one review gate.
+  tags:
+    - pattern
+    - parallel
+    - review
+status: draft
+definition:
+  type: workflow
+  spec:
+    nodes:
+      - id: start
+        kind: start
+        ui:
+          x: 80
+          y: 180
+      - id: gather_evidence
+        kind: parallel
+        ui:
+          x: 250
+          y: 180
+      - id: check_order
+        kind: tool
+        tool_refs:
+          - tool://orders.lookup
+        input:
+          include_line_items: true
+        ui:
+          x: 440
+          y: 90
+      - id: check_delivery
+        kind: tool
+        tool_refs:
+          - tool://delivery.lookup
+        input:
+          include_gps: false
+        ui:
+          x: 440
+          y: 270
+      - id: join_evidence
+        kind: join
+        ui:
+          x: 650
+          y: 180
+      - id: manager_review
+        kind: review
+        input:
+          prompt: Review gathered evidence before issuing a refund.
+        ui:
+          x: 840
+          y: 180
+      - id: issue_refund
+        kind: action
+        ref: action://orders.refund
+        input:
+          reason: approved_by_parallel_review
+        ui:
+          x: 1040
+          y: 180
+      - id: done
+        kind: end
+        input:
+          status: reviewed
+        ui:
+          x: 1240
+          y: 180
+    edges:
+      - id: start-gather-evidence
+        from: start
+        to: gather_evidence
+      - id: gather-evidence-check-order
+        from: gather_evidence
+        to: check_order
+      - id: gather-evidence-check-delivery
+        from: gather_evidence
+        to: check_delivery
+      - id: check-order-join-evidence
+        from: check_order
+        to: join_evidence
+      - id: check-delivery-join-evidence
+        from: check_delivery
+        to: join_evidence
+      - id: join-evidence-manager-review
+        from: join_evidence
+        to: manager_review
+      - id: manager-review-issue-refund
+        from: manager_review
+        to: issue_refund
+      - id: issue-refund-done
+        from: issue_refund
+        to: done
+    ui:
+      layout: dagre
+      version: 1

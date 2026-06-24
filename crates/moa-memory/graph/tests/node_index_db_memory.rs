@@ -95,9 +95,9 @@ async fn node_index_rls_scopes_seed_lookup_and_bump() {
         .await
         .expect("create isolated Postgres store");
     let prefix = format!("node-index-{}", Uuid::now_v7().simple());
-    let workspace_a = format!("{prefix}-a");
-    let workspace_b = format!("{prefix}-b");
-    let workspace_c = format!("{prefix}-c");
+    let workspace_a = Uuid::now_v7().to_string();
+    let workspace_b = Uuid::now_v7().to_string();
+    let workspace_c = Uuid::now_v7().to_string();
 
     let workspace_a_uids =
         insert_workspace_rows(store.pool(), &workspace_a, &prefix, NodeLabel::Fact, 40).await;
@@ -122,7 +122,7 @@ async fn node_index_rls_scopes_seed_lookup_and_bump() {
         .await
         .expect("lookup node_index seeds");
     assert!(!seeds.is_empty());
-    assert!(seeds.iter().all(|row| row.scope == "workspace"));
+    assert!(seeds.iter().all(|row| row.scope == "tenant"));
     assert!(
         seeds
             .iter()
@@ -150,8 +150,8 @@ async fn node_index_workspace_scope_query_uses_partial_index() {
         .await
         .expect("create isolated Postgres store");
     let prefix = format!("node-index-explain-{}", Uuid::now_v7().simple());
-    let target_workspace = format!("{prefix}-target");
-    let other_workspace = format!("{prefix}-other");
+    let target_workspace = Uuid::now_v7().to_string();
+    let other_workspace = Uuid::now_v7().to_string();
     insert_workspace_rows(
         store.pool(),
         &target_workspace,
@@ -182,7 +182,7 @@ async fn node_index_workspace_scope_query_uses_partial_index() {
     let plan = sqlx::query_scalar::<_, String>(&format!(
         "EXPLAIN SELECT * FROM moa.node_index \
          WHERE workspace_id = '{target_workspace}' \
-           AND scope = 'workspace' \
+           AND scope = 'tenant' \
            AND label = 'Fact' \
            AND valid_to IS NULL"
     ))

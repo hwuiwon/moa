@@ -1,7 +1,11 @@
+use chrono::TimeDelta;
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
-use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
+use moa_artifacts::registry::{
+    ArtifactNodeRunStatus, ArtifactNodeRunUpdate, ArtifactRegistry, ArtifactRunStatus,
+    ArtifactRunUpdate, NewArtifactDraft, NewArtifactFile, NewArtifactNodeRun, NewArtifactRun,
+};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{ActionRuleScope, Result, TenantId};
+use moa_core::{ActionRuleScope, Result, SessionId, TenantId};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -195,6 +199,256 @@ async fn registry_persists_behavior_lab_artifact_kinds() -> Result<()> {
     moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
 }
 
+#[tokio::test]
+async fn workflow_run_node_projection_db_memory() -> Result<()> {
+    // Pins: workflow runs and node-run projections round-trip through the registry schema.
+    let (store, database_url, schema_name) =
+        moa_session::testing::create_isolated_test_store().await?;
+    let registry = ArtifactRegistry::new(store.pool().clone());
+    let workspace_scope = ActionRuleScope::Tenant {
+        tenant_id: TenantId::from(Uuid::now_v7()),
+    };
+    let name = format!("support-flow-{}", Uuid::now_v7());
+    let document = workflow_doc(&name);
+    let source = document.to_json().expect("serialize workflow doc");
+    let input = json!({ "ticket_id": "T-100", "priority": "high" });
+    let initial_state = json!({ "steps": [] });
+    let session_id = SessionId::new();
+    let idempotency_key = Some(format!("workflow-run-{}", Uuid::now_v7()));
+
+    let draft = registry
+        .create_draft(
+            &workspace_scope,
+            NewArtifactDraft {
+                document: &document,
+                source_format: "json",
+                source_text: source.as_bytes(),
+                files: &[],
+            },
+        )
+        .await?;
+    let published = registry
+        .publish_revision(
+            &workspace_scope,
+            draft.revision_uid,
+            &validate_for_status(&document, ArtifactStatus::Published),
+        )
+        .await?;
+
+    let appended = registry
+        .append_run(
+            &workspace_scope,
+            NewArtifactRun {
+                artifact_uid: Some(published.artifact_uid),
+                revision_uid: Some(published.revision_uid),
+                session_id: Some(session_id),
+                workflow_ref: format!("workflow://{name}"),
+                status: ArtifactRunStatus::Queued,
+                current_node_id: None,
+                input: input.clone(),
+                state: initial_state,
+                output: None,
+                error: None,
+                idempotency_key: idempotency_key.clone(),
+            },
+        )
+        .await?;
+    let duplicate = registry
+        .append_run(
+            &workspace_scope,
+            NewArtifactRun {
+                artifact_uid: Some(published.artifact_uid),
+                revision_uid: Some(published.revision_uid),
+                session_id: Some(session_id),
+                workflow_ref: format!("workflow://{name}"),
+                status: ArtifactRunStatus::Queued,
+                current_node_id: None,
+                input: json!({ "ticket_id": "T-999" }),
+                state: json!({ "steps": ["duplicate"] }),
+                output: None,
+                error: None,
+                idempotency_key,
+            },
+        )
+        .await?;
+
+    assert_eq!(appended.artifact_uid, Some(published.artifact_uid));
+    assert_eq!(appended.revision_uid, Some(published.revision_uid));
+    assert_eq!(appended.workflow_ref, format!("workflow://{name}"));
+    assert_eq!(appended.input, input);
+    assert_eq!(appended.state, json!({ "steps": [] }));
+    assert_eq!(duplicate.run_uid, appended.run_uid);
+    assert_eq!(duplicate.input, input);
+    assert_eq!(duplicate.state, json!({ "steps": [] }));
+
+    let loaded = registry
+        .load_run(&workspace_scope, appended.run_uid)
+        .await?
+        .expect("workflow run should be visible after append");
+    assert_eq!(loaded.artifact_uid, Some(published.artifact_uid));
+    assert_eq!(loaded.revision_uid, Some(published.revision_uid));
+    assert_eq!(loaded.session_id, Some(session_id));
+    assert_eq!(loaded.workflow_ref, format!("workflow://{name}"));
+    assert_eq!(loaded.status, ArtifactRunStatus::Queued);
+    assert_eq!(loaded.input, input);
+    assert_eq!(loaded.state, json!({ "steps": [] }));
+    assert_eq!(loaded.output, None);
+
+    let running_state = json!({ "steps": ["start"], "attempt": 1 });
+    let running = registry
+        .update_run(
+            &workspace_scope,
+            appended.run_uid,
+            ArtifactRunUpdate {
+                status: Some(ArtifactRunStatus::Running),
+                current_node_id: Some(Some("start".to_string())),
+                state: Some(running_state.clone()),
+                output: None,
+                error: None,
+                completed_at: None,
+            },
+        )
+        .await?
+        .expect("running workflow run should update");
+    assert_eq!(running.status, ArtifactRunStatus::Running);
+    assert_eq!(running.current_node_id.as_deref(), Some("start"));
+    assert_eq!(running.state, running_state);
+    assert_eq!(running.completed_at, None);
+
+    let node_run_uid = registry
+        .append_node_run(
+            &workspace_scope,
+            NewArtifactNodeRun {
+                run_uid: appended.run_uid,
+                node_id: "start".to_string(),
+                status: ArtifactNodeRunStatus::Running,
+                input: json!({ "ticket_id": "T-100" }),
+                output: None,
+                error: None,
+                completed_at: None,
+            },
+        )
+        .await?;
+    let duplicate_node_run_uid = registry
+        .append_node_run(
+            &workspace_scope,
+            NewArtifactNodeRun {
+                run_uid: appended.run_uid,
+                node_id: "start".to_string(),
+                status: ArtifactNodeRunStatus::Queued,
+                input: json!({ "ticket_id": "T-duplicate" }),
+                output: None,
+                error: None,
+                completed_at: None,
+            },
+        )
+        .await?;
+    assert_eq!(duplicate_node_run_uid, node_run_uid);
+
+    let node_completed_at = running.started_at + TimeDelta::seconds(1);
+    let completed_node = registry
+        .update_node_run(
+            &workspace_scope,
+            node_run_uid,
+            ArtifactNodeRunUpdate {
+                status: Some(ArtifactNodeRunStatus::Completed),
+                output: Some(Some(json!({ "accepted": true }))),
+                error: Some(None),
+                completed_at: Some(Some(node_completed_at)),
+            },
+        )
+        .await?
+        .expect("node run should update");
+    assert_eq!(completed_node.status, ArtifactNodeRunStatus::Completed);
+    assert_eq!(completed_node.output, Some(json!({ "accepted": true })));
+    assert_eq!(completed_node.completed_at, Some(node_completed_at));
+
+    let appended_node_uids = registry
+        .append_node_runs(
+            &workspace_scope,
+            vec![
+                NewArtifactNodeRun {
+                    run_uid: appended.run_uid,
+                    node_id: "start".to_string(),
+                    status: ArtifactNodeRunStatus::Queued,
+                    input: json!({ "ticket_id": "T-duplicate" }),
+                    output: None,
+                    error: None,
+                    completed_at: None,
+                },
+                NewArtifactNodeRun {
+                    run_uid: appended.run_uid,
+                    node_id: "done".to_string(),
+                    status: ArtifactNodeRunStatus::Queued,
+                    input: json!({ "accepted": true }),
+                    output: None,
+                    error: None,
+                    completed_at: None,
+                },
+            ],
+        )
+        .await?;
+    assert_eq!(appended_node_uids[0], node_run_uid);
+    let done_node_run_uid = appended_node_uids[1];
+
+    let node_runs = registry
+        .list_node_runs(&workspace_scope, appended.run_uid)
+        .await?;
+    assert_eq!(node_runs.len(), 2);
+    assert_eq!(node_runs[0].node_run_uid, node_run_uid);
+    assert_eq!(node_runs[0].node_id, "start");
+    assert_eq!(node_runs[0].status, ArtifactNodeRunStatus::Completed);
+    assert_eq!(node_runs[1].node_run_uid, done_node_run_uid);
+    assert_eq!(node_runs[1].node_id, "done");
+    assert_eq!(node_runs[1].status, ArtifactNodeRunStatus::Queued);
+    assert!(
+        node_runs[0].started_at <= node_runs[1].started_at,
+        "node runs should be listed by started_at ASC"
+    );
+
+    let run_completed_at = running.started_at + TimeDelta::seconds(2);
+    let completed_output = json!({ "resolution": "accepted" });
+    let completed = registry
+        .update_run(
+            &workspace_scope,
+            appended.run_uid,
+            ArtifactRunUpdate {
+                status: Some(ArtifactRunStatus::Completed),
+                current_node_id: Some(Some("done".to_string())),
+                state: Some(json!({ "steps": ["start", "done"], "attempt": 1 })),
+                output: Some(Some(completed_output.clone())),
+                error: Some(None),
+                completed_at: Some(Some(run_completed_at)),
+            },
+        )
+        .await?
+        .expect("completed workflow run should update");
+    assert_eq!(completed.status, ArtifactRunStatus::Completed);
+    assert_eq!(completed.current_node_id.as_deref(), Some("done"));
+    assert_eq!(completed.output, Some(completed_output.clone()));
+    assert_eq!(completed.error, None);
+    assert_eq!(completed.completed_at, Some(run_completed_at));
+
+    let reloaded = registry
+        .load_run(&workspace_scope, appended.run_uid)
+        .await?
+        .expect("completed workflow run should remain visible");
+    assert_eq!(reloaded.artifact_uid, Some(published.artifact_uid));
+    assert_eq!(reloaded.revision_uid, Some(published.revision_uid));
+    assert_eq!(reloaded.workflow_ref, format!("workflow://{name}"));
+    assert_eq!(reloaded.input, input);
+    assert_eq!(
+        reloaded.state,
+        json!({ "steps": ["start", "done"], "attempt": 1 })
+    );
+    assert_eq!(reloaded.status, ArtifactRunStatus::Completed);
+    assert_eq!(reloaded.current_node_id.as_deref(), Some("done"));
+    assert_eq!(reloaded.output, Some(completed_output));
+    assert_eq!(reloaded.completed_at, Some(run_completed_at));
+
+    moa_session::testing::cleanup_test_schema(&database_url, &schema_name).await
+}
+
 fn skill_doc(name: &str, description: &str) -> ArtifactDocument {
     let source = json!({
         "api_version": "moa.artifact/v1",
@@ -214,6 +468,46 @@ fn skill_doc(name: &str, description: &str) -> ArtifactDocument {
         }
     });
     serde_json::from_value(source).expect("test skill artifact is valid")
+}
+
+fn workflow_doc(name: &str) -> ArtifactDocument {
+    let source = json!({
+        "api_version": "moa.artifact/v1",
+        "kind": "workflow",
+        "metadata": {
+            "name": name,
+            "description": "Support workflow projection test",
+            "tags": ["workflow"]
+        },
+        "definition": {
+            "type": "workflow",
+            "spec": {
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "ticket_id": { "type": "string" }
+                    }
+                },
+                "state_schema": {
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    }
+                },
+                "nodes": [
+                    { "id": "start", "kind": "start" },
+                    { "id": "done", "kind": "end" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "done" }
+                ]
+            }
+        }
+    });
+    serde_json::from_value(source).expect("test workflow artifact is valid")
 }
 
 fn experiment_plan_doc(name: &str) -> ArtifactDocument {

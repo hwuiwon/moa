@@ -36,6 +36,7 @@ impl Session for SessionImpl {
                 attachments: msg.attachments,
                 model: None,
                 contact: None,
+                max_turns: None,
             },
         )
         .await?;
@@ -125,12 +126,16 @@ impl Session for SessionImpl {
             sync_status(&ctx, session_id, &state).await?;
             dispatch_turn_execution(
                 &ctx,
-                next_turn_id,
-                next.identity,
-                next.contact,
-                next.user_message,
-                next.attachments,
-                next.model,
+                RunTurnRequest {
+                    session_id: ctx.key().to_string(),
+                    turn_id: next_turn_id,
+                    identity: next.identity,
+                    contact: next.contact,
+                    user_message: next.user_message,
+                    attachments: next.attachments,
+                    model: next.model,
+                    max_turns: next.max_turns,
+                },
             );
             return Ok(());
         }
@@ -191,6 +196,7 @@ impl Session for SessionImpl {
                 attachments: request.attachments,
                 model: request.model,
                 contact: request.contact,
+                max_turns: request.max_turns,
             },
         )
         .await?;
@@ -317,6 +323,7 @@ async fn start_turn_inner(
             user_message: request.user_message,
             attachments: request.attachments,
             model: request.model,
+            max_turns: request.max_turns,
         });
         persist_pending_state(ctx, &pending_state);
         return Ok(StartTurnResponse {
@@ -334,12 +341,16 @@ async fn start_turn_inner(
     sync_status(ctx, session_id, &state).await?;
     dispatch_turn_execution(
         ctx,
-        turn_id.clone(),
-        identity,
-        contact,
-        request.user_message,
-        request.attachments,
-        request.model,
+        RunTurnRequest {
+            session_id: ctx.key().to_string(),
+            turn_id: turn_id.clone(),
+            identity,
+            contact,
+            user_message: request.user_message,
+            attachments: request.attachments,
+            model: request.model,
+            max_turns: request.max_turns,
+        },
     );
 
     Ok(StartTurnResponse {

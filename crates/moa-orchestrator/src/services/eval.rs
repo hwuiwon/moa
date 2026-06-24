@@ -22,7 +22,7 @@ use moa_core::wire::{
 use moa_core::{ActionRuleScope, ScopeContext, ScopedConn};
 use moa_core::{MoaConfig, TenantId, WorkspaceId};
 #[cfg(feature = "internal-eval-runner")]
-use moa_eval::{EvalEngine, ReporterOptions, build_reporters};
+use moa_eval::EvalEngine;
 use moa_eval_core::{AgentConfig, EvalRun as CoreEvalRun, TestSuite, build_eval_plan};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{EngineOptions, EvaluatorOptions, build_evaluators, evaluate_run};

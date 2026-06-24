@@ -112,6 +112,7 @@ impl SessionTarget for RemoteTarget {
                     attachments: Vec::new(),
                     model: Some(self.model.to_string()),
                     contact: None,
+                    max_turns: None,
                 },
                 Some(&format!("loadtest-turn-{session_id}-{}", Uuid::now_v7())),
             )

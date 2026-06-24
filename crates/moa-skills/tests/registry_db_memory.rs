@@ -22,7 +22,7 @@ async fn registry_lists_skill_metadata() -> Result<()> {
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     purge_test_skill_name(&store, "scope-skill").await?;
-    let workspace_name = format!("workspace-{}", Uuid::now_v7());
+    let workspace_name = Uuid::now_v7().to_string();
     let scope = workspace_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
     registry
@@ -59,7 +59,7 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     purge_test_skill_name(&store, "scope-skill").await?;
-    let workspace_name = format!("workspace-versioned-{}", Uuid::now_v7());
+    let workspace_name = Uuid::now_v7().to_string();
     let scope = workspace_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
     let first_uid = registry
@@ -115,7 +115,7 @@ async fn registry_loads_published_skill_artifact_without_duplicate_revision() ->
     let _guard = GRAPH_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
-    let workspace_name = format!("workspace-artifact-materialize-{}", Uuid::now_v7());
+    let workspace_name = Uuid::now_v7().to_string();
     let scope = workspace_scope(&workspace_name);
     let skill_registry = SkillRegistry::new(store.pool().clone());
     let artifact_registry = ArtifactRegistry::new(store.pool().clone());
@@ -173,7 +173,7 @@ async fn registry_versions_when_supporting_file_changes() -> Result<()> {
     let _guard = GRAPH_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
-    let workspace_name = format!("workspace-package-files-{}", Uuid::now_v7());
+    let workspace_name = Uuid::now_v7().to_string();
     let scope = workspace_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
 

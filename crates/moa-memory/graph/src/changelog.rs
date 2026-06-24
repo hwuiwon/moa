@@ -9,11 +9,11 @@ use crate::{GraphError, Result};
 /// One append-only mutation record for `moa.graph_changelog`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangelogRecord {
-    /// Workspace scope for workspace and user rows.
+    /// Tenant boundary for tenant and contact rows.
     pub workspace_id: Option<String>,
-    /// User scope inside a workspace for user-private rows.
+    /// Contact owner inside a tenant for contact-private rows.
     pub user_id: Option<String>,
-    /// Expected scope tier: `global`, `workspace`, or `user`.
+    /// Expected scope tier: `global`, `tenant`, or `contact`.
     pub scope: String,
     /// Principal identifier that triggered the change.
     pub actor_id: Option<String>,

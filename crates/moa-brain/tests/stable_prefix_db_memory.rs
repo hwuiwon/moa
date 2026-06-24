@@ -7,9 +7,9 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event, MessageRole,
-    ModelCapabilities, ModelId, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
-    TokenPricing, ToolCallFormat, UserId, WorkspaceId,
+    AgentContext, CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event,
+    MessageRole, ModelCapabilities, ModelId, Result, SessionActorRef, SessionMeta, SessionStore,
+    TenantId, TokenPricing, ToolCallFormat, UserId, WorkspaceId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::ScriptedProvider;
@@ -201,6 +201,7 @@ fn session_meta(tenant_id: TenantId, user_id: &UserId, model: ModelId) -> Sessio
         contact: Some(contact_ref(tenant_id, contact_id)),
         created_by: Some(SessionActorRef::Contact { id: contact_id }),
         model,
+        agent_context: Some(AgentContext::system_default()),
         ..SessionMeta::default()
     }
 }

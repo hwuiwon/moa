@@ -58,7 +58,7 @@ fn spawn_orchestrator(
 #[tokio::test]
 #[ignore = "requires a local restate-server, Postgres, and OpenFGA"]
 async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> {
-    // Pins: workflow experiments start WorkflowRuntime runs and expose the linked queued run.
+    // Pins: workflow experiments start artifact workflow runs and expose executed node projections.
     let _guard = RESTATE_E2E_LOCK.lock().await;
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
@@ -111,11 +111,22 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
             Some(workflow_status.run_id)
         );
         assert_eq!(experiment_status.status, workflow_status.status);
-        assert_eq!(workflow_status.status, "queued");
-        assert!(workflow_status.current_node_id.is_none());
+        assert_eq!(workflow_status.status, "completed");
+        assert_eq!(workflow_status.current_node_id.as_deref(), Some("done"));
         assert!(
-            workflow_status.node_runs.is_empty(),
-            "workflow interpreter has not executed nodes yet"
+            !workflow_status.node_runs.is_empty(),
+            "workflow execution should persist node projections"
+        );
+        assert_eq!(
+            node_ids(&workflow_status),
+            vec!["start", "verify_evidence", "done"]
+        );
+        assert!(
+            workflow_status
+                .node_runs
+                .iter()
+                .all(|node_run| node_run.status == "completed"),
+            "all deterministic workflow nodes should complete: {workflow_status:?}"
         );
 
         Ok(())
@@ -248,7 +259,7 @@ async fn wait_for_linked_workflow_experiment(
         if status.status == "failed" {
             bail!("workflow experiment failed before linking a workflow run: {status:?}");
         }
-        if status.workflow_run_uid.is_some() && status.status == "queued" {
+        if status.workflow_run_uid.is_some() && status.status == "completed" {
             return Ok(status);
         }
         last_status = Some(status);
@@ -256,7 +267,7 @@ async fn wait_for_linked_workflow_experiment(
     }
 
     bail!(
-        "timed out waiting for experiment {run_uid} to link a queued workflow run; last status: {last_status:?}"
+        "timed out waiting for experiment {run_uid} to link a completed workflow run; last status: {last_status:?}"
     )
 }
 
@@ -312,6 +323,14 @@ fn service_url(ingress: &str, service: &str, handler: &str) -> String {
     format!("{}/{service}/{handler}", ingress.trim_end_matches('/'))
 }
 
+fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+    status
+        .node_runs
+        .iter()
+        .map(|node_run| node_run.node_id.as_str())
+        .collect()
+}
+
 fn damaged_food_workflow_source() -> &'static str {
     r#"
 api_version: moa.artifact/v1
@@ -358,25 +377,12 @@ definition:
         ui:
           x: 280
           y: 120
-      - id: choose_resolution
-        kind: agent
-        max_turns: 2
-        input:
-          instruction: Decide refund, credit, replacement, or escalation after evidence review.
-        ui:
-          x: 520
-          y: 120
-      - id: notify_customer
-        kind: action
-        input:
-          template: Tell the customer the resolution and timing.
-        ui:
-          x: 760
-          y: 120
       - id: done
         kind: end
+        input:
+          status: evidence_verified
         ui:
-          x: 980
+          x: 520
           y: 120
     edges:
       - id: start-to-verify
@@ -384,12 +390,6 @@ definition:
         to: verify_evidence
       - id: verify-to-resolution
         from: verify_evidence
-        to: choose_resolution
-      - id: resolution-to-notify
-        from: choose_resolution
-        to: notify_customer
-      - id: notify-to-done
-        from: notify_customer
         to: done
 "#
 }

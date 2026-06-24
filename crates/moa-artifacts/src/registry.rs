@@ -1,5 +1,7 @@
 //! Postgres-backed artifact registry with MOA three-tier visibility.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use moa_core::{
     ActionRuleScope, MoaError, Result, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
@@ -292,12 +294,22 @@ pub struct NewArtifactRun {
 pub struct ArtifactRun {
     /// Run row identifier.
     pub run_uid: Uuid,
+    /// Referenced artifact UID, if the run was started from a resolved artifact.
+    pub artifact_uid: Option<Uuid>,
+    /// Referenced revision UID, if the run was started from a resolved artifact revision.
+    pub revision_uid: Option<Uuid>,
     /// Session associated with this workflow run, when present.
     pub session_id: Option<SessionId>,
+    /// Workflow reference string.
+    pub workflow_ref: String,
     /// Current status.
     pub status: ArtifactRunStatus,
     /// Current node ID.
     pub current_node_id: Option<String>,
+    /// Input payload.
+    pub input: Value,
+    /// Mutable workflow state.
+    pub state: Value,
     /// Output payload.
     pub output: Option<Value>,
     /// Error text.
@@ -306,6 +318,23 @@ pub struct ArtifactRun {
     pub started_at: DateTime<Utc>,
     /// Run completion timestamp.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Registry patch payload for mutable workflow run fields.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArtifactRunUpdate {
+    /// Replacement status when present.
+    pub status: Option<ArtifactRunStatus>,
+    /// Replacement current node ID when present, including clearing it to `NULL`.
+    pub current_node_id: Option<Option<String>>,
+    /// Replacement workflow state when present.
+    pub state: Option<Value>,
+    /// Replacement output when present, including clearing it to `NULL`.
+    pub output: Option<Option<Value>>,
+    /// Replacement error when present, including clearing it to `NULL`.
+    pub error: Option<Option<String>>,
+    /// Replacement completion timestamp when present, including clearing it to `NULL`.
+    pub completed_at: Option<Option<DateTime<Utc>>>,
 }
 
 /// New node-run row.
@@ -325,6 +354,42 @@ pub struct NewArtifactNodeRun {
     pub error: Option<String>,
     /// Optional completion timestamp.
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Stored workflow node-run row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtifactNodeRun {
+    /// Node-run row identifier.
+    pub node_run_uid: Uuid,
+    /// Parent run identifier.
+    pub run_uid: Uuid,
+    /// Workflow node ID.
+    pub node_id: String,
+    /// Node status.
+    pub status: ArtifactNodeRunStatus,
+    /// Node input payload.
+    pub input: Value,
+    /// Node output payload.
+    pub output: Option<Value>,
+    /// Error text.
+    pub error: Option<String>,
+    /// Node-run start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Node-run completion timestamp.
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Registry patch payload for mutable workflow node-run fields.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArtifactNodeRunUpdate {
+    /// Replacement status when present.
+    pub status: Option<ArtifactNodeRunStatus>,
+    /// Replacement output when present, including clearing it to `NULL`.
+    pub output: Option<Option<Value>>,
+    /// Replacement error when present, including clearing it to `NULL`.
+    pub error: Option<Option<String>>,
+    /// Replacement completion timestamp when present, including clearing it to `NULL`.
+    pub completed_at: Option<Option<DateTime<Utc>>>,
 }
 
 /// Postgres-backed canonical artifact registry.
@@ -615,7 +680,16 @@ impl ArtifactRegistry {
                 error, idempotency_key
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            RETURNING run_uid, session_id, status, current_node_id, output, error, started_at, completed_at
+            ON CONFLICT (
+                coalesce(workspace_id, ''),
+                coalesce(user_id, ''),
+                workflow_ref,
+                idempotency_key
+            )
+            WHERE idempotency_key IS NOT NULL
+            DO UPDATE SET updated_at = moa.artifact_run.updated_at
+            RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+                      current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
         .bind(run_uid)
@@ -650,7 +724,8 @@ impl ArtifactRegistry {
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
-            SELECT run_uid, session_id, status, current_node_id, output, error, started_at, completed_at
+            SELECT run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+                   current_node_id, input, state, output, error, started_at, completed_at
             FROM moa.artifact_run
             WHERE run_uid = $3
               AND (
@@ -662,6 +737,75 @@ impl ArtifactRegistry {
         )
         .bind(parts.workspace_id.as_deref())
         .bind(parts.user_id.as_deref())
+        .bind(run_uid)
+        .fetch_optional(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        row.as_ref().map(run_from_row).transpose()
+    }
+
+    /// Updates mutable fields for a visible workflow run and returns the full projection.
+    pub async fn update_run(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+        update: ArtifactRunUpdate,
+    ) -> Result<Option<ArtifactRun>> {
+        let ArtifactRunUpdate {
+            status,
+            current_node_id,
+            state,
+            output,
+            error,
+            completed_at,
+        } = update;
+        let status_value = status.as_ref().map(ArtifactRunStatus::as_str);
+        let status_present = status_value.is_some();
+        let current_node_id_present = current_node_id.is_some();
+        let current_node_id_value = current_node_id.as_ref().and_then(|value| value.as_deref());
+        let state_present = state.is_some();
+        let output_present = output.is_some();
+        let output_value = output.unwrap_or(None);
+        let error_present = error.is_some();
+        let error_value = error.unwrap_or(None);
+        let completed_at_present = completed_at.is_some();
+        let completed_at_value = completed_at.unwrap_or(None);
+
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let row = sqlx::query(
+            r#"
+            UPDATE moa.artifact_run
+            SET status = CASE WHEN $2 THEN $3::TEXT ELSE status END,
+                current_node_id = CASE WHEN $4 THEN $5::TEXT ELSE current_node_id END,
+                state = CASE WHEN $6 THEN $7::JSONB ELSE state END,
+                output = CASE WHEN $8 THEN $9::JSONB ELSE output END,
+                error = CASE WHEN $10 THEN $11::TEXT ELSE error END,
+                completed_at = CASE WHEN $12 THEN $13::TIMESTAMPTZ ELSE completed_at END,
+                updated_at = now()
+            WHERE run_uid = $14
+              AND (
+                scope = 'global'
+                OR (workspace_id = $1 AND user_id IS NULL)
+              )
+            RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+                      current_node_id, input, state, output, error, started_at, completed_at
+            "#,
+        )
+        .bind(parts.workspace_id.as_deref())
+        .bind(status_present)
+        .bind(status_value)
+        .bind(current_node_id_present)
+        .bind(current_node_id_value)
+        .bind(state_present)
+        .bind(state)
+        .bind(output_present)
+        .bind(output_value)
+        .bind(error_present)
+        .bind(error_value)
+        .bind(completed_at_present)
+        .bind(completed_at_value)
         .bind(run_uid)
         .fetch_optional(&mut *conn.as_mut())
         .await
@@ -692,7 +836,8 @@ impl ArtifactRegistry {
                 scope = 'global'
                 OR (workspace_id = $1 AND user_id IS NULL)
               )
-            RETURNING run_uid, session_id, status, current_node_id, output, error, started_at, completed_at
+            RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
+                      current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
         .bind(parts.workspace_id.as_deref())
@@ -714,6 +859,30 @@ impl ArtifactRegistry {
     ) -> Result<Uuid> {
         let parts = ArtifactScopeParts::from_scope(scope);
         let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        if let Some(existing_uid) = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT node_run_uid
+            FROM moa.artifact_node_run
+            WHERE run_uid = $2
+              AND node_id = $3
+              AND (
+                scope = 'global'
+                OR (workspace_id = $1 AND user_id IS NULL)
+              )
+            ORDER BY started_at ASC, node_run_uid ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(parts.workspace_id.as_deref())
+        .bind(node_run.run_uid)
+        .bind(&node_run.node_id)
+        .fetch_optional(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?
+        {
+            conn.commit().await?;
+            return Ok(existing_uid);
+        }
         let node_run_uid = Uuid::now_v7();
         sqlx::query(
             r#"
@@ -740,6 +909,180 @@ impl ArtifactRegistry {
         .map_err(map_sqlx_error)?;
         conn.commit().await?;
         Ok(node_run_uid)
+    }
+
+    /// Appends missing node-run rows for one workflow run in a single transaction.
+    pub async fn append_node_runs(
+        &self,
+        scope: &ActionRuleScope,
+        node_runs: Vec<NewArtifactNodeRun>,
+    ) -> Result<Vec<Uuid>> {
+        let Some(run_uid) = node_runs.first().map(|node_run| node_run.run_uid) else {
+            return Ok(Vec::new());
+        };
+        if node_runs.iter().any(|node_run| node_run.run_uid != run_uid) {
+            return Err(MoaError::ValidationError(
+                "append_node_runs requires rows from one workflow run".to_string(),
+            ));
+        }
+
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let node_ids = node_runs
+            .iter()
+            .map(|node_run| node_run.node_id.clone())
+            .collect::<Vec<_>>();
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let existing_rows = sqlx::query(
+            r#"
+            SELECT node_id, node_run_uid
+            FROM moa.artifact_node_run
+            WHERE run_uid = $2
+              AND node_id = ANY($3)
+              AND (
+                scope = 'global'
+                OR (workspace_id = $1 AND user_id IS NULL)
+              )
+            ORDER BY started_at ASC, node_run_uid ASC
+            "#,
+        )
+        .bind(parts.workspace_id.as_deref())
+        .bind(run_uid)
+        .bind(&node_ids)
+        .fetch_all(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let mut known_uids = BTreeMap::new();
+        for row in existing_rows {
+            let node_id: String = row.get("node_id");
+            known_uids
+                .entry(node_id)
+                .or_insert_with(|| row.get::<Uuid, _>("node_run_uid"));
+        }
+
+        let mut appended = Vec::with_capacity(node_runs.len());
+        for node_run in node_runs {
+            if let Some(existing_uid) = known_uids.get(&node_run.node_id) {
+                appended.push(*existing_uid);
+                continue;
+            }
+
+            let node_run_uid = Uuid::now_v7();
+            sqlx::query(
+                r#"
+                INSERT INTO moa.artifact_node_run (
+                    node_run_uid, run_uid, tenant_id, workspace_id, user_id, node_id, status,
+                    input, output, error, completed_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "#,
+            )
+            .bind(node_run_uid)
+            .bind(node_run.run_uid)
+            .bind(parts.tenant_id)
+            .bind(parts.workspace_id.as_deref())
+            .bind(parts.user_id.as_deref())
+            .bind(&node_run.node_id)
+            .bind(node_run.status.as_str())
+            .bind(node_run.input)
+            .bind(node_run.output)
+            .bind(node_run.error)
+            .bind(node_run.completed_at)
+            .execute(&mut *conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?;
+            known_uids.insert(node_run.node_id, node_run_uid);
+            appended.push(node_run_uid);
+        }
+        conn.commit().await?;
+        Ok(appended)
+    }
+
+    /// Updates mutable fields for a visible workflow node run.
+    pub async fn update_node_run(
+        &self,
+        scope: &ActionRuleScope,
+        node_run_uid: Uuid,
+        update: ArtifactNodeRunUpdate,
+    ) -> Result<Option<ArtifactNodeRun>> {
+        let ArtifactNodeRunUpdate {
+            status,
+            output,
+            error,
+            completed_at,
+        } = update;
+        let status_value = status.as_ref().map(ArtifactNodeRunStatus::as_str);
+        let status_present = status_value.is_some();
+        let output_present = output.is_some();
+        let output_value = output.unwrap_or(None);
+        let error_present = error.is_some();
+        let error_value = error.unwrap_or(None);
+        let completed_at_present = completed_at.is_some();
+        let completed_at_value = completed_at.unwrap_or(None);
+
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let row = sqlx::query(
+            r#"
+            UPDATE moa.artifact_node_run
+            SET status = CASE WHEN $2 THEN $3::TEXT ELSE status END,
+                output = CASE WHEN $4 THEN $5::JSONB ELSE output END,
+                error = CASE WHEN $6 THEN $7::TEXT ELSE error END,
+                completed_at = CASE WHEN $8 THEN $9::TIMESTAMPTZ ELSE completed_at END,
+                updated_at = now()
+            WHERE node_run_uid = $10
+              AND (
+                scope = 'global'
+                OR (workspace_id = $1 AND user_id IS NULL)
+              )
+            RETURNING node_run_uid, run_uid, node_id, status, input, output, error,
+                      started_at, completed_at
+            "#,
+        )
+        .bind(parts.workspace_id.as_deref())
+        .bind(status_present)
+        .bind(status_value)
+        .bind(output_present)
+        .bind(output_value)
+        .bind(error_present)
+        .bind(error_value)
+        .bind(completed_at_present)
+        .bind(completed_at_value)
+        .bind(node_run_uid)
+        .fetch_optional(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        row.as_ref().map(node_run_from_row).transpose()
+    }
+
+    /// Lists visible node runs for a workflow run in start order.
+    pub async fn list_node_runs(
+        &self,
+        scope: &ActionRuleScope,
+        run_uid: Uuid,
+    ) -> Result<Vec<ArtifactNodeRun>> {
+        let mut conn = ScopedConn::begin(&self.pool, &artifact_scope_context(scope)).await?;
+        let parts = ArtifactScopeParts::from_scope(scope);
+        let rows = sqlx::query(
+            r#"
+            SELECT node_run_uid, run_uid, node_id, status, input, output, error,
+                   started_at, completed_at
+            FROM moa.artifact_node_run
+            WHERE run_uid = $2
+              AND (
+                scope = 'global'
+                OR (workspace_id = $1 AND user_id IS NULL)
+              )
+            ORDER BY started_at ASC, node_run_uid ASC
+            "#,
+        )
+        .bind(parts.workspace_id.as_deref())
+        .bind(run_uid)
+        .fetch_all(&mut *conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await?;
+        rows.iter().map(node_run_from_row).collect()
     }
 }
 
@@ -1110,9 +1453,29 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactRun> {
         .map(SessionId);
     Ok(ArtifactRun {
         run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
+        artifact_uid: row.try_get("artifact_uid").map_err(map_sqlx_error)?,
+        revision_uid: row.try_get("revision_uid").map_err(map_sqlx_error)?,
         session_id,
+        workflow_ref: row.try_get("workflow_ref").map_err(map_sqlx_error)?,
         status: run_status_from_str(&status_text)?,
         current_node_id: row.try_get("current_node_id").map_err(map_sqlx_error)?,
+        input: row.try_get("input").map_err(map_sqlx_error)?,
+        state: row.try_get("state").map_err(map_sqlx_error)?,
+        output: row.try_get("output").map_err(map_sqlx_error)?,
+        error: row.try_get("error").map_err(map_sqlx_error)?,
+        started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
+        completed_at: row.try_get("completed_at").map_err(map_sqlx_error)?,
+    })
+}
+
+fn node_run_from_row(row: &sqlx::postgres::PgRow) -> Result<ArtifactNodeRun> {
+    let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
+    Ok(ArtifactNodeRun {
+        node_run_uid: row.try_get("node_run_uid").map_err(map_sqlx_error)?,
+        run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
+        node_id: row.try_get("node_id").map_err(map_sqlx_error)?,
+        status: node_run_status_from_str(&status_text)?,
+        input: row.try_get("input").map_err(map_sqlx_error)?,
         output: row.try_get("output").map_err(map_sqlx_error)?,
         error: row.try_get("error").map_err(map_sqlx_error)?,
         started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
@@ -1130,6 +1493,21 @@ fn run_status_from_str(value: &str) -> Result<ArtifactRunStatus> {
         "cancelled" => Ok(ArtifactRunStatus::Cancelled),
         _ => Err(MoaError::StorageError(format!(
             "unknown artifact run status: {value}"
+        ))),
+    }
+}
+
+fn node_run_status_from_str(value: &str) -> Result<ArtifactNodeRunStatus> {
+    match value {
+        "queued" => Ok(ArtifactNodeRunStatus::Queued),
+        "running" => Ok(ArtifactNodeRunStatus::Running),
+        "pending_review" => Ok(ArtifactNodeRunStatus::PendingReview),
+        "completed" => Ok(ArtifactNodeRunStatus::Completed),
+        "failed" => Ok(ArtifactNodeRunStatus::Failed),
+        "cancelled" => Ok(ArtifactNodeRunStatus::Cancelled),
+        "skipped" => Ok(ArtifactNodeRunStatus::Skipped),
+        _ => Err(MoaError::StorageError(format!(
+            "unknown artifact node run status: {value}"
         ))),
     }
 }

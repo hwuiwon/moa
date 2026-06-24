@@ -2289,13 +2289,10 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
     .await
     .unwrap();
     assert_eq!(first, TurnResult::Complete);
+    let runtime_workspace_id = test_runtime_workspace_id();
     assert_eq!(
         store
-            .list_action_policy_rules_for_tool(
-                &WorkspaceId::new("workspace"),
-                &UserId::new("user"),
-                "bash",
-            )
+            .list_action_policy_rules_for_tool(&runtime_workspace_id, &UserId::new("user"), "bash",)
             .await
             .unwrap()
             .len(),

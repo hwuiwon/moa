@@ -50,6 +50,7 @@ use crate::{
         workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
     },
     workflows::{
+        artifact_workflow_execution::{ArtifactWorkflowExecution, ArtifactWorkflowExecutionImpl},
         consolidate::{Consolidate, ConsolidateImpl},
         experiment_run::{ExperimentRun, ExperimentRunImpl},
         experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl},
@@ -64,6 +65,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Analytics",
     "ActionReviews",
     "AgentDefinitions",
+    "ArtifactWorkflowExecution",
     "Artifacts",
     "ApiKeys",
     "Audit",
@@ -167,6 +169,7 @@ pub fn build_endpoint(
         .bind(WorkspaceImpl.serve())
         .bind(WhoamiImpl.serve())
         .bind(WorkflowsImpl.serve())
+        .bind(ArtifactWorkflowExecutionImpl.serve())
         .bind(ConsolidateImpl.serve());
     #[cfg(feature = "internal-eval-runner")]
     let endpoint = endpoint.bind(EvalRunImpl.serve());
@@ -273,6 +276,10 @@ mod tests {
         assert!(
             names.contains(&"ExperimentTrialRun"),
             "default product readiness should include ExperimentTrialRun"
+        );
+        assert!(
+            names.contains(&"ArtifactWorkflowExecution"),
+            "default product readiness should include ArtifactWorkflowExecution"
         );
     }
 

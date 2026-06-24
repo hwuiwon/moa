@@ -1,0 +1,58 @@
+api_version: moa.artifact/v1
+kind: workflow
+metadata:
+  name: react-agent
+  description: Deterministic skill node that delegates one bounded open-ended turn to the agent loop.
+  tags:
+    - pattern
+    - react
+    - agent
+status: draft
+definition:
+  type: workflow
+  spec:
+    nodes:
+      - id: start
+        kind: start
+        ui:
+          x: 80
+          y: 140
+      - id: retrieve_context
+        kind: memory_read
+        input:
+          query: "customer preferences relevant to this task"
+          limit: 6
+        ui:
+          x: 270
+          y: 140
+      - id: bounded_agent_turn
+        kind: agent
+        skill_refs:
+          - skill://support-triage
+        tool_refs:
+          - tool://orders.lookup
+          - tool://knowledge.search
+        max_turns: 4
+        input:
+          instruction: Use the retrieved context, reason with tools if needed, and return one final recommendation.
+        ui:
+          x: 500
+          y: 140
+      - id: done
+        kind: end
+        ui:
+          x: 760
+          y: 140
+    edges:
+      - id: start-retrieve-context
+        from: start
+        to: retrieve_context
+      - id: retrieve-context-bounded-agent-turn
+        from: retrieve_context
+        to: bounded_agent_turn
+      - id: bounded-agent-turn-done
+        from: bounded_agent_turn
+        to: done
+    ui:
+      layout: dagre
+      version: 1

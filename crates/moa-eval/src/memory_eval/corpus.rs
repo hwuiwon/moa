@@ -574,7 +574,7 @@ mod tests {
         let raw = serde_json::json!({
             "workspace_id": "workspace-a",
             "user_id": "user-a",
-            "scope": "workspace",
+            "scope": "tenant",
             "fact_id": "fact-a",
             "valid_from": "2026-01-01T00:00:00Z",
             "valid_to": null,

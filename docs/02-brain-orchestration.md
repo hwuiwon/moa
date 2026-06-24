@@ -12,6 +12,7 @@ _Restate orchestration, hosted API runtime mode, turn execution, and sub-agents.
 - Session VO: `crates/moa-orchestrator/src/objects/session/`
 - Sub-agent VO: `crates/moa-orchestrator/src/objects/sub_agent/`
 - Turn workflows: `crates/moa-orchestrator/src/workflows/turn_execution.rs` and `crates/moa-orchestrator/src/workflows/sub_agent_turn_execution.rs`
+- Artifact workflow execution: `crates/moa-orchestrator/src/workflows/artifact_workflow_execution.rs`
 - CronJob VO: `crates/moa-orchestrator/src/objects/cron_job.rs`
 - Pipeline assembly: `crates/moa-brain/src/pipeline/mod.rs`
 
@@ -33,7 +34,7 @@ Default production Restate bindings:
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
 | Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
-| Workflow | `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution` |
+| Workflow | `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Feature-gated Restate bindings:
 
@@ -50,9 +51,17 @@ to create internal network services.
 
 Restate state is used for hot orchestration state: queued messages, status, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
 
-`Artifacts` owns import, export, listing, validation, and publish for canonical skills, connectors, and workflows. `Workflows` exposes artifact-backed workflow run lifecycle over Restate, while `moa-workflows` owns the reusable lifecycle logic and future node interpreter. The open-ended agent loop still lives in `Session` and `TurnExecution`.
+`Artifacts` owns import, export, listing, validation, and publish for canonical
+skills, connectors, and workflows. `Workflows` exposes artifact-backed workflow
+run lifecycle over Restate, while `ArtifactWorkflowExecution` executes the
+deterministic workflow graph using the pure interpreter in `moa-workflows`.
+The open-ended agent loop still lives in `Session` and `TurnExecution`.
 
-Workflow runs can carry an optional `session_id` so the product can show a procedure/workflow attached to the same support conversation. This is an association boundary, not autonomous routing: skill selection still happens inside the context pipeline, and workflow node execution remains explicit workflow runtime behavior.
+Workflow runs can carry an optional `session_id` so the product can show a
+procedure/workflow attached to the same support conversation. This is an
+association boundary, not autonomous routing: skill selection still happens
+inside the context pipeline, and workflow node execution remains explicit
+workflow runtime behavior.
 
 ## Session Flow
 
@@ -163,7 +172,38 @@ MOA has two workflow-shaped execution surfaces. Restate workflows run internal d
 
 These are workflow-shaped because rerunning the same logical job should be explicit and observable.
 
-Artifact-backed workflows are user-authored `WorkflowDefinition` documents for explicit node graphs, branch conditions, connector actions, approval gates, checkpoints, and product-visible run history. `moa-artifacts` stores and validates the workflow document shape; `moa-workflows` creates and mutates durable workflow runs; the `Workflows` Restate service handles authorization and service binding. Workflow improvement should operate on artifact revisions and proposed patches, not by rewriting the live run state directly.
+Artifact-backed workflows are user-authored deterministic skills. A
+`WorkflowDefinition` stores an explicit node/edge graph for branch conditions,
+parallel fan-out, joins, bounded loops, connector actions, approval gates,
+memory reads/writes, checkpoints, and product-visible run history.
+`moa-artifacts` stores and validates the workflow document shape;
+`moa-workflows` owns the pure graph interpreter and graph-renderable execution
+state; the `Workflows` Restate service handles authorization and run creation;
+`ArtifactWorkflowExecution` owns durable execution and node-run persistence.
+
+Workflow nodes stay decomposable for future dashboard editing:
+
+- deterministic nodes such as `start`, `condition`, `parallel`, `join`, and
+  `end` are interpreted directly by `moa-workflows`;
+- governed tool/action/skill-action nodes call existing action policy,
+  review, and `ToolExecutor` services;
+- `review` nodes pause the run until `Workflows/decide_review` resumes or
+  fails the node;
+- `agent` nodes enqueue one bounded `Session` turn and wait for the existing
+  `TurnExecution` result; `max_turns` caps that turn loop, not the workflow
+  graph itself;
+- `sub_agent` nodes call the existing delegation path, including depth,
+  fan-out, repeated-task, and budget validation;
+- `memory_read` and `memory_write` nodes call the existing `Memory` service so
+  tenant/contact scope, privacy, ingestion, and retrieval behavior do not fork
+  inside the workflow runtime.
+
+Adapter nodes link to inner service records such as session turns, sub-agent
+outputs, review IDs, memory hit IDs, or ingestion reports through node output.
+The workflow graph remains the product-visible control plane; detailed inner
+events remain in their owning service logs. Workflow improvement should operate
+on artifact revisions and proposed patches, not by rewriting the live run state
+directly.
 
 Reusable scheduled work is anchored by the `CronJob` virtual object. Each job
 key stores its cron expression, timezone, target service handler, and a version

@@ -90,19 +90,19 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
     let bodies = captured_json_bodies(&server).await;
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["text"]["format"]["name"], "query_rewrite_result");
-    let prompt = bodies[0]["input"][0]["content"]
+    let instructions = bodies[0]["instructions"]
         .as_str()
-        .expect("query rewrite request should include prompt text");
+        .expect("query rewrite request should include static instructions");
     assert!(
-        prompt.contains("Produce retrieval and segment-boundary metadata only"),
+        instructions.contains("Produce retrieval and segment-boundary metadata only"),
         "query rewrite prompt should stay retrieval-scoped"
     );
     assert!(
-        prompt.contains("Do not classify intent, choose tools"),
+        instructions.contains("Do not classify intent, choose tools"),
         "query rewrite prompt should not act as an intent router"
     );
     assert!(
-        !prompt.contains("freshness_required"),
+        !instructions.contains("freshness_required"),
         "query rewrite prompt should not request advisory freshness metadata"
     );
     let schema = &bodies[0]["text"]["format"]["schema"];

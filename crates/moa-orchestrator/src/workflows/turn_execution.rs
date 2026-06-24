@@ -247,12 +247,10 @@ async fn execute_turn_inside_workflow(
     ctx.set(K_USER_MESSAGE_SEQUENCE, Json::from(user_sequence_num));
     ctx.clear(K_QUERY_REWRITE_CACHE);
 
-    let max_turns = OrchestratorCtx::current_config().session_limits.max_turns;
-    let max_turns = if max_turns == 0 {
-        usize::MAX
-    } else {
-        max_turns as usize
-    };
+    let max_turns = effective_max_turns(
+        request.max_turns,
+        OrchestratorCtx::current_config().session_limits.max_turns,
+    );
     let mut last_summary = None;
 
     for turn_number in 1..=max_turns {
@@ -334,6 +332,15 @@ async fn execute_turn_inside_workflow(
         kind: TurnOutcomeKind::Completed,
         message: format!("turn budget exceeded ({max_turns}), stopping"),
     })
+}
+
+fn effective_max_turns(request_max_turns: Option<u32>, configured_max_turns: u32) -> usize {
+    match request_max_turns {
+        Some(0) => 1,
+        Some(max_turns) => max_turns as usize,
+        None if configured_max_turns == 0 => usize::MAX,
+        None => configured_max_turns as usize,
+    }
 }
 
 async fn evaluate_input_guardrail(
@@ -1890,8 +1897,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        SegmentBoundarySequences, segment_assessment_to_seq, segment_boundary_sequences,
-        segment_events_for_assessment,
+        SegmentBoundarySequences, effective_max_turns, segment_assessment_to_seq,
+        segment_boundary_sequences, segment_events_for_assessment,
     };
 
     fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
@@ -2032,5 +2039,14 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(sequences, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn effective_max_turns_prefers_request_override() {
+        // Pins: workflow Agent nodes can cap one Session turn without changing global limits.
+        assert_eq!(effective_max_turns(Some(2), 50), 2);
+        assert_eq!(effective_max_turns(Some(0), 50), 1);
+        assert_eq!(effective_max_turns(None, 50), 50);
+        assert_eq!(effective_max_turns(None, 0), usize::MAX);
     }
 }

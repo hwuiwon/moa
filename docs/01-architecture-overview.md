@@ -41,12 +41,31 @@ Restate owns durable cloud execution. Postgres owns product-visible data. Graph 
 
 ## Agent Building Blocks
 
-MOA supports two user-facing execution shapes:
+MOA supports two user-facing capability artifact shapes:
 
-- Agent loop: the existing `Session` and `TurnExecution` path gives an agent tools, skills, memory, approvals, and sub-agents so it can handle an open-ended task autonomously.
-- Agent workflow: an artifact-backed `WorkflowDefinition` stores a typed node/edge graph for cases that need explicit conditions, approval gates, connector actions, checkpoints, and run history.
+- Skill: an open-ended, agent-mediated capability selected by the context
+  pipeline and executed through the existing `Session` and `TurnExecution`
+  path. Skills give an agent instructions, tools, memory, approvals, and
+  sub-agents so it can handle a task autonomously.
+- Workflow: a deterministic, graph-shaped skill stored as an artifact-backed
+  `WorkflowDefinition`. Workflows are used when conditions, approval gates,
+  connector actions, checkpoints, memory operations, bounded agent/sub-agent
+  adapter nodes, and run history must be explicit and reviewable.
 
-Agents, skills, connectors, actions, workflows, and behavior-lab experiment plans are canonical artifacts. `moa-artifacts` owns the persisted document model, validation, stable references, revision history, and Postgres registry; `moa-skills` owns skill package parsing, draft proposal generation, and artifact-backed package helpers; `moa-workflows` owns durable workflow run lifecycle and the future node interpreter/improvement loop. JSON is the canonical persisted shape in Postgres, while YAML is a human authoring/import/export format. Visual builders must round-trip through the same artifact structs instead of owning a separate canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
+Agents, skills, connectors, actions, workflows, and behavior-lab experiment
+plans are canonical artifacts. `moa-artifacts` owns the persisted document
+model, validation, stable references, revision history, and Postgres registry;
+`moa-skills` owns skill package parsing, draft proposal generation, and
+artifact-backed package helpers; `moa-workflows` owns the pure deterministic
+workflow interpreter and graph-renderable execution state; `moa-orchestrator`
+owns Restate execution through `ArtifactWorkflowExecution` and adapter calls
+into existing services. JSON is the canonical persisted shape in Postgres,
+while YAML is a human authoring/import/export format. Visual builders must
+round-trip through the same artifact structs instead of owning a separate
+canvas-only model; optional `ui` metadata is non-semantic layout/canvas data.
+This shared capability-artifact model does not imply a shared implementation
+crate: package learning/review and deterministic graph interpretation stay
+separate until there is concrete duplicated code to extract.
 
 Behavior Lab uses a single `experiment_plan` artifact. Personas, profiles, data bundles, and scenarios are typed embedded blocks under `definition.spec.simulation`, each with stable IDs for UI round trips, trial fanout, scoring, and analytics. Their product boundary, UI expectations, and verification lanes are documented in [`docs/product/behavior-lab.md`](product/behavior-lab.md).
 
@@ -62,9 +81,10 @@ artifact revisions and materializes selected artifact files for the tool
 router, but that selection now runs inside the configured agent policy for the
 session.
 Artifact-backed workflows are explicit product operations through the
-`Workflows` API; a run may be associated with a session for UI/history, but the
-open-ended agent loop does not yet select or interpret workflow nodes
-automatically.
+`Workflows` API; a run may be associated with a session for UI/history. The
+workflow runtime interprets explicit graph nodes; the open-ended agent loop does
+not implicitly choose workflow graphs unless a caller starts a workflow or a
+future reviewed artifact policy allows that routing.
 
 Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
 
@@ -141,8 +161,8 @@ Default production bindings:
   `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`,
   `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
   `Workflows`, `WorkspaceStore`, `Whoami`
-- Workflows: `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`,
-  `TurnExecution`, `SubAgentTurnExecution`
+- Workflows: `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`,
+  `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution`
 
 Feature-gated bindings:
 
@@ -312,8 +332,8 @@ separate surfaces:
   production execution paths. Agent-loop targets create or reuse `Session`
   state and queue messages through the normal `Session` and `TurnExecution`
   path. Workflow targets start existing artifact-backed runs through
-  `WorkflowRuntime` and link `moa.artifact_run.run_uid`; workflow node
-  interpretation remains a future `moa-workflows` capability. The
+  `WorkflowRuntime`, link `moa.artifact_run.run_uid`, and execute supported
+  deterministic workflow nodes through `ArtifactWorkflowExecution`. The
   `moa.experiment_run` row is the experiment ledger and links to the session,
   workflow run, pinned artifact revisions, and `analytics.score_run`.
   `ExperimentTrialRun` owns per-trial simulator execution. The public edge

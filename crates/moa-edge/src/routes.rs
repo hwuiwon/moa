@@ -1061,6 +1061,20 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                     body: body.to_vec(),
                 };
             }
+            "/v1/workflows/decide-review" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Workflows/decide_review".to_string(),
+                    body: body.to_vec(),
+                };
+            }
+            "/v1/workflows/signal" => {
+                return RouteTranslation::Forward {
+                    method: Method::POST,
+                    path: "/Workflows/signal".to_string(),
+                    body: body.to_vec(),
+                };
+            }
             _ => {}
         }
     }
@@ -2250,6 +2264,8 @@ mod tests {
             ("/v1/workflows/run", "/Workflows/run"),
             ("/v1/workflows/status", "/Workflows/status"),
             ("/v1/workflows/cancel", "/Workflows/cancel"),
+            ("/v1/workflows/decide-review", "/Workflows/decide_review"),
+            ("/v1/workflows/signal", "/Workflows/signal"),
         ];
 
         for (public_path, internal_path) in cases {

@@ -51,27 +51,27 @@ async fn set_auditor_role(conn: &mut sqlx::PgConnection) {
         .expect("set moa_auditor role");
 }
 
-async fn set_workspace_gucs(conn: &mut sqlx::PgConnection, workspace_id: &str) {
-    sqlx::query("SELECT pg_catalog.set_config('moa.workspace_id', $1, true)")
-        .bind(workspace_id)
-        .execute(&mut *conn)
-        .await
-        .expect("set workspace GUC");
-    sqlx::query("SELECT pg_catalog.set_config('moa.user_id', '', true)")
-        .execute(&mut *conn)
-        .await
-        .expect("clear user GUC");
-    sqlx::query("SELECT pg_catalog.set_config('moa.scope_tier', 'workspace', true)")
-        .execute(conn)
-        .await
-        .expect("set scope tier GUC");
+async fn set_tenant_gucs(conn: &mut sqlx::PgConnection, workspace_id: &str) {
+    let tenant_id = Uuid::parse_str(workspace_id).expect("test workspace id is a UUID");
+    sqlx::query(
+        r#"
+        SELECT
+            pg_catalog.set_config('moa.tenant_id', $1, true),
+            pg_catalog.set_config('moa.contact_id', '', true),
+            pg_catalog.set_config('moa.control_plane', 'false', true)
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .execute(conn)
+    .await
+    .expect("set tenant GUCs");
 }
 
 fn record(workspace_id: &str, uid: Uuid, index: usize) -> ChangelogRecord {
     ChangelogRecord {
         workspace_id: Some(workspace_id.to_string()),
         user_id: None,
-        scope: "workspace".to_string(),
+        scope: "tenant".to_string(),
         actor_id: None,
         actor_kind: "system".to_string(),
         op: "create".to_string(),
@@ -92,8 +92,8 @@ async fn changelog_write_bumps_workspace_version_and_respects_read_rls() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_a = format!("changelog-{}-a", Uuid::now_v7().simple());
-    let workspace_b = format!("changelog-{}-b", Uuid::now_v7().simple());
+    let workspace_a = Uuid::now_v7().to_string();
+    let workspace_b = Uuid::now_v7().to_string();
     let ctx = tenant_scope(workspace_a.clone());
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
@@ -127,7 +127,7 @@ async fn changelog_write_bumps_workspace_version_and_respects_read_rls() {
     .expect("count own changelog rows");
     assert_eq!(own_visible, 5);
 
-    set_workspace_gucs(conn.as_mut(), &workspace_b).await;
+    set_tenant_gucs(conn.as_mut(), &workspace_b).await;
     let cross_tenant_visible = sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM moa.graph_changelog WHERE target_uid = ANY($1)",
     )
@@ -162,22 +162,55 @@ async fn changelog_rejects_updates_for_app_role() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("changelog-update-{}", Uuid::now_v7().simple());
-    let ctx = tenant_scope(workspace_id);
+    let workspace_id = Uuid::now_v7().to_string();
+    let ctx = tenant_scope(&workspace_id);
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped changelog transaction");
     set_app_role(conn.as_mut()).await;
 
-    let error = sqlx::query("UPDATE moa.graph_changelog SET pii_class = 'none' WHERE false")
-        .execute(conn.as_mut())
+    let target_uid = Uuid::now_v7();
+    write_and_bump(conn.as_mut(), record(&workspace_id, target_uid, 0))
         .await
-        .expect_err("moa_app must not be able to update graph_changelog");
-    let message = error.to_string();
-    assert!(
-        message.contains("permission denied") || message.contains("row-level security"),
-        "{message}"
-    );
+        .expect("seed changelog record");
+    let visible_before = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.graph_changelog WHERE target_uid = $1",
+    )
+    .bind(target_uid)
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count seeded changelog row");
+    assert_eq!(visible_before, 1);
+
+    let update_result =
+        sqlx::query("UPDATE moa.graph_changelog SET pii_class = 'pii' WHERE target_uid = $1")
+            .bind(target_uid)
+            .execute(conn.as_mut())
+            .await;
+    match update_result {
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("permission denied") || message.contains("row-level security"),
+                "{message}"
+            );
+        }
+        Ok(result) => {
+            assert_eq!(
+                result.rows_affected(),
+                0,
+                "moa_app must not update graph_changelog rows"
+            );
+            let pii_class = sqlx::query_scalar::<_, String>(
+                "SELECT pii_class FROM moa.graph_changelog WHERE target_uid = $1",
+            )
+            .bind(target_uid)
+            .fetch_one(conn.as_mut())
+            .await
+            .expect("read unchanged changelog row");
+            assert_eq!(pii_class, "none");
+        }
+    }
 
     conn.rollback()
         .await

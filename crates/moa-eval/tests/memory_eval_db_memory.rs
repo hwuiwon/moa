@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
 use moa_brain::retrieval::{LegSources, RetrievalHit};
 use moa_core::{
-    MoaError, ScopeContext, ScopeTier, SessionId, TenantId, UserId, WorkspaceId,
+    MoaError, ScopeContext, ScopeTier, ScopedConn, SessionId, TenantId, UserId, WorkspaceId,
     traits::EmbeddingProvider,
 };
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
@@ -48,6 +48,8 @@ use uuid::Uuid;
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 static GOLD_RESOLUTION_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+const GOLD_RESOLUTION_EMBEDDER_MODEL: &str = "gold-resolution-mock-embedder";
+const GOLD_RESOLUTION_EMBEDDER_VERSION: i32 = 31;
 
 #[tokio::test]
 async fn memory_eval_corpus_round_trips_versioned_jsonl() {
@@ -1413,11 +1415,11 @@ struct GoldResolutionEmbedder;
 #[async_trait]
 impl EmbeddingProvider for GoldResolutionEmbedder {
     fn model_id(&self) -> &str {
-        "gold-resolution-mock-embedder"
+        GOLD_RESOLUTION_EMBEDDER_MODEL
     }
 
     fn model_version(&self) -> i32 {
-        31
+        GOLD_RESOLUTION_EMBEDDER_VERSION
     }
 
     fn dimensions(&self) -> usize {
@@ -1490,10 +1492,10 @@ impl GoldResolutionStack {
         })
     }
 
-    fn ingest_ctx(&self) -> IngestCtx {
-        let scope = ScopeContext::tenant(tenant_id_from_workspace_id(&workspace(
-            "gold-resolution-base-workspace",
-        )));
+    async fn ingest_ctx(&self, workspace_id: &WorkspaceId) -> TestResult<IngestCtx> {
+        let scope = ScopeContext::tenant(tenant_id_from_workspace_id(workspace_id));
+        self.seed_workspace_embedder_state(&scope, workspace_id)
+            .await?;
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             self.pool.clone(),
             scope.clone(),
@@ -1502,14 +1504,45 @@ impl GoldResolutionStack {
             AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope)
                 .with_vector_store(vector.clone()),
         );
-        IngestCtx::new(
+        Ok(IngestCtx::new(
             self.pool.clone(),
             graph,
             vector,
             Arc::new(GoldResolutionEmbedder),
             Arc::new(GoldResolutionNoPiiClassifier),
             Arc::new(GoldResolutionInsertOnlyDetector),
+        ))
+    }
+
+    async fn seed_workspace_embedder_state(
+        &self,
+        scope: &ScopeContext,
+        workspace_id: &WorkspaceId,
+    ) -> TestResult {
+        let mut conn = ScopedConn::begin(&self.pool, scope).await?;
+        sqlx::query("SET LOCAL ROLE moa_app")
+            .execute(conn.as_mut())
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO moa.workspace_state
+                (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (workspace_id) DO UPDATE
+                SET embedding_model = EXCLUDED.embedding_model,
+                    embedding_model_version = EXCLUDED.embedding_model_version,
+                    embedding_dimension = EXCLUDED.embedding_dimension,
+                    reembed_state = 'steady'
+            "#,
         )
+        .bind(workspace_id.as_str())
+        .bind(GOLD_RESOLUTION_EMBEDDER_MODEL)
+        .bind(GOLD_RESOLUTION_EMBEDDER_VERSION)
+        .bind(VECTOR_DIMENSION as i32)
+        .execute(conn.as_mut())
+        .await?;
+        conn.commit().await?;
+        Ok(())
     }
 
     async fn cleanup(self) -> TestResult {
@@ -1521,8 +1554,12 @@ impl GoldResolutionStack {
 
     fn workspace_ids(&self) -> Vec<String> {
         vec![
-            format!("gold-resolution-explicit-workspace-{}", self.schema_name),
-            format!("gold-resolution-partial-workspace-{}", self.schema_name),
+            gold_resolution_workspace_id("explicit", &self.schema_name)
+                .as_str()
+                .to_string(),
+            gold_resolution_workspace_id("partial", &self.schema_name)
+                .as_str()
+                .to_string(),
         ]
     }
 }
@@ -1591,7 +1628,13 @@ const GOLD_RESOLUTION_AGE_EDGE_LABELS: &[&str] = &[
 
 async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
     let (ledger, sessions) = explicit_gold_resolution_corpus(&stack.schema_name);
-    let report = resolve_gold_nodes(stack.ingest_ctx(), &ledger, &sessions).await?;
+    let workspace_id = sessions
+        .first()
+        .expect("explicit gold corpus includes a session")
+        .workspace_id
+        .clone();
+    let report =
+        resolve_gold_nodes(stack.ingest_ctx(&workspace_id).await?, &ledger, &sessions).await?;
 
     assert_eq!(report.ingestion_coverage(), 1.0);
     assert!(report.unresolved_facts().is_empty());
@@ -1669,7 +1712,13 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
 
 async fn run_partial_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
     let (ledger, sessions) = partial_gold_resolution_corpus(&stack.schema_name);
-    let report = resolve_gold_nodes(stack.ingest_ctx(), &ledger, &sessions).await?;
+    let workspace_id = sessions
+        .first()
+        .expect("partial gold corpus includes a session")
+        .workspace_id
+        .clone();
+    let report =
+        resolve_gold_nodes(stack.ingest_ctx(&workspace_id).await?, &ledger, &sessions).await?;
 
     assert!(
         report.ingestion_coverage() < 1.0,
@@ -1703,8 +1752,7 @@ fn explicit_gold_resolution_corpus(
     workspace_suffix: &str,
 ) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
     let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d01");
-    let workspace_name = format!("gold-resolution-explicit-workspace-{workspace_suffix}");
-    let workspace_id = workspace(&workspace_name);
+    let workspace_id = gold_resolution_workspace_id("explicit", workspace_suffix);
     let user_id = user("gold-resolution-explicit-user");
     let facts = vec![
         gold_fact(GoldFactSpec {
@@ -1758,8 +1806,7 @@ fn partial_gold_resolution_corpus(
     workspace_suffix: &str,
 ) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
     let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d02");
-    let workspace_name = format!("gold-resolution-partial-workspace-{workspace_suffix}");
-    let workspace_id = workspace(&workspace_name);
+    let workspace_id = gold_resolution_workspace_id("partial", workspace_suffix);
     let user_id = user("gold-resolution-partial-user");
     let facts = vec![
         gold_fact(GoldFactSpec {
@@ -1807,6 +1854,15 @@ fn partial_gold_resolution_corpus(
         ],
     }];
     (facts, sessions)
+}
+
+fn gold_resolution_workspace_id(kind: &str, workspace_suffix: &str) -> WorkspaceId {
+    workspace(
+        &stable_uuid_from_label(&format!(
+            "gold-resolution-{kind}-workspace-{workspace_suffix}"
+        ))
+        .to_string(),
+    )
 }
 
 struct GoldFactSpec {

@@ -6,8 +6,10 @@ use moa_authz_schema::{ObjectType, Relation};
 use moa_core::ActionRuleScope;
 use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
-    WorkflowCancelRequest, WorkflowCancelResponse, WorkflowRunRequest, WorkflowRunResponse,
-    WorkflowRunStatus, WorkflowStatusRequest,
+    WorkflowCancelRequest, WorkflowCancelResponse, WorkflowNodeRunSummary,
+    WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse, WorkflowRunRequest,
+    WorkflowRunResponse, WorkflowRunStatus, WorkflowSignalRequest, WorkflowSignalResponse,
+    WorkflowStatusRequest,
 };
 use moa_workflows::error::WorkflowError;
 use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
@@ -16,6 +18,11 @@ use restate_sdk::prelude::*;
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
+use crate::workflows::artifact_workflow_execution::{
+    ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest, validate_workflow_review_decision,
+    validate_workflow_signal,
+};
+use crate::workflows::errors::workflow_handler_error;
 
 /// Restate service surface for workflow run lifecycle operations.
 #[restate_sdk::service]
@@ -35,6 +42,16 @@ pub trait Workflows {
     async fn cancel(
         request: Json<WorkflowCancelRequest>,
     ) -> Result<Json<WorkflowCancelResponse>, HandlerError>;
+
+    /// Decides a pending workflow review node.
+    async fn decide_review(
+        request: Json<WorkflowReviewDecisionRequest>,
+    ) -> Result<Json<WorkflowReviewDecisionResponse>, HandlerError>;
+
+    /// Resolves a pending workflow wait-signal node.
+    async fn signal(
+        request: Json<WorkflowSignalRequest>,
+    ) -> Result<Json<WorkflowSignalResponse>, HandlerError>;
 }
 
 /// Concrete workflow service implementation.
@@ -50,12 +67,24 @@ impl Workflows for WorkflowsImpl {
     ) -> Result<Json<WorkflowRunResponse>, HandlerError> {
         annotate_restate_handler_span("Workflows", "run");
         let request = request.into_inner();
-        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let identity = authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let execution_request_tenant_id = request.tenant_id;
+        let execution_request_session_id = request.session_id;
 
-        Ok(ctx
+        let response = ctx
             .run(|| async move { run_inner(request).await.map(Json::from) })
             .name("workflows_run")
-            .await?)
+            .await?
+            .into_inner();
+        ctx.workflow_client::<ArtifactWorkflowExecutionClient>(response.run_id.to_string())
+            .run(Json::from(RunArtifactWorkflowRequest {
+                tenant_id: execution_request_tenant_id,
+                run_uid: response.run_id,
+                identity,
+                session_id: execution_request_session_id,
+            }))
+            .send();
+        Ok(Json::from(response))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -83,11 +112,81 @@ impl Workflows for WorkflowsImpl {
         annotate_restate_handler_span("Workflows", "cancel");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let run_uid = request.run_id;
+        let reason = request
+            .reason
+            .clone()
+            .unwrap_or_else(|| "workflow cancellation requested".to_string());
 
-        Ok(ctx
+        let response = ctx
             .run(|| async move { cancel_inner(request).await.map(Json::from) })
             .name("workflows_cancel")
-            .await?)
+            .await?
+            .into_inner();
+        if response.cancelled {
+            ctx.workflow_client::<ArtifactWorkflowExecutionClient>(run_uid.to_string())
+                .request_cancel(Json::from(reason))
+                .send();
+        }
+        Ok(Json::from(response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn decide_review(
+        &self,
+        ctx: Context<'_>,
+        request: Json<WorkflowReviewDecisionRequest>,
+    ) -> Result<Json<WorkflowReviewDecisionResponse>, HandlerError> {
+        annotate_restate_handler_span("Workflows", "decide_review");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
+        let run_uid = request.run_id;
+
+        let validated = ctx
+            .run(|| async move {
+                validate_workflow_review_decision(request)
+                    .await
+                    .map(Json::from)
+            })
+            .name("workflows_decide_review")
+            .await?
+            .into_inner();
+        if let Some(resolution) = validated.resolution {
+            return ctx
+                .workflow_client::<ArtifactWorkflowExecutionClient>(run_uid.to_string())
+                .decide_review(Json::from(resolution))
+                .call()
+                .await
+                .map_err(HandlerError::from);
+        }
+        Ok(Json::from(validated.response))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn signal(
+        &self,
+        ctx: Context<'_>,
+        request: Json<WorkflowSignalRequest>,
+    ) -> Result<Json<WorkflowSignalResponse>, HandlerError> {
+        annotate_restate_handler_span("Workflows", "signal");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
+        let run_uid = request.run_id;
+
+        let validated = ctx
+            .run(|| async move { validate_workflow_signal(request).await.map(Json::from) })
+            .name("workflows_signal")
+            .await?
+            .into_inner();
+        if let Some(resolution) = validated.resolution {
+            return ctx
+                .workflow_client::<ArtifactWorkflowExecutionClient>(run_uid.to_string())
+                .signal(Json::from(resolution))
+                .call()
+                .await
+                .map_err(HandlerError::from);
+        }
+        Ok(Json::from(validated.response))
     }
 }
 
@@ -123,12 +222,24 @@ async fn status_inner(request: WorkflowStatusRequest) -> Result<WorkflowRunStatu
         .await
         .map_err(workflow_handler_error)?
         .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+    let node_runs = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool())
+        .list_node_runs(&scope, request.run_id)
+        .await
+        .map_err(|error| workflow_handler_error(WorkflowError::Artifact(error)))?
+        .into_iter()
+        .map(|node_run| WorkflowNodeRunSummary {
+            node_id: node_run.node_id,
+            status: node_run.status.as_str().to_string(),
+            started_at: node_run.started_at,
+            completed_at: node_run.completed_at,
+        })
+        .collect();
     Ok(WorkflowRunStatus {
         run_id: run.run_uid,
         session_id: run.session_id,
         current_node_id: run.current_node_id,
         status: run.status.as_str().to_string(),
-        node_runs: Vec::new(),
+        node_runs,
         output: run.output,
         error: run.error,
     })
@@ -160,28 +271,11 @@ async fn authorize_tenant(
     ctx: &impl RequestHeaders,
     tenant_id: moa_core::TenantId,
     relation: Relation,
-) -> Result<(), HandlerError> {
+) -> Result<moa_core::traits::Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
     require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
         .await
-        .map_err(translate_authz_error)
-}
-
-fn workflow_handler_error(error: WorkflowError) -> HandlerError {
-    match error {
-        WorkflowError::InvalidReference { .. } | WorkflowError::WrongReferenceKind => {
-            TerminalError::new_with_code(400, error.to_string()).into()
-        }
-        WorkflowError::WorkflowNotFound { .. } => {
-            TerminalError::new_with_code(404, error.to_string()).into()
-        }
-        WorkflowError::Artifact(source) => {
-            if source.is_fatal() {
-                TerminalError::new(source.to_string()).into()
-            } else {
-                HandlerError::from(source)
-            }
-        }
-    }
+        .map_err(translate_authz_error)?;
+    Ok(identity)
 }

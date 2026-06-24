@@ -211,6 +211,7 @@ fn spawn_input(task_name: &str) -> SpawnSubAgentInput {
         task_name: Some(task_name.to_string()),
         tool_subset: vec!["file_search".to_string()],
         budget_tokens: 256,
+        max_turns: Some(2),
     }
 }
 
@@ -220,6 +221,7 @@ fn reserve_input(spawn: &SpawnSubAgentInput) -> ReserveSubAgentInput {
             task: spawn.task.clone(),
             tool_subset: spawn.tool_subset.clone(),
             budget_tokens: spawn.budget_tokens,
+            max_turns: spawn.max_turns,
         },
         task_name: spawn.task_name.clone(),
     }

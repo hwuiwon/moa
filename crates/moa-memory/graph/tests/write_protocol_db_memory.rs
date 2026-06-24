@@ -234,7 +234,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("write-protocol-{}", Uuid::now_v7().simple());
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = graph_store(session_store.pool(), &workspace_id);
     seed_workspace_embedder_state(session_store.pool(), &workspace_id).await;
 
@@ -401,7 +401,7 @@ async fn write_protocol_creates_every_edge_label() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("edge-labels-{}", Uuid::now_v7().simple());
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = graph_store(session_store.pool(), &workspace_id);
     let now = Utc::now();
     let start_uid = graph
@@ -452,7 +452,7 @@ async fn rollback_on_failure_removes_age_and_sidecar_rows() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("write-rollback-{}", Uuid::now_v7().simple());
+    let workspace_id = Uuid::now_v7().to_string();
     let graph = graph_store(session_store.pool(), &workspace_id);
     seed_workspace_embedder_state(session_store.pool(), &workspace_id).await;
     let bad = node_intent(
