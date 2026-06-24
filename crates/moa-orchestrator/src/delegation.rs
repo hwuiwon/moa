@@ -171,6 +171,7 @@ async fn spawn_child_detached(
         task: request.task,
         tool_subset: request.tool_subset,
         budget_tokens: request.budget_tokens,
+        max_turns: request.max_turns,
     };
     let reservation =
         reserve_and_start_child(ctx, parent, child_request, task_name, "spawn_sub_agent_id")

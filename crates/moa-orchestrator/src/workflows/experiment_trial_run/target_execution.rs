@@ -33,6 +33,18 @@ struct StartedWorkflowRun {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct WorkflowTrialStart {
+    scope: ActionRuleScope,
+    trial_uid: Uuid,
+    workflow_ref: String,
+    input: Value,
+    session_id: Option<SessionId>,
+    idempotency_key: Option<String>,
+    tenant_id: TenantId,
+    identity: Identity,
+}
+
 pub(super) async fn run_agent_loop_trial(
     ctx: &WorkflowContext<'_>,
     request: ExperimentTrialRunWorkflowRequest,
@@ -92,6 +104,7 @@ pub(super) async fn run_agent_loop_trial(
                     attachments: Vec::new(),
                     model: target_model.as_ref().map(ToString::to_string),
                     contact: None,
+                    max_turns: None,
                 })),
             &request.identity,
         )
@@ -206,12 +219,16 @@ pub(super) async fn run_workflow_trial(
     let scope = tenant_scope(request.tenant_id);
     let run = start_and_attach_workflow_run(
         ctx,
-        scope,
-        trial.trial_uid,
-        workflow_ref,
-        input,
-        session_id,
-        idempotency_key.or_else(|| Some(trial.trial_key.clone())),
+        WorkflowTrialStart {
+            scope,
+            trial_uid: trial.trial_uid,
+            workflow_ref,
+            input,
+            session_id,
+            idempotency_key: idempotency_key.or_else(|| Some(trial.trial_key.clone())),
+            tenant_id: request.tenant_id,
+            identity: request.identity.clone(),
+        },
     )
     .await?;
     ctx.set(K_WORKFLOW_RUN_UID, Json(run.run_uid));
@@ -407,29 +424,28 @@ fn target_is_waiting_or_idle(status: &SessionStatus, snapshot: &SessionSnapshot)
 
 async fn start_and_attach_workflow_run(
     ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    trial_uid: Uuid,
-    workflow_ref: String,
-    input: Value,
-    session_id: Option<SessionId>,
-    idempotency_key: Option<String>,
+    start: WorkflowTrialStart,
 ) -> Result<StartedWorkflowRun, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    Ok(ctx
+    let session_id = start.session_id;
+    let tenant_id = start.tenant_id;
+    let identity = start.identity.clone();
+    let run = ctx
         .run(|| async move {
             let run = workflow_runtime(pool.clone())
                 .start(
-                    &scope,
+                    &start.scope,
                     StartWorkflowRun {
-                        workflow_ref,
-                        input,
-                        session_id,
-                        idempotency_key,
+                        workflow_ref: start.workflow_ref,
+                        input: start.input,
+                        session_id: start.session_id,
+                        idempotency_key: start.idempotency_key,
                     },
                 )
                 .await
                 .map_err(workflow_handler_error)?;
-            let trial = attach_trial_workflow_run(pool, scope, trial_uid, run.run_uid).await?;
+            let trial =
+                attach_trial_workflow_run(pool, start.scope, start.trial_uid, run.run_uid).await?;
             let stop = trial_stop_for_workflow_status(&run.status).map(|(status, stop_reason)| {
                 WorkflowTrialStop {
                     status,
@@ -445,7 +461,16 @@ async fn start_and_attach_workflow_run(
         })
         .name("experiment_trial_start_workflow_run")
         .await?
-        .into_inner())
+        .into_inner();
+    ctx.workflow_client::<ArtifactWorkflowExecutionClient>(run.run_uid.to_string())
+        .run(Json::from(RunArtifactWorkflowRequest {
+            tenant_id,
+            run_uid: run.run_uid,
+            identity,
+            session_id,
+        }))
+        .send();
+    Ok(run)
 }
 
 fn latest_brain_response(events: &[EventRecord]) -> Option<String> {

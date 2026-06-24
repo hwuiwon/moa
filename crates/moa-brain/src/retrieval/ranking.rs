@@ -465,8 +465,8 @@ mod tests {
     }
 
     #[test]
-    fn feature_score_scope_term_orders_user_over_workspace_when_tied() {
-        // Pins: FeatureV1 preserves the old preference for user facts over workspace facts.
+    fn feature_score_scope_term_orders_contact_over_tenant_when_tied() {
+        // Pins: FeatureV1 prefers contact facts over tenant facts when text features tie.
         let reference_time = Utc
             .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
             .single()
@@ -474,15 +474,15 @@ mod tests {
         let config = RankingConfig::default();
         let ranker = FeatureRanker::new(&config, reference_time);
         let query_tokens = normalize_tokens("checkout service");
-        let user = row(
-            "user",
+        let contact = row(
+            "contact",
             "checkout service",
             reference_time,
             reference_time,
             None,
         );
-        let workspace = row(
-            "workspace",
+        let tenant = row(
+            "tenant",
             "checkout service",
             reference_time,
             reference_time,
@@ -490,14 +490,14 @@ mod tests {
         );
 
         assert!(
-            ranker.score(1.0, 1.0, &query_tokens, &user)
-                > ranker.score(1.0, 1.0, &query_tokens, &workspace)
+            ranker.score(1.0, 1.0, &query_tokens, &contact)
+                > ranker.score(1.0, 1.0, &query_tokens, &tenant)
         );
     }
 
     #[test]
-    fn feature_score_user_scope_applies_to_request_user_only() {
-        // Pins: user-scope boost belongs to the caller's user row, not every visible user row.
+    fn feature_score_contact_scope_applies_to_request_contact_only() {
+        // Pins: contact-scope boost belongs to the caller's contact row, not every visible contact row.
         let reference_time = Utc
             .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
             .single()
@@ -510,7 +510,7 @@ mod tests {
         let ranker = FeatureRanker::new(&config, reference_time).with_request_scope(&request_scope);
         let query_tokens = normalize_tokens("checkout service");
         let mut caller = row(
-            "user",
+            "contact",
             "checkout service",
             reference_time,
             reference_time,
@@ -518,19 +518,19 @@ mod tests {
         );
         caller.workspace_id = Some(Uuid::from_u128(0x100).to_string());
         caller.user_id = Some(Uuid::from_u128(0x101).to_string());
-        let mut other_user = row(
-            "user",
+        let mut other_contact = row(
+            "contact",
             "checkout service",
             reference_time,
             reference_time,
             None,
         );
-        other_user.workspace_id = Some(Uuid::from_u128(0x100).to_string());
-        other_user.user_id = Some(Uuid::from_u128(0x102).to_string());
+        other_contact.workspace_id = Some(Uuid::from_u128(0x100).to_string());
+        other_contact.user_id = Some(Uuid::from_u128(0x102).to_string());
 
         assert!(
             ranker.score(1.0, 1.0, &query_tokens, &caller)
-                > ranker.score(1.0, 1.0, &query_tokens, &other_user)
+                > ranker.score(1.0, 1.0, &query_tokens, &other_contact)
         );
     }
 

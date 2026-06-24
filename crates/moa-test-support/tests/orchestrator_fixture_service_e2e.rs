@@ -23,6 +23,7 @@ async fn fixture_round_trips_session_turn_through_restate() -> anyhow::Result<()
                 attachments: Vec::new(),
                 model: Some("scripted-loadtest".to_string()),
                 contact: None,
+                max_turns: None,
             },
             Some("fixture-round-trip"),
         )

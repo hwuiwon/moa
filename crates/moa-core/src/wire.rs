@@ -38,6 +38,9 @@ pub struct RunTurnRequest {
     /// Optional per-turn model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional turn-iteration cap for this request.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 /// Input accepted by one `SubAgentTurnExecution` workflow run.
@@ -47,6 +50,9 @@ pub struct RunSubAgentTurnRequest {
     pub sub_agent_id: String,
     /// Stable turn identifier and workflow key.
     pub turn_id: String,
+    /// Optional turn-iteration cap for this child turn workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
 }
 
 /// Durable lifecycle phase for one turn workflow.
@@ -120,6 +126,9 @@ pub struct StartTurnRequest {
     /// Agent-facing contact for this message, defaulting to the session contact.
     #[serde(default)]
     pub contact: Option<ContactRef>,
+    /// Optional turn-iteration cap for this request.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 /// Response returned by `Session/start_turn`.
@@ -145,6 +154,9 @@ pub struct QueueMessageRequest {
     /// Agent-facing contact for this message, defaulting to the session contact.
     #[serde(default)]
     pub contact: Option<ContactRef>,
+    /// Optional turn-iteration cap for this request.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 /// Response returned by `Session/queue_message`.
@@ -183,6 +195,9 @@ pub struct PendingMessage {
     /// Optional per-turn model override.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional turn-iteration cap for this queued request.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 /// Read-only projection of the additive `TurnExecution` session state.
@@ -1814,6 +1829,82 @@ pub struct WorkflowCancelResponse {
     pub cancelled: bool,
     /// Human-readable status message.
     pub reason: String,
+}
+
+/// Decision kind for a workflow review node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowReviewDecisionKind {
+    /// Approve the waiting workflow review node.
+    Approved,
+    /// Reject the waiting workflow review node.
+    Rejected,
+}
+
+/// Request payload for deciding a workflow review node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowReviewDecisionRequest {
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Review node to decide. Defaults to the run's current node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Decision to apply.
+    pub decision: WorkflowReviewDecisionKind,
+    /// Optional human-readable reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Optional approved output to store under the review node id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+}
+
+/// Response payload returned after deciding a workflow review node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowReviewDecisionResponse {
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Whether this request changed workflow state.
+    pub accepted: bool,
+    /// Current run status when the decision was accepted or rejected.
+    pub status: String,
+    /// Current node ID after the decision was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_node_id: Option<String>,
+}
+
+/// Request payload for delivering an external workflow signal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowSignalRequest {
+    /// Tenant used for authorization.
+    pub tenant_id: TenantId,
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Wait-signal node to resolve. Defaults to the run's current node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Optional logical signal name supplied by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_name: Option<String>,
+    /// Signal payload to store under the wait-signal node id.
+    #[serde(default)]
+    pub payload: Value,
+}
+
+/// Response payload returned after delivering an external workflow signal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowSignalResponse {
+    /// Workflow run row identifier.
+    pub run_id: Uuid,
+    /// Whether this request was accepted by the waiting workflow.
+    pub accepted: bool,
+    /// Current run status when the signal was accepted or rejected.
+    pub status: String,
+    /// Current node ID when the signal was accepted or rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_node_id: Option<String>,
 }
 
 /// Request payload for planning an eval suite run.

@@ -207,12 +207,20 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             run_workflow_for_session(&client, ingress, &identity, &workspace_id, session_id).await?;
         assert_eq!(workflow_run.status, "queued");
         let workflow_status =
-            workflow_status(&client, ingress, &identity, &workspace_id, workflow_run.run_id)
+            wait_for_workflow_status(&client, ingress, &identity, &workspace_id, workflow_run.run_id, "completed")
                 .await?;
         assert_eq!(workflow_status.run_id, workflow_run.run_id);
         assert_eq!(workflow_status.session_id, Some(session_id));
-        assert_eq!(workflow_status.status, "queued");
-        assert!(workflow_status.node_runs.is_empty());
+        assert_eq!(workflow_status.status, "completed");
+        assert_eq!(workflow_status.current_node_id.as_deref(), Some("done"));
+        assert_eq!(node_ids(&workflow_status), vec!["start", "verify_evidence", "done"]);
+        assert!(
+            workflow_status
+                .node_runs
+                .iter()
+                .all(|node_run| node_run.status == "completed"),
+            "associated deterministic workflow should complete visible nodes: {workflow_status:?}"
+        );
 
         let pool = PgPool::connect(&test_database_url())
             .await
@@ -685,6 +693,40 @@ async fn workflow_status(
         .json::<WorkflowRunStatus>()
         .await
         .context("deserialize workflow status response")
+}
+
+async fn wait_for_workflow_status(
+    client: &reqwest::Client,
+    ingress: &str,
+    identity: &Identity,
+    workspace_id: &WorkspaceId,
+    run_id: Uuid,
+    expected: &str,
+) -> Result<WorkflowRunStatus> {
+    let mut last_status = None;
+    for _attempt in 0..60 {
+        let status = workflow_status(client, ingress, identity, workspace_id, run_id).await?;
+        if status.status == expected {
+            return Ok(status);
+        }
+        if status.status == "failed" {
+            bail!("workflow run failed before reaching {expected}: {status:?}");
+        }
+        last_status = Some(status);
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    bail!(
+        "timed out waiting for workflow run {run_id} to reach {expected}; last status: {last_status:?}"
+    )
+}
+
+fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+    status
+        .node_runs
+        .iter()
+        .map(|node_run| node_run.node_id.as_str())
+        .collect()
 }
 
 async fn wait_for_session_messages(
@@ -1277,22 +1319,16 @@ definition:
         condition:
           type: exists
           path: $.damage_summary
-      - id: choose_resolution
-        kind: agent
-        max_turns: 2
-        input:
-          instruction: Decide replacement, refund review, or escalation after evidence review.
       - id: done
         kind: end
+        input:
+          status: evidence_verified
     edges:
       - id: start-to-verify
         from: start
         to: verify_evidence
       - id: verify-to-resolution
         from: verify_evidence
-        to: choose_resolution
-      - id: resolution-to-done
-        from: choose_resolution
         to: done
 "#
 }

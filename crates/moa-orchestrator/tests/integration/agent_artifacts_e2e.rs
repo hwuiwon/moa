@@ -190,39 +190,68 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
 
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
+    let fixture_path = memory_dir.path().join("damaged-food-workflow-script.json");
+    write_scripted_text_fixture(
+        &fixture_path,
+        "I checked the damaged food report and queued it for approval.",
+    )?;
+
     let ports = reserve_orchestrator_ports()?;
     let endpoint_url = deployment_endpoint_url(ports.restate);
     let ingress = restate_ingress_url();
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let mut identity = test_user_identity();
-    let workspace_id = WorkspaceId::new(Uuid::now_v7().to_string());
-    identity.tenant_id = tenant_id_from_workspace(&workspace_id)?;
+    let mut meta = test_session_meta(&format!("agent-artifacts-workflow-{}", Uuid::now_v7()));
+    meta.model = ModelId::new("scripted-loadtest");
+    let workspace_id = workspace_id_from_meta(&meta);
+    identity.tenant_id = meta.tenant_id;
     grant_tenant_admin(&identity, &workspace_id).await?;
-    let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, None)?;
+    let mut orchestrator =
+        spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_and_publish_damaged_food_workflow(&client, ingress, &identity, &workspace_id)
             .await?;
+        let session_id = create_session(&client, ingress, &identity, &meta).await?;
 
         let response = start_damaged_food_workflow(
             &client,
             ingress,
             &identity,
             &workspace_id,
-            None,
+            Some(session_id),
             "ORD-4821",
         )
         .await?;
         assert_eq!(response.status, "queued");
 
-        let status =
-            workflow_status(&client, ingress, &identity, &workspace_id, response.run_id).await?;
-        assert_eq!(status.status, "queued");
-        assert_eq!(status.session_id, None);
-        assert!(status.current_node_id.is_none());
-        assert!(status.node_runs.is_empty());
+        let status = wait_for_workflow_status(
+            &client,
+            ingress,
+            &identity,
+            &workspace_id,
+            response.run_id,
+            "pending_review",
+        )
+        .await?;
+        assert_eq!(status.session_id, Some(session_id));
+        assert_eq!(status.current_node_id.as_deref(), Some("review_resolution"));
+        assert_eq!(
+            node_ids(&status),
+            vec![
+                "start",
+                "verify_evidence",
+                "choose_resolution",
+                "review_resolution"
+            ]
+        );
+        assert_eq!(status.node_runs[3].status, "pending_review");
+        assert!(
+            status.error.is_none(),
+            "workflow should pause cleanly: {status:?}"
+        );
 
         Ok(())
     }
@@ -268,15 +297,6 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
         import_and_publish_damaged_food_workflow(&client, ingress, &identity, &workspace_id)
             .await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
-        let workflow_run = start_damaged_food_workflow(
-            &client,
-            ingress,
-            &identity,
-            &workspace_id,
-            Some(session_id),
-            "ORD-7002",
-        )
-        .await?;
 
         let prompt = "Use our refund triage guidance while tracking the damaged-food workflow \
             for order ORD-7002. The customer says sauce leaked through the bag and wants a credit.";
@@ -296,20 +316,39 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
             "workflow association should not make the agent loop invent workflow tool calls"
         );
 
-        let status = workflow_status(
+        let workflow_run = start_damaged_food_workflow(
+            &client,
+            ingress,
+            &identity,
+            &workspace_id,
+            Some(session_id),
+            "ORD-7002",
+        )
+        .await?;
+        assert_eq!(workflow_run.status, "queued");
+
+        let status = wait_for_workflow_status(
             &client,
             ingress,
             &identity,
             &workspace_id,
             workflow_run.run_id,
+            "pending_review",
         )
         .await?;
-        assert_eq!(status.status, "queued");
         assert_eq!(status.session_id, Some(session_id));
-        assert!(
-            status.node_runs.is_empty(),
-            "workflow interpreter has not executed nodes in the agent loop"
+        assert_eq!(status.current_node_id.as_deref(), Some("review_resolution"));
+        assert_eq!(
+            node_ids(&status),
+            vec![
+                "start",
+                "verify_evidence",
+                "choose_resolution",
+                "review_resolution"
+            ]
         );
+        assert_eq!(status.node_runs[3].status, "pending_review");
+        assert!(status.error.is_none(), "workflow should pause cleanly: {status:?}");
 
         Ok(())
     }
@@ -425,22 +464,39 @@ async fn start_damaged_food_workflow(
         .context("deserialize workflow run response")
 }
 
-async fn workflow_status(
+async fn wait_for_workflow_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
     workspace_id: &WorkspaceId,
     run_id: Uuid,
+    expected: &str,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
         tenant_id: tenant_id_from_workspace(workspace_id)?,
         run_id,
     };
-    post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
-        .await?
-        .json::<WorkflowRunStatus>()
-        .await
-        .context("deserialize workflow status response")
+    let mut last_status = None;
+    for _attempt in 0..60 {
+        let status =
+            post_json_with_identity(client, ingress, "Workflows", "status", identity, &request)
+                .await?
+                .json::<WorkflowRunStatus>()
+                .await
+                .context("deserialize workflow status response")?;
+        if status.status == expected {
+            return Ok(status);
+        }
+        if status.status == "failed" {
+            bail!("workflow run failed before reaching {expected}: {status:?}");
+        }
+        last_status = Some(status);
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    bail!(
+        "timed out waiting for workflow run {run_id} to reach {expected}; last status: {last_status:?}"
+    )
 }
 
 async fn create_session(
@@ -705,6 +761,14 @@ fn detailed_event_summary(events: &[EventRecord]) -> String {
         .join("; ")
 }
 
+fn node_ids(status: &WorkflowRunStatus) -> Vec<&str> {
+    status
+        .node_runs
+        .iter()
+        .map(|node_run| node_run.node_id.as_str())
+        .collect()
+}
+
 fn truncate_for_summary(value: &str) -> String {
     const LIMIT: usize = 500;
     if value.chars().count() <= LIMIT {
@@ -744,6 +808,19 @@ fn write_skill_file_read_fixture(path: &Path, final_text: &str) -> Result<()> {
     });
     let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted skill fixture")?;
     fs::write(path, body).context("write scripted skill fixture")
+}
+
+fn write_scripted_text_fixture(path: &Path, final_text: &str) -> Result<()> {
+    let fixture = json!({
+        "default": {
+            "completion": {
+                "content": final_text,
+                "tool_calls": []
+            }
+        }
+    });
+    let body = serde_json::to_vec_pretty(&fixture).context("serialize scripted text fixture")?;
+    fs::write(path, body).context("write scripted text fixture")
 }
 
 fn refund_skill_package() -> SkillPackageDocument {
@@ -865,17 +942,17 @@ definition:
         ui:
           x: 520
           y: 120
-      - id: notify_customer
-        kind: action
+      - id: review_resolution
+        kind: review
         input:
-          template: Tell the customer the resolution and timing.
+          prompt: Review the proposed refund, credit, replacement, or escalation before notifying the customer.
         ui:
           x: 760
           y: 120
       - id: done
         kind: end
         ui:
-          x: 980
+          x: 1000
           y: 120
     edges:
       - id: start-to-verify
@@ -884,11 +961,11 @@ definition:
       - id: verify-to-resolution
         from: verify_evidence
         to: choose_resolution
-      - id: resolution-to-notify
+      - id: resolution-to-review
         from: choose_resolution
-        to: notify_customer
-      - id: notify-to-done
-        from: notify_customer
+        to: review_resolution
+      - id: review-to-done
+        from: review_resolution
         to: done
 "#
 }

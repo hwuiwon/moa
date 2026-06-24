@@ -305,6 +305,7 @@ async fn run_scripted_turn(
                 attachments: Vec::new(),
                 model: None,
                 contact: None,
+                max_turns: None,
             },
             None,
         )

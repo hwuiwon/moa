@@ -153,7 +153,17 @@ async fn run_sub_agent_inside_workflow(
     ctx: &WorkflowContext<'_>,
     request: &RunSubAgentTurnRequest,
 ) -> Result<TurnOutcome, HandlerError> {
-    for turn_number in 1..=MAX_SUB_AGENT_TURNS_PER_WORKFLOW {
+    let max_turns = match effective_sub_agent_max_turns(request.max_turns) {
+        Ok(max_turns) => max_turns,
+        Err(message) => {
+            return Ok(TurnOutcome {
+                turn_id: request.turn_id.clone(),
+                kind: TurnOutcomeKind::Failed,
+                message,
+            });
+        }
+    };
+    for turn_number in 1..=max_turns {
         if let Some(reason) = cancel_requested(ctx).await? {
             ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
                 .cancel(reason.clone())
@@ -229,8 +239,16 @@ async fn run_sub_agent_inside_workflow(
     Ok(TurnOutcome {
         turn_id: request.turn_id.clone(),
         kind: TurnOutcomeKind::Failed,
-        message: format!("sub-agent turn budget exceeded ({MAX_SUB_AGENT_TURNS_PER_WORKFLOW})"),
+        message: format!("sub-agent turn budget exceeded ({max_turns})"),
     })
+}
+
+fn effective_sub_agent_max_turns(max_turns: Option<u32>) -> Result<usize, String> {
+    match max_turns {
+        Some(0) => Err("sub-agent max_turns must be at least 1".to_string()),
+        Some(max_turns) => Ok(max_turns as usize),
+        None => Ok(MAX_SUB_AGENT_TURNS_PER_WORKFLOW),
+    }
 }
 
 async fn run_sub_agent_iteration(
@@ -793,7 +811,10 @@ mod tests {
     use moa_core::SessionId;
     use moa_core::wire::TurnPhase;
 
-    use super::{is_terminal_phase, parent_session_from_initial_message};
+    use super::{
+        MAX_SUB_AGENT_TURNS_PER_WORKFLOW, effective_sub_agent_max_turns, is_terminal_phase,
+        parent_session_from_initial_message,
+    };
 
     #[test]
     fn terminal_phase_detection_matches_workflow_lifecycle() {
@@ -809,6 +830,24 @@ mod tests {
     }
 
     #[test]
+    fn effective_sub_agent_max_turns_honors_request_cap() {
+        // Pins: workflow sub_agent max_turns is applied by the child turn loop.
+        assert_eq!(
+            effective_sub_agent_max_turns(None).expect("default cap should be valid"),
+            MAX_SUB_AGENT_TURNS_PER_WORKFLOW
+        );
+        assert_eq!(
+            effective_sub_agent_max_turns(Some(3)).expect("explicit cap should be valid"),
+            3
+        );
+        assert!(
+            effective_sub_agent_max_turns(Some(0))
+                .expect_err("zero cap should fail closed")
+                .contains("max_turns must be at least 1")
+        );
+    }
+
+    #[test]
     fn reserved_child_parent_session_requires_initial_message() {
         // Pins: nested spawn events derive their root session only from validated initial child messages.
         let session_id = SessionId::new();
@@ -816,6 +855,7 @@ mod tests {
             task: "inspect".to_string(),
             tool_subset: Vec::new(),
             budget_tokens: 100,
+            max_turns: Some(2),
             parent_session: session_id,
             parent_sub_agent: Some("parent".to_string()),
             depth: 2,

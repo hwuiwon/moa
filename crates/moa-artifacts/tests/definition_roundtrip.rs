@@ -405,6 +405,57 @@ definition:
 }
 
 #[test]
+fn workflow_validation_rejects_executable_nodes_without_invocation_targets() {
+    // Pins: published workflow action/tool nodes fail validation before runtime if no target can be executed.
+    let yaml = r#"
+api_version: moa.artifact/v1
+kind: workflow
+metadata:
+  name: invalid-executable-workflow
+definition:
+  type: workflow
+  spec:
+    nodes:
+      - id: start
+        kind: start
+      - id: notify_customer
+        kind: action
+        input:
+          template: Tell the customer what happens next.
+      - id: call_tool
+        kind: tool
+      - id: done
+        kind: end
+    edges:
+      - from: start
+        to: notify_customer
+      - from: notify_customer
+        to: call_tool
+      - from: call_tool
+        to: done
+"#;
+    let document = ArtifactDocument::from_yaml(yaml).expect("parse invalid workflow");
+    let report = validate_for_status(&document, ArtifactStatus::Published);
+
+    assert!(
+        report.errors.iter().any(|error| {
+            error.path == "definition.spec.nodes[1]"
+                && error.message
+                    == "workflow action node must specify ref, input.tool_name, or input.tool"
+        }),
+        "expected missing action invocation target error: {report:?}"
+    );
+    assert!(
+        report.errors.iter().any(|error| {
+            error.path == "definition.spec.nodes[2]"
+                && error.message
+                    == "workflow tool node must specify exactly one tool_ref, input.tool_name, or input.tool"
+        }),
+        "expected missing tool invocation target error: {report:?}"
+    );
+}
+
+#[test]
 fn prompt_examples_parse_as_draft_artifacts() {
     // Pins: docs examples stay executable by the canonical parser.
     let skill = include_str!("../../../docs/examples/artifacts/transaction-dispute.skill.yaml");
@@ -415,5 +466,29 @@ fn prompt_examples_parse_as_draft_artifacts() {
         let document = ArtifactDocument::from_yaml(source).expect("parse example artifact");
         let report = validate_for_status(&document, ArtifactStatus::Draft);
         assert!(report.is_ok(), "example should be draft-valid: {report:?}");
+    }
+}
+
+#[test]
+fn capability_pattern_workflow_examples_parse_as_draft_artifacts() {
+    // Pins: pattern examples stay round-trippable for future dashboard editing.
+    let examples = [
+        include_str!("../../../docs/examples/artifacts/patterns/sequential.workflow.yaml"),
+        include_str!("../../../docs/examples/artifacts/patterns/parallel-review.workflow.yaml"),
+        include_str!("../../../docs/examples/artifacts/patterns/react-agent.workflow.yaml"),
+        include_str!("../../../docs/examples/artifacts/patterns/human-approval.workflow.yaml"),
+        include_str!("../../../docs/examples/artifacts/patterns/custom-logic.workflow.yaml"),
+    ];
+
+    for source in examples {
+        let document = ArtifactDocument::from_yaml(source).expect("parse pattern workflow");
+        let report = validate_for_status(&document, ArtifactStatus::Draft);
+        assert!(
+            report.is_ok(),
+            "pattern workflow should be draft-valid: {report:?}"
+        );
+        let yaml = document.to_yaml().expect("serialize pattern workflow");
+        let reparsed = ArtifactDocument::from_yaml(&yaml).expect("parse serialized workflow");
+        assert_eq!(reparsed, document);
     }
 }

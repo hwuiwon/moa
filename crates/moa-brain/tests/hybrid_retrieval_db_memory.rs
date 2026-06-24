@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use moa_brain::planning::{PlanningCtx, QueryPlanner, QueryRetrievalCtx};
 use moa_brain::retrieval::{
-    CachedHybridRetriever, HybridRetriever, RetrievalRequest, legs::lexical_leg,
+    CachedHybridRetriever, HybridRetriever, RetrievalRequest,
+    legs::{lexical_leg, vector_leg},
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
@@ -47,6 +48,10 @@ fn stable_uuid_from_label(label: &str) -> Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
+}
+
+fn test_workspace_id() -> String {
+    Uuid::now_v7().to_string()
 }
 
 fn tenant_scope(workspace_id: &str) -> ScopeContext {
@@ -328,7 +333,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("hybrid-retrieval-{}", Uuid::now_v7().simple());
+    let workspace_id = test_workspace_id();
     let prefix = format!("hybrid-e2e-{}", Uuid::now_v7().simple());
     let graph = graph_store(session_store.pool(), &workspace_id);
 
@@ -380,12 +385,13 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
     }
 
     let scope = tenant_memory_scope(&workspace_id);
-    let vector =
-        PgvectorStore::new_for_app_role(session_store.pool().clone(), tenant_scope(&workspace_id));
+    let vector: Arc<dyn moa_memory_vector::VectorStore> = Arc::new(
+        PgvectorStore::new_for_app_role(session_store.pool().clone(), tenant_scope(&workspace_id)),
+    );
     let retriever = HybridRetriever::new(
         session_store.pool().clone(),
         Arc::new(graph.clone()),
-        Arc::new(vector),
+        vector.clone(),
     )
     .with_assume_app_role(true);
     let request = RetrievalRequest {
@@ -411,6 +417,13 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
         lexical_hits.iter().any(|hit| hit.uid == exact_uid),
         "{lexical_hits:?}"
     );
+    let vector_hits = vector_leg(vector.as_ref(), &request)
+        .await
+        .expect("vector leg should retrieve exact fact");
+    assert!(
+        vector_hits.iter().any(|hit| hit.uid == exact_uid),
+        "{vector_hits:?}"
+    );
 
     let hits = retriever
         .retrieve(request)
@@ -425,7 +438,7 @@ async fn hybrid_retrieval_db_memory_returns_fused_annotated_results() {
         .expect("exact fact should be retrieved");
     assert!(exact_hit.legs.graph, "{exact_hit:?}");
     assert!(exact_hit.legs.vector, "{exact_hit:?}");
-    assert_eq!(exact_hit.node.scope, "workspace");
+    assert_eq!(exact_hit.node.scope, "tenant");
 
     let graph_only_hits = retriever
         .retrieve(RetrievalRequest {
@@ -497,7 +510,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         .await
         .expect("create isolated Postgres store");
     let pool = session_store.pool().clone();
-    let workspace_id = format!("scope-isolation-{}", Uuid::now_v7().simple());
+    let workspace_id = test_workspace_id();
     let user_a = "user-scope-owner";
     let user_b = "user-scope-other";
     let workspace_scope = tenant_scope(&workspace_id);
@@ -611,7 +624,7 @@ async fn temporal_retrieval_returns_superseded_node_as_of_valid_window() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("hybrid-temporal-{}", Uuid::now_v7().simple());
+    let workspace_id = test_workspace_id();
     let graph = graph_store(session_store.pool(), &workspace_id);
 
     let old_name = "temporal-asof retired gateway owner";
@@ -713,7 +726,7 @@ async fn temporal_turbopuffer_unsupported_as_of_falls_back_to_pgvector() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("hybrid-tp-asof-{}", Uuid::now_v7().simple());
+    let workspace_id = test_workspace_id();
     let graph = graph_store(session_store.pool(), &workspace_id);
     set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
     let fact = "temporal turbopuffer fallback pgvector fact";

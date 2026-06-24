@@ -165,6 +165,7 @@ impl GoldenStack {
             AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
                 .with_vector_store(vector.clone()),
         );
+        seed_workspace_embedder_state(&pool, &scope, workspace_uuid).await?;
 
         Ok(Self {
             pool,
@@ -217,6 +218,39 @@ impl GoldenStack {
             .await
             .map_err(box_error)
     }
+}
+
+async fn seed_workspace_embedder_state(
+    pool: &PgPool,
+    scope: &ScopeContext,
+    workspace_id: Uuid,
+) -> TestResult {
+    let mut conn = ScopedConn::begin(pool, scope).await.map_err(box_error)?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await
+        .map_err(box_error)?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id.to_string())
+    .bind("golden-mock-embedder")
+    .bind(29_i32)
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(conn.as_mut())
+    .await
+    .map_err(box_error)?;
+    conn.commit().await.map_err(box_error)?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -331,8 +365,15 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
         }
     }
 
+    let other_tenant_id = TenantId::new();
+    seed_workspace_embedder_state(
+        &stack.pool,
+        &ScopeContext::tenant(other_tenant_id),
+        other_tenant_id.0,
+    )
+    .await?;
     let other_scope = MemoryScope::Tenant {
-        tenant_id: TenantId::new(),
+        tenant_id: other_tenant_id,
     };
     let other_retrieval = RetrievalHarness::new(stack, other_scope);
     for query in &queries.cross_queries {

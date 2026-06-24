@@ -343,7 +343,7 @@ fn skill_files_with_checklist(checklist: &str) -> Vec<NewArtifactFile> {
         },
         NewArtifactFile {
             path: "scripts/run.sh".to_string(),
-            content: b"printf 'helper-script-ok\n'".to_vec(),
+            content: b"#!/bin/sh\nprintf 'helper-script-ok\n'".to_vec(),
             content_type: Some("text/x-shellscript".to_string()),
             executable: true,
         },
@@ -562,7 +562,7 @@ fn session_meta(
         contact: Some(contact_ref(tenant_id, contact_id)),
         created_by: Some(SessionActorRef::Contact { id: contact_id }),
         model,
-        agent_context,
+        agent_context: Some(agent_context.unwrap_or_else(AgentContext::system_default)),
         ..SessionMeta::default()
     }
 }

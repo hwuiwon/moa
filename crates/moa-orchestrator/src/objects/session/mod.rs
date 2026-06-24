@@ -123,25 +123,11 @@ fn generate_turn_id(ctx: &mut ObjectContext<'_>) -> String {
     ctx.rand_uuid().to_string()
 }
 
-fn dispatch_turn_execution(
-    ctx: &ObjectContext<'_>,
-    turn_id: String,
-    identity: moa_core::traits::Identity,
-    contact: Option<ContactRef>,
-    user_message: String,
-    attachments: Vec<moa_core::Attachment>,
-    model: Option<String>,
-) {
+fn dispatch_turn_execution(ctx: &ObjectContext<'_>, request: RunTurnRequest) {
+    let turn_id = request.turn_id.clone();
+    let identity = request.identity.clone();
     let request = ctx
         .workflow_client::<TurnExecutionClient>(turn_id.clone())
-        .run(Json::from(RunTurnRequest {
-            session_id: ctx.key().to_string(),
-            turn_id,
-            identity: identity.clone(),
-            contact,
-            user_message,
-            attachments,
-            model,
-        }));
+        .run(Json::from(request));
     with_identity_headers(request, &identity).send();
 }

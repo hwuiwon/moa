@@ -26,6 +26,27 @@ skill artifact metadata: input and output schemas, connector references, named
 actions, allowed tools, and UI metadata. When it is absent, MOA converts the
 package to a minimal skill artifact that points at `SKILL.md`.
 
+## Workflow Artifacts As Deterministic Skills
+
+Skills and workflows are both reviewable capability artifacts. A skill is
+open-ended and agent-mediated: the context pipeline selects it, materializes its
+package, and the `Session`/`TurnExecution` loop decides how to use it. A
+workflow is deterministic and graph-mediated: `WorkflowDefinition` stores
+explicit nodes and edges, and `ArtifactWorkflowExecution` advances the graph
+through persisted node runs.
+
+This distinction is about execution shape, not governance. Both artifact types
+are imported, validated, revised, reviewed, published, and rolled back through
+the artifact and learning-review boundary. Workflow improvements are therefore
+deterministic-skill candidates: generated or experiment-derived workflow changes
+must first become draft workflow artifact revisions plus
+`LearningCandidateType::Workflow` rows. They are not auto-promoted from a live
+run, and a visual/dashboard edit must round-trip through the same artifact
+document with stable node IDs, edge IDs, and non-semantic `ui` metadata.
+The implementation remains split on purpose: `moa-skills` owns package and
+learning/review mechanics, while `moa-workflows` owns the deterministic graph
+interpreter.
+
 ## Storage
 
 Postgres is the only durable skill package store:

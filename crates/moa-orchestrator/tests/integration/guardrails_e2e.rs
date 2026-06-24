@@ -259,6 +259,7 @@ async fn run_turn(
                 attachments: Vec::new(),
                 model: None,
                 contact: None,
+                max_turns: None,
             },
             None,
         )

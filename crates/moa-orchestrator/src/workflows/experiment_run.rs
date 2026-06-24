@@ -22,7 +22,6 @@ use moa_experiments::model::{
 };
 use moa_experiments::plan::{ExpandedPlanTrial, PlanExpansionError, expand_plan_trials};
 use moa_experiments::store::ExperimentStore;
-use moa_workflows::error::WorkflowError;
 use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
 use restate_sdk::context::Request;
 use restate_sdk::prelude::*;
@@ -36,6 +35,10 @@ use crate::objects::session::SessionClient;
 use crate::services::session_store::inner::{
     apply_agent_model_policy, create_session_for_identity, resolve_agent_context_for_session,
 };
+use crate::workflows::artifact_workflow_execution::{
+    ArtifactWorkflowExecutionClient, RunArtifactWorkflowRequest,
+};
+use crate::workflows::errors::workflow_handler_error;
 use crate::workflows::experiment_trial_run::{
     ExperimentTrialRunClient, ExperimentTrialRunWorkflowRequest, trial_workflow_key,
 };
@@ -440,24 +443,6 @@ fn non_retryable_handler_error(error: HandlerError) -> HandlerError {
 fn handler_error_message(error: &HandlerError) -> String {
     let error_ref = <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(error);
     error_ref.to_string()
-}
-
-fn workflow_handler_error(error: WorkflowError) -> HandlerError {
-    match error {
-        WorkflowError::InvalidReference { .. } | WorkflowError::WrongReferenceKind => {
-            TerminalError::new_with_code(400, error.to_string()).into()
-        }
-        WorkflowError::WorkflowNotFound { .. } => {
-            TerminalError::new_with_code(404, error.to_string()).into()
-        }
-        WorkflowError::Artifact(source) => {
-            if source.is_fatal() {
-                TerminalError::new(source.to_string()).into()
-            } else {
-                HandlerError::from(source)
-            }
-        }
-    }
 }
 
 #[cfg(test)]

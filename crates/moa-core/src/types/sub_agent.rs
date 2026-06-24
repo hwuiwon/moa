@@ -27,6 +27,9 @@ pub enum SubAgentMessage {
         tool_subset: Vec<String>,
         /// Token budget allocated to the child.
         budget_tokens: u64,
+        /// Optional maximum autonomous turns for the child.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_turns: Option<u32>,
         /// Root session that owns the child.
         parent_session: SessionId,
         /// Optional parent sub-agent when dispatch is nested.
@@ -130,6 +133,9 @@ pub struct SubAgentChildRequest {
     /// Token budget allocated to the child.
     #[serde(default = "default_sub_agent_budget_tokens")]
     pub budget_tokens: u64,
+    /// Optional maximum autonomous turns for the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
 }
 
 /// Spawn-tool input.
@@ -146,6 +152,9 @@ pub struct SpawnSubAgentInput {
     /// Token budget allocated to the child.
     #[serde(default = "default_sub_agent_budget_tokens")]
     pub budget_tokens: u64,
+    /// Optional maximum autonomous turns for the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
 }
 
 /// Wait-tool input.
@@ -481,6 +490,7 @@ impl SubAgentChildRequest {
             task: self.task,
             tool_subset: self.tool_subset,
             budget_tokens: self.budget_tokens,
+            max_turns: self.max_turns,
             parent_session,
             parent_sub_agent,
             depth,
@@ -516,6 +526,11 @@ pub fn spawn_sub_agent_tool_schema() -> serde_json::Value {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Token budget reserved for the child agent."
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum autonomous turns the child may run for this task."
                 }
             },
             "required": ["task"],

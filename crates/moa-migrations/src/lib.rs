@@ -29,6 +29,7 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000307__session_channels.sql",
     "V000308__tenant_configurable_agents.sql",
     "V000309__tenant_runtime_boundaries.sql",
+    "V000310__graph_changelog_append_only.sql",
 ];
 
 // Schema-isolated session tests do not own artifact/experiment tables. Keep
@@ -137,6 +138,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000309__tenant_runtime_boundaries.sql",
         sql: include_str!("../migrations/postgres/V000309__tenant_runtime_boundaries.sql"),
+    },
+    SchemaMigration {
+        name: "V000310__graph_changelog_append_only.sql",
+        sql: include_str!("../migrations/postgres/V000310__graph_changelog_append_only.sql"),
     },
 ];
 

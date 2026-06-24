@@ -6,5 +6,7 @@
 
 /// Workflow runtime errors.
 pub mod error;
+/// Pure workflow graph interpreter.
+pub mod interpreter;
 /// Durable workflow run lifecycle operations.
 pub mod runtime;

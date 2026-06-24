@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 moa-artifacts.workspace = true
 moa-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

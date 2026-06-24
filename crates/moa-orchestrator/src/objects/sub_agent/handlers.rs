@@ -33,10 +33,11 @@ impl SubAgent for SubAgentImpl {
         } else {
             None
         };
+        let max_turns = state.max_turns;
         state.persist_into(&ctx);
 
         if let Some(turn_id) = turn_id {
-            start_sub_agent_turn_execution(&ctx, turn_id);
+            start_sub_agent_turn_execution(&ctx, turn_id, max_turns);
         }
         Ok(())
     }
@@ -321,10 +322,11 @@ impl SubAgent for SubAgentImpl {
         } else {
             None
         };
+        let max_turns = state.max_turns;
         state.persist_into(&ctx);
 
         if let Some(turn_id) = next_turn_id {
-            start_sub_agent_turn_execution(&ctx, turn_id);
+            start_sub_agent_turn_execution(&ctx, turn_id, max_turns);
             return Ok(());
         }
         maybe_resolve_parent_awakeable(&ctx).await
@@ -570,11 +572,16 @@ async fn complete_child_inner(
     Ok(())
 }
 
-fn start_sub_agent_turn_execution(ctx: &ObjectContext<'_>, turn_id: String) {
+fn start_sub_agent_turn_execution(
+    ctx: &ObjectContext<'_>,
+    turn_id: String,
+    max_turns: Option<u32>,
+) {
     ctx.workflow_client::<SubAgentTurnExecutionClient>(turn_id.clone())
         .run(Json::from(RunSubAgentTurnRequest {
             sub_agent_id: ctx.key().to_string(),
             turn_id,
+            max_turns,
         }))
         .send();
 }

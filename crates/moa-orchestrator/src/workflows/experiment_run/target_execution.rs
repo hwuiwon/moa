@@ -7,6 +7,18 @@ struct StartedWorkflowRun {
     run_uid: Uuid,
 }
 
+#[derive(Debug, Clone)]
+struct WorkflowTargetStart {
+    scope: ActionRuleScope,
+    experiment_run_uid: Uuid,
+    workflow_ref: String,
+    input: Value,
+    session_id: Option<SessionId>,
+    idempotency_key: Option<String>,
+    tenant_id: TenantId,
+    identity: Identity,
+}
+
 pub(super) async fn run_agent_loop_target(
     ctx: &WorkflowContext<'_>,
     request: ExperimentRunWorkflowRequest,
@@ -61,6 +73,7 @@ pub(super) async fn run_agent_loop_target(
                 attachments,
                 model: Some(model.to_string()),
                 contact: None,
+                max_turns: None,
             })),
         &request.identity,
     )
@@ -98,12 +111,16 @@ pub(super) async fn run_workflow_target(
 
     let workflow_run = start_and_attach_workflow_run(
         ctx,
-        scope,
-        request.run_uid,
-        workflow_ref,
-        input,
-        session_id,
-        idempotency_key,
+        WorkflowTargetStart {
+            scope,
+            experiment_run_uid: request.run_uid,
+            workflow_ref,
+            input,
+            session_id,
+            idempotency_key,
+            tenant_id: request.tenant_id,
+            identity: request.identity.clone(),
+        },
     )
     .await?;
     ctx.set(K_WORKFLOW_RUN_UID, Json(workflow_run.run_uid));
@@ -150,34 +167,41 @@ async fn create_new_session(
 
 async fn start_and_attach_workflow_run(
     ctx: &WorkflowContext<'_>,
-    scope: ActionRuleScope,
-    experiment_run_uid: Uuid,
-    workflow_ref: String,
-    input: Value,
-    session_id: Option<SessionId>,
-    idempotency_key: Option<String>,
+    start: WorkflowTargetStart,
 ) -> Result<StartedWorkflowRun, HandlerError> {
     let pool = OrchestratorCtx::current_graph_pool();
-    Ok(ctx
+    let session_id = start.session_id;
+    let tenant_id = start.tenant_id;
+    let identity = start.identity.clone();
+    let run = ctx
         .run(|| async move {
             let run = workflow_runtime(pool.clone())
                 .start(
-                    &scope,
+                    &start.scope,
                     StartWorkflowRun {
-                        workflow_ref,
-                        input,
-                        session_id,
-                        idempotency_key,
+                        workflow_ref: start.workflow_ref,
+                        input: start.input,
+                        session_id: start.session_id,
+                        idempotency_key: start.idempotency_key,
                     },
                 )
                 .await
                 .map_err(workflow_handler_error)?;
-            attach_workflow_run(pool, scope, experiment_run_uid, run.run_uid).await?;
+            attach_workflow_run(pool, start.scope, start.experiment_run_uid, run.run_uid).await?;
             Ok::<_, HandlerError>(Json::from(StartedWorkflowRun {
                 run_uid: run.run_uid,
             }))
         })
         .name("experiment_start_workflow_run")
         .await?
-        .into_inner())
+        .into_inner();
+    ctx.workflow_client::<ArtifactWorkflowExecutionClient>(run.run_uid.to_string())
+        .run(Json::from(RunArtifactWorkflowRequest {
+            tenant_id,
+            run_uid: run.run_uid,
+            identity,
+            session_id,
+        }))
+        .send();
+    Ok(run)
 }
