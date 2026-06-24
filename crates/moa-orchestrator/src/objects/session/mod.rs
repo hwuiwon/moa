@@ -13,8 +13,8 @@ use moa_core::{
     ActiveSegment, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
     ContactRef, MarkSubAgentChildTerminalInput, MoaError, Result as MoaResult, SessionId,
     SessionMeta, SessionStatus, SubAgentChildRef, SubAgentTerminalResult, UserMessage,
-    record_turn_event_persist_duration,
 };
+use moa_observability::record_turn_event_persist_duration;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
@@ -23,7 +23,7 @@ use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_vec};
 use crate::workflows::turn_execution::TurnExecutionClient;
-use moa_core::restate_observability::{annotate_restate_handler_span, event_persist_span};
+use moa_observability::restate_observability::{annotate_restate_handler_span, event_persist_span};
 
 mod handlers;
 mod persistence;

@@ -8,9 +8,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, MoaConfig, ScopeContext, ScopedConn, SessionId};
+use moa_core::{MoaConfig, SessionId};
+use moa_db::ScopedConn;
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
 use sqlx::PgPool;

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{ContactId, MemoryScope, ScopeContext, ScopedConn, SessionId, TenantId};
+use moa_core::{ContactId, SessionId, TenantId};
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
@@ -13,6 +14,7 @@ use moa_memory_ingest::{
     SessionTurn, fact_hash, fact_uid_from_hash, ingest_turn_direct_with_ctx,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{PgvectorStore, TurbopufferStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use secrecy::SecretString;

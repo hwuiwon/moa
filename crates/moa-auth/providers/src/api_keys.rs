@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng as SaltOsRng};
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use chrono::{DateTime, Utc};
-use moa_core::record_api_key_validation_duration;
+use moa_observability::record_api_key_validation_duration;
 use moka::future::Cache;
 use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};

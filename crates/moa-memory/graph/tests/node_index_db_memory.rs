@@ -1,7 +1,9 @@
 //! Integration coverage for the `moa.node_index` sidecar table.
 
-use moa_core::{ScopeContext, ScopedConn, TenantId};
+use moa_core::TenantId;
+use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass, bump_last_accessed, lookup_seed_by_name};
+use moa_memory_types::ScopeContext;
 use moa_session::testing;
 use sqlx::PgPool;
 use tokio::sync::Mutex;

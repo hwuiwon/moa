@@ -3,9 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moa_artifacts::agent::{
-    ActionPolicy, AgentDefinition, GuardrailMode as ArtifactGuardrailMode, GuardrailPolicy,
-    GuardrailStagePolicy, KnowledgeScopeMode, ModelPolicy, SkillPolicy, SkillPolicyMode,
-    ToolPolicyMode, WorkflowPolicy,
+    ActionPolicy, AgentDefinition, GuardrailPolicy, GuardrailStagePolicy, KnowledgeScopeMode,
+    ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicyMode, WorkflowPolicy,
 };
 use moa_artifacts::canonical::canonical_hash;
 use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
@@ -15,9 +14,10 @@ use moa_core::{
     ActionRuleScope, AgentActionPolicy, AgentContext, AgentGuardrailPolicy,
     AgentGuardrailStagePolicy, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentModelPolicy,
     AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy, AgentSkillPolicyMode,
-    AgentToolPolicy, AgentToolPolicyMode, AgentWorkflowPolicy, GuardrailMode, LockedToolRef,
-    MoaError, ModelId, ResolvedArtifactRevisionRef, Result, ScopedConn,
+    AgentToolPolicy, AgentToolPolicyMode, AgentWorkflowPolicy, LockedToolRef, MoaError, ModelId,
+    ResolvedArtifactRevisionRef, Result,
 };
+use moa_db::ScopedConn;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, types::Json};
@@ -449,17 +449,10 @@ fn guardrail_stage_policy_from_definition(
         .or_else(|| definition.enabled.then_some(fallback_model).flatten());
     AgentGuardrailStagePolicy {
         enabled: definition.enabled,
-        mode: guardrail_mode_from_definition(definition.mode),
+        mode: definition.mode,
         model: effective_model.map(ModelId::new),
         policy_prompt: definition.policy_prompt.clone(),
         block_message: definition.block_message.clone(),
-    }
-}
-
-fn guardrail_mode_from_definition(mode: ArtifactGuardrailMode) -> GuardrailMode {
-    match mode {
-        ArtifactGuardrailMode::Shadow => GuardrailMode::Shadow,
-        ArtifactGuardrailMode::Enforce => GuardrailMode::Enforce,
     }
 }
 
@@ -672,6 +665,7 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 #[cfg(test)]
 mod tests {
     use moa_artifacts::agent::{AgentPurpose, ToolPolicy};
+    use moa_core::GuardrailMode;
 
     use super::*;
 
@@ -686,7 +680,7 @@ mod tests {
             guardrail_policy: GuardrailPolicy {
                 input: Some(GuardrailStagePolicy {
                     enabled: true,
-                    mode: ArtifactGuardrailMode::Shadow,
+                    mode: GuardrailMode::Shadow,
                     model: None,
                     policy_prompt: "Flag unsafe requests.".to_string(),
                     block_message: None,

@@ -18,9 +18,8 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::config::{MoaConfig, ObservabilityConfig, OtlpProtocol};
-use crate::error::{MoaError, Result};
 use crate::runtime_metrics::init_metrics;
+use moa_core::{MoaConfig, MoaError, ObservabilityConfig, OtlpProtocol, Result};
 
 /// Keeps the configured OTLP tracer provider alive for the process lifetime.
 #[derive(Debug, Default)]

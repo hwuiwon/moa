@@ -20,13 +20,15 @@ use moa_core::wire::{
 use moa_core::{
     Event, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
     SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore, SessionSummary,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, WorkspaceId, record_session_error,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, WorkspaceId,
 };
+use moa_observability::record_session_error;
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
+use sqlx::PgPool;
 
 use crate::objects::session::SessionClient;
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
 pub(crate) mod inner;
@@ -176,11 +178,12 @@ pub trait RestateSessionStore {
 #[derive(Clone)]
 pub struct SessionStoreImpl {
     store: Arc<PostgresSessionStore>,
+    pool: PgPool,
 }
 
 impl SessionStoreImpl {
     /// Creates a new Restate service wrapper around the shared session-store backend.
-    pub fn new(store: Arc<PostgresSessionStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<PostgresSessionStore>, pool: PgPool) -> Self {
+        Self { store, pool }
     }
 }

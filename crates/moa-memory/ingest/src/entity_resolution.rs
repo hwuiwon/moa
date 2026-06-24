@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, ScopedConn, traits::EmbeddingProvider};
+use moa_core::traits::EmbeddingProvider;
+use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{VectorQuery, VectorStore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -491,7 +493,8 @@ fn deterministic_entity_uid(scope: &ScopeContext, normalized_name: &str) -> Uuid
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ContactId, ScopeContext, TenantId};
+    use moa_core::{ContactId, TenantId};
+    use moa_memory_types::ScopeContext;
     use uuid::Uuid;
 
     use super::{deterministic_entity_uid, normalize_entity_name};

@@ -2,7 +2,7 @@
 
 use restate_sdk::prelude::*;
 
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 
 const RESTATE_SDK_VERSION: &str = "0.8";
 
@@ -46,18 +46,21 @@ pub struct HealthImpl;
 
 impl Health for HealthImpl {
     #[tracing::instrument(skip(self, _ctx))]
+    // SAFETY: Health readiness probe returns static process status and reads no caller-owned data.
     async fn check(&self, _ctx: Context<'_>) -> Result<String, HandlerError> {
         annotate_restate_handler_span("Health", "check");
         Ok("ok".to_string())
     }
 
     #[tracing::instrument(skip(self, _ctx))]
+    // SAFETY: Health liveness probe returns static process status and reads no caller-owned data.
     async fn ping(&self, _ctx: Context<'_>) -> Result<String, HandlerError> {
         annotate_restate_handler_span("Health", "ping");
         Ok("pong".to_string())
     }
 
     #[tracing::instrument(skip(self, _ctx))]
+    // SAFETY: Version endpoint returns build metadata and reads no caller-owned data.
     async fn version(&self, _ctx: Context<'_>) -> Result<Json<VersionInfo>, HandlerError> {
         annotate_restate_handler_span("Health", "version");
         Ok(Json(VersionInfo::current()))

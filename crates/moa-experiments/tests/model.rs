@@ -1,9 +1,10 @@
 use chrono::Utc;
+use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{ActionRuleScope, Attachment, ModelId, SessionId, TenantId};
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
-    ExperimentTrialStopReason, ExperimentVariant,
+    ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
+    ExperimentVariant,
 };
 use serde_json::json;
 use std::collections::BTreeSet;

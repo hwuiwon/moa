@@ -12,14 +12,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
+use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     ActionRuleScope, Event, EventRange, EventRecord, ModelId, SessionId, TenantId, traits::Identity,
 };
 use moa_experiments::{
     model::{
-        ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTargetKind,
-        ExperimentTrialRecord, NewExperimentRun, NewExperimentTrial,
+        ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTrialRecord, NewExperimentRun,
+        NewExperimentTrial,
     },
     store::ExperimentStore,
 };

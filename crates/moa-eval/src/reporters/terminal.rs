@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use moa_eval_core::engine::EvalRun;
 use moa_eval_core::{
-    AgentConfig, EvalError, EvalResult, EvalScore, EvalStatus, Result, ScoreValue, TestCase,
+    AgentConfig, EvalError, EvalResult, EvalScore, EvalScoreValue, EvalStatus, Result, TestCase,
     TestSuite,
 };
 use tokio::io::AsyncWriteExt;
@@ -209,9 +209,9 @@ fn format_scores(scores: &[EvalScore]) -> String {
         .iter()
         .map(|score| {
             let value = match &score.value {
-                ScoreValue::Numeric(value) => format!("{value:.2}"),
-                ScoreValue::Boolean(value) => value.to_string(),
-                ScoreValue::Categorical(value) => value.clone(),
+                EvalScoreValue::Numeric(value) => format!("{value:.2}"),
+                EvalScoreValue::Boolean(value) => value.to_string(),
+                EvalScoreValue::Categorical(value) => value.clone(),
             };
             format!("{}={value}", score.name)
         })
@@ -269,7 +269,7 @@ mod tests {
     use super::TerminalReporter;
     use moa_eval_core::engine::{EvalRun, RunSummary};
     use moa_eval_core::{
-        AgentConfig, EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TestCase,
+        AgentConfig, EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus, TestCase,
         TestSuite,
     };
 
@@ -304,7 +304,7 @@ mod tests {
                 scores: vec![EvalScore {
                     evaluator: "output_match".to_string(),
                     name: "output_match".to_string(),
-                    value: ScoreValue::Numeric(1.0),
+                    value: EvalScoreValue::Numeric(1.0),
                     comment: None,
                 }],
                 metrics: EvalMetrics {

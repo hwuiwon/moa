@@ -8,17 +8,17 @@ use moa_core::{
     Event, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, SessionStore as _, TenantId, ToolCallId, ToolCallRequest, ToolDefinition,
     ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
-    record_tool_idempotency_scan,
 };
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
+use moa_observability::record_tool_idempotency_scan;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::services::session_store::RestateSessionStoreClient;
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Restate service surface for durable tool execution.
@@ -88,6 +88,7 @@ impl ToolExecutorImpl {
 
 impl ToolExecutor for ToolExecutorImpl {
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal session and sub-agent workflows admit callers before invoking tool execution.
     async fn execute(
         &self,
         ctx: Context<'_>,
@@ -178,6 +179,7 @@ impl ToolExecutor for ToolExecutorImpl {
     }
 
     #[tracing::instrument(skip(self, _ctx, tenant_id))]
+    // SAFETY: Returns informational tool descriptors; the tenant id only scopes descriptor listing.
     async fn list_tools(
         &self,
         _ctx: Context<'_>,

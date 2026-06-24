@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep, str_replace};
 
+use super::tool_route::SandboxToolRoute;
+
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -198,8 +200,8 @@ impl LocalHandProvider {
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
         let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
-        match tool {
-            "bash" => {
+        match SandboxToolRoute::from_name(tool) {
+            Some(SandboxToolRoute::Bash) => {
                 bash::execute_local(
                     &sandbox.execution_root,
                     input,
@@ -208,19 +210,27 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            "grep" => {
+            Some(SandboxToolRoute::Grep) => {
                 grep::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips).await
             }
-            "file_outline" => file_outline::execute(&sandbox.execution_root, input).await,
-            "file_read" => file_read::execute(&sandbox.execution_root, input).await,
-            "str_replace" => str_replace::execute(&sandbox.execution_root, input).await,
-            "file_write" => file_write::execute(&sandbox.execution_root, input).await,
-            "file_search" => {
+            Some(SandboxToolRoute::FileOutline) => {
+                file_outline::execute(&sandbox.execution_root, input).await
+            }
+            Some(SandboxToolRoute::FileRead) => {
+                file_read::execute(&sandbox.execution_root, input).await
+            }
+            Some(SandboxToolRoute::StrReplace) => {
+                str_replace::execute(&sandbox.execution_root, input).await
+            }
+            Some(SandboxToolRoute::FileWrite) => {
+                file_write::execute(&sandbox.execution_root, input).await
+            }
+            Some(SandboxToolRoute::FileSearch) => {
                 file_search::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips)
                     .await
             }
-            other => Err(MoaError::ToolError(format!(
-                "unsupported local hand tool: {other}"
+            None => Err(MoaError::ToolError(format!(
+                "unsupported local hand tool: {tool}"
             ))),
         }
     }
@@ -242,20 +252,21 @@ impl LocalHandProvider {
                 MoaError::ProviderError(format!("unknown docker sandbox handle: {container_id}"))
             })?;
 
-        if tool == "bash" {
-            return bash::execute_docker(
-                container_id,
-                &sandbox.workspace_mount,
-                input,
-                self.command_timeout,
-                hard_cancel_token,
-            )
-            .await;
-        }
-
-        match tool {
-            "grep" => grep::execute(&sandbox.sandbox_dir, input, &sandbox.extra_search_skips).await,
-            "file_outline" => {
+        match SandboxToolRoute::from_name(tool) {
+            Some(SandboxToolRoute::Bash) => {
+                bash::execute_docker(
+                    container_id,
+                    &sandbox.workspace_mount,
+                    input,
+                    self.command_timeout,
+                    hard_cancel_token,
+                )
+                .await
+            }
+            Some(SandboxToolRoute::Grep) => {
+                grep::execute(&sandbox.sandbox_dir, input, &sandbox.extra_search_skips).await
+            }
+            Some(SandboxToolRoute::FileOutline) => {
                 file_outline::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
@@ -265,7 +276,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            "file_read" => {
+            Some(SandboxToolRoute::FileRead) => {
                 file_read::execute_docker_bind_mount(
                     &sandbox.sandbox_dir,
                     &sandbox.workspace_mount,
@@ -273,7 +284,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            "str_replace" => {
+            Some(SandboxToolRoute::StrReplace) => {
                 str_replace::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
@@ -283,7 +294,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            "file_write" => {
+            Some(SandboxToolRoute::FileWrite) => {
                 file_write::execute_docker_bind_mount(
                     &sandbox.sandbox_dir,
                     &sandbox.workspace_mount,
@@ -291,7 +302,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            "file_search" => {
+            Some(SandboxToolRoute::FileSearch) => {
                 file_search::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
@@ -302,8 +313,8 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            other => Err(MoaError::ToolError(format!(
-                "tool {other} not supported in Docker mode"
+            None => Err(MoaError::ToolError(format!(
+                "tool {tool} not supported in Docker mode"
             ))),
         }
     }

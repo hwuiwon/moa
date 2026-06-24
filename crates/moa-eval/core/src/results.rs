@@ -113,7 +113,7 @@ pub struct EvalScore {
     /// Score name within the evaluator.
     pub name: String,
     /// Score value.
-    pub value: ScoreValue,
+    pub value: EvalScoreValue,
     /// Optional evaluator comment or reasoning.
     pub comment: Option<String>,
 }
@@ -121,7 +121,7 @@ pub struct EvalScore {
 /// Score value emitted by an evaluator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ScoreValue {
+pub enum EvalScoreValue {
     /// A numeric score, typically in the range `0.0..=1.0`.
     Numeric(f64),
     /// A boolean score.

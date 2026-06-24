@@ -1,7 +1,8 @@
 //! Serializable lineage records emitted by retrieval, context, and generation.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContextSourceRef, MemoryScope, SessionId, UserId, WorkspaceId};
+use moa_core::{ContextSourceRef, SessionId, UserId, WorkspaceId};
+use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
@@ -309,7 +310,7 @@ pub struct GenerationLineage {
     /// Response model.
     pub response_model: String,
     /// Token usage.
-    pub usage: TokenUsage,
+    pub usage: GenerationTokenUsage,
     /// Provider finish reasons.
     pub finish_reasons: Vec<String>,
     /// Tool calls requested by the model.
@@ -332,7 +333,7 @@ pub struct GenerationLineage {
 
 /// Provider token usage normalized for lineage storage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TokenUsage {
+pub struct GenerationTokenUsage {
     /// Input tokens.
     pub input_tokens: u32,
     /// Output tokens.
@@ -635,7 +636,8 @@ impl LineageEvent {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{MemoryScope, SessionId, TenantId, UserId, WorkspaceId};
+    use moa_core::{SessionId, TenantId, UserId, WorkspaceId};
+    use moa_memory_types::MemoryScope;
 
     use super::*;
 

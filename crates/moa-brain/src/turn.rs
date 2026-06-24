@@ -5,8 +5,9 @@ use std::time::Instant;
 
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, LLMProvider, Result, RuntimeEvent,
-    SessionSignal, record_turn_llm_ttft,
+    SessionSignal,
 };
+use moa_observability::record_turn_llm_ttft;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

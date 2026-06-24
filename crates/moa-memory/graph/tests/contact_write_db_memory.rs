@@ -1,8 +1,10 @@
 //! Tenant/contact RLS coverage for graph-memory writes.
 
 use chrono::Utc;
-use moa_core::{ContactId, ScopeContext, ScopedConn, TenantId};
+use moa_core::{ContactId, TenantId};
+use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_types::ScopeContext;
 use moa_session::testing;
 use serde_json::json;
 use uuid::Uuid;

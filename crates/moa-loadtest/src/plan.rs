@@ -30,7 +30,7 @@ pub(crate) async fn inspectable_files(workspace_root: Option<&Path>) -> Result<I
         ];
         let detail_candidates = [
             "docs/02-brain-orchestration.md",
-            "moa-core/src/runtime_metrics.rs",
+            "moa-observability/src/runtime_metrics.rs",
             "Cargo.toml",
             "README.md",
         ];

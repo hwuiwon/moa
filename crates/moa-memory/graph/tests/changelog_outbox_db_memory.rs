@@ -1,7 +1,9 @@
 //! Integration coverage for the `moa.graph_changelog` outbox.
 
-use moa_core::{ScopeContext, ScopedConn, TenantId};
+use moa_core::TenantId;
+use moa_db::ScopedConn;
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
+use moa_memory_types::ScopeContext;
 use moa_session::testing;
 use serde_json::json;
 use tokio::sync::Mutex;

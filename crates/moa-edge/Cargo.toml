@@ -18,6 +18,7 @@ hex.workspace = true
 hmac.workspace = true
 moa-auth-providers.workspace = true
 moa-core.workspace = true
+moa-observability.workspace = true
 moa-ocsf.workspace = true
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }

@@ -3,8 +3,8 @@
 use moa_auth_providers::api_keys::{CreateApiKeyRequest, CreateApiKeyResponse, KeyListItem};
 use moa_authz::{AuthzCheckError, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
@@ -64,6 +64,7 @@ impl ApiKeys for ApiKeysImpl {
     }
 
     #[tracing::instrument(skip(self, ctx))]
+    // SAFETY: Lists keys scoped to the trusted caller identity; no caller-supplied resource id is read.
     async fn list(&self, ctx: Context<'_>) -> Result<Json<Vec<KeyListItem>>, HandlerError> {
         annotate_restate_handler_span("ApiKeys", "list");
         let identity = require_identity(&ctx)?;
@@ -75,6 +76,7 @@ impl ApiKeys for ApiKeysImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, id))]
+    // SAFETY: `rotate_key` validates caller ownership or agent operator authz through FGA before mutation.
     async fn rotate(
         &self,
         ctx: Context<'_>,
@@ -97,6 +99,7 @@ impl ApiKeys for ApiKeysImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, id))]
+    // SAFETY: `revoke_key` validates caller ownership or agent operator authz through FGA before mutation.
     async fn revoke(&self, ctx: Context<'_>, id: Json<Uuid>) -> Result<(), HandlerError> {
         annotate_restate_handler_span("ApiKeys", "revoke");
         let identity = require_identity(&ctx)?;

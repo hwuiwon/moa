@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
     Event, EventRange, EventRecord, EventType, MoaConfig, MoaError, Result as MoaResult, SegmentId,
     SessionId, SessionStore as _,
 };
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 use moa_skills::distiller::{

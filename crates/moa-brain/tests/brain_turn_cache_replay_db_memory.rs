@@ -104,6 +104,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
+            segment_store: Some(session_store.clone()),
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,

@@ -30,11 +30,11 @@ async fn main() -> anyhow::Result<()> {
     if telemetry_config.observability.service_name == "moa" {
         telemetry_config.observability.service_name = "moa-edge".to_string();
     }
-    let _telemetry_guard = moa_core::init_observability(
+    let _telemetry_guard = moa_observability::init_observability(
         &telemetry_config,
-        &moa_core::TelemetryConfig {
+        &moa_observability::TelemetryConfig {
             json_stdout: true,
-            ..moa_core::TelemetryConfig::default()
+            ..moa_observability::TelemetryConfig::default()
         },
     )
     .context("initialize edge observability")?;

@@ -1,6 +1,6 @@
 //! Threshold-based evaluator for cost, latency, token, turn, and tool-call limits.
 
-use crate::{EvalResult, EvalScore, Evaluator, Result, ScoreValue, TestCase};
+use crate::{EvalResult, EvalScore, EvalScoreValue, Evaluator, Result, TestCase};
 
 /// Enforces resource thresholds on a completed eval result.
 #[derive(Debug, Clone, Default)]
@@ -76,7 +76,7 @@ fn limit_score(evaluator: &str, name: &str, passed: bool, comment: String) -> Ev
     EvalScore {
         evaluator: evaluator.to_string(),
         name: name.to_string(),
-        value: ScoreValue::Boolean(passed),
+        value: EvalScoreValue::Boolean(passed),
         comment: Some(comment),
     }
 }
@@ -84,7 +84,7 @@ fn limit_score(evaluator: &str, name: &str, passed: bool, comment: String) -> Ev
 #[cfg(test)]
 mod tests {
     use super::ThresholdEvaluator;
-    use crate::{EvalMetrics, EvalResult, Evaluator, ScoreValue, TestCase};
+    use crate::{EvalMetrics, EvalResult, EvalScoreValue, Evaluator, TestCase};
 
     #[tokio::test]
     async fn cost_over_budget_fails_boolean_score() {
@@ -104,6 +104,6 @@ mod tests {
             .evaluate(&TestCase::default(), &result)
             .await
             .expect("score");
-        assert_eq!(scores[0].value, ScoreValue::Boolean(false));
+        assert_eq!(scores[0].value, EvalScoreValue::Boolean(false));
     }
 }

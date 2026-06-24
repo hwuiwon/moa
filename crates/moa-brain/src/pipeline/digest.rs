@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
     ContextMessage, ContextProcessor, MemoryDigestConfig, MoaError, ProcessorOutput, Result,
-    ScopeContext, ScopedConn, WorkingContext,
+    WorkingContext,
 };
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use serde_json::json;
 use sqlx::Row;
 

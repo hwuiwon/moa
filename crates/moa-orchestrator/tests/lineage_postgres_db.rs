@@ -2,10 +2,11 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use moa_core::{MemoryScope, MoaConfig, SessionId, TenantId, UserId, WorkspaceId};
+use moa_core::{MoaConfig, SessionId, TenantId, UserId, WorkspaceId};
 use moa_lineage_core::{
     BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
 };
+use moa_memory_types::MemoryScope;
 use moa_orchestrator::lineage::build_lineage_sink_from_env_value;
 use uuid::Uuid;
 

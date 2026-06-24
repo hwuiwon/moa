@@ -6,12 +6,11 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
-use moa_core::{
-    ContactId, MemoryScope, ScopeContext, SessionId, TenantId, WorkspaceId,
-    traits::EmbeddingProvider,
-};
+use moa_core::{ContactId, SessionId, TenantId, WorkspaceId, traits::EmbeddingProvider};
+use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
+use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{
     CohereV4Embedder, PgvectorStore, PromotionOptions, TurbopufferStore, WorkspacePromotion,
     finalize_promotion,
@@ -77,13 +76,17 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let pool = session_store.pool().clone();
     let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
     let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let workspace_text = workspace_id.to_string();
-    let scope = ScopeContext::tenant(tenant_id);
+    let tenant_scope = ScopeContext::tenant(tenant_id);
+    let contact_scope = ScopeContext::contact(tenant_id, contact_id);
+    let embedder = CohereV4Embedder::new(SecretString::from(cohere_api_key()?));
+    seed_workspace_embedder_state(&pool, &tenant_scope, &workspace_text, &embedder).await?;
     let transcript = news_transcript().await?;
     let turn = SessionTurn {
         tenant_id,
-        contact_id: ContactId::new(),
+        contact_id,
         session_id: SessionId::new(),
         turn_seq: 1,
         transcript,
@@ -109,9 +112,12 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         "expected Cohere-backed embeddings for ingested facts"
     );
 
-    let pgvector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+    let promotion_pgvector = Arc::new(PgvectorStore::new_for_control_plane(
+        pool.clone(),
+        tenant_scope.clone(),
+    ));
     let turbopuffer = Arc::new(TurbopufferStore::from_env()?);
-    let promotion = WorkspacePromotion::new(pool.clone(), pgvector.clone(), turbopuffer.clone());
+    let promotion = WorkspacePromotion::new(pool.clone(), promotion_pgvector, turbopuffer.clone());
     let report = promotion
         .promote(PromotionOptions {
             workspace_id: workspace_text.clone(),
@@ -127,7 +133,6 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         report.validation_overlap
     );
 
-    let embedder = CohereV4Embedder::new(SecretString::from(cohere_api_key()?));
     let query_text = "Which Artemis mission core stage moved from Michoud to the Pegasus barge?";
     let query_embedding = embedder
         .embed(&[query_text.to_string()])
@@ -135,15 +140,25 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         .into_iter()
         .next()
         .ok_or_else(|| std::io::Error::other("Cohere returned no query embedding"))?;
-    let graph = Arc::new(AgeGraphStore::scoped_for_app_role(pool.clone(), scope));
-    let retriever = HybridRetriever::new(pool.clone(), graph, pgvector)
+    let retrieval_pgvector = Arc::new(PgvectorStore::new_for_app_role(
+        pool.clone(),
+        contact_scope.clone(),
+    ));
+    let graph = Arc::new(AgeGraphStore::scoped_for_app_role(
+        pool.clone(),
+        contact_scope,
+    ));
+    let retriever = HybridRetriever::new(pool.clone(), graph, retrieval_pgvector)
         .with_turbopuffer(Some(turbopuffer.clone()))
         .with_assume_app_role(true);
     let req = RetrievalRequest {
         seeds: Vec::new(),
         query_text: query_text.to_string(),
         query_embedding,
-        scope: MemoryScope::Tenant { tenant_id },
+        scope: MemoryScope::Contact {
+            tenant_id,
+            contact_id,
+        },
         label_filter: None,
         max_pii_class: PiiClass::Restricted,
         k_final: 5,
@@ -174,6 +189,38 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name).await?;
 
+    Ok(())
+}
+
+async fn seed_workspace_embedder_state(
+    pool: &sqlx::PgPool,
+    scope: &ScopeContext,
+    workspace_id: &str,
+    embedder: &CohereV4Embedder,
+) -> TestResult {
+    let mut conn = ScopedConn::begin(pool, scope).await?;
+    sqlx::query("SET LOCAL ROLE moa_app")
+        .execute(conn.as_mut())
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO moa.workspace_state
+            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (workspace_id) DO UPDATE
+            SET embedding_model = EXCLUDED.embedding_model,
+                embedding_model_version = EXCLUDED.embedding_model_version,
+                embedding_dimension = EXCLUDED.embedding_dimension,
+                reembed_state = 'steady'
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(embedder.model_name())
+    .bind(embedder.model_version())
+    .bind(embedder.dimension() as i32)
+    .execute(conn.as_mut())
+    .await?;
+    conn.commit().await?;
     Ok(())
 }
 

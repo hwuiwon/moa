@@ -5,7 +5,6 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifactRevision};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::wire::{
     AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDefinitionSummary,
@@ -13,7 +12,9 @@ use moa_core::wire::{
     AgentDeploymentListResponse, AgentDeploymentSummary, AgentInstallRequest, AgentInstallResponse,
     AgentInstallationListRequest, AgentInstallationListResponse, AgentInstallationSummary,
 };
-use moa_core::{ActionRuleScope, MoaError, ScopedConn, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
+use moa_db::ScopedConn;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::Json as SqlJson};

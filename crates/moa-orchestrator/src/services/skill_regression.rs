@@ -19,8 +19,8 @@ use moa_eval::EvalEngine;
 use moa_eval_core::engine::EvalRun;
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{
-    ActionPolicyOverride, AgentConfig, EngineOptions, EvalResult, EvalStatus, Evaluator,
-    EvaluatorOptions, ScoreValue, SkillOverride, TestSuite, build_evaluators, evaluate_run,
+    ActionPolicyOverride, AgentConfig, EngineOptions, EvalResult, EvalScoreValue, EvalStatus,
+    Evaluator, EvaluatorOptions, SkillOverride, TestSuite, build_evaluators, evaluate_run,
 };
 #[cfg(feature = "internal-eval-runner")]
 use moa_providers::ProviderRegistry;
@@ -521,15 +521,15 @@ fn result_score(result: &EvalResult) -> f64 {
     let mut count = 0usize;
     for score in &result.scores {
         match &score.value {
-            ScoreValue::Numeric(value) => {
+            EvalScoreValue::Numeric(value) => {
                 total += *value;
                 count += 1;
             }
-            ScoreValue::Boolean(value) => {
+            EvalScoreValue::Boolean(value) => {
                 total += if *value { 1.0 } else { 0.0 };
                 count += 1;
             }
-            ScoreValue::Categorical(_) => {}
+            EvalScoreValue::Categorical(_) => {}
         }
     }
 

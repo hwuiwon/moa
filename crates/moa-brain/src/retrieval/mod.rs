@@ -7,7 +7,8 @@ pub mod ranking;
 pub mod reranker;
 
 pub use cache::{
-    CacheKey, CachedEntry, CachedHybridRetriever, CachedHybridRetrieverConfig, RetrievalBackend,
+    CacheKey, CachedEntry, CachedHybridRetriever, CachedHybridRetrieverConfig, PlannedRetriever,
+    RetrievalBackend,
 };
 pub use hybrid::{
     HybridRetriever, LegSources, LineageContext, Result, RetrievalError, RetrievalHit,

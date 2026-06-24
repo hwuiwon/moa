@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use moa_core::{
-    ActionRuleScope, MoaError, Result, ScopeContext, ScopedConn, SessionId, UserId, WorkspaceId,
-};
+use moa_core::{ActionRuleScope, MoaError, Result, SessionId, UserId, WorkspaceId};
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Row};

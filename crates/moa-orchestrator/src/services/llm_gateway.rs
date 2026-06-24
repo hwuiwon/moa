@@ -8,9 +8,10 @@ use moa_core::wire::AppendEventRequest;
 use moa_core::{
     CompletionRequest, CompletionResponse, ContactId, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event,
     MoaError, ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage,
-    genai_operation_name, genai_provider_name, record_llm_cost_cents,
+    genai_operation_name, genai_provider_name,
 };
 use moa_memory_ingest::{IngestionVOClient, SessionTurn, ingestion_object_key, turn_transcript};
+use moa_observability::record_llm_cost_cents;
 use moa_providers::ProviderRegistry;
 use restate_sdk::prelude::*;
 use serde_json::Value;
@@ -18,7 +19,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::services::session_store::RestateSessionStoreClient;
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Restate service surface for journaled LLM completions.
 #[restate_sdk::service]
@@ -60,6 +61,7 @@ impl LLMGatewayImpl {
 
 impl LLMGateway for LLMGatewayImpl {
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal workflow and eval-runner callers admit session or tenant access before requesting provider completion.
     async fn complete(
         &self,
         ctx: Context<'_>,

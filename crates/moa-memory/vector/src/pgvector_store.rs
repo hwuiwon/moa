@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use moa_core::{ScopeContext, ScopedConn};
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use pgvector::HalfVector;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
@@ -19,6 +20,7 @@ pub struct PgvectorStore {
     pool: PgPool,
     scope: ScopeContext,
     assume_app_role: bool,
+    control_plane: bool,
     exact_search: bool,
 }
 
@@ -29,6 +31,7 @@ impl PgvectorStore {
             pool,
             scope,
             assume_app_role: false,
+            control_plane: false,
             exact_search: false,
         }
     }
@@ -42,6 +45,21 @@ impl PgvectorStore {
             pool,
             scope,
             assume_app_role: true,
+            control_plane: false,
+            exact_search: false,
+        }
+    }
+
+    /// Creates a pgvector store that reads through the workspace control-plane scope.
+    ///
+    /// This is intended for administrative operations, such as backend promotion,
+    /// that must validate both tenant and contact-owned vectors in one workspace.
+    pub fn new_for_control_plane(pool: PgPool, scope: ScopeContext) -> Self {
+        Self {
+            pool,
+            scope,
+            assume_app_role: false,
+            control_plane: true,
             exact_search: false,
         }
     }
@@ -64,7 +82,11 @@ impl PgvectorStore {
     }
 
     async fn begin(&self) -> Result<ScopedConn<'_>> {
-        let mut conn = ScopedConn::begin(&self.pool, &self.scope).await?;
+        let mut conn = if self.control_plane {
+            ScopedConn::begin_control_plane(&self.pool).await?
+        } else {
+            ScopedConn::begin(&self.pool, &self.scope).await?
+        };
         if self.assume_app_role {
             sqlx::query("SET LOCAL ROLE moa_app")
                 .execute(conn.as_mut())
@@ -98,6 +120,12 @@ impl VectorStore for PgvectorStore {
     }
 
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>> {
+        let Some(workspace_id) = query.workspace_id.as_deref() else {
+            return Err(Error::WorkspaceRequired {
+                backend: self.backend(),
+                operation: "knn",
+            });
+        };
         let limit = i64::try_from(query.k).map_err(|_| Error::QueryLimitTooLarge(query.k))?;
         let max_pii_rank = pii_rank(&query.max_pii_class)?;
         if limit <= 0 {
@@ -136,6 +164,8 @@ impl VectorStore for PgvectorStore {
         } else {
             builder.push("node.valid_to IS NULL AND embedding.valid_to IS NULL");
         }
+        builder.push(" AND embedding.workspace_id = ");
+        builder.push_bind(workspace_id);
         builder.push(
             r#"
                  AND CASE embedding.pii_class

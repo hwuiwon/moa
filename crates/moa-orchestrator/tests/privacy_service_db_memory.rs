@@ -6,16 +6,17 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use moa_core::wire::ContactErasureScope;
-use moa_core::{ContactId, ScopeContext, TenantId};
+use moa_core::{ContactId, TenantId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::PgvectorStore;
+use moa_orchestrator::services::privacy::repository::collect_privacy_export_data_sections;
 use moa_orchestrator::services::privacy::{
     ApprovalClaims, ApprovalTokenVerifier, Ed25519ManifestSigner, PrivacyEraseContext,
-    PrivacyExportContext, PrivacySubject, PrivacySubjectProvenance,
-    collect_privacy_export_data_sections, ensure_jti_inserted, finalize_archive_to_bytes,
-    run_privacy_erase, write_export_readme, write_manifest,
+    PrivacyExportContext, PrivacySubject, PrivacySubjectProvenance, ensure_jti_inserted,
+    finalize_archive_to_bytes, run_privacy_erase, write_export_readme, write_manifest,
 };
 use moa_session::testing;
 use serde_json::json;

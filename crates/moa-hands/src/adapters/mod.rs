@@ -6,3 +6,4 @@ pub mod daytona;
 pub mod e2b;
 pub mod local;
 pub mod mcp;
+mod tool_route;

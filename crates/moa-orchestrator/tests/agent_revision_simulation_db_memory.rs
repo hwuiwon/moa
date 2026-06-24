@@ -2,15 +2,18 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{AgentRevisionSimulationCompareRequest, AgentRevisionSimulationVariant};
-use moa_core::{ActionRuleScope, ModelId, ScopeContext, ScopedConn, TenantId};
+use moa_core::{ActionRuleScope, ModelId, TenantId};
+use moa_db::ScopedConn;
 use moa_experiments::model::{
-    ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTargetKind,
-    ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
-    NewExperimentRun as NewExperiment, NewExperimentTrial,
+    ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
+    ExperimentTrialStopReason, ExperimentVariant, NewExperimentRun as NewExperiment,
+    NewExperimentTrial,
 };
 use moa_experiments::store::ExperimentStore;
+use moa_memory_types::ScopeContext;
 use moa_orchestrator::services::experiments::compare_agent_revision_simulation_inner;
 use serde_json::json;
 use uuid::Uuid;

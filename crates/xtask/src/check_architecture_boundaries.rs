@@ -1,5 +1,6 @@
 //! `xtask check-architecture-boundaries` command implementation.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ const SCAN_ROOTS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Rule {
     DirectSql,
+    HandlerAuthzSafety,
     RuntimeContext,
 }
 
@@ -22,6 +24,9 @@ impl fmt::Display for Rule {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DirectSql => formatter.write_str("direct SQL in handler/workflow code"),
+            Self::HandlerAuthzSafety => {
+                formatter.write_str("Restate handler without authz or SAFETY marker")
+            }
             Self::RuntimeContext => formatter.write_str("raw OrchestratorCtx dependency access"),
         }
     }
@@ -144,6 +149,27 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/services/agent_definitions.rs",
+        "OrchestratorCtx::current_graph_pool",
+        5,
+        "Agent-definition service currently owns artifact-backed install/deploy repository operations"
+    ),
+    allow!(
+        DirectSql,
+        "crates/moa-orchestrator/src/services/agent_definitions.rs",
+        "sqlx::query(",
+        7,
+        "Agent installation and deployment SQL remains local pending an agent-definition repository seam"
+    ),
+    allow!(
+        DirectSql,
+        "crates/moa-orchestrator/src/services/agent_definitions.rs",
+        "sqlx::query_scalar",
+        2,
+        "Agent installation guard SQL remains local pending an agent-definition repository seam"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/services/analytics.rs",
         "OrchestratorCtx::current_graph_pool",
         1,
@@ -162,13 +188,6 @@ const ALLOWANCES: &[Allowance] = &[
         "sqlx::query(",
         4,
         "Analytics read-model SQL remains in the handler pending a dedicated analytics repository"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/analytics.rs",
-        "QueryBuilder::<",
-        1,
-        "Analytics learning-candidate list uses dynamic filters pending a dedicated query object"
     ),
     allow!(
         RuntimeContext,
@@ -223,14 +242,14 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/contacts.rs",
         "OrchestratorCtx::current_graph_pool",
-        7,
+        8,
         "Contact service constructs the initial in-process contact repository operations"
     ),
     allow!(
         RuntimeContext,
         "crates/moa-orchestrator/src/services/contacts.rs",
         "OrchestratorCtx::current_session_store",
-        4,
+        5,
         "Contact service validates and updates session contact bindings through the session-store seam"
     ),
     allow!(
@@ -255,67 +274,53 @@ const ALLOWANCES: &[Allowance] = &[
         "Contact token issuer is stored on the auth provider bundle"
     ),
     allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        "sqlx::query(",
-        13,
-        "Initial contact repository SQL remains local to the Contacts service before repository extraction"
-    ),
-    allow!(
-        DirectSql,
-        "crates/moa-orchestrator/src/services/contacts.rs",
-        "sqlx::query_scalar",
-        4,
-        "Initial contact lookup SQL remains local to the Contacts service before repository extraction"
-    ),
-    allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/mod.rs",
         "OrchestratorCtx::current()",
         1,
         "Eval service still combines provider registry and analytics persistence"
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/mod.rs",
         ".graph_pool()",
         1,
         "Eval service reads the pool from grouped runtime deps"
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/mod.rs",
         "OrchestratorCtx::current_config",
         2,
         "Internal eval runner still reads model and database config from runtime config accessors"
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/repository.rs",
         "QueryBuilder::<",
         1,
-        "Eval dataset persistence builds a multi-row insert pending repository extraction"
+        "Eval repository owns dataset multi-row insert persistence"
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/mod.rs",
         "OrchestratorCtx::current_graph_pool",
         4,
-        "Eval dataset management remains a temporary service-owned read model"
+        "Eval handler obtains pools before delegating to repositories and scoring read models"
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/repository.rs",
         "sqlx::query(",
         3,
-        "Eval dataset SQL remains temporary until an eval repository is extracted"
+        "Eval repository owns dataset SQL row mapping"
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/eval.rs",
+        "crates/moa-orchestrator/src/services/eval/repository.rs",
         "sqlx::query_scalar",
         1,
-        "Eval dataset insertion SQL remains temporary until an eval repository is extracted"
+        "Eval repository owns dataset upsert SQL"
     ),
     allow!(
         RuntimeContext,
@@ -349,7 +354,7 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/experiments.rs",
         "OrchestratorCtx::current_graph_pool",
-        7,
+        10,
         "Experiment service still constructs extracted experiment app/store helpers per handler"
     ),
     allow!(
@@ -386,6 +391,13 @@ const ALLOWANCES: &[Allowance] = &[
         ".session_store()",
         1,
         "Learning review handler passes the session store to the extracted review store"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/services/learning_review.rs",
+        ".graph_pool()",
+        1,
+        "Learning review acceptance passes the runtime pool into the extracted skill promotion flow"
     ),
     allow!(
         RuntimeContext,
@@ -452,24 +464,24 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/services/privacy.rs",
+        "crates/moa-orchestrator/src/services/privacy/mod.rs",
         "OrchestratorCtx::current_graph_pool",
         2,
         "Privacy adapter keeps token/vault/export orchestration while erasure moved to owning crates"
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/privacy.rs",
+        "crates/moa-orchestrator/src/services/privacy/repository.rs",
         "sqlx::query(",
         2,
-        "Privacy export sets the auditor role locally and resolves contact subjects before controlled export reads"
+        "Privacy repository sets auditor role and resolves contact subjects before controlled export reads"
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/services/privacy.rs",
+        "crates/moa-orchestrator/src/services/privacy/repository.rs",
         "sqlx::query_scalar",
-        8,
-        "Privacy DSAR export read-model and linked-contact SQL remains in the adapter pending an export repository"
+        7,
+        "Privacy repository owns DSAR export read-model and linked-contact SQL"
     ),
     allow!(
         RuntimeContext,
@@ -496,7 +508,7 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/workflows.rs",
         "OrchestratorCtx::current_graph_pool",
-        1,
+        2,
         "Workflow service constructs the artifact registry for workflow state"
     ),
     allow!(
@@ -536,6 +548,13 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/artifact_workflow_execution.rs",
+        "OrchestratorCtx::current_graph_pool",
+        8,
+        "Artifact workflow execution still constructs the artifact registry in workflow helper steps"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/workflows/experiment_run.rs",
         "OrchestratorCtx::current_graph_pool",
         3,
@@ -566,8 +585,8 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/experiment_run/target_execution.rs",
         "OrchestratorCtx::current_graph_pool",
-        1,
-        "Experiment target execution still reads experiment definitions from workflow code"
+        2,
+        "Experiment target execution reads workflow/runtime stores and passes the pool into session creation helpers"
     ),
     allow!(
         RuntimeContext,
@@ -594,8 +613,8 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/experiment_trial_run/target_execution.rs",
         "OrchestratorCtx::current_graph_pool",
-        1,
-        "Experiment trial target execution still reads trial state from workflow code"
+        2,
+        "Experiment trial target execution reads workflow/runtime stores and passes the pool into session creation helpers"
     ),
     allow!(
         RuntimeContext,
@@ -678,7 +697,7 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         "OrchestratorCtx::current_config",
-        4,
+        6,
         "TurnExecution still reads session and resolution config from the runtime singleton"
     ),
 ];
@@ -713,8 +732,9 @@ fn scan_roots(roots: &[&str]) -> Result<Vec<Finding>> {
 
     let mut findings = Vec::new();
     let mut allowance_uses = vec![0usize; ALLOWANCES.len()];
+    let service_traits = collect_restate_service_traits(&files)?;
     for path in files {
-        scan_file(&path, &mut allowance_uses, &mut findings)?;
+        scan_file(&path, &service_traits, &mut allowance_uses, &mut findings)?;
     }
     for (index, allowance) in ALLOWANCES.iter().enumerate() {
         let used = allowance_uses[index];
@@ -726,7 +746,12 @@ fn scan_roots(roots: &[&str]) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-fn scan_file(path: &Path, allowance_uses: &mut [usize], findings: &mut Vec<Finding>) -> Result<()> {
+fn scan_file(
+    path: &Path,
+    service_traits: &BTreeSet<String>,
+    allowance_uses: &mut [usize],
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
     if path.file_name().and_then(|name| name.to_str()) == Some("tests.rs") {
         return Ok(());
     }
@@ -751,7 +776,218 @@ fn scan_file(path: &Path, allowance_uses: &mut [usize], findings: &mut Vec<Findi
             ));
         }
     }
+    if path_text.starts_with("crates/moa-orchestrator/src/services/") {
+        findings.extend(handler_authz_safety_findings(
+            &path_text,
+            &body,
+            service_traits,
+        ));
+    }
     Ok(())
+}
+
+fn collect_restate_service_traits(files: &[PathBuf]) -> Result<BTreeSet<String>> {
+    let mut service_traits = BTreeSet::new();
+    for path in files {
+        if path.file_name().and_then(|name| name.to_str()) == Some("tests.rs") {
+            continue;
+        }
+        let path_text = normalize_path(path);
+        let body = fs::read_to_string(path).with_context(|| format!("read {path_text}"))?;
+        service_traits.extend(restate_service_traits_from_source(&body));
+    }
+    Ok(service_traits)
+}
+
+fn restate_service_traits_from_source(source: &str) -> BTreeSet<String> {
+    let mut service_traits = BTreeSet::new();
+    let mut pending_service_attr = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[restate_sdk::service") {
+            pending_service_attr = true;
+            continue;
+        }
+        if !pending_service_attr {
+            continue;
+        }
+        if trimmed.starts_with("#[") || trimmed.starts_with("///") || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(trait_name) = service_trait_name(trimmed) {
+            service_traits.insert(trait_name.to_string());
+        }
+        pending_service_attr = false;
+    }
+    service_traits
+}
+
+fn service_trait_name(line: &str) -> Option<&str> {
+    let line = line
+        .strip_prefix("pub trait ")
+        .or_else(|| line.strip_prefix("trait "))?;
+    line.split(|character: char| {
+        character.is_whitespace() || matches!(character, '<' | '{' | ':' | '(')
+    })
+    .find(|part| !part.is_empty())
+}
+
+fn handler_authz_safety_findings(
+    path_text: &str,
+    source: &str,
+    service_traits: &BTreeSet<String>,
+) -> Vec<Finding> {
+    if path_text.contains("/tests/") {
+        return Vec::new();
+    }
+
+    let lines = source.lines().collect::<Vec<_>>();
+    let scan_limit = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("#[cfg(test)]"))
+        .unwrap_or(lines.len());
+    let mut findings = Vec::new();
+    let mut index = 0;
+
+    while index < scan_limit {
+        let line = lines[index].trim_start();
+        if !is_service_impl(line, service_traits) {
+            index += 1;
+            continue;
+        }
+
+        let (impl_end, method_starts) = service_impl_methods(&lines, index, scan_limit);
+        for (method_index, method_start) in method_starts.iter().copied().enumerate() {
+            let method_end = method_starts
+                .get(method_index + 1)
+                .copied()
+                .unwrap_or(impl_end);
+            let body = lines[method_start..method_end].join("\n");
+            if has_immediate_safety_comment(&lines, method_start) || has_authz_boundary(&body) {
+                continue;
+            }
+            let method_name = handler_method_name(lines[method_start]).unwrap_or("<unknown>");
+            findings.push(Finding {
+                rule: Rule::HandlerAuthzSafety,
+                path: path_text.to_string(),
+                line: Some(method_start + 1),
+                detail: format!(
+                    "`{method_name}` must call require_authz*/authorize_* or carry an immediate // SAFETY: comment"
+                ),
+            });
+        }
+
+        index = impl_end.max(index + 1);
+    }
+
+    findings
+}
+
+fn is_service_impl(line: &str, service_traits: &BTreeSet<String>) -> bool {
+    let Some(after_impl) = line.strip_prefix("impl ") else {
+        return false;
+    };
+    let Some((before_for, _)) = after_impl.split_once(" for ") else {
+        return false;
+    };
+    let Some(trait_name) = before_for
+        .split_whitespace()
+        .last()
+        .map(|name| name.split('<').next().unwrap_or(name))
+    else {
+        return false;
+    };
+    service_traits.contains(trait_name)
+}
+
+fn service_impl_methods(
+    lines: &[&str],
+    impl_start: usize,
+    scan_limit: usize,
+) -> (usize, Vec<usize>) {
+    let mut methods = Vec::new();
+    let mut brace_depth = 0i32;
+    let mut opened_impl = false;
+    let mut line_index = impl_start;
+
+    while line_index < scan_limit {
+        let trimmed = lines[line_index].trim_start();
+        if opened_impl && brace_depth == 1 && trimmed.starts_with("async fn ") {
+            methods.push(line_index);
+        }
+
+        brace_depth += brace_delta(lines[line_index]);
+        if brace_depth > 0 {
+            opened_impl = true;
+        }
+        line_index += 1;
+        if opened_impl && brace_depth <= 0 {
+            break;
+        }
+    }
+
+    (line_index, methods)
+}
+
+fn brace_delta(line: &str) -> i32 {
+    let mut delta = 0;
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some(character) = chars.next() {
+        if !in_string && character == '/' && chars.peek() == Some(&'/') {
+            break;
+        }
+        if character == '"' && !escaped {
+            in_string = !in_string;
+        }
+        if !in_string {
+            match character {
+                '{' => delta += 1,
+                '}' => delta -= 1,
+                _ => {}
+            }
+        }
+        escaped = character == '\\' && !escaped;
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+
+    delta
+}
+
+fn has_immediate_safety_comment(lines: &[&str], method_start: usize) -> bool {
+    method_start
+        .checked_sub(1)
+        .and_then(|index| lines.get(index))
+        .is_some_and(|line| line.trim_start().starts_with("// SAFETY:"))
+}
+
+fn has_authz_boundary(body: &str) -> bool {
+    [
+        "require_authz",
+        "authorize_",
+        "authorized_",
+        "require_tenant_",
+        "require_agent_",
+        "require_grant_authority",
+        "require_contact_scope",
+        "require_contact_session_permission",
+        "require_contact_agent_permission",
+        "require_scim_admin",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle))
+}
+
+fn handler_method_name(line: &str) -> Option<&str> {
+    line.trim_start()
+        .strip_prefix("async fn ")
+        .and_then(|rest| rest.split('(').next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
 }
 
 fn classify_line(line: &str) -> Option<Rule> {
@@ -890,7 +1126,10 @@ impl Finding {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rule, classify_line, matching_allowance};
+    use super::{
+        Rule, classify_line, handler_authz_safety_findings, matching_allowance,
+        restate_service_traits_from_source,
+    };
 
     #[test]
     fn classifies_direct_sql() {
@@ -972,6 +1211,87 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn restate_handler_without_authz_or_safety_is_flagged() {
+        // Pins: a new Restate service handler cannot read or mutate caller-owned data without an explicit authz boundary marker.
+        let source = r#"#[restate_sdk::service]
+pub trait Example {
+    async fn read() -> Result<(), HandlerError>;
+}
+pub struct ExampleImpl;
+impl Example for ExampleImpl {
+    async fn read(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+"#;
+        let service_traits = restate_service_traits_from_source(source);
+        let findings = handler_authz_safety_findings(
+            "crates/moa-orchestrator/src/services/example.rs",
+            source,
+            &service_traits,
+        );
+
+        assert_eq!(
+            findings.len(),
+            1,
+            "missing marker should produce one finding"
+        );
+        assert_eq!(findings[0].rule, Rule::HandlerAuthzSafety);
+        assert_eq!(findings[0].line, Some(7));
+    }
+
+    #[test]
+    fn restate_handler_with_immediate_safety_comment_is_allowed() {
+        // Pins: intentionally internal or informational handlers document why resource authz is not applied.
+        let source = r#"#[restate_sdk::service]
+pub trait Example {
+    async fn read() -> Result<(), HandlerError>;
+}
+pub struct ExampleImpl;
+impl Example for ExampleImpl {
+    #[tracing::instrument(skip(self, _ctx))]
+    // SAFETY: informational status endpoint with no caller-owned data.
+    async fn read(&self, _ctx: Context<'_>) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+"#;
+        let service_traits = restate_service_traits_from_source(source);
+        let findings = handler_authz_safety_findings(
+            "crates/moa-orchestrator/src/services/example.rs",
+            source,
+            &service_traits,
+        );
+
+        assert!(findings.is_empty(), "immediate SAFETY marker should pass");
+    }
+
+    #[test]
+    fn restate_handler_with_visible_authz_helper_is_allowed() {
+        // Pins: local authorization helper calls in handler bodies count as the behavior-boundary check.
+        let source = r#"#[restate_sdk::service]
+pub trait Example {
+    async fn read() -> Result<(), HandlerError>;
+}
+pub struct ExampleImpl;
+impl Example for ExampleImpl {
+    async fn read(&self, ctx: Context<'_>) -> Result<(), HandlerError> {
+        authorize_tenant(&ctx).await?;
+        Ok(())
+    }
+}
+"#;
+        let service_traits = restate_service_traits_from_source(source);
+        let findings = handler_authz_safety_findings(
+            "crates/moa-orchestrator/src/services/example.rs",
+            source,
+            &service_traits,
+        );
+
+        assert!(findings.is_empty(), "visible authz helper should pass");
     }
 
     #[test]

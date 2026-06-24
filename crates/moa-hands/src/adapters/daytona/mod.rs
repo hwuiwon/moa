@@ -16,6 +16,8 @@ use crate::tools::edit_output::{
 };
 use crate::tools::str_replace::plan_str_replace;
 
+use super::tool_route::{CloudSandboxToolRoute, unsupported_tool};
+
 const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io/toolbox";
 const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/workspace:latest";
@@ -319,8 +321,8 @@ impl HandProvider for DaytonaHandProvider {
         let workspace_id = handle.daytona_id()?;
         let payload: Value = serde_json::from_str(input)?;
         self.resume(handle).await?;
-        match tool {
-            "bash" => {
+        match CloudSandboxToolRoute::from_name(tool) {
+            Some(CloudSandboxToolRoute::Bash) => {
                 self.execute_command(
                     workspace_id,
                     required_string_field(&payload, "cmd")?,
@@ -329,11 +331,11 @@ impl HandProvider for DaytonaHandProvider {
                 )
                 .await
             }
-            "file_read" => {
+            Some(CloudSandboxToolRoute::FileRead) => {
                 self.read_file(workspace_id, required_string_field(&payload, "path")?)
                     .await
             }
-            "str_replace" => {
+            Some(CloudSandboxToolRoute::StrReplace) => {
                 self.str_replace_file(
                     workspace_id,
                     required_string_field(&payload, "path")?,
@@ -341,7 +343,7 @@ impl HandProvider for DaytonaHandProvider {
                 )
                 .await
             }
-            "file_write" => {
+            Some(CloudSandboxToolRoute::FileWrite) => {
                 self.write_file(
                     workspace_id,
                     required_string_field(&payload, "path")?,
@@ -349,13 +351,11 @@ impl HandProvider for DaytonaHandProvider {
                 )
                 .await
             }
-            "file_search" => {
+            Some(CloudSandboxToolRoute::FileSearch) => {
                 self.search_files(workspace_id, required_string_field(&payload, "pattern")?)
                     .await
             }
-            other => Err(MoaError::ToolError(format!(
-                "unsupported Daytona tool: {other}"
-            ))),
+            None => Err(unsupported_tool("Daytona", tool)),
         }
     }
 

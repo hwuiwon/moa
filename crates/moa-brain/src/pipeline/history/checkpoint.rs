@@ -11,8 +11,8 @@ use std::time::Instant;
 use moa_core::{
     CONTEXT_SNAPSHOT_FORMAT_VERSION, ContextMessage, ContextSnapshot, Event, EventRecord,
     FileReadDedupState, Result, SequenceNum, SnapshotFileReadState, WorkingContext,
-    record_turn_snapshot_load,
 };
+use moa_observability::record_turn_snapshot_load;
 
 use crate::compaction::recent_turn_boundary;
 use crate::pipeline::estimate_tokens;

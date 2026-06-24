@@ -1,6 +1,8 @@
 //! Skill rendering with linked graph lessons.
 
-use moa_core::{MemoryScope, MoaError, Result, ScopeContext, ScopedConn};
+use moa_core::{MoaError, Result};
+use moa_db::ScopedConn;
+use moa_memory_types::{MemoryScope, ScopeContext};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 

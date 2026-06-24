@@ -5,8 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moa_core::{MoaConfig, ScopeContext, ScopedConn};
+use moa_core::MoaConfig;
+use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
 use moka::future::Cache;
 use reqwest::Client;

@@ -5,7 +5,9 @@ pub mod consolidate;
 pub(crate) mod errors;
 #[cfg(feature = "internal-eval-runner")]
 pub mod eval_run;
+#[cfg(feature = "experiments")]
 pub mod experiment_run;
+#[cfg(feature = "experiments")]
 pub mod experiment_trial_run;
 #[cfg(feature = "skill-learning")]
 pub mod skill_learning;

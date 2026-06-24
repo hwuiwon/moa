@@ -1,7 +1,8 @@
 //! Shared graph-backed skill integration fixtures.
 
-use moa_core::{ActionRuleScope, MemoryScope, MoaError, Result, ScopeContext, TenantId};
+use moa_core::{ActionRuleScope, MoaError, Result, TenantId};
 use moa_memory_graph::AgeGraphStore;
+use moa_memory_types::{MemoryScope, ScopeContext};
 use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
 use uuid::Uuid;

@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use moa_core::{MemoryScope, MoaError, traits::EmbeddingProvider};
+use moa_core::{MoaError, traits::EmbeddingProvider};
 use moa_memory_graph::{GraphError, GraphStore, NodeLabel, PiiClass};
+use moa_memory_types::MemoryScope;
 use uuid::Uuid;
 
 use crate::planning::ner::{NerExtractor, NerSpan};
 use crate::retrieval::{
-    CachedHybridRetriever, LineageContext, RetrievalError, RetrievalHit, RetrievalRequest,
+    LineageContext, PlannedRetriever, RetrievalError, RetrievalHit, RetrievalRequest,
 };
 
 const DEFAULT_SEED_LIMIT_PER_SPAN: i64 = 5;
@@ -184,8 +185,8 @@ pub struct QueryRetrievalCtx<'a> {
     pub planning: &'a PlanningCtx,
     /// Embedder used to produce the query vector.
     pub embedder: &'a dyn EmbeddingProvider,
-    /// Cached hybrid retriever used after planning.
-    pub hybrid: &'a CachedHybridRetriever,
+    /// Planned retriever used after planning.
+    pub hybrid: &'a dyn PlannedRetriever,
     /// Maximum PII class visible to the caller.
     pub max_pii_class: PiiClass,
     /// Number of final hits requested.
@@ -209,7 +210,7 @@ impl<'a> QueryRetrievalCtx<'a> {
         planner: &'a QueryPlanner,
         planning: &'a PlanningCtx,
         embedder: &'a dyn EmbeddingProvider,
-        hybrid: &'a CachedHybridRetriever,
+        hybrid: &'a dyn PlannedRetriever,
         max_pii_class: PiiClass,
     ) -> Self {
         Self {

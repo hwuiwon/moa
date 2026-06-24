@@ -23,8 +23,8 @@ use moa_core::{
     deterministic_segment_id,
 };
 use moa_eval_core::{
-    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalStatus, LongConversationMode,
-    LongSessionInterleaving, LongTestCase, Result, ScoreValue, TestCase,
+    AgentConfig, EngineOptions, EvalError, EvalResult, EvalScore, EvalScoreValue, EvalStatus,
+    LongConversationMode, LongSessionInterleaving, LongTestCase, Result, TestCase,
 };
 use moa_lineage_core::LineageEvent;
 use serde_json::Value;
@@ -813,7 +813,7 @@ async fn materialize_primary_learning_if_requested(
         outcome_confidence: Some(assessment.confidence),
     };
 
-    environment.session_store.create_segment(&segment).await?;
+    environment.segment_store.create_segment(&segment).await?;
     let experience = experience_from_assessment(
         &meta,
         &segment,
@@ -826,21 +826,21 @@ async fn materialize_primary_learning_if_requested(
     let attributions = attributions_for_experience(&experience, &events, now);
     let candidates = propose_candidates_for_experience(&experience, &attributions, now);
     environment
-        .session_store
+        .experience_store
         .append_experience_record(&experience)
         .await?;
     environment
-        .session_store
+        .experience_store
         .append_experience_attributions(&attributions)
         .await?;
     for candidate in candidates {
         environment
-            .session_store
+            .learning_candidate_store
             .append_learning_candidate(&candidate)
             .await?;
     }
     environment
-        .session_store
+        .segment_store
         .refresh_segment_materialized_views()
         .await?;
     Ok(())
@@ -855,18 +855,18 @@ async fn collect_learning_summary(
     let mut skill_subjects = BTreeSet::new();
     for session_id in session_ids {
         let experiences = environment
-            .session_store
+            .experience_store
             .list_experience_records(*session_id)
             .await?;
         experience_count += experiences.len();
         for experience in experiences {
             let attributions = environment
-                .session_store
+                .experience_store
                 .list_experience_attributions(experience.id)
                 .await?;
             attribution_count += attributions.len();
             let rates = environment
-                .session_store
+                .segment_store
                 .list_task_strategy_success_rates(
                     environment.workspace_id.as_str(),
                     &experience.task_fingerprint.hash,
@@ -881,7 +881,7 @@ async fn collect_learning_summary(
     }
 
     let candidates = environment
-        .session_store
+        .learning_candidate_store
         .list_learning_candidates(
             environment.workspace_id.as_str(),
             Some(LearningCandidateStatus::Proposed),
@@ -1380,12 +1380,12 @@ fn score_card_scores(score_card: &ScoreCard) -> Vec<EvalScore> {
         .collect()
 }
 
-fn eval_score_value(value: serde_json::Value) -> ScoreValue {
+fn eval_score_value(value: serde_json::Value) -> EvalScoreValue {
     match value {
-        serde_json::Value::Bool(value) => ScoreValue::Boolean(value),
-        serde_json::Value::Number(value) => ScoreValue::Numeric(value.as_f64().unwrap_or(0.0)),
-        serde_json::Value::String(value) => ScoreValue::Categorical(value),
-        other => ScoreValue::Categorical(other.to_string()),
+        serde_json::Value::Bool(value) => EvalScoreValue::Boolean(value),
+        serde_json::Value::Number(value) => EvalScoreValue::Numeric(value.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(value) => EvalScoreValue::Categorical(value),
+        other => EvalScoreValue::Categorical(other.to_string()),
     }
 }
 

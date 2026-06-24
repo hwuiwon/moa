@@ -11,7 +11,8 @@ use crate::{
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
-use moa_core::{MoaConfig, ScopeContext, ScopedConn, traits::EmbeddingProvider};
+use moa_core::{MoaConfig, traits::EmbeddingProvider};
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent,
 };
@@ -19,6 +20,7 @@ use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
     redact_text,
 };
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;

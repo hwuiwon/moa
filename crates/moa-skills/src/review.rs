@@ -7,8 +7,10 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, MoaError, ScopeContext, ScopedConn, WorkspaceId,
+    LearningCandidateType, LearningEntry, MoaError, WorkspaceId,
 };
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use std::future::Future;

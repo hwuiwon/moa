@@ -3,7 +3,8 @@
 //! If `MOA_NEON_API_KEY` is unset, the service is a no-op so local development
 //! and self-hosted deployments do not require Neon.
 
-use moa_core::{BranchManager, restate_observability::annotate_restate_handler_span};
+use moa_core::BranchManager;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,7 @@ pub struct NeonMaintImpl;
 
 impl NeonMaint for NeonMaintImpl {
     #[tracing::instrument(skip(self, ctx, _request))]
+    // SAFETY: Internal CronJob/maintenance handler; prunes external Neon branches only.
     async fn prune_branches(
         &self,
         ctx: Context<'_>,

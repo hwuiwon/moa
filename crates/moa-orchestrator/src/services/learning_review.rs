@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use moa_authz::{fga_subject, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
     LearningCandidateReviewResponse,
@@ -13,6 +12,7 @@ use moa_core::{
     LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, MoaError, TenantId,
     WorkspaceId,
 };
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
 use moa_skills::registry::SkillRegistry;
 use moa_skills::review::{
@@ -87,6 +87,7 @@ impl LearningReview for LearningReviewImpl {
         request.reviewer_subject = fga_subject(&identity);
         let runtime = OrchestratorCtx::current();
         let store = runtime.session_store();
+        let pool = runtime.graph_pool();
         let config = runtime.config();
         #[cfg(feature = "internal-eval-runner")]
         let providers = runtime.provider_registry();
@@ -94,9 +95,11 @@ impl LearningReview for LearningReviewImpl {
         #[cfg(feature = "internal-eval-runner")]
         let response = ctx
             .run(move || async move {
-                accept_skill_candidate_after_authz_on_runtime(store, config, providers, request)
-                    .await
-                    .map(Json::from)
+                accept_skill_candidate_after_authz_on_runtime(
+                    store, pool, config, providers, request,
+                )
+                .await
+                .map(Json::from)
             })
             .name("learning_review_accept_skill")
             .await?;
@@ -104,7 +107,7 @@ impl LearningReview for LearningReviewImpl {
         #[cfg(not(feature = "internal-eval-runner"))]
         let response = ctx
             .run(move || async move {
-                accept_skill_candidate_after_authz(store, config, request)
+                accept_skill_candidate_after_authz(store, pool, config, request)
                     .await
                     .map(Json::from)
             })
@@ -217,6 +220,7 @@ pub async fn get_learning_candidate_after_authz(
 /// Accepts one skill candidate after the caller has authorized tenant operator access.
 pub async fn accept_skill_candidate_after_authz(
     store: Arc<PostgresSessionStore>,
+    pool: sqlx::PgPool,
     config: Arc<moa_core::MoaConfig>,
     #[cfg(feature = "internal-eval-runner")] providers: Arc<moa_providers::ProviderRegistry>,
     request: LearningCandidateReviewRequest,
@@ -224,7 +228,6 @@ pub async fn accept_skill_candidate_after_authz(
     ensure_requested_action(request.action, LearningCandidateReviewAction::Accept)?;
     let review_request = skill_review_request(&request, SkillReviewAction::Accept);
     let review_store = SessionLearningReviewStore::new(store.clone());
-    let pool = store.pool().clone();
     let prepared = prepare_skill_acceptance(&review_store, pool.clone(), &review_request)
         .await
         .map_err(skill_review_error_to_handler_error)?;
@@ -269,11 +272,12 @@ pub async fn accept_skill_candidate_after_authz(
 #[cfg(feature = "internal-eval-runner")]
 async fn accept_skill_candidate_after_authz_on_runtime(
     store: Arc<PostgresSessionStore>,
+    pool: sqlx::PgPool,
     config: Arc<moa_core::MoaConfig>,
     providers: Arc<moa_providers::ProviderRegistry>,
     request: LearningCandidateReviewRequest,
 ) -> Result<LearningCandidateReviewResponse, HandlerError> {
-    accept_skill_candidate_after_authz(store, config, providers, request).await
+    accept_skill_candidate_after_authz(store, pool, config, providers, request).await
 }
 
 /// Rejects one candidate after the caller has authorized tenant operator access.

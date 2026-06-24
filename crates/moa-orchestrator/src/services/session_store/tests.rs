@@ -40,8 +40,9 @@ fn test_session_meta(workspace_id: &str) -> SessionMeta {
 
 async fn test_service() -> Result<(SessionStoreImpl, String, String)> {
     let (store, database_url, schema_name) = testing::create_isolated_test_store().await?;
+    let pool = store.pool().clone();
     Ok((
-        SessionStoreImpl::new(Arc::new(store)),
+        SessionStoreImpl::new(Arc::new(store), pool),
         database_url,
         schema_name,
     ))
@@ -79,9 +80,14 @@ async fn create_session_for_identity_db_enqueues_owner_and_tenant_tuples() -> Re
         api_key_id: None,
         acting_on_behalf_of: None,
     };
-    let session_id = create_session_for_identity(service.store.as_ref(), meta, identity.clone())
-        .await
-        .map_err(into_anyhow)?;
+    let session_id = create_session_for_identity(
+        service.store.as_ref(),
+        &service.pool,
+        meta,
+        identity.clone(),
+    )
+    .await
+    .map_err(into_anyhow)?;
     let session_object = format!("session:{session_id}");
 
     let tuples = sqlx::query_as::<_, AuthzOutboxTuple>(
@@ -149,9 +155,14 @@ async fn create_contact_session_for_identity_db_enqueues_contact_session_tuple()
         api_key_id: None,
         acting_on_behalf_of: None,
     };
-    let session_id = create_session_for_identity(service.store.as_ref(), meta, identity.clone())
-        .await
-        .map_err(into_anyhow)?;
+    let session_id = create_session_for_identity(
+        service.store.as_ref(),
+        &service.pool,
+        meta,
+        identity.clone(),
+    )
+    .await
+    .map_err(into_anyhow)?;
     let session_object = format!("session:{session_id}");
 
     let tuples = sqlx::query_as::<_, AuthzOutboxTuple>(

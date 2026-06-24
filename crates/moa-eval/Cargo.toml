@@ -13,6 +13,7 @@ chrono.workspace = true
 futures-util.workspace = true
 moa-brain = { workspace = true, features = ["eval-harness"] }
 moa-core = { workspace = true }
+moa-db = { workspace = true }
 moa-eval-core = { workspace = true }
 moa-hands = { workspace = true }
 moa-lineage-core = { workspace = true }
@@ -20,6 +21,7 @@ moa-memory-graph = { workspace = true }
 moa-memory-ingest = { workspace = true, features = ["test-util"] }
 moa-memory-lifecycle = { workspace = true }
 moa-memory-pii = { workspace = true }
+moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-providers = { workspace = true, features = ["test-util"] }
 moa-security = { workspace = true }

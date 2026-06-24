@@ -1,9 +1,9 @@
 //! Restate workflow that executes one hosted eval run.
 
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     EvalRunRequest, EvalRunResponse, EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse,
 };
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

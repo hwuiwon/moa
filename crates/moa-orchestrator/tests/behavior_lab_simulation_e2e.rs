@@ -13,8 +13,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::{
-    ActionRuleScope, Event, EventRange, EventRecord, ScopeContext, ScopedConn, SessionId, TenantId,
-    WorkspaceId,
+    ActionRuleScope, Event, EventRange, EventRecord, SessionId, TenantId, WorkspaceId,
     traits::Identity,
     wire::{
         ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
@@ -26,6 +25,8 @@ use moa_core::{
         WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
     },
 };
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use sqlx::PgPool;

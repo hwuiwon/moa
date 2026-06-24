@@ -39,6 +39,7 @@ use crate::core::schema::compile_for_openai_strict;
 
 const OPENAI_METADATA_VALUE_LIMIT: usize = 512;
 
+pub(crate) mod provider;
 mod request;
 mod response;
 mod streaming;
@@ -49,6 +50,7 @@ mod streaming_tests;
 #[cfg(test)]
 mod tests;
 
+pub use provider::{OpenAIProvider, debug_build_openai_request_body};
 pub(crate) use request::{build_openai_client, build_responses_request};
 pub(crate) use streaming::stream_responses_with_retry;
 

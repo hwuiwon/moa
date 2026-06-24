@@ -418,7 +418,9 @@ mod tests {
                 PROVIDER_ANTHROPIC => {
                     crate::adapters::anthropic::model::canonical_model_id(model.id)
                 }
-                PROVIDER_OPENAI => crate::adapters::openai_chat::canonical_model_id(model.id),
+                PROVIDER_OPENAI => {
+                    crate::adapters::openai_responses::provider::canonical_model_id(model.id)
+                }
                 PROVIDER_GOOGLE => crate::adapters::gemini::model::canonical_model_id(model.id),
                 unsupported => panic!("unknown provider in catalog: {unsupported}"),
             }

@@ -51,7 +51,7 @@ impl TestSessionStoreApp {
             .context("convert std listener into tokio listener")?;
 
         let endpoint = Endpoint::builder()
-            .bind(SessionStoreImpl::new(store.clone()).serve())
+            .bind(SessionStoreImpl::new(store.clone(), store.pool().clone()).serve())
             .build();
         let server_task = tokio::spawn(async move {
             HttpServer::new(endpoint).serve(listener).await;

@@ -1016,7 +1016,10 @@ impl SessionStore for PostgresSessionStore {
 
         Ok(())
     }
+}
 
+#[async_trait]
+impl SegmentStore for PostgresSessionStore {
     async fn create_segment(&self, segment: &TaskSegment) -> Result<()> {
         PostgresSessionStore::create_segment(self, segment).await
     }
@@ -1068,59 +1071,6 @@ impl SessionStore for PostgresSessionStore {
             .await
     }
 
-    async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()> {
-        PostgresSessionStore::append_experience_record(self, experience).await
-    }
-
-    async fn list_experience_records(
-        &self,
-        session_id: moa_core::SessionId,
-    ) -> Result<Vec<ExperienceRecord>> {
-        PostgresSessionStore::list_experience_records(self, session_id).await
-    }
-
-    async fn append_experience_attributions(
-        &self,
-        attributions: &[ExperienceAttribution],
-    ) -> Result<()> {
-        PostgresSessionStore::append_experience_attributions(self, attributions).await
-    }
-
-    async fn list_experience_attributions(
-        &self,
-        experience_id: uuid::Uuid,
-    ) -> Result<Vec<ExperienceAttribution>> {
-        PostgresSessionStore::list_experience_attributions(self, experience_id).await
-    }
-
-    async fn append_learning_candidate(&self, candidate: &LearningCandidate) -> Result<()> {
-        PostgresSessionStore::append_learning_candidate(self, candidate).await
-    }
-
-    async fn get_learning_candidate(
-        &self,
-        workspace_id: &WorkspaceId,
-        candidate_id: Uuid,
-    ) -> Result<Option<LearningCandidate>> {
-        PostgresSessionStore::get_learning_candidate(self, workspace_id, candidate_id).await
-    }
-
-    async fn list_learning_candidates(
-        &self,
-        tenant_id: &str,
-        status: Option<LearningCandidateStatus>,
-        limit: usize,
-    ) -> Result<Vec<LearningCandidate>> {
-        PostgresSessionStore::list_learning_candidates(self, tenant_id, status, limit).await
-    }
-
-    async fn update_learning_candidate_status(
-        &self,
-        update: &LearningCandidateStatusUpdate,
-    ) -> Result<()> {
-        PostgresSessionStore::update_learning_candidate_status(self, update).await
-    }
-
     async fn refresh_segment_materialized_views(&self) -> Result<()> {
         PostgresSessionStore::refresh_segment_materialized_views(self).await
     }
@@ -1148,6 +1098,65 @@ impl SessionStore for PostgresSessionStore {
         token_cost: u64,
     ) -> Result<()> {
         PostgresSessionStore::record_active_segment_turn_usage(self, session_id, token_cost).await
+    }
+}
+
+#[async_trait]
+impl ExperienceStore for PostgresSessionStore {
+    async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()> {
+        PostgresSessionStore::append_experience_record(self, experience).await
+    }
+
+    async fn list_experience_records(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Vec<ExperienceRecord>> {
+        PostgresSessionStore::list_experience_records(self, session_id).await
+    }
+
+    async fn append_experience_attributions(
+        &self,
+        attributions: &[ExperienceAttribution],
+    ) -> Result<()> {
+        PostgresSessionStore::append_experience_attributions(self, attributions).await
+    }
+
+    async fn list_experience_attributions(
+        &self,
+        experience_id: uuid::Uuid,
+    ) -> Result<Vec<ExperienceAttribution>> {
+        PostgresSessionStore::list_experience_attributions(self, experience_id).await
+    }
+}
+
+#[async_trait]
+impl LearningCandidateStore for PostgresSessionStore {
+    async fn append_learning_candidate(&self, candidate: &LearningCandidate) -> Result<()> {
+        PostgresSessionStore::append_learning_candidate(self, candidate).await
+    }
+
+    async fn get_learning_candidate(
+        &self,
+        workspace_id: &WorkspaceId,
+        candidate_id: Uuid,
+    ) -> Result<Option<LearningCandidate>> {
+        PostgresSessionStore::get_learning_candidate(self, workspace_id, candidate_id).await
+    }
+
+    async fn list_learning_candidates(
+        &self,
+        tenant_id: &str,
+        status: Option<LearningCandidateStatus>,
+        limit: usize,
+    ) -> Result<Vec<LearningCandidate>> {
+        PostgresSessionStore::list_learning_candidates(self, tenant_id, status, limit).await
+    }
+
+    async fn update_learning_candidate_status(
+        &self,
+        update: &LearningCandidateStatusUpdate,
+    ) -> Result<()> {
+        PostgresSessionStore::update_learning_candidate_status(self, update).await
     }
 }
 

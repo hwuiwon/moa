@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use moa_core::{ScopeContext, ScopedConn};
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::VectorStore;
 use sqlx::{PgConnection, PgPool};
 

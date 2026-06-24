@@ -134,7 +134,9 @@ pub struct ProviderDeliverySink {
     email: Option<PostmarkEmailClient>,
     #[cfg(feature = "twilio")]
     sms: Option<TwilioSmsClient>,
+    #[cfg_attr(not(feature = "postmark"), allow(dead_code))]
     email_from: String,
+    #[cfg_attr(not(feature = "postmark"), allow(dead_code))]
     email_reply_to: Option<String>,
 }
 
@@ -158,8 +160,15 @@ impl ProviderDeliverySink {
         scope: &str,
         config: &MessagingConfig,
     ) -> Result<Self> {
+        #[cfg(any(feature = "postmark", feature = "twilio"))]
         let mut sink = Self::empty(config.email_from.clone())
             .with_email_reply_to(config.email_reply_to.clone());
+        #[cfg(not(any(feature = "postmark", feature = "twilio")))]
+        let sink = {
+            let _ = (vault, scope);
+            Self::empty(config.email_from.clone())
+                .with_email_reply_to(config.email_reply_to.clone())
+        };
         #[cfg(feature = "postmark")]
         {
             sink.email = optional_postmark_client(vault.clone(), scope, config).await?;
@@ -303,26 +312,35 @@ pub struct EnvironmentDeliveryCredentialVault;
 #[async_trait]
 impl CredentialVault for EnvironmentDeliveryCredentialVault {
     async fn get(&self, service: &str, _scope: &str) -> Result<Credential> {
-        let value = match service {
-            #[cfg(feature = "postmark")]
-            POSTMARK_SERVER_TOKEN_SERVICE => required_env(POSTMARK_SERVER_API_TOKEN_ENV)?,
-            #[cfg(feature = "twilio")]
-            TWILIO_ACCOUNT_SID_SERVICE => required_env(TWILIO_ACCOUNT_SID_ENV)?,
-            #[cfg(feature = "twilio")]
-            TWILIO_AUTH_TOKEN_SERVICE => required_env(TWILIO_AUTH_TOKEN_ENV)?,
-            #[cfg(feature = "twilio")]
-            TWILIO_API_KEY_SID_SERVICE => required_env(TWILIO_API_KEY_SID_ENV)?,
-            #[cfg(feature = "twilio")]
-            TWILIO_API_KEY_SECRET_SERVICE => required_env(TWILIO_API_KEY_SECRET_ENV)?,
-            #[cfg(feature = "twilio")]
-            TWILIO_FROM_NUMBER_SERVICE => required_env(TWILIO_FROM_NUMBER_ENV)?,
-            #[cfg(feature = "twilio")]
-            TWILIO_MESSAGING_SERVICE_SID_SERVICE => required_env(TWILIO_MESSAGING_SERVICE_SID_ENV)?,
-            _ => {
-                return Err(MoaError::MissingEnvironmentVariable(service.to_string()));
-            }
-        };
-        Ok(Credential::Bearer(value))
+        #[cfg(any(feature = "postmark", feature = "twilio"))]
+        {
+            let value = match service {
+                #[cfg(feature = "postmark")]
+                POSTMARK_SERVER_TOKEN_SERVICE => required_env(POSTMARK_SERVER_API_TOKEN_ENV)?,
+                #[cfg(feature = "twilio")]
+                TWILIO_ACCOUNT_SID_SERVICE => required_env(TWILIO_ACCOUNT_SID_ENV)?,
+                #[cfg(feature = "twilio")]
+                TWILIO_AUTH_TOKEN_SERVICE => required_env(TWILIO_AUTH_TOKEN_ENV)?,
+                #[cfg(feature = "twilio")]
+                TWILIO_API_KEY_SID_SERVICE => required_env(TWILIO_API_KEY_SID_ENV)?,
+                #[cfg(feature = "twilio")]
+                TWILIO_API_KEY_SECRET_SERVICE => required_env(TWILIO_API_KEY_SECRET_ENV)?,
+                #[cfg(feature = "twilio")]
+                TWILIO_FROM_NUMBER_SERVICE => required_env(TWILIO_FROM_NUMBER_ENV)?,
+                #[cfg(feature = "twilio")]
+                TWILIO_MESSAGING_SERVICE_SID_SERVICE => {
+                    required_env(TWILIO_MESSAGING_SERVICE_SID_ENV)?
+                }
+                _ => {
+                    return Err(MoaError::MissingEnvironmentVariable(service.to_string()));
+                }
+            };
+            Ok(Credential::Bearer(value))
+        }
+        #[cfg(not(any(feature = "postmark", feature = "twilio")))]
+        {
+            Err(MoaError::MissingEnvironmentVariable(service.to_string()))
+        }
     }
 
     async fn set(&self, _service: &str, _scope: &str, _cred: Credential) -> Result<()> {
@@ -338,32 +356,39 @@ impl CredentialVault for EnvironmentDeliveryCredentialVault {
     }
 
     async fn list(&self, _scope: &str) -> Result<Vec<String>> {
-        let mut services = Vec::new();
-        #[cfg(feature = "postmark")]
-        if optional_env(POSTMARK_SERVER_API_TOKEN_ENV).is_some() {
-            services.push(POSTMARK_SERVER_TOKEN_SERVICE.to_string());
-        }
-        #[cfg(feature = "twilio")]
+        #[cfg(not(any(feature = "postmark", feature = "twilio")))]
         {
-            if optional_env(TWILIO_ACCOUNT_SID_ENV).is_some() {
-                services.push(TWILIO_ACCOUNT_SID_SERVICE.to_string());
+            Ok(Vec::new())
+        }
+        #[cfg(any(feature = "postmark", feature = "twilio"))]
+        {
+            let mut services = Vec::new();
+            #[cfg(feature = "postmark")]
+            if optional_env(POSTMARK_SERVER_API_TOKEN_ENV).is_some() {
+                services.push(POSTMARK_SERVER_TOKEN_SERVICE.to_string());
             }
-            for (service, env_name) in [
-                (TWILIO_AUTH_TOKEN_SERVICE, TWILIO_AUTH_TOKEN_ENV),
-                (TWILIO_API_KEY_SID_SERVICE, TWILIO_API_KEY_SID_ENV),
-                (TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SECRET_ENV),
-                (TWILIO_FROM_NUMBER_SERVICE, TWILIO_FROM_NUMBER_ENV),
-                (
-                    TWILIO_MESSAGING_SERVICE_SID_SERVICE,
-                    TWILIO_MESSAGING_SERVICE_SID_ENV,
-                ),
-            ] {
-                if optional_env(env_name).is_some() {
-                    services.push(service.to_string());
+            #[cfg(feature = "twilio")]
+            {
+                if optional_env(TWILIO_ACCOUNT_SID_ENV).is_some() {
+                    services.push(TWILIO_ACCOUNT_SID_SERVICE.to_string());
+                }
+                for (service, env_name) in [
+                    (TWILIO_AUTH_TOKEN_SERVICE, TWILIO_AUTH_TOKEN_ENV),
+                    (TWILIO_API_KEY_SID_SERVICE, TWILIO_API_KEY_SID_ENV),
+                    (TWILIO_API_KEY_SECRET_SERVICE, TWILIO_API_KEY_SECRET_ENV),
+                    (TWILIO_FROM_NUMBER_SERVICE, TWILIO_FROM_NUMBER_ENV),
+                    (
+                        TWILIO_MESSAGING_SERVICE_SID_SERVICE,
+                        TWILIO_MESSAGING_SERVICE_SID_ENV,
+                    ),
+                ] {
+                    if optional_env(env_name).is_some() {
+                        services.push(service.to_string());
+                    }
                 }
             }
+            Ok(services)
         }
-        Ok(services)
     }
 }
 
@@ -393,10 +418,12 @@ async fn optional_twilio_client(
     }
 }
 
+#[cfg(any(feature = "postmark", feature = "twilio"))]
 fn required_env(name: &str) -> Result<String> {
     optional_env(name).ok_or_else(|| MoaError::MissingEnvironmentVariable(name.to_string()))
 }
 
+#[cfg(any(feature = "postmark", feature = "twilio"))]
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()

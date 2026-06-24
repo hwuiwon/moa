@@ -3,7 +3,8 @@
 use moa_eval::{JsonReporter, Reporter};
 use moa_eval_core::engine::{EvalRun, RunSummary};
 use moa_eval_core::{
-    AgentConfig, EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TestCase, TestSuite,
+    AgentConfig, EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus, TestCase,
+    TestSuite,
 };
 use tempfile::tempdir;
 
@@ -39,7 +40,7 @@ async fn json_reporter_writes_valid_json() {
             scores: vec![EvalScore {
                 evaluator: "output_match".to_string(),
                 name: "output_match".to_string(),
-                value: ScoreValue::Numeric(1.0),
+                value: EvalScoreValue::Numeric(1.0),
                 comment: None,
             }],
             metrics: EvalMetrics {

@@ -18,6 +18,7 @@ futures-util.workspace = true
 globset.workspace = true
 ignore = "0.4"
 moa-core = { workspace = true }
+moa-observability = { workspace = true }
 moa-security = { workspace = true }
 opentelemetry.workspace = true
 regex.workspace = true

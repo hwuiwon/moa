@@ -6,8 +6,8 @@ use moa_core::{
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
-    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, LineageEvent, ScoreRecord,
-    ScoreSource, ScoreTarget, ScoreValue, TokenUsage, ToolCallSummary, TurnId,
+    CitationLineage, ContextChunk, ContextLineage, GenerationLineage, GenerationTokenUsage,
+    LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, ToolCallSummary, TurnId,
 };
 
 /// Emits compiled-context lineage and returns citable source chunks for citation checks.
@@ -180,7 +180,7 @@ pub async fn emit_generation_lineage(
         provider: provider.to_string(),
         request_model: request_model.to_string(),
         response_model: response.model.to_string(),
-        usage: TokenUsage {
+        usage: GenerationTokenUsage {
             input_tokens: usage.total_input_tokens().min(u32::MAX as usize) as u32,
             output_tokens: usage.output_tokens.min(u32::MAX as usize) as u32,
             cache_read_tokens: Some(usage.input_tokens_cache_read.min(u32::MAX as usize) as u32),

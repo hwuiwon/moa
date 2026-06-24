@@ -313,13 +313,34 @@ pub struct ExperimentTargetVariant {
 }
 
 /// Runtime target kind for one experiment-plan variant.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExperimentTargetKind {
     /// Existing open-ended agent-loop session path.
     AgentLoop,
     /// Artifact-backed workflow runtime path.
     Workflow,
+}
+
+impl ExperimentTargetKind {
+    /// Returns the persisted database representation for this target kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentLoop => "agent_loop",
+            Self::Workflow => "workflow",
+        }
+    }
+
+    /// Parses a target kind loaded from durable storage.
+    #[must_use]
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "agent_loop" => Some(Self::AgentLoop),
+            "workflow" => Some(Self::Workflow),
+            _ => None,
+        }
+    }
 }
 
 /// Cost and token limits for an experiment plan.

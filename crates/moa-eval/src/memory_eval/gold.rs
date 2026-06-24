@@ -5,12 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContactId, ScopeContext, TenantId, UserId, WorkspaceId};
+use moa_core::{ContactId, TenantId, UserId, WorkspaceId};
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
     ingest_turn_direct_with_ctx,
 };
+use moa_memory_types::{ScopeContext, ScopeTier};
 use moa_memory_vector::PgvectorStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -978,10 +979,10 @@ fn match_tokens(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn scope_tier_str(scope: moa_core::ScopeTier) -> &'static str {
+fn scope_tier_str(scope: ScopeTier) -> &'static str {
     match scope {
-        moa_core::ScopeTier::Tenant => "tenant",
-        moa_core::ScopeTier::Contact => "contact",
+        ScopeTier::Tenant => "tenant",
+        ScopeTier::Contact => "contact",
     }
 }
 
@@ -1088,8 +1089,9 @@ pub(crate) struct FactSource<'a> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+    use moa_core::{SessionId, UserId, WorkspaceId};
     use moa_memory_ingest::ScriptedFactExtractor;
+    use moa_memory_types::ScopeTier;
     use serde_json::json;
 
     #[test]

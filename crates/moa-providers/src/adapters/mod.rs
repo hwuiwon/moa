@@ -2,8 +2,7 @@
 
 pub mod anthropic;
 pub mod gemini;
-pub mod openai_chat;
-pub(crate) mod openai_responses;
+pub mod openai_responses;
 
 #[cfg(any(test, feature = "scripted-provider"))]
 pub mod scripted;

@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use moa_core::{
-    ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SessionStore,
-    record_context_pipeline_construction, record_retrieval_embedder_construction,
+    ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SegmentStore, SessionStore,
     traits::EmbeddingProvider,
 };
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
+use moa_observability::{
+    record_context_pipeline_construction, record_retrieval_embedder_construction,
+};
 
 use super::agent_instructions::AgentInstructionProcessor;
 use super::compactor::Compactor;
@@ -85,6 +87,8 @@ pub struct GraphMemoryPipelineOptions {
     pub retrieval_embedder: Option<Arc<dyn EmbeddingProvider>>,
     /// Optional process-wide skill injector reused across pipelines.
     pub shared_skill_injector: Option<Arc<SkillInjector>>,
+    /// Optional segment analytics store used by skill-ranking signals.
+    pub segment_store: Option<Arc<dyn SegmentStore>>,
     /// Optional LLM provider used by context compaction.
     pub compaction_llm_provider: Option<Arc<dyn LLMProvider>>,
     /// Optional LLM provider used by query rewriting.
@@ -155,6 +159,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         shared_graph_memory_retriever,
         retrieval_embedder,
         shared_skill_injector,
+        segment_store,
         compaction_llm_provider,
         query_rewrite_llm_provider,
         identity_prompt_override,
@@ -228,11 +233,15 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
         stages.push(query_rewriter);
     }
     let skill_injector = shared_skill_injector.unwrap_or_else(|| {
-        Arc::new(
-            SkillInjector::new(graph_pool.clone())
-                .with_session_store(session_store.clone())
-                .with_budget_config(config.skill_budget.clone()),
-        )
+        let injector = SkillInjector::new(graph_pool.clone())
+            .with_session_store(session_store.clone())
+            .with_budget_config(config.skill_budget.clone());
+        let injector = if let Some(segment_store) = segment_store {
+            injector.with_segment_store(segment_store)
+        } else {
+            injector
+        };
+        Arc::new(injector)
     });
     stages.push(Box::new(SharedSkillInjector::new(skill_injector)));
     if config.memory.digest.enabled {

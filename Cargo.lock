@@ -3020,6 +3020,7 @@ dependencies = [
  "hex",
  "moa-artifacts",
  "moa-core",
+ "moa-db",
  "moa-session",
  "serde",
  "serde_json",
@@ -3037,6 +3038,8 @@ dependencies = [
  "chrono",
  "hex",
  "moa-core",
+ "moa-db",
+ "moa-memory-types",
  "moa-session",
  "serde",
  "serde_canonical_json",
@@ -3065,6 +3068,7 @@ dependencies = [
  "moa-authz-schema",
  "moa-core",
  "moa-migrations",
+ "moa-observability",
  "moka",
  "rand 0.8.5",
  "reqwest 0.13.2",
@@ -3149,13 +3153,16 @@ dependencies = [
  "metrics",
  "moa-artifacts",
  "moa-core",
+ "moa-db",
  "moa-hands",
  "moa-lineage-citation",
  "moa-lineage-core",
  "moa-memory-graph",
  "moa-memory-ingest",
  "moa-memory-pii",
+ "moa-memory-types",
  "moa-memory-vector",
+ "moa-observability",
  "moa-providers",
  "moa-security",
  "moa-session",
@@ -3180,6 +3187,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-contacts"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "hex",
+ "moa-core",
+ "moa-messaging",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "moa-core"
 version = "0.1.0"
 dependencies = [
@@ -3187,11 +3213,6 @@ dependencies = [
  "chrono",
  "envy",
  "metrics",
- "metrics-exporter-prometheus",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "reqwest 0.13.2",
  "secrecy",
  "serde",
  "serde_json",
@@ -3202,13 +3223,21 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-metrics",
  "tokio-util",
  "tracing",
- "tracing-appender",
- "tracing-opentelemetry",
- "tracing-subscriber",
+ "url",
  "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moa-db"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "moa-core",
+ "moa-memory-types",
+ "sqlx",
  "workspace-hack",
 ]
 
@@ -3224,6 +3253,7 @@ dependencies = [
  "hmac",
  "moa-auth-providers",
  "moa-core",
+ "moa-observability",
  "moa-ocsf",
  "reqwest 0.13.2",
  "serde",
@@ -3247,6 +3277,7 @@ dependencies = [
  "futures-util",
  "moa-brain",
  "moa-core",
+ "moa-db",
  "moa-eval-core",
  "moa-hands",
  "moa-lineage-core",
@@ -3254,6 +3285,7 @@ dependencies = [
  "moa-memory-ingest",
  "moa-memory-lifecycle",
  "moa-memory-pii",
+ "moa-memory-types",
  "moa-memory-vector",
  "moa-providers",
  "moa-security",
@@ -3305,6 +3337,9 @@ dependencies = [
  "chrono",
  "moa-artifacts",
  "moa-core",
+ "moa-db",
+ "moa-memory-types",
+ "moa-observability",
  "moa-scoring",
  "moa-test-support",
  "serde",
@@ -3345,6 +3380,7 @@ dependencies = [
  "globset",
  "ignore",
  "moa-core",
+ "moa-observability",
  "moa-security",
  "moa-session",
  "opentelemetry",
@@ -3417,6 +3453,7 @@ dependencies = [
  "blake3",
  "chrono",
  "moa-core",
+ "moa-memory-types",
  "serde",
  "serde_canonical_json",
  "serde_json",
@@ -3449,6 +3486,7 @@ dependencies = [
  "moa-core",
  "moa-lineage-core",
  "moa-lineage-otel",
+ "moa-memory-types",
  "moa-migrations",
  "serde",
  "serde_json",
@@ -3476,8 +3514,11 @@ dependencies = [
  "moa-authz",
  "moa-brain",
  "moa-core",
+ "moa-db",
  "moa-memory-graph",
+ "moa-memory-types",
  "moa-memory-vector",
+ "moa-observability",
  "moa-session",
  "rand 0.8.5",
  "reqwest 0.13.2",
@@ -3500,6 +3541,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "moa-core",
+ "moa-db",
+ "moa-memory-types",
  "moa-memory-vector",
  "moa-session",
  "moa-test-support",
@@ -3523,9 +3566,11 @@ dependencies = [
  "chrono",
  "metrics",
  "moa-core",
+ "moa-db",
  "moa-hands",
  "moa-memory-graph",
  "moa-memory-pii",
+ "moa-memory-types",
  "moa-memory-vector",
  "moa-session",
  "moa-test-support",
@@ -3555,6 +3600,7 @@ dependencies = [
  "moa-core",
  "moa-memory-graph",
  "moa-memory-ingest",
+ "moa-memory-types",
  "moa-memory-vector",
  "moa-test-support",
  "serde",
@@ -3573,7 +3619,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "moa-core",
+ "moa-db",
  "moa-memory-graph",
+ "moa-memory-types",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3587,6 +3635,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-memory-types"
+version = "0.1.0"
+dependencies = [
+ "moa-core",
+ "serde",
+ "serde_json",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-memory-vector"
 version = "0.1.0"
 dependencies = [
@@ -3594,6 +3653,8 @@ dependencies = [
  "backon",
  "chrono",
  "moa-core",
+ "moa-db",
+ "moa-memory-types",
  "moa-session",
  "moa-test-support",
  "pgvector",
@@ -3649,6 +3710,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moa-observability"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "metrics-exporter-prometheus",
+ "moa-core",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest 0.13.2",
+ "tokio",
+ "tokio-metrics",
+ "tracing",
+ "tracing-appender",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moa-ocsf"
 version = "0.1.0"
 dependencies = [
@@ -3693,7 +3774,9 @@ dependencies = [
  "moa-authz",
  "moa-authz-schema",
  "moa-brain",
+ "moa-contacts",
  "moa-core",
+ "moa-db",
  "moa-eval",
  "moa-eval-core",
  "moa-experiments",
@@ -3706,9 +3789,11 @@ dependencies = [
  "moa-memory-ingest",
  "moa-memory-lifecycle",
  "moa-memory-pii",
+ "moa-memory-types",
  "moa-memory-vector",
  "moa-messaging",
  "moa-migrations",
+ "moa-observability",
  "moa-ocsf",
  "moa-providers",
  "moa-scoring",
@@ -3750,6 +3835,7 @@ dependencies = [
  "futures-util",
  "insta",
  "moa-core",
+ "moa-observability",
  "moa-test-support",
  "opentelemetry",
  "reqwest 0.13.2",
@@ -3801,7 +3887,9 @@ dependencies = [
  "chrono",
  "hex",
  "moa-core",
+ "moa-db",
  "moa-migrations",
+ "moa-observability",
  "moa-security",
  "moa-test-support",
  "proptest",
@@ -3828,8 +3916,10 @@ dependencies = [
  "hex",
  "moa-artifacts",
  "moa-core",
+ "moa-db",
  "moa-eval-core",
  "moa-memory-graph",
+ "moa-memory-types",
  "moa-providers",
  "moa-session",
  "moa-test-support",
@@ -7919,6 +8009,7 @@ dependencies = [
  "base64 0.22.1",
  "bitflags 2.11.0",
  "byteorder",
+ "cc",
  "chrono",
  "clap",
  "clap_builder",
@@ -7934,6 +8025,7 @@ dependencies = [
  "form_urlencoded",
  "futures-channel",
  "futures-core",
+ "futures-executor",
  "futures-sink",
  "futures-task",
  "futures-util",
@@ -7994,6 +8086,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-core",
+ "tracing-log",
  "tracing-subscriber",
  "typenum",
  "url",

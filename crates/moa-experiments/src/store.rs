@@ -1,10 +1,10 @@
 //! Storage boundary for durable experiment records.
 
 use chrono::{DateTime, Utc};
-use moa_core::{
-    ActionRuleScope, MoaError, ModelId, Result as MoaResult, ScopeContext, ScopedConn, SessionId,
-    TenantId,
-};
+use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::{ActionRuleScope, MoaError, ModelId, Result as MoaResult, SessionId, TenantId};
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use moa_scoring::{
     SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL, ensure_score_run_parent,
 };
@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
-    ExperimentVariant, NewExperimentRun, NewExperimentTrial,
+    ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
+    NewExperimentRun, NewExperimentTrial,
 };
 
 /// Postgres-backed repository for experiment run metadata.

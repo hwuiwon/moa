@@ -10,19 +10,22 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
     AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContextMessage, ContextProcessor,
-    ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MemoryScope, MoaError,
-    NullLineageHandle, ProcessorOutput, QueryRewriteResult, Result, RewriteSource, ScopeContext,
-    ScopeTier, UserId, WorkingContext, WorkspaceId, traits::EmbeddingProvider,
+    ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MoaError, NullLineageHandle,
+    ProcessorOutput, QueryRewriteResult, Result, RewriteSource, UserId, WorkingContext,
+    WorkspaceId, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
     ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, PiiClass};
+use moa_memory_types::{MemoryScope, ScopeContext, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use sqlx::PgPool;
 use tracing::Span;
 use uuid::Uuid;
+
+use crate::retrieval::PlannedRetriever;
 
 const MEMORY_BUDGET_DIVISOR: usize = 5;
 const GRAPH_MEMORY_RESULTS: usize = 4;
@@ -39,6 +42,7 @@ pub struct GraphMemoryRetriever {
     result_limit: usize,
     planner: crate::planning::QueryPlanner,
     scoped_runtimes: Mutex<HashMap<MemoryScope, Arc<ScopedRetrievalRuntime>>>,
+    runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
 }
 
 /// Shared graph-memory retrieval stage backed by a process-wide retriever.
@@ -70,9 +74,81 @@ impl ContextProcessor for SharedGraphMemoryRetriever {
     }
 }
 
-struct ScopedRetrievalRuntime {
+/// Runtime backends for one graph-memory scope.
+pub struct ScopedRetrievalRuntime {
     graph: Arc<dyn GraphStore>,
-    hybrid: Arc<crate::retrieval::CachedHybridRetriever>,
+    hybrid: Arc<dyn PlannedRetriever>,
+}
+
+impl ScopedRetrievalRuntime {
+    /// Creates a scoped runtime from graph planning and retrieval backends.
+    #[must_use]
+    pub fn new(graph: Arc<dyn GraphStore>, hybrid: Arc<dyn PlannedRetriever>) -> Self {
+        Self { graph, hybrid }
+    }
+}
+
+/// Factory for building graph-memory retrieval runtimes for individual scopes.
+pub trait ScopedRetrievalRuntimeFactory: Send + Sync {
+    /// Builds graph-memory backends for one memory scope.
+    fn build_runtime(
+        &self,
+        scope: &MemoryScope,
+        config: &moa_core::MoaConfig,
+        pool: &PgPool,
+        assume_app_role: bool,
+    ) -> ScopedRetrievalRuntime;
+}
+
+#[derive(Debug, Default)]
+struct PostgresScopedRetrievalRuntimeFactory;
+
+impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
+    fn build_runtime(
+        &self,
+        scope: &MemoryScope,
+        config: &moa_core::MoaConfig,
+        pool: &PgPool,
+        assume_app_role: bool,
+    ) -> ScopedRetrievalRuntime {
+        let scope_context = ScopeContext::from(scope.clone());
+        let vector: Arc<dyn VectorStore> = if assume_app_role {
+            Arc::new(PgvectorStore::new_for_app_role(
+                pool.clone(),
+                scope_context.clone(),
+            ))
+        } else {
+            Arc::new(PgvectorStore::new(pool.clone(), scope_context.clone()))
+        };
+        let graph_store = if assume_app_role {
+            AgeGraphStore::scoped_for_app_role(pool.clone(), scope_context)
+        } else {
+            AgeGraphStore::scoped(pool.clone(), scope_context)
+        }
+        .with_vector_store(vector.clone());
+        let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
+        let hybrid = Arc::new(
+            crate::retrieval::HybridRetriever::from_config(
+                config,
+                pool.clone(),
+                graph.clone(),
+                vector,
+            )
+            .with_assume_app_role(assume_app_role),
+        );
+        let cached: Arc<dyn PlannedRetriever> = if assume_app_role {
+            Arc::new(crate::retrieval::CachedHybridRetriever::new_for_app_role(
+                hybrid,
+                pool.clone(),
+            ))
+        } else {
+            Arc::new(crate::retrieval::CachedHybridRetriever::new(
+                hybrid,
+                pool.clone(),
+            ))
+        };
+        ScopedRetrievalRuntime::new(graph, cached)
+    }
 }
 
 impl GraphMemoryRetriever {
@@ -98,6 +174,7 @@ impl GraphMemoryRetriever {
             result_limit: GRAPH_MEMORY_RESULTS,
             planner: crate::planning::QueryPlanner::new(),
             scoped_runtimes: Mutex::new(HashMap::new()),
+            runtime_factory: Arc::new(PostgresScopedRetrievalRuntimeFactory),
         }
     }
 
@@ -119,6 +196,17 @@ impl GraphMemoryRetriever {
     #[must_use]
     pub fn with_result_limit(mut self, result_limit: usize) -> Self {
         self.result_limit = result_limit;
+        self
+    }
+
+    /// Overrides the scoped runtime factory used to build retrieval backends.
+    #[must_use]
+    pub fn with_scoped_runtime_factory(
+        mut self,
+        runtime_factory: Arc<dyn ScopedRetrievalRuntimeFactory>,
+    ) -> Self {
+        self.runtime_factory = runtime_factory;
+        self.scoped_runtimes = Mutex::new(HashMap::new());
         self
     }
 
@@ -174,7 +262,7 @@ impl GraphMemoryRetriever {
                 &self.planner,
                 &planning,
                 embedder,
-                &runtime.hybrid,
+                runtime.hybrid.as_ref(),
                 max_pii_class,
             )
             .with_k_final(result_limit)
@@ -240,40 +328,8 @@ impl GraphMemoryRetriever {
     }
 
     fn build_runtime_for_scope(&self, scope: &MemoryScope) -> ScopedRetrievalRuntime {
-        let scope_context = ScopeContext::from(scope.clone());
-        let vector: Arc<dyn VectorStore> = if self.assume_app_role {
-            Arc::new(PgvectorStore::new_for_app_role(
-                self.pool.clone(),
-                scope_context.clone(),
-            ))
-        } else {
-            Arc::new(PgvectorStore::new(self.pool.clone(), scope_context.clone()))
-        };
-        let graph_store = if self.assume_app_role {
-            AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope_context)
-        } else {
-            AgeGraphStore::scoped(self.pool.clone(), scope_context)
-        }
-        .with_vector_store(vector.clone());
-        let graph: Arc<dyn GraphStore> = Arc::new(graph_store);
-        let hybrid = Arc::new(
-            crate::retrieval::HybridRetriever::from_config(
-                &self.config,
-                self.pool.clone(),
-                graph.clone(),
-                vector,
-            )
-            .with_assume_app_role(self.assume_app_role),
-        );
-        let cached = if self.assume_app_role {
-            crate::retrieval::CachedHybridRetriever::new_for_app_role(hybrid, self.pool.clone())
-        } else {
-            crate::retrieval::CachedHybridRetriever::new(hybrid, self.pool.clone())
-        };
-        ScopedRetrievalRuntime {
-            graph,
-            hybrid: Arc::new(cached),
-        }
+        self.runtime_factory
+            .build_runtime(scope, &self.config, &self.pool, self.assume_app_role)
     }
 }
 
@@ -733,18 +789,129 @@ fn truncate_excerpt(excerpt: &str, max_tokens: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
     use moa_core::{
         AgentKnowledgePolicy, Channel, ContactId, ContactRef, ContactVerificationState,
-        ContextProcessor, MemoryScope, ModelCapabilities, ModelId, QueryRewriteResult, SessionId,
-        SessionMeta, TenantId, TokenPricing, ToolCallFormat, WorkingContext,
+        ContextProcessor, ModelCapabilities, ModelId, QueryRewriteResult, SessionId, SessionMeta,
+        TenantId, TokenPricing, ToolCallFormat, WorkingContext,
     };
     use moa_lineage_core::TurnId;
+    use moa_memory_graph::{
+        EdgeLabel, EdgeWriteIntent, GraphExpansionHit, GraphStore, NodeIndexRow, NodeWriteIntent,
+    };
+    use moa_memory_types::MemoryScope;
     use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
 
     use super::{
-        GraphMemoryRetriever, SharedGraphMemoryRetriever, extract_search_keywords,
-        extract_search_query, memory_scopes_from_context,
+        GraphMemoryRetriever, ScopedRetrievalRuntime, ScopedRetrievalRuntimeFactory,
+        SharedGraphMemoryRetriever, extract_search_keywords, extract_search_query,
+        memory_scopes_from_context,
     };
+
+    #[derive(Debug)]
+    struct NoopGraphStore;
+
+    #[async_trait]
+    impl GraphStore for NoopGraphStore {
+        async fn create_node(&self, _intent: NodeWriteIntent) -> moa_memory_graph::Result<Uuid> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn supersede_node(
+            &self,
+            _old_uid: Uuid,
+            _intent: NodeWriteIntent,
+        ) -> moa_memory_graph::Result<Uuid> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn invalidate_node(&self, _uid: Uuid, _reason: &str) -> moa_memory_graph::Result<()> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn hard_purge(
+            &self,
+            _uid: Uuid,
+            _redaction_marker: &str,
+        ) -> moa_memory_graph::Result<()> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn create_edge(&self, _intent: EdgeWriteIntent) -> moa_memory_graph::Result<Uuid> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn get_node(&self, _uid: Uuid) -> moa_memory_graph::Result<Option<NodeIndexRow>> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn neighbors(
+            &self,
+            _seed: Uuid,
+            _hops: u8,
+            _edge_filter: Option<&[EdgeLabel]>,
+            _as_of: Option<DateTime<Utc>>,
+        ) -> moa_memory_graph::Result<Vec<NodeIndexRow>> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn expand_seeds(
+            &self,
+            _seeds: &[Uuid],
+            _max_hops: u8,
+            _as_of: Option<DateTime<Utc>>,
+        ) -> moa_memory_graph::Result<Vec<GraphExpansionHit>> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+
+        async fn lookup_seeds(
+            &self,
+            _name: &str,
+            _limit: i64,
+            _as_of: Option<DateTime<Utc>>,
+        ) -> moa_memory_graph::Result<Vec<NodeIndexRow>> {
+            panic!("NoopGraphStore should not be called by runtime factory tests")
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopPlannedRetriever;
+
+    #[async_trait]
+    impl crate::retrieval::PlannedRetriever for NoopPlannedRetriever {
+        async fn retrieve(
+            &self,
+            _planned: &crate::planning::PlannedQuery,
+            _req: crate::retrieval::RetrievalRequest,
+        ) -> crate::retrieval::Result<Vec<crate::retrieval::RetrievalHit>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CountingRuntimeFactory {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ScopedRetrievalRuntimeFactory for CountingRuntimeFactory {
+        fn build_runtime(
+            &self,
+            _scope: &MemoryScope,
+            _config: &moa_core::MoaConfig,
+            _pool: &sqlx::PgPool,
+            _assume_app_role: bool,
+        ) -> ScopedRetrievalRuntime {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ScopedRetrievalRuntime::new(Arc::new(NoopGraphStore), Arc::new(NoopPlannedRetriever))
+        }
+    }
 
     #[tokio::test]
     async fn shared_graph_memory_retriever_preserves_processor_identity() {
@@ -802,6 +969,39 @@ mod tests {
             1,
             "tenant scopes should still reuse one cached runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_runtime_factory_can_be_injected_without_postgres_stores() {
+        // Pins: graph-memory tests can inject scope runtimes instead of constructing PG stores.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retriever = GraphMemoryRetriever::new(pool, None).with_scoped_runtime_factory(
+            Arc::new(CountingRuntimeFactory {
+                calls: calls.clone(),
+            }),
+        );
+        let tenant_id = TenantId::new();
+        let tenant_scope = MemoryScope::Tenant { tenant_id };
+        let contact_scope = MemoryScope::Contact {
+            tenant_id,
+            contact_id: ContactId::new(),
+        };
+
+        retriever
+            .runtime_for_scope(&tenant_scope)
+            .expect("tenant runtime should build from injected factory");
+        retriever
+            .runtime_for_scope(&tenant_scope)
+            .expect("tenant runtime should be cached");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        retriever
+            .runtime_for_scope(&contact_scope)
+            .expect("contact runtime should build from injected factory");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

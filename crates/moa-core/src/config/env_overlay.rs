@@ -407,7 +407,7 @@ impl MoaEnvOverlay {
             ),
         ] {
             if let Some(value) = value {
-                reqwest::Url::parse(value).map_err(|error| parse_error(env_name, value, error))?;
+                url::Url::parse(value).map_err(|error| parse_error(env_name, value, error))?;
             }
         }
         Ok(())

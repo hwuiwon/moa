@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryRankingConfig, MemoryRankingWeights, MemoryScope};
+use moa_core::{MemoryRankingConfig, MemoryRankingWeights};
 use moa_memory_graph::NodeIndexRow;
+use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 
 /// Ranking pipeline version included in cache fingerprints.

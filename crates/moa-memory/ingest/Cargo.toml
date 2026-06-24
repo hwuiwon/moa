@@ -13,8 +13,10 @@ async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 moa-core = { workspace = true }
+moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
 moa-memory-pii = { workspace = true }
+moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moka.workspace = true
 metrics.workspace = true

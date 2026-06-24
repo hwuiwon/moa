@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{ContactId, ScopeContext, ScopedConn, TenantId, traits::EmbeddingProvider};
+use moa_core::{ContactId, TenantId, traits::EmbeddingProvider};
+use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastError, FastPathCtx,
     FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde_json::json;

@@ -4,8 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+use moa_core::{SessionId, UserId, WorkspaceId};
 use moa_memory_graph::PiiClass;
+use moa_memory_types::ScopeTier;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;
@@ -559,8 +560,9 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+    use moa_core::{SessionId, UserId, WorkspaceId};
     use moa_memory_graph::PiiClass;
+    use moa_memory_types::ScopeTier;
     use uuid::Uuid;
 
     use super::{

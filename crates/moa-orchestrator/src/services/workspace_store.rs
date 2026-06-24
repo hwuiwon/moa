@@ -11,7 +11,7 @@ use moa_security::stricter_effect;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Request payload for `WorkspaceStore/prepare_action_review`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

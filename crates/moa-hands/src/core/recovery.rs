@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use moa_core::{
     HandHandle, IdempotencyClass, MoaError, Result, SandboxTier, SessionMeta, ToolDefinition,
-    ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error, record_tool_failure,
-    record_tool_reprovision, record_tool_retry,
+    ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
 };
+use moa_observability::{record_tool_failure, record_tool_reprovision, record_tool_retry};
 use tracing::Instrument;
 
 use crate::adapters::mcp::MCPClient;

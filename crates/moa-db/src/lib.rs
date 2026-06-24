@@ -1,18 +1,23 @@
-//! Postgres helpers shared by MOA storage crates.
+//! Database helpers shared by MOA storage crates.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use moa_core::{ContactId, MoaError, Result, TenantId};
+use moa_memory_types::ScopeContext;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
-
-use crate::{
-    MoaError, Result, ScopeContext, record_scoped_guc_application_duration,
-    record_scoped_transaction_begin_duration,
-};
 
 struct DbScopeGucs {
     tenant_id: Option<String>,
     contact_id: Option<String>,
     control_plane: bool,
+}
+
+fn record_scoped_transaction_begin_duration(duration: Duration) {
+    metrics::histogram!("moa_scoped_transaction_begin_seconds").record(duration.as_secs_f64());
+}
+
+fn record_scoped_guc_application_duration(duration: Duration) {
+    metrics::histogram!("moa_scoped_guc_application_seconds").record(duration.as_secs_f64());
 }
 
 /// Transaction wrapper that installs MOA row-level-security GUCs before use.
@@ -37,15 +42,15 @@ impl<'p> ScopedConn<'p> {
     }
 
     /// Begins a tenant-scoped transaction without contact access.
-    pub async fn begin_tenant(pool: &'p PgPool, tenant_id: crate::TenantId) -> Result<Self> {
+    pub async fn begin_tenant(pool: &'p PgPool, tenant_id: TenantId) -> Result<Self> {
         Self::begin(pool, &ScopeContext::tenant(tenant_id)).await
     }
 
     /// Begins a contact-scoped transaction inside one tenant.
     pub async fn begin_contact(
         pool: &'p PgPool,
-        tenant_id: crate::TenantId,
-        contact_id: crate::ContactId,
+        tenant_id: TenantId,
+        contact_id: ContactId,
     ) -> Result<Self> {
         Self::begin(pool, &ScopeContext::contact(tenant_id, contact_id)).await
     }

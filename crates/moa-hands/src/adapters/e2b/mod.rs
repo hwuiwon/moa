@@ -28,6 +28,8 @@ use client::{
     expect_success_json, http_error, parse_e2b_connect_stream, required_string_field, shell_escape,
 };
 
+use super::tool_route::{CloudSandboxToolRoute, unsupported_tool};
+
 const DEFAULT_E2B_API_URL: &str = "https://api.e2b.dev";
 const DEFAULT_E2B_DOMAIN: &str = "e2b.app";
 const DEFAULT_E2B_TEMPLATE: &str = "base";
@@ -408,8 +410,8 @@ impl HandProvider for E2BHandProvider {
         };
         let sandbox = self.connected_sandbox(sandbox_id).await?;
         let payload: Value = serde_json::from_str(input)?;
-        match tool {
-            "bash" => {
+        match CloudSandboxToolRoute::from_name(tool) {
+            Some(CloudSandboxToolRoute::Bash) => {
                 self.execute_bash(
                     sandbox_id,
                     &sandbox,
@@ -417,7 +419,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            "file_read" => {
+            Some(CloudSandboxToolRoute::FileRead) => {
                 self.read_file(
                     sandbox_id,
                     &sandbox,
@@ -425,7 +427,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            "str_replace" => {
+            Some(CloudSandboxToolRoute::StrReplace) => {
                 self.str_replace_file(
                     sandbox_id,
                     &sandbox,
@@ -434,7 +436,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            "file_write" => {
+            Some(CloudSandboxToolRoute::FileWrite) => {
                 self.write_file(
                     sandbox_id,
                     &sandbox,
@@ -443,7 +445,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            "file_search" => {
+            Some(CloudSandboxToolRoute::FileSearch) => {
                 let pattern = shell_escape(required_string_field(&payload, "pattern")?);
                 self.execute_bash(
                     sandbox_id,
@@ -452,9 +454,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            other => Err(MoaError::ToolError(format!(
-                "unsupported E2B tool: {other}"
-            ))),
+            None => Err(unsupported_tool("E2B", tool)),
         }
     }
 

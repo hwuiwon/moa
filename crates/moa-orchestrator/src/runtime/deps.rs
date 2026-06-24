@@ -9,9 +9,10 @@ use moa_brain::{
     build_graph_memory_retriever,
     pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector},
 };
-use moa_core::{MoaConfig, record_retrieval_embedder_construction, traits::EmbeddingProvider};
+use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_hands::ToolRouter;
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
+use moa_observability::record_retrieval_embedder_construction;
 use moa_providers::{ProviderRegistry, build_embedding_provider_from_config};
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
@@ -106,13 +107,14 @@ impl RuntimeDeps {
         let retrieval_embedder = build_retrieval_embedder(config.as_ref());
         let graph_memory_retriever = build_graph_memory_retriever(
             config.as_ref(),
-            session_store.pool().clone(),
+            pool.clone(),
             retrieval_embedder,
             lineage.handle.clone(),
         );
         let skill_injector = Arc::new(
-            SkillInjector::new(session_store.pool().clone())
+            SkillInjector::new(pool.clone())
                 .with_session_store(session_store.clone())
+                .with_segment_store(session_store.clone())
                 .with_budget_config(config.skill_budget.clone()),
         );
         let tool_schemas = Arc::new(tool_router.tool_schemas());
@@ -157,10 +159,7 @@ impl RuntimeDeps {
     fn orchestrator_ctx(&self) -> OrchestratorCtx {
         OrchestratorCtx::new(
             self.config.clone(),
-            PersistenceDeps::new(
-                self.session_store.clone(),
-                self.session_store.pool().clone(),
-            ),
+            PersistenceDeps::new(self.session_store.clone(), self.pool.clone()),
             AuthDeps::new(self.fga_client.clone(), self.auth_providers.clone()),
             ProviderDeps::new(self.providers.clone(), self.embedding_provider.clone()),
             ToolDeps::new(self.tool_router.clone(), self.tool_schemas.clone()),

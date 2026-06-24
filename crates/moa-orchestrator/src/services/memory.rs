@@ -8,23 +8,23 @@ use chrono::Utc;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_brain::retrieval::{HybridRetriever, RetrievalHit, RetrievalRequest};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
     MemoryHit, MemoryIngestDocument, MemoryIngestRequest, MemoryIngestResponse, MemoryIngestResult,
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
-use moa_core::{
-    ContactId, MemoryScope, ScopeContext, SessionId, UserId, WorkspaceId, record_memory_operation,
-};
+use moa_core::{ContactId, SessionId, UserId, WorkspaceId};
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
     StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{IngestApplyReport, IngestionVOClient, SessionTurn, ingestion_object_key};
+use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::PgvectorStore;
+use moa_observability::record_memory_operation;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use uuid::{Builder as UuidBuilder, Uuid, Variant, Version};

@@ -16,8 +16,8 @@ use moa_brain::retrieval::{
     RetrievalHit,
 };
 use moa_core::{
-    ContactId, MemoryDigestConfig, MemoryScope, ScopeContext, ScopeTier, TenantId, UserId,
-    WorkspaceId, config::MemoryExtractionConfig, traits::EmbeddingProvider,
+    ContactId, MemoryDigestConfig, TenantId, UserId, WorkspaceId, config::MemoryExtractionConfig,
+    traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_ingest::{
@@ -30,6 +30,7 @@ use moa_memory_ingest::{
 };
 use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoothed_quality};
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
+use moa_memory_types::{MemoryScope, ScopeContext, ScopeTier};
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
 use secrecy::SecretString;

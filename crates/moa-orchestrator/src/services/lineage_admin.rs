@@ -4,7 +4,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     LineageEraseRequest, LineageEraseResponse, LineageExplainRequest, LineageExplainResponse,
     LineageExportRequest, LineageExportResponse, LineageQueryRequest, LineageQueryResponse,
@@ -14,6 +13,7 @@ use moa_core::{TenantId, WorkspaceId};
 use moa_lineage_audit::SigningKey;
 use moa_lineage_audit::admin as lineage_audit_admin;
 use moa_lineage_sink::admin as lineage_sink_admin;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 use uuid::Uuid;

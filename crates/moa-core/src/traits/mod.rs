@@ -163,170 +163,124 @@ pub trait SessionStore: Send + Sync {
     /// must be removed through privacy erasure or tombstoning flows, not destructive event-log
     /// deletes.
     async fn delete_empty_session(&self, session_id: SessionId) -> Result<()>;
+}
 
+/// Focused contract for task-segment persistence and segment-derived aggregates.
+#[async_trait]
+pub trait SegmentStore: Send + Sync {
     /// Persists a task segment metadata row.
-    async fn create_segment(&self, _segment: &TaskSegment) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "task segments are not supported by this session store".to_string(),
-        ))
-    }
+    async fn create_segment(&self, segment: &TaskSegment) -> Result<()>;
 
     /// Marks a task segment as completed and stores final counters.
     async fn complete_segment(
         &self,
-        _segment_id: SegmentId,
-        _update: SegmentCompletion,
-    ) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "task segments are not supported by this session store".to_string(),
-        ))
-    }
+        segment_id: SegmentId,
+        update: SegmentCompletion,
+    ) -> Result<()>;
 
     /// Loads the open task segment for a session, if one exists.
-    async fn get_active_segment(&self, _session_id: SessionId) -> Result<Option<TaskSegment>> {
-        Ok(None)
-    }
+    async fn get_active_segment(&self, session_id: SessionId) -> Result<Option<TaskSegment>>;
 
     /// Lists task segments for a session in segment order.
-    async fn list_segments(&self, _session_id: SessionId) -> Result<Vec<TaskSegment>> {
-        Ok(Vec::new())
-    }
+    async fn list_segments(&self, session_id: SessionId) -> Result<Vec<TaskSegment>>;
 
     /// Updates the assessed outcome and evidence for a task segment.
     async fn update_segment_assessment(
         &self,
-        _segment_id: SegmentId,
-        _assessment: &SegmentAssessment,
-    ) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "task segments are not supported by this session store".to_string(),
-        ))
-    }
+        segment_id: SegmentId,
+        assessment: &SegmentAssessment,
+    ) -> Result<()>;
 
     /// Loads the structural baseline for one tenant.
-    async fn get_segment_baseline(&self, _tenant_id: &str) -> Result<Option<SegmentBaseline>> {
-        Ok(None)
-    }
+    async fn get_segment_baseline(&self, tenant_id: &str) -> Result<Option<SegmentBaseline>>;
 
     /// Lists skill resolution-rate aggregates for ranking.
     async fn list_skill_resolution_rates(
         &self,
-        _tenant_id: &str,
-    ) -> Result<Vec<SkillResolutionRate>> {
-        Ok(Vec::new())
-    }
+        tenant_id: &str,
+    ) -> Result<Vec<SkillResolutionRate>>;
 
     /// Lists task-conditioned strategy success aggregates for one task fingerprint.
     async fn list_task_strategy_success_rates(
         &self,
-        _tenant_id: &str,
-        _task_fingerprint: &str,
-    ) -> Result<Vec<TaskStrategySuccessRate>> {
-        Ok(Vec::new())
-    }
-
-    /// Appends or idempotently refreshes one derived experience record.
-    async fn append_experience_record(&self, _experience: &ExperienceRecord) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "experience records are not supported by this session store".to_string(),
-        ))
-    }
-
-    /// Lists experience records for a session in creation order.
-    async fn list_experience_records(
-        &self,
-        _session_id: SessionId,
-    ) -> Result<Vec<ExperienceRecord>> {
-        Ok(Vec::new())
-    }
-
-    /// Appends attribution records for one or more experiences.
-    async fn append_experience_attributions(
-        &self,
-        _attributions: &[ExperienceAttribution],
-    ) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "experience attributions are not supported by this session store".to_string(),
-        ))
-    }
-
-    /// Lists attributions for one experience.
-    async fn list_experience_attributions(
-        &self,
-        _experience_id: uuid::Uuid,
-    ) -> Result<Vec<ExperienceAttribution>> {
-        Ok(Vec::new())
-    }
-
-    /// Appends or idempotently refreshes one learning candidate.
-    async fn append_learning_candidate(&self, _candidate: &LearningCandidate) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "learning candidates are not supported by this session store".to_string(),
-        ))
-    }
-
-    /// Loads one full learning candidate for a tenant-scoped review path.
-    async fn get_learning_candidate(
-        &self,
-        _workspace_id: &WorkspaceId,
-        _candidate_id: uuid::Uuid,
-    ) -> Result<Option<LearningCandidate>> {
-        Err(MoaError::Unsupported(
-            "learning candidate detail reads are not supported by this session store".to_string(),
-        ))
-    }
-
-    /// Lists current learning candidates for a tenant and optional status.
-    async fn list_learning_candidates(
-        &self,
-        _tenant_id: &str,
-        _status: Option<crate::types::LearningCandidateStatus>,
-        _limit: usize,
-    ) -> Result<Vec<LearningCandidate>> {
-        Ok(Vec::new())
-    }
-
-    /// Applies an explicit candidate status transition.
-    async fn update_learning_candidate_status(
-        &self,
-        _update: &LearningCandidateStatusUpdate,
-    ) -> Result<()> {
-        Err(MoaError::Unsupported(
-            "learning candidate status updates are not supported by this session store".to_string(),
-        ))
-    }
+        tenant_id: &str,
+        task_fingerprint: &str,
+    ) -> Result<Vec<TaskStrategySuccessRate>>;
 
     /// Refreshes materialized analytics views derived from task segments.
-    async fn refresh_segment_materialized_views(&self) -> Result<()> {
-        Ok(())
-    }
+    async fn refresh_segment_materialized_views(&self) -> Result<()>;
 
     /// Records a tool name on the active segment for a session.
     async fn record_active_segment_tool_use(
         &self,
-        _session_id: SessionId,
-        _tool_name: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
+        session_id: SessionId,
+        tool_name: &str,
+    ) -> Result<()>;
 
     /// Records a skill activation on the active segment for a session.
     async fn record_active_segment_skill_activation(
         &self,
-        _session_id: SessionId,
-        _skill_name: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
+        session_id: SessionId,
+        skill_name: &str,
+    ) -> Result<()>;
 
     /// Adds one turn and token usage to the active segment for a session.
     async fn record_active_segment_turn_usage(
         &self,
-        _session_id: SessionId,
-        _token_cost: u64,
-    ) -> Result<()> {
-        Ok(())
-    }
+        session_id: SessionId,
+        token_cost: u64,
+    ) -> Result<()>;
+}
+
+/// Focused contract for assessed experience records and attribution rows.
+#[async_trait]
+pub trait ExperienceStore: Send + Sync {
+    /// Appends or idempotently refreshes one derived experience record.
+    async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()>;
+
+    /// Lists experience records for a session in creation order.
+    async fn list_experience_records(&self, session_id: SessionId)
+    -> Result<Vec<ExperienceRecord>>;
+
+    /// Appends attribution records for one or more experiences.
+    async fn append_experience_attributions(
+        &self,
+        attributions: &[ExperienceAttribution],
+    ) -> Result<()>;
+
+    /// Lists attributions for one experience.
+    async fn list_experience_attributions(
+        &self,
+        experience_id: uuid::Uuid,
+    ) -> Result<Vec<ExperienceAttribution>>;
+}
+
+/// Focused contract for reviewable learning candidates.
+#[async_trait]
+pub trait LearningCandidateStore: Send + Sync {
+    /// Appends or idempotently refreshes one learning candidate.
+    async fn append_learning_candidate(&self, candidate: &LearningCandidate) -> Result<()>;
+
+    /// Loads one full learning candidate for a tenant-scoped review path.
+    async fn get_learning_candidate(
+        &self,
+        workspace_id: &WorkspaceId,
+        candidate_id: uuid::Uuid,
+    ) -> Result<Option<LearningCandidate>>;
+
+    /// Lists current learning candidates for a tenant and optional status.
+    async fn list_learning_candidates(
+        &self,
+        tenant_id: &str,
+        status: Option<crate::types::LearningCandidateStatus>,
+        limit: usize,
+    ) -> Result<Vec<LearningCandidate>>;
+
+    /// Applies an explicit candidate status transition.
+    async fn update_learning_candidate_status(
+        &self,
+        update: &LearningCandidateStatusUpdate,
+    ) -> Result<()>;
 }
 
 /// Durable blob store used by the claim-check session event pattern.

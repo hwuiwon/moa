@@ -1,0 +1,22 @@
+[package]
+name = "moa-contacts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3.workspace = true
+chrono.workspace = true
+hex.workspace = true
+moa-core = { workspace = true }
+moa-messaging.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, ScopeContext, ScopeTier, ScopedConn};
+use moa_db::ScopedConn;
+use moa_memory_types::{MemoryScope, ScopeContext, ScopeTier};
 use moka::future::Cache;
 use sqlx::PgPool;
 
@@ -27,6 +28,17 @@ pub trait RetrievalBackend: Send + Sync {
 
     /// Runs one uncached retrieval request.
     async fn retrieve(&self, req: RetrievalRequest) -> Result<Vec<RetrievalHit>>;
+}
+
+/// Planned retrieval abstraction used by graph-memory pipeline tests and production caches.
+#[async_trait]
+pub trait PlannedRetriever: Send + Sync {
+    /// Retrieves graph-memory hits for an already planned query.
+    async fn retrieve(
+        &self,
+        planned: &PlannedQuery,
+        req: RetrievalRequest,
+    ) -> Result<Vec<RetrievalHit>>;
 }
 
 #[async_trait]
@@ -262,6 +274,17 @@ impl CachedHybridRetriever {
     }
 }
 
+#[async_trait]
+impl PlannedRetriever for CachedHybridRetriever {
+    async fn retrieve(
+        &self,
+        planned: &PlannedQuery,
+        req: RetrievalRequest,
+    ) -> Result<Vec<RetrievalHit>> {
+        CachedHybridRetriever::retrieve(self, planned, req).await
+    }
+}
+
 fn workspace_cache_id(scope: &MemoryScope) -> String {
     scope.tenant_id().to_string()
 }
@@ -371,8 +394,9 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use moa_core::{ContactId, MemoryScope, TenantId};
+    use moa_core::{ContactId, TenantId};
     use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
+    use moa_memory_types::MemoryScope;
     use uuid::Uuid;
 
     use super::*;

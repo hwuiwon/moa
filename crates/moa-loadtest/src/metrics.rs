@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::*;
-use moa_core::TURN_STEP_DURATION_METRIC;
+use moa_observability::TURN_STEP_DURATION_METRIC;
 
 const METRICS_SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
 

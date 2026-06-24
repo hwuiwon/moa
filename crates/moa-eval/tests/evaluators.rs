@@ -1,9 +1,9 @@
 //! Integration tests for built-in evaluators.
 
 use moa_eval_core::{
-    EvalMetrics, EvalResult, EvalScore, Evaluator, ExpectedOutput, OutputMatchEvaluator,
-    ScoreValue, TestCase, ThresholdEvaluator, ToolSuccessEvaluator, TrajectoryMatchEvaluator,
-    TrajectoryStep, score_is_failure,
+    EvalMetrics, EvalResult, EvalScore, EvalScoreValue, Evaluator, ExpectedOutput,
+    OutputMatchEvaluator, TestCase, ThresholdEvaluator, ToolSuccessEvaluator,
+    TrajectoryMatchEvaluator, TrajectoryStep, score_is_failure,
 };
 
 #[tokio::test]
@@ -30,7 +30,7 @@ async fn trajectory_exact_match_scores_one() {
     let scores = Evaluator::evaluate(&evaluator, &case, &result)
         .await
         .expect("score");
-    assert_eq!(scores[0].value, ScoreValue::Numeric(1.0));
+    assert_eq!(scores[0].value, EvalScoreValue::Numeric(1.0));
 }
 
 #[tokio::test]
@@ -51,7 +51,7 @@ async fn output_match_contains_passes() {
     let scores = Evaluator::evaluate(&evaluator, &case, &result)
         .await
         .expect("score");
-    assert_eq!(scores[0].value, ScoreValue::Numeric(1.0));
+    assert_eq!(scores[0].value, EvalScoreValue::Numeric(1.0));
 }
 
 #[tokio::test]
@@ -71,7 +71,7 @@ async fn threshold_cost_over_budget_fails() {
     let scores = Evaluator::evaluate(&evaluator, &TestCase::default(), &result)
         .await
         .expect("score");
-    assert_eq!(scores[0].value, ScoreValue::Boolean(false));
+    assert_eq!(scores[0].value, EvalScoreValue::Boolean(false));
 }
 
 #[tokio::test]
@@ -96,7 +96,7 @@ async fn tool_success_reports_rate() {
     let scores = Evaluator::evaluate(&evaluator, &TestCase::default(), &result)
         .await
         .expect("score");
-    assert_eq!(scores[0].value, ScoreValue::Numeric(0.5));
+    assert_eq!(scores[0].value, EvalScoreValue::Numeric(0.5));
 }
 
 #[test]
@@ -104,13 +104,13 @@ fn low_numeric_scores_fail_quality_gate() {
     let failure = EvalScore {
         evaluator: "test".to_string(),
         name: "score".to_string(),
-        value: ScoreValue::Numeric(0.3),
+        value: EvalScoreValue::Numeric(0.3),
         comment: None,
     };
     let success = EvalScore {
         evaluator: "test".to_string(),
         name: "score".to_string(),
-        value: ScoreValue::Numeric(0.8),
+        value: EvalScoreValue::Numeric(0.8),
         comment: None,
     };
 

@@ -20,6 +20,7 @@ moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers-auth0 = { workspace = true, optional = true }
 moa-core.workspace = true
+moa-observability.workspace = true
 moka.workspace = true
 rand.workspace = true
 secrecy.workspace = true

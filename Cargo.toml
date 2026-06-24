@@ -2,10 +2,13 @@
 resolver = "2"
 members = [
     "crates/moa-core",
+    "crates/moa-db",
     "crates/moa-scoring",
     "crates/moa-agents",
     "crates/moa-artifacts",
     "crates/moa-brain",
+    "crates/moa-contacts",
+    "crates/moa-observability",
     "crates/moa-workflows",
     "crates/moa-session",
     "crates/moa-migrations",
@@ -13,6 +16,7 @@ members = [
     "crates/moa-memory/ingest",
     "crates/moa-memory/lifecycle",
     "crates/moa-memory/pii",
+    "crates/moa-memory/types",
     "crates/moa-memory/vector",
     "crates/moa-lineage/core",
     "crates/moa-lineage/citation",
@@ -42,10 +46,13 @@ members = [
 ]
 default-members = [
     "crates/moa-core",
+    "crates/moa-db",
     "crates/moa-scoring",
     "crates/moa-agents",
     "crates/moa-artifacts",
     "crates/moa-brain",
+    "crates/moa-contacts",
+    "crates/moa-observability",
     "crates/moa-workflows",
     "crates/moa-session",
     "crates/moa-migrations",
@@ -53,6 +60,7 @@ default-members = [
     "crates/moa-memory/ingest",
     "crates/moa-memory/lifecycle",
     "crates/moa-memory/pii",
+    "crates/moa-memory/types",
     "crates/moa-memory/vector",
     "crates/moa-lineage/core",
     "crates/moa-lineage/citation",
@@ -91,14 +99,16 @@ moa-authz-schema = { path = "crates/moa-auth/authz-schema" }
 moa-artifacts = { path = "crates/moa-artifacts" }
 moa-agents = { path = "crates/moa-agents" }
 moa-brain = { path = "crates/moa-brain" }
+moa-contacts = { path = "crates/moa-contacts" }
 moa-core = { path = "crates/moa-core" }
+moa-db = { path = "crates/moa-db" }
 moa-scoring = { path = "crates/moa-scoring" }
 moa-edge = { path = "crates/moa-edge" }
 moa-eval-core = { path = "crates/moa-eval/core" }
 moa-eval = { path = "crates/moa-eval" }
 moa-experiments = { path = "crates/moa-experiments" }
 moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
-moa-messaging = { path = "crates/moa-messaging" }
+moa-messaging = { path = "crates/moa-messaging", default-features = false }
 moa-hands = { path = "crates/moa-hands" }
 moa-lineage-audit = { path = "crates/moa-lineage/audit" }
 moa-lineage-citation = { path = "crates/moa-lineage/citation" }
@@ -110,9 +120,11 @@ moa-memory-graph = { path = "crates/moa-memory/graph" }
 moa-memory-ingest = { path = "crates/moa-memory/ingest" }
 moa-memory-lifecycle = { path = "crates/moa-memory/lifecycle" }
 moa-memory-pii = { path = "crates/moa-memory/pii" }
+moa-memory-types = { path = "crates/moa-memory/types" }
 moa-memory-vector = { path = "crates/moa-memory/vector" }
 moa-migrations = { path = "crates/moa-migrations" }
 moa-ocsf = { path = "crates/moa-ocsf" }
+moa-observability = { path = "crates/moa-observability" }
 moa-orchestrator = { path = "crates/moa-orchestrator" }
 moa-providers = { path = "crates/moa-providers" }
 moa-security = { path = "crates/moa-security" }

@@ -4,17 +4,18 @@ use std::sync::Arc;
 
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
     CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
     VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
 };
-use moa_core::{BranchManager, ScopeContext, TenantId};
+use moa_core::{BranchManager, TenantId};
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
     PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, WorkspacePromotion,
     finalize_promotion, rollback_promotion,
 };
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
 use crate::OrchestratorCtx;
@@ -83,7 +84,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
             .run(|| async move {
                 let workspace_id = request.tenant_id.to_string();
                 let scope = ScopeContext::tenant(request.tenant_id);
-                let pgvector = Arc::new(PgvectorStore::new(pool.clone(), scope));
+                let pgvector = Arc::new(PgvectorStore::new_for_control_plane(pool.clone(), scope));
                 let turbopuffer =
                     Arc::new(TurbopufferStore::from_config(&config).map_err(|error| {
                         TerminalError::new(format!("loading Turbopuffer client: {error}"))

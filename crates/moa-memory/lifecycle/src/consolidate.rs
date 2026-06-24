@@ -4,14 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{
-    ContactId, MemoryDigestConfig, ScopeContext, TenantId, WorkspaceId, traits::EmbeddingProvider,
-};
+use moa_core::{ContactId, MemoryDigestConfig, TenantId, WorkspaceId, traits::EmbeddingProvider};
 use moa_memory_graph::{
     AgeGraphStore, ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
     NodePropertyUpdateIntent, PiiClass,
 };
 use moa_memory_ingest::normalize_entity_name;
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::PgvectorStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

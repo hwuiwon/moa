@@ -10,6 +10,8 @@ pub mod planning;
 pub mod retrieval;
 pub mod segment_assessment;
 pub mod turn;
+pub mod turn_learning;
+pub mod turn_segments;
 
 #[cfg(feature = "eval-harness")]
 pub use harness::{

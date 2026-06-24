@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use moa_auth_providers::builtin_authz::BuiltinApprovalRow;
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::IdentityType;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -58,6 +58,7 @@ pub struct AuthzChallengesImpl;
 
 impl AuthzChallenges for AuthzChallengesImpl {
     #[tracing::instrument(skip(self, ctx))]
+    // SAFETY: Lists only builtin challenges keyed to the trusted user identity.
     async fn list_mine(
         &self,
         ctx: Context<'_>,
@@ -87,6 +88,7 @@ impl AuthzChallenges for AuthzChallengesImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Resolves only builtin challenges keyed to the trusted user identity.
     async fn decide(
         &self,
         ctx: Context<'_>,

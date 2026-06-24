@@ -5,17 +5,21 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
+use moa_core::wire::LearningCandidateSummary;
 use moa_core::{
     ActionPolicyRule, BlobStore, CacheDailyMetric, ChannelAccountId, ChannelRef, ClaimCheck,
     ContactId, ContactPointId, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,
-    EventType, ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningCandidateStatus,
-    LearningCandidateStatusUpdate, LearningEntry, MoaConfig, MoaError, Result, SegmentAssessment,
-    SegmentBaseline, SegmentCompletion, SegmentId, SessionAnalyticsSummary, SessionFilter,
-    SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, TenantAnalyticsSummary, ToolCallId,
-    ToolCallSummary, WorkspaceId, record_session_created, record_session_event_append,
-    record_session_event_decoded_bytes, record_session_event_load, record_session_event_replay,
-    record_sessions_active, record_turn_completed,
+    EventType, ExperienceAttribution, ExperienceRecord, ExperienceStore, LearningCandidate,
+    LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateStore, LearningEntry,
+    MoaConfig, MoaError, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
+    SegmentStore, SessionAnalyticsSummary, SessionFilter, SessionId, SessionMeta, SessionStatus,
+    SessionStore, SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment,
+    TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary,
+    WorkspaceId, record_session_event_replay,
+};
+use moa_observability::{
+    record_session_created, record_session_event_append, record_session_event_decoded_bytes,
+    record_session_event_load, record_sessions_active, record_turn_completed,
 };
 use moa_security::ActionPolicyRuleStore;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::Json};
@@ -175,7 +179,7 @@ impl PostgresSessionStore {
         &self,
         session_id: moa_core::SessionId,
     ) -> Result<SessionAnalyticsSummary> {
-        moa_core::get_session_summary(&self.pool, self.schema_name(), session_id).await
+        crate::analytics::get_session_summary(&self.pool, self.schema_name(), session_id).await
     }
 
     /// Lists per-tool analytics rows, optionally scoped to one tenant.
@@ -183,7 +187,7 @@ impl PostgresSessionStore {
         &self,
         tenant_id: Option<&moa_core::TenantId>,
     ) -> Result<Vec<ToolCallSummary>> {
-        moa_core::list_tool_call_summaries(&self.pool, self.schema_name(), tenant_id).await
+        crate::analytics::list_tool_call_summaries(&self.pool, self.schema_name(), tenant_id).await
     }
 
     /// Lists per-turn analytics rows for one session.
@@ -191,25 +195,74 @@ impl PostgresSessionStore {
         &self,
         session_id: moa_core::SessionId,
     ) -> Result<Vec<SessionTurnMetric>> {
-        moa_core::list_session_turn_metrics(&self.pool, self.schema_name(), session_id).await
+        crate::analytics::list_session_turn_metrics(&self.pool, self.schema_name(), session_id)
+            .await
     }
 
     /// Loads aggregated tenant analytics over a recent day window.
     pub async fn get_tenant_stats(
         &self,
-        tenant_id: &moa_core::TenantId,
+        tenant_id: &TenantId,
         days: u32,
     ) -> Result<TenantAnalyticsSummary> {
-        moa_core::get_tenant_stats(&self.pool, self.schema_name(), tenant_id, days).await
+        crate::analytics::get_tenant_stats(&self.pool, self.schema_name(), tenant_id, days).await
+    }
+
+    /// Loads aggregated tenant analytics over a recent day window through control-plane RLS.
+    pub async fn get_tenant_stats_control_plane(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<TenantAnalyticsSummary> {
+        crate::analytics::get_tenant_stats_control_plane(
+            &self.pool,
+            self.schema_name(),
+            tenant_id,
+            days,
+        )
+        .await
     }
 
     /// Lists daily cache trend rows for one tenant.
     pub async fn list_cache_daily_metrics(
         &self,
-        tenant_id: &moa_core::TenantId,
+        tenant_id: &TenantId,
         days: u32,
     ) -> Result<Vec<CacheDailyMetric>> {
-        moa_core::list_cache_daily_metrics(&self.pool, self.schema_name(), tenant_id, days).await
+        crate::analytics::list_cache_daily_metrics(&self.pool, self.schema_name(), tenant_id, days)
+            .await
+    }
+
+    /// Lists daily cache trend rows for one tenant through control-plane RLS.
+    pub async fn list_cache_daily_metrics_control_plane(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<Vec<CacheDailyMetric>> {
+        crate::analytics::list_cache_daily_metrics_control_plane(
+            &self.pool,
+            self.schema_name(),
+            tenant_id,
+            days,
+        )
+        .await
+    }
+
+    /// Lists redacted learning-candidate summaries for one tenant.
+    pub async fn list_learning_candidate_summaries(
+        &self,
+        tenant_id: TenantId,
+        status: Option<LearningCandidateStatus>,
+        limit: u32,
+    ) -> Result<Vec<LearningCandidateSummary>> {
+        crate::analytics::list_learning_candidate_summaries(
+            &self.pool,
+            self.schema_name(),
+            tenant_id,
+            status,
+            limit,
+        )
+        .await
     }
 
     /// Refreshes materialized analytics views using concurrent refreshes.

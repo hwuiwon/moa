@@ -8,10 +8,6 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use moa_core::restate_observability::{
-    annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
-    tool_dispatch_span,
-};
 use moa_core::wire::{
     AppendEventRequest, RecordSegmentToolUseRequest, RunSubAgentTurnRequest, TurnOutcome,
     TurnOutcomeKind, TurnPhase, TurnProgress,
@@ -21,6 +17,12 @@ use moa_core::{
     SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
     SubAgentTurnResponseRecord, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
     ToolOutput, TurnOutcome as CoreTurnOutcome, is_delegation_tool_name,
+};
+use moa_observability::restate_observability::{
+    annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
+    tool_dispatch_span,
+};
+use moa_observability::{
     record_turn_event_persist_duration, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration, record_turn_workflow_outcome,
 };

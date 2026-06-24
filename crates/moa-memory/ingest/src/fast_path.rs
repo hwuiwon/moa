@@ -7,15 +7,17 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ContactId, MemoryToolExecutor, MoaError, ScopeContext, ScopedConn, SessionActorRef,
-    SessionMeta, TenantId, ToolOutput, traits::EmbeddingProvider,
+    ContactId, MemoryToolExecutor, MoaError, SessionActorRef, SessionMeta, TenantId, ToolOutput,
+    traits::EmbeddingProvider,
 };
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, GraphError, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
 };
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
     CohereV4Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
 };

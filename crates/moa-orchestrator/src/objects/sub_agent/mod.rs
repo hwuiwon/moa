@@ -25,7 +25,7 @@ use crate::sub_agent_dispatch::{
 };
 use crate::turn::util::{apply_response_to_history, summarize_response_text};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar, set_or_clear_vec};
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 
 mod handlers;
 mod persistence;

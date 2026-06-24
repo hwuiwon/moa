@@ -22,10 +22,12 @@ use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContactId,
     ContextMessage, ContextProcessor, LLMProvider, MessageRole, MoaConfig, ModelCapabilities,
     ModelId, NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
-    RewriteSource, ScopeContext, ScopedConn, StopReason, TenantId, TokenUsage, WorkingContext,
-    WorkspaceId, stable_prefix_fingerprint,
+    RewriteSource, StopReason, TenantId, TokenUsage, WorkingContext, WorkspaceId,
+    stable_prefix_fingerprint,
 };
+use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass};
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
 use moa_session::testing;
 use serde_json::json;
@@ -60,6 +62,7 @@ async fn digest_processor_registers_at_documented_position() {
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
+            segment_store: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,

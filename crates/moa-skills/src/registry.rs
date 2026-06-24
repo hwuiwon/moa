@@ -6,10 +6,9 @@ use moa_artifacts::registry::{
     ArtifactFile, ArtifactRegistry, ArtifactScopeParts, NewPublishedArtifactRevision,
     StoredArtifactRevision, insert_published_revision,
 };
-use moa_core::{
-    ActionRuleScope, MemoryScope, MoaError, Result, ScopeContext, ScopedConn, SkillMetadata,
-    TenantId, UserId, WorkspaceId,
-};
+use moa_core::{ActionRuleScope, MoaError, Result, SkillMetadata, TenantId, UserId, WorkspaceId};
+use moa_db::ScopedConn;
+use moa_memory_types::{MemoryScope, ScopeContext};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;

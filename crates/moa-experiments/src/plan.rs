@@ -1,7 +1,7 @@
 //! Pure helpers for expanding behavior-lab experiment plans.
 
 use moa_artifacts::simulation::{
-    ExperimentPlanDefinition, ExperimentTargetKind as PlanTargetKind, ExperimentTargetVariant,
+    ExperimentPlanDefinition, ExperimentTargetKind, ExperimentTargetVariant,
     SimulationDataBundleDefinition, SimulationPersonaDefinition, SimulationProfileDefinition,
     SimulationScenarioDefinition,
 };
@@ -12,8 +12,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{
-    ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTargetKind,
-    ExperimentVariant, NewExperimentTrial,
+    ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentVariant,
+    NewExperimentTrial,
 };
 
 /// Default target-agent turn cap for plan-expanded simulator trials.
@@ -176,7 +176,7 @@ pub fn expand_plan_trials(
                             trial: NewExperimentTrial {
                                 run_uid,
                                 trial_key: trial_key.clone(),
-                                target_kind: experiment_target_kind_for_plan(&variant.kind),
+                                target_kind: variant.kind,
                                 variant_key: variant.key.clone(),
                                 plan_revision_uid,
                                 scenario_id: Some(scenario.id.clone()),
@@ -293,7 +293,7 @@ pub fn target_for_plan_variant(
     variant: &ExperimentTargetVariant,
 ) -> Result<ExperimentTarget, PlanExpansionError> {
     match variant.kind {
-        PlanTargetKind::AgentLoop => Ok(ExperimentTarget::AgentLoop {
+        ExperimentTargetKind::AgentLoop => Ok(ExperimentTarget::AgentLoop {
             prompt: variant
                 .config
                 .get("prompt")
@@ -309,7 +309,7 @@ pub fn target_for_plan_variant(
                 .ok_or(PlanExpansionError::MissingTargetModel)?,
             attachments: Vec::new(),
         }),
-        PlanTargetKind::Workflow => Ok(ExperimentTarget::Workflow {
+        ExperimentTargetKind::Workflow => Ok(ExperimentTarget::Workflow {
             workflow_ref: variant
                 .workflow_ref
                 .as_ref()
@@ -400,13 +400,6 @@ fn data_bundle_ids_for_scenario(
         .filter(|bundle| scenario.data_bundle_ids.contains(&bundle.id))
         .map(|bundle| bundle.id.clone())
         .collect()
-}
-
-fn experiment_target_kind_for_plan(kind: &PlanTargetKind) -> ExperimentTargetKind {
-    match kind {
-        PlanTargetKind::AgentLoop => ExperimentTargetKind::AgentLoop,
-        PlanTargetKind::Workflow => ExperimentTargetKind::Workflow,
-    }
 }
 
 fn stable_trial_key(
@@ -655,14 +648,14 @@ mod tests {
             target_variants: vec![
                 ExperimentTargetVariant {
                     key: "baseline".to_string(),
-                    kind: PlanTargetKind::AgentLoop,
+                    kind: ExperimentTargetKind::AgentLoop,
                     workflow_ref: None,
                     config: json!({"prompt": "start"}),
                     ui: json!({}),
                 },
                 ExperimentTargetVariant {
                     key: "candidate-v2".to_string(),
-                    kind: PlanTargetKind::AgentLoop,
+                    kind: ExperimentTargetKind::AgentLoop,
                     workflow_ref: None,
                     config: json!({"prompt": "start"}),
                     ui: json!({}),

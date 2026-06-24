@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use moa_core::{
     HandHandle, HandResources, HandSpec, MoaError, Result, SandboxFile, SandboxTier, SessionMeta,
-    WorkspaceId, record_sandbox_provision_duration,
+    WorkspaceId,
 };
+use moa_observability::record_sandbox_provision_duration;
 
 use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRouter};
 

@@ -3,14 +3,14 @@
 use chrono::{DateTime, Utc};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
     ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, Event, EventType,
-    TenantId, ToolCallId, ToolCallRequest, WorkspaceId, record_action_review_decision,
-    record_action_review_requested,
+    TenantId, ToolCallId, ToolCallRequest, WorkspaceId,
 };
+use moa_observability::restate_observability::annotate_restate_handler_span;
+use moa_observability::{record_action_review_decision, record_action_review_requested};
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

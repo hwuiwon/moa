@@ -1,0 +1,52 @@
+//! Construction helpers for segment-derived learning artifacts.
+
+use chrono::{DateTime, Utc};
+use moa_core::{
+    EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate, QueryRewriteResult,
+    SegmentAssessment, SessionMeta, TaskSegment,
+};
+
+use crate::learning::{
+    attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
+    experience::experience_from_assessment,
+};
+
+/// Learning artifacts derived from one assessed segment.
+#[derive(Clone, Debug)]
+pub struct SegmentLearningBundle {
+    /// Experience row produced for the assessed segment.
+    pub experience: ExperienceRecord,
+    /// Attribution rows derived from the experience and its source events.
+    pub attributions: Vec<ExperienceAttribution>,
+    /// Reviewable learning candidates proposed from the experience.
+    pub candidates: Vec<LearningCandidate>,
+}
+
+/// Builds all learning artifacts for an assessed segment without persisting them.
+#[must_use]
+pub fn build_segment_learning_bundle(
+    meta: &SessionMeta,
+    segment: &TaskSegment,
+    assessment: &SegmentAssessment,
+    segment_events: &[EventRecord],
+    rewrite: Option<&QueryRewriteResult>,
+    duration_ms: Option<u64>,
+    now: DateTime<Utc>,
+) -> SegmentLearningBundle {
+    let experience = experience_from_assessment(
+        meta,
+        segment,
+        assessment,
+        segment_events,
+        rewrite,
+        duration_ms,
+        now,
+    );
+    let attributions = attributions_for_experience(&experience, segment_events, now);
+    let candidates = propose_candidates_for_experience(&experience, &attributions, now);
+    SegmentLearningBundle {
+        experience,
+        attributions,
+        candidates,
+    }
+}

@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
+            segment_store: Some(store.clone()),
             compaction_llm_provider: Some(provider.clone()),
             query_rewrite_llm_provider: Some(provider.clone()),
             identity_prompt_override: None,

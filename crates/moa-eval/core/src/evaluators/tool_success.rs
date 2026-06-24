@@ -1,6 +1,6 @@
 //! Evaluator that scores successful tool execution rate.
 
-use crate::{EvalResult, EvalScore, Evaluator, Result, ScoreValue, TestCase};
+use crate::{EvalResult, EvalScore, EvalScoreValue, Evaluator, Result, TestCase};
 
 /// Scores the ratio of successful tool calls for a run.
 pub struct ToolSuccessEvaluator;
@@ -23,7 +23,7 @@ impl Evaluator for ToolSuccessEvaluator {
         Ok(vec![EvalScore {
             evaluator: self.name().to_string(),
             name: "tool_success_rate".to_string(),
-            value: ScoreValue::Numeric(rate),
+            value: EvalScoreValue::Numeric(rate),
             comment: Some(format!("{success_count}/{total} succeeded")),
         }])
     }

@@ -69,6 +69,7 @@ mod skill_learning_review {
 
         let response = accept_skill_candidate_after_authz(
             store.clone(),
+            store.pool().clone(),
             config,
             #[cfg(feature = "internal-eval-runner")]
             review_providers(),
@@ -386,10 +387,12 @@ mod skill_learning_review {
         .await;
 
         let store = Arc::new(test_db.store().clone());
+        let pool = store.pool().clone();
         let config = review_config(&test_db);
         assert!(
             accept_skill_candidate_after_authz(
                 store.clone(),
+                pool.clone(),
                 config.clone(),
                 #[cfg(feature = "internal-eval-runner")]
                 review_providers(),
@@ -417,6 +420,7 @@ mod skill_learning_review {
         assert!(
             accept_skill_candidate_after_authz(
                 store.clone(),
+                pool,
                 config,
                 #[cfg(feature = "internal-eval-runner")]
                 review_providers(),

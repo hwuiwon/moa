@@ -98,8 +98,8 @@ pub async fn evaluate_run(
 /// Returns whether a score should downgrade a successful run to `Failed`.
 pub fn score_is_failure(score: &EvalScore) -> bool {
     match &score.value {
-        crate::ScoreValue::Numeric(value) => *value < 0.5,
-        crate::ScoreValue::Boolean(value) => !value,
-        crate::ScoreValue::Categorical(_) => false,
+        crate::EvalScoreValue::Numeric(value) => *value < 0.5,
+        crate::EvalScoreValue::Boolean(value) => !value,
+        crate::EvalScoreValue::Categorical(_) => false,
     }
 }

@@ -60,7 +60,8 @@ fn resolve_backend_choice(
 mod tests {
     use std::sync::Arc;
 
-    use moa_core::{ScopeContext, TenantId};
+    use moa_core::TenantId;
+    use moa_memory_types::ScopeContext;
     use secrecy::SecretString;
     use sqlx::PgPool;
 

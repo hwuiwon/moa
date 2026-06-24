@@ -8,13 +8,13 @@ use moa_artifacts::registry::{
     ArtifactNodeRunStatus, ArtifactNodeRunUpdate, ArtifactRegistry, ArtifactRun, ArtifactRunStatus,
     ArtifactRunUpdate, NewArtifactNodeRun,
 };
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::wire::{
     WorkflowReviewDecisionKind, WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse,
     WorkflowSignalRequest, WorkflowSignalResponse,
 };
 use moa_core::{ActionRuleScope, TenantId};
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_workflows::error::WorkflowError;
 use moa_workflows::interpreter::{
     WorkflowAdvance, WorkflowExecutionState, WorkflowInterpreter, WorkflowNodeRequest,

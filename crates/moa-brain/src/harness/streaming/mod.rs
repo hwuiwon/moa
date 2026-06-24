@@ -9,10 +9,13 @@ use moa_core::{
     CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
     ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStore,
     StopReason, TraceContext, WorkingContext, WorkspaceId, genai_operation_name,
-    genai_provider_name, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    genai_provider_name,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
+use moa_observability::{
+    apply_trace_context_to_span, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -61,7 +64,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
     turn_span.record("moa.turn.number", turn_number);
     turn_span.record("moa.turn.id", tracing::field::display(turn_id.0));
     turn_span.record("moa.model", tracing::field::display(&initial_session.model));
-    trace_context.apply_to_span(&turn_span);
+    apply_trace_context_to_span(&trace_context, &turn_span);
 
     let mut local_turn_requested = false;
     let turn_requested = turn_requested.unwrap_or(&mut local_turn_requested);

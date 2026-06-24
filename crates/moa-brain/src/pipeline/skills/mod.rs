@@ -12,7 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use moa_core::{
     AgentSkillPolicy, AgentSkillPolicyMode, ContextMessage, ContextProcessor, ExcludedItem,
-    ProcessorOutput, Result, SessionStore, SkillBudgetConfig, SkillMetadata, WorkingContext,
+    ProcessorOutput, Result, SegmentStore, SessionStore, SkillBudgetConfig, SkillMetadata,
+    WorkingContext,
 };
 use serde_json::json;
 use sqlx::PgPool;
@@ -37,6 +38,7 @@ pub const SELECTED_SKILL_FILE_COUNT_METADATA_KEY: &str = "selected_skill_sandbox
 pub struct SkillInjector {
     source: SkillSource,
     session_store: Option<Arc<dyn SessionStore>>,
+    segment_store: Option<Arc<dyn SegmentStore>>,
     budget_config: SkillBudgetConfig,
 }
 
@@ -81,6 +83,7 @@ impl SkillInjector {
         Self {
             source: SkillSource::Registry(pool),
             session_store: None,
+            segment_store: None,
             budget_config: SkillBudgetConfig::default(),
         }
     }
@@ -91,6 +94,7 @@ impl SkillInjector {
         Self {
             source: SkillSource::Static(skills),
             session_store: None,
+            segment_store: None,
             budget_config: SkillBudgetConfig::default(),
         }
     }
@@ -98,6 +102,12 @@ impl SkillInjector {
     /// Configures the injector to derive query keywords from recent session events.
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = Some(session_store);
+        self
+    }
+
+    /// Configures the injector to use segment-derived analytics for skill ranking.
+    pub fn with_segment_store(mut self, segment_store: Arc<dyn SegmentStore>) -> Self {
+        self.segment_store = Some(segment_store);
         self
     }
 

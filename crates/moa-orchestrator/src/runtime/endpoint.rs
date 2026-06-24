@@ -9,8 +9,14 @@ use std::sync::Arc;
 
 #[cfg(feature = "internal-eval-runner")]
 use crate::services::eval::{Eval, EvalImpl};
+#[cfg(feature = "experiments")]
+use crate::services::experiments::{Experiments, ExperimentsImpl};
 #[cfg(feature = "internal-eval-runner")]
 use crate::workflows::eval_run::{EvalRun, EvalRunImpl};
+#[cfg(feature = "experiments")]
+use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
+#[cfg(feature = "experiments")]
+use crate::workflows::experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl};
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{SkillLearning, SkillLearningImpl};
 use crate::{
@@ -32,7 +38,6 @@ use crate::{
         authz_admin::{Authz, AuthzImpl},
         authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
         contacts::{Contacts, ContactsImpl},
-        experiments::{Experiments, ExperimentsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
         learning_review::{LearningReview, LearningReviewImpl},
@@ -52,8 +57,6 @@ use crate::{
     workflows::{
         artifact_workflow_execution::{ArtifactWorkflowExecution, ArtifactWorkflowExecutionImpl},
         consolidate::{Consolidate, ConsolidateImpl},
-        experiment_run::{ExperimentRun, ExperimentRunImpl},
-        experiment_trial_run::{ExperimentTrialRun, ExperimentTrialRunImpl},
         sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
     },
@@ -74,9 +77,6 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Consolidate",
     "Contacts",
     "CronJob",
-    "Experiments",
-    "ExperimentRun",
-    "ExperimentTrialRun",
     "GraphMemoryMaint",
     "Health",
     "IngestionVO",
@@ -99,6 +99,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Whoami",
     "Workflows",
 ];
+const EXPERIMENT_SERVICE_NAMES: &[&str] = &["Experiments", "ExperimentRun", "ExperimentTrialRun"];
 const INTERNAL_EVAL_SERVICE_NAMES: &[&str] = &["Eval", "EvalRun"];
 const SKILL_LEARNING_SERVICE_NAMES: &[&str] = &["SkillLearning"];
 
@@ -130,12 +131,13 @@ pub struct RegisteredService {
 /// Builds the Restate endpoint with the production binding order.
 pub fn build_endpoint(
     session_store: Arc<moa_session::PostgresSessionStore>,
+    pool: sqlx::PgPool,
     providers: Arc<ProviderRegistry>,
     tool_router: Arc<ToolRouter>,
 ) -> Endpoint {
     let endpoint = Endpoint::builder()
         .bind(HealthImpl.serve())
-        .bind(SessionStoreImpl::new(session_store.clone()).serve())
+        .bind(SessionStoreImpl::new(session_store.clone(), pool).serve())
         .bind(LLMGatewayImpl::new(providers).serve())
         .bind(AgentDefinitionsImpl.serve())
         .bind(AgentsImpl.serve())
@@ -150,8 +152,9 @@ pub fn build_endpoint(
         .bind(ContactsImpl.serve());
     #[cfg(feature = "internal-eval-runner")]
     let endpoint = endpoint.bind(EvalImpl.serve());
+    #[cfg(feature = "experiments")]
+    let endpoint = endpoint.bind(ExperimentsImpl.serve());
     let endpoint = endpoint
-        .bind(ExperimentsImpl.serve())
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
@@ -175,9 +178,11 @@ pub fn build_endpoint(
     let endpoint = endpoint.bind(EvalRunImpl.serve());
     #[cfg(feature = "skill-learning")]
     let endpoint = endpoint.bind(SkillLearningImpl.serve());
-    endpoint
+    #[cfg(feature = "experiments")]
+    let endpoint = endpoint
         .bind(ExperimentRunImpl.serve())
-        .bind(ExperimentTrialRunImpl.serve())
+        .bind(ExperimentTrialRunImpl.serve());
+    endpoint
         .bind(SubAgentTurnExecutionImpl.serve())
         .bind(TurnExecutionImpl.serve())
         .build()
@@ -187,6 +192,7 @@ pub fn build_endpoint(
 #[must_use]
 pub fn expected_service_names() -> Vec<&'static str> {
     expected_service_names_for_features(
+        cfg!(feature = "experiments"),
         cfg!(feature = "internal-eval-runner"),
         cfg!(feature = "skill-learning"),
     )
@@ -194,14 +200,22 @@ pub fn expected_service_names() -> Vec<&'static str> {
 
 #[cfg(test)]
 fn expected_service_names_for_internal_eval(internal_eval_enabled: bool) -> Vec<&'static str> {
-    expected_service_names_for_features(internal_eval_enabled, cfg!(feature = "skill-learning"))
+    expected_service_names_for_features(
+        cfg!(feature = "experiments"),
+        internal_eval_enabled,
+        cfg!(feature = "skill-learning"),
+    )
 }
 
 fn expected_service_names_for_features(
+    experiments_enabled: bool,
     internal_eval_enabled: bool,
     skill_learning_enabled: bool,
 ) -> Vec<&'static str> {
     let mut names = DEFAULT_EXPECTED_SERVICE_NAMES.to_vec();
+    if experiments_enabled {
+        names.extend_from_slice(EXPERIMENT_SERVICE_NAMES);
+    }
     if internal_eval_enabled {
         names.extend_from_slice(INTERNAL_EVAL_SERVICE_NAMES);
     }
@@ -265,17 +279,20 @@ mod tests {
             !names.contains(&"EvalRun"),
             "default product readiness must not expect hosted EvalRun workflow"
         );
-        assert!(
+        assert_eq!(
             names.contains(&"Experiments"),
-            "default product readiness should include Experiments"
+            cfg!(feature = "experiments"),
+            "default product readiness should match the experiments feature"
         );
-        assert!(
+        assert_eq!(
             names.contains(&"ExperimentRun"),
-            "default product readiness should include ExperimentRun"
+            cfg!(feature = "experiments"),
+            "default product readiness should match the experiments feature"
         );
-        assert!(
+        assert_eq!(
             names.contains(&"ExperimentTrialRun"),
-            "default product readiness should include ExperimentTrialRun"
+            cfg!(feature = "experiments"),
+            "default product readiness should match the experiments feature"
         );
         assert!(
             names.contains(&"ArtifactWorkflowExecution"),
@@ -297,17 +314,51 @@ mod tests {
             1,
             "internal eval gate should add EvalRun exactly once"
         );
-        assert!(
+        assert_eq!(
             names.contains(&"Experiments"),
-            "internal eval mode should keep Experiments registered"
+            cfg!(feature = "experiments"),
+            "internal eval mode should preserve the experiments feature state"
         );
-        assert!(
+        assert_eq!(
             names.contains(&"ExperimentRun"),
-            "internal eval mode should keep ExperimentRun registered"
+            cfg!(feature = "experiments"),
+            "internal eval mode should preserve the experiments feature state"
+        );
+        assert_eq!(
+            names.contains(&"ExperimentTrialRun"),
+            cfg!(feature = "experiments"),
+            "internal eval mode should preserve the experiments feature state"
+        );
+    }
+
+    #[test]
+    fn experiments_feature_adds_experiment_services() {
+        let names = expected_service_names_for_features(true, false, false);
+
+        assert_eq!(
+            names.iter().filter(|name| **name == "Experiments").count(),
+            1,
+            "experiments feature should add Experiments exactly once"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "ExperimentRun")
+                .count(),
+            1,
+            "experiments feature should add ExperimentRun exactly once"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "ExperimentTrialRun")
+                .count(),
+            1,
+            "experiments feature should add ExperimentTrialRun exactly once"
         );
         assert!(
-            names.contains(&"ExperimentTrialRun"),
-            "internal eval mode should keep ExperimentTrialRun registered"
+            !expected_service_names_for_features(false, false, false).contains(&"Experiments"),
+            "builds without the feature must not expect Experiments"
         );
     }
 
@@ -346,7 +397,7 @@ mod tests {
 
     #[test]
     fn skill_learning_feature_adds_skill_learning_workflow() {
-        let names = expected_service_names_for_features(false, true);
+        let names = expected_service_names_for_features(false, false, true);
 
         assert_eq!(
             names
@@ -357,7 +408,7 @@ mod tests {
             "skill-learning feature should add SkillLearning exactly once"
         );
         assert!(
-            !expected_service_names_for_features(false, false).contains(&"SkillLearning"),
+            !expected_service_names_for_features(false, false, false).contains(&"SkillLearning"),
             "builds without the feature must not expect SkillLearning"
         );
     }

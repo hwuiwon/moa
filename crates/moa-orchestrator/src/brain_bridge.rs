@@ -10,11 +10,13 @@ use moa_brain::{
 use moa_core::{
     CompletionRequest, ContextSnapshot, EventRange, QueryRewriteResult, Result, SandboxFile,
     SessionId, SessionStore, WorkingContext, record_pipeline_compile_duration,
-    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
     session_engine::session_requires_processing,
 };
 use moa_lineage_citation::ChunkRef;
 use moa_lineage_core::TurnId;
+use moa_observability::{
+    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
+};
 use moa_security::inject_canary;
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
@@ -106,6 +108,7 @@ pub(crate) async fn prepare_turn_request(
             shared_graph_memory_retriever: Some(ctx.graph_memory_retriever()),
             retrieval_embedder: None,
             shared_skill_injector: Some(ctx.skill_injector()),
+            segment_store: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: query_rewrite_provider,
             identity_prompt_override: None,

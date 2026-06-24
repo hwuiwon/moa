@@ -2,9 +2,11 @@
 
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, TokenPricing, TokenUsage,
-    genai_operation_name, genai_provider_name, record_cache_hit_rate,
-    record_genai_client_operation_duration, record_genai_client_time_to_first_chunk,
-    record_genai_client_token_usage,
+    genai_operation_name, genai_provider_name,
+};
+use moa_observability::{
+    record_cache_hit_rate, record_genai_client_operation_duration,
+    record_genai_client_time_to_first_chunk, record_genai_client_token_usage,
 };
 use opentelemetry::trace::Status;
 use serde_json::Value;

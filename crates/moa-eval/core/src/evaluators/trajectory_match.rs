@@ -1,6 +1,6 @@
 //! Trajectory-matching evaluator based on longest common subsequence.
 
-use crate::{EvalResult, EvalScore, Evaluator, Result, ScoreValue, TestCase};
+use crate::{EvalResult, EvalScore, EvalScoreValue, Evaluator, Result, TestCase};
 
 /// Scores how closely the actual tool-call sequence matches the expected trajectory.
 pub struct TrajectoryMatchEvaluator;
@@ -41,7 +41,7 @@ impl Evaluator for TrajectoryMatchEvaluator {
         Ok(vec![EvalScore {
             evaluator: self.name().to_string(),
             name: "trajectory_match".to_string(),
-            value: ScoreValue::Numeric(score),
+            value: EvalScoreValue::Numeric(score),
             comment,
         }])
     }
@@ -69,7 +69,7 @@ fn lcs_len(expected: &[&str], actual: &[&str]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::TrajectoryMatchEvaluator;
-    use crate::{EvalResult, Evaluator, ScoreValue, TestCase, TrajectoryStep};
+    use crate::{EvalResult, EvalScoreValue, Evaluator, TestCase, TrajectoryStep};
 
     #[tokio::test]
     async fn partial_match_scores_below_one() {
@@ -98,7 +98,7 @@ mod tests {
 
         let scores = evaluator.evaluate(&case, &result).await.expect("score");
         match &scores[0].value {
-            ScoreValue::Numeric(score) => assert!(*score > 0.0 && *score < 1.0),
+            EvalScoreValue::Numeric(score) => assert!(*score > 0.0 && *score < 1.0),
             other => panic!("unexpected score: {other:?}"),
         }
     }

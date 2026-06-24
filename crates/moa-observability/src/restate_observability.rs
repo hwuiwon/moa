@@ -3,12 +3,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::{
-    SessionId, SessionMeta, TraceContext, TurnLatencySnapshot, TurnLatencyStep, TurnReplaySnapshot,
-    current_turn_root_span, record_turn_step_duration,
-};
+use moa_core::{SessionId, SessionMeta, TraceContext, TurnReplaySnapshot};
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use crate::runtime_metrics::{TurnLatencyStep, record_turn_step_duration};
+use crate::trace_context::apply_trace_context_to_span;
+use crate::turn_latency::{TurnLatencySnapshot, current_turn_root_span};
 
 /// Annotates the current tracing span with the Restate service and handler names.
 pub fn annotate_restate_handler_span(service: &str, handler: &str) {
@@ -42,9 +43,9 @@ pub fn apply_session_trace(
     prompt: Option<&str>,
     environment: Option<&str>,
 ) {
-    TraceContext::from_session_meta(meta, prompt)
-        .with_environment(environment.map(str::to_string))
-        .apply_to_span(span);
+    let trace_context = TraceContext::from_session_meta(meta, prompt)
+        .with_environment(environment.map(str::to_string));
+    apply_trace_context_to_span(&trace_context, span);
 }
 
 /// Adds a deterministic session-root link so all turns can be grouped by session in Tempo.

@@ -2,6 +2,7 @@
 
 use chrono::{TimeZone, Utc};
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
+use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::wire::{
     ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest,
@@ -21,8 +22,7 @@ use moa_experiments::app::{
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig,
-    ExperimentTarget, ExperimentTargetKind, ExperimentTrialRecord, ExperimentTrialStatus,
-    ExperimentVariant,
+    ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentVariant,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -986,7 +986,7 @@ fn experiment_observability_uses_trace_attributes_for_drilldown_ids_only() {
     // Pins: drilldown IDs are trace attributes; Prometheus labels stay bounded.
     let trial_source = experiment_trial_run_workflow_source();
     let run_source = experiment_run_workflow_source();
-    let metrics_source = include_str!("../../moa-core/src/runtime_metrics.rs");
+    let metrics_source = include_str!("../../moa-observability/src/runtime_metrics.rs");
 
     for required in [
         "moa.experiment.run_uid",

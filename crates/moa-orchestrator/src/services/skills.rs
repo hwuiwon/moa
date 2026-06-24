@@ -4,7 +4,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{
     SkillBootstrapWorkspaceDefaultRequest, SkillBootstrapWorkspaceDefaultResponse,
@@ -13,6 +12,7 @@ use moa_core::wire::{
     SkillSummary,
 };
 use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
 use restate_sdk::prelude::*;

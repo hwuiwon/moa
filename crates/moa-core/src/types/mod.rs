@@ -84,7 +84,7 @@ pub use identifiers::{
     BrainId, ModelId, SegmentId, SessionId, TenantId, ToolCallId, UserId, WorkspaceId,
 };
 pub use learning::LearningEntry;
-pub use memory::{MemoryScope, ScopeContext, ScopeTier, SkillMetadata};
+pub use memory::SkillMetadata;
 pub use model::{Credential, ModelCapabilities, ProviderNativeTool, TokenPricing, ToolCallFormat};
 pub use observability::{
     CacheReport, TraceContext, full_request_fingerprint, genai_operation_name, genai_provider_name,

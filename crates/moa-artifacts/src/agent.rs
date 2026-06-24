@@ -1,5 +1,6 @@
 //! Tenant-configurable agent artifact definitions.
 
+use moa_core::GuardrailMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -301,17 +302,6 @@ pub struct GuardrailStagePolicy {
     /// Optional message returned when an enforced guardrail blocks text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_message: Option<String>,
-}
-
-/// Runtime behavior for a configured guardrail stage.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GuardrailMode {
-    /// Record judge results without blocking the turn.
-    Shadow,
-    /// Apply blocking judge results to the turn.
-    #[default]
-    Enforce,
 }
 
 fn named_ref_paths(field: &str, refs: &[ArtifactRef]) -> Vec<(String, ArtifactRef)> {

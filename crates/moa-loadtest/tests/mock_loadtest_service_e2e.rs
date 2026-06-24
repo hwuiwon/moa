@@ -96,7 +96,9 @@ fn mock_short_profile_reports_runtime_step_latency() {
         std::fs::read_to_string(&prom_out).expect("mock smoke step latency prometheus snapshot");
     let expected_turns = metric_value(&snapshot, "perf_gate_requests_total");
     assert_eq!(expected_turns, 25.0);
-    for step in moa_core::TURN_LATENCY_REPORT_STEPS.map(moa_core::TurnLatencyStep::as_str) {
+    for step in
+        moa_observability::TURN_LATENCY_REPORT_STEPS.map(moa_observability::TurnLatencyStep::as_str)
+    {
         assert_eq!(
             metric_value_with_step(&snapshot, "perf_gate_step_latency_samples", step),
             expected_turns,

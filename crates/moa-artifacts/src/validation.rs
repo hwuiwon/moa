@@ -2,14 +2,14 @@
 
 use std::collections::HashSet;
 
+use moa_core::GuardrailMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::action::ActionDefinition;
 use crate::agent::{
-    ActionPolicy, AgentDefinition, GuardrailMode, GuardrailPolicy, GuardrailStagePolicy,
-    InstructionPolicy, ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicy, ToolPolicyMode,
-    WorkflowPolicy,
+    ActionPolicy, AgentDefinition, GuardrailPolicy, GuardrailStagePolicy, InstructionPolicy,
+    ModelPolicy, SkillPolicy, SkillPolicyMode, ToolPolicy, ToolPolicyMode, WorkflowPolicy,
 };
 use crate::connector::ConnectorDefinition;
 use crate::document::{ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactStatus};
@@ -1004,9 +1004,9 @@ fn is_empty_value(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ValidationReport, validate_for_status};
-    use crate::agent::{
-        AgentDefinition, AgentPurpose, GuardrailMode, GuardrailPolicy, GuardrailStagePolicy,
-    };
+    use moa_core::GuardrailMode;
+
+    use crate::agent::{AgentDefinition, AgentPurpose, GuardrailPolicy, GuardrailStagePolicy};
     use crate::document::{
         ArtifactDefinition, ArtifactDocument, ArtifactKind, ArtifactMetadata, ArtifactStatus,
         ArtifactUi,

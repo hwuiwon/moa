@@ -1,17 +1,17 @@
 //! Shared rendering helpers for messaging channel adapters.
 
-use moa_core::{
-    Channel, MessageContent, OutboundMessage, SessionStatus, ToolStatus, types::DiffHunk,
-};
-use unicode_segmentation::UnicodeSegmentation;
-
 #[cfg(feature = "slack")]
-use moa_core::{ActionButton, ButtonStyle};
+use moa_core::{
+    ActionButton, ButtonStyle, Channel, MessageContent, OutboundMessage, SessionStatus, ToolStatus,
+    types::DiffHunk,
+};
 #[cfg(feature = "slack")]
 use slack_morphism::prelude::{
     SlackActionBlockElement, SlackActionId, SlackActionsBlock, SlackBlock, SlackBlockButtonElement,
     SlackBlockMarkDownText, SlackBlockPlainText, SlackBlockPlainTextOnly, SlackSectionBlock,
 };
+#[cfg(feature = "slack")]
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Slack's documented hard cap for one message text payload.
 pub const SLACK_MAX_MESSAGE_LENGTH: usize = 40_000;
@@ -123,6 +123,7 @@ impl SlackRenderer {
     }
 }
 
+#[cfg(feature = "slack")]
 fn render_diff(filename: &str, hunks: &[DiffHunk]) -> String {
     let mut rendered = format!("--- a/{filename}\n+++ b/{filename}\n");
     for hunk in hunks {
@@ -143,6 +144,7 @@ fn render_diff(filename: &str, hunks: &[DiffHunk]) -> String {
     rendered
 }
 
+#[cfg(feature = "slack")]
 fn render_tool_card(
     tool: &str,
     status: &ToolStatus,
@@ -185,6 +187,7 @@ fn risk_icon(risk_level: &moa_core::RiskLevel) -> &'static str {
     }
 }
 
+#[cfg(feature = "slack")]
 fn tool_status_icon(status: &ToolStatus) -> &'static str {
     match status {
         ToolStatus::Pending => "🕒",
@@ -194,6 +197,7 @@ fn tool_status_icon(status: &ToolStatus) -> &'static str {
     }
 }
 
+#[cfg(feature = "slack")]
 fn session_status_icon(status: &SessionStatus) -> &'static str {
     match status {
         SessionStatus::Created => "🆕",
@@ -205,6 +209,7 @@ fn session_status_icon(status: &SessionStatus) -> &'static str {
     }
 }
 
+#[cfg(feature = "slack")]
 fn split_plain_text(text: &str, limit: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
@@ -229,6 +234,7 @@ fn split_plain_text(text: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+#[cfg(feature = "slack")]
 fn append_piece(piece: &str, limit: usize, current: &mut String, chunks: &mut Vec<String>) {
     let piece_len = piece.graphemes(true).count();
     if piece_len > limit {
@@ -248,6 +254,7 @@ fn append_piece(piece: &str, limit: usize, current: &mut String, chunks: &mut Ve
     current.push_str(piece);
 }
 
+#[cfg(feature = "slack")]
 fn split_hard(text: &str, limit: usize) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -315,7 +322,9 @@ fn slack_button(button: &ActionButton) -> SlackBlockButtonElement {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "slack")]
     use super::*;
+    #[cfg(feature = "slack")]
     use moa_core::{
         ActionButton, ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview,
         ButtonStyle, RiskLevel, SessionActorRef, TenantId, ToolCallId,

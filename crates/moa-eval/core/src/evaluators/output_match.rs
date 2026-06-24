@@ -2,7 +2,7 @@
 
 use regex::Regex;
 
-use crate::{EvalResult, EvalScore, Evaluator, ExpectedOutput, Result, ScoreValue, TestCase};
+use crate::{EvalResult, EvalScore, EvalScoreValue, Evaluator, ExpectedOutput, Result, TestCase};
 
 /// Scores how well the final response matches the test case output expectations.
 pub struct OutputMatchEvaluator;
@@ -23,7 +23,7 @@ impl Evaluator for OutputMatchEvaluator {
         Ok(vec![EvalScore {
             evaluator: self.name().to_string(),
             name: "output_match".to_string(),
-            value: ScoreValue::Numeric(score.0),
+            value: EvalScoreValue::Numeric(score.0),
             comment: score.1,
         }])
     }
@@ -97,7 +97,7 @@ fn evaluate_output(response: &str, expected: &ExpectedOutput) -> Result<(f64, Op
 #[cfg(test)]
 mod tests {
     use super::OutputMatchEvaluator;
-    use crate::{EvalResult, Evaluator, ExpectedOutput, ScoreValue, TestCase};
+    use crate::{EvalResult, EvalScoreValue, Evaluator, ExpectedOutput, TestCase};
 
     #[tokio::test]
     async fn contains_rules_pass_when_all_terms_match() {
@@ -115,7 +115,7 @@ mod tests {
         };
 
         let scores = evaluator.evaluate(&case, &result).await.expect("score");
-        assert_eq!(scores[0].value, ScoreValue::Numeric(1.0));
+        assert_eq!(scores[0].value, EvalScoreValue::Numeric(1.0));
     }
 
     #[tokio::test]
@@ -134,6 +134,6 @@ mod tests {
         };
 
         let scores = evaluator.evaluate(&case, &result).await.expect("score");
-        assert_eq!(scores[0].value, ScoreValue::Numeric(0.5));
+        assert_eq!(scores[0].value, EvalScoreValue::Numeric(0.5));
     }
 }

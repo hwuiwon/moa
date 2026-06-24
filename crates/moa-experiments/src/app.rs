@@ -20,8 +20,9 @@ use moa_core::wire::{
 use moa_core::{
     ActionRuleScope, CompletionRequest, ContextMessage, JsonResponseFormat, LearningCandidate,
     LearningCandidateStatus, LearningCandidateType, LearningRiskClass, MoaError, ModelId, TenantId,
-    WorkspaceId, record_experiment_run, record_experiment_score_rows,
+    WorkspaceId,
 };
+use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
     ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
     ScoreCompareRef, ScoreCompareRow, ScoreRunRef, ScoreSummary, ScoreSummaryRow, ScoringError,
@@ -1227,13 +1228,12 @@ fn plan_expansion_error(error: PlanExpansionError) -> ExperimentAppError {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use moa_artifacts::simulation::ExperimentTargetKind;
     use moa_core::{ActionRuleScope, MessageRole, ModelId, SessionId};
     use serde_json::json;
 
     use super::*;
-    use crate::model::{
-        ExperimentSimulatorConfig, ExperimentTargetKind, ExperimentTrialStopReason,
-    };
+    use crate::model::{ExperimentSimulatorConfig, ExperimentTrialStopReason};
 
     #[test]
     fn plan_generation_request_keeps_description_out_of_system_prompt() {

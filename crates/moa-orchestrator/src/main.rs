@@ -12,8 +12,9 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::{Parser, Subcommand};
+use moa_core::MoaConfig;
 use moa_core::config::AuthHeaderTrustKind;
-use moa_core::{MoaConfig, TelemetryConfig, init_observability, metrics_endpoint_url};
+use moa_observability::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_orchestrator::{
     config::{
         ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
@@ -127,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
     let endpoint = build_endpoint(
         runtime_deps.session_store.clone(),
+        runtime_deps.pool.clone(),
         runtime_deps.providers.clone(),
         runtime_deps.tool_router.clone(),
     );

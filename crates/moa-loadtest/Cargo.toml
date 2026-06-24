@@ -16,8 +16,11 @@ metrics-exporter-prometheus.workspace = true
 moa-authz = { workspace = true }
 moa-brain = { workspace = true }
 moa-core = { workspace = true }
+moa-db = { workspace = true }
 moa-memory-graph = { workspace = true }
+moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
+moa-observability = { workspace = true }
 moa-session = { workspace = true }
 rand = "0.8"
 reqwest.workspace = true

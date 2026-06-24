@@ -1,8 +1,10 @@
 //! Skill lesson graph helpers.
 
 use chrono::Utc;
-use moa_core::{MemoryScope, MoaError, Result, ScopeContext, ScopedConn};
+use moa_core::{MoaError, Result};
+use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_types::{MemoryScope, ScopeContext};
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;

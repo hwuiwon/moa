@@ -1,15 +1,15 @@
-use moa_core::{
-    ActionRuleScope, ModelId, Result, ScopeContext, ScopedConn, SessionId, TenantId, UserId,
-    WorkspaceId,
-};
+use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::{ActionRuleScope, ModelId, Result, SessionId, TenantId, UserId, WorkspaceId};
+use moa_db::ScopedConn;
 use moa_experiments::{
     model::{
         ExperimentRunStatus, ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget,
-        ExperimentTargetKind, ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
+        ExperimentTrialStatus, ExperimentTrialStopReason, ExperimentVariant,
         NewExperimentRun as NewExperiment, NewExperimentTrial,
     },
     store::ExperimentStore,
 };
+use moa_memory_types::ScopeContext;
 use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;

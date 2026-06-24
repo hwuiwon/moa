@@ -13,19 +13,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use moa_brain::learning::{
-    attribution::attributions_for_experience, candidates::propose_candidates_for_experience,
-    experience::experience_from_assessment,
-};
 use moa_brain::lineage::emit_generation_lineage;
 use moa_brain::pipeline::segments::SegmentTracker;
-use moa_brain::segment_assessment::{
-    AssessmentOverride, SegmentAssessor, continuation_signal, self_assessment_signal,
-    structural_signal, tool_signal, verification_signal,
-};
-use moa_core::restate_observability::{
-    annotate_restate_handler_span, emit_turn_latency_summary, emit_turn_replay_summary,
-    event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
+use moa_brain::segment_assessment::AssessmentOverride;
+use moa_brain::turn_learning::build_segment_learning_bundle;
+use moa_brain::turn_segments::{
+    SegmentBoundarySequences, assess_segment_events, latest_user_message,
+    segment_assessment_to_seq, segment_boundary_sequences, segment_events_for_assessment,
+    task_segment_from_active, task_segment_from_completed,
 };
 use moa_core::wire::{
     AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
@@ -39,15 +34,21 @@ use moa_core::{
     EventRecord, EventType, GuardrailDecision, GuardrailDirection, LearningEntry, MoaError,
     ModelTier, QueryRewriteResult, SandboxFile, SegmentId, SessionId, SessionMeta,
     SessionStore as _, StopReason, TaskSegment, ToolCallContent, ToolCallId, ToolCallRequest,
-    ToolInvocation, ToolOutput, TurnLatencyCounters, TurnOutcome as CoreTurnOutcome,
-    TurnReplayCounters, is_delegation_tool_name, record_session_error,
-    record_turn_event_persist_duration, record_turn_latency, record_turn_llm_call_duration,
-    record_turn_tool_dispatch_duration, record_turn_workflow_outcome, scope_turn_latency_counters,
-    scope_turn_replay_counters,
+    ToolInvocation, ToolOutput, TurnOutcome as CoreTurnOutcome, TurnReplayCounters,
+    is_delegation_tool_name, scope_turn_replay_counters,
 };
 use moa_lineage_citation::ChunkRef;
 use moa_lineage_core::TurnId;
 use moa_memory_ingest::{IngestionVOClient, ingestion_object_key};
+use moa_observability::restate_observability::{
+    annotate_restate_handler_span, emit_turn_latency_summary, emit_turn_replay_summary,
+    event_persist_span, llm_call_span, session_turn_span, tool_dispatch_span,
+};
+use moa_observability::{
+    TurnLatencyCounters, record_session_error, record_turn_event_persist_duration,
+    record_turn_latency, record_turn_llm_call_duration, record_turn_tool_dispatch_duration,
+    record_turn_workflow_outcome, scope_turn_latency_counters,
+};
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
@@ -80,12 +81,6 @@ const K_QUERY_REWRITE_CACHE: &str = "query_rewrite_cache";
 struct BodyOutcome {
     kind: TurnOutcomeKind,
     message: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SegmentBoundarySequences {
-    start_seq: u64,
-    completed_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1004,6 +999,7 @@ async fn assess_completed_segment_at_transition(
     } else {
         AssessmentPhase::Immediate
     };
+    let resolution_config = OrchestratorCtx::current_config().resolution.clone();
     let assessment = assess_segment_events(
         &segment_events,
         completed.turn_count,
@@ -1014,6 +1010,7 @@ async fn assess_completed_segment_at_transition(
         rewrite.as_ref().is_some_and(|rewrite| rewrite.is_new_task),
         phase,
         &[],
+        &resolution_config,
     );
 
     record_segment_assessment_learning(ctx, meta.tenant_id, completed.segment_id, &assessment)
@@ -1094,6 +1091,7 @@ async fn assess_current_active_segment(
         false,
         phase,
         overrides,
+        &runtime.config().resolution,
     );
 
     record_segment_assessment_learning(ctx, meta.tenant_id, segment.id, &assessment).await?;
@@ -1116,69 +1114,6 @@ async fn assess_current_active_segment(
     )
     .await?;
     Ok(())
-}
-
-fn task_segment_from_completed(
-    meta: &SessionMeta,
-    completed: &moa_brain::pipeline::segments::SegmentCompleted,
-    events: &[EventRecord],
-    assessment: &moa_core::SegmentAssessment,
-) -> TaskSegment {
-    let (started_at, previous_segment_id) = events
-        .iter()
-        .find_map(|record| match &record.event {
-            Event::SegmentStarted {
-                segment_id,
-                previous_segment_id,
-                ..
-            } if *segment_id == completed.segment_id => {
-                Some((record.timestamp, *previous_segment_id))
-            }
-            _ => None,
-        })
-        .unwrap_or((assessment.assessed_at, None));
-    TaskSegment {
-        id: completed.segment_id,
-        session_id: meta.id,
-        tenant_id: tenant_key(meta),
-        segment_index: completed.segment_index,
-        task_summary: completed.task_summary.clone(),
-        started_at,
-        ended_at: Some(assessment.assessed_at),
-        turn_count: completed.turn_count,
-        tools_used: completed.tools_used.clone(),
-        skills_activated: completed.skills_activated.clone(),
-        token_cost: completed.token_cost,
-        previous_segment_id,
-        outcome: Some(assessment.outcome.as_str().to_string()),
-        assessment: Some(assessment.clone()),
-        outcome_confidence: Some(assessment.confidence),
-    }
-}
-
-fn task_segment_from_active(
-    meta: &SessionMeta,
-    segment: &ActiveSegment,
-    assessment: &moa_core::SegmentAssessment,
-    ended_at: Option<DateTime<Utc>>,
-) -> TaskSegment {
-    TaskSegment {
-        id: segment.id,
-        session_id: meta.id,
-        tenant_id: tenant_key(meta),
-        segment_index: segment.segment_index,
-        task_summary: segment.task_summary.clone(),
-        started_at: segment.started_at,
-        ended_at,
-        turn_count: segment.turn_count,
-        tools_used: segment.tools_used.clone(),
-        skills_activated: segment.skills_activated.clone(),
-        token_cost: segment.token_cost,
-        previous_segment_id: None,
-        outcome: Some(assessment.outcome.as_str().to_string()),
-        assessment: Some(assessment.clone()),
-        outcome_confidence: Some(assessment.confidence),
-    }
 }
 
 fn tenant_key(meta: &SessionMeta) -> String {
@@ -1213,7 +1148,7 @@ async fn emit_experience_for_assessment(
     duration_ms: Option<u64>,
 ) -> Result<(), HandlerError> {
     let now = durable_utc_now(ctx).await?;
-    let experience = experience_from_assessment(
+    let learning = build_segment_learning_bundle(
         meta,
         segment,
         assessment,
@@ -1222,25 +1157,23 @@ async fn emit_experience_for_assessment(
         duration_ms,
         now,
     );
-    let attributions = attributions_for_experience(&experience, segment_events, now);
-    let candidates = propose_candidates_for_experience(&experience, &attributions, now);
     let runtime = OrchestratorCtx::current();
     let store = runtime.session_store();
     #[cfg(feature = "skill-learning")]
-    let experience_id = experience.id;
+    let experience_id = learning.experience.id;
     #[cfg(feature = "skill-learning")]
     let min_skill_learning_tool_calls = runtime.config().learning.skills.min_tool_calls;
     let learning_error = ctx
         .run(move || {
             let store = store.clone();
-            let experience = experience.clone();
-            let attributions = attributions.clone();
-            let candidates = candidates.clone();
+            let learning = learning.clone();
             async move {
                 let result = async {
-                    store.append_experience_record(&experience).await?;
-                    store.append_experience_attributions(&attributions).await?;
-                    for candidate in &candidates {
+                    store.append_experience_record(&learning.experience).await?;
+                    store
+                        .append_experience_attributions(&learning.attributions)
+                        .await?;
+                    for candidate in &learning.candidates {
                         store.append_learning_candidate(candidate).await?;
                     }
                     store.refresh_segment_materialized_views().await?;
@@ -1487,50 +1420,6 @@ async fn load_session_events_fallback(
         .into_inner())
 }
 
-fn segment_boundary_sequences(
-    boundary_events: &[EventRecord],
-    segment_id: SegmentId,
-) -> Option<SegmentBoundarySequences> {
-    let mut start_seq = None;
-    let mut completed_seq = None;
-    for record in boundary_events {
-        match &record.event {
-            Event::SegmentStarted {
-                segment_id: started_id,
-                ..
-            } if *started_id == segment_id && start_seq.is_none() => {
-                start_seq = Some(record.sequence_num);
-            }
-            Event::SegmentCompleted {
-                segment_id: completed_id,
-                ..
-            } if *completed_id == segment_id && completed_seq.is_none() => {
-                completed_seq = Some(record.sequence_num);
-            }
-            _ => {}
-        }
-    }
-
-    start_seq.map(|start_seq| SegmentBoundarySequences {
-        start_seq,
-        completed_seq,
-    })
-}
-
-fn segment_assessment_to_seq(
-    boundary: SegmentBoundarySequences,
-    cutoff_before_seq: Option<u64>,
-    stop_at_completion: bool,
-) -> Option<u64> {
-    if let Some(sequence_num) = cutoff_before_seq {
-        return Some(sequence_num.saturating_sub(1));
-    }
-    if stop_at_completion {
-        return boundary.completed_seq;
-    }
-    None
-}
-
 async fn load_segment_baseline(
     ctx: &WorkflowContext<'_>,
     tenant_id: moa_core::TenantId,
@@ -1541,109 +1430,6 @@ async fn load_segment_baseline(
         .call()
         .await?
         .into_inner())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assess_segment_events(
-    segment_events: &[EventRecord],
-    turn_count: u32,
-    token_cost: u64,
-    duration_ms: u64,
-    baseline: Option<&moa_core::SegmentBaseline>,
-    next_user_message: Option<&str>,
-    is_new_task: bool,
-    phase: AssessmentPhase,
-    extra_overrides: &[AssessmentOverride],
-) -> moa_core::SegmentAssessment {
-    let config = OrchestratorCtx::current_config().resolution.clone();
-    let tool = tool_signal::score(segment_events);
-    let verification = verification_signal::score(segment_events);
-    let continuation = continuation_signal::score(
-        continuation_signal::ContinuationInput {
-            next_user_message,
-            initial_query: first_user_message(segment_events),
-            is_new_task,
-        },
-        config.rephrase_similarity_threshold,
-    );
-    let self_assessment = self_assessment_signal::score(last_brain_response(segment_events));
-    let structural = structural_signal::score(
-        structural_signal::SegmentMetrics {
-            turn_count,
-            token_cost,
-            duration_secs: duration_ms as f64 / 1_000.0,
-        },
-        baseline,
-        config.structural_min_samples,
-    );
-    let mut overrides = extra_overrides.to_vec();
-    if let Some(override_value) = verification_signal::override_for_events(segment_events) {
-        overrides.push(override_value);
-    }
-    if tool_signal::all_tools_failed(segment_events) {
-        overrides.push(AssessmentOverride::AllToolsFailed);
-    }
-
-    SegmentAssessor::new(config.weights).assess(
-        tool,
-        verification,
-        continuation,
-        self_assessment,
-        structural,
-        phase,
-        &overrides,
-    )
-}
-
-fn segment_events_for_assessment(
-    events: &[EventRecord],
-    segment_id: SegmentId,
-    cutoff_before_seq: Option<u64>,
-) -> Vec<EventRecord> {
-    let start_seq = events.iter().find_map(|record| match &record.event {
-        Event::SegmentStarted {
-            segment_id: started_id,
-            ..
-        } if *started_id == segment_id => Some(record.sequence_num),
-        _ => None,
-    });
-    let completed_seq = events.iter().find_map(|record| match &record.event {
-        Event::SegmentCompleted {
-            segment_id: completed_id,
-            ..
-        } if *completed_id == segment_id => Some(record.sequence_num),
-        _ => None,
-    });
-    let end_exclusive = cutoff_before_seq
-        .or_else(|| completed_seq.map(|sequence_num| sequence_num.saturating_add(1)));
-
-    events
-        .iter()
-        .filter(|record| start_seq.is_none_or(|start_seq| record.sequence_num >= start_seq))
-        .filter(|record| end_exclusive.is_none_or(|end_seq| record.sequence_num < end_seq))
-        .cloned()
-        .collect()
-}
-
-fn latest_user_message(events: &[EventRecord]) -> Option<(&str, u64)> {
-    events.iter().rev().find_map(|record| match &record.event {
-        Event::UserMessage { text, .. } => Some((text.as_str(), record.sequence_num)),
-        _ => None,
-    })
-}
-
-fn first_user_message(events: &[EventRecord]) -> Option<&str> {
-    events.iter().find_map(|record| match &record.event {
-        Event::UserMessage { text, .. } => Some(text.as_str()),
-        _ => None,
-    })
-}
-
-fn last_brain_response(events: &[EventRecord]) -> Option<&str> {
-    events.iter().rev().find_map(|record| match &record.event {
-        Event::BrainResponse { text, .. } => Some(text.as_str()),
-        _ => None,
-    })
 }
 
 fn query_rewrite_from_metadata(
@@ -1910,154 +1696,7 @@ fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-    use moa_core::{Event, EventRecord, SegmentId, SessionId};
-    use uuid::Uuid;
-
-    use super::{
-        SegmentBoundarySequences, effective_max_turns, segment_assessment_to_seq,
-        segment_boundary_sequences, segment_events_for_assessment,
-    };
-
-    fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {
-        let event_type = event.event_type();
-        EventRecord {
-            id: Uuid::from_u128(sequence_num as u128),
-            session_id,
-            sequence_num,
-            event_type,
-            event,
-            timestamp: Utc::now(),
-            brain_id: None,
-            hand_id: None,
-            token_count: None,
-        }
-    }
-
-    fn segment_started(
-        session_id: SessionId,
-        sequence_num: u64,
-        segment_id: SegmentId,
-    ) -> EventRecord {
-        event_record(
-            session_id,
-            sequence_num,
-            Event::SegmentStarted {
-                segment_id,
-                segment_index: 0,
-                task_summary: Some("target task".to_string()),
-                previous_segment_id: None,
-            },
-        )
-    }
-
-    fn segment_completed(
-        session_id: SessionId,
-        sequence_num: u64,
-        segment_id: SegmentId,
-    ) -> EventRecord {
-        event_record(
-            session_id,
-            sequence_num,
-            Event::SegmentCompleted {
-                segment_id,
-                segment_index: 0,
-                task_summary: Some("target task".to_string()),
-                turn_count: 1,
-                tools_used: Vec::new(),
-                skills_activated: Vec::new(),
-                token_cost: 10,
-                duration_ms: 50,
-            },
-        )
-    }
-
-    fn user_message(session_id: SessionId, sequence_num: u64, text: &str) -> EventRecord {
-        event_record(
-            session_id,
-            sequence_num,
-            Event::UserMessage {
-                text: text.to_string(),
-                attachments: Vec::new(),
-            },
-        )
-    }
-
-    fn warning(session_id: SessionId, sequence_num: u64, message: &str) -> EventRecord {
-        event_record(
-            session_id,
-            sequence_num,
-            Event::Warning {
-                message: message.to_string(),
-            },
-        )
-    }
-
-    #[test]
-    fn segment_boundary_sequences_match_requested_segment_only() {
-        // Pins: boundary lookup uses durable segment boundary events for the target segment.
-        let session_id = SessionId::new();
-        let target_segment = SegmentId::new();
-        let other_segment = SegmentId::new();
-        let boundaries = vec![
-            segment_started(session_id, 2, other_segment),
-            segment_started(session_id, 10, target_segment),
-            segment_completed(session_id, 18, other_segment),
-            segment_completed(session_id, 31, target_segment),
-        ];
-
-        assert_eq!(
-            segment_boundary_sequences(&boundaries, target_segment),
-            Some(SegmentBoundarySequences {
-                start_seq: 10,
-                completed_seq: Some(31),
-            })
-        );
-        assert_eq!(
-            segment_boundary_sequences(&boundaries, SegmentId::new()),
-            None
-        );
-    }
-
-    #[test]
-    fn segment_assessment_to_seq_prefers_next_user_cutoff() {
-        // Pins: completed segment assessment ends before the next user message when known.
-        let boundary = SegmentBoundarySequences {
-            start_seq: 10,
-            completed_seq: Some(40),
-        };
-
-        assert_eq!(
-            segment_assessment_to_seq(boundary, Some(35), true),
-            Some(34)
-        );
-        assert_eq!(segment_assessment_to_seq(boundary, None, true), Some(40));
-        assert_eq!(segment_assessment_to_seq(boundary, None, false), None);
-    }
-
-    #[test]
-    fn segment_events_for_assessment_starts_at_segment_and_stops_before_cutoff() {
-        // Pins: segment assessment excludes prior events and the next task's user message.
-        let session_id = SessionId::new();
-        let target_segment = SegmentId::new();
-        let events = vec![
-            user_message(session_id, 1, "previous task"),
-            segment_started(session_id, 2, target_segment),
-            user_message(session_id, 3, "target task"),
-            warning(session_id, 4, "inside target segment"),
-            user_message(session_id, 5, "next task"),
-            segment_completed(session_id, 6, target_segment),
-            warning(session_id, 7, "after target segment"),
-        ];
-
-        let filtered = segment_events_for_assessment(&events, target_segment, Some(5));
-        let sequences = filtered
-            .iter()
-            .map(|record| record.sequence_num)
-            .collect::<Vec<_>>();
-
-        assert_eq!(sequences, vec![2, 3, 4]);
-    }
+    use super::effective_max_turns;
 
     #[test]
     fn effective_max_turns_prefers_request_override() {

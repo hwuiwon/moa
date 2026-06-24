@@ -43,6 +43,7 @@ async fn live_brain_turn_completes() -> Result<()> {
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
+            segment_store: Some(store.clone()),
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,

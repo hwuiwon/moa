@@ -8,6 +8,7 @@ license.workspace = true
 hex.workspace = true
 moa-artifacts.workspace = true
 moa-core.workspace = true
+moa-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

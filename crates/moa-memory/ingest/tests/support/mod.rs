@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::{
-    ContactId, ScopeContext, ScopedConn, SessionId, TenantId, traits::EmbeddingProvider,
-};
+use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass, cypher,
 };
 use moa_memory_ingest::{IngestCtx, RrfPlusJudgeDetector, SessionTurn};
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};

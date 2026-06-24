@@ -8,10 +8,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
 use moa_brain::retrieval::{LegSources, RetrievalHit};
-use moa_core::{
-    MoaError, ScopeContext, ScopeTier, ScopedConn, SessionId, TenantId, UserId, WorkspaceId,
-    traits::EmbeddingProvider,
-};
+use moa_core::{MoaError, SessionId, TenantId, UserId, WorkspaceId, traits::EmbeddingProvider};
+use moa_db::ScopedConn;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
 use moa_eval::memory_eval::{
@@ -38,6 +36,7 @@ use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, IngestCtx, IngestError,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_types::{ScopeContext, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use sha2::{Digest, Sha256};

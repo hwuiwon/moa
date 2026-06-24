@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
-use moa_core::{ScopeTier, SessionId, UserId, WorkspaceId};
+use moa_core::{SessionId, UserId, WorkspaceId};
 use moa_memory_graph::PiiClass;
+use moa_memory_types::ScopeTier;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File;

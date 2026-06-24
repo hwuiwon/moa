@@ -147,17 +147,19 @@ async fn create_new_session(
     agent: AgentSessionSelection,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
     let store = OrchestratorCtx::current_session_store();
+    let pool = OrchestratorCtx::current_graph_pool();
     let identity = request.identity.clone();
     Ok(ctx
         .run(|| async move {
             let mut meta = new_session_meta(tenant_id, model, &identity)?;
             let agent_context =
-                resolve_agent_context_for_session(store.as_ref(), &meta, &agent).await?;
+                resolve_agent_context_for_session(pool.clone(), &meta, &agent).await?;
             apply_agent_model_policy(&mut meta, &agent_context)?;
             meta.agent_context = Some(agent_context);
-            let session_id = create_session_for_identity(store.as_ref(), meta.clone(), identity)
-                .await
-                .map_err(non_retryable_handler_error)?;
+            let session_id =
+                create_session_for_identity(store.as_ref(), &pool, meta.clone(), identity)
+                    .await
+                    .map_err(non_retryable_handler_error)?;
             Ok::<_, HandlerError>(Json::from((session_id, meta)))
         })
         .name("experiment_create_session")

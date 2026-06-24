@@ -1,7 +1,8 @@
 //! Periodic graph-memory maintenance triggered by the CronJob virtual object.
 
 use chrono::{NaiveDate, Utc};
-use moa_core::{TenantId, restate_observability::annotate_restate_handler_span};
+use moa_core::TenantId;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -56,6 +57,7 @@ pub struct GraphMemoryMaintImpl;
 
 impl GraphMemoryMaint for GraphMemoryMaintImpl {
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: Internal CronJob/maintenance handler; queues storage compaction workflows only.
     async fn compact(
         &self,
         ctx: Context<'_>,

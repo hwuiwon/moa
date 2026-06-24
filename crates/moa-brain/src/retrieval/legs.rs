@@ -4,11 +4,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use moa_core::{MemoryScope, ScopeContext, ScopedConn};
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel, PiiClass,
     push_validity_filter,
 };
+use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -632,8 +633,9 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use moa_core::{MemoryScope, TenantId};
+    use moa_core::TenantId;
     use moa_memory_graph::{EdgeLabel, GraphExpansionHit, NodeIndexRow, NodeLabel, PiiClass};
+    use moa_memory_types::MemoryScope;
     use moa_memory_vector::{Error as VectorError, VectorItem, VectorMatch, VectorQuery};
     use sqlx::PgConnection;
     use uuid::Uuid;

@@ -1,7 +1,8 @@
 //! Lexical lookup over the `moa.node_index` sidecar.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, ScopedConn};
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::{GraphError, NodeIndexRow};

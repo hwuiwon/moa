@@ -1,9 +1,11 @@
 //! Memory-owned privacy erasure helpers.
 
-use moa_core::{ContactId, MoaError, ScopeContext, ScopedConn, TenantId};
+use moa_core::{ContactId, MoaError, TenantId};
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
 };
+use moa_memory_types::ScopeContext;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;

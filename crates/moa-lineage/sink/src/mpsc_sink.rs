@@ -243,10 +243,11 @@ impl From<&WriterHandle> for WriterStats {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{MemoryScope, SessionId, TenantId, UserId, WorkspaceId};
+    use moa_core::{SessionId, TenantId, UserId, WorkspaceId};
     use moa_lineage_core::{
         BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
     };
+    use moa_memory_types::MemoryScope;
     use uuid::Uuid;
 
     use super::*;

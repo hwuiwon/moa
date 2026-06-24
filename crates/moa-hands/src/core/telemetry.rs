@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use moa_core::{
     ActionPolicyEffect, MoaError, Result, SandboxTier, SessionMeta, ToolInvocation, ToolOutput,
-    TraceContext, record_tool_call, record_tool_output_truncated_metric,
+    TraceContext,
+};
+use moa_observability::{
+    apply_trace_context_to_span, record_tool_call, record_tool_output_truncated_metric,
 };
 use opentelemetry::trace::Status;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -17,7 +20,8 @@ pub(super) fn tool_execution_span(
 ) -> tracing::Span {
     let span_name = format!("execute_tool {}", invocation.name);
     let span = tracing::info_span!("tool_execution", otel.name = %span_name);
-    TraceContext::from_session_meta(session, None).apply_to_span(&span);
+    let trace_context = TraceContext::from_session_meta(session, None);
+    apply_trace_context_to_span(&trace_context, &span);
     span.set_attribute("gen_ai.tool.name", invocation.name.clone());
     if let Some(tool_call_id) = invocation.id.as_ref() {
         span.set_attribute("gen_ai.tool.call.id", tool_call_id.clone());
@@ -35,7 +39,8 @@ pub(super) fn record_tool_invocation_metadata(
     execution: &ToolExecution,
     effect: &ActionPolicyEffect,
 ) {
-    TraceContext::from_session_meta(session, None).apply_to_span(span);
+    let trace_context = TraceContext::from_session_meta(session, None);
+    apply_trace_context_to_span(&trace_context, span);
 
     let (category, sandbox_tier) = match execution {
         ToolExecution::BuiltIn(_) => ("builtin", "none"),

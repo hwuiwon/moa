@@ -20,7 +20,7 @@ pub use evaluators::{
 pub use loader::{discover_configs, discover_suites, load_agent_config, load_suite};
 pub use plan::{EvalPlan, build_eval_plan};
 pub use replay::{ReplayConfig, token_f1};
-pub use results::{EvalMetrics, EvalResult, EvalScore, EvalStatus, ScoreValue, TrajectoryStep};
+pub use results::{EvalMetrics, EvalResult, EvalScore, EvalScoreValue, EvalStatus, TrajectoryStep};
 pub use types::{
     ActionPolicyOverride, AgentConfig, ExpectedOutput, InstructionOverride, LongConversationMode,
     LongSessionInterleaving, LongTestCase, MemoryOverride, SecondaryLongSession, SkillOverride,

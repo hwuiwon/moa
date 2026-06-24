@@ -1,10 +1,11 @@
 //! Integration coverage for weighted lexical seed ranking.
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ScopeContext, TenantId};
+use moa_core::TenantId;
 use moa_memory_graph::{
     AgeGraphStore, GraphStore, LexicalStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
+use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
 use tokio::sync::Mutex;

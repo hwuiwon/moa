@@ -7,10 +7,10 @@ use moa_core::{TenantId, WorkspaceId};
 use moa_eval_core::{
     AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite,
 };
+use moa_orchestrator::services::eval::repository::parse_dataset_items_for_workspace;
 use moa_orchestrator::services::eval::{
     EvalServiceError, accepted_eval_run_response, hosted_eval_report_artifacts,
-    parse_dataset_items_for_workspace, status_response_from_run_response,
-    suite_summaries_from_documents, verify_run_status_tenant,
+    status_response_from_run_response, suite_summaries_from_documents, verify_run_status_tenant,
 };
 use serde_json::json;
 use uuid::Uuid;

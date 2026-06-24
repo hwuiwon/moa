@@ -1,9 +1,10 @@
 //! Postgres-backed checks for contact-local memory consolidation.
 
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::{ContactId, ScopeContext, TenantId, WorkspaceId};
+use moa_core::{ContactId, TenantId, WorkspaceId};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_lifecycle::merge_duplicates;
+use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
 use sqlx::PgPool;

@@ -3,6 +3,7 @@
 //! Database migrations live in `moa-migrations`; this crate owns runtime
 //! session-store queries.
 
+pub mod analytics;
 pub mod blob;
 pub mod neon;
 pub mod queries;

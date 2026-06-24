@@ -6,10 +6,20 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::{record_compaction_tier_applied, record_pipeline_compile_duration_metric};
-
 tokio::task_local! {
     static TURN_LATENCY_COUNTERS: Arc<TurnLatencyCounters>;
+}
+
+fn record_pipeline_compile_duration_metric(duration: Duration) {
+    metrics::histogram!("moa_pipeline_compile_seconds").record(duration.as_secs_f64());
+}
+
+fn record_compaction_tier_applied(tier: u8) {
+    metrics::counter!(
+        "moa_compaction_tier_applied_total",
+        "tier" => tier.to_string()
+    )
+    .increment(1);
 }
 
 /// Snapshot of per-turn latency breakdown metrics.

@@ -1,7 +1,9 @@
 //! Integration tests for the pgvector `halfvec(1024)` graph-memory store.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ScopeContext, ScopedConn, TenantId};
+use moa_core::{ContactId, TenantId};
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VectorItem, VectorQuery, VectorStore};
 use moa_session::testing;
 use sqlx::PgPool;
@@ -86,6 +88,40 @@ async fn insert_node_index_rows(pool: &PgPool, workspace_id: &str, items: &[Vect
     conn.commit()
         .await
         .expect("commit node_index seed transaction");
+}
+
+async fn insert_contact_node_index_rows(
+    pool: &PgPool,
+    workspace_id: &str,
+    contact_id: ContactId,
+    items: &[VectorItem],
+) {
+    let tenant_id = Uuid::parse_str(workspace_id).expect("test workspace id should be a UUID");
+    let ctx = ScopeContext::contact(TenantId::from(tenant_id), contact_id);
+    let mut conn = ScopedConn::begin(pool, &ctx)
+        .await
+        .expect("begin contact node_index seed transaction");
+    set_app_role(conn.as_mut()).await;
+
+    for item in items {
+        sqlx::query(
+            "INSERT INTO moa.node_index (uid, label, workspace_id, user_id, name, pii_class) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(item.uid)
+        .bind(&item.label)
+        .bind(workspace_id)
+        .bind(item.user_id.as_deref())
+        .bind(format!("contact vector seed {}", item.uid))
+        .bind(&item.pii_class)
+        .execute(conn.as_mut())
+        .await
+        .expect("insert contact node_index seed row");
+    }
+
+    conn.commit()
+        .await
+        .expect("commit contact node_index seed transaction");
 }
 
 async fn set_workspace_embedder_state(pool: &PgPool, workspace_id: &str, model: &str) {
@@ -250,6 +286,83 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     assert!(matches.is_empty(), "{matches:?}");
 
     delete_node_index_rows(session_store.pool(), &[item_a.uid]).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn control_plane_knn_can_validate_contact_workspace_vectors() {
+    // Pins: workspace vector promotion validates contact-owned embeddings through control-plane RLS.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let workspace_id = Uuid::now_v7().to_string();
+    let tenant_id = TenantId::from(Uuid::parse_str(&workspace_id).expect("workspace uuid"));
+    let contact_id = ContactId::new();
+    let mut item = vector_item(Uuid::now_v7(), &workspace_id, "Fact", basis_vector(11));
+    item.user_id = Some(contact_id.to_string());
+    insert_contact_node_index_rows(
+        session_store.pool(),
+        &workspace_id,
+        contact_id,
+        std::slice::from_ref(&item),
+    )
+    .await;
+    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
+
+    let contact_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        ScopeContext::contact(tenant_id, contact_id),
+    );
+    contact_store
+        .upsert(std::slice::from_ref(&item))
+        .await
+        .expect("upsert contact vector");
+
+    let query = VectorQuery {
+        workspace_id: Some(workspace_id.clone()),
+        embedding: item.embedding.clone(),
+        k: 10,
+        label_filter: Some(vec!["Fact".to_string()]),
+        max_pii_class: "restricted".to_string(),
+        include_global: false,
+        as_of: None,
+    };
+    let tenant_store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        ScopeContext::tenant(tenant_id),
+    );
+    let tenant_matches = tenant_store
+        .knn(&query)
+        .await
+        .expect("tenant-scoped query should run");
+    assert_eq!(
+        tenant_matches,
+        Vec::new(),
+        "tenant-scoped pgvector must not see contact vectors"
+    );
+
+    let control_plane_store = PgvectorStore::new_for_control_plane(
+        session_store.pool().clone(),
+        ScopeContext::tenant(tenant_id),
+    );
+    let control_plane_matches = control_plane_store
+        .knn(&query)
+        .await
+        .expect("control-plane query should run");
+    assert_eq!(
+        control_plane_matches.first().map(|row| row.uid),
+        Some(item.uid)
+    );
+
+    control_plane_store
+        .delete(&[item.uid])
+        .await
+        .expect("delete contact vector");
+    delete_node_index_rows(session_store.pool(), &[item.uid]).await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

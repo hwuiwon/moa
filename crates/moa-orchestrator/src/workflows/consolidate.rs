@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::ctx::OrchestratorCtx;
 use crate::objects::workspace::WorkspaceObjectClient;
-use moa_core::restate_observability::annotate_restate_handler_span;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Returns the durable workflow ID for a tenant/date consolidation pass.
 #[must_use]

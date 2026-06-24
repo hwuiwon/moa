@@ -1,11 +1,13 @@
 //! Read-side smoke tests for `GraphStore`.
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ScopeContext, ScopedConn, TenantId};
+use moa_core::TenantId;
+use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, EdgeLabel, EdgeWriteIntent, GraphStore, NodeLabel, NodeWriteIntent, PiiClass,
     cypher,
 };
+use moa_memory_types::ScopeContext;
 use moa_session::testing;
 use serde_json::json;
 use sqlx::Row;

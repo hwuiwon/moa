@@ -2,7 +2,8 @@
 
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::MemoryIngestDocument;
-use moa_core::{ContactId, MemoryScope, TenantId, UserId};
+use moa_core::{ContactId, TenantId, UserId};
+use moa_memory_types::MemoryScope;
 use moa_orchestrator::services::memory::{
     UserScopeError, checked_ingest_contact_id, checked_memory_scope, document_ingest_session_id,
     effective_user_id,

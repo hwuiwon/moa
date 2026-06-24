@@ -4,25 +4,26 @@ use std::sync::OnceLock;
 
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::{IdentityType, SessionStore as _};
 use moa_core::wire::{
     CacheDailyMetricRow, CacheStatsRequest, CacheStatsResponse, ExperimentAnalyticsRequest,
     ExperimentAnalyticsResponse, ExperimentRunTrendPoint, ExperimentScoreRunRef,
     ExperimentStatusCount, ExperimentTrialTrendPoint, LearningCandidateListRequest,
-    LearningCandidateListResponse, LearningCandidateSummary, SessionSearchRequest,
-    SessionSearchResponse, SessionSearchResult, SessionStatsRequest, SessionStatsResponse,
-    TenantStatsRequest, TenantStatsResponse, ToolStatsRequest, ToolStatsResponse, ToolStatsRow,
+    LearningCandidateListResponse, SessionSearchRequest, SessionSearchResponse,
+    SessionSearchResult, SessionStatsRequest, SessionStatsResponse, TenantStatsRequest,
+    TenantStatsResponse, ToolStatsRequest, ToolStatsResponse, ToolStatsRow,
 };
 use moa_core::{
-    CacheDailyMetric, Event, EventFilter, EventRecord, LearningCandidateStatus,
-    LearningCandidateType, LearningRiskClass, MoaError, ScopeContext, ScopedConn, SessionActorRef,
+    CacheDailyMetric, Event, EventFilter, EventRecord, MoaError, SessionActorRef,
     SessionAnalyticsSummary, TenantAnalyticsSummary, TenantId, ToolCallSummary,
 };
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use regex::Regex;
 use restate_sdk::prelude::*;
 use serde_json::Value;
-use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
+use sqlx::{Row, postgres::PgRow};
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
@@ -113,14 +114,10 @@ impl Analytics for AnalyticsImpl {
                     .refresh_analytics_materialized_views()
                     .await
                     .map_err(to_handler_error)?;
-                let summary = moa_core::analytics::get_tenant_stats_control_plane(
-                    store.pool(),
-                    store.schema_name(),
-                    &request.tenant_id,
-                    request.days,
-                )
-                .await
-                .map_err(to_handler_error)?;
+                let summary = store
+                    .get_tenant_stats_control_plane(&request.tenant_id, request.days)
+                    .await
+                    .map_err(to_handler_error)?;
                 Ok(Json(tenant_stats_response_from_summary(summary)))
             })
             .name("analytics_tenant_stats")
@@ -176,22 +173,14 @@ impl Analytics for AnalyticsImpl {
                     .refresh_analytics_materialized_views()
                     .await
                     .map_err(to_handler_error)?;
-                let summary = moa_core::analytics::get_tenant_stats_control_plane(
-                    store.pool(),
-                    store.schema_name(),
-                    &request.tenant_id,
-                    request.days,
-                )
-                .await
-                .map_err(to_handler_error)?;
-                let daily = moa_core::analytics::list_cache_daily_metrics_control_plane(
-                    store.pool(),
-                    store.schema_name(),
-                    &request.tenant_id,
-                    request.days,
-                )
-                .await
-                .map_err(to_handler_error)?;
+                let summary = store
+                    .get_tenant_stats_control_plane(&request.tenant_id, request.days)
+                    .await
+                    .map_err(to_handler_error)?;
+                let daily = store
+                    .list_cache_daily_metrics_control_plane(&request.tenant_id, request.days)
+                    .await
+                    .map_err(to_handler_error)?;
                 Ok(Json(cache_stats_response_from_parts(summary, daily)))
             })
             .name("analytics_cache_stats")
@@ -229,14 +218,14 @@ impl Analytics for AnalyticsImpl {
 
         Ok(ctx
             .run(|| async move {
-                learning_candidates_inner(
-                    store.pool().clone(),
-                    store.schema_name().map(str::to_string),
+                let candidates = store
+                    .list_learning_candidate_summaries(tenant_id, request.status, request.limit)
+                    .await
+                    .map_err(to_handler_error)?;
+                Ok(Json(LearningCandidateListResponse {
                     tenant_id,
-                    request,
-                )
-                .await
-                .map(Json::from)
+                    candidates,
+                }))
             })
             .name("analytics_learning_candidates")
             .await?)
@@ -524,43 +513,6 @@ async fn experiment_stats_inner(
     ))
 }
 
-async fn learning_candidates_inner(
-    pool: sqlx::PgPool,
-    schema_name: Option<String>,
-    tenant_id: TenantId,
-    request: LearningCandidateListRequest,
-) -> Result<LearningCandidateListResponse, HandlerError> {
-    let learning_candidates = qualified_table(schema_name.as_deref(), "learning_candidates");
-    let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT id, tenant_id, workspace_id, contact_id, candidate_type, status, \
-         target_id, target_label, task_fingerprint, payload, \
-         confidence::DOUBLE PRECISION AS confidence, risk_class, created_at, updated_at \
-         FROM {learning_candidates} WHERE tenant_id = "
-    ));
-    query.push_bind(tenant_id.0);
-    if let Some(status) = request.status {
-        query.push(" AND status = ");
-        query.push_bind(status.as_str());
-    }
-    query.push(" ORDER BY updated_at DESC, id ASC LIMIT ");
-    query.push_bind(i64::from(request.limit));
-
-    let rows = query
-        .build()
-        .fetch_all(&pool)
-        .await
-        .map_err(sqlx_to_handler_error)?;
-    let candidates = rows
-        .iter()
-        .map(learning_candidate_summary_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(LearningCandidateListResponse {
-        tenant_id,
-        candidates,
-    })
-}
-
 /// Converts experiment status counts and score-run references into a response.
 #[must_use]
 pub fn experiment_stats_response_from_parts(
@@ -778,51 +730,6 @@ fn experiment_trial_trend_point_from_row(
     })
 }
 
-fn learning_candidate_summary_from_row(
-    row: &PgRow,
-) -> Result<LearningCandidateSummary, HandlerError> {
-    let candidate_type = parse_db_enum::<LearningCandidateType>(
-        "learning candidate type",
-        row.try_get("candidate_type")
-            .map_err(sqlx_to_handler_error)?,
-    )?;
-    let status = parse_db_enum::<LearningCandidateStatus>(
-        "learning candidate status",
-        row.try_get("status").map_err(sqlx_to_handler_error)?,
-    )?;
-    let risk_class = parse_db_enum::<LearningRiskClass>(
-        "learning risk class",
-        row.try_get("risk_class").map_err(sqlx_to_handler_error)?,
-    )?;
-    let payload: Value = row.try_get("payload").map_err(sqlx_to_handler_error)?;
-    Ok(LearningCandidateSummary {
-        id: row.try_get("id").map_err(sqlx_to_handler_error)?,
-        tenant_id: row.try_get("tenant_id").map_err(sqlx_to_handler_error)?,
-        contact_id: row.try_get("contact_id").map_err(sqlx_to_handler_error)?,
-        candidate_type,
-        status,
-        target_id: row.try_get("target_id").map_err(sqlx_to_handler_error)?,
-        target_label: row.try_get("target_label").map_err(sqlx_to_handler_error)?,
-        task_fingerprint: row
-            .try_get("task_fingerprint")
-            .map_err(sqlx_to_handler_error)?,
-        confidence: row.try_get("confidence").map_err(sqlx_to_handler_error)?,
-        risk_class,
-        payload_preview: redacted_payload_preview(&payload),
-        created_at: row.try_get("created_at").map_err(sqlx_to_handler_error)?,
-        updated_at: row.try_get("updated_at").map_err(sqlx_to_handler_error)?,
-    })
-}
-
-fn parse_db_enum<T>(field: &'static str, value: String) -> Result<T, HandlerError>
-where
-    T: std::str::FromStr,
-{
-    value
-        .parse()
-        .map_err(|_| TerminalError::new(format!("invalid {field} `{value}`")).into())
-}
-
 fn u64_from_i64(value: i64, field: &'static str) -> Result<u64, HandlerError> {
     u64::try_from(value)
         .map_err(|_| TerminalError::new(format!("{field} was negative: {value}")).into())
@@ -918,21 +825,6 @@ fn truncate_snippet(text: &str, limit: usize) -> String {
         end = index;
     }
     format!("{}...", &text[..end])
-}
-
-fn qualified_table(schema_name: Option<&str>, table_name: &str) -> String {
-    match schema_name {
-        Some(schema_name) => format!(
-            "{}.{}",
-            quote_identifier(schema_name),
-            quote_identifier(table_name)
-        ),
-        None => quote_identifier(table_name),
-    }
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn sqlx_to_handler_error(error: sqlx::Error) -> HandlerError {

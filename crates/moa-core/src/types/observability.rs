@@ -3,8 +3,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -263,48 +261,6 @@ impl TraceContext {
             .map(normalize_environment)
             .filter(|value| !value.is_empty());
         self
-    }
-
-    /// Sets MOA span attributes on the provided tracing span.
-    pub fn apply_to_span(&self, span: &tracing::Span) {
-        let model = self.model.to_string();
-        span.set_attribute("moa.session.id", self.session_id.to_string());
-        span.set_attribute("moa.tenant.id", self.tenant_id.to_string());
-        span.set_attribute("moa.model", model);
-        if let Some(contact_id) = self.contact_id {
-            span.set_attribute("moa.contact.id", contact_id.to_string());
-        }
-        if let Some(created_by) = self.created_by.as_ref() {
-            match created_by {
-                SessionActorRef::Identity { id } => {
-                    span.set_attribute("moa.actor.type", "identity");
-                    span.set_attribute("moa.actor.id", id.to_string());
-                }
-                SessionActorRef::Contact { id } => {
-                    span.set_attribute("moa.actor.type", "contact");
-                    span.set_attribute("moa.actor.id", id.to_string());
-                }
-                SessionActorRef::Anonymous => {
-                    span.set_attribute("moa.actor.type", "anonymous");
-                }
-            }
-        }
-        if let Some(contact_state) = self.contact_state.as_ref() {
-            span.set_attribute("moa.contact.state", contact_state.clone());
-        }
-
-        if let Some(channel) = self.channel.as_ref() {
-            let value = channel.to_string();
-            span.set_attribute("moa.channel", value);
-        }
-
-        if let Some(trace_name) = self.trace_name.as_ref() {
-            span.set_attribute("moa.trace.name", trace_name.clone());
-        }
-
-        if let Some(environment) = self.environment.as_ref() {
-            span.set_attribute("moa.environment", environment.clone());
-        }
     }
 }
 

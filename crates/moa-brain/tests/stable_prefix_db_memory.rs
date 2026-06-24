@@ -54,6 +54,7 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
             shared_graph_memory_retriever: None,
             retrieval_embedder: None,
             shared_skill_injector: None,
+            segment_store: None,
             compaction_llm_provider: None,
             query_rewrite_llm_provider: None,
             identity_prompt_override: None,

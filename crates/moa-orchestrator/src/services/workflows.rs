@@ -4,13 +4,13 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::ActionRuleScope;
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::wire::{
     WorkflowCancelRequest, WorkflowCancelResponse, WorkflowNodeRunSummary,
     WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse, WorkflowRunRequest,
     WorkflowRunResponse, WorkflowRunStatus, WorkflowSignalRequest, WorkflowSignalResponse,
     WorkflowStatusRequest,
 };
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_workflows::error::WorkflowError;
 use moa_workflows::runtime::{StartWorkflowRun, WorkflowRuntime};
 use restate_sdk::prelude::*;

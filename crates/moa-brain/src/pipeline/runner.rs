@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use moa_core::{
     ContextProcessor, ContextSnapshotConfig, MessageRole, ProcessorOutput, Result, WorkingContext,
-    record_query_rewrite_decision,
 };
+use moa_observability::record_query_rewrite_decision;
 use tracing::Instrument;
 
 use super::util::estimate_tokens;

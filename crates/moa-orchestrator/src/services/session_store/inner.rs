@@ -12,14 +12,14 @@ use moa_core::{
 /// Creates a session row and enqueues the authorization tuples needed by its first caller.
 pub(crate) async fn create_session_for_identity(
     store: &PostgresSessionStore,
+    pool: &sqlx::PgPool,
     meta: SessionMeta,
     identity: Identity,
 ) -> Result<SessionId, HandlerError> {
     let (owner_user_type, owner_id) = owner_tuple_subject(&identity)?;
     let tenant_id = meta.tenant_id;
     let contact_id = meta.contact.as_ref().map(|contact| contact.contact_id);
-    let mut transaction = store
-        .pool()
+    let mut transaction = pool
         .begin()
         .await
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
@@ -84,6 +84,7 @@ pub(crate) async fn create_session_for_identity(
 /// Creates a session after resolving and pinning a tenant-configured agent policy.
 pub(crate) async fn create_agent_session_for_identity(
     store: &PostgresSessionStore,
+    pool: sqlx::PgPool,
     request: CreateAgentSessionRequest,
     identity: Identity,
 ) -> Result<CreateAgentSessionResponse, HandlerError> {
@@ -98,10 +99,11 @@ pub(crate) async fn create_agent_session_for_identity(
         );
     }
 
-    let agent_context = resolve_agent_context_for_session(store, &meta, &request.agent).await?;
+    let agent_context =
+        resolve_agent_context_for_session(pool.clone(), &meta, &request.agent).await?;
     meta.agent_context = Some(agent_context.clone());
     apply_agent_model_policy(&mut meta, &agent_context)?;
-    let session_id = create_session_for_identity(store, meta, identity).await?;
+    let session_id = create_session_for_identity(store, &pool, meta, identity).await?;
 
     Ok(CreateAgentSessionResponse {
         session_id,
@@ -111,7 +113,7 @@ pub(crate) async fn create_agent_session_for_identity(
 
 /// Resolves the agent selection for a session and returns the pinned runtime context.
 pub(crate) async fn resolve_agent_context_for_session(
-    store: &PostgresSessionStore,
+    pool: sqlx::PgPool,
     meta: &SessionMeta,
     agent: &AgentSessionSelection,
 ) -> Result<AgentContext, HandlerError> {
@@ -133,7 +135,7 @@ pub(crate) async fn resolve_agent_context_for_session(
         .into());
     }
 
-    let resolver = AgentResolver::new(store.pool().clone());
+    let resolver = AgentResolver::new(pool);
     let policy = match (agent.installation_uid, agent.revision_uid) {
         (Some(installation_uid), None) => resolver
             .resolve_installation(&scope, installation_uid)

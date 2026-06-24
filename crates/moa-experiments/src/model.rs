@@ -1,6 +1,7 @@
 //! Typed experiment definitions and run records.
 
 use chrono::{DateTime, Utc};
+use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::{ActionRuleScope, AgentSessionSelection, Attachment, ModelId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -158,37 +159,6 @@ impl ExperimentTrialStopReason {
             "target_terminal" => Some(Self::TargetTerminal),
             "error" => Some(Self::Error),
             "cancelled" => Some(Self::Cancelled),
-            _ => None,
-        }
-    }
-}
-
-/// Execution shape targeted by an experiment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExperimentTargetKind {
-    /// An open-ended agent loop backed by a session turn.
-    AgentLoop,
-    /// An artifact-backed workflow run.
-    Workflow,
-}
-
-impl ExperimentTargetKind {
-    /// Returns the persisted database representation for this target kind.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::AgentLoop => "agent_loop",
-            Self::Workflow => "workflow",
-        }
-    }
-
-    /// Parses a target kind loaded from durable storage.
-    #[must_use]
-    pub fn from_db(value: &str) -> Option<Self> {
-        match value {
-            "agent_loop" => Some(Self::AgentLoop),
-            "workflow" => Some(Self::Workflow),
             _ => None,
         }
     }

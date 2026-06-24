@@ -10,8 +10,9 @@ use moa_brain::{
     pipeline::identity::DEFAULT_IDENTITY_PROMPT,
 };
 use moa_core::{
-    ActionPolicyEffect, LLMProvider, LineageHandle, MoaConfig, SessionActorRef, SessionMeta,
-    SessionStore, TenantId, UserId, WorkspaceId,
+    ActionPolicyEffect, ExperienceStore, LLMProvider, LearningCandidateStore, LineageHandle,
+    MoaConfig, SegmentStore, SessionActorRef, SessionMeta, SessionStore, TenantId, UserId,
+    WorkspaceId,
 };
 use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
 use moa_hands::ToolRouter;
@@ -30,6 +31,12 @@ const DEFAULT_EVAL_USER: &str = "eval-runner";
 pub struct AgentEnvironment {
     /// Session store scoped to this run.
     pub session_store: Arc<dyn SessionStore>,
+    /// Segment persistence and analytics scoped to this run.
+    pub segment_store: Arc<dyn SegmentStore>,
+    /// Experience persistence scoped to this run.
+    pub experience_store: Arc<dyn ExperienceStore>,
+    /// Learning candidate persistence scoped to this run.
+    pub learning_candidate_store: Arc<dyn LearningCandidateStore>,
     /// LLM provider used for the run.
     pub llm_provider: Arc<dyn LLMProvider>,
     /// Tool router with per-config restrictions and policies applied.
@@ -113,6 +120,9 @@ pub(crate) async fn build_agent_environment_with_provider(
         PostgresSessionStore::new_in_schema(&base_config.database.url, &schema_name).await?,
     );
     let session_store: Arc<dyn SessionStore> = session_store_concrete.clone();
+    let segment_store: Arc<dyn SegmentStore> = session_store_concrete.clone();
+    let experience_store: Arc<dyn ExperienceStore> = session_store_concrete.clone();
+    let learning_candidate_store: Arc<dyn LearningCandidateStore> = session_store_concrete.clone();
     let rule_store: Arc<dyn ActionPolicyRuleStore> = session_store_concrete.clone();
     seed_memory(base_config, agent_config).await?;
 
@@ -139,16 +149,22 @@ pub(crate) async fn build_agent_environment_with_provider(
     let pipeline = build_pipeline(
         base_config,
         agent_config,
-        session_store.clone(),
-        session_store_concrete.pool().clone(),
-        llm_provider.clone(),
+        EvalPipelineDeps {
+            session_store: session_store.clone(),
+            segment_store: segment_store.clone(),
+            graph_pool: session_store_concrete.pool().clone(),
+            llm_provider: llm_provider.clone(),
+            lineage: lineage.clone(),
+        },
         tool_router.as_ref(),
-        lineage.clone(),
     )
     .await?;
 
     Ok(AgentEnvironment {
         session_store,
+        segment_store,
+        experience_store,
+        learning_candidate_store,
         llm_provider,
         tool_router,
         pipeline,
@@ -207,20 +223,26 @@ async fn build_tool_router(
         .with_policies(policies))
 }
 
+struct EvalPipelineDeps {
+    session_store: Arc<dyn SessionStore>,
+    segment_store: Arc<dyn SegmentStore>,
+    graph_pool: sqlx::PgPool,
+    llm_provider: Arc<dyn LLMProvider>,
+    lineage: Arc<dyn LineageHandle>,
+}
+
 async fn build_pipeline(
     base_config: &MoaConfig,
     agent_config: &AgentConfig,
-    session_store: Arc<dyn SessionStore>,
-    graph_pool: sqlx::PgPool,
-    llm_provider: Arc<dyn LLMProvider>,
+    deps: EvalPipelineDeps,
     tool_router: &ToolRouter,
-    lineage: Arc<dyn LineageHandle>,
 ) -> Result<ContextPipeline> {
     let workspace_instructions =
         load_workspace_instructions(base_config, &agent_config.instructions).await?;
     let user_instructions = base_config.general.user_instructions.clone();
     let tool_schemas = tool_router.tool_schemas();
-    let query_rewrite_provider = resolve_eval_rewriter_provider(base_config, llm_provider.clone());
+    let query_rewrite_provider =
+        resolve_eval_rewriter_provider(base_config, deps.llm_provider.clone());
     let mut eval_config = base_config.clone();
     eval_config.general.workspace_instructions = workspace_instructions;
     eval_config.general.user_instructions = user_instructions;
@@ -228,18 +250,19 @@ async fn build_pipeline(
     Ok(
         build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions(
             &eval_config,
-            session_store,
+            deps.session_store,
             GraphMemoryPipelineOptions {
-                graph_pool,
+                graph_pool: deps.graph_pool,
                 shared_graph_memory_retriever: None,
                 retrieval_embedder: None,
                 shared_skill_injector: None,
-                compaction_llm_provider: Some(llm_provider),
+                segment_store: Some(deps.segment_store),
+                compaction_llm_provider: Some(deps.llm_provider),
                 query_rewrite_llm_provider: query_rewrite_provider,
                 identity_prompt_override: Some(compose_identity_prompt(&agent_config.instructions)),
                 discovered_workspace_instructions: None,
                 tool_schemas,
-                lineage,
+                lineage: deps.lineage,
             },
         ),
     )

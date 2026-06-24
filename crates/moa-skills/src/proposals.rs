@@ -4,9 +4,11 @@ use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_core::{
-    ActionRuleScope, LearningCandidate, MoaError, Result, ScopeContext, ScopedConn, SessionMeta,
-    SkillMetadata, TaskFacetSet, TaskFingerprint, WorkspaceId,
+    ActionRuleScope, LearningCandidate, MoaError, Result, SessionMeta, SkillMetadata, TaskFacetSet,
+    TaskFingerprint, WorkspaceId,
 };
+use moa_db::ScopedConn;
+use moa_memory_types::ScopeContext;
 use moa_session::PostgresSessionStore;
 use serde_json::json;
 use sqlx::PgConnection;

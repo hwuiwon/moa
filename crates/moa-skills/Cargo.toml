@@ -15,8 +15,10 @@ chrono.workspace = true
 hex.workspace = true
 moa-artifacts.workspace = true
 moa-core = { workspace = true }
+moa-db = { workspace = true }
 moa-eval-core = { workspace = true, optional = true }
 moa-memory-graph = { workspace = true }
+moa-memory-types = { workspace = true }
 moa-providers = { workspace = true, optional = true }
 moa-session = { workspace = true, optional = true }
 moka.workspace = true

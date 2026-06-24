@@ -15,10 +15,8 @@ use moa_brain::{
     planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };
-use moa_core::{
-    ContactId, MemoryScope, ScopeContext, ScopedConn, SessionId, TenantId,
-    traits::EmbeddingProvider,
-};
+use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
+use moa_db::ScopedConn;
 use moa_eval::golden::comparator::dump_traces;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
@@ -27,6 +25,7 @@ use moa_memory_ingest::{
     ingest_turn_direct_with_ctx,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
+use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde::Deserialize;

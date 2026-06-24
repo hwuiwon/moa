@@ -3,8 +3,10 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ScopeContext, ScopedConn, TenantId};
+use moa_core::TenantId;
+use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};

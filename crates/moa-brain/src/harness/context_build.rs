@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 use moa_core::{
     CacheReport, CompletionRequest, CompletionResponse, ContextSnapshot, Event, EventRecord,
     LLMProvider, Result, SessionActorRef, SessionId, SessionMeta, SessionStore, TokenPricing,
-    TraceContext, WorkingContext, current_turn_root_span, record_pipeline_compile_duration,
-    record_turn_compaction, record_turn_event_persist_duration,
-    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
-    stable_prefix_fingerprint,
+    TraceContext, WorkingContext, record_pipeline_compile_duration, stable_prefix_fingerprint,
 };
 use moa_lineage_core::TurnId;
+use moa_observability::{
+    current_turn_root_span, record_turn_compaction, record_turn_event_persist_duration,
+    record_turn_pipeline_compile_duration, record_turn_snapshot_write_duration,
+};
 use moa_security::inject_canary;
 use tokio::sync::broadcast;
 use tracing::Instrument;

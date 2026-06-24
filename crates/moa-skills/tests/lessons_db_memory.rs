@@ -2,8 +2,10 @@
 
 mod support;
 
-use moa_core::{MoaError, Result, ScopeContext, ScopedConn};
+use moa_core::{MoaError, Result};
+use moa_db::ScopedConn;
 use moa_memory_graph::GraphStore;
+use moa_memory_types::ScopeContext;
 use moa_skills::lessons::{LessonContext, learn_lesson};
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use sqlx::Row;

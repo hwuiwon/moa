@@ -9,11 +9,6 @@ async-trait.workspace = true
 chrono.workspace = true
 envy.workspace = true
 metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
-opentelemetry.workspace = true
-opentelemetry-otlp.workspace = true
-opentelemetry_sdk.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 secrecy.workspace = true
@@ -23,12 +18,9 @@ sqlx = { workspace = true, features = ["chrono", "uuid"] }
 strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-metrics.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-tracing-appender.workspace = true
-tracing-opentelemetry.workspace = true
-tracing-subscriber = { workspace = true, features = ["json"] }
+url.workspace = true
 uuid.workspace = true
 workspace-hack = { workspace = true }
 

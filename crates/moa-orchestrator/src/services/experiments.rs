@@ -3,7 +3,6 @@
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::restate_observability::annotate_restate_handler_span;
 use moa_core::traits::Identity;
 use moa_core::wire::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
@@ -19,9 +18,7 @@ use moa_core::wire::{
     ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
     ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{
-    ActionRuleScope, MoaError, TenantId, WorkspaceId, record_experiment_learning_candidates,
-};
+use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
@@ -29,6 +26,8 @@ use moa_experiments::app::{
 };
 use moa_experiments::model::{ExperimentTrialStatus, ExperimentVariant};
 use moa_experiments::store::ExperimentStore;
+use moa_observability::record_experiment_learning_candidates;
+use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_scoring::ScoringError;
 use moa_scoring::{ExperimentRunScoreRef, experiment_score_breakdown_for_workspace};
 use moa_session::PostgresSessionStore;
