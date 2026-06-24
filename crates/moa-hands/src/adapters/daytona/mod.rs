@@ -15,8 +15,9 @@ use crate::tools::edit_output::{
     ExistingFileContent, build_file_write_output, build_text_edit_output,
 };
 use crate::tools::str_replace::plan_str_replace;
+use crate::tools::{file_outline, file_read, grep};
 
-use super::tool_route::{CloudSandboxToolRoute, unsupported_tool};
+use super::tool_route::{SandboxToolRoute, unsupported_tool};
 
 const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 const DEFAULT_DAYTONA_TOOLBOX_URL: &str = "https://proxy.app.daytona.io/toolbox";
@@ -321,8 +322,8 @@ impl HandProvider for DaytonaHandProvider {
         let workspace_id = handle.daytona_id()?;
         let payload: Value = serde_json::from_str(input)?;
         self.resume(handle).await?;
-        match CloudSandboxToolRoute::from_name(tool) {
-            Some(CloudSandboxToolRoute::Bash) => {
+        match SandboxToolRoute::from_name(tool) {
+            Some(SandboxToolRoute::Bash) => {
                 self.execute_command(
                     workspace_id,
                     required_string_field(&payload, "cmd")?,
@@ -331,11 +332,22 @@ impl HandProvider for DaytonaHandProvider {
                 )
                 .await
             }
-            Some(CloudSandboxToolRoute::FileRead) => {
-                self.read_file(workspace_id, required_string_field(&payload, "path")?)
+            Some(SandboxToolRoute::Grep) => {
+                let command = grep::remote_shell_command(input, "/")?;
+                self.execute_command(workspace_id, &command, None, None)
                     .await
             }
-            Some(CloudSandboxToolRoute::StrReplace) => {
+            Some(SandboxToolRoute::FileOutline) => {
+                let path = required_string_field(&payload, "path")?;
+                let content = self.read_file(workspace_id, path).await?.to_text();
+                file_outline::execute_with_content(input, path, &content)
+            }
+            Some(SandboxToolRoute::FileRead) => {
+                let path = required_string_field(&payload, "path")?;
+                let content = self.read_file(workspace_id, path).await?.to_text();
+                file_read::execute_with_content(input, path, &content)
+            }
+            Some(SandboxToolRoute::StrReplace) => {
                 self.str_replace_file(
                     workspace_id,
                     required_string_field(&payload, "path")?,
@@ -343,7 +355,7 @@ impl HandProvider for DaytonaHandProvider {
                 )
                 .await
             }
-            Some(CloudSandboxToolRoute::FileWrite) => {
+            Some(SandboxToolRoute::FileWrite) => {
                 self.write_file(
                     workspace_id,
                     required_string_field(&payload, "path")?,
@@ -351,7 +363,7 @@ impl HandProvider for DaytonaHandProvider {
                 )
                 .await
             }
-            Some(CloudSandboxToolRoute::FileSearch) => {
+            Some(SandboxToolRoute::FileSearch) => {
                 self.search_files(workspace_id, required_string_field(&payload, "pattern")?)
                     .await
             }

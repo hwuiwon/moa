@@ -12,6 +12,8 @@ use moa_core::{
 };
 use serde_json::{Value, json};
 
+use crate::adapters::tool_route::SandboxToolRoute;
+
 use super::DEFAULT_PROVIDER_NAME;
 
 pub(crate) fn execute_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
@@ -119,7 +121,7 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(tool_result::ToolResultReadTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultSearchTool));
         registry.register_hand(
-            "bash",
+            SandboxToolRoute::Bash.name(),
             "Purpose: run a non-interactive shell command inside the active workspace root. Use when: tests, builds, package managers, git inspection, or commands native file tools cannot express. Do not use: routine repository navigation, source reading, or text edits that file_search, grep, file_outline, file_read, str_replace, or file_write can handle. If blocked: keep commands targeted, preserve stderr/stdout, and stop after repeated failures instead of looping.",
             json!({
                 "type": "object",
@@ -134,7 +136,7 @@ impl ToolRegistry {
             IdempotencyClass::NonIdempotent,
         );
         registry.register_hand(
-            "file_outline",
+            SandboxToolRoute::FileOutline.name(),
             "Purpose: inspect a Python file's symbol outline without reading the full file. Use when: a large Python source file needs class, function, method, or line-number orientation. Do not use: non-Python files or exact content searches where grep is better. If blocked: fall back to a narrow file_read range after locating the nearest symbol.",
             json!({
                 "type": "object",
@@ -149,7 +151,7 @@ impl ToolRegistry {
             IdempotencyClass::Idempotent,
         );
         registry.register_hand(
-            "grep",
+            SandboxToolRoute::Grep.name(),
             "Purpose: search workspace file contents with regex or literal patterns. Use when: locating symbols, strings, errors, tests, or references before reading files. Do not use: broad exploratory filesystem walks or generated/vendor directories. If blocked: narrow path, enable literal matching for exact strings, or read a small matching range.",
             json!({
                 "type": "object",
@@ -166,7 +168,7 @@ impl ToolRegistry {
             IdempotencyClass::Idempotent,
         );
         registry.register_hand(
-            "file_read",
+            SandboxToolRoute::FileRead.name(),
             "Purpose: read UTF-8 text from a workspace file. Use when: you already know the relevant file or line range. Do not use: whole large files before searching or outlining. If blocked: use grep or file_outline first, then retry with a narrower start_line/end_line range.",
             json!({
                 "type": "object",
@@ -182,7 +184,7 @@ impl ToolRegistry {
             IdempotencyClass::Idempotent,
         );
         registry.register_hand(
-            "str_replace",
+            SandboxToolRoute::StrReplace.name(),
             "Purpose: replace one unique string match in an existing UTF-8 text file. Use when: editing an existing file with enough surrounding context to make old_str match exactly once. Do not use: new files, ambiguous matches, or line-number-only insertions. If blocked: read a narrower span and retry with more exact context.",
             json!({
                 "type": "object",
@@ -198,7 +200,7 @@ impl ToolRegistry {
             IdempotencyClass::NonIdempotent,
         );
         registry.register_hand(
-            "file_write",
+            SandboxToolRoute::FileWrite.name(),
             "Purpose: create or deliberately overwrite a UTF-8 text file inside the active workspace root. Use when: adding a new file or replacing a whole generated/test fixture file intentionally. Do not use: small edits to existing source files where str_replace is safer. If blocked: verify the relative path and avoid `..` or paths outside the workspace.",
             json!({
                 "type": "object",
@@ -213,7 +215,7 @@ impl ToolRegistry {
             IdempotencyClass::NonIdempotent,
         );
         registry.register_hand(
-            "file_search",
+            SandboxToolRoute::FileSearch.name(),
             "Purpose: find files inside the active workspace root with a glob pattern. Use when: locating paths before reading or editing. Do not use: content search, shell globbing, or generated/vendor directory exploration. If blocked: tighten the glob or switch to grep when the identifier is content rather than a path.",
             json!({
                 "type": "object",
@@ -226,21 +228,21 @@ impl ToolRegistry {
             read_tool_policy(ToolInputShape::Pattern),
             IdempotencyClass::Idempotent,
         );
-        registry.default_loadout = vec![
+        registry.default_loadout = [
             "memory_remember".to_string(),
             "memory_forget".to_string(),
             "memory_supersede".to_string(),
             "session_search".to_string(),
             "tool_result_read".to_string(),
             "tool_result_search".to_string(),
-            "file_search".to_string(),
-            "grep".to_string(),
-            "file_outline".to_string(),
-            "file_read".to_string(),
-            "str_replace".to_string(),
-            "file_write".to_string(),
-            "bash".to_string(),
-        ];
+        ]
+        .into_iter()
+        .chain(
+            SandboxToolRoute::DEFAULT_LOADOUT
+                .into_iter()
+                .map(|route| route.name().to_string()),
+        )
+        .collect();
         registry
     }
 
@@ -336,33 +338,19 @@ impl Default for ToolRegistry {
 }
 
 fn default_budget_for_tool(tool_name: &str) -> u32 {
-    match tool_name {
-        "bash" => 4_000,
-        "file_outline" => 2_000,
-        "grep" | "file_search" => 4_000,
-        "file_read" => 8_000,
-        _ => 8_000,
-    }
+    ToolBudgetConfig::default().for_tool(tool_name)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ToolRegistry;
+    use super::{SandboxToolRoute, ToolRegistry};
 
     #[test]
     fn default_local_prompt_schemas_keep_structured_hand_tool_guidance() {
         // Pins: prompt-facing hand tool descriptions carry usage policy without changing schemas.
         let registry = ToolRegistry::default_local();
 
-        for name in [
-            "bash",
-            "file_outline",
-            "grep",
-            "file_read",
-            "str_replace",
-            "file_write",
-            "file_search",
-        ] {
+        for name in SandboxToolRoute::ALL.map(SandboxToolRoute::name) {
             let description = registry
                 .get(name)
                 .expect("default tool should exist")

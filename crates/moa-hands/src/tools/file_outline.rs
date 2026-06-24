@@ -25,6 +25,17 @@ pub async fn execute(sandbox_dir: &Path, input: &str) -> Result<ToolOutput> {
     render_outline(&content, &display_path.to_string(), &params)
 }
 
+/// Renders a `file_outline` response from content already loaded by a provider.
+#[cfg(any(feature = "daytona", feature = "e2b"))]
+pub(crate) fn execute_with_content(
+    input: &str,
+    display_path: &str,
+    content: &str,
+) -> Result<ToolOutput> {
+    let params: FileOutlineInput = serde_json::from_str(input)?;
+    render_outline(content, display_path, &params)
+}
+
 /// Executes the `file_outline` tool inside an existing Docker sandbox.
 pub async fn execute_docker(
     container_id: &str,

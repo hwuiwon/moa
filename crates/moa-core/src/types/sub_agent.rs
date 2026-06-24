@@ -386,6 +386,15 @@ pub enum DelegationToolKind {
 }
 
 impl DelegationToolKind {
+    /// All built-in delegation tool kinds in stable prompt order.
+    pub const ALL: [Self; 5] = [
+        Self::Spawn,
+        Self::Wait,
+        Self::Message,
+        Self::List,
+        Self::Cancel,
+    ];
+
     /// Returns the stable provider-facing tool name.
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -401,14 +410,7 @@ impl DelegationToolKind {
     /// Returns the kind for a provider-facing delegation tool name.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "spawn_sub_agent" => Some(Self::Spawn),
-            "wait_sub_agent" => Some(Self::Wait),
-            "message_sub_agent" => Some(Self::Message),
-            "list_sub_agents" => Some(Self::List),
-            "cancel_sub_agent" => Some(Self::Cancel),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 
     /// Returns the provider-facing JSON schema for this tool.
@@ -625,13 +627,10 @@ pub fn cancel_sub_agent_tool_schema() -> serde_json::Value {
 
 /// Returns all delegation tool schemas.
 pub fn delegation_tool_schemas() -> Vec<serde_json::Value> {
-    vec![
-        DelegationToolKind::Spawn.schema(),
-        DelegationToolKind::Wait.schema(),
-        DelegationToolKind::Message.schema(),
-        DelegationToolKind::List.schema(),
-        DelegationToolKind::Cancel.schema(),
-    ]
+    DelegationToolKind::ALL
+        .into_iter()
+        .map(DelegationToolKind::schema)
+        .collect()
 }
 
 /// Returns one delegation tool schema by name.

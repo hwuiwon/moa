@@ -3,9 +3,9 @@
 #[cfg(any(feature = "daytona", feature = "e2b"))]
 use moa_core::MoaError;
 
-/// Tool routes supported by local filesystem-backed sandboxes.
+/// Tool routes supported by registered hand-backed sandboxes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SandboxToolRoute {
+pub(crate) enum SandboxToolRoute {
     /// Run a shell command.
     Bash,
     /// Search file contents.
@@ -23,49 +23,44 @@ pub(super) enum SandboxToolRoute {
 }
 
 impl SandboxToolRoute {
-    /// Parses a registered sandbox tool name.
-    pub(super) fn from_name(tool: &str) -> Option<Self> {
-        match tool {
-            "bash" => Some(Self::Bash),
-            "grep" => Some(Self::Grep),
-            "file_outline" => Some(Self::FileOutline),
-            "file_read" => Some(Self::FileRead),
-            "str_replace" => Some(Self::StrReplace),
-            "file_write" => Some(Self::FileWrite),
-            "file_search" => Some(Self::FileSearch),
-            _ => None,
+    /// All registered hand-tool routes in stable route order.
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Bash,
+        Self::Grep,
+        Self::FileOutline,
+        Self::FileRead,
+        Self::StrReplace,
+        Self::FileWrite,
+        Self::FileSearch,
+    ];
+
+    /// Prompt-facing default loadout order for registered hand tools.
+    pub(crate) const DEFAULT_LOADOUT: [Self; 7] = [
+        Self::FileSearch,
+        Self::Grep,
+        Self::FileOutline,
+        Self::FileRead,
+        Self::StrReplace,
+        Self::FileWrite,
+        Self::Bash,
+    ];
+
+    /// Returns the stable registered tool name for this route.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Grep => "grep",
+            Self::FileOutline => "file_outline",
+            Self::FileRead => "file_read",
+            Self::StrReplace => "str_replace",
+            Self::FileWrite => "file_write",
+            Self::FileSearch => "file_search",
         }
     }
-}
 
-/// Tool routes supported by HTTP-backed cloud sandboxes.
-#[cfg(any(feature = "daytona", feature = "e2b", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CloudSandboxToolRoute {
-    /// Run a shell command.
-    Bash,
-    /// Read a file.
-    FileRead,
-    /// Replace text in a file.
-    StrReplace,
-    /// Write a file.
-    FileWrite,
-    /// Search file names.
-    FileSearch,
-}
-
-#[cfg(any(feature = "daytona", feature = "e2b", test))]
-impl CloudSandboxToolRoute {
-    /// Parses a cloud sandbox tool name.
-    pub(super) fn from_name(tool: &str) -> Option<Self> {
-        match SandboxToolRoute::from_name(tool)? {
-            SandboxToolRoute::Bash => Some(Self::Bash),
-            SandboxToolRoute::FileRead => Some(Self::FileRead),
-            SandboxToolRoute::StrReplace => Some(Self::StrReplace),
-            SandboxToolRoute::FileWrite => Some(Self::FileWrite),
-            SandboxToolRoute::FileSearch => Some(Self::FileSearch),
-            SandboxToolRoute::Grep | SandboxToolRoute::FileOutline => None,
-        }
+    /// Parses a registered sandbox tool name.
+    pub(crate) fn from_name(tool: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|route| route.name() == tool)
     }
 }
 
@@ -77,30 +72,39 @@ pub(super) fn unsupported_tool(provider: &str, tool: &str) -> MoaError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CloudSandboxToolRoute, SandboxToolRoute};
+    use super::SandboxToolRoute;
 
     #[test]
-    fn sandbox_route_parses_registered_tool_names() {
+    fn sandbox_route_parses_all_registered_tool_names() {
         // Pins: adapter routing recognizes every registered sandbox tool exactly once.
+        let parsed = SandboxToolRoute::ALL
+            .into_iter()
+            .map(|route| SandboxToolRoute::from_name(route.name()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            SandboxToolRoute::from_name("bash"),
-            Some(SandboxToolRoute::Bash)
-        );
-        assert_eq!(
-            SandboxToolRoute::from_name("file_search"),
-            Some(SandboxToolRoute::FileSearch)
+            parsed,
+            SandboxToolRoute::ALL
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>()
         );
         assert_eq!(SandboxToolRoute::from_name("unknown"), None);
     }
 
     #[test]
-    fn cloud_route_excludes_host_only_tools() {
-        // Pins: cloud HTTP adapters do not advertise local-only grep or file_outline routes.
+    fn default_loadout_keeps_prompt_order() {
+        // Pins: hand-tool prompt order stays stable while routes remain a single source of truth.
         assert_eq!(
-            CloudSandboxToolRoute::from_name("file_read"),
-            Some(CloudSandboxToolRoute::FileRead)
+            SandboxToolRoute::DEFAULT_LOADOUT.map(SandboxToolRoute::name),
+            [
+                "file_search",
+                "grep",
+                "file_outline",
+                "file_read",
+                "str_replace",
+                "file_write",
+                "bash",
+            ]
         );
-        assert_eq!(CloudSandboxToolRoute::from_name("grep"), None);
-        assert_eq!(CloudSandboxToolRoute::from_name("file_outline"), None);
     }
 }

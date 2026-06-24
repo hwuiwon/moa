@@ -9,6 +9,8 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::tools::file_read::resolve_sandbox_path;
+#[cfg(any(feature = "daytona", feature = "e2b"))]
+use crate::tools::file_search::default_skipped_dirs;
 use crate::tools::file_search::should_skip_search_path_static;
 
 const MAX_MATCHES: usize = 100;
@@ -49,6 +51,59 @@ pub async fn execute(
     .map_err(|error| MoaError::ToolError(format!("grep search task failed: {error}")))?;
 
     Ok(build_grep_output(outcome, started.elapsed()))
+}
+
+/// Builds a shell command for cloud sandboxes to execute the `grep` input shape.
+#[cfg(any(feature = "daytona", feature = "e2b"))]
+pub(crate) fn remote_shell_command(input: &str, search_root: &str) -> Result<String> {
+    let params: GrepInput = serde_json::from_str(input)?;
+    let search_path = params
+        .path
+        .as_deref()
+        .map(|path| remote_search_path(search_root, path))
+        .unwrap_or_else(|| search_root.to_string());
+    let context_lines = params.context_lines.unwrap_or(0).min(MAX_CONTEXT_LINES);
+    let literal = params.literal.unwrap_or(false);
+    if !literal {
+        Regex::new(&params.pattern)
+            .map_err(|error| MoaError::ValidationError(error.to_string()))?;
+    }
+    let mode = if literal { "-F" } else { "-E" };
+    let context_flag = if context_lines == 0 {
+        String::new()
+    } else {
+        format!(" -C {context_lines}")
+    };
+    let exclude_dirs = default_skipped_dirs()
+        .iter()
+        .map(|dir| format!(" --exclude-dir={}", shell_quote(dir)))
+        .collect::<String>();
+
+    Ok(format!(
+        "if ! command -v grep >/dev/null 2>&1; then printf 'grep is not available in this sandbox\\n' >&2; exit 127; fi\n\
+         output=$(grep -R -n -I {mode}{context_flag}{exclude_dirs} -- {} {} 2>/dev/null | head -n {MAX_MATCHES})\n\
+         if [ -z \"$output\" ]; then printf 'No matching lines found.\\n'; else printf '%s\\n' \"$output\"; fi",
+        shell_quote(&params.pattern),
+        shell_quote(&search_path),
+    ))
+}
+
+#[cfg(any(feature = "daytona", feature = "e2b"))]
+fn remote_search_path(search_root: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    let root = search_root.trim_end_matches('/');
+    if root.is_empty() {
+        format!("/{path}")
+    } else {
+        format!("{root}/{path}")
+    }
+}
+
+#[cfg(any(feature = "daytona", feature = "e2b"))]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn resolve_search_root(sandbox_dir: &Path, relative_path: Option<&str>) -> Result<PathBuf> {
