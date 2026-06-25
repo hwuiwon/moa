@@ -222,6 +222,41 @@ impl PostgresSessionStore {
         Ok(binding_id)
     }
 
+    /// Loads the currently active channel binding route for a session, when one exists.
+    pub async fn get_active_session_channel_binding(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Option<SessionChannelBinding>> {
+        let sessions = self.table_name("sessions");
+        let bindings = self.table_name("session_channel_bindings");
+        let row = sqlx::query(&format!(
+            "SELECT b.id, b.route \
+             FROM {sessions} s \
+             JOIN {bindings} b ON b.id = s.active_channel_binding_id \
+             WHERE s.id = $1 AND b.ended_at IS NULL"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let binding_id = row
+            .try_get::<Uuid, _>("id")
+            .map(moa_core::SessionChannelBindingId)
+            .map_err(map_sqlx_error)?;
+        let channel_ref = row
+            .try_get::<Json<ChannelRef>, _>("route")
+            .map(|route| route.0)
+            .map_err(map_sqlx_error)?;
+        Ok(Some(SessionChannelBinding {
+            binding_id,
+            channel_ref,
+        }))
+    }
+
     /// Updates contact metadata attached to an existing session.
     pub async fn update_session_contact(
         &self,

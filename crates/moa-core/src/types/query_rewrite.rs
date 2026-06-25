@@ -160,5 +160,9 @@ mod tests {
                 "skill_pattern"
             ])
         );
+        assert!(
+            schema["properties"].get("complexity_hint").is_none(),
+            "query rewrite remains retrieval-scoped, not an intent router"
+        );
     }
 }

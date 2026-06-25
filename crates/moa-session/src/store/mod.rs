@@ -12,10 +12,10 @@ use moa_core::{
     EventType, ExperienceAttribution, ExperienceRecord, ExperienceStore, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateStore, LearningEntry,
     MoaConfig, MoaError, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
-    SegmentStore, SessionAnalyticsSummary, SessionFilter, SessionId, SessionMeta, SessionStatus,
-    SessionStore, SessionSummary, SessionTurnMetric, SkillResolutionRate, TaskSegment,
-    TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary,
-    WorkspaceId, record_session_event_replay,
+    SegmentStore, SessionAnalyticsSummary, SessionChannelBinding, SessionFilter, SessionId,
+    SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId,
+    ToolCallId, ToolCallSummary, WorkspaceId, record_session_event_replay,
 };
 use moa_observability::{
     record_session_created, record_session_event_append, record_session_event_decoded_bytes,

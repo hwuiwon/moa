@@ -10,13 +10,16 @@ use uuid::Uuid;
 use crate::traits::Identity;
 use crate::{
     ActionClass, ActionRuleScope, AgentContext, AgentSessionSelection, Attachment,
-    CheckpointHandle, CheckpointInfo, ContactId, ContactRef, Event, EventRange, EventType,
-    ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
+    CheckpointHandle, CheckpointInfo, ContactId, ContactRef, Event, EventRange, EventRecord,
+    EventType, ExperienceAttribution, ExperienceRecord, IdempotencyClass, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType,
     LearningRiskClass, RiskLevel, SegmentAssessment, SegmentCompletion, SegmentId, SessionFilter,
     SessionId, SessionMeta, SessionStatus, TaskSegment, TaskStrategySuccessRate, TenantId,
     ToolDefinition, UserId,
 };
+
+const DEFAULT_SESSION_PROGRESS_EVENT_LIMIT: usize = 100;
+const MAX_SESSION_PROGRESS_EVENT_LIMIT: usize = 500;
 
 /// Input accepted by one `TurnExecution` workflow run.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -246,6 +249,53 @@ pub struct SessionSnapshot {
     pub pending_message_count: u64,
     /// Last outcome delivered by `TurnExecution`.
     pub last_outcome: Option<TurnOutcome>,
+}
+
+/// Request payload for `Session/progress`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProgressRequest {
+    /// Event range to include alongside hot workflow progress.
+    #[serde(default = "default_session_progress_event_range")]
+    pub event_range: EventRange,
+}
+
+impl Default for SessionProgressRequest {
+    fn default() -> Self {
+        Self {
+            event_range: default_session_progress_event_range(),
+        }
+    }
+}
+
+impl SessionProgressRequest {
+    /// Returns a bounded event range for progress polling.
+    #[must_use]
+    pub fn normalized_event_range(&self) -> EventRange {
+        let mut range = self.event_range.clone();
+        range.limit = Some(
+            range
+                .limit
+                .unwrap_or(DEFAULT_SESSION_PROGRESS_EVENT_LIMIT)
+                .min(MAX_SESSION_PROGRESS_EVENT_LIMIT),
+        );
+        range
+    }
+}
+
+/// Combined session progress projection for polling clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionProgress {
+    /// Current Session VO lifecycle snapshot.
+    pub snapshot: SessionSnapshot,
+    /// Active turn workflow progress, when a turn is currently running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn_progress: Option<TurnProgress>,
+    /// Durable event history matching the requested range.
+    pub events: Vec<EventRecord>,
+}
+
+fn default_session_progress_event_range() -> EventRange {
+    EventRange::recent(DEFAULT_SESSION_PROGRESS_EVENT_LIMIT)
 }
 
 /// Request payload for `SessionStore/append_event`.
@@ -3094,5 +3144,61 @@ mod tests {
         assert_eq!(decoded.last_progress_summary, None);
         assert!(!decoded.cancel_requested);
         assert_eq!(decoded.cancel_reason, None);
+    }
+
+    #[test]
+    fn session_progress_request_defaults_to_bounded_recent_events() {
+        // Pins: Session/progress does not accidentally become an unbounded event-history endpoint.
+        let decoded: SessionProgressRequest =
+            serde_json::from_str("{}").expect("deserialize default session progress request");
+
+        assert_eq!(decoded.event_range.from_seq, None);
+        assert_eq!(decoded.event_range.to_seq, None);
+        assert_eq!(decoded.event_range.event_types, None);
+        assert_eq!(decoded.event_range.limit, Some(100));
+        assert_eq!(decoded.normalized_event_range().limit, Some(100));
+    }
+
+    #[test]
+    fn session_progress_request_normalizes_nested_empty_event_range() {
+        // Pins: an explicit nested event_range object cannot bypass the bounded default.
+        let decoded: SessionProgressRequest = serde_json::from_str(r#"{"event_range":{}}"#)
+            .expect("deserialize empty nested event range");
+
+        assert_eq!(decoded.event_range.limit, None);
+        assert_eq!(decoded.normalized_event_range().limit, Some(100));
+    }
+
+    #[test]
+    fn session_progress_request_clamps_oversized_event_limit() {
+        // Pins: Session/progress remains a compact progress endpoint, not bulk event export.
+        let decoded: SessionProgressRequest =
+            serde_json::from_str(r#"{"event_range":{"limit":10000}}"#)
+                .expect("deserialize oversized event range");
+
+        assert_eq!(decoded.event_range.limit, Some(10_000));
+        assert_eq!(decoded.normalized_event_range().limit, Some(500));
+    }
+
+    #[test]
+    fn session_progress_response_omits_missing_active_turn_progress() {
+        // Pins: idle sessions can use the same convenience endpoint without a synthetic turn object.
+        let progress = SessionProgress {
+            snapshot: SessionSnapshot {
+                session_id: "session-123".to_string(),
+                active_turn_id: None,
+                pending_message_count: 0,
+                last_outcome: None,
+            },
+            active_turn_progress: None,
+            events: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&progress).expect("serialize session progress");
+        assert!(!json.contains("active_turn_progress"));
+
+        let decoded: SessionProgress =
+            serde_json::from_str(&json).expect("deserialize session progress");
+        assert_eq!(decoded, progress);
     }
 }

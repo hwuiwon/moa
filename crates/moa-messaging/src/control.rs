@@ -93,6 +93,7 @@ fn acknowledgement(_channel: &Channel, text: &str, ephemeral: bool) -> OutboundM
     OutboundMessage {
         content: MessageContent::Text(text.to_string()),
         buttons: Vec::new(),
+        channel_ref: None,
         reply_to: None,
         ephemeral,
     }

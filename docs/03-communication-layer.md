@@ -109,6 +109,16 @@ This avoids losing information when a client disconnects or a messaging process 
 - status snapshots from the Restate-backed orchestrator
 
 Clients choose their own verbosity, but durable events are the source of truth.
+Browser chat clients send user text and their contact token through
+`POST /v1/sessions/{session_id}/messages`. The edge injects the path session id
+and forwards admission/progress reads through the `Contacts` service, which
+verifies the token, `contact:session:message:send` scope, and session
+allowlist. The response is an SSE stream over the same HTTP request: it first
+emits an `accepted` frame, then durable `progress`, `response`, `tool`, or
+generic `session_event` frames keyed by event sequence number, and finally a
+`done` frame. This lets the browser render the turn without holding a second
+live progress connection. `Session/progress` remains the compact
+history/recovery projection used by the stream and by reload flows.
 
 ## API Automation
 

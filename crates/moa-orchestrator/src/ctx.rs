@@ -1,12 +1,13 @@
 //! Shared runtime context for the Restate-backed orchestrator binary.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use moa_authz::FgaClient;
 use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_core::{
-    LineageHandle, MoaConfig,
-    traits::{EmbeddingProvider, Identity, IdentityType},
+    Channel, LineageHandle, MoaConfig,
+    traits::{ChannelAdapter, EmbeddingProvider, Identity, IdentityType},
 };
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
@@ -202,6 +203,46 @@ impl LineageDeps {
     }
 }
 
+/// Messaging adapter dependencies used for live channel updates.
+#[derive(Clone, Default)]
+pub struct MessagingDeps {
+    adapters: Arc<HashMap<Channel, Arc<dyn ChannelAdapter>>>,
+}
+
+impl MessagingDeps {
+    /// Creates a messaging dependency group from channel adapters.
+    #[must_use]
+    pub fn new(adapters: HashMap<Channel, Arc<dyn ChannelAdapter>>) -> Self {
+        Self {
+            adapters: Arc::new(adapters),
+        }
+    }
+
+    /// Returns the adapter for a channel, when live outbound delivery is configured.
+    #[must_use]
+    pub fn adapter(&self, channel: Channel) -> Option<Arc<dyn ChannelAdapter>> {
+        self.adapters.get(&channel).cloned()
+    }
+}
+
+/// Runtime dependencies shared by every Restate handler in this binary.
+pub struct OrchestratorDeps {
+    /// Persistence dependencies shared by handlers that read or write product data.
+    pub persistence: PersistenceDeps,
+    /// AuthN/AuthZ dependencies shared by handler boundaries.
+    pub auth: AuthDeps,
+    /// LLM and embedding provider dependencies.
+    pub providers: ProviderDeps,
+    /// Tool-routing dependencies exposed to turn and tool handlers.
+    pub tools: ToolDeps,
+    /// Memory retrieval dependencies for context compilation and memory APIs.
+    pub memory: MemoryDeps,
+    /// Lineage capture and durable sink dependencies.
+    pub lineage: LineageDeps,
+    /// Messaging adapter dependencies used for live channel updates.
+    pub messaging: MessagingDeps,
+}
+
 /// Runtime dependencies shared by every Restate handler in this binary.
 ///
 /// Constructed once at startup from `main.rs` and installed via
@@ -215,28 +256,22 @@ pub struct OrchestratorCtx {
     tools: ToolDeps,
     memory: MemoryDeps,
     lineage: LineageDeps,
+    messaging: MessagingDeps,
 }
 
 impl OrchestratorCtx {
     /// Creates the process-wide orchestrator context from typed dependency groups.
     #[must_use]
-    pub fn new(
-        config: Arc<MoaConfig>,
-        persistence: PersistenceDeps,
-        auth: AuthDeps,
-        providers: ProviderDeps,
-        tools: ToolDeps,
-        memory: MemoryDeps,
-        lineage: LineageDeps,
-    ) -> Self {
+    pub fn new(config: Arc<MoaConfig>, deps: OrchestratorDeps) -> Self {
         Self {
             config,
-            persistence,
-            auth,
-            providers,
-            tools,
-            memory,
-            lineage,
+            persistence: deps.persistence,
+            auth: deps.auth,
+            providers: deps.providers,
+            tools: deps.tools,
+            memory: deps.memory,
+            lineage: deps.lineage,
+            messaging: deps.messaging,
         }
     }
 
@@ -298,6 +333,12 @@ impl OrchestratorCtx {
         Self::current().lineage()
     }
 
+    /// Returns the configured live messaging adapter for a channel, when available.
+    #[must_use]
+    pub fn current_channel_adapter(channel: Channel) -> Option<Arc<dyn ChannelAdapter>> {
+        Self::current().channel_adapter(channel)
+    }
+
     /// Returns the current runtime configuration.
     #[must_use]
     pub fn config(&self) -> Arc<MoaConfig> {
@@ -338,6 +379,12 @@ impl OrchestratorCtx {
     #[must_use]
     pub fn lineage_deps(&self) -> LineageDeps {
         self.lineage.clone()
+    }
+
+    /// Returns the messaging dependency group.
+    #[must_use]
+    pub fn messaging_deps(&self) -> MessagingDeps {
+        self.messaging.clone()
     }
 
     /// Returns the session store from persistence dependencies.
@@ -404,6 +451,12 @@ impl OrchestratorCtx {
     #[must_use]
     pub fn lineage(&self) -> Arc<dyn LineageHandle> {
         self.lineage.handle()
+    }
+
+    /// Returns the configured live messaging adapter for a channel, when available.
+    #[must_use]
+    pub fn channel_adapter(&self, channel: Channel) -> Option<Arc<dyn ChannelAdapter>> {
+        self.messaging.adapter(channel)
     }
 
     /// Returns the durable lineage writer from lineage dependencies, when configured.

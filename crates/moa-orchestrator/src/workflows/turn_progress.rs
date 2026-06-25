@@ -10,6 +10,7 @@ use std::time::Instant;
 use tracing::Instrument;
 
 use crate::services::session_store::RestateSessionStoreClient;
+use crate::workflows::progress_delivery;
 
 const K_PROGRESS_STARTED_AT: &str = "progress_started_at";
 const K_PROGRESS_LAST_EMITTED_AT: &str = "progress_last_emitted_at";
@@ -111,6 +112,11 @@ pub(crate) async fn initialize(ctx: &WorkflowContext<'_>) -> Result<(), HandlerE
     Ok(())
 }
 
+/// Enables live channel status delivery for progress emitted by this workflow.
+pub(crate) fn enable_live_delivery(ctx: &WorkflowContext<'_>) {
+    progress_delivery::enable_live_delivery(ctx);
+}
+
 /// Records final elapsed time without appending a progress event.
 pub(crate) async fn finish(ctx: &WorkflowContext<'_>) -> Result<(), HandlerError> {
     let mut state = load_workflow_state(ctx).await?;
@@ -120,6 +126,17 @@ pub(crate) async fn finish(ctx: &WorkflowContext<'_>) -> Result<(), HandlerError
     let now = workflow_utc_now(ctx).await?;
     state.finish(now);
     store_state(ctx, &state);
+    Ok(())
+}
+
+/// Records final elapsed time and updates any live root-turn status message.
+pub(crate) async fn finish_with_live_delivery(
+    ctx: &WorkflowContext<'_>,
+    session_id: moa_core::SessionId,
+    phase: TurnPhase,
+) -> Result<(), HandlerError> {
+    finish(ctx).await?;
+    progress_delivery::maybe_deliver_terminal(ctx, session_id, phase).await?;
     Ok(())
 }
 
@@ -138,6 +155,7 @@ pub(crate) async fn maybe_emit(
     let attempt = state.attempt(now, summary.into(), first_delay_ms, interval_ms);
     if let Some(summary) = attempt.emit {
         append_progress_event(ctx, session_id, turn_id, &phase, &summary, state.elapsed_ms).await?;
+        progress_delivery::maybe_deliver(ctx, session_id, &summary).await?;
     }
     store_state(ctx, &state);
     Ok(())

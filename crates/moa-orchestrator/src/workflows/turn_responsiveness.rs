@@ -72,6 +72,10 @@ pub(crate) fn classify_turn_request(input: TurnResponsivenessInput<'_>) -> TurnC
         return TurnComplexityClass::Standard;
     }
 
+    if direct_question && input.available_tool_count > 0 && !is_short_prompt(text) {
+        return TurnComplexityClass::Standard;
+    }
+
     if input
         .request_max_turns
         .is_some_and(|max_turns| max_turns > 1)
@@ -781,6 +785,19 @@ mod tests {
         // Pins: direct "what is X" requests do not get mistaken for vague edits.
         let input = TurnResponsivenessInput::root("what is X");
         assert_eq!(classify_turn_request(input), TurnComplexityClass::Simple);
+    }
+
+    #[test]
+    fn detailed_question_with_tools_is_standard() {
+        // Pins: detailed support requests phrased as questions still get enough budget to use selected skills/tools.
+        let input = TurnResponsivenessInput {
+            available_tool_count: 3,
+            ..TurnResponsivenessInput::root(
+                "A customer says their ramen order arrived spilled all over the bag. They uploaded a clear photo and want a refund or replacement. Can you handle this?",
+            )
+        };
+
+        assert_eq!(classify_turn_request(input), TurnComplexityClass::Standard);
     }
 
     #[test]

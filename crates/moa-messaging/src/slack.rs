@@ -11,10 +11,7 @@ use moa_core::{
 };
 use slack_morphism::errors::SlackClientError;
 use slack_morphism::prelude::*;
-use tokio::{
-    sync::{RwLock, mpsc},
-    time::sleep,
-};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{Instrument, field, warn};
 use uuid::Uuid;
 
@@ -25,6 +22,7 @@ use crate::{
 };
 
 const SLACK_RATE_LIMIT_RETRIES: usize = 3;
+const SLACK_MESSAGE_ID_PREFIX: &str = "slack:";
 
 #[derive(Clone)]
 struct SlackListenerState {
@@ -87,28 +85,34 @@ impl SlackAdapter {
         Self::new(bot_token, app_token)
     }
 
-    async fn resolve_target(&self, reply_to: Option<&str>) -> Result<SlackTarget> {
-        let reply_to = reply_to.ok_or_else(|| {
-            MoaError::ValidationError("slack outbound messages require reply_to context".into())
-        })?;
+    async fn resolve_target(
+        &self,
+        reply_to: Option<&str>,
+        channel_ref: Option<&ChannelRef>,
+    ) -> Result<SlackTarget> {
+        if let Some(reply_to) = reply_to {
+            if let Some(last_ref) = self
+                .outbound_messages
+                .read()
+                .await
+                .get(reply_to)
+                .and_then(|refs| refs.last().cloned())
+            {
+                return Ok(last_ref.target());
+            }
 
-        if let Some(last_ref) = self
-            .outbound_messages
-            .read()
-            .await
-            .get(reply_to)
-            .and_then(|refs| refs.last().cloned())
-        {
-            return Ok(last_ref.target());
+            if let Some(inbound_ref) = self.inbound_contexts.read().await.get(reply_to).cloned() {
+                return Ok(inbound_ref.target());
+            }
         }
 
-        if let Some(inbound_ref) = self.inbound_contexts.read().await.get(reply_to).cloned() {
-            return Ok(inbound_ref.target());
+        if let Some(target) = channel_ref.and_then(slack_target_from_channel_ref) {
+            return Ok(target);
         }
 
-        Err(MoaError::ValidationError(format!(
-            "slack reply target not found: {reply_to}"
-        )))
+        Err(MoaError::ValidationError(
+            "slack outbound messages require reply_to context or Slack channel_ref".into(),
+        ))
     }
 
     async fn send_chunk(
@@ -125,7 +129,7 @@ impl SlackAdapter {
             icon_url: None,
             link_names: None,
             parse: None,
-            thread_ts: Some(SlackTs(target.thread_ts.clone())),
+            thread_ts: target.thread_ts.clone().map(SlackTs),
             username: None,
             reply_broadcast: None,
             unfurl_links: None,
@@ -140,7 +144,7 @@ impl SlackAdapter {
             Ok(SlackMessageRef {
                 channel_id: Arc::<str>::from(response.channel.0),
                 ts: response.ts.0,
-                thread_ts: Some(target.thread_ts.clone()),
+                thread_ts: target.thread_ts.clone(),
             })
         }
         .instrument(slack_api_span("slack_message_send", "chat.postMessage"))
@@ -174,22 +178,23 @@ impl SlackAdapter {
         .await
     }
 
-    async fn wait_for_edit_window(&self, message_id: &MessageId) {
+    async fn record_edit_attempt(&self, message_id: &MessageId) {
         let min_interval = self.capabilities().min_edit_interval;
-        let sleep_for = {
-            let last_edits = self.last_edits.read().await;
-            last_edits
-                .get(message_id.as_str())
-                .copied()
-                .map(|last_edit| min_interval.saturating_sub(last_edit.elapsed()))
-        };
-        if let Some(delay) = sleep_for.filter(|delay| !delay.is_zero()) {
-            sleep(delay).await;
-        }
-        self.last_edits
+        let previous = self
+            .last_edits
             .write()
             .await
             .insert(message_id.as_str().to_string(), Instant::now());
+        if let Some(last_edit) = previous {
+            let remaining = min_interval.saturating_sub(last_edit.elapsed());
+            if !remaining.is_zero() {
+                tracing::debug!(
+                    message_id = %message_id,
+                    remaining_ms = remaining.as_millis() as u64,
+                    "slack edit requested before advertised edit interval elapsed"
+                );
+            }
+        }
     }
 }
 
@@ -256,24 +261,30 @@ impl ChannelAdapter for SlackAdapter {
     /// Sends a new outbound Slack message, splitting at Slack's length limit.
     async fn send(&self, msg: OutboundMessage) -> Result<MessageId> {
         let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
-        let target = self.resolve_target(msg.reply_to.as_deref()).await?;
+        let target = self
+            .resolve_target(msg.reply_to.as_deref(), msg.channel_ref.as_ref())
+            .await?;
         let rendered = self.renderer.render(&msg);
-        let synthetic_id = MessageId::new(Uuid::now_v7().to_string());
         let mut sent_refs = Vec::with_capacity(rendered.len());
         for chunk in &rendered {
             let sent_ref = self.send_chunk(&target, chunk).await?;
             sent_refs.push(sent_ref);
         }
+        let message_id = if sent_refs.len() == 1 {
+            slack_message_id_from_ref(&sent_refs[0])
+        } else {
+            MessageId::new(Uuid::now_v7().to_string())
+        };
         self.outbound_messages
             .write()
             .await
-            .insert(synthetic_id.as_str().to_string(), sent_refs);
-        Ok(synthetic_id)
+            .insert(message_id.as_str().to_string(), sent_refs);
+        Ok(message_id)
     }
 
     /// Edits an existing outbound Slack message in place.
     async fn edit(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
-        self.wait_for_edit_window(msg_id).await;
+        self.record_edit_attempt(msg_id).await;
         let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
 
         let existing = self
@@ -282,6 +293,7 @@ impl ChannelAdapter for SlackAdapter {
             .await
             .get(msg_id.as_str())
             .cloned()
+            .or_else(|| slack_message_ref_from_id(msg_id).map(|message_ref| vec![message_ref]))
             .ok_or_else(|| {
                 MoaError::ValidationError(format!("unknown slack message id: {msg_id}"))
             })?;
@@ -338,6 +350,7 @@ impl ChannelAdapter for SlackAdapter {
             .write()
             .await
             .remove(msg_id.as_str())
+            .or_else(|| slack_message_ref_from_id(msg_id).map(|message_ref| vec![message_ref]))
             .ok_or_else(|| {
                 MoaError::ValidationError(format!("unknown slack message id: {msg_id}"))
             })?;
@@ -600,7 +613,7 @@ async fn handle_push_event(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SlackTarget {
     channel_id: Arc<str>,
-    thread_ts: String,
+    thread_ts: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -614,13 +627,48 @@ impl SlackMessageRef {
     fn target(&self) -> SlackTarget {
         SlackTarget {
             channel_id: self.channel_id.clone(),
-            thread_ts: self.thread_anchor().to_string(),
+            thread_ts: Some(self.thread_anchor().to_string()),
         }
     }
 
     fn thread_anchor(&self) -> &str {
         self.thread_ts.as_deref().unwrap_or(self.ts.as_str())
     }
+}
+
+fn slack_message_id_from_ref(message_ref: &SlackMessageRef) -> MessageId {
+    MessageId::new(format!(
+        "{SLACK_MESSAGE_ID_PREFIX}{}:{}",
+        message_ref.channel_id, message_ref.ts
+    ))
+}
+
+fn slack_message_ref_from_id(message_id: &MessageId) -> Option<SlackMessageRef> {
+    let value = message_id.as_str().strip_prefix(SLACK_MESSAGE_ID_PREFIX)?;
+    let (channel_id, ts) = value.split_once(':')?;
+    if channel_id.is_empty() || ts.is_empty() {
+        return None;
+    }
+    Some(SlackMessageRef {
+        channel_id: Arc::<str>::from(channel_id),
+        ts: ts.to_string(),
+        thread_ts: None,
+    })
+}
+
+fn slack_target_from_channel_ref(channel_ref: &ChannelRef) -> Option<SlackTarget> {
+    let ChannelRef::Slack {
+        slack_channel_id,
+        thread_ts,
+        ..
+    } = channel_ref
+    else {
+        return None;
+    };
+    Some(SlackTarget {
+        channel_id: Arc::<str>::from(slack_channel_id.as_ref()?.as_str()),
+        thread_ts: thread_ts.clone(),
+    })
 }
 
 fn inbound_from_push_event(event: &SlackPushEventCallback) -> Option<InboundMessage> {
@@ -809,6 +857,49 @@ mod tests {
                 user_id: Some("U123".to_string())
             }
         );
+    }
+
+    #[test]
+    fn slack_target_uses_durable_channel_ref_when_reply_anchor_is_absent() {
+        // Pins: workflow-originated progress can send after process restart using the persisted route.
+        let target = slack_target_from_channel_ref(&ChannelRef::Slack {
+            team_id: Some("T123".to_string()),
+            slack_channel_id: Some("C123".to_string()),
+            thread_ts: Some("1712668800.000100".to_string()),
+            user_id: Some("U123".to_string()),
+        })
+        .expect("slack route with channel id should resolve");
+
+        assert_eq!(target.channel_id.as_ref(), "C123");
+        assert_eq!(target.thread_ts.as_deref(), Some("1712668800.000100"));
+        assert!(
+            slack_target_from_channel_ref(&ChannelRef::Chat {
+                conversation_id: "chat-1".to_string(),
+                user_id: None,
+                client_session_id: None,
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn slack_message_id_round_trips_single_message_ref() {
+        // Pins: single-message Slack sends can be edited after worker restart without process-local state.
+        let message_ref = SlackMessageRef {
+            channel_id: Arc::<str>::from("C123"),
+            ts: "1712668800.000100".to_string(),
+            thread_ts: None,
+        };
+
+        let message_id = slack_message_id_from_ref(&message_ref);
+        let restored =
+            slack_message_ref_from_id(&message_id).expect("durable Slack message id should parse");
+
+        assert_eq!(message_id.as_str(), "slack:C123:1712668800.000100");
+        assert_eq!(restored.channel_id.as_ref(), "C123");
+        assert_eq!(restored.ts, "1712668800.000100");
+        assert_eq!(restored.thread_ts, None);
+        assert!(slack_message_ref_from_id(&MessageId::new("other-id")).is_none());
     }
 
     #[test]

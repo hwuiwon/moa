@@ -12,6 +12,7 @@ use crate::{ContactError, Result};
 const LOW_ASSURANCE_SCOPES: &[&str] = &[
     "agent:session:create",
     "contact:session:channel:update",
+    "contact:session:message:send",
     "contact:verify:start",
     "contact:verify:complete",
     "memory:session:read",
@@ -21,6 +22,7 @@ const LOW_ASSURANCE_SCOPES: &[&str] = &[
 const VERIFIED_SCOPES: &[&str] = &[
     "agent:session:create",
     "contact:session:channel:update",
+    "contact:session:message:send",
     "contact:verify:start",
     "contact:verify:complete",
     "contact:self:update",
@@ -281,7 +283,8 @@ mod tests {
     };
 
     use super::{
-        contact_allows_channel_contact, contact_point_delivery, require_contact_agent_permission,
+        contact_allows_channel_contact, contact_point_delivery, low_assurance_scopes,
+        require_contact_agent_permission, verified_scopes,
     };
 
     #[test]
@@ -315,6 +318,19 @@ mod tests {
         assert!(
             format!("{error:?}").contains("contact token agent denied"),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn contact_message_send_scope_is_grantable_for_browser_sessions() {
+        // Pins: end-user browser sessions can receive the narrow scope required by Contacts/send_message.
+        let requested = vec!["contact:session:message:send".to_string()];
+
+        assert_eq!(low_assurance_scopes(&requested), requested);
+        assert!(
+            verified_scopes()
+                .iter()
+                .any(|scope| scope == "contact:session:message:send")
         );
     }
 

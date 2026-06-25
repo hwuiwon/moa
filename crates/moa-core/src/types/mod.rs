@@ -44,7 +44,7 @@ pub use agent::{
 pub use channel::{
     ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,
     ChannelActor, ChannelCapabilities, ChannelRef, DiffHunk, InboundMessage, MessageContent,
-    MessageId, OutboundMessage, SessionChannelBindingId, ToolStatus,
+    MessageId, OutboundMessage, SessionChannelBinding, SessionChannelBindingId, ToolStatus,
 };
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
@@ -55,6 +55,7 @@ pub use contact::{
     ContactId, ContactPointId, ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
     ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
     ContactSessionChannelRequest, ContactSessionInitRequest, ContactSessionInitResponse,
+    ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
     ContactSessionPromotionRequest, ContactSessionPromotionResponse, ContactTokenClaims,
     ContactTokenIssueRequest, ContactTokenIssueResponse, ContactVerificationChallengeId,
     ContactVerificationCompleteRequest, ContactVerificationCompleteResponse,

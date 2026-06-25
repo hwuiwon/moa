@@ -104,9 +104,23 @@ struct BuiltTurnRequest {
     citation_sources: Vec<ChunkRef>,
 }
 
+#[derive(Clone, Copy)]
+struct RunOnceContext<'a> {
+    session_id: SessionId,
+    turn_id: TurnId,
+    identity: &'a moa_core::traits::Identity,
+}
+
 #[derive(Clone, Debug)]
 enum TurnIterationOutcome {
     Core(CoreTurnOutcome),
+    ToolBudgetExceeded(ToolBudgetExhausted),
+}
+
+#[derive(Clone, Debug)]
+enum ToolDispatchOutcome {
+    Completed,
+    Cancelled,
     ToolBudgetExceeded(ToolBudgetExhausted),
 }
 
@@ -157,7 +171,7 @@ impl TurnExecution for TurnExecutionImpl {
                     TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
                     TurnOutcomeKind::Failed => TurnPhase::Failed,
                 };
-                turn_progress::finish(&ctx).await?;
+                turn_progress::finish_with_live_delivery(&ctx, session_id, phase.clone()).await?;
                 ctx.set(K_PHASE, Json::from(phase));
                 TurnOutcome {
                     turn_id: request.turn_id.clone(),
@@ -166,7 +180,8 @@ impl TurnExecution for TurnExecutionImpl {
                 }
             }
             Err(err) => {
-                turn_progress::finish(&ctx).await?;
+                turn_progress::finish_with_live_delivery(&ctx, session_id, TurnPhase::Failed)
+                    .await?;
                 ctx.set(K_PHASE, Json::from(TurnPhase::Failed));
                 TurnOutcome {
                     turn_id: request.turn_id.clone(),
@@ -278,6 +293,7 @@ async fn execute_turn_inside_workflow(
     }
 
     turn_progress::initialize(ctx).await?;
+    turn_progress::enable_live_delivery(ctx);
 
     let meta = load_session_meta(ctx, session_id).await?;
     if let Some(outcome) = evaluate_input_guardrail(
@@ -358,9 +374,11 @@ async fn execute_turn_inside_workflow(
             let turn_result = scope_turn_latency_counters(turn_latency_counters.clone(), async {
                 run_once_inside_workflow(
                     ctx,
-                    session_id,
-                    turn_id,
-                    &request.identity,
+                    RunOnceContext {
+                        session_id,
+                        turn_id,
+                        identity: &request.identity,
+                    },
                     &mut last_summary,
                     &mut turn_evidence,
                     &mut tool_budget,
@@ -685,13 +703,13 @@ async fn ingest_deferred_session_turn(
 
 async fn run_once_inside_workflow(
     ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    turn_id: TurnId,
-    identity: &moa_core::traits::Identity,
+    turn_context: RunOnceContext<'_>,
     last_summary: &mut Option<String>,
     turn_evidence: &mut TurnEvidence,
     tool_budget: &mut ToolBudgetState,
 ) -> Result<TurnIterationOutcome, HandlerError> {
+    let session_id = turn_context.session_id;
+    let turn_id = turn_context.turn_id;
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
         return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
@@ -809,8 +827,13 @@ async fn run_once_inside_workflow(
         response_sequence_num,
     )
     .await?;
-    let response_event =
-        latest_matching_brain_response_event(ctx, session_id, identity, &visible_response).await?;
+    let response_event = latest_matching_brain_response_event(
+        ctx,
+        session_id,
+        turn_context.identity,
+        &visible_response,
+    )
+    .await?;
     let lineage = OrchestratorCtx::current_lineage();
     emit_generation_lineage(
         lineage.as_ref(),
@@ -833,37 +856,30 @@ async fn run_once_inside_workflow(
         return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Idle));
     }
 
-    for (index, tool_call) in response_tool_calls(&visible_response)
-        .into_iter()
-        .enumerate()
-    {
-        if let Some(reason) = cancel_requested(ctx).await? {
-            *last_summary = Some(reason);
-            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
-        }
-        match tool_budget.before_tool_dispatch(&tool_call.invocation) {
-            ToolBudgetDecision::Allow {
-                attempted_tool_calls,
-            } => ctx.set(
-                K_TOOL_CALLS,
-                Json::from(progress_count(attempted_tool_calls)),
-            ),
-            ToolBudgetDecision::Stop(exhaustion) => {
-                ctx.set(
-                    K_TOOL_CALLS,
-                    Json::from(progress_count(tool_budget.attempted_tool_calls())),
-                );
-                return Ok(TurnIterationOutcome::ToolBudgetExceeded(exhaustion));
-            }
-        }
-        let tool_context = RootToolContext {
+    let tool_calls = response_tool_calls(&visible_response);
+    match dispatch_response_tool_calls(
+        ctx,
+        RootToolContext {
             turn_id: &progress_turn_id,
             meta: &meta,
             session_id,
             active_canary: active_canary.as_deref(),
             turn_evidence,
-        };
-        handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
+        },
+        &allowed_tools,
+        tool_budget,
+        &tool_calls,
+        last_summary,
+    )
+    .await?
+    {
+        ToolDispatchOutcome::Completed => {}
+        ToolDispatchOutcome::Cancelled => {
+            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
+        }
+        ToolDispatchOutcome::ToolBudgetExceeded(exhaustion) => {
+            return Ok(TurnIterationOutcome::ToolBudgetExceeded(exhaustion));
+        }
     }
 
     Ok(TurnIterationOutcome::Core(turn_outcome_for_response(
@@ -924,9 +940,57 @@ struct RootToolContext<'a> {
     turn_evidence: &'a mut TurnEvidence,
 }
 
+async fn dispatch_response_tool_calls(
+    ctx: &WorkflowContext<'_>,
+    mut tool_context: RootToolContext<'_>,
+    allowed_tools: &std::collections::BTreeSet<String>,
+    tool_budget: &mut ToolBudgetState,
+    tool_calls: &[&ToolCallContent],
+    last_summary: &mut Option<String>,
+) -> Result<ToolDispatchOutcome, HandlerError> {
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        if let Some(reason) = cancel_requested(ctx).await? {
+            *last_summary = Some(reason);
+            return Ok(ToolDispatchOutcome::Cancelled);
+        }
+        if let Some(exhaustion) =
+            record_tool_budget(ctx, tool_budget, &tool_call.invocation).await?
+        {
+            return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
+        }
+        handle_tool_call(ctx, &mut tool_context, allowed_tools, index, tool_call).await?;
+    }
+    Ok(ToolDispatchOutcome::Completed)
+}
+
+async fn record_tool_budget(
+    ctx: &WorkflowContext<'_>,
+    tool_budget: &mut ToolBudgetState,
+    invocation: &ToolInvocation,
+) -> Result<Option<ToolBudgetExhausted>, HandlerError> {
+    match tool_budget.before_tool_dispatch(invocation) {
+        ToolBudgetDecision::Allow {
+            attempted_tool_calls,
+        } => {
+            ctx.set(
+                K_TOOL_CALLS,
+                Json::from(progress_count(attempted_tool_calls)),
+            );
+            Ok(None)
+        }
+        ToolBudgetDecision::Stop(exhaustion) => {
+            ctx.set(
+                K_TOOL_CALLS,
+                Json::from(progress_count(tool_budget.attempted_tool_calls())),
+            );
+            Ok(Some(exhaustion))
+        }
+    }
+}
+
 async fn handle_tool_call(
     ctx: &WorkflowContext<'_>,
-    tool_context: RootToolContext<'_>,
+    tool_context: &mut RootToolContext<'_>,
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
@@ -935,7 +999,8 @@ async fn handle_tool_call(
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let active_canary = tool_context.active_canary;
-    let turn_evidence = tool_context.turn_evidence;
+    let turn_id = tool_context.turn_id;
+    let turn_evidence = &mut *tool_context.turn_evidence;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
     let invocation = tool_call.invocation.clone();
 
@@ -950,7 +1015,7 @@ async fn handle_tool_call(
     if is_delegation_tool_name(&invocation.name) {
         handle_delegation_tool(
             ctx,
-            tool_context.turn_id,
+            turn_id,
             meta,
             session_id,
             tool_id,

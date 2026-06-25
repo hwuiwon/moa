@@ -223,6 +223,44 @@ impl Session for SessionImpl {
         }))
     }
 
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn progress(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        request: Json<SessionProgressRequest>,
+    ) -> Result<Json<SessionProgress>, HandlerError> {
+        annotate_restate_handler_span("Session", "progress");
+        let session_id = parse_session_key(ctx.key())?;
+        require_session_participant(&ctx, session_id).await?;
+        let event_range = request.into_inner().normalized_event_range();
+        let pending_state = load_pending_state(&ctx).await?;
+        let active_turn_id = pending_state.active_turn_id.clone();
+        let snapshot = SessionSnapshot {
+            session_id: ctx.key().to_string(),
+            active_turn_id: pending_state.active_turn_id,
+            pending_message_count: pending_state.pending_messages.len() as u64,
+            last_outcome: pending_state.last_outcome,
+        };
+        let events = load_progress_events(&ctx, session_id, event_range).await?;
+        let active_turn_progress = if let Some(turn_id) = active_turn_id {
+            active_turn_progress_or_none(
+                &turn_id,
+                ctx.workflow_client::<TurnExecutionClient>(turn_id.clone())
+                    .progress()
+                    .call()
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        Ok(Json::from(SessionProgress {
+            snapshot,
+            active_turn_progress,
+            events,
+        }))
+    }
+
     #[tracing::instrument(skip(self, ctx, child))]
     // SAFETY: called only from TurnExecution after session participant authz has already checked.
     async fn register_child(
@@ -302,6 +340,45 @@ impl Session for SessionImpl {
         tracing::info!(key = %ctx.key(), "session VO state cleared");
         Ok(())
     }
+}
+
+fn active_turn_progress_or_none(
+    turn_id: &str,
+    progress: Result<Json<TurnProgress>, TerminalError>,
+) -> Option<TurnProgress> {
+    match progress {
+        Ok(progress) => Some(progress.into_inner()),
+        Err(error) => {
+            tracing::warn!(
+                turn_id = %turn_id,
+                error = %error,
+                "active turn progress unavailable; returning durable session history"
+            );
+            None
+        }
+    }
+}
+
+async fn load_progress_events(
+    ctx: &SharedObjectContext<'_>,
+    session_id: SessionId,
+    range: EventRange,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    let store = OrchestratorCtx::current_session_store();
+    Ok(ctx
+        .run(move || {
+            let store = store.clone();
+            async move {
+                store
+                    .get_events(session_id, range)
+                    .await
+                    .map(Json::from)
+                    .map_err(to_handler_error)
+            }
+        })
+        .name("session_progress_load_events")
+        .await?
+        .into_inner())
 }
 
 async fn start_turn_inner(
@@ -396,8 +473,20 @@ mod tests {
     use moa_core::{
         Channel, ContactId, ContactRef, ContactVerificationState, ModelId, SessionMeta, TenantId,
     };
+    use restate_sdk::prelude::TerminalError;
 
-    use super::admitted_contact_for_turn;
+    use super::{active_turn_progress_or_none, admitted_contact_for_turn};
+
+    #[test]
+    fn session_progress_active_turn_failure_returns_none() {
+        // Pins: Session/progress still returns snapshot and durable history when the active turn workflow is unavailable.
+        let progress = active_turn_progress_or_none(
+            "turn-1",
+            Err(TerminalError::new("turn progress unavailable")),
+        );
+
+        assert_eq!(progress, None);
+    }
 
     #[test]
     fn admitted_contact_for_turn_rejects_per_message_contact_override() {

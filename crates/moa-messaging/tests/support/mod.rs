@@ -38,6 +38,7 @@ pub fn text_message(text: impl Into<String>) -> OutboundMessage {
     OutboundMessage {
         content: MessageContent::Text(text.into()),
         buttons: Vec::new(),
+        channel_ref: None,
         reply_to: None,
         ephemeral: false,
     }
