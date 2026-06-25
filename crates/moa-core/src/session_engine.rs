@@ -14,6 +14,7 @@ pub fn session_requires_processing(session: &SessionMeta, events: &[EventRecord]
         .find_map(|record| match record.event {
             Event::SessionStatusChanged { .. }
             | Event::Warning { .. }
+            | Event::ProgressUpdate { .. }
             | Event::GuardrailCheck { .. }
             | Event::MemoryWrite { .. }
             | Event::HandDestroyed { .. }
@@ -118,5 +119,32 @@ mod tests {
         )];
 
         assert!(!session_requires_processing(&session, &events));
+    }
+
+    #[test]
+    fn progress_update_does_not_mask_pending_user_message_progress() {
+        // Pins: durable progress updates are replay metadata and must not complete pending user work.
+        let session = SessionMeta::default();
+        let events = vec![
+            record(
+                1,
+                Event::UserMessage {
+                    text: "please continue".to_string(),
+                    attachments: Vec::new(),
+                },
+            ),
+            record(
+                2,
+                Event::ProgressUpdate {
+                    turn_id: "turn-123".to_string(),
+                    phase: "Compiling".to_string(),
+                    summary: "Working on it".to_string(),
+                    elapsed_ms: 14,
+                },
+            ),
+        ];
+
+        assert!(session_requires_processing(&session, &events));
+        assert_eq!(events[1].event_type, EventType::ProgressUpdate);
     }
 }

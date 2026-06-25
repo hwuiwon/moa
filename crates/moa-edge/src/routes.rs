@@ -6,11 +6,22 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{any, get, patch, post};
-use moa_core::traits::{AuthProvider, Credential};
+use futures_util::stream;
+use moa_core::traits::{AuthProvider, Credential, Identity};
+use moa_core::wire::SessionProgress;
+use moa_core::{
+    ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
+    Event, EventRange, EventRecord, SequenceNum, SessionId, TenantId,
+};
 #[cfg(feature = "auth0")]
 use serde::Deserialize;
+use serde::Serialize;
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 #[cfg(feature = "auth0")]
@@ -71,6 +82,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/channel",
             patch(handle_public_agent_session_channel_change),
         )
+        .route(
+            "/v1/sessions/{session_id}/messages",
+            post(handle_session_message_stream),
+        )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
 }
@@ -98,78 +113,10 @@ async fn handle_proxy(
     body: Bytes,
 ) -> axum::response::Response {
     let span = tracing::Span::current();
-    let credential = match credential_for_request(state.auth.as_ref(), &headers) {
-        Some(credential) => credential,
-        None => {
-            span.record("moa.edge.auth.result", "missing_credential");
-            if let Err(error) = moa_ocsf::emit_authn_failure(
-                &state.pool,
-                Uuid::nil(),
-                None,
-                "unknown",
-                source_ip(&headers),
-                "missing credential",
-            )
-            .await
-            {
-                tracing::error!(error = %error, "security audit write failed for missing credential");
-                span.record("http.status_code", 500_i64);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
-            }
-            span.record("http.status_code", 401_i64);
-            return (StatusCode::UNAUTHORIZED, "missing credential").into_response();
-        }
-    };
-
-    let identity = match state.auth.authenticate(&credential).await {
+    let identity = match authenticate_edge_request(&state, &headers, &span).await {
         Ok(identity) => identity,
-        Err(error) => {
-            span.record(
-                "moa.edge.auth.provider",
-                tracing::field::display(state.auth.name()),
-            );
-            span.record("moa.edge.auth.result", "rejected");
-            if let Err(audit_error) = moa_ocsf::emit_authn_failure(
-                &state.pool,
-                Uuid::nil(),
-                None,
-                state.auth.name(),
-                source_ip(&headers),
-                &error.to_string(),
-            )
-            .await
-            {
-                tracing::error!(
-                    error = %audit_error,
-                    auth_error = %error,
-                    "security audit write failed for rejected credential"
-                );
-                span.record("http.status_code", 500_i64);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
-            }
-            tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
-            span.record("http.status_code", 401_i64);
-            return (StatusCode::UNAUTHORIZED, "invalid credential").into_response();
-        }
+        Err(response) => return response,
     };
-    span.record(
-        "moa.edge.auth.provider",
-        tracing::field::display(state.auth.name()),
-    );
-    span.record("moa.edge.auth.result", "accepted");
-    if let Err(error) = moa_ocsf::emit_authn_success(
-        &state.pool,
-        identity.tenant_id.0,
-        &identity,
-        state.auth.name(),
-        source_ip(&headers),
-    )
-    .await
-    {
-        tracing::error!(error = %error, "security audit write failed for authenticated request");
-        span.record("http.status_code", 500_i64);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response();
-    }
 
     let original_path = uri
         .path_and_query()
@@ -199,6 +146,90 @@ async fn handle_proxy(
 
     span.record("http.status_code", response.status().as_u16() as i64);
     response_to_axum(response).await
+}
+
+async fn authenticate_edge_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    span: &tracing::Span,
+) -> Result<Identity, axum::response::Response> {
+    let credential = match credential_for_request(state.auth.as_ref(), headers) {
+        Some(credential) => credential,
+        None => {
+            span.record("moa.edge.auth.result", "missing_credential");
+            if let Err(error) = moa_ocsf::emit_authn_failure(
+                &state.pool,
+                Uuid::nil(),
+                None,
+                "unknown",
+                source_ip(headers),
+                "missing credential",
+            )
+            .await
+            {
+                tracing::error!(error = %error, "security audit write failed for missing credential");
+                span.record("http.status_code", 500_i64);
+                return Err(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response()
+                );
+            }
+            span.record("http.status_code", 401_i64);
+            return Err((StatusCode::UNAUTHORIZED, "missing credential").into_response());
+        }
+    };
+
+    let identity = match state.auth.authenticate(&credential).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            span.record(
+                "moa.edge.auth.provider",
+                tracing::field::display(state.auth.name()),
+            );
+            span.record("moa.edge.auth.result", "rejected");
+            if let Err(audit_error) = moa_ocsf::emit_authn_failure(
+                &state.pool,
+                Uuid::nil(),
+                None,
+                state.auth.name(),
+                source_ip(headers),
+                &error.to_string(),
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %audit_error,
+                    auth_error = %error,
+                    "security audit write failed for rejected credential"
+                );
+                span.record("http.status_code", 500_i64);
+                return Err(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response()
+                );
+            }
+            tracing::info!(error = %error, provider = state.auth.name(), "authentication rejected");
+            span.record("http.status_code", 401_i64);
+            return Err((StatusCode::UNAUTHORIZED, "invalid credential").into_response());
+        }
+    };
+    span.record(
+        "moa.edge.auth.provider",
+        tracing::field::display(state.auth.name()),
+    );
+    span.record("moa.edge.auth.result", "accepted");
+    if let Err(error) = moa_ocsf::emit_authn_success(
+        &state.pool,
+        identity.tenant_id.0,
+        &identity,
+        state.auth.name(),
+        source_ip(headers),
+    )
+    .await
+    {
+        tracing::error!(error = %error, "security audit write failed for authenticated request");
+        span.record("http.status_code", 500_i64);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response());
+    }
+    Ok(identity)
 }
 
 fn credential_for_request(auth: &dyn AuthProvider, headers: &HeaderMap) -> Option<Credential> {
@@ -370,6 +401,355 @@ async fn forward_public_contact_route<const N: usize>(
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
         }
     }
+}
+
+#[tracing::instrument(
+    skip(state, body),
+    fields(
+        http.route = "/v1/sessions/{session_id}/messages",
+        http.status_code = tracing::field::Empty,
+    )
+)]
+async fn handle_session_message_stream(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    body: Bytes,
+) -> axum::response::Response {
+    let span = tracing::Span::current();
+    let message = match contact_session_message_request(session_id, &body) {
+        Ok(message) => message,
+        Err(message) => {
+            span.record("http.status_code", 400_i64);
+            return (StatusCode::BAD_REQUEST, message).into_response();
+        }
+    };
+
+    let next_sequence_num = match initial_stream_sequence(&state, &message).await {
+        Ok(next_sequence_num) => next_sequence_num,
+        Err(error) => {
+            tracing::warn!(error = %error.summary(), "session stream preflight failed");
+            span.record("http.status_code", error.status_code().as_u16() as i64);
+            return error.into_response();
+        }
+    };
+    let accepted = match call_contacts_handler::<_, ContactSessionMessageResponse>(
+        &state,
+        "send_message",
+        &message,
+    )
+    .await
+    {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            tracing::warn!(error = %error.summary(), "session message admission failed");
+            span.record("http.status_code", error.status_code().as_u16() as i64);
+            return error.into_response();
+        }
+    };
+    span.record("http.status_code", 200_i64);
+
+    let accepted_frame = SessionMessageAccepted {
+        session_id: accepted.session_id,
+        queued: accepted.queued,
+        started_turn_id: accepted.started_turn_id,
+        next_sequence_num,
+    };
+    let terminal_turn_id = accepted_frame.started_turn_id.clone();
+    let mut pending_events = VecDeque::new();
+    pending_events.push_back(json_sse_event("accepted", &accepted_frame));
+
+    let stream_state = SessionMessageStreamState {
+        app: state,
+        tenant_id: message.tenant_id,
+        session_id: accepted.session_id,
+        contact_token: message.contact_token,
+        next_sequence_num,
+        terminal_turn_id,
+        pending_events,
+        closed: false,
+    };
+    Sse::new(stream::unfold(stream_state, next_session_message_event))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+#[derive(Debug)]
+enum EdgeJsonError {
+    Serialize(String),
+    Forward(String),
+    Upstream { status: StatusCode, body: String },
+    Read(String),
+    Decode(String),
+}
+
+impl EdgeJsonError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Upstream { status, .. } => *status,
+            Self::Serialize(_) | Self::Decode(_) | Self::Forward(_) | Self::Read(_) => {
+                StatusCode::BAD_GATEWAY
+            }
+        }
+    }
+
+    fn summary(&self) -> String {
+        match self {
+            Self::Serialize(error) => format!("serialize upstream request failed: {error}"),
+            Self::Forward(error) => format!("upstream request failed: {error}"),
+            Self::Upstream { status, body } if body.is_empty() => {
+                format!("upstream returned {status}")
+            }
+            Self::Upstream { status, body } => format!("upstream returned {status}: {body}"),
+            Self::Read(error) => format!("upstream response read failed: {error}"),
+            Self::Decode(error) => format!("upstream response decode failed: {error}"),
+        }
+    }
+
+    fn into_response(self) -> axum::response::Response {
+        let status = self.status_code();
+        let body = match self {
+            Self::Upstream { body, .. } if !body.is_empty() => body,
+            error => error.summary(),
+        };
+        (status, body).into_response()
+    }
+}
+
+fn contact_session_message_request(
+    session_id: Uuid,
+    body: &Bytes,
+) -> Result<ContactSessionMessageRequest, &'static str> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| "bad session message body")?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("session message body must be object");
+    };
+    object.insert("session_id".to_string(), serde_json::json!(session_id));
+    serde_json::from_value(value).map_err(|_| "bad session message body")
+}
+
+async fn call_contacts_handler<I, O>(
+    state: &AppState,
+    handler: &str,
+    input: &I,
+) -> Result<O, EdgeJsonError>
+where
+    I: Serialize + ?Sized,
+    O: serde::de::DeserializeOwned,
+{
+    let body =
+        serde_json::to_vec(input).map_err(|error| EdgeJsonError::Serialize(error.to_string()))?;
+    let path = format!("/Contacts/{handler}");
+    let response = state
+        .proxy
+        .forward_public(Method::POST, &path, body, &HeaderMap::new())
+        .await
+        .map_err(|error| EdgeJsonError::Forward(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| EdgeJsonError::Read(error.to_string()))?;
+    if !status.is_success() {
+        return Err(EdgeJsonError::Upstream {
+            status,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        });
+    }
+    serde_json::from_slice(&body).map_err(|error| EdgeJsonError::Decode(error.to_string()))
+}
+
+async fn initial_stream_sequence(
+    state: &AppState,
+    message: &ContactSessionMessageRequest,
+) -> Result<SequenceNum, EdgeJsonError> {
+    let progress = call_contacts_handler::<_, SessionProgress>(
+        state,
+        "progress",
+        &ContactSessionProgressRequest {
+            tenant_id: message.tenant_id,
+            session_id: message.session_id,
+            contact_token: message.contact_token.clone(),
+            event_range: EventRange::recent(1),
+        },
+    )
+    .await?;
+    Ok(next_sequence_after(&progress.events))
+}
+
+struct SessionMessageStreamState {
+    app: AppState,
+    tenant_id: TenantId,
+    session_id: SessionId,
+    contact_token: String,
+    next_sequence_num: SequenceNum,
+    terminal_turn_id: Option<String>,
+    pending_events: VecDeque<SseEvent>,
+    closed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionMessageAccepted {
+    session_id: SessionId,
+    queued: bool,
+    started_turn_id: Option<String>,
+    next_sequence_num: SequenceNum,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionMessageDone {
+    session_id: SessionId,
+    status: &'static str,
+    last_turn_id: Option<String>,
+}
+
+async fn next_session_message_event(
+    mut state: SessionMessageStreamState,
+) -> Option<(Result<SseEvent, Infallible>, SessionMessageStreamState)> {
+    if state.closed {
+        return None;
+    }
+    if let Some(event) = state.pending_events.pop_front() {
+        return Some((Ok(event), state));
+    }
+
+    loop {
+        match fetch_stream_progress(&state).await {
+            Ok(progress) => {
+                let done_event = session_message_stream_done(&state, &progress)
+                    .then(|| done_sse_event(&state, &progress));
+                enqueue_progress_events(&mut state, progress.events);
+                if let Some(event) = state.pending_events.pop_front() {
+                    return Some((Ok(event), state));
+                }
+                if let Some(event) = done_event {
+                    state.closed = true;
+                    return Some((Ok(event), state));
+                }
+            }
+            Err(error) => {
+                state.closed = true;
+                return Some((Ok(error_sse_event(error.summary())), state));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn fetch_stream_progress(
+    state: &SessionMessageStreamState,
+) -> Result<SessionProgress, EdgeJsonError> {
+    call_contacts_handler(
+        &state.app,
+        "progress",
+        &ContactSessionProgressRequest {
+            tenant_id: state.tenant_id,
+            session_id: state.session_id,
+            contact_token: state.contact_token.clone(),
+            event_range: EventRange {
+                from_seq: Some(state.next_sequence_num),
+                to_seq: None,
+                event_types: None,
+                limit: Some(100),
+            },
+        },
+    )
+    .await
+}
+
+fn enqueue_progress_events(state: &mut SessionMessageStreamState, records: Vec<EventRecord>) {
+    for record in records {
+        state.next_sequence_num = state
+            .next_sequence_num
+            .max(record.sequence_num.saturating_add(1));
+        state.pending_events.push_back(record_sse_event(&record));
+    }
+}
+
+fn next_sequence_after(records: &[EventRecord]) -> SequenceNum {
+    records
+        .iter()
+        .map(|record| record.sequence_num)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn session_message_stream_done(
+    state: &SessionMessageStreamState,
+    progress: &SessionProgress,
+) -> bool {
+    session_message_terminal_done(state.terminal_turn_id.as_deref(), progress)
+}
+
+fn session_message_terminal_done(
+    terminal_turn_id: Option<&str>,
+    progress: &SessionProgress,
+) -> bool {
+    if let Some(turn_id) = terminal_turn_id {
+        return progress
+            .snapshot
+            .last_outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.turn_id == turn_id);
+    }
+    progress.snapshot.active_turn_id.is_none() && progress.snapshot.pending_message_count == 0
+}
+
+fn done_sse_event(state: &SessionMessageStreamState, progress: &SessionProgress) -> SseEvent {
+    let last_turn_id = progress
+        .snapshot
+        .last_outcome
+        .as_ref()
+        .map(|outcome| outcome.turn_id.clone());
+    json_sse_event(
+        "done",
+        &SessionMessageDone {
+            session_id: state.session_id,
+            status: done_status(progress),
+            last_turn_id,
+        },
+    )
+}
+
+fn done_status(progress: &SessionProgress) -> &'static str {
+    let Some(outcome) = progress.snapshot.last_outcome.as_ref() else {
+        return "idle";
+    };
+    match outcome.kind {
+        moa_core::wire::TurnOutcomeKind::Completed => "completed",
+        moa_core::wire::TurnOutcomeKind::Cancelled => "cancelled",
+        moa_core::wire::TurnOutcomeKind::Failed => "failed",
+    }
+}
+
+fn record_sse_event(record: &EventRecord) -> SseEvent {
+    let event_name = match &record.event {
+        Event::ProgressUpdate { .. } => "progress",
+        Event::BrainResponse { .. } => "response",
+        Event::ToolCall { .. } | Event::ToolResult { .. } | Event::ToolError { .. } => "tool",
+        _ => "session_event",
+    };
+    match SseEvent::default()
+        .id(record.sequence_num.to_string())
+        .event(event_name)
+        .json_data(record)
+    {
+        Ok(event) => event,
+        Err(error) => error_sse_event(format!("failed to serialize session event: {error}")),
+    }
+}
+
+fn json_sse_event<T: Serialize>(event_name: &'static str, data: &T) -> SseEvent {
+    match SseEvent::default().event(event_name).json_data(data) {
+        Ok(event) => event,
+        Err(error) => error_sse_event(format!("failed to serialize SSE event: {error}")),
+    }
+}
+
+fn error_sse_event(message: String) -> SseEvent {
+    let data = serde_json::json!({ "message": message });
+    SseEvent::default().event("error").data(data.to_string())
 }
 
 #[cfg(feature = "auth0")]
@@ -687,6 +1067,22 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
     }
     if let Some(translation) = translate_workspace_agent_route(method, uri, body) {
         return translation;
+    }
+    if *method == Method::POST
+        && let Some(id) = uri
+            .path()
+            .strip_prefix("/v1/sessions/")
+            .and_then(|rest| rest.strip_suffix("/progress"))
+    {
+        let session_id = match Uuid::parse_str(id) {
+            Ok(value) => value,
+            Err(_) => return RouteTranslation::BadRequest("bad session id"),
+        };
+        return RouteTranslation::Forward {
+            method: Method::POST,
+            path: format!("/Session/{session_id}/progress"),
+            body: body.to_vec(),
+        };
     }
     if *method == Method::POST {
         match uri.path() {
@@ -1325,8 +1721,10 @@ fn translate_json_object_with_fields<const N: usize>(
 mod tests {
     use async_trait::async_trait;
     use axum::http::header::AUTHORIZATION;
-    use moa_core::TenantId;
+    use chrono::Utc;
     use moa_core::traits::{AuthError, Identity, IdentityType};
+    use moa_core::wire::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
+    use moa_core::{EventType, SessionId, TenantId};
 
     use super::*;
 
@@ -1403,6 +1801,77 @@ mod tests {
     }
 
     #[test]
+    fn session_message_stream_cursor_starts_after_latest_event() {
+        // Pins: a fresh browser message stream does not replay old session history.
+        let records = vec![event_record(4), event_record(9), event_record(7)];
+
+        assert_eq!(next_sequence_after(&records), 10);
+        assert_eq!(next_sequence_after(&[]), 1);
+    }
+
+    #[test]
+    fn session_message_stream_finishes_when_started_turn_reports_outcome() {
+        // Pins: a stream for an immediately-started message closes on that turn, not on later session idle.
+        let progress = session_progress(
+            Some("next-turn".to_string()),
+            1,
+            Some(TurnOutcome {
+                turn_id: "started-turn".to_string(),
+                kind: TurnOutcomeKind::Completed,
+                message: "done".to_string(),
+            }),
+        );
+
+        assert!(session_message_terminal_done(
+            Some("started-turn"),
+            &progress
+        ));
+        assert!(!session_message_terminal_done(
+            Some("other-turn"),
+            &progress
+        ));
+    }
+
+    #[test]
+    fn queued_session_message_stream_finishes_when_session_is_idle() {
+        // Pins: queued messages have no accepted turn id, so their stream waits for the queue to drain.
+        let running = session_progress(Some("active-turn".to_string()), 1, None);
+        let idle = session_progress(None, 0, None);
+
+        assert!(!session_message_terminal_done(None, &running));
+        assert!(session_message_terminal_done(None, &idle));
+    }
+
+    #[test]
+    fn session_message_request_uses_path_session_id() {
+        // Pins: browser clients send the session once in the path; conflicting body values cannot retarget the message.
+        let path_session_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("path session id should parse");
+        let body = Bytes::from_static(
+            br#"{
+                "tenant_id":"22222222-2222-2222-2222-222222222222",
+                "session_id":"33333333-3333-3333-3333-333333333333",
+                "contact_token":"token",
+                "user_message":"hello"
+            }"#,
+        );
+
+        let request = contact_session_message_request(path_session_id, &body)
+            .expect("message request should decode");
+
+        assert_eq!(request.session_id, SessionId(path_session_id));
+        assert_eq!(
+            request.tenant_id,
+            TenantId::from(
+                Uuid::parse_str("22222222-2222-2222-2222-222222222222")
+                    .expect("tenant id should parse")
+            )
+        );
+        assert_eq!(request.contact_token, "token");
+        assert_eq!(request.user_message, "hello");
+    }
+
+    #[test]
     fn whoami_public_route_translates_to_restate_handler() {
         // Pins: hosted identity inspection stays available through the public edge API.
         let uri = "/v1/whoami"
@@ -1424,6 +1893,39 @@ mod tests {
             RouteTranslation::BadRequest(message) => {
                 panic!("whoami should not fail translation: {message}")
             }
+        }
+    }
+
+    fn event_record(sequence_num: SequenceNum) -> EventRecord {
+        EventRecord {
+            id: Uuid::now_v7(),
+            session_id: SessionId(Uuid::nil()),
+            sequence_num,
+            event_type: EventType::Warning,
+            event: Event::Warning {
+                message: "test".to_string(),
+            },
+            timestamp: Utc::now(),
+            brain_id: None,
+            hand_id: None,
+            token_count: None,
+        }
+    }
+
+    fn session_progress(
+        active_turn_id: Option<String>,
+        pending_message_count: u64,
+        last_outcome: Option<TurnOutcome>,
+    ) -> SessionProgress {
+        SessionProgress {
+            snapshot: SessionSnapshot {
+                session_id: Uuid::nil().to_string(),
+                active_turn_id,
+                pending_message_count,
+                last_outcome,
+            },
+            active_turn_progress: None,
+            events: Vec::new(),
         }
     }
 
@@ -1890,6 +2392,56 @@ mod tests {
             RouteTranslation::BadRequest(message) => {
                 panic!("agent session route should not fail translation: {message}")
             }
+        }
+    }
+
+    #[test]
+    fn session_progress_public_route_translates_to_session_vo() {
+        // Pins: clients can fetch snapshot, active turn progress, and event history through one Session endpoint.
+        let session_id = "11111111-1111-1111-1111-111111111111";
+        let uri = format!("/v1/sessions/{session_id}/progress")
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(br#"{"event_range":{"from_seq":4,"limit":20}}"#);
+
+        let translation = translate_public_route(&Method::POST, &uri, &body);
+
+        match translation {
+            RouteTranslation::Forward {
+                method,
+                path,
+                body: forwarded_body,
+            } => {
+                assert_eq!(method, Method::POST);
+                assert_eq!(
+                    path,
+                    "/Session/11111111-1111-1111-1111-111111111111/progress"
+                );
+                assert_eq!(forwarded_body, body.as_ref());
+            }
+            RouteTranslation::NoChange => panic!("session progress route should translate"),
+            RouteTranslation::BadRequest(message) => {
+                panic!("session progress route should not fail translation: {message}")
+            }
+        }
+    }
+
+    #[test]
+    fn session_progress_public_route_rejects_bad_session_id() {
+        // Pins: malformed public Session/progress paths do not reach the Restate object namespace.
+        let uri = "/v1/sessions/not-a-uuid/progress"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let body = Bytes::from_static(br#"{}"#);
+
+        let translation = translate_public_route(&Method::POST, &uri, &body);
+
+        match translation {
+            RouteTranslation::BadRequest(message) => assert_eq!(message, "bad session id"),
+            RouteTranslation::Forward { path, .. } => {
+                panic!("bad session id should not translate to {path}")
+            }
+            RouteTranslation::NoChange => panic!("bad session id should be rejected"),
         }
     }
 

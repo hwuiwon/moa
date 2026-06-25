@@ -98,7 +98,7 @@ impl OrchestratorTestFixture {
         if let Ok(ingress_url) = std::env::var("MOA_RESTATE_INGRESS_URL") {
             return Self::external(ingress_url);
         }
-        Self::internal(None).await
+        Self::internal(None, Vec::new()).await
     }
 
     /// Starts a dedicated fixture with a scripted provider fixture loaded at startup.
@@ -106,7 +106,18 @@ impl OrchestratorTestFixture {
         if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
             bail!("dedicated scripted fixtures cannot use an external orchestrator");
         }
-        Self::internal(Some(script)).await
+        Self::internal(Some(script), Vec::new()).await
+    }
+
+    /// Starts a dedicated scripted fixture with extra orchestrator process environment.
+    pub async fn with_script_and_env(
+        script: serde_json::Value,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<Self> {
+        if std::env::var("MOA_RESTATE_INGRESS_URL").is_ok() {
+            bail!("dedicated scripted fixtures cannot use an external orchestrator");
+        }
+        Self::internal(Some(script), extra_env).await
     }
 
     fn external(raw_ingress_url: String) -> Result<Self> {
@@ -137,7 +148,10 @@ impl OrchestratorTestFixture {
         })
     }
 
-    async fn internal(script: Option<serde_json::Value>) -> Result<Self> {
+    async fn internal(
+        script: Option<serde_json::Value>,
+        extra_env: Vec<(String, String)>,
+    ) -> Result<Self> {
         let repo_root = repo_root();
         ensure_postgres_image(&repo_root).await?;
         let postgres = start_postgres_container().await?;
@@ -191,6 +205,7 @@ impl OrchestratorTestFixture {
             ingress_url: &ingress_url,
             script_path: &script_path,
             fga_config: &fga_config,
+            extra_env: &extra_env,
         })?;
         wait_for_orchestrator_health(health_port, &mut orchestrator).await?;
         let deployment_uri = format!("http://host.docker.internal:{orchestrator_port}");
@@ -937,10 +952,12 @@ struct OrchestratorSpawnConfig<'a> {
     ingress_url: &'a str,
     script_path: &'a Path,
     fga_config: &'a FgaConfig,
+    extra_env: &'a [(String, String)],
 }
 
 fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<Child> {
-    Command::new(config.binary)
+    let mut command = Command::new(config.binary);
+    command
         .arg("--port")
         .arg(config.port.to_string())
         .arg("--health-port")
@@ -963,7 +980,11 @@ fn spawn_orchestrator(config: OrchestratorSpawnConfig<'_>) -> Result<Child> {
         .env("MOA_AUTHZ_OPENFGA_MODEL_ID", &config.fga_config.model_id)
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("MOA_LINEAGE_SINK", "null")
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "warn");
+    for (key, value) in config.extra_env {
+        command.env(key, value);
+    }
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

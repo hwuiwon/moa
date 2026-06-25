@@ -6,18 +6,21 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use moa_core::wire::{
     CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
-    SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome as ExecutionTurnOutcome,
-    TurnOutcomeKind as ExecutionTurnOutcomeKind, UpdateStatusRequest,
+    SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
+    TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
+    UpdateStatusRequest,
 };
 use moa_core::{
     ActiveSegment, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
-    ContactRef, MarkSubAgentChildTerminalInput, MoaError, Result as MoaResult, SessionId,
-    SessionMeta, SessionStatus, SubAgentChildRef, SubAgentTerminalResult, UserMessage,
+    ContactRef, EventRange, EventRecord, MarkSubAgentChildTerminalInput, MoaError,
+    Result as MoaResult, SessionId, SessionMeta, SessionStatus, SessionStore as _,
+    SubAgentChildRef, SubAgentTerminalResult, UserMessage,
 };
 use moa_observability::record_turn_event_persist_duration;
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
+use crate::OrchestratorCtx;
 use crate::objects::sub_agent::SubAgentClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::RestateSessionStoreClient;
@@ -76,6 +79,12 @@ pub trait Session {
     /// Returns a read-only snapshot of the additive `TurnExecution` lifecycle state.
     #[shared]
     async fn snapshot() -> Result<Json<SessionSnapshot>, HandlerError>;
+
+    /// Returns session snapshot, active-turn progress, and recent durable events in one call.
+    #[shared]
+    async fn progress(
+        req: Json<SessionProgressRequest>,
+    ) -> Result<Json<SessionProgress>, HandlerError>;
 
     /// Registers a root-owned child sub-agent for later turns and cancellation.
     async fn register_child(child: Json<SubAgentChildRef>) -> Result<(), HandlerError>;

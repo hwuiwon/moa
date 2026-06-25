@@ -74,7 +74,7 @@ inherits = "default"
 test-threads = 1
 default-filter = '''
 binary(/^orchestrator_fixture_service_e2e$/)
-  | (binary(/^integration_service_e2e$/) & test(/^action_policy_flow_e2e::/))
+  | (binary(/^integration_service_e2e$/) & test(/^(action_policy_flow_e2e|turn_responsiveness_e2e)::/))
 '''
 
 [profile.loadtest-service-e2e]
@@ -121,7 +121,7 @@ test-group = "eval-recorded"
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
-filter = 'binary(/^ingestion_service_e2e$/) | (binary(/^integration_service_e2e$/) & test(/^(action_policy_flow_e2e|agent_artifacts_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e)::/)) | binary(/^(orchestrator_fixture_service_e2e|session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e|mock_loadtest_service_e2e)$/)'
+filter = 'binary(/^ingestion_service_e2e$/) | (binary(/^integration_service_e2e$/) & test(/^(action_policy_flow_e2e|agent_artifacts_e2e|consolidate_e2e|session_store_e2e|tool_executor_e2e|turn_responsiveness_e2e)::/)) | binary(/^(orchestrator_fixture_service_e2e|session_turn_lifecycle_service_e2e|turn_execution_smoke_service_e2e|mock_loadtest_service_e2e)$/)'
 test-group = "service-e2e"
 threads-required = "num-test-threads"
 

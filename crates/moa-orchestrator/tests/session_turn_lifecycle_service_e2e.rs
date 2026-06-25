@@ -46,6 +46,13 @@ struct SessionSnapshot {
     last_outcome: Option<TurnOutcome>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionProgress {
+    snapshot: SessionSnapshot,
+    active_turn_progress: Option<TurnProgress>,
+    events: Vec<serde_json::Value>,
+}
+
 struct InitializedSession {
     id: String,
     identity: Identity,
@@ -192,6 +199,23 @@ async fn snapshot(
         .context("deserialize Session snapshot")
 }
 
+async fn session_progress(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+) -> Result<SessionProgress> {
+    let request = client.post(session_url(&session.id, "progress"));
+    with_identity(request, &session.identity)
+        .json(&serde_json::json!({ "event_range": { "limit": 20 } }))
+        .send()
+        .await
+        .context("send Session progress")?
+        .error_for_status()
+        .context("Session progress should succeed")?
+        .json::<SessionProgress>()
+        .await
+        .context("deserialize Session progress")
+}
+
 async fn turn_progress(client: &reqwest::Client, turn_id: &str) -> Result<TurnProgress> {
     client
         .post(turn_url(turn_id, "progress"))
@@ -257,6 +281,34 @@ where
     )
 }
 
+async fn await_session_progress_matching<F>(
+    client: &reqwest::Client,
+    session: &InitializedSession,
+    timeout: Duration,
+    matches: F,
+) -> Result<SessionProgress>
+where
+    F: Fn(&SessionProgress) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut last_progress = None;
+    while Instant::now() < deadline {
+        let current = session_progress(client, session).await?;
+        if matches(&current) {
+            return Ok(current);
+        }
+        last_progress = Some(current);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    bail!(
+        "session {} did not reach expected progress within {:?}; last progress: {:?}",
+        session.id,
+        timeout,
+        last_progress
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
 async fn start_turn_returns_turn_id_immediately() -> Result<()> {
@@ -282,6 +334,59 @@ async fn start_turn_returns_turn_id_immediately() -> Result<()> {
     assert_eq!(current.active_turn_id.as_deref(), Some(turn_id.as_str()));
     assert_eq!(current.pending_message_count, 0);
     assert!(current.last_outcome.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running Restate ingress and moa-orchestrator deployment"]
+async fn session_progress_combines_snapshot_turn_progress_and_events() -> Result<()> {
+    // Pins: Session/progress saves clients from calling Session/snapshot, TurnExecution/progress, and SessionStore/get_events separately.
+    let client = reqwest::Client::new();
+    let session = create_initialized_session(&client, "session-progress").await?;
+
+    let started = start_turn(&client, &session, "hi").await?;
+    let turn_id = started
+        .turn_id
+        .expect("start_turn should return the active turn ID");
+
+    let initial_progress = session_progress(&client, &session).await?;
+    assert_eq!(initial_progress.snapshot.session_id, session.id);
+    assert_eq!(
+        initial_progress.snapshot.active_turn_id.as_deref(),
+        Some(turn_id.as_str())
+    );
+    assert_eq!(
+        initial_progress
+            .active_turn_progress
+            .as_ref()
+            .map(|turn| turn.turn_id.as_str()),
+        Some(turn_id.as_str())
+    );
+
+    let progress =
+        await_session_progress_matching(&client, &session, Duration::from_secs(10), |current| {
+            !current.events.is_empty()
+        })
+        .await?;
+
+    assert_eq!(progress.snapshot.session_id, session.id);
+    assert_eq!(progress.snapshot.pending_message_count, 0);
+    assert!(
+        progress.snapshot.active_turn_id.as_deref() == Some(turn_id.as_str())
+            || progress
+                .snapshot
+                .last_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.turn_id == turn_id),
+        "progress should describe the active turn or its terminal outcome: {progress:?}"
+    );
+    assert!(
+        !progress.events.is_empty(),
+        "Session/progress should include durable event history"
+    );
+    if let Some(active_turn_progress) = progress.active_turn_progress.as_ref() {
+        assert_eq!(active_turn_progress.turn_id, turn_id);
+    }
     Ok(())
 }
 

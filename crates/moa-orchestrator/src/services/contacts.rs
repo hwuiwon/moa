@@ -12,11 +12,13 @@ use moa_contacts::repository::{
     ensure_contact_token_grant_active, issue_contact, load_contact_ref, promoted_from_contact,
     resolve_contact_session_channel, start_contact_verification, storage_workspace_id_for_tenant,
 };
-use moa_core::traits::Identity;
+use moa_core::traits::{Identity, IdentityType};
+use moa_core::wire::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
 use moa_core::{
     ChannelAccountRef, ChannelRef, ContactId, ContactPointId, ContactRef,
     ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
-    ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionPromotionRequest,
+    ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionMessageRequest,
+    ContactSessionMessageResponse, ContactSessionProgressRequest, ContactSessionPromotionRequest,
     ContactSessionPromotionResponse, ContactTokenClaims, ContactTokenIssueRequest,
     ContactTokenIssueResponse, ContactVerificationCompleteRequest,
     ContactVerificationCompleteResponse, ContactVerificationStartRequest,
@@ -33,6 +35,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::OrchestratorCtx;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::objects::session::SessionClient;
+use crate::restate_identity::with_identity_headers;
 use crate::services::session_store::inner::resolve_agent_context_for_session;
 
 /// Restate surface for contact identity and contact-scoped sessions.
@@ -63,6 +66,16 @@ pub trait Contacts {
     async fn change_session_channel(
         request: Json<ContactSessionChannelChangeRequest>,
     ) -> Result<Json<ContactSessionChannelChangeResponse>, HandlerError>;
+
+    /// Sends one user message to an existing contact-owned session.
+    async fn send_message(
+        request: Json<ContactSessionMessageRequest>,
+    ) -> Result<Json<ContactSessionMessageResponse>, HandlerError>;
+
+    /// Returns progress for an existing contact-owned session.
+    async fn progress(
+        request: Json<ContactSessionProgressRequest>,
+    ) -> Result<Json<SessionProgress>, HandlerError>;
 
     /// Promotes an existing session to the verified canonical contact.
     async fn promote_session(
@@ -540,6 +553,127 @@ impl Contacts for ContactsImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: contact JWT verification, scope checks, and session ownership validation bind this message to one contact session.
+    async fn send_message(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ContactSessionMessageRequest>,
+    ) -> Result<Json<ContactSessionMessageResponse>, HandlerError> {
+        annotate_restate_handler_span("Contacts", "send_message");
+        let request = request.into_inner();
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        require_contact_scope(&claims, "contact:session:message:send")
+            .map_err(contact_error_handler_error)?;
+        require_contact_session_permission(&claims, Some(request.session_id))
+            .map_err(contact_error_handler_error)?;
+        let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
+        annotate_claim_contact_span(&claims, Some(request.session_id));
+        let session_id = request.session_id;
+        let tenant_id = claims.tenant_id;
+        let pool = OrchestratorCtx::current_graph_pool();
+        let store = OrchestratorCtx::current_session_store();
+
+        let contact = ctx
+            .run(|| async move {
+                ensure_contact_token_grant_active(&pool, &claims, contact_id)
+                    .await
+                    .map_err(contact_error_handler_error)?;
+                let meta =
+                    validate_contact_session(store.as_ref(), session_id, tenant_id, contact_id)
+                        .await?;
+                let Some(contact) = meta.contact else {
+                    return Err(TerminalError::new_with_code(
+                        403,
+                        "session has no contact binding",
+                    )
+                    .into());
+                };
+                Ok::<_, HandlerError>(Json::from(contact))
+            })
+            .name("contacts_validate_message_session")
+            .await?
+            .into_inner();
+        let identity = contact_identity(contact.contact_id, contact.tenant_id);
+        let response = with_identity_headers(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .queue_message(Json::from(QueueMessageRequest {
+                    user_message: request.user_message,
+                    attachments: request.attachments,
+                    model: request.model,
+                    contact: None,
+                    max_turns: request.max_turns,
+                })),
+            &identity,
+        )
+        .call()
+        .await?
+        .into_inner();
+        annotate_contact_operation_span(&contact, Some(session_id));
+
+        Ok(Json::from(ContactSessionMessageResponse {
+            session_id,
+            queued: response.queued,
+            started_turn_id: response.started_turn_id,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: contact JWT verification, scope checks, and session ownership validation bind this progress read to one contact session.
+    async fn progress(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ContactSessionProgressRequest>,
+    ) -> Result<Json<SessionProgress>, HandlerError> {
+        annotate_restate_handler_span("Contacts", "progress");
+        let request = request.into_inner();
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        require_contact_scope(&claims, "contact:session:message:send")
+            .map_err(contact_error_handler_error)?;
+        require_contact_session_permission(&claims, Some(request.session_id))
+            .map_err(contact_error_handler_error)?;
+        let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
+        annotate_claim_contact_span(&claims, Some(request.session_id));
+        let session_id = request.session_id;
+        let tenant_id = claims.tenant_id;
+        let pool = OrchestratorCtx::current_graph_pool();
+        let store = OrchestratorCtx::current_session_store();
+
+        let contact = ctx
+            .run(|| async move {
+                ensure_contact_token_grant_active(&pool, &claims, contact_id)
+                    .await
+                    .map_err(contact_error_handler_error)?;
+                let meta =
+                    validate_contact_session(store.as_ref(), session_id, tenant_id, contact_id)
+                        .await?;
+                let Some(contact) = meta.contact else {
+                    return Err(TerminalError::new_with_code(
+                        403,
+                        "session has no contact binding",
+                    )
+                    .into());
+                };
+                Ok::<_, HandlerError>(Json::from(contact))
+            })
+            .name("contacts_validate_progress_session")
+            .await?
+            .into_inner();
+        let identity = contact_identity(contact.contact_id, contact.tenant_id);
+        let progress = with_identity_headers(
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .progress(Json::from(SessionProgressRequest {
+                    event_range: request.event_range,
+                })),
+            &identity,
+        )
+        .call()
+        .await?;
+        annotate_contact_operation_span(&contact, Some(session_id));
+
+        Ok(progress)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
     // SAFETY: contact JWT verification and scope checks bind session promotion to the verified canonical contact.
     async fn promote_session(
         &self,
@@ -707,6 +841,16 @@ fn annotate_claim_contact_span(
     span.set_attribute("moa.contact.state", claims.state.as_str().to_string());
     if let Some(session_id) = session_id {
         span.set_attribute("moa.session.id", session_id.to_string());
+    }
+}
+
+fn contact_identity(contact_id: ContactId, tenant_id: TenantId) -> Identity {
+    Identity {
+        identity_type: IdentityType::Contact,
+        id: contact_id.0,
+        tenant_id,
+        api_key_id: None,
+        acting_on_behalf_of: None,
     }
 }
 

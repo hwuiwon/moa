@@ -1,5 +1,6 @@
 //! Dependency construction for orchestrator runtime startup.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,7 +10,10 @@ use moa_brain::{
     build_graph_memory_retriever,
     pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector},
 };
-use moa_core::{MoaConfig, traits::EmbeddingProvider};
+use moa_core::{
+    Channel, MoaConfig,
+    traits::{ChannelAdapter, EmbeddingProvider},
+};
 use moa_hands::ToolRouter;
 use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 use moa_observability::record_retrieval_embedder_construction;
@@ -21,7 +25,8 @@ use sqlx::PgPool;
 use crate::{
     config::ProvidersOverride,
     ctx::{
-        AuthDeps, LineageDeps, MemoryDeps, OrchestratorCtx, PersistenceDeps, ProviderDeps, ToolDeps,
+        AuthDeps, LineageDeps, MemoryDeps, MessagingDeps, OrchestratorCtx, OrchestratorDeps,
+        PersistenceDeps, ProviderDeps, ToolDeps,
     },
     lineage::{LineageSinkRuntime, build_lineage_sink},
     runtime::jobs::{restate_ingress_base_url, start_authz_outbox_poller},
@@ -58,6 +63,8 @@ pub struct RuntimeDeps {
     pub awakeable_resolver: Arc<dyn AwakeableResolver>,
     /// Optional OpenFGA outbox poller handle.
     pub authz_outbox_poller: Option<moa_authz::PollerHandle>,
+    /// Configured live outbound channel adapters.
+    pub channel_adapters: HashMap<Channel, Arc<dyn ChannelAdapter>>,
 }
 
 impl RuntimeDeps {
@@ -118,6 +125,7 @@ impl RuntimeDeps {
                 .with_budget_config(config.skill_budget.clone()),
         );
         let tool_schemas = Arc::new(tool_router.tool_schemas());
+        let channel_adapters = build_channel_adapters(config.as_ref())?;
         let _ = moa_memory_ingest::install_runtime_with_config(pool.clone(), config.as_ref());
 
         Ok(Self {
@@ -135,6 +143,7 @@ impl RuntimeDeps {
             lineage,
             awakeable_resolver,
             authz_outbox_poller,
+            channel_adapters,
         })
     }
 
@@ -159,17 +168,48 @@ impl RuntimeDeps {
     fn orchestrator_ctx(&self) -> OrchestratorCtx {
         OrchestratorCtx::new(
             self.config.clone(),
-            PersistenceDeps::new(self.session_store.clone(), self.pool.clone()),
-            AuthDeps::new(self.fga_client.clone(), self.auth_providers.clone()),
-            ProviderDeps::new(self.providers.clone(), self.embedding_provider.clone()),
-            ToolDeps::new(self.tool_router.clone(), self.tool_schemas.clone()),
-            MemoryDeps::new(
-                self.graph_memory_retriever.clone(),
-                self.skill_injector.clone(),
-            ),
-            LineageDeps::new(self.lineage.handle.clone(), self.lineage.writer.clone()),
+            OrchestratorDeps {
+                persistence: PersistenceDeps::new(self.session_store.clone(), self.pool.clone()),
+                auth: AuthDeps::new(self.fga_client.clone(), self.auth_providers.clone()),
+                providers: ProviderDeps::new(
+                    self.providers.clone(),
+                    self.embedding_provider.clone(),
+                ),
+                tools: ToolDeps::new(self.tool_router.clone(), self.tool_schemas.clone()),
+                memory: MemoryDeps::new(
+                    self.graph_memory_retriever.clone(),
+                    self.skill_injector.clone(),
+                ),
+                lineage: LineageDeps::new(self.lineage.handle.clone(), self.lineage.writer.clone()),
+                messaging: MessagingDeps::new(self.channel_adapters.clone()),
+            },
         )
     }
+}
+
+fn build_channel_adapters(config: &MoaConfig) -> Result<HashMap<Channel, Arc<dyn ChannelAdapter>>> {
+    #[cfg(feature = "slack")]
+    let mut adapters: HashMap<Channel, Arc<dyn ChannelAdapter>> = HashMap::new();
+    #[cfg(not(feature = "slack"))]
+    let adapters: HashMap<Channel, Arc<dyn ChannelAdapter>> = HashMap::new();
+    #[cfg(feature = "slack")]
+    match moa_messaging::SlackAdapter::from_config(config) {
+        Ok(adapter) => {
+            adapters.insert(Channel::Slack, Arc::new(adapter));
+        }
+        Err(moa_core::MoaError::MissingEnvironmentVariable(name)) => {
+            tracing::warn!(
+                env = %name,
+                "Slack live progress delivery disabled because credentials are not configured"
+            );
+        }
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(not(feature = "slack"))]
+    {
+        let _ = config;
+    }
+    Ok(adapters)
 }
 
 fn build_retrieval_embedder(config: &MoaConfig) -> Option<Arc<dyn EmbeddingProvider>> {

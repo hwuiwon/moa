@@ -9,26 +9,28 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use moa_core::wire::{
-    AppendEventRequest, RecordSegmentToolUseRequest, RunSubAgentTurnRequest, TurnOutcome,
-    TurnOutcomeKind, TurnPhase, TurnProgress,
+    AppendEventRequest, RecordSegmentToolUseRequest, RunSubAgentTurnRequest, TurnComplexityClass,
+    TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
 };
 use moa_core::{
-    ActionPolicyEffect, CompletionRequest, Event, ModelTier, SessionId, SessionMeta,
-    SubAgentToolRecord, SubAgentTurnOutcomeRecord, SubAgentTurnPreparation,
-    SubAgentTurnResponseRecord, ToolCallContent, ToolCallId, ToolCallRequest, ToolInvocation,
-    ToolOutput, TurnOutcome as CoreTurnOutcome, is_delegation_tool_name,
+    ActionPolicyEffect, CompletionContent, CompletionRequest, CompletionResponse, Event, ModelTier,
+    SessionId, SessionMeta, StopReason, SubAgentToolRecord, SubAgentTurnOutcomeRecord,
+    SubAgentTurnPreparation, SubAgentTurnResponseRecord, TokenUsage, ToolCallContent, ToolCallId,
+    ToolCallRequest, ToolInvocation, ToolOutput, TurnOutcome as CoreTurnOutcome,
+    is_delegation_tool_name,
 };
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
     tool_dispatch_span,
 };
 use moa_observability::{
-    record_turn_event_persist_duration, record_turn_llm_call_duration,
+    record_session_error, record_turn_event_persist_duration, record_turn_llm_call_duration,
     record_turn_tool_dispatch_duration, record_turn_workflow_outcome,
 };
 use restate_sdk::prelude::*;
 use tracing::Instrument;
 
+use crate::OrchestratorCtx;
 use crate::objects::sub_agent::{MAX_SUB_AGENT_TURNS_PER_WORKFLOW, SubAgentClient};
 use crate::services::{
     action_reviews::{ActionReviewsClient, RequestActionReview},
@@ -42,14 +44,35 @@ use crate::turn::util::{
     denied_tool_output, disallowed_tool_output, meaningful_cancel_reason, response_tool_calls,
     stable_tool_call_id, tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
 };
+use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
+use crate::workflows::turn_responsiveness::{
+    ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState, TurnResponsivenessInput,
+    classify_turn_request, effective_tool_cap, effective_turn_cap, progress_cap, progress_count,
+};
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PHASE: &str = "phase";
+const K_COMPLEXITY_CLASS: &str = "complexity_class";
+const K_ITERATION: &str = "iteration";
+const K_MAX_TURNS: &str = "max_turns";
+const K_TOOL_CALLS: &str = "tool_calls";
+const K_MAX_TOOL_CALLS: &str = "max_tool_calls";
 
 #[derive(Clone, Debug)]
 enum SubAgentIterationOutcome {
     Core(CoreTurnOutcome),
     Cancelled(String),
+    ToolBudgetExceeded(String),
+}
+
+struct SubAgentIterationInput<'a> {
+    request: &'a RunSubAgentTurnRequest,
+    completion_request: CompletionRequest,
+    active_canary: Option<String>,
+    meta: SessionMeta,
+    parent_session: SessionId,
+    turn_evidence: &'a mut TurnEvidence,
+    tool_budget: &'a mut ToolBudgetState,
 }
 
 /// Restate workflow surface for durable sub-agent turn execution.
@@ -101,6 +124,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
             TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
             TurnOutcomeKind::Failed => TurnPhase::Failed,
         };
+        turn_progress::finish(&ctx).await?;
         ctx.set(K_PHASE, Json::from(phase));
         notify_sub_agent_of_outcome(&ctx, &request.sub_agent_id, &outcome);
         Ok(Json::from(outcome))
@@ -142,9 +166,42 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
             .unwrap_or_default();
         let cancel_reason =
             meaningful_cancel_reason(ctx.peek_promise::<String>(K_CANCEL_REASON_PROMISE).await?);
+        let complexity_class = ctx
+            .get::<Json<TurnComplexityClass>>(K_COMPLEXITY_CLASS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or_default();
+        let iteration = ctx
+            .get::<Json<u32>>(K_ITERATION)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or_default();
+        let max_turns = ctx
+            .get::<Json<Option<u32>>>(K_MAX_TURNS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or(None);
+        let tool_calls = ctx
+            .get::<Json<u32>>(K_TOOL_CALLS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or_default();
+        let max_tool_calls = ctx
+            .get::<Json<Option<u32>>>(K_MAX_TOOL_CALLS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or(None);
+        let progress = turn_progress::snapshot(&ctx, is_terminal_phase(&phase)).await?;
         Ok(Json::from(TurnProgress {
             turn_id: ctx.key().to_string(),
             phase,
+            complexity_class,
+            iteration,
+            max_turns,
+            tool_calls,
+            max_tool_calls,
+            elapsed_ms: progress.elapsed_ms,
+            last_progress_summary: progress.last_summary,
             cancel_requested: cancel_reason.is_some(),
             cancel_reason,
         }))
@@ -155,18 +212,34 @@ async fn run_sub_agent_inside_workflow(
     ctx: &WorkflowContext<'_>,
     request: &RunSubAgentTurnRequest,
 ) -> Result<TurnOutcome, HandlerError> {
-    let max_turns = match effective_sub_agent_max_turns(request.max_turns) {
-        Ok(max_turns) => max_turns,
-        Err(message) => {
-            return Ok(TurnOutcome {
-                turn_id: request.turn_id.clone(),
-                kind: TurnOutcomeKind::Failed,
-                message,
-            });
-        }
-    };
+    let session_limits = &OrchestratorCtx::current_config().session_limits;
+    let selected_class = classify_turn_request(TurnResponsivenessInput {
+        user_text: "",
+        attachment_count: 0,
+        request_max_turns: request.max_turns,
+        has_recent_target: true,
+        is_workflow_context: false,
+        is_sub_agent_context: true,
+        available_tool_count: 0,
+    });
+    let request_or_default_cap = request.max_turns.or(Some(
+        MAX_SUB_AGENT_TURNS_PER_WORKFLOW.min(u32::MAX as usize) as u32,
+    ));
+    let max_turns = effective_turn_cap(request_or_default_cap, selected_class, session_limits);
+    let max_tool_calls = effective_tool_cap(selected_class, session_limits);
+    let mut tool_budget =
+        ToolBudgetState::new(max_tool_calls, session_limits.loop_detection_threshold);
+    ctx.set(K_COMPLEXITY_CLASS, Json::from(selected_class));
+    ctx.set(K_ITERATION, Json::from(0_u32));
+    ctx.set(K_MAX_TURNS, Json::from(progress_cap(max_turns)));
+    ctx.set(K_TOOL_CALLS, Json::from(0_u32));
+    ctx.set(K_MAX_TOOL_CALLS, Json::from(progress_cap(max_tool_calls)));
+    turn_progress::initialize(ctx).await?;
     let mut turn_evidence = TurnEvidence::default();
+    let mut last_request_meta = None;
+    let mut last_parent_session = None;
     for turn_number in 1..=max_turns {
+        ctx.set(K_ITERATION, Json::from(progress_count(turn_number)));
         if let Some(reason) = cancel_requested(ctx).await? {
             ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
                 .cancel(reason.clone())
@@ -194,7 +267,11 @@ async fn run_sub_agent_inside_workflow(
                 active_canary,
                 session_meta,
                 parent_session,
-            } => (*request, active_canary, *session_meta, parent_session),
+            } => {
+                last_request_meta = Some((*session_meta).clone());
+                last_parent_session = Some(parent_session);
+                (*request, active_canary, *session_meta, parent_session)
+            }
         };
         let turn_span = sub_agent_turn_span(
             &meta,
@@ -205,12 +282,15 @@ async fn run_sub_agent_inside_workflow(
         );
         let outcome = run_sub_agent_iteration(
             ctx,
-            request,
-            completion_request,
-            active_canary,
-            meta,
-            parent_session,
-            &mut turn_evidence,
+            SubAgentIterationInput {
+                request,
+                completion_request,
+                active_canary,
+                meta,
+                parent_session,
+                turn_evidence: &mut turn_evidence,
+                tool_budget: &mut tool_budget,
+            },
         )
         .instrument(turn_span)
         .await?;
@@ -219,6 +299,13 @@ async fn run_sub_agent_inside_workflow(
                 return Ok(TurnOutcome {
                     turn_id: request.turn_id.clone(),
                     kind: TurnOutcomeKind::Cancelled,
+                    message,
+                });
+            }
+            SubAgentIterationOutcome::ToolBudgetExceeded(message) => {
+                return Ok(TurnOutcome {
+                    turn_id: request.turn_id.clone(),
+                    kind: TurnOutcomeKind::Completed,
                     message,
                 });
             }
@@ -240,6 +327,17 @@ async fn run_sub_agent_inside_workflow(
         }
     }
 
+    if let (Some(meta), Some(parent_session)) = (last_request_meta.as_ref(), last_parent_session) {
+        let message =
+            record_sub_agent_turn_budget_stop(ctx, request, meta, parent_session, max_turns)
+                .await?;
+        return Ok(TurnOutcome {
+            turn_id: request.turn_id.clone(),
+            kind: TurnOutcomeKind::Completed,
+            message,
+        });
+    }
+
     Ok(TurnOutcome {
         turn_id: request.turn_id.clone(),
         kind: TurnOutcomeKind::Failed,
@@ -247,42 +345,41 @@ async fn run_sub_agent_inside_workflow(
     })
 }
 
-fn effective_sub_agent_max_turns(max_turns: Option<u32>) -> Result<usize, String> {
-    match max_turns {
-        Some(0) => Err("sub-agent max_turns must be at least 1".to_string()),
-        Some(max_turns) => Ok(max_turns as usize),
-        None => Ok(MAX_SUB_AGENT_TURNS_PER_WORKFLOW),
-    }
-}
-
 async fn run_sub_agent_iteration(
     ctx: &WorkflowContext<'_>,
-    request: &RunSubAgentTurnRequest,
-    mut completion_request: CompletionRequest,
-    active_canary: Option<String>,
-    meta: SessionMeta,
-    parent_session: SessionId,
-    turn_evidence: &mut TurnEvidence,
+    mut input: SubAgentIterationInput<'_>,
 ) -> Result<SubAgentIterationOutcome, HandlerError> {
-    attach_active_segment_metadata(ctx, parent_session, &mut completion_request).await?;
-    let allowed_tools = allowed_tool_names(&completion_request);
+    attach_active_segment_metadata(ctx, input.parent_session, &mut input.completion_request)
+        .await?;
+    let allowed_tools = allowed_tool_names(&input.completion_request);
 
     ctx.set(K_PHASE, Json::from(TurnPhase::Streaming));
-    let span = llm_call_span(&meta);
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        input.parent_session,
+        &input.request.turn_id,
+        TurnPhase::Streaming,
+        SUMMARY_CALLING_MODEL,
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
+    let span = llm_call_span(&input.meta);
     let llm_started = Instant::now();
     let response = {
         let _guard = span.enter();
         restate_sdk::select! {
             reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
                 let reason = reason?;
-                ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+                ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
                     .cancel(reason.clone())
                     .send();
                 return Ok(SubAgentIterationOutcome::Cancelled(reason));
             },
             response = ctx
                 .service_client::<LLMGatewayClient>()
-                .complete(Json::from(completion_request))
+                .complete(Json::from(input.completion_request))
                 .call() => {
                     response?.into_inner()
                 }
@@ -290,11 +387,11 @@ async fn run_sub_agent_iteration(
     };
     record_turn_llm_call_duration(llm_started.elapsed());
     let (response, verification_annotated) =
-        annotate_unresolved_verification(&response, turn_evidence);
+        annotate_unresolved_verification(&response, &*input.turn_evidence);
 
-    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+    ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
         .record_response(Json::from(SubAgentTurnResponseRecord {
-            turn_id: request.turn_id.clone(),
+            turn_id: input.request.turn_id.clone(),
             response: response.clone(),
         }))
         .call()
@@ -302,9 +399,9 @@ async fn run_sub_agent_iteration(
 
     if verification_annotated {
         let outcome = CoreTurnOutcome::Idle;
-        ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
             .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
-                turn_id: request.turn_id.clone(),
+                turn_id: input.request.turn_id.clone(),
                 outcome,
             }))
             .call()
@@ -314,17 +411,43 @@ async fn run_sub_agent_iteration(
 
     for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
         if let Some(reason) = cancel_requested(ctx).await? {
-            ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+            ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
                 .cancel(reason.clone())
                 .send();
             return Ok(SubAgentIterationOutcome::Cancelled(reason));
         }
+        match input
+            .tool_budget
+            .before_tool_dispatch(&tool_call.invocation)
+        {
+            ToolBudgetDecision::Allow {
+                attempted_tool_calls,
+            } => ctx.set(
+                K_TOOL_CALLS,
+                Json::from(progress_count(attempted_tool_calls)),
+            ),
+            ToolBudgetDecision::Stop(exhaustion) => {
+                ctx.set(
+                    K_TOOL_CALLS,
+                    Json::from(progress_count(input.tool_budget.attempted_tool_calls())),
+                );
+                let message = record_sub_agent_budget_stop(
+                    ctx,
+                    input.request,
+                    &input.meta,
+                    input.parent_session,
+                    &exhaustion,
+                )
+                .await?;
+                return Ok(SubAgentIterationOutcome::ToolBudgetExceeded(message));
+            }
+        }
         let tool_context = SubAgentToolContext {
-            turn_id: &request.turn_id,
-            sub_agent_id: &request.sub_agent_id,
-            meta: &meta,
-            session_id: parent_session,
-            active_canary: active_canary.as_deref(),
+            turn_id: &input.request.turn_id,
+            sub_agent_id: &input.request.sub_agent_id,
+            meta: &input.meta,
+            session_id: input.parent_session,
+            active_canary: input.active_canary.as_deref(),
         };
         handle_tool_call(
             ctx,
@@ -332,15 +455,15 @@ async fn run_sub_agent_iteration(
             &allowed_tools,
             index,
             tool_call,
-            turn_evidence,
+            &mut *input.turn_evidence,
         )
         .await?;
     }
 
     let outcome = turn_outcome_for_response(&response);
-    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+    ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
         .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
-            turn_id: request.turn_id.clone(),
+            turn_id: input.request.turn_id.clone(),
             outcome,
         }))
         .call()
@@ -529,6 +652,17 @@ async fn handle_tool_call(
     }
 
     let span = tool_dispatch_span(&invocation.name);
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        tool_context.turn_id,
+        TurnPhase::Tooling,
+        turn_progress::running_tool_summary(&invocation.name),
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let dispatch_started = Instant::now();
     let output = ctx
         .service_client::<ToolExecutorClient>()
@@ -585,6 +719,17 @@ async fn handle_delegation_tool(
     };
 
     let span = tool_dispatch_span(&invocation.name);
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        turn_id,
+        TurnPhase::Tooling,
+        turn_progress::running_tool_summary(&invocation.name),
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let dispatch_started = Instant::now();
     let output = crate::delegation::execute_delegation_tool(
         ctx,
@@ -613,6 +758,133 @@ async fn handle_delegation_tool(
         record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
     Ok(())
+}
+
+async fn record_sub_agent_budget_stop(
+    ctx: &WorkflowContext<'_>,
+    request: &RunSubAgentTurnRequest,
+    meta: &SessionMeta,
+    parent_session: SessionId,
+    exhaustion: &ToolBudgetExhausted,
+) -> Result<String, HandlerError> {
+    emit_sub_agent_tool_budget_exceeded(ctx, parent_session, exhaustion).await?;
+    let message = exhaustion.assistant_message();
+    append_zero_cost_assistant_response(ctx, parent_session, meta, message.clone()).await?;
+    let response = CompletionResponse {
+        text: message.clone(),
+        content: vec![CompletionContent::Text(message.clone())],
+        stop_reason: StopReason::EndTurn,
+        model: meta.model.clone(),
+        usage: TokenUsage::default(),
+        duration_ms: 0,
+        thought_signature: None,
+    };
+    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        .record_response(Json::from(SubAgentTurnResponseRecord {
+            turn_id: request.turn_id.clone(),
+            response,
+        }))
+        .call()
+        .await?;
+    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
+            turn_id: request.turn_id.clone(),
+            outcome: CoreTurnOutcome::Idle,
+        }))
+        .call()
+        .await?;
+    Ok(message)
+}
+
+async fn record_sub_agent_turn_budget_stop(
+    ctx: &WorkflowContext<'_>,
+    request: &RunSubAgentTurnRequest,
+    meta: &SessionMeta,
+    parent_session: SessionId,
+    max_turns: usize,
+) -> Result<String, HandlerError> {
+    record_session_error("turn_budget");
+    append_session_event(
+        ctx,
+        parent_session,
+        Event::Error {
+            message: format!("sub-agent turn budget exceeded ({max_turns}), stopping"),
+            recoverable: true,
+        },
+    )
+    .await?;
+    let message = format!(
+        "MOA stopped because this sub-agent reached the model-loop budget ({max_turns}). Narrow the scope or ask MOA to continue."
+    );
+    append_zero_cost_assistant_response(ctx, parent_session, meta, message.clone()).await?;
+    let response = CompletionResponse {
+        text: message.clone(),
+        content: vec![CompletionContent::Text(message.clone())],
+        stop_reason: StopReason::EndTurn,
+        model: meta.model.clone(),
+        usage: TokenUsage::default(),
+        duration_ms: 0,
+        thought_signature: None,
+    };
+    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        .record_response(Json::from(SubAgentTurnResponseRecord {
+            turn_id: request.turn_id.clone(),
+            response,
+        }))
+        .call()
+        .await?;
+    ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
+        .apply_turn_outcome(Json::from(SubAgentTurnOutcomeRecord {
+            turn_id: request.turn_id.clone(),
+            outcome: CoreTurnOutcome::Idle,
+        }))
+        .call()
+        .await?;
+    Ok(message)
+}
+
+async fn emit_sub_agent_tool_budget_exceeded(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    exhaustion: &ToolBudgetExhausted,
+) -> Result<(), HandlerError> {
+    record_session_error("tool_budget");
+    append_session_event(
+        ctx,
+        session_id,
+        Event::Error {
+            message: exhaustion.audit_message(),
+            recoverable: true,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn append_zero_cost_assistant_response(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    text: String,
+) -> Result<(), HandlerError> {
+    append_session_event(
+        ctx,
+        session_id,
+        Event::BrainResponse {
+            text,
+            thought_signature: None,
+            model: meta.model.clone(),
+            model_tier: ModelTier::Auxiliary,
+            input_tokens_uncached: 0,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 0,
+            cost_cents: 0,
+            duration_ms: 0,
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -816,6 +1088,11 @@ fn is_terminal_phase(phase: &TurnPhase) -> bool {
     )
 }
 
+fn progress_cadence() -> (u64, u64) {
+    let limits = &OrchestratorCtx::current_config().session_limits;
+    (limits.progress_first_delay_ms, limits.progress_interval_ms)
+}
+
 fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
     match kind {
         TurnOutcomeKind::Completed => "completed",
@@ -847,10 +1124,7 @@ mod tests {
     use moa_core::SessionId;
     use moa_core::wire::TurnPhase;
 
-    use super::{
-        MAX_SUB_AGENT_TURNS_PER_WORKFLOW, effective_sub_agent_max_turns, is_terminal_phase,
-        parent_session_from_initial_message,
-    };
+    use super::{is_terminal_phase, parent_session_from_initial_message};
 
     #[test]
     fn terminal_phase_detection_matches_workflow_lifecycle() {
@@ -863,24 +1137,6 @@ mod tests {
         assert!(is_terminal_phase(&TurnPhase::Completed));
         assert!(is_terminal_phase(&TurnPhase::Cancelled));
         assert!(is_terminal_phase(&TurnPhase::Failed));
-    }
-
-    #[test]
-    fn effective_sub_agent_max_turns_honors_request_cap() {
-        // Pins: workflow sub_agent max_turns is applied by the child turn loop.
-        assert_eq!(
-            effective_sub_agent_max_turns(None).expect("default cap should be valid"),
-            MAX_SUB_AGENT_TURNS_PER_WORKFLOW
-        );
-        assert_eq!(
-            effective_sub_agent_max_turns(Some(3)).expect("explicit cap should be valid"),
-            3
-        );
-        assert!(
-            effective_sub_agent_max_turns(Some(0))
-                .expect_err("zero cap should fail closed")
-                .contains("max_turns must be at least 1")
-        );
     }
 
     #[test]

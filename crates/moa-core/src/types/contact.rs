@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{AgentSessionSelection, Channel, ChannelAccountRef, ChannelRef, SessionId, TenantId};
+use super::{
+    AgentSessionSelection, Attachment, Channel, ChannelAccountRef, ChannelRef, EventRange,
+    SessionId, TenantId,
+};
 
 uuid_id!(
     /// Identifier for an agent-facing contact.
@@ -386,6 +389,54 @@ pub struct ContactSessionChannelChangeResponse {
     /// Channel account used by the route, when applicable.
     #[serde(default)]
     pub channel_account: Option<ChannelAccountRef>,
+}
+
+/// Request to send one user message to an existing contact-owned session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionMessageRequest {
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
+    /// Session receiving the user message.
+    pub session_id: SessionId,
+    /// Current contact token.
+    pub contact_token: String,
+    /// User message text to enqueue or start immediately.
+    pub user_message: String,
+    /// Attachments included with the user message.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    /// Optional per-turn model override.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional turn-iteration cap for this request.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+}
+
+/// Response returned after admitting a contact session message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionMessageResponse {
+    /// Session that accepted the message.
+    pub session_id: SessionId,
+    /// Whether the message was queued behind an active turn.
+    pub queued: bool,
+    /// Turn ID when the message started a workflow immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_turn_id: Option<String>,
+}
+
+/// Request to read progress for a contact-owned session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionProgressRequest {
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
+    /// Session being observed.
+    pub session_id: SessionId,
+    /// Current contact token.
+    pub contact_token: String,
+    /// Event range to include alongside hot workflow progress.
+    #[serde(default)]
+    pub event_range: EventRange,
 }
 
 /// Request to promote an active session after contact verification.

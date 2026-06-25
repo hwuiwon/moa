@@ -597,6 +597,12 @@ pub fn redacted_event_snippet(event: &Event) -> String {
         | Event::QueuedMessage { text, .. }
         | Event::BrainResponse { text, .. }
         | Event::SubAgentMessageSent { text, .. } => text.clone(),
+        Event::ProgressUpdate {
+            phase,
+            summary,
+            elapsed_ms,
+            ..
+        } => format!("progress {phase} after {elapsed_ms}ms: {summary}"),
         Event::GuardrailCheck {
             direction,
             mode,

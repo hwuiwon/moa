@@ -1,0 +1,6 @@
+kind = "long"
+name = "turn_responsiveness_vague_fix_this_clarification"
+goal_card = "goal_card.md"
+scripted_user = "scripted_user.jsonl"
+expectations = "expectations.toml"
+mode = "scripted_user"

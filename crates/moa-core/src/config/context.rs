@@ -24,15 +24,30 @@ impl Default for BudgetConfig {
 pub struct SessionLimitsConfig {
     /// Maximum completed turns per session before pausing. `0` disables the limit.
     pub max_turns: u32,
+    /// Maximum model loop iterations for requests classified as simple.
+    pub simple_max_turns: u32,
+    /// Maximum model loop iterations for requests classified as standard.
+    pub standard_max_turns: u32,
+    /// Maximum tool calls allowed within one turn. `0` disables tool calls.
+    pub max_tool_calls: u32,
     /// Number of identical consecutive turn fingerprints that triggers a loop pause. `0` disables detection.
     pub loop_detection_threshold: u32,
+    /// Delay before the first durable progress update is eligible, in milliseconds.
+    pub progress_first_delay_ms: u64,
+    /// Minimum interval between durable progress updates, in milliseconds.
+    pub progress_interval_ms: u64,
 }
 
 impl Default for SessionLimitsConfig {
     fn default() -> Self {
         Self {
             max_turns: 50,
+            simple_max_turns: 1,
+            standard_max_turns: 6,
+            max_tool_calls: 30,
             loop_detection_threshold: 3,
+            progress_first_delay_ms: 8_000,
+            progress_interval_ms: 8_000,
         }
     }
 }

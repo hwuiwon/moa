@@ -248,9 +248,12 @@ pub(crate) fn stable_tool_call_id(
     }
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"moa.orchestrator.tool_call_id.v1");
+    hasher.update(b"moa.orchestrator.tool_call_id.v2");
     update_len_prefixed(&mut hasher, session_id.0.as_bytes());
     update_len_prefixed(&mut hasher, &(index as u64).to_be_bytes());
+    if let Some(raw_id) = tool_call.invocation.id.as_deref() {
+        update_len_prefixed(&mut hasher, raw_id.as_bytes());
+    }
     update_len_prefixed(&mut hasher, tool_call.invocation.name.as_bytes());
     let input = serde_json::to_vec(&tool_call.invocation.input).unwrap_or_default();
     update_len_prefixed(&mut hasher, &input);
@@ -552,10 +555,14 @@ mod tests {
         let first = stable_tool_call_id(session_id, 0, &call);
         let second = stable_tool_call_id(session_id, 0, &call);
         let third = stable_tool_call_id(session_id, 1, &call);
+        let mut repeated_call = call.clone();
+        repeated_call.invocation.id = Some("provider-tool-id-2".to_string());
+        let fourth = stable_tool_call_id(session_id, 0, &repeated_call);
 
         assert_eq!(first, second);
         assert_ne!(first, third);
-        assert_eq!(first.0.to_string(), "cbd69d4a-b3b5-4604-99f0-651dd9dbb308");
+        assert_ne!(first, fourth);
+        assert_eq!(first.0.to_string(), "b9a3e70e-6e0e-49f8-9034-2405d5019a72");
     }
 
     #[test]

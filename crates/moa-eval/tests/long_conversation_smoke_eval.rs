@@ -740,7 +740,7 @@ async fn insert_eval_skill<T: AsRef<str>>(
         .map(|tag| tag.as_ref().to_string())
         .collect::<Vec<_>>();
     let skill_md = format!(
-        "---\nname: {name}\ndescription: >-\n  {}\nallowed-tools:\n  - file_write\nmetadata:\n  moa-tags: \"{}\"\n  moa-use-count: \"{use_count}\"\n  moa-success-rate: \"1.0\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
+        "---\nname: {name}\ndescription: >-\n  {}\nallowed-tools: file_write\nmetadata:\n  moa-tags: \"{}\"\n  moa-use-count: \"{use_count}\"\n  moa-success-rate: \"1.0\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
         indent_frontmatter_block(description),
         tag_values.join(", ")
     );

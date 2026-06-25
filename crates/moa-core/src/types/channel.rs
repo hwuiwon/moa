@@ -142,6 +142,15 @@ impl ChannelRef {
     }
 }
 
+/// Active channel binding route for one session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChannelBinding {
+    /// Binding identifier stored in `session_channel_bindings`.
+    pub binding_id: SessionChannelBindingId,
+    /// Concrete channel route for outbound replies.
+    pub channel_ref: ChannelRef,
+}
+
 /// File or rich attachment metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
@@ -284,6 +293,9 @@ pub struct OutboundMessage {
     pub content: MessageContent,
     /// Attached buttons.
     pub buttons: Vec<ActionButton>,
+    /// Concrete channel route when the caller already resolved it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_ref: Option<ChannelRef>,
     /// Optional parent message identifier.
     pub reply_to: Option<String>,
     /// Whether the message is ephemeral.

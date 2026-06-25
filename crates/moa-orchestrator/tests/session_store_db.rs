@@ -2,10 +2,11 @@
 
 use anyhow::Result;
 use moa_core::{
-    ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
-    SessionActorRef, SessionFilter, SessionMeta, SessionStatus, SessionStore, TenantId,
+    ChannelRef, ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange,
+    ModelId, SessionActorRef, SessionFilter, SessionMeta, SessionStatus, SessionStore, TenantId,
+    WorkspaceId,
 };
-use moa_session::{PostgresSessionStore, testing};
+use moa_session::{PostgresSessionStore, store::SessionChannelBindingReplacement, testing};
 use uuid::Uuid;
 
 fn test_session_meta(_workspace_id: &str) -> SessionMeta {
@@ -64,6 +65,63 @@ async fn create_session_persists_requested_metadata() -> Result<()> {
     assert_eq!(persisted.created_by, meta.created_by);
     assert_eq!(persisted.model, meta.model);
     assert_eq!(persisted.status, meta.status);
+
+    cleanup(&database_url, &schema_name).await
+}
+
+#[tokio::test]
+#[ignore = "requires MOA_DATABASE_URL or the local Postgres compose service"]
+async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()> {
+    // Pins: workflow progress delivery reads the durable active channel route.
+    let (store, database_url, schema_name) = test_store().await?;
+    let tenant_id = TenantId::new();
+    let contact_id = ContactId::new();
+    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let session_id = store
+        .create_session(SessionMeta {
+            tenant_id,
+            contact: Some(contact_ref(tenant_id, contact_id)),
+            created_by: Some(SessionActorRef::Contact { id: contact_id }),
+            model: ModelId::new("test-model"),
+            ..SessionMeta::default()
+        })
+        .await?;
+    sqlx::query(
+        "INSERT INTO contacts (id, tenant_id, workspace_id, contact_id, state) VALUES ($1, $2, $3, $4, 'verified')",
+    )
+    .bind(contact_id.0)
+    .bind(tenant_id.0)
+    .bind(workspace_id.as_str())
+    .bind(contact_id.0)
+    .execute(store.pool())
+    .await?;
+
+    let channel_ref = ChannelRef::Slack {
+        team_id: Some("T123".to_string()),
+        slack_channel_id: Some("C123".to_string()),
+        thread_ts: Some("1712668800.000100".to_string()),
+        user_id: Some("U123".to_string()),
+    };
+    let binding_id = store
+        .replace_session_channel_binding(SessionChannelBindingReplacement {
+            tenant_id,
+            workspace_id: &workspace_id,
+            session_id,
+            contact_id,
+            channel_account_id: None,
+            contact_point_id: None,
+            channel_ref: &channel_ref,
+            reason: Some("test"),
+        })
+        .await?;
+
+    let active = store
+        .get_active_session_channel_binding(session_id)
+        .await?
+        .expect("active route should be present");
+
+    assert_eq!(active.binding_id, binding_id);
+    assert_eq!(active.channel_ref, channel_ref);
 
     cleanup(&database_url, &schema_name).await
 }

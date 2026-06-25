@@ -327,7 +327,7 @@ mod tests {
     #[cfg(feature = "slack")]
     use moa_core::{
         ActionButton, ActionClass, ActionEnvelope, ActionReviewField, ActionReviewPreview,
-        ButtonStyle, RiskLevel, SessionActorRef, TenantId, ToolCallId,
+        ButtonStyle, RiskLevel, SessionActorRef, SessionId, SessionStatus, TenantId, ToolCallId,
     };
 
     #[cfg(feature = "slack")]
@@ -337,6 +337,7 @@ mod tests {
         let message = OutboundMessage {
             content: MessageContent::Text(text.clone()),
             buttons: Vec::new(),
+            channel_ref: None,
             reply_to: Some("123".to_string()),
             ephemeral: false,
         };
@@ -355,6 +356,33 @@ mod tests {
                 .collect::<String>(),
             text
         );
+    }
+
+    #[cfg(feature = "slack")]
+    #[test]
+    fn slack_renderer_renders_status_update_as_single_line() {
+        // Pins: durable progress bridges render through MessageContent::StatusUpdate.
+        let session_id = SessionId::new();
+        let message = OutboundMessage {
+            content: MessageContent::StatusUpdate {
+                session_id,
+                status: SessionStatus::Running,
+                summary: "Calling the model".to_string(),
+            },
+            buttons: Vec::new(),
+            channel_ref: None,
+            reply_to: None,
+            ephemeral: false,
+        };
+
+        let chunks = SlackRenderer::new().render(&message);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].text,
+            format!("🔄 Session {session_id}: Calling the model")
+        );
+        assert!(chunks[0].blocks.is_none());
     }
 
     #[cfg(feature = "slack")]
@@ -400,6 +428,7 @@ mod tests {
                 style: ButtonStyle::Primary,
                 callback_data: "noop".to_string(),
             }],
+            channel_ref: None,
             reply_to: Some("123".to_string()),
             ephemeral: false,
         };

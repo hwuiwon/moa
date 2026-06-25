@@ -143,6 +143,17 @@ pub enum Event {
         /// Duration in milliseconds.
         duration_ms: u64,
     },
+    /// Durable user-visible progress update for a running turn.
+    ProgressUpdate {
+        /// Stable turn identifier and workflow key.
+        turn_id: String,
+        /// Current durable turn phase.
+        phase: String,
+        /// Short safe progress summary.
+        summary: String,
+        /// Elapsed turn runtime in milliseconds.
+        elapsed_ms: u64,
+    },
     /// A guardrail judge evaluated user or assistant text.
     GuardrailCheck {
         /// Direction of text that was evaluated.
@@ -396,6 +407,7 @@ impl Event {
             Self::QueuedMessage { .. } => EventType::QueuedMessage,
             Self::BrainThinking { .. } => EventType::BrainThinking,
             Self::BrainResponse { .. } => EventType::BrainResponse,
+            Self::ProgressUpdate { .. } => EventType::ProgressUpdate,
             Self::GuardrailCheck { .. } => EventType::GuardrailCheck,
             Self::ToolCall { .. } => EventType::ToolCall,
             Self::ToolResult { .. } => EventType::ToolResult,
@@ -432,6 +444,7 @@ impl Event {
             Self::QueuedMessage { .. } => "QueuedMessage",
             Self::BrainThinking { .. } => "BrainThinking",
             Self::BrainResponse { .. } => "BrainResponse",
+            Self::ProgressUpdate { .. } => "ProgressUpdate",
             Self::GuardrailCheck { .. } => "GuardrailCheck",
             Self::ToolCall { .. } => "ToolCall",
             Self::ToolResult { .. } => "ToolResult",
@@ -643,6 +656,31 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize action review request");
         let decoded: Event =
             serde_json::from_str(&json).expect("deserialize action review request");
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn progress_update_event_round_trips_minimal_payload() {
+        // Pins: durable progress updates stay a small event-log payload.
+        let event = Event::ProgressUpdate {
+            turn_id: "turn-123".to_string(),
+            phase: "Tooling".to_string(),
+            summary: "Running tool: bash".to_string(),
+            elapsed_ms: 12_500,
+        };
+
+        assert_eq!(event.event_type(), EventType::ProgressUpdate);
+        assert_eq!(event.type_name(), "ProgressUpdate");
+        assert_eq!(event.token_count(), 0);
+
+        let json = serde_json::to_string(&event).expect("serialize progress update");
+        assert!(json.contains("\"type\":\"ProgressUpdate\""));
+        assert!(json.contains("\"turn_id\":\"turn-123\""));
+        assert!(json.contains("\"phase\":\"Tooling\""));
+        assert!(json.contains("\"summary\":\"Running tool: bash\""));
+        assert!(json.contains("\"elapsed_ms\":12500"));
+
+        let decoded: Event = serde_json::from_str(&json).expect("deserialize progress update");
         assert_eq!(decoded, event);
     }
 

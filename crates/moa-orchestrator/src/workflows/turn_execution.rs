@@ -25,7 +25,7 @@ use moa_brain::turn_segments::{
 use moa_core::wire::{
     AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
     GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
-    RunTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+    RunTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
     UpdateSegmentAssessmentRequest,
 };
 use moa_core::{
@@ -71,9 +71,22 @@ use crate::turn::util::{
 };
 #[cfg(feature = "skill-learning")]
 use crate::workflows::skill_learning::{RunSkillLearningRequest, SkillLearningClient};
+use crate::workflows::turn_progress::{
+    self, SUMMARY_CALLING_MODEL, SUMMARY_CHECKING_RESULTS, SUMMARY_WORKING,
+};
+use crate::workflows::turn_responsiveness::{
+    ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState, TurnResponsivenessInput,
+    classify_turn_request, effective_tool_cap, effective_turn_cap,
+    has_recent_target as recent_events_have_target, progress_cap, progress_count,
+};
 
 const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
 const K_PHASE: &str = "phase";
+const K_COMPLEXITY_CLASS: &str = "complexity_class";
+const K_ITERATION: &str = "iteration";
+const K_MAX_TURNS: &str = "max_turns";
+const K_TOOL_CALLS: &str = "tool_calls";
+const K_MAX_TOOL_CALLS: &str = "max_tool_calls";
 const K_USER_MESSAGE_SEQUENCE: &str = "user_message_sequence";
 const K_QUERY_REWRITE_CACHE: &str = "query_rewrite_cache";
 
@@ -89,6 +102,26 @@ struct BuiltTurnRequest {
     active_canary: Option<String>,
     trusted_sandbox_files: Vec<SandboxFile>,
     citation_sources: Vec<ChunkRef>,
+}
+
+#[derive(Clone, Copy)]
+struct RunOnceContext<'a> {
+    session_id: SessionId,
+    turn_id: TurnId,
+    identity: &'a moa_core::traits::Identity,
+}
+
+#[derive(Clone, Debug)]
+enum TurnIterationOutcome {
+    Core(CoreTurnOutcome),
+    ToolBudgetExceeded(ToolBudgetExhausted),
+}
+
+#[derive(Clone, Debug)]
+enum ToolDispatchOutcome {
+    Completed,
+    Cancelled,
+    ToolBudgetExceeded(ToolBudgetExhausted),
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -138,6 +171,7 @@ impl TurnExecution for TurnExecutionImpl {
                     TurnOutcomeKind::Cancelled => TurnPhase::Cancelled,
                     TurnOutcomeKind::Failed => TurnPhase::Failed,
                 };
+                turn_progress::finish_with_live_delivery(&ctx, session_id, phase.clone()).await?;
                 ctx.set(K_PHASE, Json::from(phase));
                 TurnOutcome {
                     turn_id: request.turn_id.clone(),
@@ -146,6 +180,8 @@ impl TurnExecution for TurnExecutionImpl {
                 }
             }
             Err(err) => {
+                turn_progress::finish_with_live_delivery(&ctx, session_id, TurnPhase::Failed)
+                    .await?;
                 ctx.set(K_PHASE, Json::from(TurnPhase::Failed));
                 TurnOutcome {
                     turn_id: request.turn_id.clone(),
@@ -201,9 +237,42 @@ impl TurnExecution for TurnExecutionImpl {
             .unwrap_or_default();
         let cancel_reason =
             meaningful_cancel_reason(ctx.peek_promise::<String>(K_CANCEL_REASON_PROMISE).await?);
+        let complexity_class = ctx
+            .get::<Json<TurnComplexityClass>>(K_COMPLEXITY_CLASS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or_default();
+        let iteration = ctx
+            .get::<Json<u32>>(K_ITERATION)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or_default();
+        let max_turns = ctx
+            .get::<Json<Option<u32>>>(K_MAX_TURNS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or(None);
+        let tool_calls = ctx
+            .get::<Json<u32>>(K_TOOL_CALLS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or_default();
+        let max_tool_calls = ctx
+            .get::<Json<Option<u32>>>(K_MAX_TOOL_CALLS)
+            .await?
+            .map(Json::into_inner)
+            .unwrap_or(None);
+        let progress = turn_progress::snapshot(&ctx, is_terminal_phase(&phase)).await?;
         Ok(Json::from(TurnProgress {
             turn_id: ctx.key().to_string(),
             phase,
+            complexity_class,
+            iteration,
+            max_turns,
+            tool_calls,
+            max_tool_calls,
+            elapsed_ms: progress.elapsed_ms,
+            last_progress_summary: progress.last_summary,
             cancel_requested: cancel_reason.is_some(),
             cancel_reason,
         }))
@@ -223,9 +292,18 @@ async fn execute_turn_inside_workflow(
         });
     }
 
+    turn_progress::initialize(ctx).await?;
+    turn_progress::enable_live_delivery(ctx);
+
     let meta = load_session_meta(ctx, session_id).await?;
-    if let Some(outcome) =
-        evaluate_input_guardrail(ctx, session_id, &meta, &request.user_message).await?
+    if let Some(outcome) = evaluate_input_guardrail(
+        ctx,
+        session_id,
+        &request.turn_id,
+        &meta,
+        &request.user_message,
+    )
+    .await?
     {
         return Ok(outcome);
     }
@@ -242,14 +320,40 @@ async fn execute_turn_inside_workflow(
     ctx.set(K_USER_MESSAGE_SEQUENCE, Json::from(user_sequence_num));
     ctx.clear(K_QUERY_REWRITE_CACHE);
 
-    let max_turns = effective_max_turns(
-        request.max_turns,
-        OrchestratorCtx::current_config().session_limits.max_turns,
-    );
+    let recent_target_events = load_recent_target_events(ctx, session_id).await?;
+    let has_recent_target = recent_events_have_target(&recent_target_events, user_sequence_num);
+    let session_limits = &OrchestratorCtx::current_config().session_limits;
+    let selected_class = classify_turn_request(TurnResponsivenessInput {
+        user_text: &request.user_message,
+        attachment_count: request.attachments.len(),
+        request_max_turns: request.max_turns,
+        has_recent_target,
+        is_workflow_context: false,
+        is_sub_agent_context: false,
+        available_tool_count: OrchestratorCtx::current_tool_schemas().len(),
+    });
+    let max_turns = effective_turn_cap(request.max_turns, selected_class, session_limits);
+    let max_tool_calls = effective_tool_cap(selected_class, session_limits);
+    let mut tool_budget =
+        ToolBudgetState::new(max_tool_calls, session_limits.loop_detection_threshold);
+    ctx.set(K_COMPLEXITY_CLASS, Json::from(selected_class));
+    ctx.set(K_ITERATION, Json::from(0_u32));
+    ctx.set(K_MAX_TURNS, Json::from(progress_cap(max_turns)));
+    ctx.set(K_TOOL_CALLS, Json::from(0_u32));
+    ctx.set(K_MAX_TOOL_CALLS, Json::from(progress_cap(max_tool_calls)));
+    if matches!(selected_class, TurnComplexityClass::Clarification) {
+        let message = append_clarification_response(ctx, session_id, &meta).await?;
+        return Ok(BodyOutcome {
+            kind: TurnOutcomeKind::Completed,
+            message,
+        });
+    }
+
     let mut last_summary = None;
     let mut turn_evidence = TurnEvidence::default();
 
     for turn_number in 1..=max_turns {
+        ctx.set(K_ITERATION, Json::from(progress_count(turn_number)));
         if let Some(reason) = cancel_requested(ctx).await? {
             return Ok(BodyOutcome {
                 kind: TurnOutcomeKind::Cancelled,
@@ -257,9 +361,9 @@ async fn execute_turn_inside_workflow(
             });
         }
 
-        let meta = load_session_meta(ctx, session_id).await.ok();
+        let span_meta = load_session_meta(ctx, session_id).await.ok();
         let turn_root_span = create_turn_span(
-            meta.as_ref(),
+            span_meta.as_ref(),
             Some(request.user_message.as_str()),
             turn_number,
         );
@@ -270,11 +374,14 @@ async fn execute_turn_inside_workflow(
             let turn_result = scope_turn_latency_counters(turn_latency_counters.clone(), async {
                 run_once_inside_workflow(
                     ctx,
-                    session_id,
-                    turn_id,
-                    &request.identity,
+                    RunOnceContext {
+                        session_id,
+                        turn_id,
+                        identity: &request.identity,
+                    },
                     &mut last_summary,
                     &mut turn_evidence,
+                    &mut tool_budget,
                 )
                 .instrument(turn_root_span.clone())
                 .await
@@ -291,8 +398,8 @@ async fn execute_turn_inside_workflow(
         emit_turn_replay_summary(&turn_root_span, turn_number as i64, &turn_snapshot);
 
         match turn_outcome {
-            CoreTurnOutcome::Continue => continue,
-            CoreTurnOutcome::Cancelled => {
+            TurnIterationOutcome::Core(CoreTurnOutcome::Continue) => continue,
+            TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled) => {
                 assess_current_active_segment(
                     ctx,
                     session_id,
@@ -307,11 +414,32 @@ async fn execute_turn_inside_workflow(
                         .unwrap_or_else(|| "turn cancelled by provider".to_string()),
                 });
             }
-            CoreTurnOutcome::Idle => {
+            TurnIterationOutcome::Core(CoreTurnOutcome::Idle) => {
                 assess_current_active_segment(ctx, session_id, AssessmentPhase::Final, &[]).await?;
                 return Ok(BodyOutcome {
                     kind: TurnOutcomeKind::Completed,
                     message: last_summary.unwrap_or_else(|| "idle".to_string()),
+                });
+            }
+            TurnIterationOutcome::ToolBudgetExceeded(exhaustion) => {
+                assess_current_active_segment(
+                    ctx,
+                    session_id,
+                    AssessmentPhase::Final,
+                    &[AssessmentOverride::TurnBudgetExceeded],
+                )
+                .await?;
+                emit_tool_budget_exceeded(ctx, session_id, &exhaustion).await?;
+                let message = append_zero_cost_assistant_response(
+                    ctx,
+                    session_id,
+                    &meta,
+                    exhaustion.assistant_message(),
+                )
+                .await?;
+                return Ok(BodyOutcome {
+                    kind: TurnOutcomeKind::Completed,
+                    message,
                 });
             }
         }
@@ -325,24 +453,60 @@ async fn execute_turn_inside_workflow(
     )
     .await?;
     emit_turn_budget_exceeded(ctx, session_id, max_turns).await?;
+    let message = append_zero_cost_assistant_response(
+        ctx,
+        session_id,
+        &meta,
+        format!(
+            "MOA stopped because this turn reached the model-loop budget ({max_turns}). Narrow the scope or ask MOA to continue."
+        ),
+    )
+    .await?;
     Ok(BodyOutcome {
         kind: TurnOutcomeKind::Completed,
-        message: format!("turn budget exceeded ({max_turns}), stopping"),
+        message,
     })
 }
 
-fn effective_max_turns(request_max_turns: Option<u32>, configured_max_turns: u32) -> usize {
-    match request_max_turns {
-        Some(0) => 1,
-        Some(max_turns) => max_turns as usize,
-        None if configured_max_turns == 0 => usize::MAX,
-        None => configured_max_turns as usize,
-    }
+async fn append_clarification_response(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+) -> Result<String, HandlerError> {
+    let text = "What should I change? Point me at the file, message, object, or output and the specific fix you want.".to_string();
+    append_zero_cost_assistant_response(ctx, session_id, meta, text).await
+}
+
+async fn append_zero_cost_assistant_response(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    meta: &SessionMeta,
+    text: String,
+) -> Result<String, HandlerError> {
+    append_session_event(
+        ctx,
+        session_id,
+        Event::BrainResponse {
+            text: text.clone(),
+            thought_signature: None,
+            model: meta.model.clone(),
+            model_tier: ModelTier::Auxiliary,
+            input_tokens_uncached: 0,
+            input_tokens_cache_write: 0,
+            input_tokens_cache_read: 0,
+            output_tokens: 0,
+            cost_cents: 0,
+            duration_ms: 0,
+        },
+    )
+    .await?;
+    Ok(text)
 }
 
 async fn evaluate_input_guardrail(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
+    turn_id: &str,
     meta: &SessionMeta,
     user_message: &str,
 ) -> Result<Option<BodyOutcome>, HandlerError> {
@@ -357,6 +521,17 @@ async fn evaluate_input_guardrail(
         return Ok(None);
     }
 
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        turn_id,
+        TurnPhase::Compiling,
+        SUMMARY_CALLING_MODEL,
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let guardrail_request = crate::guardrails::guardrail_completion_request(
         &OrchestratorCtx::current_config(),
         GuardrailDirection::Input,
@@ -413,6 +588,7 @@ async fn visible_response_after_output_guardrail(
     session_id: SessionId,
     meta: &SessionMeta,
     response: &CompletionResponse,
+    turn_id: &str,
 ) -> Result<(CompletionResponse, bool), HandlerError> {
     if response.text.is_empty() {
         return Ok((response.clone(), false));
@@ -428,6 +604,18 @@ async fn visible_response_after_output_guardrail(
         return Ok((response.clone(), false));
     }
 
+    ctx.set(K_PHASE, Json::from(TurnPhase::Persisting));
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        turn_id,
+        TurnPhase::Persisting,
+        SUMMARY_CHECKING_RESULTS,
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let guardrail_request = crate::guardrails::guardrail_completion_request(
         &OrchestratorCtx::current_config(),
         GuardrailDirection::Output,
@@ -515,20 +703,33 @@ async fn ingest_deferred_session_turn(
 
 async fn run_once_inside_workflow(
     ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    turn_id: TurnId,
-    identity: &moa_core::traits::Identity,
+    turn_context: RunOnceContext<'_>,
     last_summary: &mut Option<String>,
     turn_evidence: &mut TurnEvidence,
-) -> Result<CoreTurnOutcome, HandlerError> {
+    tool_budget: &mut ToolBudgetState,
+) -> Result<TurnIterationOutcome, HandlerError> {
+    let session_id = turn_context.session_id;
+    let turn_id = turn_context.turn_id;
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
-        return Ok(CoreTurnOutcome::Cancelled);
+        return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
     }
 
+    let progress_turn_id = turn_id.0.to_string();
     ctx.set(K_PHASE, Json::from(TurnPhase::Compiling));
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        &progress_turn_id,
+        TurnPhase::Compiling,
+        SUMMARY_WORKING,
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let Some(built_request) = build_request_inside_workflow(ctx, session_id, turn_id).await? else {
-        return Ok(CoreTurnOutcome::Idle);
+        return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Idle));
     };
     let BuiltTurnRequest {
         mut request,
@@ -538,7 +739,7 @@ async fn run_once_inside_workflow(
     } = built_request;
     if let Some(reason) = cancel_requested(ctx).await? {
         *last_summary = Some(reason);
-        return Ok(CoreTurnOutcome::Cancelled);
+        return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
     }
 
     let meta = load_session_meta(ctx, session_id).await?;
@@ -570,6 +771,17 @@ async fn run_once_inside_workflow(
         .to_string();
 
     ctx.set(K_PHASE, Json::from(TurnPhase::Streaming));
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        &progress_turn_id,
+        TurnPhase::Streaming,
+        SUMMARY_CALLING_MODEL,
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let span = llm_call_span(&meta);
     let llm_started = Instant::now();
     let response = {
@@ -578,7 +790,7 @@ async fn run_once_inside_workflow(
             reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
                 let reason = reason?;
                 *last_summary = Some(reason);
-                return Ok(CoreTurnOutcome::Cancelled);
+                return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
             },
             response = ctx
                 .service_client::<LLMGatewayClient>()
@@ -590,8 +802,14 @@ async fn run_once_inside_workflow(
     };
     let llm_call_duration = llm_started.elapsed();
     record_turn_llm_call_duration(llm_call_duration);
-    let (visible_response, output_blocked) =
-        visible_response_after_output_guardrail(ctx, session_id, &meta, &response).await?;
+    let (visible_response, output_blocked) = visible_response_after_output_guardrail(
+        ctx,
+        session_id,
+        &meta,
+        &response,
+        &progress_turn_id,
+    )
+    .await?;
     let (visible_response, verification_annotated) =
         annotate_unresolved_verification(&visible_response, turn_evidence);
     let response_usage = visible_response.token_usage();
@@ -609,8 +827,13 @@ async fn run_once_inside_workflow(
         response_sequence_num,
     )
     .await?;
-    let response_event =
-        latest_matching_brain_response_event(ctx, session_id, identity, &visible_response).await?;
+    let response_event = latest_matching_brain_response_event(
+        ctx,
+        session_id,
+        turn_context.identity,
+        &visible_response,
+    )
+    .await?;
     let lineage = OrchestratorCtx::current_lineage();
     emit_generation_lineage(
         lineage.as_ref(),
@@ -630,27 +853,38 @@ async fn run_once_inside_workflow(
     record_response(ctx, session_id, &visible_response, last_summary).await?;
 
     if output_blocked || verification_annotated {
-        return Ok(CoreTurnOutcome::Idle);
+        return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Idle));
     }
 
-    for (index, tool_call) in response_tool_calls(&visible_response)
-        .into_iter()
-        .enumerate()
-    {
-        if let Some(reason) = cancel_requested(ctx).await? {
-            *last_summary = Some(reason);
-            return Ok(CoreTurnOutcome::Cancelled);
-        }
-        let tool_context = RootToolContext {
+    let tool_calls = response_tool_calls(&visible_response);
+    match dispatch_response_tool_calls(
+        ctx,
+        RootToolContext {
+            turn_id: &progress_turn_id,
             meta: &meta,
             session_id,
             active_canary: active_canary.as_deref(),
             turn_evidence,
-        };
-        handle_tool_call(ctx, tool_context, &allowed_tools, index, tool_call).await?;
+        },
+        &allowed_tools,
+        tool_budget,
+        &tool_calls,
+        last_summary,
+    )
+    .await?
+    {
+        ToolDispatchOutcome::Completed => {}
+        ToolDispatchOutcome::Cancelled => {
+            return Ok(TurnIterationOutcome::Core(CoreTurnOutcome::Cancelled));
+        }
+        ToolDispatchOutcome::ToolBudgetExceeded(exhaustion) => {
+            return Ok(TurnIterationOutcome::ToolBudgetExceeded(exhaustion));
+        }
     }
 
-    Ok(turn_outcome_for_response(&visible_response))
+    Ok(TurnIterationOutcome::Core(turn_outcome_for_response(
+        &visible_response,
+    )))
 }
 
 async fn build_request_inside_workflow(
@@ -699,15 +933,64 @@ async fn build_request_inside_workflow(
 }
 
 struct RootToolContext<'a> {
+    turn_id: &'a str,
     meta: &'a SessionMeta,
     session_id: SessionId,
     active_canary: Option<&'a str>,
     turn_evidence: &'a mut TurnEvidence,
 }
 
+async fn dispatch_response_tool_calls(
+    ctx: &WorkflowContext<'_>,
+    mut tool_context: RootToolContext<'_>,
+    allowed_tools: &std::collections::BTreeSet<String>,
+    tool_budget: &mut ToolBudgetState,
+    tool_calls: &[&ToolCallContent],
+    last_summary: &mut Option<String>,
+) -> Result<ToolDispatchOutcome, HandlerError> {
+    for (index, tool_call) in tool_calls.iter().enumerate() {
+        if let Some(reason) = cancel_requested(ctx).await? {
+            *last_summary = Some(reason);
+            return Ok(ToolDispatchOutcome::Cancelled);
+        }
+        if let Some(exhaustion) =
+            record_tool_budget(ctx, tool_budget, &tool_call.invocation).await?
+        {
+            return Ok(ToolDispatchOutcome::ToolBudgetExceeded(exhaustion));
+        }
+        handle_tool_call(ctx, &mut tool_context, allowed_tools, index, tool_call).await?;
+    }
+    Ok(ToolDispatchOutcome::Completed)
+}
+
+async fn record_tool_budget(
+    ctx: &WorkflowContext<'_>,
+    tool_budget: &mut ToolBudgetState,
+    invocation: &ToolInvocation,
+) -> Result<Option<ToolBudgetExhausted>, HandlerError> {
+    match tool_budget.before_tool_dispatch(invocation) {
+        ToolBudgetDecision::Allow {
+            attempted_tool_calls,
+        } => {
+            ctx.set(
+                K_TOOL_CALLS,
+                Json::from(progress_count(attempted_tool_calls)),
+            );
+            Ok(None)
+        }
+        ToolBudgetDecision::Stop(exhaustion) => {
+            ctx.set(
+                K_TOOL_CALLS,
+                Json::from(progress_count(tool_budget.attempted_tool_calls())),
+            );
+            Ok(Some(exhaustion))
+        }
+    }
+}
+
 async fn handle_tool_call(
     ctx: &WorkflowContext<'_>,
-    tool_context: RootToolContext<'_>,
+    tool_context: &mut RootToolContext<'_>,
     allowed_tools: &std::collections::BTreeSet<String>,
     index: usize,
     tool_call: &ToolCallContent,
@@ -716,7 +999,8 @@ async fn handle_tool_call(
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let active_canary = tool_context.active_canary;
-    let turn_evidence = tool_context.turn_evidence;
+    let turn_id = tool_context.turn_id;
+    let turn_evidence = &mut *tool_context.turn_evidence;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
     let invocation = tool_call.invocation.clone();
 
@@ -729,7 +1013,16 @@ async fn handle_tool_call(
     }
 
     if is_delegation_tool_name(&invocation.name) {
-        handle_delegation_tool(ctx, meta, session_id, tool_id, tool_call, turn_evidence).await?;
+        handle_delegation_tool(
+            ctx,
+            turn_id,
+            meta,
+            session_id,
+            tool_id,
+            tool_call,
+            turn_evidence,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -805,6 +1098,17 @@ async fn handle_tool_call(
     }
 
     let span = tool_dispatch_span(&invocation.name);
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        tool_context.turn_id,
+        TurnPhase::Tooling,
+        turn_progress::running_tool_summary(&invocation.name),
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let dispatch_started = Instant::now();
     let output = ctx
         .service_client::<ToolExecutorClient>()
@@ -834,6 +1138,7 @@ async fn handle_tool_call(
 
 async fn handle_delegation_tool(
     ctx: &WorkflowContext<'_>,
+    turn_id: &str,
     meta: &SessionMeta,
     session_id: SessionId,
     tool_id: ToolCallId,
@@ -851,6 +1156,17 @@ async fn handle_delegation_tool(
     };
 
     let span = tool_dispatch_span(&invocation.name);
+    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    turn_progress::maybe_emit(
+        ctx,
+        session_id,
+        turn_id,
+        TurnPhase::Tooling,
+        turn_progress::running_tool_summary(&invocation.name),
+        progress_first_delay_ms,
+        progress_interval_ms,
+    )
+    .await?;
     let dispatch_started = Instant::now();
     let output = crate::delegation::execute_delegation_tool(
         ctx,
@@ -1307,6 +1623,35 @@ async fn load_events_in_range(
         .into_inner())
 }
 
+async fn load_recent_target_events(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+) -> Result<Vec<EventRecord>, HandlerError> {
+    load_events_in_range(
+        ctx,
+        session_id,
+        EventRange {
+            event_types: Some(vec![
+                EventType::SegmentStarted,
+                EventType::SegmentCompleted,
+                EventType::UserMessage,
+                EventType::BrainResponse,
+                EventType::ToolCall,
+                EventType::ToolResult,
+                EventType::ToolError,
+                EventType::SubAgentSpawned,
+                EventType::SubAgentMessageSent,
+                EventType::MemoryRead,
+                EventType::MemoryWrite,
+                EventType::MemoryIngest,
+            ]),
+            ..EventRange::recent(24)
+        },
+        "turn_execution_load_recent_target_events",
+    )
+    .await
+}
+
 async fn load_segment_boundary_events(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -1519,6 +1864,24 @@ async fn emit_turn_budget_exceeded(
     .map(|_| ())
 }
 
+async fn emit_tool_budget_exceeded(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    exhaustion: &ToolBudgetExhausted,
+) -> Result<(), HandlerError> {
+    record_session_error("tool_budget");
+    append_session_event(
+        ctx,
+        session_id,
+        Event::Error {
+            message: exhaustion.audit_message(),
+            recoverable: true,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn append_tool_call_event(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -1686,24 +2049,15 @@ fn is_terminal_phase(phase: &TurnPhase) -> bool {
     )
 }
 
+fn progress_cadence() -> (u64, u64) {
+    let limits = &OrchestratorCtx::current_config().session_limits;
+    (limits.progress_first_delay_ms, limits.progress_interval_ms)
+}
+
 fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
     match kind {
         TurnOutcomeKind::Completed => "completed",
         TurnOutcomeKind::Cancelled => "cancelled",
         TurnOutcomeKind::Failed => "failed",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::effective_max_turns;
-
-    #[test]
-    fn effective_max_turns_prefers_request_override() {
-        // Pins: workflow Agent nodes can cap one Session turn without changing global limits.
-        assert_eq!(effective_max_turns(Some(2), 50), 2);
-        assert_eq!(effective_max_turns(Some(0), 50), 1);
-        assert_eq!(effective_max_turns(None, 50), 50);
-        assert_eq!(effective_max_turns(None, 0), usize::MAX);
     }
 }

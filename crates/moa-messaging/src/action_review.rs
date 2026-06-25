@@ -69,6 +69,7 @@ mod tests {
                 }),
             },
             buttons: Vec::new(),
+            channel_ref: None,
             reply_to: Some("42".to_string()),
             ephemeral: false,
         }
