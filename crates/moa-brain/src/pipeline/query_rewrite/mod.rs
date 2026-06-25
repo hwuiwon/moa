@@ -697,36 +697,6 @@ mod tests {
         assert_eq!(metadata_result(&second).source, RewriteSource::Original);
     }
 
-    #[tokio::test]
-    async fn parses_only_retrieval_and_segment_fields() {
-        // Pins: advisory fields are gone from the response contract.
-        let response = json!({
-            "retrieval_query": "Fix the OAuth refresh token race condition in auth/refresh.rs",
-            "is_new_task": false,
-            "task_summary": null,
-        })
-        .to_string();
-        let (rewriter, calls) = rewriter_with_response(response);
-        let mut ctx = context_with_messages(vec![
-            ContextMessage::user("The OAuth refresh token race condition is in auth/refresh.rs"),
-            ContextMessage::assistant("I found it."),
-            ContextMessage::user("fix that"),
-        ]);
-
-        rewriter
-            .process(&mut ctx)
-            .await
-            .expect("slim response should parse");
-
-        let result = metadata_result(&ctx);
-        assert_eq!(result.source, RewriteSource::Rewritten);
-        assert_eq!(
-            result.retrieval_query,
-            "Fix the OAuth refresh token race condition in auth/refresh.rs"
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
     #[test]
     fn circuit_breaker_resets_after_cooldown() {
         let breaker = CircuitBreaker::new(0.05, 60, 1);

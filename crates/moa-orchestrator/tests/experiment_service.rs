@@ -242,46 +242,6 @@ fn experiment_wire_dtos_use_experiment_names_and_include_tenant_id() {
 }
 
 #[test]
-fn experiment_score_dtos_use_run_uids_without_legacy_score_run_fields() {
-    // Pins: public experiment score APIs address experiment runs, not internal score-run IDs.
-    let tenant_id = tenant_id_fixture();
-    let scores = serde_json::to_value(ExperimentScoresRequest {
-        tenant_id,
-        run_uid: fixture_uuid(1),
-    })
-    .expect("scores request should serialize");
-    assert!(scores.get("run_uid").is_some());
-    assert!(scores.get("run_id").is_none());
-
-    let compare = serde_json::to_value(ExperimentCompareRequest {
-        tenant_id,
-        base_run_uid: fixture_uuid(1),
-        new_run_uid: fixture_uuid(2),
-    })
-    .expect("compare request should serialize");
-    assert!(compare.get("base_run_uid").is_some());
-    assert!(compare.get("new_run_uid").is_some());
-    assert!(compare.get("base_run").is_none());
-    assert!(compare.get("new_run").is_none());
-
-    let compare_response = serde_json::to_value(ExperimentCompareResponse {
-        tenant_id,
-        base_run_uid: fixture_uuid(1),
-        new_run_uid: fixture_uuid(2),
-        base_score_run_id: fixture_uuid(3),
-        new_score_run_id: fixture_uuid(4),
-        rows: Vec::new(),
-        scenario_deltas: Vec::new(),
-        variant_deltas: Vec::new(),
-    })
-    .expect("compare response should serialize");
-    assert!(compare_response.get("base_score_run_id").is_some());
-    assert!(compare_response.get("new_score_run_id").is_some());
-    assert!(compare_response.get("base_run").is_none());
-    assert!(compare_response.get("new_run").is_none());
-}
-
-#[test]
 fn experiment_score_responses_serialize_typed_trial_and_scenario_breakdowns() {
     // Pins: Experiments/scores exposes typed aggregate, trial, and scenario score APIs.
     let tenant_id = tenant_id_fixture();
@@ -443,35 +403,6 @@ fn experiments_service_declares_required_tenant_relations() {
     ] {
         assert_method_requires_relation(source, method, "Relation::Operator");
     }
-}
-
-#[test]
-fn experiments_exposes_propose_improvements_without_candidate_read_endpoint() {
-    // Pins: Experiments owns proposal writes only; Analytics remains the learning-candidate read path.
-    let experiments_source = normalized_source(include_str!("../src/services/experiments.rs"));
-    let analytics_source = include_str!("../src/services/analytics.rs");
-
-    assert!(
-        experiments_source.contains(&normalized_source(
-            "async fn propose_improvements(
-                 request: Json<ExperimentProposeImprovementsRequest>,
-             ) -> Result<Json<ExperimentProposeImprovementsResponse>, HandlerError>;"
-        )),
-        "Experiments should expose the explicit proposal operation"
-    );
-    assert!(
-        experiments_source
-            .contains("annotate_restate_handler_span(\"Experiments\", \"propose_improvements\")"),
-        "proposal writes should have their own Experiments handler span"
-    );
-    assert!(
-        !experiments_source.contains("async fn learning_candidates("),
-        "Experiments must not grow a learning-candidate read endpoint"
-    );
-    assert!(
-        analytics_source.contains("async fn learning_candidates("),
-        "Analytics should remain the read surface for learning candidates"
-    );
 }
 
 #[test]

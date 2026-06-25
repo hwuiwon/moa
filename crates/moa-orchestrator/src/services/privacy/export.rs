@@ -7,6 +7,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
 use moa_core::TenantId;
+use moa_core::config::ComplianceConfig;
 use moa_core::wire::privacy::{PrivacyExportRequest, PrivacyExportResponse};
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
 use restate_sdk::prelude::*;
@@ -31,6 +32,7 @@ pub(super) async fn execute_privacy_export(
     tenant_id: TenantId,
     request: PrivacyExportRequest,
     claims: ApprovalClaims,
+    config: ComplianceConfig,
 ) -> Result<PrivacyExportResponse, HandlerError> {
     if request.reason.trim().is_empty() {
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
@@ -51,7 +53,7 @@ pub(super) async fn execute_privacy_export(
         .map(|subject| subject.target_uid)
         .ok_or_else(|| TerminalError::new("privacy subject resolution returned no subjects"))?;
     let storage_partition = resolved.effective_storage_partition.clone();
-    let signer = Ed25519ManifestSigner::from_env()?;
+    let signer = Ed25519ManifestSigner::from_config(&config)?;
     let base_dir = create_temp_dir("moa-privacy-export").await?;
     let export_dir = base_dir.join("export");
     tokio::fs::create_dir_all(&export_dir)

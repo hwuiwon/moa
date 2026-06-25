@@ -61,17 +61,19 @@ impl Privacy for PrivacyImpl {
         let request = request.into_inner();
         authorize_tenant_admin(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let claims = ApprovalTokenVerifier::from_env()?.verify(
+        let config = OrchestratorCtx::current_config();
+        let claims = ApprovalTokenVerifier::from_config(&config.compliance)?.verify(
             &request.approval_token,
             "export",
             &subject_user_id,
             request.tenant_id,
         )?;
         let pool = OrchestratorCtx::current_graph_pool();
+        let compliance_config = config.compliance.clone();
 
         Ok(ctx
             .run(|| async move {
-                execute_privacy_export(pool, request.tenant_id, request, claims)
+                execute_privacy_export(pool, request.tenant_id, request, claims, compliance_config)
                     .await
                     .map(Json::from)
             })
@@ -89,14 +91,16 @@ impl Privacy for PrivacyImpl {
         let request = request.into_inner();
         authorize_tenant_admin(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let claims = ApprovalTokenVerifier::from_env()?.verify(
+        let config = OrchestratorCtx::current_config();
+        let claims = ApprovalTokenVerifier::from_config(&config.compliance)?.verify(
             &request.approval_token,
             "erase",
             &subject_user_id,
             request.tenant_id,
         )?;
         let pool = OrchestratorCtx::current_graph_pool();
-        let erase_ctx = PrivacyEraseContext::from_request(pool, request, claims)?;
+        let erase_ctx =
+            PrivacyEraseContext::from_request(pool, request, claims, &config.compliance)?;
 
         Ok(ctx
             .run(|| async move { run_privacy_erase(erase_ctx).await.map(Json::from) })

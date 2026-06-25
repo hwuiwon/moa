@@ -5,12 +5,11 @@ use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_P
 use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use moa_core::TenantId;
+use moa_core::config::ComplianceConfig;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::handler_error;
-
-const APPROVAL_PUBLIC_KEY_ENV: &str = "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX";
 
 /// Signed approval-token claims required before privacy operations touch data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,11 +54,13 @@ pub struct ApprovalTokenVerifier {
 }
 
 impl ApprovalTokenVerifier {
-    /// Builds a verifier from the configured approval public key environment.
-    pub fn from_env() -> Result<Self, HandlerError> {
-        let raw = std::env::var(APPROVAL_PUBLIC_KEY_ENV)
-            .map_err(|_| TerminalError::new(format!("{APPROVAL_PUBLIC_KEY_ENV} is required")))?;
-        Self::from_public_key_material(&raw)
+    /// Builds a verifier from the configured approval public key material.
+    pub fn from_config(config: &ComplianceConfig) -> Result<Self, HandlerError> {
+        let raw = config
+            .privacy_approval_public_key_hex
+            .as_deref()
+            .ok_or_else(|| TerminalError::new("MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX is required"))?;
+        Self::from_public_key_material(raw)
     }
 
     /// Builds a verifier from hex or base64 public key material.

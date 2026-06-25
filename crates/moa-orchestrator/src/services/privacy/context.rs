@@ -1,5 +1,6 @@
 //! Privacy operation context and subject-scope helpers.
 
+use moa_core::config::ComplianceConfig;
 use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseRequest};
 use moa_core::{StoragePartitionId, TenantId, UserId};
 use restate_sdk::prelude::*;
@@ -9,7 +10,6 @@ use uuid::Uuid;
 use super::approval::ApprovalClaims;
 use super::repository::parse_privacy_subject_id;
 
-const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_SECRET_HEX";
 /// Prefix that identifies privacy subjects backed by contacts.
 pub(super) const CONTACT_SUBJECT_PREFIX: &str = "contact:";
 
@@ -65,6 +65,7 @@ impl PrivacyEraseContext {
         pool: PgPool,
         request: PrivacyEraseRequest,
         claims: ApprovalClaims,
+        config: &ComplianceConfig,
     ) -> Result<Self, HandlerError> {
         let subject_user = parse_subject_uuid(&request.subject_user_id)?;
         let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
@@ -78,7 +79,7 @@ impl PrivacyEraseContext {
             dry_run: request.dry_run,
             contact_erasure_scope: request.contact_erasure_scope,
             claims,
-            pii_vault_secret: pii_vault_secret_from_env()?,
+            pii_vault_secret: pii_vault_secret_from_config(config)?,
         })
     }
 }
@@ -139,14 +140,17 @@ pub(super) fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePar
     StoragePartitionId::for_tenant(tenant_id)
 }
 
-fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
-    std::env::var(PII_VAULT_SECRET_HEX_ENV)
-        .ok()
+fn pii_vault_secret_from_config(
+    config: &ComplianceConfig,
+) -> Result<Option<Vec<u8>>, HandlerError> {
+    config
+        .pii_vault_secret_hex
+        .as_deref()
         .map(|secret_hex| {
             hex::decode(secret_hex.trim()).map_err(|error| {
                 TerminalError::new_with_code(
                     400,
-                    format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded: {error}"),
+                    format!("MOA_PII_VAULT_SECRET_HEX must be hex-encoded: {error}"),
                 )
                 .into()
             })

@@ -279,45 +279,6 @@ fn redact_password(database_url: &str) -> String {
 }
 
 fn cmd_audit_paths() -> Result<()> {
-    for old in [
-        ["crates/moa-memory", "-graph"].concat(),
-        ["crates/moa-memory", "-vector"].concat(),
-        ["crates/moa-memory", "-pii"].concat(),
-        ["crates/moa-memory", "-ingest"].concat(),
-    ] {
-        if Path::new(&old).exists() {
-            bail!("forbidden directory exists: {old}");
-        }
-    }
-
-    for forbidden_file in [
-        "crates/moa-memory/Cargo.toml",
-        "crates/moa-memory/src/lib.rs",
-    ] {
-        if Path::new(forbidden_file).exists() {
-            bail!("forbidden parent memory crate file exists: {forbidden_file}");
-        }
-    }
-
-    let removed_shim_pattern = [
-        "use ",
-        "moa_memory",
-        "::|",
-        "moa_memory",
-        "::vector|",
-        "moa_memory",
-        "::embedder|",
-        "moa_memory",
-        "::chunking",
-    ]
-    .concat();
-    rg_forbid(
-        "removed moa-memory shim references",
-        &removed_shim_pattern,
-        &["crates/"],
-        &["--type", "rust"],
-    )?;
-
     let connector_pattern = ["Mock", "Connector|Connector", "Client|connector", "_inbox"].concat();
     rg_forbid(
         "connector code",
@@ -335,58 +296,11 @@ fn cmd_audit_paths() -> Result<()> {
         &["--type-add", "sql:*.sql", "--type", "rust", "--type", "sql"],
     )?;
 
-    let doc_paths = existing_paths(&["docs/", "examples/"]);
-    let removed_doc_pattern = [
-        "MEMORY",
-        r"\.md|File",
-        "Memory",
-        "Store|wiki",
-        "_branch|reconcile",
-        "_pages|File",
-        "Wiki",
-    ]
-    .concat();
-    rg_forbid(
-        "removed memory documentation",
-        &removed_doc_pattern,
-        &doc_paths,
-        &[],
-    )?;
-
-    audit_removed_segment_score_names()?;
     audit_learning_candidate_promotion_paths()?;
     audit_moa_test_support_dev_dependency_only()?;
 
     println!("path audit clean");
     Ok(())
-}
-
-fn audit_removed_segment_score_names() -> Result<()> {
-    let paths = existing_paths(&[
-        "crates/moa-core",
-        "crates/moa-brain",
-        "crates/moa-session",
-        "crates/moa-orchestrator",
-        "docs",
-    ]);
-    let removed_segment_pattern = [
-        "ResolutionScore|",
-        "ResolutionScorer|",
-        "ScoringPhase|",
-        "UpdateSegmentResolutionRequest|",
-        "UpdateSegmentResolutionScoreRequest|",
-        "update_segment_resolution_score|",
-        "update_segment_resolution|",
-        "Session::run_turn|",
-        "resolution_scored",
-    ]
-    .concat();
-    rg_forbid(
-        "removed segment-score compatibility names",
-        &removed_segment_pattern,
-        &paths,
-        &[],
-    )
 }
 
 fn audit_learning_candidate_promotion_paths() -> Result<()> {

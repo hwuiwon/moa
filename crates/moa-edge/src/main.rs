@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         auth: providers.auth.clone(),
+        auth0_webhook_secret: moa_config.auth.auth0_webhook_secret.clone(),
         pool: pool.clone(),
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
     };

@@ -4,6 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::config::ComplianceConfig;
 use moa_core::wire::lineage::{
     LineageEraseRequest, LineageEraseResponse, LineageExplainRequest, LineageExplainResponse,
     LineageExportRequest, LineageExportResponse, LineageQueryRequest, LineageQueryResponse,
@@ -21,12 +22,6 @@ use uuid::Uuid;
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
-
-const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_SECRET_HEX";
-const PRIVACY_EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
-const PRIVACY_EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
-const LINEAGE_AUDIT_SIGNING_KEY_ENV: &str = "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX";
-const LINEAGE_AUDIT_SIGNING_KEY_ID_ENV: &str = "MOA_LINEAGE_AUDIT_SIGNING_KEY_ID";
 
 /// Restate service surface for protected lineage administration.
 #[restate_sdk::service]
@@ -107,9 +102,10 @@ impl LineageAdmin for LineageAdminImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
+        let config = OrchestratorCtx::current_config().compliance.clone();
 
         Ok(ctx
-            .run(|| async move { export_inner(pool, request).await.map(Json::from) })
+            .run(|| async move { export_inner(pool, request, config).await.map(Json::from) })
             .name("lineage_export")
             .await?)
     }
@@ -124,9 +120,10 @@ impl LineageAdmin for LineageAdminImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let pool = OrchestratorCtx::current_graph_pool();
+        let config = OrchestratorCtx::current_config().compliance.clone();
 
         Ok(ctx
-            .run(|| async move { verify_inner(pool, request).await.map(Json::from) })
+            .run(|| async move { verify_inner(pool, request, config).await.map(Json::from) })
             .name("lineage_verify")
             .await?)
     }
@@ -141,9 +138,10 @@ impl LineageAdmin for LineageAdminImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
+        let config = OrchestratorCtx::current_config().compliance.clone();
 
         Ok(ctx
-            .run(|| async move { erase_inner(pool, request).await.map(Json::from) })
+            .run(|| async move { erase_inner(pool, request, config).await.map(Json::from) })
             .name("lineage_erase")
             .await?)
     }
@@ -216,8 +214,9 @@ async fn query_inner(
 async fn export_inner(
     pool: PgPool,
     request: LineageExportRequest,
+    config: ComplianceConfig,
 ) -> Result<LineageExportResponse, HandlerError> {
-    let signing = configured_lineage_dsar_signing_key()?;
+    let signing = configured_lineage_dsar_signing_key(&config)?;
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let records = lineage_sink_admin::load_dsar_export_records(
         &pool,
@@ -251,6 +250,7 @@ async fn export_inner(
 async fn verify_inner(
     pool: PgPool,
     request: LineageVerifyRequest,
+    config: ComplianceConfig,
 ) -> Result<LineageVerifyResponse, HandlerError> {
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     if request.window == "hot" || request.window == "db" {
@@ -279,7 +279,7 @@ async fn verify_inner(
         });
     }
 
-    let signing = configured_audit_root_signing_key()?;
+    let signing = configured_audit_root_signing_key(&config)?;
     let root =
         lineage_audit_admin::load_audit_root(&pool, storage_partition_id.as_str(), &request.window)
             .await
@@ -313,6 +313,7 @@ async fn verify_inner(
 async fn erase_inner(
     pool: PgPool,
     request: LineageEraseRequest,
+    config: ComplianceConfig,
 ) -> Result<LineageEraseResponse, HandlerError> {
     let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let subject = hex::decode(request.subject.trim()).map_err(|error| {
@@ -321,7 +322,7 @@ async fn erase_inner(
             format!("subject must be a hex-encoded pseudonym: {error}"),
         )
     })?;
-    let secret = pii_vault_secret_from_env()?.unwrap_or_default();
+    let secret = pii_vault_secret_from_config(&config)?.unwrap_or_default();
     let subjects = lineage_audit_admin::erase_subject_pseudonym(
         &pool,
         storage_partition_id.as_str(),
@@ -370,14 +371,17 @@ pub fn prepare_lineage_sql(sql: &str) -> Result<String, HandlerError> {
     Ok(prepared)
 }
 
-fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
-    std::env::var(PII_VAULT_SECRET_HEX_ENV)
-        .ok()
+fn pii_vault_secret_from_config(
+    config: &ComplianceConfig,
+) -> Result<Option<Vec<u8>>, HandlerError> {
+    config
+        .pii_vault_secret_hex
+        .as_deref()
         .map(|secret_hex| {
             hex::decode(secret_hex.trim()).map_err(|error| {
                 TerminalError::new_with_code(
                     400,
-                    format!("{PII_VAULT_SECRET_HEX_ENV} must be hex-encoded: {error}"),
+                    format!("MOA_PII_VAULT_SECRET_HEX must be hex-encoded: {error}"),
                 )
                 .into()
             })
@@ -385,42 +389,33 @@ fn pii_vault_secret_from_env() -> Result<Option<Vec<u8>>, HandlerError> {
         .transpose()
 }
 
-fn configured_lineage_dsar_signing_key() -> Result<SigningKey, HandlerError> {
-    configured_signing_key_from_env(
-        PRIVACY_EXPORT_SIGNING_KEY_ENV,
-        PRIVACY_EXPORT_SIGNING_KEY_ID_ENV,
-        "moa-privacy-export-ops",
+fn configured_lineage_dsar_signing_key(
+    config: &ComplianceConfig,
+) -> Result<SigningKey, HandlerError> {
+    configured_signing_key_from_config(
+        "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX",
+        config.privacy_export_signing_key_hex.as_deref(),
+        config.privacy_export_signing_key_id.clone(),
     )
 }
 
-fn configured_audit_root_signing_key() -> Result<SigningKey, HandlerError> {
-    configured_signing_key_from_env(
-        LINEAGE_AUDIT_SIGNING_KEY_ENV,
-        LINEAGE_AUDIT_SIGNING_KEY_ID_ENV,
-        "moa-lineage-audit-ops",
+fn configured_audit_root_signing_key(
+    config: &ComplianceConfig,
+) -> Result<SigningKey, HandlerError> {
+    configured_signing_key_from_config(
+        "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
+        config.lineage_audit_signing_key_hex.as_deref(),
+        config.lineage_audit_signing_key_id.clone(),
     )
 }
 
-fn configured_signing_key_from_env(
+fn configured_signing_key_from_config(
     key_env: &str,
-    label_env: &str,
-    default_label: &str,
+    raw: Option<&str>,
+    label: String,
 ) -> Result<SigningKey, HandlerError> {
-    configured_signing_key_from_lookup(key_env, label_env, default_label, |name| {
-        std::env::var(name).ok()
-    })
-}
-
-fn configured_signing_key_from_lookup(
-    key_env: &str,
-    label_env: &str,
-    default_label: &str,
-    lookup: impl Fn(&str) -> Option<String>,
-) -> Result<SigningKey, HandlerError> {
-    let raw =
-        lookup(key_env).ok_or_else(|| TerminalError::new(format!("{key_env} is required")))?;
-    let label = lookup(label_env).unwrap_or_else(|| default_label.to_string());
-    signing_key_from_material(key_env, label, &raw)
+    let raw = raw.ok_or_else(|| TerminalError::new(format!("{key_env} is required")))?;
+    signing_key_from_material(key_env, label, raw)
 }
 
 fn signing_key_from_material(
@@ -494,18 +489,14 @@ fn handler_error(error: impl std::fmt::Display) -> HandlerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        configured_signing_key_from_lookup, signing_key_from_material, verification_status,
+        configured_signing_key_from_config, signing_key_from_material, verification_status,
     };
 
     #[test]
     fn configured_signing_key_reports_missing_material() {
         // Pins: lineage DSAR export fails before DB work when signing material is unset.
-        let result = configured_signing_key_from_lookup(
-            "MOA_TEST_KEY",
-            "MOA_TEST_KEY_ID",
-            "default",
-            |_| None,
-        );
+        let result =
+            configured_signing_key_from_config("MOA_TEST_KEY", None, "default".to_string());
         let Err(error) = result else {
             panic!("missing key material should fail");
         };

@@ -17,6 +17,9 @@ pub struct AuthConfig {
     /// Auth0 provider settings.
     #[serde(default)]
     pub auth0: Option<Auth0AuthConfig>,
+    /// Shared secret used to verify Auth0 connection-linked webhooks.
+    #[serde(default)]
+    pub auth0_webhook_secret: Option<String>,
     /// Generic OIDC provider settings.
     #[serde(default)]
     pub oidc: Option<OidcAuthConfig>,

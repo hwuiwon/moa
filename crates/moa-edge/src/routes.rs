@@ -36,6 +36,8 @@ use subtle::ConstantTimeEq;
 pub struct AppState {
     /// Credential resolver used for incoming requests.
     pub auth: Arc<dyn AuthProvider>,
+    /// Shared secret used to verify Auth0 connection-linked webhooks.
+    pub auth0_webhook_secret: Option<String>,
     /// Postgres pool used by unauthenticated webhooks that update auth metadata.
     pub pool: Arc<sqlx::PgPool>,
     /// Internal orchestrator proxy.
@@ -720,9 +722,9 @@ async fn handle_auth0_connection_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let secret = match std::env::var("MOA_AUTH_AUTH0_WEBHOOK_SECRET") {
-        Ok(secret) if !secret.trim().is_empty() => secret,
-        _ => {
+    let secret = match state.auth0_webhook_secret.as_deref() {
+        Some(secret) if !secret.trim().is_empty() => secret,
+        None | Some(_) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "webhook secret not configured",
@@ -730,7 +732,7 @@ async fn handle_auth0_connection_webhook(
                 .into_response();
         }
     };
-    if !verify_auth0_signature(&headers, &body, &secret) {
+    if !verify_auth0_signature(&headers, &body, secret) {
         return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
     }
     let payload: Auth0ConnectionLinkedWebhook = match serde_json::from_slice(&body) {

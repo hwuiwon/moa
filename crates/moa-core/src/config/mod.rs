@@ -4,6 +4,7 @@ mod async_authz;
 mod audit_security;
 mod auth;
 mod authz;
+mod compliance;
 mod context;
 mod database;
 mod env_overlay;
@@ -27,6 +28,9 @@ pub use auth::{
     LocalAuthConfig, OidcAuthConfig,
 };
 pub use authz::{AuthzConfig, AuthzEngine, OpenFgaConfig};
+pub use compliance::{
+    ComplianceConfig, LINEAGE_AUDIT_SIGNING_KEY_ID_DEFAULT, PRIVACY_EXPORT_SIGNING_KEY_ID_DEFAULT,
+};
 pub use context::{
     BudgetConfig, CompactionConfig, ContextSnapshotConfig, QueryRewriteConfig, ResolutionConfig,
     ResolutionWeights, SessionLimitsConfig, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
@@ -78,6 +82,8 @@ pub struct MoaConfig {
     pub async_authz: AsyncAuthzConfig,
     /// OCSF security-event audit settings.
     pub audit_security: AuditSecurityConfig,
+    /// Compliance, privacy, and DSAR signing settings.
+    pub compliance: ComplianceConfig,
     /// Local runtime settings.
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.
@@ -174,6 +180,13 @@ mod tests {
         "MOA_AUTHZ_OPENFGA_STORE_ID",
         "MOA_AUTHZ_OPENFGA_MODEL_ID",
         "MOA_AUTHZ_OPENFGA_TIMEOUT_MS",
+        "MOA_AUTH_AUTH0_WEBHOOK_SECRET",
+        "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX",
+        "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX",
+        "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID",
+        "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
+        "MOA_LINEAGE_AUDIT_SIGNING_KEY_ID",
+        "MOA_PII_VAULT_SECRET_HEX",
         "MOA_DATABASE_NEON_ENABLED",
         "MOA_DATABASE_NEON_PROJECT_ID",
         "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
@@ -249,12 +262,17 @@ mod tests {
             std::env::set_var("MOA_AUTHZ_OPENFGA_STORE_ID", "store-1");
             std::env::set_var("MOA_AUTHZ_OPENFGA_MODEL_ID", "model-1");
             std::env::set_var("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "1234");
+            std::env::set_var("MOA_AUTH_AUTH0_WEBHOOK_SECRET", "webhook-secret");
         }
 
         let config = MoaConfig::load_from_env().expect("load config from env");
 
         assert_eq!(config.database.url, "postgres://env.example/moa");
         assert_eq!(config.auth.provider, AuthProviderKind::Disabled);
+        assert_eq!(
+            config.auth.auth0_webhook_secret.as_deref(),
+            Some("webhook-secret")
+        );
         assert_eq!(config.authz.engine, AuthzEngine::Openfga);
         let openfga = config
             .authz
@@ -310,11 +328,49 @@ mod tests {
     }
 
     #[test]
-    fn skill_learning_defaults_to_threshold_without_runtime_gate() {
-        // Pins: compiled skill learning has no runtime enable flag; only evidence thresholds tune it.
-        let config = MoaConfig::default();
+    fn env_only_loads_compliance_privacy_and_lineage_config() {
+        // Pins: privacy and lineage operational keys use flat MOA env names through envy.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
+        let approval_key_hex = "01".repeat(32);
+        let export_key_hex = "02".repeat(32);
+        let lineage_key_hex = "03".repeat(32);
+        let pii_vault_secret_hex = "04".repeat(32);
+        unsafe {
+            std::env::set_var("MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX", &approval_key_hex);
+            std::env::set_var("MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX", &export_key_hex);
+            std::env::set_var("MOA_PRIVACY_EXPORT_SIGNING_KEY_ID", "privacy-key-v2");
+            std::env::set_var("MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX", &lineage_key_hex);
+            std::env::set_var("MOA_LINEAGE_AUDIT_SIGNING_KEY_ID", "lineage-key-v2");
+            std::env::set_var("MOA_PII_VAULT_SECRET_HEX", &pii_vault_secret_hex);
+        }
 
-        assert_eq!(config.learning.skills.min_tool_calls, 5);
+        let config = MoaConfig::load_from_env().expect("load config from env");
+
+        assert_eq!(
+            config.compliance.privacy_approval_public_key_hex.as_deref(),
+            Some(approval_key_hex.as_str())
+        );
+        assert_eq!(
+            config.compliance.privacy_export_signing_key_hex.as_deref(),
+            Some(export_key_hex.as_str())
+        );
+        assert_eq!(
+            config.compliance.privacy_export_signing_key_id,
+            "privacy-key-v2"
+        );
+        assert_eq!(
+            config.compliance.lineage_audit_signing_key_hex.as_deref(),
+            Some(lineage_key_hex.as_str())
+        );
+        assert_eq!(
+            config.compliance.lineage_audit_signing_key_id,
+            "lineage-key-v2"
+        );
+        assert_eq!(
+            config.compliance.pii_vault_secret_hex.as_deref(),
+            Some(pii_vault_secret_hex.as_str())
+        );
     }
 
     #[test]

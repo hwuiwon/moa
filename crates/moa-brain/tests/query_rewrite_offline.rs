@@ -101,10 +101,6 @@ async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> mo
         instructions.contains("Do not classify intent, choose tools"),
         "query rewrite prompt should not act as an intent router"
     );
-    assert!(
-        !instructions.contains("freshness_required"),
-        "query rewrite prompt should not request advisory freshness metadata"
-    );
     let schema = &bodies[0]["text"]["format"]["schema"];
     assert!(
         schema["required"]

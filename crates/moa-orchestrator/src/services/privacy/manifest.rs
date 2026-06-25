@@ -7,6 +7,7 @@ use chrono::Utc;
 use ed25519_dalek::{Signer as DalekSigner, SigningKey};
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use moa_core::config::ComplianceConfig;
 use restate_sdk::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
@@ -19,9 +20,6 @@ use super::approval::decode_key_material;
 use super::context::PrivacyExportContext;
 use super::{handler_error, usize_to_u64};
 
-const EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
-const EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
-
 /// Ed25519 signer for generated privacy export manifests.
 pub struct Ed25519ManifestSigner {
     /// Stable key identifier recorded in manifests.
@@ -31,13 +29,14 @@ pub struct Ed25519ManifestSigner {
 }
 
 impl Ed25519ManifestSigner {
-    /// Builds a manifest signer from configured signing key environment.
-    pub fn from_env() -> Result<Self, HandlerError> {
-        let raw = std::env::var(EXPORT_SIGNING_KEY_ENV)
-            .map_err(|_| TerminalError::new(format!("{EXPORT_SIGNING_KEY_ENV} is required")))?;
-        let key_id = std::env::var(EXPORT_SIGNING_KEY_ID_ENV)
-            .unwrap_or_else(|_| "moa-privacy-export-ops".to_string());
-        Self::from_signing_key_material(key_id, &raw)
+    /// Builds a manifest signer from configured signing key material.
+    pub fn from_config(config: &ComplianceConfig) -> Result<Self, HandlerError> {
+        let raw = config
+            .privacy_export_signing_key_hex
+            .as_deref()
+            .ok_or_else(|| TerminalError::new("MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX is required"))?;
+        let key_id = config.privacy_export_signing_key_id.clone();
+        Self::from_signing_key_material(key_id, raw)
     }
 
     /// Builds a manifest signer from hex or base64 private key material.

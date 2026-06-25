@@ -122,6 +122,7 @@ and deployment setup. Key groups:
 | `MOA_CLOUD_*` | cloud mode and hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
+| `MOA_PRIVACY_*`, `MOA_LINEAGE_AUDIT_*`, and `MOA_PII_VAULT_SECRET_HEX` | privacy approval verification, DSAR/export signing, lineage audit signing, and PII-vault pseudonymization |
 | `MOA_MESSAGING_*` | messaging adapter settings |
 | `MOA_PERMISSIONS_*` | default action-policy posture for tool execution |
 | `MOA_COMPACTION_*` | history compaction thresholds |

@@ -82,6 +82,8 @@ pub struct MoaEnvOverlay {
     pub auth_auth0_client_id_env: Option<String>,
     /// `MOA_AUTH_AUTH0_CLIENT_SECRET_ENV`.
     pub auth_auth0_client_secret_env: Option<String>,
+    /// `MOA_AUTH_AUTH0_WEBHOOK_SECRET`.
+    pub auth_auth0_webhook_secret: Option<String>,
     /// `MOA_AUTH_OIDC_ISSUER`.
     pub auth_oidc_issuer: Option<String>,
     /// `MOA_AUTH_OIDC_AUDIENCE`.
@@ -126,6 +128,18 @@ pub struct MoaEnvOverlay {
     pub async_authz_default_timeout_secs: Option<u64>,
     /// `MOA_AUDIT_SECURITY_EMIT_AUTHZ_ALLOWS`.
     pub audit_security_emit_authz_allows: Option<bool>,
+    /// `MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX`.
+    pub privacy_approval_public_key_hex: Option<String>,
+    /// `MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX`.
+    pub privacy_export_signing_key_hex: Option<String>,
+    /// `MOA_PRIVACY_EXPORT_SIGNING_KEY_ID`.
+    pub privacy_export_signing_key_id: Option<String>,
+    /// `MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX`.
+    pub lineage_audit_signing_key_hex: Option<String>,
+    /// `MOA_LINEAGE_AUDIT_SIGNING_KEY_ID`.
+    pub lineage_audit_signing_key_id: Option<String>,
+    /// `MOA_PII_VAULT_SECRET_HEX`.
+    pub pii_vault_secret_hex: Option<String>,
     /// `MOA_LOCAL_DOCKER_ENABLED`.
     pub local_docker_enabled: Option<bool>,
     /// `MOA_LOCAL_SANDBOX_DIR`.
@@ -502,6 +516,10 @@ impl MoaEnvOverlay {
         set_copy_if_some(&mut config.auth.provider, self.auth_provider);
         set_copy_if_some(&mut config.auth.header_trust, self.auth_header_trust);
         self.apply_auth0(config)?;
+        set_option_if_some(
+            &mut config.auth.auth0_webhook_secret,
+            &self.auth_auth0_webhook_secret,
+        );
         self.apply_oidc(config)?;
         self.apply_contact_tokens(config)?;
         set_copy_if_some(&mut config.authz.engine, self.authz_engine);
@@ -515,6 +533,30 @@ impl MoaEnvOverlay {
         set_copy_if_some(
             &mut config.audit_security.emit_authz_allows,
             self.audit_security_emit_authz_allows,
+        );
+        set_option_if_some(
+            &mut config.compliance.privacy_approval_public_key_hex,
+            &self.privacy_approval_public_key_hex,
+        );
+        set_option_if_some(
+            &mut config.compliance.privacy_export_signing_key_hex,
+            &self.privacy_export_signing_key_hex,
+        );
+        set_if_some(
+            &mut config.compliance.privacy_export_signing_key_id,
+            &self.privacy_export_signing_key_id,
+        );
+        set_option_if_some(
+            &mut config.compliance.lineage_audit_signing_key_hex,
+            &self.lineage_audit_signing_key_hex,
+        );
+        set_if_some(
+            &mut config.compliance.lineage_audit_signing_key_id,
+            &self.lineage_audit_signing_key_id,
+        );
+        set_option_if_some(
+            &mut config.compliance.pii_vault_secret_hex,
+            &self.pii_vault_secret_hex,
         );
         set_copy_if_some(&mut config.local.docker_enabled, self.local_docker_enabled);
         set_if_some(&mut config.local.sandbox_dir, &self.local_sandbox_dir);
@@ -1268,6 +1310,10 @@ mod tests {
     #[test]
     fn from_iter_applies_flat_single_underscore_env() {
         // Pins: flat MOA env names deserialize through envy and update real nested config fields.
+        let approval_key_hex = "01".repeat(32);
+        let export_key_hex = "02".repeat(32);
+        let lineage_key_hex = "03".repeat(32);
+        let pii_vault_secret_hex = "04".repeat(32);
         let overlay = MoaEnvOverlay::from_iter(env_pairs([
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_DATABASE_MAX_CONNECTIONS", "42"),
@@ -1279,10 +1325,26 @@ mod tests {
             ("MOA_AUTHZ_OPENFGA_STORE_ID", "store-1"),
             ("MOA_AUTHZ_OPENFGA_MODEL_ID", "model-1"),
             ("MOA_AUTHZ_OPENFGA_TIMEOUT_MS", "2500"),
+            ("MOA_AUTH_AUTH0_WEBHOOK_SECRET", "webhook-secret"),
             ("MOA_TOKEN_VAULT_PROVIDER", "auth0"),
             ("MOA_ASYNC_AUTHZ_PROVIDER", "auth0"),
             ("MOA_ASYNC_AUTHZ_DEFAULT_TIMEOUT_SECS", "120"),
             ("MOA_AUDIT_SECURITY_EMIT_AUTHZ_ALLOWS", "true"),
+            (
+                "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX",
+                approval_key_hex.as_str(),
+            ),
+            (
+                "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX",
+                export_key_hex.as_str(),
+            ),
+            ("MOA_PRIVACY_EXPORT_SIGNING_KEY_ID", "privacy-key-v2"),
+            (
+                "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
+                lineage_key_hex.as_str(),
+            ),
+            ("MOA_LINEAGE_AUDIT_SIGNING_KEY_ID", "lineage-key-v2"),
+            ("MOA_PII_VAULT_SECRET_HEX", pii_vault_secret_hex.as_str()),
             ("MOA_LOCAL_DOCKER_ENABLED", "false"),
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
             ("MOA_PII_SERVICE_URL", "http://pii.example:8080"),
@@ -1340,6 +1402,10 @@ mod tests {
         assert_eq!(config.database.max_connections, 42);
         assert_eq!(config.auth.provider, AuthProviderKind::Oidc);
         assert_eq!(config.auth.header_trust, AuthHeaderTrustKind::Lenient);
+        assert_eq!(
+            config.auth.auth0_webhook_secret.as_deref(),
+            Some("webhook-secret")
+        );
         assert_eq!(config.authz.engine, AuthzEngine::Openfga);
         let openfga = config.authz.openfga.expect("openfga config");
         assert_eq!(openfga.url, "http://openfga.example");
@@ -1351,6 +1417,30 @@ mod tests {
         assert_eq!(config.async_authz.provider, AsyncAuthzKind::Auth0);
         assert_eq!(config.async_authz.default_timeout_secs, 120);
         assert!(config.audit_security.emit_authz_allows);
+        assert_eq!(
+            config.compliance.privacy_approval_public_key_hex.as_deref(),
+            Some(approval_key_hex.as_str())
+        );
+        assert_eq!(
+            config.compliance.privacy_export_signing_key_hex.as_deref(),
+            Some(export_key_hex.as_str())
+        );
+        assert_eq!(
+            config.compliance.privacy_export_signing_key_id,
+            "privacy-key-v2"
+        );
+        assert_eq!(
+            config.compliance.lineage_audit_signing_key_hex.as_deref(),
+            Some(lineage_key_hex.as_str())
+        );
+        assert_eq!(
+            config.compliance.lineage_audit_signing_key_id,
+            "lineage-key-v2"
+        );
+        assert_eq!(
+            config.compliance.pii_vault_secret_hex.as_deref(),
+            Some(pii_vault_secret_hex.as_str())
+        );
         assert!(!config.local.docker_enabled);
         assert_eq!(config.local.sandbox_dir, "/tmp/moa-sandbox");
         assert_eq!(
