@@ -1,7 +1,7 @@
 //! Deterministic turn responsiveness classification and cap policy.
 
 use moa_core::config::SessionLimitsConfig;
-use moa_core::wire::TurnComplexityClass;
+use moa_core::wire::turn::TurnComplexityClass;
 use moa_core::{Event, EventRecord, ToolContent, ToolInvocation, ToolOutput};
 
 /// Cheap, deterministic inputs used to classify one turn request.
@@ -697,7 +697,7 @@ fn starts_with_any(text: &str, prefixes: &[&str]) -> bool {
 mod tests {
     use chrono::Utc;
     use moa_core::config::SessionLimitsConfig;
-    use moa_core::wire::TurnComplexityClass;
+    use moa_core::wire::turn::TurnComplexityClass;
     use moa_core::{Attachment, Event, EventRecord, SessionId, ToolCallId, ToolInvocation};
     use uuid::Uuid;
 

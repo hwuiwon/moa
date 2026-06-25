@@ -7,7 +7,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::{ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, TenantId, UserId};
+use moa_core::{
+    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, StoragePartitionId, TenantId,
+    UserId,
+};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
@@ -367,7 +370,7 @@ async fn require_tenant_admin(
 async fn count_graph_nodes(tenant_id: TenantId) -> Result<u64, HandlerError> {
     let ctx = OrchestratorCtx::current();
     let pool = ctx.graph_pool();
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT count(*)::bigint

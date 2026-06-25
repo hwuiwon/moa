@@ -4,7 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::wire::{
+use moa_core::wire::lineage::{
     LineageEraseRequest, LineageEraseResponse, LineageExplainRequest, LineageExplainResponse,
     LineageExportRequest, LineageExportResponse, LineageQueryRequest, LineageQueryResponse,
     LineageVerifyRequest, LineageVerifyResponse,
@@ -162,7 +162,7 @@ async fn authorize_tenant(
 }
 
 fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
-    StoragePartitionId::new(tenant_id.to_string())
+    StoragePartitionId::for_tenant(tenant_id)
 }
 
 async fn explain_inner(

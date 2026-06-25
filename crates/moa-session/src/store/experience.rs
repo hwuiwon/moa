@@ -402,5 +402,5 @@ impl PostgresSessionStore {
 }
 
 fn storage_partition_id(tenant_id: TenantId) -> String {
-    tenant_id.to_string()
+    StoragePartitionId::for_tenant(tenant_id).to_string()
 }

@@ -148,7 +148,7 @@ pub(super) async fn seed_attack_dlq(pool: &PgPool, tenant_id: TenantId) -> Resul
     sqlx::query(
         "INSERT INTO moa.ingest_dlq (storage_partition_id, payload, error) VALUES ($1, $2, $3)",
     )
-    .bind(tenant_id.to_string())
+    .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
     .bind(json!({ "source": "perf_gate" }))
     .bind("perf_gate_fixture")
     .execute(pool)
@@ -167,7 +167,7 @@ pub(super) async fn first_embedding(
     let row = sqlx::query(
         "SELECT embedding::vector::text AS embedding FROM moa.embeddings WHERE storage_partition_id = $1 LIMIT 1",
     )
-    .bind(tenant_id.to_string())
+    .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
     .fetch_one(conn.as_mut())
     .await?;
     conn.commit()
@@ -181,7 +181,7 @@ pub(super) async fn first_dlq(pool: &PgPool, tenant_id: TenantId) -> Result<i64,
     let row = sqlx::query_scalar::<_, i64>(
         "SELECT dlq_id FROM moa.ingest_dlq WHERE storage_partition_id = $1 ORDER BY dlq_id LIMIT 1",
     )
-    .bind(tenant_id.to_string())
+    .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
     .fetch_one(pool)
     .await?;
     Ok(row)

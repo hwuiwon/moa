@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use moa_core::{ContactId, MoaError, Result, TenantId};
+use moa_core::{ContactId, MoaError, Result, StoragePartitionId, TenantId};
 use moa_memory_types::ScopeContext;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
@@ -82,7 +82,9 @@ impl<'p> ScopedConn<'p> {
 
     /// Applies MOA scope GUCs to an existing transaction.
     pub async fn apply_gucs(tx: &mut Transaction<'_, Postgres>, ctx: &ScopeContext) -> Result<()> {
-        let tenant_id = ctx.tenant_id().to_string();
+        let tenant_id = ctx.tenant_id();
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+        let tenant_id = tenant_id.to_string();
         let contact_id = ctx
             .contact_id()
             .map(|contact_id| contact_id.to_string())
@@ -90,7 +92,7 @@ impl<'p> ScopedConn<'p> {
         Self::apply_guc_values(
             tx,
             &DbScopeGucs {
-                storage_partition_id: Some(tenant_id.clone()),
+                storage_partition_id: Some(storage_partition_id),
                 tenant_id: Some(tenant_id),
                 contact_id: Some(contact_id),
                 control_plane: false,

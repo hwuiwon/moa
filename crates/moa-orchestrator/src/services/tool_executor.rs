@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use moa_core::wire::{AppendEventRequest, ToolDescriptor, tool_descriptor};
+use moa_core::wire::session_store::AppendEventRequest;
+use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
     Event, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
     SessionStatus, SessionStore as _, TenantId, ToolCallId, ToolCallRequest, ToolDefinition,
@@ -438,7 +439,7 @@ async fn prior_tool_call_event_exists(
 }
 
 fn storage_partition_id_for_session(session: &SessionMeta) -> moa_core::StoragePartitionId {
-    moa_core::StoragePartitionId::new(session.tenant_id.to_string())
+    moa_core::StoragePartitionId::for_tenant(session.tenant_id)
 }
 
 async fn append_tool_call_event(

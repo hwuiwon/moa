@@ -657,7 +657,7 @@ async fn active_rows(
 }
 
 fn storage_partition_id(tenant_id: &TenantId) -> StoragePartitionId {
-    StoragePartitionId::new(tenant_id.to_string())
+    StoragePartitionId::for_tenant(*tenant_id)
 }
 
 fn lifecycle_row_from_sql(

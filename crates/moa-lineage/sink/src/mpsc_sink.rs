@@ -277,7 +277,7 @@ mod tests {
 
     fn sample_event() -> LineageEvent {
         let tenant_id = TenantId::from(Uuid::from_u128(1));
-        let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         LineageEvent::Retrieval(RetrievalLineage {
             turn_id: TurnId::new_v7(),
             session_id: SessionId::new(),

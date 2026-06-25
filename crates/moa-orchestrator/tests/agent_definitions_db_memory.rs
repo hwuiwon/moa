@@ -5,7 +5,7 @@ use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifactRevision};
 use moa_artifacts::validation::validate_for_status;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{
+use moa_core::wire::agents::{
     AgentDefinitionListRequest, AgentDeployRequest, AgentDeploymentListRequest,
     AgentInstallRequest, AgentInstallationListRequest,
 };

@@ -4,8 +4,8 @@ use chrono::{TimeZone, Utc};
 use moa_brain::pipeline::digest::DigestProcessor;
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
-    MemoryDigestConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
-    ToolCallFormat, WorkingContext,
+    MemoryDigestConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, StoragePartitionId,
+    TenantId, TokenPricing, ToolCallFormat, WorkingContext,
 };
 use moa_memory_lifecycle::rebuild_digests;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
@@ -108,7 +108,7 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
         return;
     };
     let tenant_id = TenantId::new();
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let user_id = "digest-reader-user";
     let now = Utc
         .with_ymd_and_hms(2026, 6, 11, 0, 0, 0)

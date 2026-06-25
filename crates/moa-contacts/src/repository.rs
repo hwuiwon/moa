@@ -19,12 +19,6 @@ use crate::{ContactError, Result};
 
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
-/// Returns the storage partition used for tenant-scoped contact rows.
-#[must_use]
-pub fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
-    StoragePartitionId::new(tenant_id.to_string())
-}
-
 /// Issues a contact row and any unverified contact points in one transaction.
 pub async fn issue_contact(
     pool: sqlx::PgPool,
@@ -52,7 +46,7 @@ pub async fn issue_contact(
     )
     .bind(contact_id.0)
     .bind(tenant_id.0)
-    .bind(storage_partition_id_for_tenant(tenant_id).as_str())
+    .bind(StoragePartitionId::for_tenant(tenant_id).as_str())
     .bind(contact_id.0)
     .bind(state.as_str())
     .bind(request.display_name.as_deref())
@@ -163,7 +157,7 @@ pub async fn create_contact_token_grant(
     .bind(Uuid::now_v7())
     .bind(&claims.jti)
     .bind(claims.tenant_id.0)
-    .bind(storage_partition_id_for_tenant(claims.tenant_id).as_str())
+    .bind(StoragePartitionId::for_tenant(claims.tenant_id).as_str())
     .bind(contact_id.0)
     .bind(claims.state.as_str())
     .bind(&claims.scopes)
@@ -302,7 +296,7 @@ pub async fn start_contact_verification(
     .bind(command.contact_id.0)
     .bind(contact_point.id.0)
     .bind(command.tenant_id.0)
-    .bind(storage_partition_id_for_tenant(command.tenant_id).as_str())
+    .bind(StoragePartitionId::for_tenant(command.tenant_id).as_str())
     .bind(hash_verification_code(challenge_id, &code))
     .bind(expires_at)
     .execute(&mut *transaction)
@@ -313,7 +307,7 @@ pub async fn start_contact_verification(
         .await
         .map_err(|error| ContactError::database("commit contact verification", error))?;
     let sink = match ProviderDeliverySink::from_env(
-        storage_partition_id_for_tenant(command.tenant_id).as_str(),
+        StoragePartitionId::for_tenant(command.tenant_id).as_str(),
         &command.messaging_config,
     )
     .await
@@ -777,7 +771,7 @@ async fn upsert_verified_contact_point_channel_account(
     )
     .bind(account_id.0)
     .bind(tenant_id.0)
-    .bind(storage_partition_id_for_tenant(tenant_id).as_str())
+    .bind(StoragePartitionId::for_tenant(tenant_id).as_str())
     .bind(contact_id.0)
     .bind(point_id.0)
     .bind(channel.as_str())
@@ -897,7 +891,7 @@ async fn upsert_external_channel_account(
     )
     .bind(account_id.0)
     .bind(contact.tenant_id.0)
-    .bind(storage_partition_id_for_tenant(contact.tenant_id).as_str())
+    .bind(StoragePartitionId::for_tenant(contact.tenant_id).as_str())
     .bind(contact.contact_id.0)
     .bind(channel.as_str())
     .bind(external_tenant_key)
@@ -1116,7 +1110,7 @@ async fn insert_contact_point(
     .bind(point_id.0)
     .bind(contact_id.0)
     .bind(tenant_id.0)
-    .bind(storage_partition_id_for_tenant(tenant_id).as_str())
+    .bind(StoragePartitionId::for_tenant(tenant_id).as_str())
     .bind(point.kind.as_str())
     .bind(&normalized_hash)
     .bind(point.display_value.as_deref())

@@ -2,7 +2,10 @@
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
-use moa_core::{ActionRuleScope, MoaError, ModelId, Result as MoaResult, SessionId, TenantId};
+use moa_core::{
+    ActionRuleScope, MoaError, ModelId, Result as MoaResult, SessionId, StoragePartitionId,
+    TenantId,
+};
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
 use moa_scoring::{
@@ -739,7 +742,7 @@ impl ScopeParts {
         match scope {
             ActionRuleScope::Tenant { tenant_id } => Self {
                 scope: "tenant",
-                storage_partition_id: Some(tenant_id.to_string()),
+                storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
                 user_id: None,
             },
         }

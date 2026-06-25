@@ -1,7 +1,7 @@
 //! Analytics service response-mapping and scoping tests.
 
 use chrono::{TimeZone, Utc};
-use moa_core::wire::{
+use moa_core::wire::analytics::{
     ExperimentRunTrendPoint, ExperimentScoreRunRef, ExperimentStatusCount,
     ExperimentTrialTrendPoint, LearningCandidateListRequest, SessionSearchRequest,
     ToolStatsRequest,

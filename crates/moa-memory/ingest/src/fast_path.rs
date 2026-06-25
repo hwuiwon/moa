@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{
-    ContactId, MemoryToolExecutor, MoaError, SessionActorRef, SessionMeta, TenantId, ToolOutput,
-    traits::EmbeddingProvider,
+    ContactId, MemoryToolExecutor, MoaError, SessionActorRef, SessionMeta, StoragePartitionId,
+    TenantId, ToolOutput, traits::EmbeddingProvider,
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -374,7 +374,9 @@ fn build_intent(
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: req.label,
-        storage_partition_id: Some(req.tenant_id.to_string()),
+        storage_partition_id: Some(
+            StoragePartitionId::for_tenant(TenantId::from(req.tenant_id)).to_string(),
+        ),
         contact_id: req.contact_id.map(|contact_id| contact_id.to_string()),
         scope: req.scope.clone(),
         name: short_name(redacted_text),

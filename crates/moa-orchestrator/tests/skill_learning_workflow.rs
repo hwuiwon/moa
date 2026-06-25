@@ -198,7 +198,7 @@ async fn seed_experience_fixture(
     _label: &str,
 ) -> (MoaConfig, RunSkillLearningRequest, StoragePartitionId) {
     let tenant_id = TenantId::new();
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let creator_id = Uuid::now_v7();
     let session = SessionMeta {
         id: SessionId::new(),

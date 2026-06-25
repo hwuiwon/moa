@@ -13,7 +13,7 @@ fn promotion_report_maps_to_wire_response() {
     let response = promotion_response_from_report(
         tenant_id,
         PromotionReport {
-            storage_partition_id: tenant_id.to_string(),
+            storage_partition_id: moa_core::StoragePartitionId::for_tenant(tenant_id).to_string(),
             copied: 42,
             validation_overlap: 0.981,
             vector_backend: "turbopuffer".to_string(),

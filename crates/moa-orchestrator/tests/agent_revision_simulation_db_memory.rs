@@ -4,8 +4,10 @@ use anyhow::Result;
 use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{AgentRevisionSimulationCompareRequest, AgentRevisionSimulationVariant};
-use moa_core::{ActionRuleScope, ModelId, TenantId};
+use moa_core::wire::experiments::{
+    AgentRevisionSimulationCompareRequest, AgentRevisionSimulationVariant,
+};
+use moa_core::{ActionRuleScope, ModelId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 use moa_experiments::model::{
     ExperimentScorecard, ExperimentSimulatorConfig, ExperimentTarget, ExperimentTrialStatus,
@@ -197,7 +199,7 @@ fn new_trial(
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
     let ActionRuleScope::Tenant { tenant_id } = scope;
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id)).await?;

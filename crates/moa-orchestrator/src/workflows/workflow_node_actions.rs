@@ -4,10 +4,8 @@ use std::time::Duration;
 
 use moa_artifacts::reference::ArtifactRef;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{
-    MemoryIngestDocument, MemoryIngestRequest, MemorySearchRequest, QueueMessageRequest,
-    TurnOutcomeKind,
-};
+use moa_core::wire::memory::{MemoryIngestDocument, MemoryIngestRequest, MemorySearchRequest};
+use moa_core::wire::turn::{QueueMessageRequest, TurnOutcomeKind};
 use moa_core::{
     ActionPolicyEffect, ContactId, DelegationTool, SessionActorRef, SessionId, SessionMeta,
     SessionStatus, SpawnSubAgentInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,

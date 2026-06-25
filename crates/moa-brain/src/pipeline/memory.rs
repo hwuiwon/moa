@@ -570,7 +570,7 @@ fn lineage_memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
 }
 
 fn lineage_storage_partition_id_from_context(ctx: &WorkingContext) -> StoragePartitionId {
-    StoragePartitionId::new(ctx.tenant_id.to_string())
+    StoragePartitionId::for_tenant(ctx.tenant_id)
 }
 
 fn lineage_user_id_from_context(ctx: &WorkingContext) -> UserId {

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moa_core::wire::AppendEventRequest;
+use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     AttachSubAgentResultWaiterInput, CancelSubAgentInput, ConsumeSubAgentChildResultInput,
     DelegationTool, Event, ListSubAgentsInput, ListSubAgentsOutput, ListedSubAgent,

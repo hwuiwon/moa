@@ -14,9 +14,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_artifacts::document::{ArtifactDocument, ArtifactStatus};
 use moa_artifacts::validation::validate_for_status;
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
+};
+use moa_core::wire::skills::{
     SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
+};
+use moa_core::wire::workflows::{
     WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
 use moa_core::{

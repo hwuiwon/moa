@@ -1,7 +1,8 @@
 //! Durable progress projection helpers for turn workflows.
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::{AppendEventRequest, TurnPhase};
+use moa_core::wire::session_store::AppendEventRequest;
+use moa_core::wire::turn::TurnPhase;
 use moa_core::{Event, SessionId};
 use moa_observability::record_turn_event_persist_duration;
 use moa_observability::restate_observability::event_persist_span;

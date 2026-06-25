@@ -5,7 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::skills::{
     SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
     SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
     SkillSummary,

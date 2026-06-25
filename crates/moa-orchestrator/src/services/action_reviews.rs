@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
-use moa_core::wire::AppendEventRequest;
+use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, Event, EventType,
     StoragePartitionId, TenantId, ToolCallId, ToolCallRequest,
@@ -379,5 +379,5 @@ async fn authorize_tenant(
 }
 
 fn storage_partition_id(tenant_id: TenantId) -> StoragePartitionId {
-    StoragePartitionId::new(tenant_id.to_string())
+    StoragePartitionId::for_tenant(tenant_id)
 }

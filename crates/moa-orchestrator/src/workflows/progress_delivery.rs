@@ -1,6 +1,6 @@
 //! Live channel delivery for durable turn progress updates.
 
-use moa_core::wire::TurnPhase;
+use moa_core::wire::turn::TurnPhase;
 use moa_core::{
     Channel, MessageContent, MessageId, OutboundMessage, SessionChannelBinding,
     SessionChannelBindingId, SessionId, SessionStatus, traits::ChannelAdapter,

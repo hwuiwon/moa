@@ -58,7 +58,9 @@ impl Stack {
                     .create_node(NodeWriteIntent {
                         uid,
                         label: NodeLabel::Fact,
-                        storage_partition_id: Some(tenant_id.to_string()),
+                        storage_partition_id: Some(
+                            StoragePartitionId::for_tenant(tenant_id).to_string(),
+                        ),
                         contact_id: None,
                         scope: "tenant".to_string(),
                         name: text.clone(),

@@ -1,6 +1,6 @@
 //! Admin read helpers for hot lineage rows.
 
-use moa_core::wire::LineageRecordView;
+use moa_core::wire::lineage::LineageRecordView;
 use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};

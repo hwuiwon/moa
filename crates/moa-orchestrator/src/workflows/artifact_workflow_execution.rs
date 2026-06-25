@@ -9,7 +9,7 @@ use moa_artifacts::registry::{
     ArtifactRunUpdate, NewArtifactNodeRun,
 };
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::workflows::{
     WorkflowReviewDecisionKind, WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse,
     WorkflowSignalRequest, WorkflowSignalResponse,
 };

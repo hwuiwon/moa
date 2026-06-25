@@ -7,8 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
+};
+use moa_core::wire::workflows::{
     WorkflowCancelRequest, WorkflowCancelResponse, WorkflowReviewDecisionKind,
     WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse, WorkflowRunRequest,
     WorkflowRunResponse, WorkflowRunStatus, WorkflowSignalRequest, WorkflowSignalResponse,

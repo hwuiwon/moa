@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContactId, StoragePartitionId, TenantId, UserId};
+use moa_core::{ContactId, UserId};
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
@@ -16,11 +16,11 @@ use moa_memory_vector::PgvectorStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
+use super::scope::{stable_uuid_from_label, tenant_id_from_storage_partition_id};
 use super::{LedgerFact, SyntheticSession, SyntheticTurn, validate_ledger, validate_sessions};
 use moa_eval_core::{EvalError, Result};
 
@@ -984,25 +984,10 @@ fn scope_tier_str(scope: ScopeTier) -> &'static str {
     }
 }
 
-fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
-    uuid::Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
-}
-
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
     uuid::Uuid::parse_str(user_id.as_str())
         .map(ContactId)
         .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let digest = Sha256::digest(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn sorted_strings(values: &[String]) -> Vec<String> {

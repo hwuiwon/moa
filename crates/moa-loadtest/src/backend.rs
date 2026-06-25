@@ -3,10 +3,8 @@
 use crate::*;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{
-    AppendEventRequest, GetEventsRequest, InitSessionVoRequest, SessionSnapshot, StartTurnRequest,
-    TurnOutcome,
-};
+use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
+use moa_core::wire::turn::{SessionSnapshot, StartTurnRequest, TurnOutcome};
 use serde::Serialize;
 
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -128,13 +126,13 @@ impl SessionTarget for RemoteTarget {
             .map_err(client_error)?;
 
         match outcome.kind {
-            moa_core::wire::TurnOutcomeKind::Completed => Ok(TurnObservation {
+            moa_core::wire::turn::TurnOutcomeKind::Completed => Ok(TurnObservation {
                 latency: started.elapsed(),
                 ttft: None,
                 auto_denied_approvals: 0,
             }),
-            moa_core::wire::TurnOutcomeKind::Cancelled => Err(MoaError::Cancelled),
-            moa_core::wire::TurnOutcomeKind::Failed => {
+            moa_core::wire::turn::TurnOutcomeKind::Cancelled => Err(MoaError::Cancelled),
+            moa_core::wire::turn::TurnOutcomeKind::Failed => {
                 Err(MoaError::ProviderError(outcome.message))
             }
         }
@@ -415,7 +413,7 @@ impl RemoteSessionHandle<'_> {
         &self,
         request: StartTurnRequest,
         idempotency_key: Option<&str>,
-    ) -> std::result::Result<moa_core::wire::StartTurnResponse, RemoteHttpError> {
+    ) -> std::result::Result<moa_core::wire::turn::StartTurnResponse, RemoteHttpError> {
         self.client
             .post_call_with_idempotency(
                 &format!("/Session/{}/start_turn", self.session_id),

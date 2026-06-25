@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, io::Read, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
-use moa_core::wire::ContactErasureScope;
+use moa_core::wire::privacy::ContactErasureScope;
 use moa_core::{ContactId, TenantId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};

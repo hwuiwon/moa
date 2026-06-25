@@ -77,7 +77,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let pool = session_store.pool().clone();
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let workspace_text = storage_partition_id.to_string();
     let tenant_scope = ScopeContext::tenant(tenant_id);
     let contact_scope = ScopeContext::contact(tenant_id, contact_id);

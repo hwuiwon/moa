@@ -148,7 +148,7 @@ pub(crate) async fn decide_review(
 }
 
 fn storage_partition_id(tenant_id: moa_core::TenantId) -> StoragePartitionId {
-    StoragePartitionId::new(tenant_id.to_string())
+    StoragePartitionId::for_tenant(tenant_id)
 }
 
 /// Mark the requested event as recorded.

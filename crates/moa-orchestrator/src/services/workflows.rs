@@ -4,7 +4,7 @@ use moa_artifacts::registry::ArtifactRegistry;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::ActionRuleScope;
-use moa_core::wire::{
+use moa_core::wire::workflows::{
     WorkflowCancelRequest, WorkflowCancelResponse, WorkflowNodeRunSummary,
     WorkflowReviewDecisionRequest, WorkflowReviewDecisionResponse, WorkflowRunRequest,
     WorkflowRunResponse, WorkflowRunStatus, WorkflowSignalRequest, WorkflowSignalResponse,

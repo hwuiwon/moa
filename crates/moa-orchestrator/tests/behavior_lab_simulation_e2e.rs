@@ -12,18 +12,24 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use moa_core::wire::artifacts::{
+    ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
+};
+use moa_core::wire::experiments::{
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse, ExperimentScoresRequest, ExperimentScoresResponse,
+    ExperimentTrialStatusRequest, ExperimentTrialStatusResponse, ExperimentTrialSummary,
+    ExperimentTrialsRequest, ExperimentTrialsResponse,
+};
+use moa_core::wire::skills::{
+    SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
+};
+use moa_core::wire::workflows::{
+    WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
+};
 use moa_core::{
     ActionRuleScope, Event, EventRange, EventRecord, SessionId, StoragePartitionId, TenantId,
     traits::Identity,
-    wire::{
-        ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
-        ArtifactPublishResponse, ExperimentRunRequest, ExperimentRunResponse,
-        ExperimentRunStatusRequest, ExperimentRunStatusResponse, ExperimentScoresRequest,
-        ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
-        ExperimentTrialSummary, ExperimentTrialsRequest, ExperimentTrialsResponse,
-        SkillImportRequest, SkillImportResponse, SkillPackageDocument, SkillPackageDocumentFile,
-        WorkflowRunRequest, WorkflowRunResponse, WorkflowRunStatus, WorkflowStatusRequest,
-    },
 };
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
@@ -105,7 +111,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let scope = ActionRuleScope::Tenant { tenant_id };
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
@@ -279,7 +285,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let scope = ActionRuleScope::Tenant { tenant_id };
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;

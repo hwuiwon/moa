@@ -9,10 +9,11 @@ use async_trait::async_trait;
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
     ActionRuleScope, CompletionRequest, CompletionResponse, CompletionStream, Event, LLMProvider,
-    MoaError, ModelCapabilities, StopReason, TenantId, TokenUsage, ToolCallContent, ToolCallId,
+    MoaError, ModelCapabilities, StopReason, TokenUsage, ToolCallContent, ToolCallId,
     ToolInvocation,
 };
 use moa_eval::long_conversation::{Budgets, RecordedScriptedProvider, run_scenario_with_provider};
+use moa_eval::memory_eval::tenant_id_from_storage_partition;
 use moa_eval_core::{
     ActionPolicyOverride, AgentConfig, EngineOptions, LongConversationMode,
     LongSessionInterleaving, LongTestCase, SecondaryLongSession, TestCase, TestCaseKind, TestSuite,
@@ -22,7 +23,6 @@ use moa_skills::package::SkillPackage;
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -760,27 +760,12 @@ async fn insert_eval_skill<T: AsRef<str>>(
     registry
         .upsert_by_name(NewSkill::from_package(
             ActionRuleScope::Tenant {
-                tenant_id: tenant_id_from_label(storage_partition_id),
+                tenant_id: tenant_id_from_storage_partition(storage_partition_id),
             },
             SkillPackage::from_skill_markdown(skill_md),
         ))
         .await?;
     Ok(())
-}
-
-fn tenant_id_from_label(label: &str) -> TenantId {
-    Uuid::parse_str(label)
-        .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(label)))
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let digest = Sha256::digest(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn indent_frontmatter_block(value: &str) -> String {

@@ -1,7 +1,7 @@
 //! Memory service authorization-scope helper coverage.
 
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::MemoryIngestDocument;
+use moa_core::wire::memory::MemoryIngestDocument;
 use moa_core::{ContactId, TenantId, UserId};
 use moa_memory_types::MemoryScope;
 use moa_orchestrator::services::memory::{

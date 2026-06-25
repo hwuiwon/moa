@@ -10,10 +10,10 @@ use moa_contacts::domain::{
 use moa_contacts::repository::{
     ContactVerificationStartCommand, complete_contact_verification, create_contact_token_grant,
     ensure_contact_token_grant_active, issue_contact, load_contact_ref, promoted_from_contact,
-    resolve_contact_session_channel, start_contact_verification, storage_partition_id_for_tenant,
+    resolve_contact_session_channel, start_contact_verification,
 };
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
+use moa_core::wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
 use moa_core::{
     ChannelAccountRef, ChannelRef, ContactId, ContactPointId, ContactRef,
     ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
@@ -23,7 +23,7 @@ use moa_core::{
     ContactTokenIssueResponse, ContactVerificationCompleteRequest,
     ContactVerificationCompleteResponse, ContactVerificationStartRequest,
     ContactVerificationStartResponse, Event, ModelId, SessionActorRef, SessionMeta, SessionStatus,
-    TenantId,
+    StoragePartitionId, TenantId,
 };
 use moa_core::{MoaError, SessionStore};
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -319,7 +319,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
-        let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         let model = ModelId::new(request.model);
         let channel_request = request.channel;
         let initial_channel_ref = channel_request.channel_ref;
@@ -465,7 +465,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
-        let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
 
         let ChannelChangeResult {
             contact,

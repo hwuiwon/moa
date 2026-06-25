@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::AppendEventRequest;
+use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     CompletionRequest, CompletionResponse, ContactId, DEFER_BRAIN_RESPONSE_METADATA_KEY, Event,
     MoaError, ModelId, ModelTier, SessionId, TenantId, TokenPricing, TokenUsage,

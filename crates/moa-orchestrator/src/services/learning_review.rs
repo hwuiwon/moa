@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use moa_authz::{fga_subject, require_authz_with_delegation};
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::wire::{
+use moa_core::wire::session_store::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
     LearningCandidateReviewResponse,
 };

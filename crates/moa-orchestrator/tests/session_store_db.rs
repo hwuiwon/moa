@@ -76,7 +76,7 @@ async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()
     let (store, database_url, schema_name) = test_store().await?;
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let session_id = store
         .create_session(SessionMeta {
             tenant_id,

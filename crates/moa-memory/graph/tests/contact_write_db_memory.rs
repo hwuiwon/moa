@@ -13,7 +13,7 @@ fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
-        storage_partition_id: Some(tenant_id.to_string()),
+        storage_partition_id: Some(moa_core::StoragePartitionId::for_tenant(tenant_id).to_string()),
         contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),

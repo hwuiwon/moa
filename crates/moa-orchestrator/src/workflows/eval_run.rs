@@ -1,6 +1,6 @@
 //! Restate workflow that executes one hosted eval run.
 
-use moa_core::wire::{
+use moa_core::wire::eval::{
     EvalRunRequest, EvalRunResponse, EvalRunStatus, EvalRunStatusRequest, EvalRunStatusResponse,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;

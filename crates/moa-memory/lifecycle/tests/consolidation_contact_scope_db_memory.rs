@@ -1,7 +1,7 @@
 //! Postgres-backed checks for contact-local memory consolidation.
 
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::{ContactId, TenantId};
+use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_lifecycle::merge_duplicates;
 use moa_memory_types::ScopeContext;
@@ -96,7 +96,7 @@ async fn create_contact_fact(
         .create_node(NodeWriteIntent {
             uid,
             label: NodeLabel::Fact,
-            storage_partition_id: Some(tenant_id.to_string()),
+            storage_partition_id: Some(StoragePartitionId::for_tenant(tenant_id).to_string()),
             contact_id: Some(contact_id.to_string()),
             scope: "contact".to_string(),
             name: name.to_string(),

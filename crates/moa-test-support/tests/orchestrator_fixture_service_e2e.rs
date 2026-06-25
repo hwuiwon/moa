@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use moa_core::wire::{StartTurnRequest, TurnOutcomeKind};
+use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_test_support::OrchestratorTestFixture;
 
 #[tokio::test]

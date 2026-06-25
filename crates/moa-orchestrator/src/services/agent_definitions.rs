@@ -6,7 +6,7 @@ use moa_artifacts::registry::{ArtifactRegistry, ArtifactScopeParts, StoredArtifa
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::agents::{
     AgentDefinitionListRequest, AgentDefinitionListResponse, AgentDefinitionSummary,
     AgentDeployRequest, AgentDeployResponse, AgentDeploymentListRequest,
     AgentDeploymentListResponse, AgentDeploymentSummary, AgentInstallRequest, AgentInstallResponse,
@@ -660,7 +660,7 @@ fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
 }
 
 fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
-    StoragePartitionId::new(tenant_id.to_string())
+    StoragePartitionId::for_tenant(tenant_id)
 }
 
 async fn scoped_conn_for_scope<'p>(

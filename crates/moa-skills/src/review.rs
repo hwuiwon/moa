@@ -7,7 +7,7 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, MoaError, TenantId,
+    LearningCandidateType, LearningEntry, MoaError, StoragePartitionId, TenantId,
 };
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
@@ -382,7 +382,7 @@ fn ensure_tenant_skill_draft(revision: &StoredArtifactRevision, tenant_id: Tenan
     if revision.status != ArtifactStatus::Draft {
         return Err(bad_request("skill artifact revision must still be a draft"));
     }
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     if revision.storage_partition_id.as_ref().map(|id| id.as_str())
         != Some(storage_partition_id.as_str())
         || revision.user_id.is_some()

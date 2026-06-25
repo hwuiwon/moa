@@ -8,6 +8,7 @@ pub mod judge;
 pub mod metrics;
 pub mod recording;
 pub mod runner;
+pub mod scope;
 
 pub use crate::kernel::{
     BinaryProbeOutcome, BootstrapConfig, ClusterBootstrapReport, ClusterObservation,
@@ -55,6 +56,10 @@ pub use runner::{
     EvalLane, MemoryEvalExtractorMode, MemoryRetrievalEvalOptions, MemoryRetrievalEvalReport,
     QueryRewritePolicy, RETRIEVAL_EVAL_CANDIDATE_K, RETRIEVAL_EVAL_FINAL_K,
     run_memory_retrieval_eval,
+};
+pub use scope::{
+    stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
+    tenant_id_from_storage_partition_id,
 };
 
 impl crate::kernel::FixtureRecord for moa_memory_ingest::ExtractionFixtureRecord {

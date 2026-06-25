@@ -43,15 +43,15 @@ GRANT moa_promoter TO CURRENT_USER;
 GRANT moa_auditor TO CURRENT_USER;
 
 CREATE OR REPLACE FUNCTION moa.compute_scope_tier(
-    storage_partition_id TEXT,
+    workspace_id TEXT,
     user_id TEXT
 ) RETURNS TEXT
 LANGUAGE SQL IMMUTABLE
 AS $$
     SELECT CASE
-        WHEN storage_partition_id IS NULL AND user_id IS NULL THEN 'global'
-        WHEN storage_partition_id IS NOT NULL AND user_id IS NOT NULL THEN 'contact'
-        WHEN storage_partition_id IS NOT NULL AND user_id IS NULL THEN 'tenant'
+        WHEN workspace_id IS NULL AND user_id IS NULL THEN 'global'
+        WHEN workspace_id IS NOT NULL AND user_id IS NOT NULL THEN 'contact'
+        WHEN workspace_id IS NOT NULL AND user_id IS NULL THEN 'tenant'
         ELSE NULL
     END;
 $$;

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{StartTurnRequest, TurnOutcomeKind};
+use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
     AgentContext, AgentGuardrailPolicy, AgentGuardrailStagePolicy, AgentPolicySnapshot, Channel,
     Event, EventRange, EventRecord, GuardrailDirection, GuardrailMode, ModelId, ModelTier,

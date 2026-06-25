@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{StartTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress};
+use moa_core::wire::turn::{
+    StartTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+};
 use moa_core::{Event, EventRange, EventRecord, EventType, ModelTier, SessionId, TenantId};
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use serde_json::json;

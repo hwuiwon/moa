@@ -3,7 +3,7 @@
 use super::*;
 use crate::objects::session::SessionClient;
 use crate::workflows::sub_agent_turn_execution::SubAgentTurnExecutionClient;
-use moa_core::wire::{RunSubAgentTurnRequest, TurnOutcomeKind};
+use moa_core::wire::turn::{RunSubAgentTurnRequest, TurnOutcomeKind};
 use moa_security::{canary_system_message, new_canary_token};
 
 impl SubAgent for SubAgentImpl {
@@ -295,7 +295,7 @@ impl SubAgent for SubAgentImpl {
     async fn record_turn_outcome(
         &self,
         mut ctx: ObjectContext<'_>,
-        outcome: Json<moa_core::wire::TurnOutcome>,
+        outcome: Json<moa_core::wire::turn::TurnOutcome>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgent", "record_turn_outcome");
         let outcome = outcome.into_inner();

@@ -17,10 +17,8 @@ use chrono::Utc;
 use moa_authz::{FgaClient, FgaConfig};
 use moa_authz_schema::{SCHEMA_V1_JSON, TupleOp};
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{
-    AppendEventRequest, GetEventsRequest, InitSessionVoRequest, SessionSnapshot, StartTurnRequest,
-    StartTurnResponse, TurnOutcome,
-};
+use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
+use moa_core::wire::turn::{SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome};
 use moa_core::{
     Channel, Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionMeta,
     SessionStatus, StoragePartitionId, TenantId, UserId,

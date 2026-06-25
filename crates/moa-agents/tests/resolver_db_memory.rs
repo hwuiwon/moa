@@ -23,7 +23,7 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
     let artifact_resolver = ArtifactResolver::new(ArtifactRegistry::new(pool.clone()));
     let agent_resolver = AgentResolver::new(pool.clone());
     let tenant_id = TenantId::new();
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let scope = ActionRuleScope::Tenant { tenant_id };
     let skill_name = format!("support-skill-{}", Uuid::now_v7());
     let agent_name = format!("support-agent-{}", Uuid::now_v7());

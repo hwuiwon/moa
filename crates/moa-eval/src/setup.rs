@@ -22,9 +22,10 @@ use moa_providers::{
 use moa_security::{ActionPolicies, ActionPolicyRuleStore};
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::fs;
 use uuid::Uuid;
+
+use crate::memory_eval::tenant_id_from_label;
 
 const DEFAULT_EVAL_USER: &str = "eval-runner";
 
@@ -113,7 +114,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         })?;
 
     let tenant_id = eval_tenant_id_for_agent(&agent_config.name);
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let user_id = UserId::new(DEFAULT_EVAL_USER);
     let lineage = Arc::new(EvalLineageHandle::default());
     let schema_name = format!("eval_{}", Uuid::now_v7().simple());
@@ -199,9 +200,7 @@ async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Res
 }
 
 fn eval_tenant_id_for_agent(agent_name: &str) -> TenantId {
-    TenantId::from(stable_uuid_from_label(
-        &eval_storage_partition_id_for_agent(agent_name),
-    ))
+    tenant_id_from_label(&eval_storage_partition_id_for_agent(agent_name))
 }
 
 fn eval_storage_partition_id_for_agent(agent_name: &str) -> String {
@@ -223,15 +222,6 @@ fn eval_storage_partition_id_for_agent(agent_name: &str) -> String {
         slug.pop();
     }
     slug
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let digest = Sha256::digest(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 async fn build_tool_router(

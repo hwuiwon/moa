@@ -8,10 +8,10 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus, StoredArtifactRevision};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{
+use moa_core::wire::experiments::{
     AgentRevisionSimulationVariant, ExperimentRunStatusRequest, ExperimentRunStatusResponse,
-    QueueMessageRequest,
 };
+use moa_core::wire::turn::QueueMessageRequest;
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, MoaError, ModelId, SessionActorRef, SessionId,
     SessionMeta, SessionStatus, SessionStore, TenantId,

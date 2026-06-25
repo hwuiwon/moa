@@ -99,7 +99,7 @@ impl PostgresSessionStore {
 
 fn stored_storage_partition_id_for_rule(rule: &ActionPolicyRule) -> StoragePartitionId {
     match rule.scope {
-        ActionRuleScope::Tenant { tenant_id } => StoragePartitionId::new(tenant_id.to_string()),
+        ActionRuleScope::Tenant { tenant_id } => StoragePartitionId::for_tenant(tenant_id),
     }
 }
 

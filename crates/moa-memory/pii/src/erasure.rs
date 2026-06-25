@@ -1,6 +1,6 @@
 //! Memory-owned privacy erasure helpers.
 
-use moa_core::{ContactId, TenantId};
+use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
@@ -66,7 +66,7 @@ pub async fn enumerate_erase_candidates(
     tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<Vec<EraseCandidate>> {
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
     let rows = sqlx::query_as::<_, EraseCandidate>(
         r#"
@@ -171,7 +171,7 @@ async fn emit_erase_summary(
     audit: &GraphErasureAudit,
     erased_count: usize,
 ) -> Result<()> {
-    let storage_partition_id = audit.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(audit.tenant_id).to_string();
     let mut tx = begin_app_scoped_tx(pool, audit.tenant_id, &audit.subject_user_id).await?;
     write_and_bump(
         tx.as_mut(),

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use moa_core::wire::{
+use moa_core::wire::session_store::{
     AppendEventRequest, AppendExperienceAttributionsRequest, AppendExperienceRecordRequest,
     AppendLearningCandidateRequest, CompleteSegmentRequest, CreateAgentSessionRequest,
     CreateAgentSessionResponse, CreateSegmentRequest, GetEventsRequest,

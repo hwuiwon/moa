@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use moa_core::traits::EmbeddingProvider;
+use moa_core::{StoragePartitionId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_types::ScopeContext;
@@ -203,7 +203,9 @@ impl EntityResolver {
             .create_node(NodeWriteIntent {
                 uid,
                 label: NodeLabel::Entity,
-                storage_partition_id: Some(request.scope.tenant_id().to_string()),
+                storage_partition_id: Some(
+                    StoragePartitionId::for_tenant(request.scope.tenant_id()).to_string(),
+                ),
                 contact_id: request
                     .scope
                     .contact_id()

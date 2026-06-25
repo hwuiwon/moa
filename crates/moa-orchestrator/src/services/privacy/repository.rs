@@ -11,10 +11,8 @@ use sqlx::{PgPool, Row};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use super::{
-    ApprovalClaims, CONTACT_SUBJECT_PREFIX, PrivacyExportContext, PrivacySubject,
-    ensure_jti_inserted,
-};
+use super::approval::{ApprovalClaims, ensure_jti_inserted};
+use super::context::{CONTACT_SUBJECT_PREFIX, PrivacyExportContext, PrivacySubject};
 
 /// Contact-link expansion policy for privacy subject resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

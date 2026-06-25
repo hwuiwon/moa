@@ -1,6 +1,6 @@
 //! Shared score-run storage and score summary queries.
 
-use moa_core::{ActionRuleScope, TenantId};
+use moa_core::{ActionRuleScope, StoragePartitionId, TenantId};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -425,7 +425,7 @@ pub async fn score_summaries_for_tenant(
     pool: &PgPool,
     request: ScoreRunRef,
 ) -> Result<ScoreSummary, ScoringError> {
-    let storage_partition_id = request.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let rows = sqlx::query(SCORES_BY_RUN_SQL)
         .bind(request.run_id)
         .bind(&storage_partition_id)
@@ -457,7 +457,7 @@ pub async fn experiment_score_breakdown_for_tenant(
     pool: &PgPool,
     request: ExperimentRunScoreRef,
 ) -> Result<ExperimentScoreBreakdown, ScoringError> {
-    let storage_partition_id = request.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let aggregate_query = sqlx::query(TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.run_uid)
         .bind(&storage_partition_id)
@@ -487,7 +487,7 @@ pub async fn compare_score_runs_for_tenant(
     pool: &PgPool,
     request: ScoreCompareRef,
 ) -> Result<ScoreCompare, ScoringError> {
-    let storage_partition_id = request.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let rows = sqlx::query(COMPARE_NUMERIC_RUNS_SQL)
         .bind(request.base_run)
         .bind(request.new_run)
@@ -518,7 +518,7 @@ pub async fn compare_experiment_score_breakdown_for_tenant(
     pool: &PgPool,
     request: ExperimentRunCompareRef,
 ) -> Result<ExperimentScoreBreakdownCompare, ScoringError> {
-    let storage_partition_id = request.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let scenario_query = sqlx::query(COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL)
         .bind(request.base_run_uid)
         .bind(request.new_run_uid)
@@ -726,7 +726,7 @@ impl ScopeParts {
         match scope {
             ActionRuleScope::Tenant { tenant_id } => Self {
                 scope: "tenant",
-                storage_partition_id: Some(tenant_id.to_string()),
+                storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
                 user_id: None,
             },
         }

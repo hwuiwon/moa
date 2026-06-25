@@ -22,11 +22,13 @@ use moa_brain::turn_segments::{
     segment_assessment_to_seq, segment_boundary_sequences, segment_events_for_assessment,
     task_segment_from_active, task_segment_from_completed,
 };
-use moa_core::wire::{
+use moa_core::wire::session_store::{
     AppendEventRequest, CompleteSegmentRequest, CreateSegmentRequest, GetEventsRequest,
     GetSegmentBaselineRequest, RecordSegmentToolUseRequest, RecordSegmentTurnUsageRequest,
-    RunTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
     UpdateSegmentAssessmentRequest,
+};
+use moa_core::wire::turn::{
+    RunTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
 };
 use moa_core::{
     ActionPolicyEffect, ActiveSegment, AgentContext, AssessmentPhase, CompletionContent,

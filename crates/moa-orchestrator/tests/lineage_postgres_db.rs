@@ -16,7 +16,7 @@ async fn postgres_lineage_sink_writes_rows() -> Result<()> {
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     sqlx::query("DELETE FROM analytics.turn_lineage WHERE storage_partition_id = $1")
         .bind(storage_partition_id.as_str())
         .execute(&pool)

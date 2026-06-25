@@ -1,6 +1,6 @@
 //! Outcome-weighted memory quality-score computation.
 
-use moa_core::TenantId;
+use moa_core::{StoragePartitionId, TenantId};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 
@@ -29,7 +29,7 @@ pub async fn compute_quality_scores(
     tenant_id: &TenantId,
     lookback_days: i64,
 ) -> Result<QualityStats> {
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(*tenant_id).to_string();
     if !task_segment_outcome_source_exists(pool).await? {
         tracing::warn!(
             tenant_id = %tenant_id,

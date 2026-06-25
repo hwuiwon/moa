@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::wire::{
+use moa_core::wire::admin::{
     CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
     CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
     VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
 };
-use moa_core::{BranchManager, TenantId};
+use moa_core::{BranchManager, StoragePartitionId, TenantId};
 use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
     PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
@@ -82,7 +82,8 @@ impl AdminMaintenance for AdminMaintenanceImpl {
 
         Ok(ctx
             .run(|| async move {
-                let storage_partition_id = request.tenant_id.to_string();
+                let storage_partition_id =
+                    StoragePartitionId::for_tenant(request.tenant_id).to_string();
                 let scope = ScopeContext::tenant(request.tenant_id);
                 let pgvector = Arc::new(PgvectorStore::new_for_control_plane(pool.clone(), scope));
                 let turbopuffer = Arc::new(
@@ -128,7 +129,9 @@ impl AdminMaintenance for AdminMaintenanceImpl {
 
         Ok(ctx
             .run(|| async move {
-                rollback_promotion(&pool, &request.tenant_id.to_string())
+                let storage_partition_id =
+                    StoragePartitionId::for_tenant(request.tenant_id).to_string();
+                rollback_promotion(&pool, &storage_partition_id)
                     .await
                     .map_err(|error| TerminalError::new(format!("rollback promotion: {error}")))?;
                 Ok::<_, HandlerError>(Json(promotion_update_response(
@@ -155,7 +158,9 @@ impl AdminMaintenance for AdminMaintenanceImpl {
 
         Ok(ctx
             .run(|| async move {
-                finalize_promotion(&pool, &request.tenant_id.to_string())
+                let storage_partition_id =
+                    StoragePartitionId::for_tenant(request.tenant_id).to_string();
+                finalize_promotion(&pool, &storage_partition_id)
                     .await
                     .map_err(|error| TerminalError::new(format!("finalize promotion: {error}")))?;
                 Ok::<_, HandlerError>(Json(promotion_update_response(

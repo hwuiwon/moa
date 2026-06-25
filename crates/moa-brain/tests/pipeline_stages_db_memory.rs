@@ -366,7 +366,7 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         .as_ref()
         .expect("memory-stage fixture should have a contact")
         .contact_id;
-    let runtime_storage_partition_id = StoragePartitionId::new(runtime_tenant_id.to_string());
+    let runtime_storage_partition_id = StoragePartitionId::for_tenant(runtime_tenant_id);
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
     delete_memory_rows(store.pool(), &runtime_storage_partition_id).await?;
     seed_memory_rows(
@@ -626,7 +626,7 @@ async fn seed_other_tenant_vector_noise(
 ) -> Result<Uuid> {
     let uid = Uuid::from_u128(0x2_000);
     let other_tenant_id = TenantId::new();
-    let other_storage_partition_id = other_tenant_id.to_string();
+    let other_storage_partition_id = StoragePartitionId::for_tenant(other_tenant_id).to_string();
     seed_workspace_embedder_state(
         pool,
         &other_tenant_id,

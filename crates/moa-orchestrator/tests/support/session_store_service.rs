@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use moa_core::wire::InitSessionVoRequest;
-use moa_core::wire::{
+use moa_core::wire::session_store::InitSessionVoRequest;
+use moa_core::wire::session_store::{
     AppendEventRequest, GetEventsRequest, SearchEventsRequest, UpdateStatusRequest,
 };
 use moa_core::{
@@ -120,7 +120,7 @@ fn test_contact_ref(tenant_id: TenantId) -> ContactRef {
 
 /// Returns the storage partition id for a tenant-owned session fixture.
 pub fn storage_partition_id_from_meta(meta: &SessionMeta) -> StoragePartitionId {
-    StoragePartitionId::new(meta.tenant_id.to_string())
+    StoragePartitionId::for_tenant(meta.tenant_id)
 }
 
 /// Returns a user-message event suitable for append-event tests.

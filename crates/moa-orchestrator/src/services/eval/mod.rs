@@ -13,7 +13,7 @@ use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 #[cfg(feature = "internal-eval-runner")]
 use moa_core::ActionRuleScope;
-use moa_core::wire::{
+use moa_core::wire::eval::{
     EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
     EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
     EvalPlanRequest, EvalPlanResponse, EvalReplayRequest, EvalReplayResponse, EvalRunRequest,
@@ -21,7 +21,7 @@ use moa_core::wire::{
     EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
     EvalSuiteListResponse, EvalSuiteSummary,
 };
-use moa_core::{MoaConfig, TenantId};
+use moa_core::{MoaConfig, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::EvalEngine;
@@ -590,7 +590,7 @@ fn plan_eval_suite(
 
 /// Builds eval suite summaries from API-supplied suite documents.
 pub fn suite_summaries_from_documents(
-    documents: Vec<moa_core::wire::EvalSuiteListDocument>,
+    documents: Vec<moa_core::wire::eval::EvalSuiteListDocument>,
 ) -> Result<Vec<EvalSuiteSummary>, EvalServiceError> {
     documents
         .into_iter()
@@ -979,7 +979,7 @@ fn dataset_run_item_score_record(
             run_id: replay_config.run_id,
             item_id: item.item_id,
         },
-        storage_partition_id: moa_core::StoragePartitionId::new(item.tenant_id.to_string()),
+        storage_partition_id: StoragePartitionId::for_tenant(item.tenant_id),
         user_id: None,
         name: name.to_string(),
         value,
@@ -1218,7 +1218,7 @@ mod tests {
             assert_dataset_run_item_target(record, run_id, item_id);
             assert_eq!(
                 record.storage_partition_id,
-                moa_core::StoragePartitionId::new(tenant_id.to_string())
+                StoragePartitionId::for_tenant(tenant_id)
             );
             assert_eq!(record.run_id, Some(run_id));
             assert_eq!(record.dataset_id, Some(dataset_id));

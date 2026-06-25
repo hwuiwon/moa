@@ -10,7 +10,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{any, get, patch, post};
 use futures_util::stream;
 use moa_core::traits::{AuthProvider, Credential, Identity};
-use moa_core::wire::SessionProgress;
+use moa_core::wire::turn::SessionProgress;
 use moa_core::{
     ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
     Event, EventRange, EventRecord, SequenceNum, SessionId, TenantId,
@@ -679,9 +679,9 @@ fn done_status(progress: &SessionProgress) -> &'static str {
         return "idle";
     };
     match outcome.kind {
-        moa_core::wire::TurnOutcomeKind::Completed => "completed",
-        moa_core::wire::TurnOutcomeKind::Cancelled => "cancelled",
-        moa_core::wire::TurnOutcomeKind::Failed => "failed",
+        moa_core::wire::turn::TurnOutcomeKind::Completed => "completed",
+        moa_core::wire::turn::TurnOutcomeKind::Cancelled => "cancelled",
+        moa_core::wire::turn::TurnOutcomeKind::Failed => "failed",
     }
 }
 
@@ -1662,7 +1662,7 @@ mod tests {
     use axum::http::header::AUTHORIZATION;
     use chrono::Utc;
     use moa_core::traits::{AuthError, Identity, IdentityType};
-    use moa_core::wire::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
+    use moa_core::wire::turn::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
     use moa_core::{EventType, SessionId, TenantId};
 
     use super::*;

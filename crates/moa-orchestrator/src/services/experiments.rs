@@ -4,7 +4,7 @@ use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
     AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
     AgentRevisionSimulationCompareResponse, AgentRevisionSimulationRunRequest,
@@ -1002,7 +1002,7 @@ fn score_error_to_handler_error(error: ScoringError) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::wire::AgentDependencyChange;
+    use moa_core::wire::experiments::AgentDependencyChange;
     use moa_core::{AgentRevisionLock, LockedToolRef, ResolvedArtifactRevisionRef};
     use uuid::Uuid;
 

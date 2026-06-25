@@ -28,7 +28,7 @@ async fn quality_scores_use_task_segment_outcomes_and_bump_workspace_version_onc
         return;
     };
     let tenant_id = TenantId::new();
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let user_id = UserId::new("quality-user");
     let session_id = SessionId::new();
     let node_uid = Uuid::now_v7();

@@ -11,7 +11,7 @@ use moa_artifacts::validation::validate_for_status;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::artifacts::{
     ArtifactExportRequest, ArtifactExportResponse, ArtifactFileDocument, ArtifactImportRequest,
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
     ArtifactPublishResponse, ArtifactSummary, ArtifactValidateRequest, ArtifactValidateResponse,

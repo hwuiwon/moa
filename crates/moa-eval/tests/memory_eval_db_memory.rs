@@ -8,9 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
 use moa_brain::retrieval::{LegSources, RetrievalHit};
-use moa_core::{
-    MoaError, SessionId, StoragePartitionId, TenantId, UserId, traits::EmbeddingProvider,
-};
+use moa_core::{MoaError, SessionId, StoragePartitionId, UserId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
@@ -28,9 +26,9 @@ use moa_eval::memory_eval::{
     generate_memory_eval_corpus, generate_memory_eval_corpus_with_style, mcnemar_paired_test,
     read_embedding_inputs_jsonl, read_embeddings_jsonl, read_gold_nodes_jsonl, read_ledger_jsonl,
     read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
-    run_memory_retrieval_eval, validate_corpus, write_embeddings_jsonl, write_gold_nodes_jsonl,
-    write_ledger_jsonl, write_manifest_json, write_memory_eval_corpus, write_probes_jsonl,
-    write_sessions_jsonl,
+    run_memory_retrieval_eval, stable_uuid_from_label, tenant_id_from_storage_partition_id,
+    validate_corpus, write_embeddings_jsonl, write_gold_nodes_jsonl, write_ledger_jsonl,
+    write_manifest_json, write_memory_eval_corpus, write_probes_jsonl, write_sessions_jsonl,
 };
 use moa_eval_core::EvalError;
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
@@ -41,7 +39,6 @@ use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_types::{ScopeContext, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -3078,21 +3075,6 @@ fn user(value: &str) -> UserId {
 
 fn storage_partition(value: &str) -> StoragePartitionId {
     StoragePartitionId::new(value)
-}
-
-fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
-    Uuid::parse_str(storage_partition_id.as_str())
-        .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let digest = Sha256::digest(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn utc(value: &str) -> DateTime<Utc> {

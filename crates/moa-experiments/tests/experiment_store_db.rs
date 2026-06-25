@@ -256,7 +256,7 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let experiment_store = ExperimentStore::new(test_db.store().pool().clone());
     let tenant_id = TenantId::from(Uuid::now_v7());
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
     let scope = ActionRuleScope::Tenant { tenant_id };
     let session_id =
@@ -516,7 +516,7 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
     let tenant_id = TenantId::from(Uuid::now_v7());
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
     let scope = ActionRuleScope::Tenant { tenant_id };
     let session_id =

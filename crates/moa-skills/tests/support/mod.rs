@@ -459,7 +459,7 @@ pub fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScop
 
 /// Returns the tenant storage key for session-scoped learning rows.
 pub fn session_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
-    StoragePartitionId::new(session.tenant_id.to_string())
+    StoragePartitionId::for_tenant(session.tenant_id)
 }
 
 fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> TenantId {

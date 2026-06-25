@@ -7,10 +7,7 @@ use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 use moa_core::{SessionId, StoragePartitionId, UserId};
 use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 use super::corpus::{
@@ -19,6 +16,12 @@ use super::corpus::{
     write_manifest_json, write_probes_jsonl, write_sessions_jsonl,
 };
 use moa_eval_core::{EvalError, Result};
+
+mod io;
+mod rendering;
+
+use io::{io_error, read_jsonl, write_jsonl};
+use rendering::{distractor_transcript, render_fact_transcript, should_restate_dependency};
 
 const REQUIRED_SEED_COUNT: usize = 3;
 const PR_USER_COUNT: usize = 5;
@@ -494,7 +497,7 @@ impl FactSchedule {
                             .unwrap_or(u64::MAX);
                         turns.push(SyntheticTurn {
                             turn_seq,
-                            transcript: natural_frames::distractor(session_key),
+                            transcript: distractor_transcript(session_key),
                             fact_ids: Vec::new(),
                         });
                     }
@@ -1603,10 +1606,6 @@ fn build_embedding_inputs(facts: &[LedgerFact], probes: &[Probe]) -> Vec<Embeddi
     inputs
 }
 
-fn should_restate_dependency(fact_id: &str) -> bool {
-    matches!(natural_frames::tenant_frame_index(fact_id), 1 | 3)
-}
-
 fn validate_seeds(seeds: &[u64]) -> Result<()> {
     if seeds.len() != REQUIRED_SEED_COUNT {
         return invalid_config(format!(
@@ -1731,202 +1730,6 @@ fn validate_embedding_inputs(
         }
     }
     Ok(())
-}
-
-fn render_fact_transcript(
-    transcript_style: TranscriptStyle,
-    category: FactCategory,
-    fact: &LedgerFact,
-    facts_by_id: &BTreeMap<&str, &LedgerFact>,
-) -> String {
-    if let Some(canonical) = fact
-        .restates
-        .as_deref()
-        .and_then(|canonical_id| facts_by_id.get(canonical_id))
-    {
-        return render_fact_transcript(transcript_style, category, canonical, facts_by_id);
-    }
-
-    match transcript_style {
-        TranscriptStyle::Marked => render_marked_fact_transcript(category, fact),
-        TranscriptStyle::Natural => {
-            natural_frames::render_fact(category, fact, superseded_object(fact, facts_by_id))
-        }
-    }
-}
-
-fn render_marked_fact_transcript(category: FactCategory, fact: &LedgerFact) -> String {
-    let scope_marker = match fact.scope {
-        ScopeTier::Tenant => "tenant shared ",
-        ScopeTier::Contact => "contact private ",
-    };
-    match category {
-        FactCategory::Supersession => format!(
-            "Fact: {scope_marker}{} {} is {}. Supersedes: {}.",
-            fact.subject,
-            fact.predicate,
-            fact.object,
-            list_or_none(&fact.supersedes)
-        ),
-        FactCategory::Contradiction => format!(
-            "Fact: {scope_marker}{} {} is {}. This is an unresolved contradictory claim.",
-            fact.subject, fact.predicate, fact.object
-        ),
-        FactCategory::TenantShared => format!(
-            "Fact: tenant shared {} {} is {}.",
-            fact.subject, fact.predicate, fact.object
-        ),
-        FactCategory::UserPrivate => format!(
-            "Fact: contact private {} {} is {}.",
-            fact.subject, fact.predicate, fact.object
-        ),
-        FactCategory::Temporal => format!(
-            "Fact: tenant shared {} {} is {} from {} until {}. Supersedes: {}.",
-            fact.subject,
-            fact.predicate,
-            fact.object,
-            fact.valid_from.to_rfc3339(),
-            fact.valid_to
-                .map(|valid_to| valid_to.to_rfc3339())
-                .unwrap_or_else(|| "open-ended".to_string()),
-            list_or_none(&fact.supersedes)
-        ),
-        FactCategory::Preference => format!(
-            "Fact: preference {} {} is {}.",
-            fact.subject, fact.predicate, fact.object
-        ),
-        FactCategory::Pii => format!(
-            "Fact: pii {} {} is {}. Expected answer must be redacted.",
-            fact.subject, fact.predicate, fact.object
-        ),
-    }
-}
-
-fn superseded_object<'a>(
-    fact: &LedgerFact,
-    facts_by_id: &'a BTreeMap<&str, &LedgerFact>,
-) -> Option<&'a str> {
-    fact.supersedes
-        .first()
-        .and_then(|fact_id| facts_by_id.get(fact_id.as_str()))
-        .map(|superseded| superseded.object.as_str())
-}
-
-mod natural_frames {
-    use super::{FactCategory, LedgerFact, ScopeTier, mix_u64};
-
-    const USER_FRAMES: &[&str] = &[
-        "Just so you know, I prefer {object} when it comes to {subject}.",
-        "For my work, {subject} should use {object}.",
-        "I switched my {subject} to {object} recently.",
-        "My {subject} {predicate_phrase} {object} these days.",
-    ];
-    const TENANT_FRAMES: &[&str] = &[
-        "The team agreed that {subject} {predicate_phrase} {object}.",
-        "Heads up everyone: {subject} now {predicate_phrase} {object}.",
-        "We standardized {subject} on {object} last sprint.",
-        "{subject} {predicate_phrase} {object} per the platform decision.",
-    ];
-    const UPDATE_FRAMES: &[&str] = &[
-        "Quick update: {subject} {predicate_phrase} {object} now, not {old_object} anymore.",
-        "Correction to earlier: {subject} moved to {object}.",
-    ];
-    const DISTRACTORS: &[&str] = &[
-        "Thanks, that all sounds reasonable to me.",
-        "Busy week here, lots of meetings about nothing in particular.",
-    ];
-
-    pub(super) fn render_fact(
-        category: FactCategory,
-        fact: &LedgerFact,
-        old_object: Option<&str>,
-    ) -> String {
-        if matches!(
-            category,
-            FactCategory::Supersession | FactCategory::Temporal
-        ) && !fact.supersedes.is_empty()
-        {
-            let frame = select(&fact.fact_id, UPDATE_FRAMES);
-            return apply_frame(
-                frame,
-                fact,
-                old_object.unwrap_or("the previous value"),
-                predicate_phrase(&fact.predicate),
-            );
-        }
-
-        let frames = if fact.scope == ScopeTier::Contact {
-            USER_FRAMES
-        } else {
-            TENANT_FRAMES
-        };
-        apply_frame(
-            select(&fact.fact_id, frames),
-            fact,
-            "the previous value",
-            predicate_phrase(&fact.predicate),
-        )
-    }
-
-    pub(super) fn distractor(session_key: &str) -> String {
-        let index = stable_index(session_key, DISTRACTORS.len());
-        DISTRACTORS[index].to_string()
-    }
-
-    pub(super) fn predicate_phrase(predicate: &str) -> &'static str {
-        match predicate {
-            "cache_backend_conflict" => "has cache backend",
-            "contact_email" => "uses contact email",
-            "depends_on" => "depends on",
-            "deploy_target" => "deploys to",
-            "on_call_primary" => "has primary on-call",
-            "owned_by" => "is owned by",
-            "private_repository" => "keeps private repository",
-            "require_runbook" => "requires",
-            "response_style" => "uses response style",
-            _ => "is",
-        }
-    }
-
-    /// Returns the deterministic tenant-frame index selected for a fact key.
-    pub(super) fn tenant_frame_index(key: &str) -> usize {
-        stable_index(key, TENANT_FRAMES.len())
-    }
-
-    fn select<'a>(key: &str, frames: &'a [&str]) -> &'a str {
-        let index = stable_index(key, frames.len());
-        frames[index]
-    }
-
-    fn stable_index(key: &str, len: usize) -> usize {
-        let mut state = 0xD1B5_4A32_D192_ED03_u64;
-        for byte in key.bytes() {
-            state ^= u64::from(byte);
-            state = mix_u64(state);
-        }
-        (state as usize) % len
-    }
-
-    fn apply_frame(
-        frame: &str,
-        fact: &LedgerFact,
-        old_object: &str,
-        predicate_phrase: &str,
-    ) -> String {
-        frame
-            .replace("{subject}", &fact.subject)
-            .replace("{predicate_phrase}", predicate_phrase)
-            .replace("{object}", &fact.object)
-            .replace("{old_object}", old_object)
-    }
-}
-
-fn list_or_none(values: &[String]) -> String {
-    if values.is_empty() {
-        "none".to_string()
-    } else {
-        values.join(",")
-    }
 }
 
 fn next_turn_seq(turns: &mut BTreeMap<String, u64>, key: &str) -> Result<u64> {
@@ -2291,60 +2094,6 @@ fn sessions_per_user(sessions: &[SyntheticSession]) -> BTreeMap<String, usize> {
     counts
 }
 
-async fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
-where
-    T: DeserializeOwned,
-{
-    let file = File::open(path)
-        .await
-        .map_err(|source| io_error(path, source))?;
-    let mut lines = BufReader::new(file).lines();
-    let mut records = Vec::new();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|source| io_error(path, source))?
-    {
-        if line.trim().is_empty() {
-            continue;
-        }
-        records.push(serde_json::from_str(&line)?);
-    }
-    Ok(records)
-}
-
-async fn write_jsonl<T>(path: &Path, records: &[T]) -> Result<()>
-where
-    T: Serialize,
-{
-    ensure_parent_dir(path).await?;
-    let mut file = File::create(path)
-        .await
-        .map_err(|source| io_error(path, source))?;
-    for record in records {
-        let line = serde_json::to_vec(record)?;
-        file.write_all(&line)
-            .await
-            .map_err(|source| io_error(path, source))?;
-        file.write_all(b"\n")
-            .await
-            .map_err(|source| io_error(path, source))?;
-    }
-    file.flush().await.map_err(|source| io_error(path, source))
-}
-
-async fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| io_error(parent, source))?;
-    }
-    Ok(())
-}
-
 fn missing_reference(kind: &str, seed_index: usize, index: usize) -> EvalError {
     EvalError::InvalidConfig(format!(
         "missing generated {kind} for seed index {seed_index}, record index {index}"
@@ -2360,13 +2109,6 @@ fn ensure_non_empty(label: &str, value: &str) -> Result<()> {
 
 fn invalid_config<T>(message: impl Into<String>) -> Result<T> {
     Err(EvalError::InvalidConfig(message.into()))
-}
-
-fn io_error(path: &Path, source: std::io::Error) -> EvalError {
-    EvalError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
 }
 
 #[cfg(test)]

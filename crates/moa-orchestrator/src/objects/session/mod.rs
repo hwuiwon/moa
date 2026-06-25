@@ -4,11 +4,11 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use moa_core::wire::{
+use moa_core::wire::session_store::UpdateStatusRequest;
+use moa_core::wire::turn::{
     CancelResponse, PendingMessage, QueueMessageRequest, QueueMessageResponse, RunTurnRequest,
     SessionProgress, SessionProgressRequest, SessionSnapshot, StartTurnRequest, StartTurnResponse,
     TurnOutcome as ExecutionTurnOutcome, TurnOutcomeKind as ExecutionTurnOutcomeKind, TurnProgress,
-    UpdateStatusRequest,
 };
 use moa_core::{
     ActiveSegment, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,

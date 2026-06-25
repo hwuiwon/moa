@@ -7,7 +7,7 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
+use moa_core::wire::turn::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
     EventRange, EventRecord, EventType, MoaError, ModelId, SessionActorRef, SessionId, SessionMeta,

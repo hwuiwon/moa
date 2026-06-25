@@ -4,7 +4,7 @@ use chrono::{TimeZone, Utc};
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_artifacts::validation::validate_for_status;
-use moa_core::wire::{
+use moa_core::wire::experiments::{
     ExperimentCancelRequest, ExperimentCancelResponse, ExperimentCompareRequest,
     ExperimentCompareResponse, ExperimentCompareRow, ExperimentGeneratePlanRequest,
     ExperimentGeneratePlanResponse, ExperimentListRequest, ExperimentListResponse,

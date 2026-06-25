@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
-use moa_core::wire::{
+use moa_core::wire::session_store::{
     GetLearningCandidateRequest, LearningCandidateReviewAction, LearningCandidateReviewRequest,
 };
 use moa_core::{

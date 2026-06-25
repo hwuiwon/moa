@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
-use moa_core::{MoaConfig, TenantId};
+use moa_core::{MoaConfig, StoragePartitionId, TenantId};
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -125,7 +125,7 @@ impl TurbopufferStore {
     /// Returns a clone scoped to one tenant's storage partition.
     #[must_use]
     pub fn scoped_to_tenant(&self, tenant_id: TenantId) -> Self {
-        self.with_storage_partition_id(tenant_id.to_string())
+        self.with_storage_partition_id(StoragePartitionId::for_tenant(tenant_id).to_string())
     }
 
     /// Returns a clone scoped to one explicit storage partition.

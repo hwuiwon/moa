@@ -6,7 +6,7 @@ use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, StoredArtifact
 use moa_artifacts::simulation::experiment_plan_response_schema;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::experiments::{
     AgentRevisionSimulationVariant, ExperimentCancelRequest, ExperimentCancelResponse,
     ExperimentCompareRequest, ExperimentCompareResponse, ExperimentCompareRow,
     ExperimentGeneratePlanRequest, ExperimentGeneratePlanResponse, ExperimentListRequest,

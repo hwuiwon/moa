@@ -23,7 +23,7 @@ use moa_brain::{
     planning::{PlannedQuery, Strategy},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };
-use moa_core::{TenantId, traits::EmbeddingProvider};
+use moa_core::{StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_types::{MemoryScope, ScopeContext};

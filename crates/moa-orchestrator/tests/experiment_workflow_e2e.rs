@@ -7,11 +7,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::traits::Identity;
-use moa_core::wire::{
+use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
-    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
-    ExperimentRunStatusResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
+use moa_core::wire::experiments::{
+    ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
+    ExperimentRunStatusResponse,
+};
+use moa_core::wire::workflows::{WorkflowRunStatus, WorkflowStatusRequest};
 use moa_core::{ActionRuleScope, StoragePartitionId, TenantId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
@@ -71,7 +74,7 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 

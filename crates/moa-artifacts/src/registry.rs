@@ -33,7 +33,7 @@ impl ArtifactScopeParts {
         match scope {
             ActionRuleScope::Tenant { tenant_id } => Self {
                 tenant_id: Some(tenant_id.0),
-                storage_partition_id: Some(tenant_id.to_string()),
+                storage_partition_id: Some(StoragePartitionId::for_tenant(*tenant_id).to_string()),
                 user_id: None,
             },
         }

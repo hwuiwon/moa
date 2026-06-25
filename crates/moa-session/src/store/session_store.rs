@@ -38,7 +38,7 @@ impl PostgresSessionStore {
         validate_session_create_meta(&meta)?;
         let session_id = meta.id;
         let tenant_id = meta.tenant_id;
-        let tenant_storage_key = tenant_id.to_string();
+        let tenant_storage_key = StoragePartitionId::for_tenant(tenant_id);
         let actor_storage_key = session_actor_storage_key(meta.created_by.as_ref());
         let status = meta.status.clone();
         let agent_context = meta.agent_context.clone();
@@ -124,6 +124,7 @@ impl PostgresSessionStore {
         context: &moa_core::AgentContext,
     ) -> Result<()> {
         let table = self.table_name("session_agent_context");
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
         sqlx::query(&format!(
             r#"
             INSERT INTO {table} (
@@ -136,7 +137,7 @@ impl PostgresSessionStore {
             "#
         ))
         .bind(session_id.0)
-        .bind(tenant_id.to_string())
+        .bind(storage_partition_id.as_str())
         .bind(actor_storage_key)
         .bind(context.agent_id)
         .bind(context.installation_uid)

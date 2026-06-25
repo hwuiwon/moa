@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use moa_core::wire::AppendEventRequest;
+use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::{
     Event, EventRange, EventRecord, EventType, MoaConfig, MoaError, Result as MoaResult, SegmentId,
     SessionId, SessionStore as _,

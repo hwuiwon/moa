@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use moa_core::wire::{AppendEventRequest, RecordSegmentTurnUsageRequest};
+use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentTurnUsageRequest};
 use moa_core::{
     AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput, CompleteSubAgentChildInput,
     CompletionRequest, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
@@ -110,7 +110,7 @@ pub trait SubAgent {
 
     /// Records the terminal outcome delivered by a sub-agent turn workflow.
     async fn record_turn_outcome(
-        outcome: Json<moa_core::wire::TurnOutcome>,
+        outcome: Json<moa_core::wire::turn::TurnOutcome>,
     ) -> Result<(), HandlerError>;
 
     /// Clears all persisted state for this child key.

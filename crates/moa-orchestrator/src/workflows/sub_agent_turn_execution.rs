@@ -8,9 +8,10 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use moa_core::wire::{
-    AppendEventRequest, RecordSegmentToolUseRequest, RunSubAgentTurnRequest, TurnComplexityClass,
-    TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
+use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
+use moa_core::wire::turn::{
+    RunSubAgentTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase,
+    TurnProgress,
 };
 use moa_core::{
     ActionPolicyEffect, CompletionContent, CompletionRequest, CompletionResponse, Event, ModelTier,
@@ -1122,7 +1123,7 @@ fn session_actor_storage_id(actor: &moa_core::SessionActorRef) -> String {
 #[cfg(test)]
 mod tests {
     use moa_core::SessionId;
-    use moa_core::wire::TurnPhase;
+    use moa_core::wire::turn::TurnPhase;
 
     use super::{is_terminal_phase, parent_session_from_initial_message};
 

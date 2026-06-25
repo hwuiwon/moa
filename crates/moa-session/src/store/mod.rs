@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
-use moa_core::wire::LearningCandidateSummary;
+use moa_core::wire::analytics::LearningCandidateSummary;
 use moa_core::{
     ActionPolicyRule, BlobStore, CacheDailyMetric, ChannelAccountId, ChannelRef, ClaimCheck,
     ContactId, ContactPointId, ContextSnapshot, Event, EventFilter, EventRange, EventRecord,

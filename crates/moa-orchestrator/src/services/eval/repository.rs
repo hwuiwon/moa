@@ -1,10 +1,10 @@
 //! SQL repository helpers for hosted eval datasets.
 
-use moa_core::TenantId;
-use moa_core::wire::{
+use moa_core::wire::eval::{
     EvalDatasetListRequest, EvalDatasetListResponse, EvalDatasetRegisterRequest,
     EvalDatasetRegisterResponse, EvalDatasetSummary,
 };
+use moa_core::{StoragePartitionId, TenantId};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
@@ -91,7 +91,7 @@ pub(super) async fn register_dataset_for_tenant(
     pool: &PgPool,
     request: EvalDatasetRegisterRequest,
 ) -> Result<EvalDatasetRegisterResponse, EvalServiceError> {
-    let storage_partition_id = request.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let items = parse_dataset_items_for_tenant(
         request.tenant_id,
         request.source_uri.as_deref(),
@@ -149,7 +149,7 @@ pub(super) async fn register_dataset_for_tenant(
     item_insert.push_values(&items, |mut row, item| {
         row.push_bind(item.item_id)
             .push_bind(dataset_id)
-            .push_bind(item.tenant_id.to_string())
+            .push_bind(StoragePartitionId::for_tenant(item.tenant_id).to_string())
             .push_bind(sqlx::types::Json(&item.scope))
             .push_bind(&item.query)
             .push_bind(item.expected_answer.as_deref())
@@ -172,7 +172,7 @@ pub(super) async fn list_datasets_for_tenant(
     pool: &PgPool,
     request: EvalDatasetListRequest,
 ) -> Result<EvalDatasetListResponse, EvalServiceError> {
-    let storage_partition_id = request.tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
     let rows = sqlx::query(
         r#"
         SELECT d.dataset_id, d.name, d.source_path, COUNT(i.item_id)::BIGINT AS items
@@ -223,7 +223,7 @@ pub(super) async fn load_dataset_items_for_tenant(
     dataset_id: Uuid,
     limit: Option<usize>,
 ) -> Result<Vec<ScopedDatasetItem>, EvalServiceError> {
-    let storage_partition_id = tenant_id.to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
     let limit = i64::try_from(limit.unwrap_or(1000))
         .map_err(|_| EvalServiceError::IntegerTooLarge { field: "limit" })?;
     let rows = sqlx::query(

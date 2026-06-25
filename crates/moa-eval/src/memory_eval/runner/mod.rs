@@ -16,8 +16,8 @@ use moa_brain::retrieval::{
     RetrievalHit,
 };
 use moa_core::{
-    ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, UserId,
-    config::MemoryExtractionConfig, traits::EmbeddingProvider,
+    ContactId, MemoryDigestConfig, UserId, config::MemoryExtractionConfig,
+    traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_ingest::{
@@ -35,25 +35,36 @@ use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::time::{Instant as TokioInstant, sleep_until};
 use uuid::Uuid;
 
+use super::scope::{
+    stable_uuid_from_label, tenant_id_from_label, tenant_id_from_storage_partition,
+    tenant_id_from_storage_partition_id,
+};
 use super::{
-    BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, ClusterBootstrapReport,
-    CorpusManifest, DEFAULT_BOOTSTRAP_RESAMPLES, DeterministicJudge, EmbeddingInput,
-    ExtractionPrecisionCounts, GoldPiiStatus, GoldResolutionReport, JudgeInput, JudgeOutcome,
-    LedgerFact, Probe, ProbeResult, ProbeType, RetrievalMetrics, RetrievedCandidate,
-    SyntheticSession, candidates_from_retrieval_hits, embedding_text_hash,
-    read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl, read_manifest_json,
-    read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes, validate_corpus,
+    BootstrapConfig, CachedEmbeddingFixture, CachedEmbeddingProvider, CorpusManifest,
+    DEFAULT_BOOTSTRAP_RESAMPLES, DeterministicJudge, EmbeddingInput, ExtractionPrecisionCounts,
+    GoldPiiStatus, GoldResolutionReport, JudgeInput, JudgeOutcome, LedgerFact, Probe, ProbeResult,
+    ProbeType, RetrievedCandidate, SyntheticSession, candidates_from_retrieval_hits,
+    embedding_text_hash, read_embedding_inputs_jsonl, read_embeddings_jsonl, read_ledger_jsonl,
+    read_manifest_json, read_probes_jsonl, read_sessions_jsonl, resolve_gold_nodes,
+    validate_corpus,
 };
 use crate::kernel::{
     CostLedger, CountingEmbedder, CountingExtractor, CountingMergeVerifier, CountingReranker,
     FixtureStore, ProviderProvenance, SharedCostLedger,
 };
 use moa_eval_core::{EvalError, Result};
+
+mod report;
+mod rewrite;
+
+pub use report::{MemoryRetrievalEvalReport, QueryRewriteClassMetrics};
+
+use report::{ReportBuildInput, build_eval_report};
+use rewrite::{QueryRewriteAccounting, QueryRewriteSummary, probe_for_rewrite_policy};
 
 /// Number of fused candidates collected for each probe before metric truncation.
 pub const RETRIEVAL_EVAL_CANDIDATE_K: usize = 25;
@@ -417,88 +428,6 @@ fn default_merges_path(manifest: &CorpusManifest) -> PathBuf {
         "merges-{}-{}.jsonl",
         manifest.corpus_id, MERGE_PROMPT_VERSION
     ))
-}
-
-/// JSON report written by `run-memory-retrieval-eval`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MemoryRetrievalEvalReport {
-    /// Corpus manifest loaded for this run.
-    pub manifest: CorpusManifest,
-    /// Number of candidates requested from production retrieval for metric scoring.
-    pub candidate_k: usize,
-    /// Final answer-context cutoff used by recall@4 and nDCG@4 metrics.
-    pub final_k: usize,
-    /// Whether the eval collected a post-rerank top-4 retrieval pass.
-    #[serde(default)]
-    pub reranker_enabled: bool,
-    /// Query rewrite policy used by this run.
-    #[serde(default)]
-    pub query_rewrite_policy: QueryRewritePolicy,
-    /// Number of probes whose retrieval query came from a rewrite fixture.
-    #[serde(default, skip_serializing_if = "is_zero_usize")]
-    pub query_rewrite_call_count: usize,
-    /// Number of probes that used the original query.
-    #[serde(default, skip_serializing_if = "is_zero_usize")]
-    pub query_rewrite_skip_count: usize,
-    /// Fraction of probes that used a rewrite fixture.
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
-    pub query_rewrite_call_rate: f64,
-    /// PR-lane deterministic p50 rewrite latency.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub query_rewrite_p50_latency_ms: u64,
-    /// PR-lane deterministic p95 rewrite latency.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub query_rewrite_p95_latency_ms: u64,
-    /// Estimated rewrite input tokens.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub query_rewrite_input_tokens: u64,
-    /// Estimated rewrite output tokens.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub query_rewrite_output_tokens: u64,
-    /// Estimated rewrite cost in USD.
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
-    pub query_rewrite_est_usd: f64,
-    /// p95 latency with rewrite latency included.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub retrieval_plus_rewrite_p95_latency_ms: u64,
-    /// Query rewrite accounting grouped by deterministic query class.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub query_rewrite_by_class: BTreeMap<String, QueryRewriteClassMetrics>,
-    /// Whether the runner stopped after crossing the configured live-lane budget.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub aborted_over_budget: bool,
-    /// Optional provider cost ledger for the run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<CostLedger>,
-    /// Optional provider provenance for the run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub providers: Option<ProviderProvenance>,
-    /// Aggregated retrieval metrics.
-    pub metrics: RetrievalMetrics,
-    /// Per-probe retrieval results with candidate attribution.
-    pub probe_results: Vec<ProbeResult>,
-    /// Cluster-bootstrap confidence intervals by user.
-    pub bootstrap: Vec<ClusterBootstrapReport>,
-    /// Probe ids that retrieved blocked facts.
-    pub cross_user_leak_probe_ids: Vec<String>,
-    /// Gold-resolution ingestion and fact-to-node mapping details.
-    pub gold_resolution: GoldResolutionReport,
-    /// Optional consolidation outcome collected after gold resolution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consolidation: Option<ConsolidationOutcome>,
-}
-
-/// Query rewrite accounting for one deterministic query class.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct QueryRewriteClassMetrics {
-    /// Total probes in this class.
-    pub total_count: usize,
-    /// Probes rewritten in this class.
-    pub call_count: usize,
-    /// Probes skipped in this class.
-    pub skip_count: usize,
-    /// Fraction rewritten in this class.
-    pub call_rate: f64,
 }
 
 /// Runs the hermetic memory-retrieval eval and writes `report.json`.
@@ -1037,222 +966,6 @@ fn default_live_budget_usd(profile: super::CorpusProfile) -> f64 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProbeRewriteDecision {
-    Original,
-    Rewritten,
-}
-
-#[derive(Debug, Clone)]
-struct QueryRewriteSummary {
-    policy: QueryRewritePolicy,
-    call_count: usize,
-    skip_count: usize,
-    input_tokens: u64,
-    output_tokens: u64,
-    by_class: BTreeMap<String, QueryRewriteClassMetrics>,
-}
-
-impl QueryRewriteSummary {
-    fn empty(policy: QueryRewritePolicy) -> Self {
-        Self {
-            policy,
-            call_count: 0,
-            skip_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            by_class: BTreeMap::new(),
-        }
-    }
-
-    fn total_count(&self) -> usize {
-        self.call_count + self.skip_count
-    }
-
-    fn call_rate(&self) -> f64 {
-        let total = self.total_count();
-        if total == 0 {
-            0.0
-        } else {
-            self.call_count as f64 / total as f64
-        }
-    }
-}
-
-struct QueryRewriteAccounting {
-    summary: QueryRewriteSummary,
-}
-
-impl QueryRewriteAccounting {
-    fn new(policy: QueryRewritePolicy) -> Self {
-        Self {
-            summary: QueryRewriteSummary::empty(policy),
-        }
-    }
-
-    fn record(&mut self, probe: &Probe) -> ProbeRewriteDecision {
-        let class = query_class_for_probe(probe);
-        let rewritten = match self.summary.policy {
-            QueryRewritePolicy::Off => false,
-            QueryRewritePolicy::Always => true,
-            QueryRewritePolicy::Gated => probe
-                .expected_rewrite
-                .unwrap_or_else(|| gated_rewrite_for_class(&class)),
-        };
-        let class_entry = self.summary.by_class.entry(class).or_default();
-        class_entry.total_count += 1;
-        if rewritten {
-            self.summary.call_count += 1;
-            class_entry.call_count += 1;
-            self.summary.input_tokens += approximate_tokens(&probe.query) as u64;
-            self.summary.output_tokens +=
-                approximate_tokens(&deterministic_rewrite_query(probe)) as u64;
-            ProbeRewriteDecision::Rewritten
-        } else {
-            self.summary.skip_count += 1;
-            class_entry.skip_count += 1;
-            ProbeRewriteDecision::Original
-        }
-    }
-
-    fn summary(mut self) -> QueryRewriteSummary {
-        for metrics in self.summary.by_class.values_mut() {
-            metrics.call_rate = if metrics.total_count == 0 {
-                0.0
-            } else {
-                metrics.call_count as f64 / metrics.total_count as f64
-            };
-        }
-        self.summary
-    }
-}
-
-fn query_class_for_probe(probe: &Probe) -> String {
-    if let Some(query_class) = probe.query_class.as_deref() {
-        return query_class.to_string();
-    }
-    if query_has_exact_anchor(&probe.query) {
-        return "exact_identifier".to_string();
-    }
-    match probe.probe_type {
-        ProbeType::MultiHop => "multi_hop",
-        ProbeType::PreferenceApplication => "vector_first",
-        ProbeType::TemporalAsOf => "explicit_temporal",
-        ProbeType::LatestValueAfterUpdate => "vague_followup",
-        _ => "explicit",
-    }
-    .to_string()
-}
-
-fn gated_rewrite_for_class(class: &str) -> bool {
-    matches!(
-        class,
-        "coreference" | "vague_followup" | "vector_first" | "multi_hop"
-    )
-}
-
-fn probe_for_rewrite_policy(probe: &Probe, decision: ProbeRewriteDecision) -> Probe {
-    if decision == ProbeRewriteDecision::Original {
-        return probe.clone();
-    }
-    let mut rewritten = probe.clone();
-    rewritten.query = deterministic_rewrite_query(probe);
-    rewritten
-}
-
-fn deterministic_rewrite_query(probe: &Probe) -> String {
-    if let Some(rewrite_query) = probe.rewrite_query.as_ref() {
-        return rewrite_query.clone();
-    }
-    match query_class_for_probe(probe).as_str() {
-        "vague_followup" => format!("Latest active memory for: {}", probe.query),
-        "vector_first" => format!(
-            "Semantic memory search for user/tenant context: {}",
-            probe.query
-        ),
-        "multi_hop" => format!("Graph relationship retrieval query: {}", probe.query),
-        _ => probe.query.clone(),
-    }
-}
-
-fn query_has_exact_anchor(query: &str) -> bool {
-    query.contains("://")
-        || query.contains('/')
-        || query.contains('"')
-        || query.split_whitespace().any(|token| {
-            let token = token.trim_matches(|ch: char| ch.is_ascii_punctuation());
-            token.contains('.')
-                || token
-                    .strip_prefix('#')
-                    .is_some_and(|rest| rest.chars().all(|ch| ch.is_ascii_digit()))
-        })
-}
-
-fn approximate_tokens(text: &str) -> usize {
-    text.split_whitespace().count()
-}
-
-struct ReportBuildInput {
-    manifest: CorpusManifest,
-    gold_resolution: GoldResolutionReport,
-    probe_results: Vec<ProbeResult>,
-    bootstrap_config: BootstrapConfig,
-    extraction_precision: ExtractionPrecisionCounts,
-    entity_fragmentation: super::EntityFragmentationCounts,
-    reranker_enabled: bool,
-    rewrite_summary: QueryRewriteSummary,
-    aborted_over_budget: bool,
-    cost: Option<CostLedger>,
-    providers: Option<ProviderProvenance>,
-    consolidation: Option<ConsolidationOutcome>,
-}
-
-fn build_eval_report(input: ReportBuildInput) -> MemoryRetrievalEvalReport {
-    let rewrite_p50_latency_ms = deterministic_rewrite_latency_ms(input.rewrite_summary.call_count);
-    let rewrite_p95_latency_ms = deterministic_rewrite_latency_ms(input.rewrite_summary.call_count);
-    let retrieval = super::aggregate_retrieval_eval_with_diagnostics(
-        &input.gold_resolution,
-        input.probe_results,
-        input.bootstrap_config,
-        input.extraction_precision,
-        input.entity_fragmentation,
-    );
-    let retrieval_plus_rewrite_p95_latency_ms = retrieval
-        .metrics
-        .p95_retrieval_latency_ms
-        .saturating_add(rewrite_p95_latency_ms);
-    MemoryRetrievalEvalReport {
-        manifest: input.manifest,
-        candidate_k: RETRIEVAL_EVAL_CANDIDATE_K,
-        final_k: RETRIEVAL_EVAL_FINAL_K,
-        reranker_enabled: input.reranker_enabled,
-        query_rewrite_policy: input.rewrite_summary.policy,
-        query_rewrite_call_count: input.rewrite_summary.call_count,
-        query_rewrite_skip_count: input.rewrite_summary.skip_count,
-        query_rewrite_call_rate: input.rewrite_summary.call_rate(),
-        query_rewrite_p50_latency_ms: rewrite_p50_latency_ms,
-        query_rewrite_p95_latency_ms: rewrite_p95_latency_ms,
-        query_rewrite_input_tokens: input.rewrite_summary.input_tokens,
-        query_rewrite_output_tokens: input.rewrite_summary.output_tokens,
-        query_rewrite_est_usd: 0.0,
-        retrieval_plus_rewrite_p95_latency_ms,
-        query_rewrite_by_class: input.rewrite_summary.by_class,
-        aborted_over_budget: input.aborted_over_budget,
-        cost: input.cost,
-        providers: input.providers,
-        metrics: retrieval.metrics,
-        probe_results: retrieval.probe_results,
-        bootstrap: retrieval.bootstrap,
-        cross_user_leak_probe_ids: retrieval.cross_user_leak_probe_ids,
-        gold_resolution: input.gold_resolution,
-        consolidation: input.consolidation,
-    }
-}
-
-fn deterministic_rewrite_latency_ms(call_count: usize) -> u64 {
-    if call_count == 0 { 0 } else { 1 }
-}
-
 async fn check_budget(
     ledger: &SharedCostLedger,
 ) -> std::result::Result<(), crate::kernel::CostError> {
@@ -1261,22 +974,6 @@ async fn check_budget(
 
 async fn cost_snapshot(ledger: &SharedCostLedger) -> CostLedger {
     ledger.lock().await.clone()
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
-}
-
-fn is_zero_u64(value: &u64) -> bool {
-    *value == 0
-}
-
-fn is_zero_f64(value: &f64) -> bool {
-    *value == 0.0
 }
 
 pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
@@ -2122,33 +1819,10 @@ fn scope_tier_name(scope: ScopeTier) -> &'static str {
     }
 }
 
-fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
-    tenant_id_from_storage_partition(storage_partition_id.as_str())
-}
-
-fn tenant_id_from_storage_partition(storage_partition: &str) -> TenantId {
-    uuid::Uuid::parse_str(storage_partition)
-        .map(TenantId::from)
-        .unwrap_or_else(|_| tenant_id_from_label(storage_partition))
-}
-
-fn tenant_id_from_label(label: &str) -> TenantId {
-    TenantId::from(stable_uuid_from_label(label))
-}
-
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
     uuid::Uuid::parse_str(user_id.as_str())
         .map(ContactId)
         .unwrap_or_else(|_| ContactId(stable_uuid_from_label(user_id.as_str())))
-}
-
-fn stable_uuid_from_label(label: &str) -> Uuid {
-    let digest = Sha256::digest(label.as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn gold_records_by_fact_id(
@@ -2616,6 +2290,7 @@ mod tests {
     use crate::memory_eval::{
         CorpusProfile, generate_memory_eval_corpus, write_memory_eval_corpus,
     };
+    use moa_core::StoragePartitionId;
 
     #[test]
     fn live_lane_refuses_to_start_without_credentials() {

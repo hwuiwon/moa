@@ -75,7 +75,7 @@ pub(crate) async fn insert_review(
     let preview = serde_json::to_value(&request.preview)
         .map_err(|error| TerminalError::new(format!("serialize preview: {error}")))?;
     let tenant_id = request.envelope.tenant_id;
-    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let requested_by = session_actor_ref_to_storage(&request.envelope.requested_by);
     let insert = sqlx::query(
         r#"

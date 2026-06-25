@@ -99,7 +99,7 @@ fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) ->
 }
 
 fn lineage_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
-    StoragePartitionId::new(session.tenant_id.to_string())
+    StoragePartitionId::for_tenant(session.tenant_id)
 }
 
 fn lineage_user_id(session: &SessionMeta) -> UserId {

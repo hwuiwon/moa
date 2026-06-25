@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::wire::ToolDescriptor;
+use moa_core::wire::tools::ToolDescriptor;
 use moa_core::{
     ActionClass, BuiltInTool, Event, EventRecord, EventType, IdempotencyClass, RiskLevel, TenantId,
     ToolCallId, ToolCallRequest, ToolContext, ToolDefinition, ToolDiffStrategy, ToolInputShape,
