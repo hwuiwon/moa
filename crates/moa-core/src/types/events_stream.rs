@@ -49,6 +49,8 @@ pub enum EventType {
     BrainThinking,
     /// `BrainResponse`.
     BrainResponse,
+    /// `ProgressUpdate`.
+    ProgressUpdate,
     /// `GuardrailCheck`.
     GuardrailCheck,
     /// `ToolCall`.

@@ -1,0 +1,2 @@
+{"version":1,"scenario":"turn_responsiveness_vague_fix_this_clarification","expected_final_answer_fragments":["What should I change?","Point me at the file"],"probe_ids":["turn-responsiveness-clarification"]}
+{"user":{"text":"fix this"},"probe_ids":["vague-deictic-request"]}

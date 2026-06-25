@@ -13,4 +13,6 @@ pub mod experiment_trial_run;
 pub mod skill_learning;
 pub mod sub_agent_turn_execution;
 pub mod turn_execution;
+pub(crate) mod turn_progress;
+pub(crate) mod turn_responsiveness;
 pub mod workflow_node_actions;

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,6 +17,8 @@ use serde_json::json;
 use tempfile::tempdir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+const RESPONSIVENESS_CLARIFICATION: &str = "What should I change? Point me at the file, message, object, or output and the specific fix you want.";
 
 #[test]
 fn long_case_accepts_scripted_user_without_transcript() {
@@ -366,6 +368,66 @@ async fn offline_scripted_user_replays_distilled_dispute_failure_without_live_si
     Ok(())
 }
 
+#[tokio::test]
+async fn responsiveness_scripted_user_replays_vague_fix_this_clarification() -> TestResult {
+    if std::env::var_os("MOA_DATABASE_URL").is_none() {
+        return Ok(());
+    }
+
+    let scenario_dir = responsiveness_fixture_dir();
+    let temp = tempdir()?;
+    let case = TestCase {
+        kind: TestCaseKind::Long,
+        name: "turn_responsiveness_vague_fix_this_clarification".to_string(),
+        long: Some(LongTestCase {
+            goal_card: Some(scenario_dir.join("goal_card.md")),
+            scripted_user: Some(scenario_dir.join("scripted_user.jsonl")),
+            expectations: scenario_dir.join("expectations.toml"),
+            mode: LongConversationMode::ScriptedUser,
+            ..LongTestCase::default()
+        }),
+        ..TestCase::default()
+    };
+    let agent_config = AgentConfig {
+        name: "scripted-user-responsiveness-agent".to_string(),
+        ..AgentConfig::default()
+    };
+    let mut base_config = MoaConfig::default();
+    base_config.database.url = moa_test_support::postgres::test_database_url();
+    base_config.query_rewrite.enabled = false;
+
+    let provider = Arc::new(ResponsivenessClarificationProvider::default());
+    let llm_provider: Arc<dyn LLMProvider> = provider.clone();
+    let report = run_scenario_with_provider(
+        &base_config,
+        &agent_config,
+        &EngineOptions {
+            temp_dir: temp.path().join("runs"),
+            ..EngineOptions::default()
+        },
+        &case,
+        llm_provider,
+    )
+    .await?;
+
+    assert_eq!(report.result.status, EvalStatus::Passed);
+    assert_eq!(
+        report.result.response.as_deref(),
+        Some(RESPONSIVENESS_CLARIFICATION)
+    );
+    assert_eq!(report.score_card.functional.turn_count, 1);
+    assert_eq!(report.result.metrics.turn_count, 1);
+    assert_eq!(provider.seen_user_messages(), vec!["fix this".to_string()]);
+    assert!(
+        !report.events.iter().any(|event| matches!(
+            event,
+            Event::ActionReviewRequested { .. } | Event::ToolCall { .. }
+        )),
+        "responsiveness fixture should clarify without tool dispatch or action review"
+    );
+    Ok(())
+}
+
 #[derive(Default)]
 struct ToolThenFinalProvider {
     seen_user_messages: Mutex<Vec<String>>,
@@ -519,6 +581,73 @@ impl LLMProvider for ClarifyingDisputeProvider {
     }
 }
 
+#[derive(Default)]
+struct ResponsivenessClarificationProvider {
+    seen_user_messages: Mutex<Vec<String>>,
+}
+
+impl ResponsivenessClarificationProvider {
+    fn seen_user_messages(&self) -> Vec<String> {
+        self.seen_user_messages
+            .lock()
+            .expect("seen user messages lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LLMProvider for ResponsivenessClarificationProvider {
+    fn name(&self) -> &str {
+        "scripted-user-responsiveness"
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            model_id: ModelId::new("scripted-user-responsiveness-model"),
+            context_window: 32_000,
+            max_output: 1_024,
+            supports_tools: true,
+            supports_vision: false,
+            supports_prefix_caching: false,
+            cache_ttl: None,
+            tool_call_format: ToolCallFormat::Anthropic,
+            pricing: TokenPricing {
+                input_per_mtok: 0.0,
+                output_per_mtok: 0.0,
+                cached_input_per_mtok: Some(0.0),
+                cache_write_5m_per_mtok: None,
+                cache_write_1h_per_mtok: None,
+            },
+            native_tools: Vec::new(),
+        }
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> moa_core::Result<CompletionStream> {
+        let latest_user = latest_user_message(&request).unwrap_or_default();
+        if latest_user != "fix this" {
+            return Err(moa_core::MoaError::ProviderError(format!(
+                "unexpected responsiveness fixture user message: {latest_user}"
+            )));
+        }
+        self.seen_user_messages
+            .lock()
+            .map_err(|error| moa_core::MoaError::ProviderError(error.to_string()))?
+            .push(latest_user);
+
+        Ok(CompletionStream::from_response(CompletionResponse {
+            text: RESPONSIVENESS_CLARIFICATION.to_string(),
+            content: vec![CompletionContent::Text(
+                RESPONSIVENESS_CLARIFICATION.to_string(),
+            )],
+            stop_reason: StopReason::EndTurn,
+            model: self.capabilities().model_id,
+            usage: token_usage(12, 12),
+            duration_ms: 1,
+            thought_signature: None,
+        }))
+    }
+}
+
 fn latest_user_message(request: &CompletionRequest) -> Option<String> {
     request
         .messages
@@ -528,6 +657,11 @@ fn latest_user_message(request: &CompletionRequest) -> Option<String> {
             message.role == MessageRole::User && !message.content.starts_with("<system-reminder>")
         })
         .map(|message| message.content.clone())
+}
+
+fn responsiveness_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scenarios/long_conversation/turn_responsiveness_vague_fix_this_clarification")
 }
 
 fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {

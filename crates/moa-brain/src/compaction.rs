@@ -206,6 +206,11 @@ fn event_summary_line(record: &EventRecord) -> Option<String> {
             record.sequence_num,
             truncate(text)
         )),
+        Event::ProgressUpdate { phase, summary, .. } => Some(format!(
+            "#{} progress {phase}: {}",
+            record.sequence_num,
+            truncate(summary)
+        )),
         Event::ToolCall {
             tool_name, input, ..
         } => Some(format!(

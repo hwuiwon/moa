@@ -17,3 +17,5 @@ mod session_vo_e2e;
 mod support;
 #[path = "integration/tool_executor_e2e.rs"]
 mod tool_executor_e2e;
+#[path = "integration/turn_responsiveness_e2e.rs"]
+mod turn_responsiveness_e2e;

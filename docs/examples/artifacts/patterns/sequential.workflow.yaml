@@ -32,7 +32,7 @@ definition:
           y: 140
       - id: check_policy
         kind: skill_action
-        ref: skill://refund-policy
+        ref: action://refund_policy.check
         input:
           mode: deterministic_check
         ui:

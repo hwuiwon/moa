@@ -287,8 +287,18 @@ pub struct MoaEnvOverlay {
     pub budgets_daily_workspace_cents: Option<u32>,
     /// `MOA_SESSION_LIMITS_MAX_TURNS`.
     pub session_limits_max_turns: Option<u32>,
+    /// `MOA_SESSION_LIMITS_SIMPLE_MAX_TURNS`.
+    pub session_limits_simple_max_turns: Option<u32>,
+    /// `MOA_SESSION_LIMITS_STANDARD_MAX_TURNS`.
+    pub session_limits_standard_max_turns: Option<u32>,
+    /// `MOA_SESSION_LIMITS_MAX_TOOL_CALLS`.
+    pub session_limits_max_tool_calls: Option<u32>,
     /// `MOA_SESSION_LIMITS_LOOP_DETECTION_THRESHOLD`.
     pub session_limits_loop_detection_threshold: Option<u32>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_FIRST_DELAY_MS`.
+    pub session_limits_progress_first_delay_ms: Option<u64>,
+    /// `MOA_SESSION_LIMITS_PROGRESS_INTERVAL_MS`.
+    pub session_limits_progress_interval_ms: Option<u64>,
     /// `MOA_TOOL_OUTPUT_MAX_REPLAY_CHARS`.
     pub tool_output_max_replay_chars: Option<usize>,
     /// `MOA_TOOL_OUTPUT_MAX_BASH_LINES`.
@@ -675,8 +685,28 @@ impl MoaEnvOverlay {
             self.session_limits_max_turns,
         );
         set_copy_if_some(
+            &mut config.session_limits.simple_max_turns,
+            self.session_limits_simple_max_turns,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.standard_max_turns,
+            self.session_limits_standard_max_turns,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.max_tool_calls,
+            self.session_limits_max_tool_calls,
+        );
+        set_copy_if_some(
             &mut config.session_limits.loop_detection_threshold,
             self.session_limits_loop_detection_threshold,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.progress_first_delay_ms,
+            self.session_limits_progress_first_delay_ms,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.progress_interval_ms,
+            self.session_limits_progress_interval_ms,
         );
         self.apply_tooling(config);
         self.apply_query_rewrite(config);

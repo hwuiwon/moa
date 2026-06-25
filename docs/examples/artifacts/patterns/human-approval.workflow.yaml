@@ -18,7 +18,7 @@ definition:
           y: 150
       - id: draft_action
         kind: skill_action
-        ref: skill://refund-policy
+        ref: action://refund_policy.draft_refund
         input:
           operation: draft_refund
         ui:

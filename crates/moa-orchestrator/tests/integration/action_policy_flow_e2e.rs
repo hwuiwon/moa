@@ -33,6 +33,61 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires a local restate-server, Postgres, OpenFGA, and provider-overrides feature"]
+async fn scripted_provider_repeated_tool_loop_stops_before_unbounded_dispatch() -> Result<()> {
+    // Pins: scripted providers that keep requesting the same tool stop in TurnExecution.
+    let fixture = OrchestratorTestFixture::with_script(repeated_tool_loop_script()).await?;
+    let test = fixture.isolated().await;
+    let session_id = test.create_session("repeated-tool-loop").await?;
+
+    let events = run_scripted_turn(
+        &test,
+        session_id,
+        "run cargo test -p moa-orchestrator for repeated-loop fixture",
+    )
+    .await?;
+
+    let repeated_tool_ids = repeated_loop_tool_call_provider_ids(&events);
+    assert_eq!(
+        repeated_tool_ids,
+        vec!["repeated-loop-1", "repeated-loop-2"],
+        "third identical scripted tool request should stop before ToolCall persistence: {}",
+        event_summary(&events)
+    );
+    assert!(
+        repeated_tool_ids.len() < REPEATED_LOOP_SCRIPTED_ATTEMPTS,
+        "actual ToolCall count must stay below scripted attempts: {}",
+        event_summary(&events)
+    );
+    assert_eq!(
+        repeated_loop_successful_results(&events),
+        2,
+        "only the first two repeated bash calls should execute: {}",
+        event_summary(&events)
+    );
+    assert!(
+        events.iter().any(|record| matches!(
+            &record.event,
+            Event::Error { message, recoverable }
+                if *recoverable
+                    && message == "tool loop detected: `bash` repeated 3 consecutive times with threshold 3"
+        )),
+        "loop stop should append a recoverable budget error: {}",
+        event_summary(&events)
+    );
+    assert!(
+        events.iter().any(|record| matches!(
+            &record.event,
+            Event::BrainResponse { text, .. }
+                if text == "MOA stopped before running another tool because the model repeatedly requested the same `bash` call. Narrow the scope or ask MOA to continue."
+        )),
+        "loop stop should append the assistant stop response: {}",
+        event_summary(&events)
+    );
+    Ok(())
+}
+
 async fn action_policy_auto_mode_executes_shell_without_user_approval(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
@@ -426,6 +481,24 @@ fn action_policy_script() -> serde_json::Value {
     })
 }
 
+const REPEATED_LOOP_SCRIPTED_ATTEMPTS: usize = 5;
+const REPEATED_LOOP_CMD: &str = "printf repeated-loop-ok";
+
+fn repeated_tool_loop_script() -> serde_json::Value {
+    let responses = (1..=REPEATED_LOOP_SCRIPTED_ATTEMPTS)
+        .map(|index| bash_tool_response(&format!("repeated-loop-{index}"), REPEATED_LOOP_CMD))
+        .collect::<Vec<_>>();
+    json!({
+        "default": {
+            "completion": {
+                "content": "unexpected fallback",
+                "tool_calls": []
+            }
+        },
+        "responses": responses
+    })
+}
+
 fn bash_tool_response(provider_tool_id: &str, cmd: &str) -> serde_json::Value {
     json!({
         "completion": {
@@ -437,6 +510,40 @@ fn bash_tool_response(provider_tool_id: &str, cmd: &str) -> serde_json::Value {
             }]
         }
     })
+}
+
+fn repeated_loop_tool_call_provider_ids(events: &[EventRecord]) -> Vec<&str> {
+    let expected_input = json!({ "cmd": REPEATED_LOOP_CMD });
+    events
+        .iter()
+        .filter_map(|record| match &record.event {
+            Event::ToolCall {
+                provider_tool_use_id,
+                tool_name,
+                input,
+                ..
+            } if tool_name == "bash" && input == &expected_input => provider_tool_use_id.as_deref(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn repeated_loop_successful_results(events: &[EventRecord]) -> usize {
+    events
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                Event::ToolResult {
+                    provider_tool_use_id: Some(provider_tool_use_id),
+                    output,
+                    success: true,
+                    ..
+                } if provider_tool_use_id.starts_with("repeated-loop-")
+                    && output.to_text().contains("repeated-loop-ok")
+            )
+        })
+        .count()
 }
 
 fn text_response(text: &str) -> serde_json::Value {
@@ -557,6 +664,14 @@ fn event_summary(events: &[EventRecord]) -> String {
                     truncate_for_summary(text)
                 )
             }
+            Event::Error {
+                message,
+                recoverable,
+            } => format!(
+                "#{} Error recoverable={recoverable} {}",
+                record.sequence_num,
+                truncate_for_summary(message)
+            ),
             _ => format!("#{} {:?}", record.sequence_num, record.event_type),
         })
         .collect::<Vec<_>>()
