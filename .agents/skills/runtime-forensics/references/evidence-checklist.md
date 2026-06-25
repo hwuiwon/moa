@@ -47,15 +47,15 @@ curl -X POST "$MOA_EDGE_URL/v1/analytics/session-stats" \
 curl -X POST "$MOA_EDGE_URL/v1/analytics/tool-stats" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"workspace_id":"<workspace-id>"}'
-curl -X POST "$MOA_EDGE_URL/v1/analytics/workspace-stats" \
+  --data '{}'
+curl -X POST "$MOA_EDGE_URL/v1/analytics/tenant-stats" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"workspace_id":"<workspace-id>","days":30}'
+  --data '{"days":30}'
 curl -X POST "$MOA_EDGE_URL/v1/analytics/cache-stats" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"workspace_id":"<workspace-id>","days":30}'
+  --data '{"days":30}'
 ```
 
 If you need the raw event log, query the store or use the test harness path already used by the failing test. The key question is whether the expected event was persisted at all.

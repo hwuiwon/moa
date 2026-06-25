@@ -6,28 +6,24 @@ use std::time::Instant;
 
 use moa_core::{
     HandHandle, HandResources, HandSpec, MoaError, Result, SandboxFile, SandboxTier, SessionMeta,
-    WorkspaceId,
+    TenantId,
 };
 use moa_observability::record_sandbox_provision_duration;
 
 use super::{DEFAULT_PROVIDER_NAME, DEFAULT_TOOL_TIMEOUT, ToolRouter};
 
 impl ToolRouter {
-    /// Remembers the filesystem root for a logical workspace id.
-    pub async fn remember_workspace_root(
-        &self,
-        workspace_id: WorkspaceId,
-        workspace_root: PathBuf,
-    ) {
+    /// Remembers the filesystem workspace root for one tenant.
+    pub async fn remember_workspace_root(&self, tenant_id: TenantId, workspace_root: PathBuf) {
         self.workspace_roots
             .write()
             .await
-            .insert(workspace_id, workspace_root);
+            .insert(tenant_id, workspace_root);
     }
 
-    /// Returns the remembered filesystem root for a logical workspace id.
-    pub async fn workspace_root(&self, workspace_id: &WorkspaceId) -> Option<PathBuf> {
-        self.workspace_roots.read().await.get(workspace_id).cloned()
+    /// Returns the remembered filesystem workspace root for one tenant.
+    pub async fn workspace_root(&self, tenant_id: &TenantId) -> Option<PathBuf> {
+        self.workspace_roots.read().await.get(tenant_id).cloned()
     }
 
     /// Provisions a hand if needed and installs trusted files into its sandbox.
@@ -189,7 +185,7 @@ impl ToolRouter {
                 self.workspace_roots
                     .read()
                     .await
-                    .get(&tenant_workspace_key(session))
+                    .get(&tenant_key(session))
                     .cloned()
             } else {
                 None
@@ -243,7 +239,7 @@ impl ToolRouter {
                 self.workspace_roots
                     .read()
                     .await
-                    .get(&tenant_workspace_key(session))
+                    .get(&tenant_key(session))
                     .cloned()
             } else {
                 None
@@ -273,8 +269,8 @@ pub(super) fn session_provider_key(session: &SessionMeta, provider: &str) -> Str
     format!("{}:{provider}", session.id)
 }
 
-fn tenant_workspace_key(session: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(session.tenant_id.to_string())
+fn tenant_key(session: &SessionMeta) -> TenantId {
+    session.tenant_id
 }
 
 pub(super) fn sandbox_tier_label(tier: &SandboxTier) -> &'static str {

@@ -1,19 +1,19 @@
-//! Workspace budget enforcement helpers for streamed brain turns.
+//! Tenant budget enforcement helpers for streamed brain turns.
 
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use moa_core::{
-    Event, EventRecord, MoaError, Result, RuntimeEvent, SessionId, SessionStore, WorkspaceId,
+    Event, EventRecord, MoaError, Result, RuntimeEvent, SessionId, SessionStore, TenantId,
 };
 use tokio::sync::broadcast;
 
 use super::context_build::append_event;
 
-pub(super) async fn enforce_workspace_budget(
+pub(super) async fn enforce_tenant_budget(
     session_store: &Arc<dyn SessionStore>,
     session_id: &SessionId,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     budget_cents: u32,
     runtime_tx: &broadcast::Sender<RuntimeEvent>,
     event_tx: Option<&broadcast::Sender<EventRecord>>,
@@ -32,7 +32,7 @@ pub(super) async fn enforce_workspace_budget(
     };
 
     let spent = session_store
-        .workspace_cost_since(workspace_id, day_start)
+        .tenant_cost_since(tenant_id, day_start)
         .await?;
     if spent < budget_cents {
         return Ok(());
@@ -67,7 +67,7 @@ fn format_budget_exhausted_message(
     let minutes = remaining_minutes % 60;
 
     format!(
-        "Daily workspace budget exhausted (${budget_dollars:.2}/day). {hours} hours {minutes} minutes until reset."
+        "Daily tenant budget exhausted (${budget_dollars:.2}/day). {hours} hours {minutes} minutes until reset."
     )
 }
 
@@ -84,7 +84,7 @@ mod tests {
 
         assert_eq!(
             format_budget_exhausted_message(2_000, now, day_start),
-            "Daily workspace budget exhausted ($20.00/day). 4 hours 23 minutes until reset."
+            "Daily tenant budget exhausted ($20.00/day). 4 hours 23 minutes until reset."
         );
     }
 }

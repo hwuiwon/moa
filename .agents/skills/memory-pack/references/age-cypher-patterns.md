@@ -19,15 +19,15 @@ The repo provides helpers that:
 
 Find the current helper module before writing new Cypher; do not duplicate the projection logic. As of the audit the helpers live in `crates/moa-memory/graph/src/`, with names that include `cypher`, `project`, or `agtype`. Use the existing one.
 
-## Workspace Scope in Cypher
+## Tenant Scope in Cypher
 
-- Workspace boundaries enforced by Postgres RLS do not apply to AGE graphs. Every Cypher query must include the workspace constraint explicitly:
+- Tenant boundaries enforced by Postgres RLS do not apply to AGE graphs. Every Cypher query must include the tenant storage constraint explicitly. The property is named `storage_partition_id`:
 
   ```cypher
-  MATCH (n {workspace_id: $workspace_id}) ...
+  MATCH (n {storage_partition_id: $tenant_storage_key}) ...
   ```
 
-- Forgetting the workspace clause in a Cypher query is a cross-tenant leak. There is no second line of defense at the AGE layer.
+- Forgetting the tenant storage clause in a Cypher query is a cross-tenant leak. There is no second line of defense at the AGE layer.
 - For traversals across multiple hops, the constraint must apply to every intermediate node, not just the start node.
 
 ## Read vs Write Cypher

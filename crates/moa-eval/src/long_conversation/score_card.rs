@@ -1,7 +1,7 @@
 //! Score card schema and analytics-score flattening helpers.
 
 use chrono::{DateTime, Utc};
-use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_core::{SessionId, StoragePartitionId, UserId};
 use moa_lineage_core::{
     LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget,
     ScoreValue as LineageScoreValue,
@@ -78,7 +78,7 @@ impl ScoreCard {
     #[must_use]
     pub fn to_score_records(
         &self,
-        workspace_id: WorkspaceId,
+        storage_partition_id: StoragePartitionId,
         user_id: UserId,
         session_id: SessionId,
     ) -> Vec<ScoreRecord> {
@@ -88,7 +88,7 @@ impl ScoreCard {
                 score_id: Uuid::now_v7(),
                 ts: self.timestamp,
                 target: ScoreTarget::Session { session_id },
-                workspace_id: workspace_id.clone(),
+                storage_partition_id: storage_partition_id.clone(),
                 user_id: Some(user_id.clone()),
                 name: row.name,
                 value: lineage_score_value(row.value),
@@ -105,11 +105,11 @@ impl ScoreCard {
     #[must_use]
     pub fn to_lineage_events(
         &self,
-        workspace_id: WorkspaceId,
+        storage_partition_id: StoragePartitionId,
         user_id: UserId,
         session_id: SessionId,
     ) -> Vec<LineageEvent> {
-        self.to_score_records(workspace_id, user_id, session_id)
+        self.to_score_records(storage_partition_id, user_id, session_id)
             .into_iter()
             .map(LineageEvent::Eval)
             .collect()
@@ -119,11 +119,11 @@ impl ScoreCard {
     pub fn emit_to_lineage_sink(
         &self,
         sink: &dyn LineageSink,
-        workspace_id: WorkspaceId,
+        storage_partition_id: StoragePartitionId,
         user_id: UserId,
         session_id: SessionId,
     ) -> usize {
-        let events = self.to_lineage_events(workspace_id, user_id, session_id);
+        let events = self.to_lineage_events(storage_partition_id, user_id, session_id);
         let count = events.len();
         for event in events {
             sink.record(event);

@@ -1,7 +1,7 @@
 //! Idempotent OpenFGA bootstrap for MOA.
 //!
 //! On each run this binary ensures the configured store exists, writes the v1
-//! authorization model, runs smoke checks against a synthetic workspace/tenant
+//! authorization model, runs smoke checks against a synthetic tenant
 //! chain, and writes resolved authz env values to `.env.fga` for shell sourcing.
 
 use anyhow::{Context, Result, bail};
@@ -94,23 +94,14 @@ async fn main() -> Result<()> {
 async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &str) -> Result<()> {
     let tenant_id =
         Uuid::parse_str("00000000-0000-0000-0000-00000000ffff").context("parse smoke tenant id")?;
-    let workspace_id = Uuid::parse_str("00000000-0000-0000-0000-00000000fffe")
-        .context("parse smoke workspace id")?;
     let user_id =
         Uuid::parse_str("00000000-0000-0000-0000-00000000fffd").context("parse smoke user id")?;
 
-    let smoke_tuples = [
-        serde_json::json!({
-            "user": format!("user:{user_id}"),
-            "relation": "admin",
-            "object": format!("workspace:{workspace_id}"),
-        }),
-        serde_json::json!({
-            "user": format!("workspace:{workspace_id}"),
-            "relation": "workspace",
-            "object": format!("tenant:{tenant_id}"),
-        }),
-    ];
+    let smoke_tuples = [serde_json::json!({
+        "user": format!("user:{user_id}"),
+        "relation": "admin",
+        "object": format!("tenant:{tenant_id}"),
+    })];
 
     client
         .delete_tuples_raw_best_effort(store_id, model_id, &smoke_tuples)
@@ -126,9 +117,9 @@ async fn run_smoke_checks(client: &http::FgaClient, store_id: &str, model_id: &s
         .check(store_id, model_id, &user, "admin", &tenant)
         .await?;
     if !admin_check {
-        bail!("smoke Check failed: workspace admin expected to administer tenant");
+        bail!("smoke Check failed: tenant admin expected to administer tenant");
     }
-    tracing::info!("smoke Check ok: workspace admin -> tenant admin");
+    tracing::info!("smoke Check ok: tenant admin");
 
     let listed = client
         .list_objects(store_id, model_id, "tenant", "admin", &user)

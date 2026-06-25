@@ -7,7 +7,7 @@ use moa_core::traits::Identity;
 use moa_core::wire::AppendEventRequest;
 use moa_core::{
     ActionClass, ActionEnvelope, ActionReviewPreview, ActionReviewStatus, Event, EventType,
-    TenantId, ToolCallId, ToolCallRequest, WorkspaceId,
+    StoragePartitionId, TenantId, ToolCallId, ToolCallRequest,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_observability::{record_action_review_decision, record_action_review_requested};
@@ -154,7 +154,7 @@ impl ActionReviews for ActionReviewsImpl {
             if let Some(session_id) = session_id {
                 let event_exists = prior_action_review_event_exists(
                     &ctx,
-                    &storage_workspace_id(stored.summary.tenant_id),
+                    &storage_partition_id(stored.summary.tenant_id),
                     session_id,
                     EventType::ActionReviewRequested,
                     stored.summary.id,
@@ -176,12 +176,16 @@ impl ActionReviews for ActionReviewsImpl {
                 );
             }
             let pool = OrchestratorCtx::current_graph_pool();
-            let workspace_id = storage_workspace_id(stored.summary.tenant_id);
+            let storage_partition_id = storage_partition_id(stored.summary.tenant_id);
             let review_id = stored.summary.id;
             ctx.run(|| async move {
-                action_review_app::mark_requested_event_recorded(pool, workspace_id, review_id)
-                    .await
-                    .map(Json::from)
+                action_review_app::mark_requested_event_recorded(
+                    pool,
+                    storage_partition_id,
+                    review_id,
+                )
+                .await
+                .map(Json::from)
             })
             .name("action_reviews_mark_requested_event_recorded")
             .await?;
@@ -202,11 +206,11 @@ impl ActionReviews for ActionReviewsImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Admin).await?;
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = storage_workspace_id(request.tenant_id);
+        let storage_partition_id = storage_partition_id(request.tenant_id);
 
         Ok(ctx
             .run(|| async move {
-                action_review_app::list_pending_reviews(pool, workspace_id)
+                action_review_app::list_pending_reviews(pool, storage_partition_id)
                     .await
                     .map(Json::from)
             })
@@ -238,7 +242,7 @@ impl ActionReviews for ActionReviewsImpl {
             if let Some(session_id) = decided.session_id {
                 let event_exists = prior_action_review_event_exists(
                     &ctx,
-                    &decided.workspace_id,
+                    &decided.storage_partition_id,
                     session_id,
                     EventType::ActionReviewDecided,
                     decided.review_id,
@@ -260,12 +264,16 @@ impl ActionReviews for ActionReviewsImpl {
                 }
             }
             let pool = OrchestratorCtx::current_graph_pool();
-            let workspace_id = decided.workspace_id.clone();
+            let storage_partition_id = decided.storage_partition_id.clone();
             let review_id = decided.review_id;
             ctx.run(|| async move {
-                action_review_app::mark_decision_event_recorded(pool, workspace_id, review_id)
-                    .await
-                    .map(Json::from)
+                action_review_app::mark_decision_event_recorded(
+                    pool,
+                    storage_partition_id,
+                    review_id,
+                )
+                .await
+                .map(Json::from)
             })
             .name("action_reviews_mark_decision_event_recorded")
             .await?;
@@ -288,10 +296,10 @@ impl ActionReviews for ActionReviewsImpl {
                 }
             }
             let pool = OrchestratorCtx::current_graph_pool();
-            let workspace_id = decided.workspace_id.clone();
+            let storage_partition_id = decided.storage_partition_id.clone();
             let review_id = decided.review_id;
             ctx.run(|| async move {
-                action_review_app::mark_execution_requested(pool, workspace_id, review_id)
+                action_review_app::mark_execution_requested(pool, storage_partition_id, review_id)
                     .await
                     .map(Json::from)
             })
@@ -311,12 +319,12 @@ async fn prior_tool_result_exists(
         return Ok(false);
     };
     let store = OrchestratorCtx::current_session_store();
-    let workspace_id = decided.workspace_id.clone();
+    let storage_partition_id = decided.storage_partition_id.clone();
     Ok(ctx
         .run(|| async move {
             store
                 .tool_event_exists(
-                    &workspace_id,
+                    &storage_partition_id,
                     session_id,
                     EventType::ToolResult,
                     tool_call_id,
@@ -332,17 +340,22 @@ async fn prior_tool_result_exists(
 
 async fn prior_action_review_event_exists(
     ctx: &Context<'_>,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     session_id: moa_core::SessionId,
     event_type: EventType,
     review_id: Uuid,
 ) -> Result<bool, HandlerError> {
     let store = OrchestratorCtx::current_session_store();
-    let workspace_id = workspace_id.clone();
+    let storage_partition_id = storage_partition_id.clone();
     Ok(ctx
         .run(|| async move {
             store
-                .action_review_event_exists(&workspace_id, session_id, event_type, review_id)
+                .action_review_event_exists(
+                    &storage_partition_id,
+                    session_id,
+                    event_type,
+                    review_id,
+                )
                 .await
                 .map(Json::from)
                 .map_err(HandlerError::from)
@@ -365,6 +378,6 @@ async fn authorize_tenant(
     Ok(identity)
 }
 
-fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
+fn storage_partition_id(tenant_id: TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }

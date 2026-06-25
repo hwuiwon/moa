@@ -98,7 +98,7 @@ data:
           message      = "message",
           target       = "target",
           session_id   = "\"moa.session.id\"",
-          workspace_id = "\"moa.workspace.id\"",
+          tenant_id    = "\"moa.tenant.id\"",
           user_id      = "\"moa.user.id\"",
         }
       }
@@ -106,7 +106,7 @@ data:
       stage.structured_metadata {
         values = {
           session_id   = "",
-          workspace_id = "",
+          tenant_id    = "",
           user_id      = "",
           target       = "",
         }

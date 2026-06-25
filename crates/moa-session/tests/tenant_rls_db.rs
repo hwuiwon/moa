@@ -202,7 +202,7 @@ async fn tenant_rls_blocks_cross_tenant_ingest_dedup_reads_db() {
     sqlx::query(
         r#"
         INSERT INTO moa.ingest_dedup
-            (workspace_id, tenant_id, session_id, turn_seq, fact_hash, fact_uid)
+            (storage_partition_id, tenant_id, session_id, turn_seq, fact_hash, fact_uid)
         VALUES
             ($1, $2, $3, 1, $4, $5),
             ($6, $7, $8, 1, $9, $10)
@@ -246,7 +246,7 @@ async fn contact_rls_blocks_other_contact_memory_reads_db() {
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, workspace_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
+            (uid, label, storage_partition_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
         VALUES
             ($1, 'Fact', $3, $4, $5, 'contact A memory', 'none', 0.9, $7),
             ($2, 'Fact', $3, $4, $6, 'contact B memory', 'none', 0.9, $8)

@@ -35,7 +35,7 @@ struct WriteFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeadLetterSummary {
     row_count: usize,
-    first_workspace_id: Option<String>,
+    first_storage_partition_id: Option<String>,
     first_session_id: Option<Uuid>,
     first_turn_id: Option<Uuid>,
 }
@@ -328,7 +328,7 @@ async fn write_dead_letter_batch(
             error,
             attempts,
             row_count,
-            first_workspace_id,
+            first_storage_partition_id,
             first_session_id,
             first_turn_id,
             rows
@@ -338,7 +338,7 @@ async fn write_dead_letter_batch(
         SET error = EXCLUDED.error,
             attempts = EXCLUDED.attempts,
             row_count = EXCLUDED.row_count,
-            first_workspace_id = EXCLUDED.first_workspace_id,
+            first_storage_partition_id = EXCLUDED.first_storage_partition_id,
             first_session_id = EXCLUDED.first_session_id,
             first_turn_id = EXCLUDED.first_turn_id,
             rows = EXCLUDED.rows
@@ -348,7 +348,7 @@ async fn write_dead_letter_batch(
     .bind(failure.error.to_string())
     .bind(attempts)
     .bind(row_count)
-    .bind(summary.first_workspace_id)
+    .bind(summary.first_storage_partition_id)
     .bind(summary.first_session_id)
     .bind(summary.first_turn_id)
     .bind(rows_json)
@@ -371,16 +371,16 @@ fn dead_letter_summary(rows: &[PendingRow]) -> DeadLetterSummary {
     let first = rows.first();
     DeadLetterSummary {
         row_count: rows.len(),
-        first_workspace_id: first.map(row_workspace_id),
+        first_storage_partition_id: first.map(row_storage_partition_id),
         first_session_id: first.and_then(row_session_id),
         first_turn_id: first.and_then(row_turn_id),
     }
 }
 
-fn row_workspace_id(row: &PendingRow) -> String {
+fn row_storage_partition_id(row: &PendingRow) -> String {
     match row {
-        PendingRow::Lineage(row) => row.workspace_id.clone(),
-        PendingRow::Score(row) => row.workspace_id.clone(),
+        PendingRow::Lineage(row) => row.storage_partition_id.clone(),
+        PendingRow::Score(row) => row.storage_partition_id.clone(),
     }
 }
 
@@ -458,7 +458,7 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             turn_id        UUID        NOT NULL,
             session_id     UUID        NOT NULL,
             user_id        TEXT        NOT NULL,
-            workspace_id   TEXT        NOT NULL,
+            storage_partition_id   TEXT        NOT NULL,
             ts             TIMESTAMPTZ NOT NULL,
             tier           SMALLINT    NOT NULL,
             record_kind    SMALLINT    NOT NULL,
@@ -479,7 +479,7 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
                 turn_id,
                 session_id,
                 user_id,
-                workspace_id,
+                storage_partition_id,
                 ts,
                 tier,
                 record_kind,
@@ -503,7 +503,7 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             turn_id,
             session_id,
             user_id,
-            workspace_id,
+            storage_partition_id,
             ts,
             tier,
             record_kind,
@@ -515,7 +515,7 @@ async fn write_rows(pool: &sqlx::PgPool, rows: &[LineageRow]) -> Result<()> {
             turn_id,
             session_id,
             user_id,
-            workspace_id,
+            storage_partition_id,
             ts,
             tier,
             record_kind,
@@ -548,12 +548,12 @@ async fn apply_compliance_hashes(
             r#"
             SELECT COALESCE((
                 SELECT enabled
-                FROM analytics.compliance_workspaces
-                WHERE workspace_id = $1
+                FROM analytics.compliance_tenants
+                WHERE storage_partition_id = $1
             ), FALSE)
             "#,
         )
-        .bind(&row.workspace_id)
+        .bind(&row.storage_partition_id)
         .fetch_one(&mut **tx)
         .await?;
         if !enabled {
@@ -561,7 +561,7 @@ async fn apply_compliance_hashes(
         }
 
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("compliance:{}", row.workspace_id))
+            .bind(format!("compliance:{}", row.storage_partition_id))
             .execute(&mut **tx)
             .await?;
 
@@ -585,24 +585,24 @@ async fn apply_compliance_hashes(
 
         sqlx::query(
             r#"
-            INSERT INTO analytics.compliance_workspace_state (workspace_id)
+            INSERT INTO analytics.compliance_storage_partition_state (storage_partition_id)
             VALUES ($1)
-            ON CONFLICT (workspace_id) DO NOTHING
+            ON CONFLICT (storage_partition_id) DO NOTHING
             "#,
         )
-        .bind(&row.workspace_id)
+        .bind(&row.storage_partition_id)
         .execute(&mut **tx)
         .await?;
 
         let prev_hash: Option<Vec<u8>> = sqlx::query_scalar(
             r#"
             SELECT last_integrity_hash
-            FROM analytics.compliance_workspace_state
-            WHERE workspace_id = $1
+            FROM analytics.compliance_storage_partition_state
+            WHERE storage_partition_id = $1
             FOR UPDATE
             "#,
         )
-        .bind(&row.workspace_id)
+        .bind(&row.storage_partition_id)
         .fetch_one(&mut **tx)
         .await?;
         let prev = prev_hash.as_deref().map(hash_from_slice).transpose()?;
@@ -612,14 +612,14 @@ async fn apply_compliance_hashes(
 
         sqlx::query(
             r#"
-            UPDATE analytics.compliance_workspace_state
+            UPDATE analytics.compliance_storage_partition_state
             SET last_integrity_hash = $2,
                 last_ts = $3,
                 record_count = record_count + 1
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
             "#,
         )
-        .bind(&row.workspace_id)
+        .bind(&row.storage_partition_id)
         .bind(&row.integrity_hash)
         .bind(row.ts)
         .execute(&mut **tx)
@@ -635,7 +635,7 @@ fn render_copy_csv(rows: &[LineageRow]) -> String {
             csv_field(&row.turn_id.to_string()),
             csv_field(&row.session_id.to_string()),
             csv_field(&row.user_id),
-            csv_field(&row.workspace_id),
+            csv_field(&row.storage_partition_id),
             csv_field(&row.ts.to_rfc3339()),
             csv_field(&row.tier.to_string()),
             csv_field(&row.record_kind.to_string()),
@@ -666,7 +666,7 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
         CREATE TEMP TABLE lineage_scores_copy (
             score_id           UUID             NOT NULL,
             ts                 TIMESTAMPTZ      NOT NULL,
-            workspace_id       TEXT             NOT NULL,
+            storage_partition_id       TEXT             NOT NULL,
             user_id            TEXT,
             target_kind        TEXT             NOT NULL,
             turn_id            UUID,
@@ -695,7 +695,7 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
             COPY lineage_scores_copy (
                 score_id,
                 ts,
-                workspace_id,
+                storage_partition_id,
                 user_id,
                 target_kind,
                 turn_id,
@@ -727,7 +727,7 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
         INSERT INTO analytics.scores (
             score_id,
             ts,
-            workspace_id,
+            storage_partition_id,
             user_id,
             target_kind,
             turn_id,
@@ -747,7 +747,7 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
         SELECT
             score_id,
             ts,
-            workspace_id,
+            storage_partition_id,
             user_id,
             target_kind,
             turn_id,
@@ -765,7 +765,7 @@ async fn write_score_rows(pool: &sqlx::PgPool, rows: &[ScoreRow]) -> Result<()> 
             comment
         FROM lineage_scores_copy
         ON CONFLICT (score_id, ts) DO UPDATE
-        SET workspace_id = EXCLUDED.workspace_id,
+        SET storage_partition_id = EXCLUDED.storage_partition_id,
             user_id = EXCLUDED.user_id,
             target_kind = EXCLUDED.target_kind,
             turn_id = EXCLUDED.turn_id,
@@ -798,7 +798,7 @@ fn render_score_copy_csv(rows: &[ScoreRow]) -> String {
         let fields = [
             csv_field(&row.score_id.to_string()),
             csv_field(&row.ts.to_rfc3339()),
-            csv_field(&row.workspace_id),
+            csv_field(&row.storage_partition_id),
             nullable_csv(row.user_id.as_deref()),
             csv_field(&row.target_kind),
             nullable_uuid_csv(row.turn_id),
@@ -888,7 +888,7 @@ struct LineageRow {
     turn_id: Uuid,
     session_id: Uuid,
     user_id: String,
-    workspace_id: String,
+    storage_partition_id: String,
     ts: DateTime<Utc>,
     tier: i16,
     record_kind: i16,
@@ -904,40 +904,40 @@ impl LineageRow {
         let record_kind = evt.record_kind().as_i16();
         let fallback_ts = Utc::now();
 
-        let (turn_id, session_id, user_id, workspace_id, ts) = match &evt {
+        let (turn_id, session_id, user_id, storage_partition_id, ts) = match &evt {
             LineageEvent::Retrieval(record) => (
                 record.turn_id.0,
                 record.session_id.0,
                 record.user_id.to_string(),
-                record.workspace_id.to_string(),
+                record.storage_partition_id.to_string(),
                 record.ts,
             ),
             LineageEvent::Context(record) => (
                 record.turn_id.0,
                 record.session_id.0,
                 record.user_id.to_string(),
-                record.workspace_id.to_string(),
+                record.storage_partition_id.to_string(),
                 record.ts,
             ),
             LineageEvent::Generation(record) => (
                 record.turn_id.0,
                 record.session_id.0,
                 record.user_id.to_string(),
-                record.workspace_id.to_string(),
+                record.storage_partition_id.to_string(),
                 record.ts,
             ),
             LineageEvent::Citation(record) => (
                 record.turn_id.0,
                 record.session_id.0,
                 record.user_id.to_string(),
-                record.workspace_id.to_string(),
+                record.storage_partition_id.to_string(),
                 record.ts,
             ),
             LineageEvent::Decision(record) => (
                 record.turn_id.0,
                 record.session_id.0,
                 record.user_id.to_string(),
-                record.workspace_id.to_string(),
+                record.storage_partition_id.to_string(),
                 record.ts,
             ),
             LineageEvent::Eval(_) => (
@@ -953,7 +953,7 @@ impl LineageRow {
             turn_id,
             session_id,
             user_id,
-            workspace_id,
+            storage_partition_id,
             ts,
             tier: 1,
             record_kind,
@@ -968,7 +968,7 @@ impl LineageRow {
 struct ScoreRow {
     score_id: Uuid,
     ts: DateTime<Utc>,
-    workspace_id: String,
+    storage_partition_id: String,
     user_id: Option<String>,
     target_kind: String,
     turn_id: Option<Uuid>,
@@ -1012,7 +1012,7 @@ impl ScoreRow {
         Self {
             score_id: record.score_id,
             ts: record.ts,
-            workspace_id: record.workspace_id.to_string(),
+            storage_partition_id: record.storage_partition_id.to_string(),
             user_id: record.user_id.map(|user_id| user_id.to_string()),
             target_kind,
             turn_id,
@@ -1044,7 +1044,7 @@ fn score_source_to_db(source: ScoreSource) -> &'static str {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::WorkspaceId;
+    use moa_core::StoragePartitionId;
     use moa_lineage_core::{
         LineageEvent, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
     };
@@ -1059,7 +1059,7 @@ mod tests {
             target: ScoreTarget::Turn {
                 turn_id: TurnId::new_v7(),
             },
-            workspace_id: WorkspaceId::new("workspace"),
+            storage_partition_id: StoragePartitionId::new("tenant"),
             user_id: None,
             name: "retrieval_zero_recall".to_string(),
             value: ScoreValue::Boolean(false),
@@ -1107,7 +1107,7 @@ mod tests {
             turn_id,
             session_id,
             user_id: "user-1".to_string(),
-            workspace_id: "workspace-1".to_string(),
+            storage_partition_id: "partition-1".to_string(),
             ts: Utc::now(),
             tier: 1,
             record_kind: 1,
@@ -1119,7 +1119,10 @@ mod tests {
         let summary = super::dead_letter_summary(&[row]);
 
         assert_eq!(summary.row_count, 1);
-        assert_eq!(summary.first_workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(
+            summary.first_storage_partition_id.as_deref(),
+            Some("partition-1")
+        );
         assert_eq!(summary.first_session_id, Some(session_id));
         assert_eq!(summary.first_turn_id, Some(turn_id));
     }
@@ -1140,7 +1143,7 @@ mod tests {
             turn_id: Uuid::now_v7(),
             session_id: Uuid::now_v7(),
             user_id: "user-1".to_string(),
-            workspace_id: "workspace-1".to_string(),
+            storage_partition_id: "partition-1".to_string(),
             ts: Utc::now(),
             tier: 1,
             record_kind: 1,

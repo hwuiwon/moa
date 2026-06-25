@@ -1,7 +1,7 @@
 //! Shared Restate, Postgres, and `moa-orchestrator` stack for integration tests.
 //!
 //! The fixture is shared while at least one test holds its returned `Arc`;
-//! later callers isolate themselves with unique workspace/user prefixes.
+//! later callers isolate themselves with unique tenant/user prefixes.
 //! Set `MOA_RESTATE_INGRESS_URL` to reuse an already-running stack
 //! instead of starting Docker containers.
 
@@ -23,7 +23,7 @@ use moa_core::wire::{
 };
 use moa_core::{
     Channel, Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, TenantId, UserId, WorkspaceId,
+    SessionStatus, StoragePartitionId, TenantId, UserId,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -60,8 +60,8 @@ pub struct OrchestratorTestFixture {
     pub postgres_url: String,
     /// OpenFGA client used to seed authorization tuples for test identities.
     pub fga_client: Option<FgaClient>,
-    /// Shared workspace/user prefix for this fixture process.
-    pub workspace_prefix: String,
+    /// Shared tenant/user prefix for this fixture process.
+    pub test_prefix: String,
     _script_dir: Option<TempDir>,
     _postgres: Option<ContainerAsync<GenericImage>>,
     _restate: Option<ContainerAsync<GenericImage>>,
@@ -90,7 +90,7 @@ impl OrchestratorTestFixture {
     pub async fn isolated(&self) -> IsolatedTest<'_> {
         IsolatedTest {
             fixture: self,
-            prefix: format!("{}-{}", self.workspace_prefix, Uuid::now_v7().simple()),
+            prefix: format!("{}-{}", self.test_prefix, Uuid::now_v7().simple()),
         }
     }
 
@@ -139,7 +139,7 @@ impl OrchestratorTestFixture {
             admin_url,
             postgres_url,
             fga_client,
-            workspace_prefix: format!("external-{}", Uuid::now_v7().simple()),
+            test_prefix: format!("external-{}", Uuid::now_v7().simple()),
             _script_dir: None,
             _postgres: None,
             _restate: None,
@@ -221,7 +221,7 @@ impl OrchestratorTestFixture {
             admin_url,
             postgres_url,
             fga_client: Some(fga_client),
-            workspace_prefix: format!("fixture-{}", Uuid::now_v7().simple()),
+            test_prefix: format!("fixture-{}", Uuid::now_v7().simple()),
             _script_dir: Some(script_dir),
             _postgres: Some(postgres),
             _restate: Some(restate),
@@ -345,7 +345,7 @@ fn identity_subject(identity: &Identity) -> String {
 pub struct IsolatedTest<'a> {
     /// Parent fixture.
     pub fixture: &'a OrchestratorTestFixture,
-    /// Unique test prefix for workspace/user identifiers.
+    /// Unique test prefix for tenant/user identifiers.
     pub prefix: String,
 }
 
@@ -356,10 +356,10 @@ impl IsolatedTest<'_> {
         &self.fixture.client
     }
 
-    /// Creates a unique workspace identifier for this isolated test.
+    /// Creates a unique storage partition identifier for this isolated test.
     #[must_use]
-    pub fn workspace_id(&self, suffix: &str) -> WorkspaceId {
-        WorkspaceId::new(format!("{}-{suffix}", self.prefix))
+    pub fn storage_partition_id(&self, suffix: &str) -> StoragePartitionId {
+        StoragePartitionId::new(format!("{}-{suffix}", self.prefix))
     }
 
     /// Creates a unique user identifier for this isolated test.

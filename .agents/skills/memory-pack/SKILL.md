@@ -86,7 +86,7 @@ The dense rules are in references, loaded only when relevant:
 The five rules to keep in mind without loading a reference:
 
 - No backwards compatibility unless the prompt explicitly requests it.
-- User-scoped memory is always workspace-bound.
+- Contact-scoped memory is always tenant-bound.
 - Tool names use underscores, not dotted names.
 - For RLS work, use `FORCE ROW LEVEL SECURITY`; app paths must not use `BYPASSRLS`.
 - For AGE Cypher work, do not format user input into Cypher strings.

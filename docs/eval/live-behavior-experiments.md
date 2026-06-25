@@ -155,18 +155,16 @@ lane.
 
 | Surface | Required authorization |
 |---|---|
-| Internal-gated `Eval` suites, plan, run, status, datasets list, replay, scores, compare | `Workspace:Member` |
-| Internal-gated `Eval` dataset registration | `Workspace:Editor` |
-| `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Workspace:Editor` |
-| `Experiments/status`, `list`, `trials`, `trial_status`, `scores`, `compare` | `Workspace:Member` |
+| Internal-gated `Eval` suites, plan, run, status, datasets list, replay, scores, compare | `Tenant:Member` |
+| Internal-gated `Eval` dataset registration | `Tenant:Editor` |
+| `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Tenant:Editor` |
+| `Experiments/status`, `list`, `trials`, `trial_status`, `scores`, `compare` | `Tenant:Member` |
 | `Analytics/session_stats` | `Session:Participant` |
-| `Analytics/workspace_stats`, `cache_stats`, `experiment_stats`, `session_search` | `Workspace:Member` |
-| `Analytics/tool_stats` with `workspace_id` | `Workspace:Member` |
-| `Analytics/tool_stats` without `workspace_id` | Service identity plus `Tenant:Admin` |
-| `Analytics/learning_candidates` with `workspace_id` | `Workspace:Editor` |
-| `Analytics/learning_candidates` without `workspace_id` | `Tenant:Admin` |
-| `LineageAdmin/explain`, `query`, `verify` | `Workspace:Member` |
-| `LineageAdmin/export`, `erase` | `Workspace:Admin` |
+| `Analytics/tenant_stats`, `cache_stats`, `experiment_stats`, `session_search` | `Tenant:Member` |
+| `Analytics/tool_stats` | `Tenant:Member` |
+| `Analytics/learning_candidates` | `Tenant:Editor` |
+| `LineageAdmin/explain`, `query`, `verify` | `Tenant:Member` |
+| `LineageAdmin/export`, `erase` | `Tenant:Admin` |
 
 Future MCP support is a thin adapter over product/default typed services such
 as `Experiments`, `Analytics`, `LineageAdmin`, and `Workflows`. If it exposes

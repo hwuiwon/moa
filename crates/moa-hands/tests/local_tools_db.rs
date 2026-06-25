@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use moa_core::{
     Event, HandProvider, HandResources, HandSpec, ModelId, SandboxFile, SandboxTier, SessionMeta,
-    SessionStore, TenantId, ToolBudgetConfig, ToolInvocation, WorkspaceId,
+    SessionStore, TenantId, ToolBudgetConfig, ToolInvocation,
 };
 use moa_hands::{LocalHandProvider, ToolRouter};
 use moa_session::{PostgresSessionStore, testing};
@@ -39,10 +39,6 @@ fn session() -> SessionMeta {
         model: ModelId::new("claude-sonnet-4-6"),
         ..SessionMeta::default()
     }
-}
-
-fn runtime_workspace_id(session: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(session.tenant_id.to_string())
 }
 
 fn approximate_tokens(text: &str) -> u32 {
@@ -312,7 +308,7 @@ async fn file_search_skips_python_virtualenvs_in_remembered_workspace() {
         .unwrap();
     let session = session();
     router
-        .remember_workspace_root(runtime_workspace_id(&session), workspace_root)
+        .remember_workspace_root(session.tenant_id, workspace_root)
         .await;
 
     let (_, output) = router
@@ -357,7 +353,7 @@ async fn file_search_respects_moaignore_in_remembered_workspace() {
         .unwrap();
     let session = session();
     router
-        .remember_workspace_root(runtime_workspace_id(&session), workspace_root)
+        .remember_workspace_root(session.tenant_id, workspace_root)
         .await;
 
     let (_, output) = router
@@ -466,7 +462,7 @@ async fn action_review_preview_uses_remembered_workspace_root_for_commands() {
     let router = admin_review_router(dir.path().join("sandboxes")).await;
     let session = session();
     router
-        .remember_workspace_root(runtime_workspace_id(&session), workspace_root.clone())
+        .remember_workspace_root(session.tenant_id, workspace_root.clone())
         .await;
 
     let prepared = router
@@ -522,7 +518,7 @@ async fn action_review_preview_str_replace_diff_is_surgical() {
     let router = admin_review_router(dir.path().join("sandboxes")).await;
     let session = session();
     router
-        .remember_workspace_root(runtime_workspace_id(&session), workspace_root)
+        .remember_workspace_root(session.tenant_id, workspace_root)
         .await;
 
     let prepared = router

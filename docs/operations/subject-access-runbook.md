@@ -7,7 +7,6 @@ curl -sS "$MOA_EDGE_URL/v1/privacy/export" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "workspace_id": null,
     "subject_user_id": "<subject-user-uuid>",
     "reason": "GDPR Art.15 request <ticket>",
     "approval_token": "<signed-platform-admin-jwt>",
@@ -15,9 +14,8 @@ curl -sS "$MOA_EDGE_URL/v1/privacy/export" \
   }'
 ```
 
-Set `"workspace_id": "<workspace-id>"` to restrict the export to one workspace.
-With `"workspace_id": null`, the API exports every workspace row attributable
-to the subject user.
+The API exports rows attributable to the subject user inside the authenticated
+tenant.
 
 For agent-facing contacts, set `subject_user_id` to either the contact UUID or
 `contact:<contact-uuid>`. Contact exports are resolved inside the authenticated
@@ -34,8 +32,8 @@ The request requires an Ed25519-signed approval JWT with:
 - `exp`: expiration timestamp
 - `op`: `export`
 - `subject_user_id`: the exported user UUID, contact UUID, or `contact:<uuid>`
+- `tenant_id`: the request tenant UUID
 - `role` or `roles`: includes `platform_admin`
-- optional `workspace_id`: limits the token to one workspace
 
 The hosted privacy export API verifies the token with `MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX` and blocks
 JTI replay through `moa.audit_jti_used`.
@@ -90,7 +88,8 @@ wrapped archive. Deliver only through an approved secure channel.
 ## Operational checks
 
 1. Confirm the approval ticket and subject identity.
-2. Generate a short-lived approval JWT and record its JTI in the ticket.
+2. Generate a short-lived approval JWT with matching `tenant_id` and record its
+   JTI in the ticket.
 3. Call `POST /v1/privacy/export` from an admin workstation with the ops signing
    key available to the service.
 4. Verify the manifest signature before delivery.

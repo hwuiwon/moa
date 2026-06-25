@@ -99,11 +99,11 @@ pub struct EdgeWriteIntent {
     pub end_uid: Uuid,
     /// Relationship properties serialized into AGE `agtype`.
     pub properties: serde_json::Value,
-    /// Workspace scope for workspace and user rows.
-    pub workspace_id: Option<String>,
-    /// User scope inside a workspace for user-private rows.
-    pub user_id: Option<String>,
-    /// Expected scope tier: `global`, `workspace`, or `user`.
+    /// Storage partition scope for tenant and contact rows.
+    pub storage_partition_id: Option<String>,
+    /// Contact scope inside a tenant for contact-private rows.
+    pub contact_id: Option<String>,
+    /// Expected scope tier: `global`, `tenant`, or `contact`.
     pub scope: String,
     /// Principal identifier that triggered the mutation.
     pub actor_id: String,

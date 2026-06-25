@@ -253,7 +253,7 @@ async fn fact_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
         r#"
         SELECT count(*)
         FROM moa.node_index
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND label = 'Fact'
           AND properties_summary->>'source_session_id' = $2
         "#,
@@ -270,7 +270,7 @@ async fn pii_fact_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
         r#"
         SELECT count(*)
         FROM moa.node_index
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND label = 'Fact'
           AND pii_class <> 'none'
           AND properties_summary->>'source_session_id' = $2
@@ -288,7 +288,7 @@ async fn dedup_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
         r#"
         SELECT count(*)
         FROM moa.ingest_dedup
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND session_id = $2
           AND turn_seq = $3
         "#,
@@ -306,7 +306,7 @@ async fn dlq_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
         r#"
         SELECT count(*)
         FROM moa.ingest_dlq
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND session_id = $2
           AND turn_seq = $3
         "#,
@@ -324,7 +324,7 @@ async fn changelog_count(pool: &PgPool, turn: &SessionTurn) -> Result<i64> {
         r#"
         SELECT count(*)
         FROM moa.graph_changelog
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND target_kind = 'node'
           AND op = 'create'
           AND payload->'after'->>'source_session_id' = $2
@@ -342,7 +342,7 @@ async fn fact_summaries(pool: &PgPool, turn: &SessionTurn) -> Result<Vec<String>
         r#"
         SELECT properties_summary->>'summary'
         FROM moa.node_index
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND label = 'Fact'
           AND properties_summary->>'source_session_id' = $2
         ORDER BY properties_summary->>'summary'
@@ -358,9 +358,9 @@ async fn fact_summaries(pool: &PgPool, turn: &SessionTurn) -> Result<Vec<String>
 async fn set_slow_path_degraded(pool: &PgPool, tenant_id: TenantId, degraded: bool) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state (workspace_id, slow_path_degraded)
+        INSERT INTO moa.storage_partition_state (storage_partition_id, slow_path_degraded)
         VALUES ($1, $2)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET slow_path_degraded = EXCLUDED.slow_path_degraded,
                 updated_at = now()
         "#,

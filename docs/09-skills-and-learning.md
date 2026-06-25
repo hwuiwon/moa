@@ -61,19 +61,15 @@ Postgres is the only durable skill package store:
 The context pipeline reads published skill artifact revisions directly. There is
 no separate active skill mirror for turn context injection.
 
-Skill packages use default/override scope, not runtime memory scope:
+Skill packages use tenant scope, not runtime memory scope:
 
 | Scope | Stored as | Visibility | Typical use |
 |---|---|---|---|
-| Workspace default | no `tenant_id` | Inherited by every tenant | Operator-curated defaults and reusable workflows |
-| Tenant override | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and tenant-specific workflows |
+| Tenant | `tenant_id` set | One tenant | Tenant conventions, approved learned skills, and tenant-specific workflows |
 
-Visible skill resolution is name-based. If a workspace default and tenant
-override both provide the same skill name, the tenant row is selected first.
-Workspace-level skills are inherited defaults for tenants; tenant-level skill
-rows override those defaults. Workspace default imports require workspace
-control-plane authorization. Tenant imports go through `/v1/skills/import` after
-tenant authorization. There is no contact-scoped skill inheritance.
+Visible skill resolution is name-based within a tenant. Tenant imports go
+through `/v1/skills/import` after tenant authorization. There is no
+contact-scoped skill inheritance.
 
 MOA does not duplicate skill package bytes in object storage. Import/export uses
 package documents containing base64-encoded files. On each turn, selected skill
@@ -119,11 +115,11 @@ only generates reviewable regression suite source.
 Skill distillation runs after successful multi-step work that passes the
 configured evidence threshold. The current learning flow proposes tenant-local
 skill changes. Tenant learning is never globally promoted and never rewrites
-workspace defaults automatically. Current generation flow:
+shared defaults automatically. Current generation flow:
 
 1. Count tool calls; short/simple sessions are skipped.
 2. Extract a task summary from recent user input.
-3. Compare against existing tenant override skills and inherited workspace defaults.
+3. Compare against existing tenant skills.
 4. If a similar skill exists, attempt improvement.
 5. Otherwise ask the configured model to produce a complete skill document.
 6. Validate the generated package and store it as a tenant-scoped

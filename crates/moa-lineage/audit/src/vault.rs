@@ -1,6 +1,6 @@
 //! PII pseudonymization vault helpers.
 //!
-//! Production deployments should back the workspace secret and data encryption
+//! Production deployments should back the storage-partition secret and data encryption
 //! key with KMS. The local implementation keeps only redacted lineage payloads
 //! outside the vault and stores reversible plaintext side data behind a separate
 //! `pii_vault` schema when a Postgres pool is configured.
@@ -80,14 +80,14 @@ impl PiiVault {
     /// Pseudonymizes a natural subject identifier and redacts obvious PII.
     pub async fn pseudonymize(
         &self,
-        workspace_id: &str,
+        storage_partition_id: &str,
         subject_natural_id: &str,
         text: &str,
     ) -> Result<PseudonymizationOutcome> {
         let subject_pseudonym = self.subject_pseudonym(subject_natural_id)?;
         let (redacted_text, redactions, plaintexts) = redact_text(&subject_pseudonym, text);
         if let Some(pool) = &self.pool {
-            self.store_plaintext(pool, workspace_id, &subject_pseudonym, &plaintexts)
+            self.store_plaintext(pool, storage_partition_id, &subject_pseudonym, &plaintexts)
                 .await?;
         }
         Ok(PseudonymizationOutcome {
@@ -101,16 +101,20 @@ impl PiiVault {
     ///
     /// Production KMS key destruction happens behind the key handle represented
     /// by the `erased_at` marker.
-    pub async fn erase_subject(&self, workspace_id: &str, subject_pseudonym: &[u8]) -> Result<u64> {
+    pub async fn erase_subject(
+        &self,
+        storage_partition_id: &str,
+        subject_pseudonym: &[u8],
+    ) -> Result<u64> {
         if let Some(pool) = &self.pool {
             let affected = sqlx::query(
                 r#"
                 UPDATE pii_vault.subject_keys
                 SET erased_at = now()
-                WHERE workspace_id = $1 AND subject_pseudonym = $2
+                WHERE storage_partition_id = $1 AND subject_pseudonym = $2
                 "#,
             )
-            .bind(workspace_id)
+            .bind(storage_partition_id)
             .bind(subject_pseudonym)
             .execute(pool)
             .await?
@@ -124,7 +128,9 @@ impl PiiVault {
     pub fn subject_pseudonym(&self, subject_natural_id: &str) -> Result<Vec<u8>> {
         let mut mac =
             <HmacSha256 as Mac>::new_from_slice(&self.workspace_secret).map_err(|_| {
-                AuditError::Invalid("workspace secret is not valid HMAC material".to_string())
+                AuditError::Invalid(
+                    "storage-partition secret is not valid HMAC material".to_string(),
+                )
             })?;
         mac.update(subject_natural_id.as_bytes());
         Ok(mac.finalize().into_bytes().to_vec())
@@ -133,14 +139,14 @@ impl PiiVault {
     async fn store_plaintext(
         &self,
         pool: &sqlx::PgPool,
-        workspace_id: &str,
+        storage_partition_id: &str,
         subject_pseudonym: &[u8],
         plaintexts: &[(String, String)],
     ) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO pii_vault.subject_keys (
-                subject_pseudonym, workspace_id, hmac_key_handle
+                subject_pseudonym, storage_partition_id, hmac_key_handle
             )
             VALUES ($1, $2, $3)
             ON CONFLICT (subject_pseudonym) DO UPDATE
@@ -148,7 +154,7 @@ impl PiiVault {
             "#,
         )
         .bind(subject_pseudonym)
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(&self.key_handle)
         .execute(pool)
         .await?;
@@ -160,7 +166,7 @@ impl PiiVault {
                 INSERT INTO pii_vault.plaintext_side (
                     record_id,
                     subject_pseudonym,
-                    workspace_id,
+                    storage_partition_id,
                     field_name,
                     ciphertext,
                     encryption_context
@@ -171,7 +177,7 @@ impl PiiVault {
             )
             .bind(Uuid::now_v7())
             .bind(subject_pseudonym)
-            .bind(workspace_id)
+            .bind(storage_partition_id)
             .bind(field_name)
             .bind(ciphertext)
             .bind(serde_json::json!({
@@ -290,10 +296,10 @@ mod tests {
 
     #[tokio::test]
     async fn pseudonym_is_deterministic_and_redacts_email() {
-        let vault = PiiVault::new_dev(b"workspace-secret".to_vec());
+        let vault = PiiVault::new_dev(b"tenant-secret".to_vec());
         let first = vault
             .pseudonymize(
-                "workspace",
+                "tenant-storage-partition",
                 "alice@example.com",
                 "Email alice@example.com now",
             )
@@ -301,7 +307,7 @@ mod tests {
             .expect("pseudonymize");
         let second = vault
             .pseudonymize(
-                "workspace",
+                "tenant-storage-partition",
                 "alice@example.com",
                 "Email alice@example.com now",
             )
@@ -315,10 +321,10 @@ mod tests {
 
     #[tokio::test]
     async fn pii_vault_uses_shared_classifier_but_keeps_audit_token_format() {
-        let vault = PiiVault::new_dev(b"workspace-secret".to_vec());
+        let vault = PiiVault::new_dev(b"tenant-secret".to_vec());
         let first = vault
             .pseudonymize(
-                "workspace",
+                "tenant-storage-partition",
                 "alice@example.com",
                 "Email alice@example.com phone 555-123-4567 ssn 123-45-6789",
             )
@@ -326,7 +332,7 @@ mod tests {
             .expect("pseudonymize PII text");
         let second = vault
             .pseudonymize(
-                "workspace",
+                "tenant-storage-partition",
                 "alice@example.com",
                 "Email alice@example.com phone 555-123-4567 ssn 123-45-6789",
             )
@@ -364,7 +370,7 @@ mod tests {
 
     #[test]
     fn pii_encryption_uses_fresh_nonce_per_field() {
-        let vault = PiiVault::new_dev(b"workspace-secret".to_vec());
+        let vault = PiiVault::new_dev(b"storage-partition-secret".to_vec());
 
         let first = vault
             .encrypt_plaintext(b"alice@example.com")

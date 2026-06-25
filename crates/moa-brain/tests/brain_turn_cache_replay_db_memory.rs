@@ -12,7 +12,7 @@ use moa_core::{
     CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event, EventRange,
     EventRecord, ModelCapabilities, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
     TokenPricing, TokenUsage, ToolCallFormat, ToolOutput, TurnReplayCounters, TurnReplaySnapshot,
-    WorkspaceId, scope_turn_replay_counters,
+    scope_turn_replay_counters,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedProvider, ScriptedResponse, debug_build_anthropic_request_body};
@@ -75,7 +75,6 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
     let dyn_session_store: Arc<dyn SessionStore> = session_store.clone();
     let tenant_id = TenantId::from(uuid::Uuid::now_v7());
     let contact_id = ContactId::new();
-    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
     let session = SessionMeta {
         tenant_id,
         contact: Some(contact_ref(tenant_id, contact_id)),
@@ -92,7 +91,7 @@ async fn brain_turn_cache_replay_db_memory() -> Result<()> {
             .with_session_store(session_store.clone()),
     );
     router
-        .remember_workspace_root(runtime_workspace_id, workspace.clone())
+        .remember_workspace_root(tenant_id, workspace.clone())
         .await;
 
     let provider = Arc::new(build_scripted_provider());

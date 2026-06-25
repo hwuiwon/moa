@@ -14,7 +14,7 @@ use moa_core::wire::{
 };
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, MoaError, ModelId, SessionActorRef, SessionId,
-    SessionMeta, SessionStatus, SessionStore, TenantId, WorkspaceId,
+    SessionMeta, SessionStatus, SessionStore, TenantId,
 };
 use moa_experiments::model::{
     ExperimentRunRecord, ExperimentRunStatus, ExperimentTarget, ExperimentTrialRecord,
@@ -53,7 +53,6 @@ use plan_expansion::run_experiment_plan;
 use status::{status_response, workflow_status_response};
 use target_execution::{run_agent_loop_target, run_workflow_target};
 
-const K_WORKSPACE_ID: &str = "workspace_id";
 const K_RUN_UID: &str = "run_uid";
 const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
@@ -106,7 +105,7 @@ pub struct ExperimentRunImpl;
 
 impl ExperimentRun for ExperimentRunImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: called only from Experiments/run after workspace editor authz.
+    // SAFETY: called only from Experiments/run after tenant operator authz.
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -118,10 +117,6 @@ impl ExperimentRun for ExperimentRunImpl {
             return Err(TerminalError::new_with_code(404, "experiment run id mismatch").into());
         }
 
-        ctx.set(
-            K_WORKSPACE_ID,
-            Json(workspace_id_for_tenant(request.tenant_id)),
-        );
         ctx.set(K_RUN_UID, Json(request.run_uid));
         ctx.set(K_SCORE_RUN_ID, Json(request.score_run_id));
         ctx.set(K_STATUS, Json(ExperimentRunStatus::Running));
@@ -155,7 +150,7 @@ impl ExperimentRun for ExperimentRunImpl {
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
-    // SAFETY: called only from Experiments/status after workspace member authz.
+    // SAFETY: called only from Experiments/status after tenant operator authz.
     async fn status(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -394,10 +389,6 @@ fn annotate_run_span(
 
 fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
     ActionRuleScope::Tenant { tenant_id }
-}
-
-fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>

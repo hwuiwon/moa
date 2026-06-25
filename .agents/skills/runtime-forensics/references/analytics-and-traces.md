@@ -26,7 +26,7 @@ Key invariants:
 - generated columns own `total_input_tokens` and `cache_hit_rate`
 - the `update_session_aggregates` trigger owns event-derived counters
 - `session_summary` and `tool_call_summary` are live views
-- `session_turn_metrics` and `daily_workspace_metrics` are materialized views and may be stale until refreshed
+- `session_turn_metrics` and tenant daily metrics are materialized views and may be stale until refreshed. The tenant daily SQL view is `daily_storage_partition_metrics`.
 
 If a metric looks wrong:
 
@@ -99,9 +99,9 @@ curl -X POST "$MOA_EDGE_URL/v1/analytics/session-stats" \
 curl -X POST "$MOA_EDGE_URL/v1/analytics/tool-stats" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"workspace_id":"<workspace-id>"}'
+  --data '{}'
 curl -X POST "$MOA_EDGE_URL/v1/analytics/cache-stats" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
-  --data '{"workspace_id":"<workspace-id>","days":30}'
+  --data '{"days":30}'
 ```

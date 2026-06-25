@@ -43,7 +43,7 @@ where
 /// Enqueue a tuple operation using OpenFGA wire strings directly.
 ///
 /// This is used for parent-edge tuples whose subject is another object, such
-/// as `workspace:<id> workspace session:<id>`, which cannot be represented by
+/// as `tenant:<id> tenant session:<id>`, which cannot be represented by
 /// the typed subject enum in [`TupleKey`].
 pub async fn enqueue_raw<'executor, Executor>(
     exec: Executor,

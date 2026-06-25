@@ -114,8 +114,8 @@ pub async fn supersede_node(
     let old_change = write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: old.workspace_id.clone(),
-            user_id: old.user_id.clone(),
+            storage_partition_id: old.storage_partition_id.clone(),
+            contact_id: old.contact_id.clone(),
             scope: old.scope.clone(),
             actor_id: Some(new.actor_id.clone()),
             actor_kind: new.actor_kind.clone(),
@@ -180,8 +180,8 @@ pub async fn invalidate_node(store: &AgeGraphStore, uid: Uuid, reason: &str) -> 
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: old.workspace_id,
-            user_id: old.user_id,
+            storage_partition_id: old.storage_partition_id,
+            contact_id: old.contact_id,
             scope: old.scope,
             actor_id,
             actor_kind,
@@ -241,8 +241,8 @@ pub async fn close_existing_node_with_supersession(
             "actor": intent.actor_id.clone(),
             "reason": intent.reason.clone(),
             "edge_uid": Uuid::now_v7().to_string(),
-            "workspace_id": old.workspace_id.clone().unwrap_or_default(),
-            "user_id": old.user_id.clone().unwrap_or_default(),
+            "storage_partition_id": old.storage_partition_id.clone().unwrap_or_default(),
+            "user_id": old.contact_id.clone().unwrap_or_default(),
             "scope": old.scope.clone(),
         }))
         .execute(conn.as_mut())
@@ -265,8 +265,8 @@ pub async fn close_existing_node_with_supersession(
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: old.workspace_id,
-            user_id: old.user_id,
+            storage_partition_id: old.storage_partition_id,
+            contact_id: old.contact_id,
             scope: old.scope,
             actor_id: Some(intent.actor_id),
             actor_kind: intent.actor_kind,
@@ -341,8 +341,8 @@ pub async fn update_node_properties(
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: old.workspace_id,
-            user_id: old.user_id,
+            storage_partition_id: old.storage_partition_id,
+            contact_id: old.contact_id,
             scope: old.scope,
             actor_id: Some(intent.actor_id),
             actor_kind: intent.actor_kind,
@@ -388,8 +388,7 @@ pub async fn upsert_node_embedding(
             conn.as_mut(),
             &[VectorItem {
                 uid: intent.uid,
-                workspace_id: node.workspace_id.clone(),
-                user_id: node.user_id.clone(),
+                user_id: node.contact_id.clone(),
                 label: node.label.as_str().to_string(),
                 pii_class: node.pii_class.as_str().to_string(),
                 embedding: intent.embedding,
@@ -402,8 +401,8 @@ pub async fn upsert_node_embedding(
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: node.workspace_id,
-            user_id: node.user_id,
+            storage_partition_id: node.storage_partition_id,
+            contact_id: node.contact_id,
             scope: node.scope,
             actor_id: Some(intent.actor_id),
             actor_kind: intent.actor_kind,
@@ -449,8 +448,8 @@ pub async fn hard_purge_with_audit(
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: old.workspace_id.clone(),
-            user_id: old.user_id.clone(),
+            storage_partition_id: old.storage_partition_id.clone(),
+            contact_id: old.contact_id.clone(),
             scope: old.scope.clone(),
             actor_id,
             actor_kind,
@@ -496,8 +495,8 @@ pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Resu
     write_and_bump(
         conn.as_mut(),
         ChangelogRecord {
-            workspace_id: intent.workspace_id.clone(),
-            user_id: intent.user_id.clone(),
+            storage_partition_id: intent.storage_partition_id.clone(),
+            contact_id: intent.contact_id.clone(),
             scope: intent.scope.clone(),
             actor_id: Some(intent.actor_id.clone()),
             actor_kind: intent.actor_kind.clone(),
@@ -524,8 +523,8 @@ pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Resu
 
 fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
     validate_scope_shape(
-        intent.workspace_id.as_deref(),
-        intent.user_id.as_deref(),
+        intent.storage_partition_id.as_deref(),
+        intent.contact_id.as_deref(),
         &intent.scope,
     )?;
     if !intent.properties.is_object() {
@@ -538,8 +537,8 @@ fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
 
 fn validate_edge_scope(intent: &EdgeWriteIntent) -> Result<()> {
     validate_scope_shape(
-        intent.workspace_id.as_deref(),
-        intent.user_id.as_deref(),
+        intent.storage_partition_id.as_deref(),
+        intent.contact_id.as_deref(),
         &intent.scope,
     )?;
     if !intent.properties.is_object() {
@@ -551,17 +550,17 @@ fn validate_edge_scope(intent: &EdgeWriteIntent) -> Result<()> {
 }
 
 fn validate_scope_shape(
-    workspace_id: Option<&str>,
-    user_id: Option<&str>,
+    storage_partition_id: Option<&str>,
+    contact_id: Option<&str>,
     scope: &str,
 ) -> Result<()> {
-    let expected = match (workspace_id, user_id) {
+    let expected = match (storage_partition_id, contact_id) {
         (None, None) => "global",
         (Some(_), None) => "tenant",
         (Some(_), Some(_)) => "contact",
         (None, Some(_)) => {
             return Err(GraphError::Conflict(
-                "contact scope requires workspace_id".to_string(),
+                "contact scope requires storage partition".to_string(),
             ));
         }
     };
@@ -575,8 +574,8 @@ fn validate_scope_shape(
 }
 
 fn validate_same_scope(old: &StoredNode, replacement: &StoredNode) -> Result<()> {
-    if old.workspace_id == replacement.workspace_id
-        && old.user_id == replacement.user_id
+    if old.storage_partition_id == replacement.storage_partition_id
+        && old.contact_id == replacement.contact_id
         && old.scope == replacement.scope
     {
         Ok(())
@@ -617,8 +616,8 @@ fn edge_create_template(label: EdgeLabel) -> &'static Cypher {
 fn node_params(intent: &NodeWriteIntent, created_at: DateTime<Utc>) -> Value {
     json!({
         "uid": intent.uid.to_string(),
-        "workspace_id": intent.workspace_id.clone().unwrap_or_default(),
-        "user_id": intent.user_id.clone().unwrap_or_default(),
+        "storage_partition_id": intent.storage_partition_id.clone().unwrap_or_default(),
+        "user_id": intent.contact_id.clone().unwrap_or_default(),
         "scope": intent.scope,
         "name": intent.name,
         "pii_class": intent.pii_class.as_str(),
@@ -633,8 +632,8 @@ fn edge_params(intent: &EdgeWriteIntent) -> Value {
         "uid": intent.uid.to_string(),
         "start_uid": intent.start_uid.to_string(),
         "end_uid": intent.end_uid.to_string(),
-        "workspace_id": intent.workspace_id.clone().unwrap_or_default(),
-        "user_id": intent.user_id.clone().unwrap_or_default(),
+        "storage_partition_id": intent.storage_partition_id.clone().unwrap_or_default(),
+        "user_id": intent.contact_id.clone().unwrap_or_default(),
         "scope": intent.scope,
         "properties": intent.properties,
     })
@@ -649,15 +648,15 @@ async fn insert_node_index(
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, workspace_id, user_id, tenant_id, contact_id, name, pii_class, confidence,
+            (uid, label, storage_partition_id, user_id, tenant_id, contact_id, name, pii_class, confidence,
              reference_count, valid_from, properties_summary)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(intent.uid)
     .bind(intent.label.as_str())
-    .bind(intent.workspace_id.as_deref())
-    .bind(intent.user_id.as_deref())
+    .bind(intent.storage_partition_id.as_deref())
+    .bind(intent.contact_id.as_deref())
     .bind(tenant_id)
     .bind(contact_id)
     .bind(&intent.name)
@@ -679,14 +678,14 @@ fn runtime_ids_for_node(
         return Ok((scope.tenant_id().0, scope.contact_id().map(|id| id.0)));
     }
 
-    let Some(workspace_id) = intent.workspace_id.as_deref() else {
+    let Some(storage_partition_id) = intent.storage_partition_id.as_deref() else {
         return Err(GraphError::Conflict(
             "tenant-owned graph nodes require tenant scope".to_string(),
         ));
     };
-    let tenant_id = Uuid::parse_str(workspace_id).map_err(|error| {
+    let tenant_id = Uuid::parse_str(storage_partition_id).map_err(|error| {
         GraphError::Conflict(format!(
-            "workspace_id `{workspace_id}` cannot be used as tenant_id: {error}"
+            "storage partition `{storage_partition_id}` cannot be used as tenant_id: {error}"
         ))
     })?;
     Ok((tenant_id, None))
@@ -747,8 +746,7 @@ fn vector_item_from_intent(intent: &NodeWriteIntent) -> Result<Option<VectorItem
     };
     Ok(Some(VectorItem {
         uid: intent.uid,
-        workspace_id: intent.workspace_id.clone(),
-        user_id: intent.user_id.clone(),
+        user_id: intent.contact_id.clone(),
         label: intent.label.as_str().to_string(),
         pii_class: intent.pii_class.as_str().to_string(),
         embedding,
@@ -766,8 +764,8 @@ fn require_vector_store(store: &AgeGraphStore) -> Result<&dyn VectorStore> {
 
 fn create_changelog(intent: &NodeWriteIntent, cause_change_id: Option<i64>) -> ChangelogRecord {
     ChangelogRecord {
-        workspace_id: intent.workspace_id.clone(),
-        user_id: intent.user_id.clone(),
+        storage_partition_id: intent.storage_partition_id.clone(),
+        contact_id: intent.contact_id.clone(),
         scope: intent.scope.clone(),
         actor_id: Some(intent.actor_id.clone()),
         actor_kind: intent.actor_kind.clone(),
@@ -803,7 +801,7 @@ fn hash_properties(properties: Option<&Value>) -> Result<String> {
 async fn fetch_stored_node(conn: &mut PgConnection, uid: Uuid) -> Result<Option<StoredNode>> {
     let row = sqlx::query(
         r#"
-        SELECT label, workspace_id, user_id, scope, pii_class, confidence,
+        SELECT label, storage_partition_id, user_id, scope, pii_class, confidence,
                valid_from, valid_to, properties_summary
         FROM moa.node_index
         WHERE uid = $1
@@ -932,8 +930,8 @@ fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {
     let pii_class_text: String = row.try_get("pii_class")?;
     Ok(StoredNode {
         label: label_text.parse()?,
-        workspace_id: row.try_get("workspace_id")?,
-        user_id: row.try_get("user_id")?,
+        storage_partition_id: row.try_get("storage_partition_id")?,
+        contact_id: row.try_get("user_id")?,
         scope: row.try_get("scope")?,
         pii_class: pii_class_text.parse()?,
         confidence: row.try_get("confidence")?,
@@ -946,8 +944,8 @@ fn stored_node_from_row(row: sqlx::postgres::PgRow) -> Result<StoredNode> {
 #[derive(Debug, Clone)]
 struct StoredNode {
     label: NodeLabel,
-    workspace_id: Option<String>,
-    user_id: Option<String>,
+    storage_partition_id: Option<String>,
+    contact_id: Option<String>,
     scope: String,
     pii_class: PiiClass,
     confidence: Option<f64>,

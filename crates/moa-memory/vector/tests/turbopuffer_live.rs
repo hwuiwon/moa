@@ -15,12 +15,11 @@ fn live_store() -> TurbopufferStore {
 #[tokio::test]
 #[ignore = "live Turbopuffer test; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1 and TURBOPUFFER_API_KEY"]
 async fn turbopuffer_live_round_trip() {
-    let store = live_store();
-    let workspace_id = format!("live-{}", Uuid::now_v7());
+    let storage_partition_id = format!("live-{}", Uuid::now_v7());
+    let store = live_store().with_storage_partition_id(storage_partition_id.clone());
     let uid = Uuid::now_v7();
     let item = VectorItem {
         uid,
-        workspace_id: Some(workspace_id.clone()),
         user_id: None,
         label: "Fact".to_string(),
         pii_class: "none".to_string(),
@@ -36,7 +35,6 @@ async fn turbopuffer_live_round_trip() {
         .expect("upsert");
     let matches = store
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.clone()),
             embedding: item.embedding,
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -52,7 +50,7 @@ async fn turbopuffer_live_round_trip() {
     );
 
     store
-        .delete_in_workspace(&workspace_id, &[uid])
+        .delete_in_storage_partition(&storage_partition_id, &[uid])
         .await
         .expect("delete");
 }

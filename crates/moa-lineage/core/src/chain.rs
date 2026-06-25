@@ -42,13 +42,13 @@ pub fn canonical_payload_hash(payload: &serde_json::Value) -> Result<Hash> {
     Ok(blake3::hash(&canonical))
 }
 
-/// Returns the deterministic workspace-chain genesis hash.
+/// Returns the deterministic tenant-chain genesis hash.
 #[must_use]
 pub fn genesis_hash() -> Hash {
     blake3::hash(GENESIS_DOMAIN)
 }
 
-/// Computes the next workspace-local chain hash from a previous hash.
+/// Computes the next tenant-local chain hash from a previous hash.
 #[must_use]
 pub fn next_chain_hash(prev: Hash, payload_hash: Hash) -> Hash {
     let mut hasher = Hasher::new();

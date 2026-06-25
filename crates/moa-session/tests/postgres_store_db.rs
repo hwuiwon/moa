@@ -10,14 +10,14 @@ use moa_core::{
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateType, LearningEntry,
     LearningRiskClass, MoaError, ModelId, SegmentAssessment, SegmentCompletion, SegmentEvidence,
     SegmentEvidenceKind, SegmentEvidencePolarity, SegmentOutcome, SessionActorRef, SessionId,
-    SessionMeta, SessionStore, TaskFacetSet, TaskFingerprint, TaskSegment, TenantId, ToolCallId,
-    ToolOutput, UserId, WorkspaceId, deterministic_segment_id,
+    SessionMeta, SessionStore, StoragePartitionId, TaskFacetSet, TaskFingerprint, TaskSegment,
+    TenantId, ToolCallId, ToolOutput, UserId, deterministic_segment_id,
 };
 use moa_session::{PostgresSessionStore, testing};
 use moa_test_support::postgres::{
     test_action_policy_rules, test_create_and_get_session, test_emit_and_get_events,
     test_event_search, test_list_sessions_with_filter, test_session_status_update,
-    test_workspace_cost_since,
+    test_tenant_cost_since,
 };
 use sqlx::PgPool;
 use sqlx::types::Json;
@@ -60,8 +60,8 @@ fn tenant_id(label: &str) -> TenantId {
     TenantId::from(Uuid::from_bytes(bytes))
 }
 
-fn workspace_key(label: &str) -> WorkspaceId {
-    WorkspaceId::new(tenant_id(label).to_string())
+fn workspace_key(label: &str) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id(label).to_string())
 }
 
 fn test_session_meta(label: &str, model: &str) -> SessionMeta {
@@ -149,7 +149,7 @@ async fn postgres_shared_session_store_contract() {
     })
     .await;
     with_test_store(|store| async move {
-        test_workspace_cost_since(&store).await;
+        test_tenant_cost_since(&store).await;
     })
     .await;
     with_test_store(|store| async move {
@@ -206,7 +206,7 @@ async fn postgres_direct_session_insert_requires_agent_context_sidecar() {
         .expect("begin direct insert transaction");
     sqlx::query(&format!(
         "INSERT INTO {sessions} \
-         (id, workspace_id, user_id, status, channel, model, created_at, updated_at) \
+         (id, storage_partition_id, user_id, status, channel, model, created_at, updated_at) \
          VALUES ($1, $2, $3, 'created', 'chat', 'test-model', NOW(), NOW())"
     ))
     .bind(Uuid::now_v7())
@@ -305,8 +305,8 @@ async fn postgres_event_payloads_round_trip_as_jsonb() {
 #[ignore]
 async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id() {
     let (store, database_url, schema_name) = create_test_store().await;
-    let workspace_id = workspace_key("pg-tool-event-exists");
-    let other_workspace_id = workspace_key("pg-tool-event-exists-other");
+    let storage_partition_id = workspace_key("pg-tool-event-exists");
+    let other_storage_partition_id = workspace_key("pg-tool-event-exists-other");
     let session_id = store
         .create_session(test_session_meta("pg-tool-event-exists", "test-model"))
         .await
@@ -364,26 +364,41 @@ async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id()
 
     assert!(
         store
-            .tool_event_exists(&workspace_id, session_id, EventType::ToolCall, tool_id)
+            .tool_event_exists(
+                &storage_partition_id,
+                session_id,
+                EventType::ToolCall,
+                tool_id
+            )
             .await
             .expect("tool call existence query")
     );
     assert!(
         store
-            .tool_event_exists(&workspace_id, session_id, EventType::ToolResult, tool_id)
+            .tool_event_exists(
+                &storage_partition_id,
+                session_id,
+                EventType::ToolResult,
+                tool_id
+            )
             .await
             .expect("tool result existence query")
     );
     assert!(
         !store
-            .tool_event_exists(&workspace_id, session_id, EventType::ToolError, tool_id)
+            .tool_event_exists(
+                &storage_partition_id,
+                session_id,
+                EventType::ToolError,
+                tool_id
+            )
             .await
             .expect("wrong event type query")
     );
     assert!(
         !store
             .tool_event_exists(
-                &workspace_id,
+                &storage_partition_id,
                 session_id,
                 EventType::ToolCall,
                 other_session_tool_id,
@@ -394,7 +409,7 @@ async fn postgres_tool_event_exists_matches_session_workspace_type_and_tool_id()
     assert!(
         !store
             .tool_event_exists(
-                &other_workspace_id,
+                &other_storage_partition_id,
                 session_id,
                 EventType::ToolCall,
                 tool_id
@@ -695,7 +710,6 @@ async fn experience_records_and_candidates_round_trip() {
     let segment_id = deterministic_segment_id(session_id, 0);
     let now = Utc::now();
     let tenant_id = tenant_id("pg-experience");
-    let workspace_id = workspace_key("pg-experience");
     let assessment = SegmentAssessment {
         outcome: SegmentOutcome::Resolved,
         confidence: 0.9,
@@ -750,7 +764,6 @@ async fn experience_records_and_candidates_round_trip() {
         segment_id,
         session_id,
         tenant_id,
-        workspace_id: workspace_id.clone(),
         user_id: UserId::new("user"),
         task_summary: Some("Fix Rust auth failure".to_string()),
         task_fingerprint: fingerprint.clone(),
@@ -777,7 +790,6 @@ async fn experience_records_and_candidates_round_trip() {
         id: Uuid::now_v7(),
         experience_id: experience.id,
         tenant_id,
-        workspace_id: workspace_id.clone(),
         user_id: Some(UserId::new("user")),
         subject_type: AttributionSubjectType::Skill,
         subject_id: "moa-rust".to_string(),
@@ -793,7 +805,6 @@ async fn experience_records_and_candidates_round_trip() {
     let candidate = LearningCandidate {
         id: Uuid::now_v7(),
         tenant_id,
-        workspace_id: workspace_id.clone(),
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
         status: LearningCandidateStatus::Proposed,
@@ -895,9 +906,8 @@ async fn experience_records_and_candidates_round_trip() {
 #[ignore]
 async fn postgres_store_learning_candidate_review_lookup() {
     with_test_store(|store| async move {
-        let tenant_id = tenant_id("pg-review");
-        let workspace_id = workspace_key("pg-review");
-        let other_workspace_id = workspace_key("pg-review-other");
+        let review_tenant_id = tenant_id("pg-review");
+        let other_tenant_id = tenant_id("pg-review-other");
         let source_experience_id = Uuid::now_v7();
         let artifact_uid = Uuid::now_v7();
         let draft_revision_uid = Uuid::now_v7();
@@ -918,8 +928,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
         let now = Utc::now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
-            tenant_id,
-            workspace_id: workspace_id.clone(),
+            tenant_id: review_tenant_id,
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
             status: LearningCandidateStatus::Proposed,
@@ -946,12 +955,12 @@ async fn postgres_store_learning_candidate_review_lookup() {
 
         // Pins: review services can load full proposed candidates by id before accepting or rejecting them.
         let loaded = store
-            .get_learning_candidate(&workspace_id, candidate.id)
+            .get_learning_candidate(&candidate.tenant_id, candidate.id)
             .await
             .expect("load candidate by id")
-            .expect("candidate exists in owning workspace");
+            .expect("candidate exists in owning tenant");
         assert_eq!(loaded.id, candidate.id);
-        assert_eq!(loaded.workspace_id, workspace_id);
+        assert_eq!(loaded.tenant_id, review_tenant_id);
         assert_eq!(loaded.candidate_type, LearningCandidateType::Skill);
         assert_eq!(loaded.status, LearningCandidateStatus::Proposed);
         assert_eq!(loaded.target_label.as_deref(), Some("reviewable-skill"));
@@ -978,18 +987,18 @@ async fn postgres_store_learning_candidate_review_lookup() {
             "status update with the wrong expected state must not change the candidate"
         );
         let still_proposed = store
-            .get_learning_candidate(&workspace_id, candidate.id)
+            .get_learning_candidate(&candidate.tenant_id, candidate.id)
             .await
             .expect("reload proposed candidate")
             .expect("candidate remains visible");
         assert_eq!(still_proposed.status, LearningCandidateStatus::Proposed);
         assert_eq!(still_proposed.evaluation_payload, None);
 
-        let cross_workspace = store
-            .get_learning_candidate(&other_workspace_id, candidate.id)
+        let cross_tenant = store
+            .get_learning_candidate(&other_tenant_id, candidate.id)
             .await
-            .expect("cross-workspace lookup should not fail");
-        assert_eq!(cross_workspace, None);
+            .expect("cross-tenant lookup should not fail");
+        assert_eq!(cross_tenant, None);
 
         let evaluation_payload = serde_json::json!({
             "reviewer_subject": "user:reviewer",
@@ -1007,7 +1016,7 @@ async fn postgres_store_learning_candidate_review_lookup() {
             .expect("reject candidate");
 
         let rejected = store
-            .get_learning_candidate(&workspace_id, candidate.id)
+            .get_learning_candidate(&candidate.tenant_id, candidate.id)
             .await
             .expect("reload rejected candidate")
             .expect("candidate remains visible in owning workspace");
@@ -1280,7 +1289,7 @@ async fn postgres_trigger_failure_rolls_back_insert() {
         .expect("postgres inspection pool");
     let error = sqlx::query(&format!(
         "INSERT INTO {} \
-         (id, session_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+         (id, session_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL)",
         qualified(&schema_name, "events")
     ))
@@ -1421,7 +1430,7 @@ async fn postgres_tool_call_summary_view_reports_percentiles() {
 #[ignore]
 async fn postgres_materialized_analytics_views_refresh() {
     let (store, database_url, schema_name) = create_test_store().await;
-    let workspace_id = workspace_key("mv-ws");
+    let storage_partition_id = workspace_key("mv-ws");
     let tenant_id = tenant_id("mv-ws");
     let first_session_id = store
         .create_session(test_session_meta("mv-ws", "test-model"))
@@ -1539,10 +1548,10 @@ async fn postgres_materialized_analytics_views_refresh() {
         .await
         .expect("postgres inspection pool");
     let session_count: i64 = sqlx::query_scalar(&format!(
-        "SELECT session_count FROM {} WHERE workspace_id = $1",
-        qualified(&schema_name, "daily_workspace_metrics")
+        "SELECT session_count FROM {} WHERE storage_partition_id = $1",
+        qualified(&schema_name, "daily_storage_partition_metrics")
     ))
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_one(&pool)
     .await
     .expect("query daily workspace metrics");

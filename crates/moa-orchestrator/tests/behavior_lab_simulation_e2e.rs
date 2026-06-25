@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_core::{
-    ActionRuleScope, Event, EventRange, EventRecord, SessionId, TenantId, WorkspaceId,
+    ActionRuleScope, Event, EventRange, EventRecord, SessionId, StoragePartitionId, TenantId,
     traits::Identity,
     wire::{
         ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest,
@@ -105,20 +105,20 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let scope = ActionRuleScope::Tenant { tenant_id };
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_support_skill(&client, ingress, &identity, &workspace_id).await?;
+        import_support_skill(&client, ingress, &identity, &storage_partition_id).await?;
 
         let workflow = import_and_publish_artifact(
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             damaged_food_workflow_source(),
         )
         .await?;
@@ -126,7 +126,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             damaged_food_plan_source(),
         )
         .await?;
@@ -135,7 +135,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             "damaged-food-behavior-lab",
             plan.revision_uid,
         )
@@ -146,14 +146,14 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
         assert!(run.workflow_run_uid.is_none());
 
         let status =
-            wait_for_run_status(&client, ingress, &identity, &workspace_id, run.run_uid, |status| {
+            wait_for_run_status(&client, ingress, &identity, &storage_partition_id, run.run_uid, |status| {
                 status.status == "completed"
             })
             .await?;
         assert_eq!(status.status, "completed");
         assert_eq!(status.score_run_id, Some(run.score_run_id));
 
-        let trials = list_trials(&client, ingress, &identity, &workspace_id, run.run_uid).await?;
+        let trials = list_trials(&client, ingress, &identity, &storage_partition_id, run.run_uid).await?;
         assert_eq!(trials.trials.len(), 1);
         let trial = &trials.trials[0];
         assert_eq!(trial.run_uid, run.run_uid);
@@ -176,7 +176,7 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             trial.trial_uid,
         )
         .await?;
@@ -205,10 +205,10 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
         );
 
         let workflow_run =
-            run_workflow_for_session(&client, ingress, &identity, &workspace_id, session_id).await?;
+            run_workflow_for_session(&client, ingress, &identity, &storage_partition_id, session_id).await?;
         assert_eq!(workflow_run.status, "queued");
         let workflow_status =
-            wait_for_workflow_status(&client, ingress, &identity, &workspace_id, workflow_run.run_id, "completed")
+            wait_for_workflow_status(&client, ingress, &identity, &storage_partition_id, workflow_run.run_id, "completed")
                 .await?;
         assert_eq!(workflow_status.run_id, workflow_run.run_id);
         assert_eq!(workflow_status.session_id, Some(session_id));
@@ -228,11 +228,11 @@ async fn damaged_food_plan_links_trial_session_workflow_skill_and_score_runs() -
             .context("connect to test Postgres")?;
         assert_score_run_parent(&pool, &scope, run.score_run_id, "experiment_run").await?;
         assert_score_run_parent(&pool, &scope, trial.score_run_id, "experiment_trial").await?;
-        assert_no_analytics_scores(&pool, &workspace_id, &[run.score_run_id, trial.score_run_id])
+        assert_no_analytics_scores(&pool, &storage_partition_id, &[run.score_run_id, trial.score_run_id])
             .await?;
-        assert_no_learning_candidates(&pool, &scope, &workspace_id).await?;
+        assert_no_learning_candidates(&pool, &scope, &storage_partition_id).await?;
 
-        let scores = experiment_scores(&client, ingress, &identity, &workspace_id, run.run_uid)
+        let scores = experiment_scores(&client, ingress, &identity, &storage_partition_id, run.run_uid)
             .await?;
         assert_eq!(scores.score_run_id, run.score_run_id);
         assert!(scores.rows.is_empty());
@@ -279,7 +279,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let scope = ActionRuleScope::Tenant { tenant_id };
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
@@ -291,7 +291,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             transaction_plan_source(),
         )
         .await?;
@@ -300,7 +300,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             "transaction-dispute-behavior-lab",
             plan.revision_uid,
         )
@@ -309,14 +309,14 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
         assert_ne!(run.score_run_id, Uuid::nil());
 
         let status =
-            wait_for_run_status(&client, ingress, &identity, &workspace_id, run.run_uid, |status| {
+            wait_for_run_status(&client, ingress, &identity, &storage_partition_id, run.run_uid, |status| {
                 status.status == "completed"
             })
             .await?;
         assert_eq!(status.status, "completed");
         assert_eq!(status.score_run_id, Some(run.score_run_id));
 
-        let trials = list_trials(&client, ingress, &identity, &workspace_id, run.run_uid).await?;
+        let trials = list_trials(&client, ingress, &identity, &storage_partition_id, run.run_uid).await?;
         assert_eq!(trials.trials.len(), 1);
         let trial = &trials.trials[0];
         assert_eq!(trial.status, "completed");
@@ -337,7 +337,7 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             trial.trial_uid,
         )
         .await?;
@@ -379,9 +379,9 @@ async fn transaction_dispute_plan_clarifies_then_handles_required_review() -> Re
             .context("connect to test Postgres")?;
         assert_score_run_parent(&pool, &scope, run.score_run_id, "experiment_run").await?;
         assert_score_run_parent(&pool, &scope, trial.score_run_id, "experiment_trial").await?;
-        assert_no_analytics_scores(&pool, &workspace_id, &[run.score_run_id, trial.score_run_id])
+        assert_no_analytics_scores(&pool, &storage_partition_id, &[run.score_run_id, trial.score_run_id])
             .await?;
-        assert_no_learning_candidates(&pool, &scope, &workspace_id).await?;
+        assert_no_learning_candidates(&pool, &scope, &storage_partition_id).await?;
         pool.close().await;
 
         Ok(())
@@ -458,12 +458,13 @@ async fn import_support_skill(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) -> Result<()> {
     let request = SkillImportRequest {
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::from(
-                Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+                Uuid::parse_str(storage_partition_id.as_str())
+                    .context("storage partition id is tenant uuid")?,
             ),
         },
         packages: vec![support_skill_package()],
@@ -481,12 +482,13 @@ async fn import_and_publish_artifact(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     source_text: &str,
 ) -> Result<ArtifactPublishResponse> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: TenantId::from(
-            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            Uuid::parse_str(storage_partition_id.as_str())
+                .context("storage partition id is tenant uuid")?,
         ),
     };
     let import_request = ArtifactImportRequest {
@@ -534,12 +536,12 @@ async fn run_plan_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     name: &str,
     plan_revision_uid: Uuid,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         name: name.to_string(),
         plan_revision_uid: Some(plan_revision_uid),
         target: None,
@@ -560,12 +562,12 @@ async fn wait_for_run_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_uid: Uuid,
     done: impl Fn(&ExperimentRunStatusResponse) -> bool,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         run_uid,
     };
     let mut last_status = None;
@@ -590,11 +592,11 @@ async fn list_trials(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_uid: Uuid,
 ) -> Result<ExperimentTrialsResponse> {
     let request = ExperimentTrialsRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         run_uid,
         status: None,
         limit: Some(10),
@@ -610,11 +612,11 @@ async fn trial_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     trial_uid: Uuid,
 ) -> Result<ExperimentTrialStatusResponse> {
     let request = ExperimentTrialStatusRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         trial_uid,
     };
     post_json_with_identity(
@@ -635,11 +637,11 @@ async fn experiment_scores(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_uid: Uuid,
 ) -> Result<ExperimentScoresResponse> {
     let request = ExperimentScoresRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         run_uid,
     };
     post_json_with_identity(client, ingress, "Experiments", "scores", identity, &request)
@@ -653,12 +655,13 @@ async fn run_workflow_for_session(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     session_id: SessionId,
 ) -> Result<WorkflowRunResponse> {
     let request = WorkflowRunRequest {
         tenant_id: TenantId::from(
-            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            Uuid::parse_str(storage_partition_id.as_str())
+                .context("storage partition id is tenant uuid")?,
         ),
         workflow_ref: "workflow://damaged-food-replacement".to_string(),
         input: json!({
@@ -680,12 +683,13 @@ async fn workflow_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
         tenant_id: TenantId::from(
-            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            Uuid::parse_str(storage_partition_id.as_str())
+                .context("storage partition id is tenant uuid")?,
         ),
         run_id,
     };
@@ -700,13 +704,14 @@ async fn wait_for_workflow_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
     expected: &str,
 ) -> Result<WorkflowRunStatus> {
     let mut last_status = None;
     for _attempt in 0..60 {
-        let status = workflow_status(client, ingress, identity, workspace_id, run_id).await?;
+        let status =
+            workflow_status(client, ingress, identity, storage_partition_id, run_id).await?;
         if status.status == expected {
             return Ok(status);
         }
@@ -838,7 +843,7 @@ async fn assert_score_run_parent(
     score_run_id: Uuid,
     source: &str,
 ) -> Result<()> {
-    let (scope_label, workspace_id, user_id) = scope_parts(scope);
+    let (scope_label, storage_partition_id, user_id) = scope_parts(scope);
     let scope_context = scope_context(scope);
     let mut conn = ScopedConn::begin(pool, &scope_context).await?;
     let exists = sqlx::query_scalar::<_, bool>(
@@ -849,14 +854,14 @@ async fn assert_score_run_parent(
             WHERE run_id = $1
               AND source = $5
               AND scope = $2
-              AND workspace_id IS NOT DISTINCT FROM $3
+              AND storage_partition_id IS NOT DISTINCT FROM $3
               AND user_id IS NOT DISTINCT FROM $4
         )
         "#,
     )
     .bind(score_run_id)
     .bind(scope_label)
-    .bind(workspace_id.as_deref())
+    .bind(storage_partition_id.as_deref())
     .bind(user_id.as_deref())
     .bind(source)
     .fetch_one(conn.as_mut())
@@ -872,18 +877,18 @@ async fn assert_score_run_parent(
 
 async fn assert_no_analytics_scores(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     score_run_ids: &[Uuid],
 ) -> Result<()> {
     let count = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)
         FROM analytics.scores
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND run_id = ANY($2)
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(score_run_ids)
     .fetch_one(pool)
     .await
@@ -898,7 +903,7 @@ async fn assert_no_analytics_scores(
 async fn assert_no_learning_candidates(
     pool: &PgPool,
     scope: &ActionRuleScope,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) -> Result<()> {
     let scope_context = scope_context(scope);
     let mut conn = ScopedConn::begin(pool, &scope_context).await?;
@@ -906,13 +911,13 @@ async fn assert_no_learning_candidates(
         r#"
         SELECT COUNT(*)
         FROM learning_candidates
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_one(conn.as_mut())
     .await
-    .context("count learning candidates for behavior-lab workspace")?;
+    .context("count learning candidates for behavior-lab tenant")?;
     conn.commit().await?;
     assert_eq!(
         count, 0,
@@ -923,22 +928,20 @@ async fn assert_no_learning_candidates(
 
 fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ("global", None, None),
-        ActionRuleScope::Tenant { tenant_id } => ("workspace", Some(tenant_id.to_string()), None),
+        ActionRuleScope::Tenant { tenant_id } => ("tenant", Some(tenant_id.to_string()), None),
     }
 }
 
 fn scope_context(scope: &ActionRuleScope) -> ScopeContext {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
         ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }
 
-fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .context("workspace fixture id should be a tenant UUID")
+        .context("storage partition fixture id should be a tenant UUID")
 }
 
 fn assert_trial_status_matches_summary(

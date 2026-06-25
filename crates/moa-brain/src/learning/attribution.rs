@@ -104,7 +104,6 @@ fn attribution(
         id: Uuid::now_v7(),
         experience_id: experience.id,
         tenant_id: experience.tenant_id,
-        workspace_id: experience.workspace_id.clone(),
         user_id: Some(UserId(experience.user_id.to_string())),
         subject_type,
         subject_id: subject_id.to_string(),
@@ -164,7 +163,7 @@ mod tests {
     use chrono::TimeZone;
     use moa_core::{
         SegmentEvidence, SegmentEvidenceKind, SegmentEvidencePolarity, SegmentId, SessionId,
-        TaskFacetSet, TaskFingerprint, TenantId, WorkspaceId,
+        TaskFacetSet, TaskFingerprint, TenantId,
     };
 
     use super::*;
@@ -181,7 +180,6 @@ mod tests {
             segment_id: SegmentId::new(),
             session_id: SessionId::new(),
             tenant_id: TenantId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             task_summary: Some("Fix tests".to_string()),
             task_fingerprint: TaskFingerprint {
@@ -216,7 +214,7 @@ mod tests {
             event_type: moa_core::EventType::MemoryRead,
             event: Event::MemoryRead {
                 path: "docs/architecture".to_string(),
-                scope: "workspace".to_string(),
+                scope: "tenant".to_string(),
             },
             timestamp: now,
             brain_id: None,

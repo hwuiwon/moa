@@ -17,7 +17,7 @@ what must stay out of Restate state.
 | Restate primitive | Use in MOA | Reason |
 |---|---|---|
 | Service | Stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Analytics`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
-| Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
+| Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
 | Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
@@ -35,7 +35,7 @@ product database.
 | Tool execution | Service | none |
 | LLM call | Service | none |
 | Graph-memory ingestion | Virtual Object | ingestion key |
-| Memory consolidation | Workflow | `workspace_id:logical_date` |
+| Memory consolidation | Workflow | `tenant_id:logical_date` |
 | Scheduled job | Virtual Object | job name |
 | Tenant action review | Service plus Postgres row/event | review id |
 
@@ -73,9 +73,9 @@ Default production bindings:
 
 | Primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
+| Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` |
 | Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
-| Service | `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+| Service | `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`, `Whoami` |
 
 Feature-gated bindings:
 
@@ -106,7 +106,7 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Pending message queue | `Session` VO |
 | Current session turn progress | `TurnExecution` workflow |
 | Current sub-agent turn progress | `SubAgentTurnExecution` workflow |
-| Pending tenant action reviews | Postgres `workspace_action_reviews` rows |
+| Pending tenant action reviews | Postgres `tenant_action_reviews` rows |
 | Detached sub-agent result waiters | `SubAgent` VO, resolved by child terminal delivery |
 | Tool result and assistant output | Postgres event log |
 | Graph memory, vectors, changelog | Postgres |
@@ -209,11 +209,11 @@ let Restate reassign anything that does not finish.
 
 ## Observability
 
-Handler spans should include Restate identity plus MOA tenant/session/workspace
+Handler spans should include Restate identity plus MOA tenant/session
 attributes. The useful diagnostic chain is:
 
 1. Restate invocation id and handler.
-2. Session id, turn id, tenant id, workspace id.
+2. Session id, turn id, tenant id.
 3. Postgres session events.
 4. OTel trace and span links.
 5. Provider/tool timing and retry counters.

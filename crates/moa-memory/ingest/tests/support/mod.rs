@@ -118,10 +118,10 @@ pub(crate) fn deterministic_vector(text: &str) -> Vec<f32> {
     vector
 }
 
-pub(crate) async fn ingest_ctx(pool: &PgPool, workspace_id: Uuid) -> IngestCtx {
+pub(crate) async fn ingest_ctx(pool: &PgPool, storage_partition_id: Uuid) -> IngestCtx {
     ingest_ctx_with_pii(
         pool,
-        workspace_id,
+        storage_partition_id,
         Arc::new(FixedPiiClassifier {
             class: PiiClass::None,
         }),
@@ -131,11 +131,11 @@ pub(crate) async fn ingest_ctx(pool: &PgPool, workspace_id: Uuid) -> IngestCtx {
 
 pub(crate) async fn ingest_ctx_with_pii(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     pii: Arc<dyn PiiClassifier>,
 ) -> IngestCtx {
-    seed_workspace_embedder_state(pool, workspace_id).await;
-    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
+    seed_workspace_embedder_state(pool, storage_partition_id).await;
+    let scope = ScopeContext::tenant(TenantId::from(storage_partition_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
         AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(vector.clone()),
@@ -151,12 +151,12 @@ pub(crate) async fn ingest_ctx_with_pii(
 }
 
 pub(crate) fn turn(
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     transcript: impl Into<String>,
     turn_seq: u64,
 ) -> SessionTurn {
     SessionTurn {
-        tenant_id: TenantId::from(workspace_id),
+        tenant_id: TenantId::from(storage_partition_id),
         contact_id: slow_path_contact_id(),
         session_id: SessionId::new(),
         turn_seq,
@@ -173,7 +173,7 @@ pub(crate) fn fixed_time() -> DateTime<Utc> {
 }
 
 pub(crate) fn fact_intent(
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     name: &str,
     valid_from: DateTime<Utc>,
 ) -> NodeWriteIntent {
@@ -184,8 +184,8 @@ pub(crate) fn fact_intent(
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({
@@ -208,36 +208,36 @@ pub(crate) fn fact_intent(
 
 pub(crate) async fn create_fact(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     name: &str,
     valid_from: DateTime<Utc>,
 ) -> Uuid {
-    seed_workspace_embedder_state(pool, workspace_id).await;
-    let ctx = ScopeContext::tenant(TenantId::from(workspace_id));
+    seed_workspace_embedder_state(pool, storage_partition_id).await;
+    let ctx = ScopeContext::tenant(TenantId::from(storage_partition_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), ctx.clone());
     let graph =
         AgeGraphStore::scoped_for_app_role(pool.clone(), ctx).with_vector_store(Arc::new(vector));
     graph
-        .create_node(fact_intent(workspace_id, name, valid_from))
+        .create_node(fact_intent(storage_partition_id, name, valid_from))
         .await
         .expect("seed fact node")
 }
 
-async fn seed_workspace_embedder_state(pool: &PgPool, workspace_id: Uuid) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn seed_workspace_embedder_state(pool: &PgPool, storage_partition_id: Uuid) {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, 'mock-slow-embedder', 11, $2)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(VECTOR_DIMENSION as i32)
     .execute(conn.as_mut())
     .await
@@ -247,13 +247,19 @@ async fn seed_workspace_embedder_state(pool: &PgPool, workspace_id: Uuid) {
         .expect("commit workspace embedder state");
 }
 
-pub(crate) async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> ScopedConn<'a> {
-    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
+pub(crate) async fn scoped_conn<'a>(
+    pool: &'a PgPool,
+    storage_partition_id: Uuid,
+) -> ScopedConn<'a> {
+    let scope = ScopeContext::tenant(TenantId::from(storage_partition_id));
     scoped_conn_for_scope(pool, scope).await
 }
 
-pub(crate) async fn user_scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> ScopedConn<'a> {
-    let scope = ScopeContext::contact(TenantId::from(workspace_id), slow_path_contact_id());
+pub(crate) async fn user_scoped_conn<'a>(
+    pool: &'a PgPool,
+    storage_partition_id: Uuid,
+) -> ScopedConn<'a> {
+    let scope = ScopeContext::contact(TenantId::from(storage_partition_id), slow_path_contact_id());
     scoped_conn_for_scope(pool, scope).await
 }
 
@@ -272,20 +278,23 @@ async fn scoped_conn_for_scope<'a>(pool: &'a PgPool, scope: ScopeContext) -> Sco
     conn
 }
 
-pub(crate) async fn fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    workspace_fact_rows(pool, workspace_id).await
+pub(crate) async fn fact_rows(pool: &PgPool, storage_partition_id: Uuid) -> Vec<NodeIndexRow> {
+    tenant_fact_rows(pool, storage_partition_id).await
 }
 
-pub(crate) async fn workspace_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+pub(crate) async fn tenant_fact_rows(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+) -> Vec<NodeIndexRow> {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
-        "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
+        "SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND label = 'Fact' AND scope = 'tenant' \
+         WHERE storage_partition_id = $1 AND label = 'Fact' AND scope = 'tenant' \
          ORDER BY name",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_all(conn.as_mut())
     .await
     .expect("read fact rows");
@@ -293,16 +302,16 @@ pub(crate) async fn workspace_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Ve
     rows
 }
 
-pub(crate) async fn user_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+pub(crate) async fn user_fact_rows(pool: &PgPool, storage_partition_id: Uuid) -> Vec<NodeIndexRow> {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
-        "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
+        "SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND user_id = $2 AND label = 'Fact' AND scope = 'contact' \
+         WHERE storage_partition_id = $1 AND user_id = $2 AND label = 'Fact' AND scope = 'contact' \
          ORDER BY name",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(SLOW_PATH_CONTACT_ID)
     .fetch_all(conn.as_mut())
     .await
@@ -311,20 +320,23 @@ pub(crate) async fn user_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<Nod
     rows
 }
 
-pub(crate) async fn entity_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    workspace_entity_rows(pool, workspace_id).await
+pub(crate) async fn entity_rows(pool: &PgPool, storage_partition_id: Uuid) -> Vec<NodeIndexRow> {
+    tenant_entity_rows(pool, storage_partition_id).await
 }
 
-pub(crate) async fn workspace_entity_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+pub(crate) async fn tenant_entity_rows(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+) -> Vec<NodeIndexRow> {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
-        "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
+        "SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND label = 'Entity' AND scope = 'tenant' \
+         WHERE storage_partition_id = $1 AND label = 'Entity' AND scope = 'tenant' \
          ORDER BY name",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_all(conn.as_mut())
     .await
     .expect("read entity rows");
@@ -332,16 +344,19 @@ pub(crate) async fn workspace_entity_rows(pool: &PgPool, workspace_id: Uuid) -> 
     rows
 }
 
-pub(crate) async fn user_entity_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+pub(crate) async fn user_entity_rows(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+) -> Vec<NodeIndexRow> {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
-        "SELECT uid, label, workspace_id, user_id, scope, name, pii_class, valid_to, valid_from, \
+        "SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class, valid_to, valid_from, \
          properties_summary, last_accessed_at, COALESCE(quality_score, 0.5) AS quality_score \
          FROM moa.node_index \
-         WHERE workspace_id = $1 AND user_id = $2 AND label = 'Entity' AND scope = 'contact' \
+         WHERE storage_partition_id = $1 AND user_id = $2 AND label = 'Entity' AND scope = 'contact' \
          ORDER BY name",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(SLOW_PATH_CONTACT_ID)
     .fetch_all(conn.as_mut())
     .await
@@ -350,27 +365,33 @@ pub(crate) async fn user_entity_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<N
     rows
 }
 
-pub(crate) async fn active_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    fact_rows(pool, workspace_id)
-        .await
-        .into_iter()
-        .filter(|row| row.valid_to.is_none())
-        .collect()
-}
-
-pub(crate) async fn active_user_fact_rows(pool: &PgPool, workspace_id: Uuid) -> Vec<NodeIndexRow> {
-    user_fact_rows(pool, workspace_id)
-        .await
-        .into_iter()
-        .filter(|row| row.valid_to.is_none())
-        .collect()
-}
-
-pub(crate) async fn active_workspace_fact_rows(
+pub(crate) async fn active_fact_rows(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
 ) -> Vec<NodeIndexRow> {
-    workspace_fact_rows(pool, workspace_id)
+    fact_rows(pool, storage_partition_id)
+        .await
+        .into_iter()
+        .filter(|row| row.valid_to.is_none())
+        .collect()
+}
+
+pub(crate) async fn active_user_fact_rows(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+) -> Vec<NodeIndexRow> {
+    user_fact_rows(pool, storage_partition_id)
+        .await
+        .into_iter()
+        .filter(|row| row.valid_to.is_none())
+        .collect()
+}
+
+pub(crate) async fn active_tenant_fact_rows(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+) -> Vec<NodeIndexRow> {
+    tenant_fact_rows(pool, storage_partition_id)
         .await
         .into_iter()
         .filter(|row| row.valid_to.is_none())
@@ -379,20 +400,20 @@ pub(crate) async fn active_workspace_fact_rows(
 
 pub(crate) async fn active_user_entity_rows(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
 ) -> Vec<NodeIndexRow> {
-    user_entity_rows(pool, workspace_id)
+    user_entity_rows(pool, storage_partition_id)
         .await
         .into_iter()
         .filter(|row| row.valid_to.is_none())
         .collect()
 }
 
-pub(crate) async fn active_workspace_entity_rows(
+pub(crate) async fn active_tenant_entity_rows(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
 ) -> Vec<NodeIndexRow> {
-    workspace_entity_rows(pool, workspace_id)
+    tenant_entity_rows(pool, storage_partition_id)
         .await
         .into_iter()
         .filter(|row| row.valid_to.is_none())
@@ -401,10 +422,10 @@ pub(crate) async fn active_workspace_entity_rows(
 
 pub(crate) async fn node_valid_to(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     uid: Uuid,
 ) -> Option<DateTime<Utc>> {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let valid_to = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
         "SELECT valid_to FROM moa.node_index WHERE uid = $1",
     )
@@ -416,8 +437,8 @@ pub(crate) async fn node_valid_to(
     valid_to
 }
 
-pub(crate) async fn node_confidence(pool: &PgPool, workspace_id: Uuid, uid: Uuid) -> f64 {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+pub(crate) async fn node_confidence(pool: &PgPool, storage_partition_id: Uuid, uid: Uuid) -> f64 {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let confidence = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT confidence FROM moa.node_index WHERE uid = $1",
     )
@@ -430,14 +451,14 @@ pub(crate) async fn node_confidence(pool: &PgPool, workspace_id: Uuid, uid: Uuid
     confidence
 }
 
-pub(crate) async fn contradiction_edge_count(pool: &PgPool, workspace_id: Uuid) -> i64 {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+pub(crate) async fn contradiction_edge_count(pool: &PgPool, storage_partition_id: Uuid) -> i64 {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'edge' \
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'edge' \
            AND target_label = 'CONTRADICTS'",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_one(conn.as_mut())
     .await
     .expect("count contradicts edges");
@@ -445,14 +466,14 @@ pub(crate) async fn contradiction_edge_count(pool: &PgPool, workspace_id: Uuid) 
     count
 }
 
-pub(crate) async fn supersede_protocol_count(pool: &PgPool, workspace_id: Uuid) -> i64 {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+pub(crate) async fn supersede_protocol_count(pool: &PgPool, storage_partition_id: Uuid) -> i64 {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'supersede' AND target_kind = 'node' \
+         WHERE storage_partition_id = $1 AND op = 'supersede' AND target_kind = 'node' \
            AND target_label = 'Fact'",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_one(conn.as_mut())
     .await
     .expect("count supersede protocol rows");
@@ -464,11 +485,11 @@ pub(crate) async fn supersede_protocol_count(pool: &PgPool, workspace_id: Uuid) 
 
 pub(crate) async fn supersedes_edge_exists(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     old_uid: Uuid,
     new_uid: Uuid,
 ) -> bool {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let row = cypher::edge::SUPERSEDES_EXISTS
         .execute(&json!({
             "old_uid": old_uid.to_string(),
@@ -483,19 +504,19 @@ pub(crate) async fn supersedes_edge_exists(
 
 pub(crate) async fn relates_to_edges(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
 ) -> Vec<(String, String, String)> {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query(
         "SELECT payload->>'start_uid' AS start_uid, \
                 payload->>'end_uid' AS end_uid, \
                 payload->'after'->>'role' AS role \
          FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'edge' \
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'edge' \
            AND target_label = 'RELATES_TO' \
          ORDER BY change_id",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_all(conn.as_mut())
     .await
     .expect("read relates_to edges");
@@ -516,20 +537,20 @@ pub(crate) async fn relates_to_edges(
 
 pub(crate) async fn entity_resolution_edges(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
 ) -> Vec<(String, String, String, String)> {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query(
         "SELECT target_label, \
                 payload->>'start_uid' AS start_uid, \
                 payload->>'end_uid' AS end_uid, \
                 payload->'after'->>'role' AS role \
          FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'edge' \
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'edge' \
            AND payload->'after'->>'source' = 'slow_path_entity_resolution' \
          ORDER BY change_id",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_all(conn.as_mut())
     .await
     .expect("read entity-resolution edges");
@@ -552,15 +573,18 @@ pub(crate) async fn entity_resolution_edges(
         .collect()
 }
 
-pub(crate) async fn create_changelog_payloads(pool: &PgPool, workspace_id: Uuid) -> Vec<Value> {
-    let mut conn = user_scoped_conn(pool, workspace_id).await;
+pub(crate) async fn create_changelog_payloads(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+) -> Vec<Value> {
+    let mut conn = user_scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query(
         "SELECT payload FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'node' \
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'node' \
            AND target_label = 'Fact' \
          ORDER BY change_id",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .fetch_all(conn.as_mut())
     .await
     .expect("read create changelog payloads");

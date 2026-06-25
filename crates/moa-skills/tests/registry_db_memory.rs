@@ -5,7 +5,7 @@ mod support;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{MoaError, Result, WorkspaceId};
+use moa_core::{MoaError, Result, TenantId};
 use moa_skills::artifact::skill_artifact_document_from_package;
 use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage};
 use moa_skills::registry::{NewSkill, SkillRegistry};
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use support::skill_graph::{
     DISTILLED_SKILL, GRAPH_TEST_LOCK, IMPROVED_SKILL, map_sqlx_error, purge_test_skill_name,
-    workspace_scope,
+    tenant_scope,
 };
 
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn registry_lists_skill_metadata() -> Result<()> {
         moa_session::testing::create_isolated_test_store().await?;
     purge_test_skill_name(&store, "scope-skill").await?;
     let workspace_name = Uuid::now_v7().to_string();
-    let scope = workspace_scope(&workspace_name);
+    let scope = tenant_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
     registry
         .upsert_by_name(NewSkill::from_skill_markdown(
@@ -31,11 +31,10 @@ async fn registry_lists_skill_metadata() -> Result<()> {
             DISTILLED_SKILL.to_string(),
         ))
         .await?;
-    let skills = registry
-        .list_for_pipeline(&WorkspaceId::new(workspace_name.clone()))
-        .await?;
+    let tenant_id = TenantId::from(Uuid::parse_str(&workspace_name).expect("fixture is a UUID"));
+    let skills = registry.list_for_pipeline(tenant_id).await?;
     let package = registry
-        .load_package_by_name(&workspace_scope(&workspace_name), "debug-oauth-refresh")
+        .load_package_by_name(&tenant_scope(&workspace_name), "debug-oauth-refresh")
         .await?
         .expect("stored package exists");
 
@@ -60,7 +59,7 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
         moa_session::testing::create_isolated_test_store().await?;
     purge_test_skill_name(&store, "scope-skill").await?;
     let workspace_name = Uuid::now_v7().to_string();
-    let scope = workspace_scope(&workspace_name);
+    let scope = tenant_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
     let first_uid = registry
         .upsert_by_name(NewSkill::from_skill_markdown(
@@ -85,7 +84,7 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     assert_ne!(first_uid, third_uid);
 
     let skills = registry
-        .load_for_scope(&workspace_scope(&workspace_name))
+        .load_for_scope(&tenant_scope(&workspace_name))
         .await?;
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].skill_uid, third_uid);
@@ -93,7 +92,7 @@ async fn registry_upsert_is_idempotent_and_versions_changed_bodies() -> Result<(
     let artifact_registry = ArtifactRegistry::new(store.pool().clone());
     let published = artifact_registry
         .load_visible_published(
-            &workspace_scope(&workspace_name),
+            &tenant_scope(&workspace_name),
             ArtifactKind::Skill,
             "debug-oauth-refresh",
         )
@@ -116,7 +115,7 @@ async fn registry_loads_published_skill_artifact_without_duplicate_revision() ->
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let workspace_name = Uuid::now_v7().to_string();
-    let scope = workspace_scope(&workspace_name);
+    let scope = tenant_scope(&workspace_name);
     let skill_registry = SkillRegistry::new(store.pool().clone());
     let artifact_registry = ArtifactRegistry::new(store.pool().clone());
     let package = SkillPackage::from_skill_markdown(DISTILLED_SKILL.to_string()).validate()?;
@@ -174,7 +173,7 @@ async fn registry_versions_when_supporting_file_changes() -> Result<()> {
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let workspace_name = Uuid::now_v7().to_string();
-    let scope = workspace_scope(&workspace_name);
+    let scope = tenant_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
 
     let first_uid = registry
@@ -254,16 +253,16 @@ fn artifact_files_from_package(package: &ValidatedSkillPackage) -> Vec<NewArtifa
 
 async fn skill_artifact_revision_count(
     store: &moa_session::PostgresSessionStore,
-    workspace_id: &str,
+    storage_partition_id: &str,
     skill_name: &str,
 ) -> Result<i64> {
     sqlx::query_scalar(
         "SELECT count(*) \
          FROM moa.artifact a \
          JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid \
-         WHERE a.workspace_id = $1 AND a.kind = 'skill' AND a.name = $2",
+         WHERE a.storage_partition_id = $1 AND a.kind = 'skill' AND a.name = $2",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(skill_name)
     .fetch_one(store.pool())
     .await

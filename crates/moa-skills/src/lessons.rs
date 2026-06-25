@@ -62,8 +62,8 @@ pub async fn learn_lesson(
     }
 
     let scope_context = ScopeContext::from(scope.clone());
-    let workspace_id = Some(scope_context.tenant_id().to_string());
-    let user_id = scope_context
+    let storage_partition_id = Some(scope_context.tenant_id().to_string());
+    let contact_id = scope_context
         .contact_id()
         .map(|contact_id| contact_id.to_string());
     let scope_tier = scope_context.tier_str().to_string();
@@ -76,8 +76,8 @@ pub async fn learn_lesson(
     let intent = NodeWriteIntent {
         uid: lesson_uid,
         label: NodeLabel::Lesson,
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
+        contact_id: contact_id.clone(),
         scope: scope_tier,
         name: lesson_name(&summary),
         properties: json!({

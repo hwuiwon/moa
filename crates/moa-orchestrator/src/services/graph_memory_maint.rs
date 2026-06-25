@@ -111,21 +111,19 @@ async fn discover_tenant_ids(
         return Ok(vec![tenant_id]);
     }
 
-    let rows = sqlx::query_scalar::<_, String>(
+    sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
-        SELECT DISTINCT workspace_id
+        SELECT DISTINCT tenant_id
         FROM moa.node_index
-        WHERE workspace_id IS NOT NULL
+        WHERE tenant_id IS NOT NULL
           AND valid_to IS NULL
-        ORDER BY workspace_id
+        ORDER BY tenant_id
         "#,
     )
     .fetch_all(pool)
     .await
-    .map_err(HandlerError::from)?;
-    rows.into_iter()
-        .map(|workspace_id| tenant_id_from_storage_workspace(&workspace_id))
-        .collect()
+    .map(|rows| rows.into_iter().map(TenantId::from).collect())
+    .map_err(HandlerError::from)
 }
 
 fn build_dispatch_plan(
@@ -157,18 +155,6 @@ fn compact_report(target_date: NaiveDate, workflows_started: u64) -> CompactRepo
         tenants_scanned: workflows_started,
         workflows_started,
     }
-}
-
-fn tenant_id_from_storage_workspace(workspace_id: &str) -> Result<TenantId, HandlerError> {
-    uuid::Uuid::parse_str(workspace_id)
-        .map(TenantId::from)
-        .map_err(|error| {
-            TerminalError::new_with_code(
-                500,
-                format!("stored graph workspace_id is not a tenant id: {error}"),
-            )
-            .into()
-        })
 }
 
 fn plural_suffix(count: u64) -> &'static str {

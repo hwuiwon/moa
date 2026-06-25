@@ -1,7 +1,7 @@
 //! Skills service DTO mapping tests.
 
 use chrono::{TimeZone, Utc};
-use moa_core::{ActionRuleScope, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, TenantId};
 use moa_orchestrator::services::skills::skill_summary_from_skill;
 use moa_skills::package::SkillPackageManifest;
 use moa_skills::registry::Skill;
@@ -21,7 +21,7 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
     );
     let summary = skill_summary_from_skill(Skill {
         skill_uid,
-        workspace_id: Some(WorkspaceId::new(tenant_id.to_string())),
+        tenant_id: Some(tenant_id),
         user_id: None,
         scope: "tenant".to_string(),
         name: "debug-oauth-refresh".to_string(),
@@ -54,7 +54,7 @@ fn skill_summary_from_skill_preserves_visible_row_fields() {
         created_at: now,
         updated_at: now,
     })
-    .expect("workspace skill row should map to summary");
+    .expect("tenant skill row should map to summary");
 
     assert_eq!(summary.skill_uid, skill_uid);
     assert_eq!(summary.scope, ActionRuleScope::Tenant { tenant_id });

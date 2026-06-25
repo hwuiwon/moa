@@ -1,6 +1,6 @@
 //! SQL repository helpers for hosted eval datasets.
 
-use moa_core::WorkspaceId;
+use moa_core::TenantId;
 use moa_core::wire::{
     EvalDatasetListRequest, EvalDatasetListResponse, EvalDatasetRegisterRequest,
     EvalDatasetRegisterResponse, EvalDatasetSummary,
@@ -10,15 +10,15 @@ use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
-use super::{EvalServiceError, workspace_id_for_tenant};
+use super::EvalServiceError;
 
 /// Dataset item prepared for tenant-scoped registration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalDatasetItemInsert {
     /// Dataset item identifier.
     pub item_id: Uuid,
-    /// Workspace that owns the item.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the item.
+    pub tenant_id: TenantId,
     /// Stored item scope document.
     pub scope: Value,
     /// Query text to replay.
@@ -34,7 +34,7 @@ pub struct EvalDatasetItemInsert {
 #[derive(Debug, Deserialize)]
 struct JsonlDatasetItem {
     item_id: Option<Uuid>,
-    workspace_id: Option<String>,
+    tenant_id: Option<TenantId>,
     scope: Option<Value>,
     query: String,
     expected_answer: Option<String>,
@@ -42,9 +42,9 @@ struct JsonlDatasetItem {
     metadata: Option<Value>,
 }
 
-/// Parses JSONL dataset items and constrains every item to the authorized workspace.
-pub fn parse_dataset_items_for_workspace(
-    workspace_id: &WorkspaceId,
+/// Parses JSONL dataset items and constrains every item to the authorized tenant.
+pub fn parse_dataset_items_for_tenant(
+    tenant_id: TenantId,
     source_uri: Option<&str>,
     jsonl: &str,
 ) -> Result<Vec<EvalDatasetItemInsert>, EvalServiceError> {
@@ -65,18 +65,18 @@ pub fn parse_dataset_items_for_workspace(
                     message: format!("dataset item at line {} has an empty query", idx + 1),
                 });
             }
-            if let Some(item_workspace_id) = parsed.workspace_id.as_deref()
-                && item_workspace_id != workspace_id.as_str()
+            if let Some(item_tenant_id) = parsed.tenant_id
+                && item_tenant_id != tenant_id
             {
-                return Err(EvalServiceError::DatasetWorkspaceMismatch {
+                return Err(EvalServiceError::DatasetTenantMismatch {
                     line: idx + 1,
-                    request_workspace_id: workspace_id.clone(),
-                    item_workspace_id: WorkspaceId::new(item_workspace_id),
+                    request_tenant_id: tenant_id,
+                    item_tenant_id,
                 });
             }
             Ok(EvalDatasetItemInsert {
                 item_id: parsed.item_id.unwrap_or_else(Uuid::now_v7),
-                workspace_id: workspace_id.clone(),
+                tenant_id,
                 scope: parsed.scope.unwrap_or_else(|| serde_json::json!({})),
                 query: parsed.query,
                 expected_answer: parsed.expected_answer,
@@ -87,13 +87,13 @@ pub fn parse_dataset_items_for_workspace(
         .collect()
 }
 
-pub(super) async fn register_dataset_for_workspace(
+pub(super) async fn register_dataset_for_tenant(
     pool: &PgPool,
     request: EvalDatasetRegisterRequest,
 ) -> Result<EvalDatasetRegisterResponse, EvalServiceError> {
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
-    let items = parse_dataset_items_for_workspace(
-        &workspace_id,
+    let storage_partition_id = request.tenant_id.to_string();
+    let items = parse_dataset_items_for_tenant(
+        request.tenant_id,
         request.source_uri.as_deref(),
         &request.jsonl,
     )?;
@@ -103,7 +103,7 @@ pub(super) async fn register_dataset_for_workspace(
                 .source_uri
                 .clone()
                 .unwrap_or_else(|| "<inline-jsonl>".to_string()),
-            message: "dataset contains no items for the authorized workspace".to_string(),
+            message: "dataset contains no items for the authorized tenant".to_string(),
         });
     }
 
@@ -125,10 +125,10 @@ pub(super) async fn register_dataset_for_workspace(
     .await?;
 
     sqlx::query(
-        "DELETE FROM analytics.eval_dataset_items WHERE dataset_id = $1 AND workspace_id = $2",
+        "DELETE FROM analytics.eval_dataset_items WHERE dataset_id = $1 AND storage_partition_id = $2",
     )
     .bind(dataset_id)
-    .bind(workspace_id.as_str())
+    .bind(&storage_partition_id)
     .execute(&mut *tx)
     .await?;
 
@@ -137,7 +137,7 @@ pub(super) async fn register_dataset_for_workspace(
         INSERT INTO analytics.eval_dataset_items (
             item_id,
             dataset_id,
-            workspace_id,
+            storage_partition_id,
             scope,
             query,
             expected_answer,
@@ -149,7 +149,7 @@ pub(super) async fn register_dataset_for_workspace(
     item_insert.push_values(&items, |mut row, item| {
         row.push_bind(item.item_id)
             .push_bind(dataset_id)
-            .push_bind(item.workspace_id.as_str())
+            .push_bind(item.tenant_id.to_string())
             .push_bind(sqlx::types::Json(&item.scope))
             .push_bind(&item.query)
             .push_bind(item.expected_answer.as_deref())
@@ -168,22 +168,22 @@ pub(super) async fn register_dataset_for_workspace(
     })
 }
 
-pub(super) async fn list_datasets_for_workspace(
+pub(super) async fn list_datasets_for_tenant(
     pool: &PgPool,
     request: EvalDatasetListRequest,
 ) -> Result<EvalDatasetListResponse, EvalServiceError> {
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
+    let storage_partition_id = request.tenant_id.to_string();
     let rows = sqlx::query(
         r#"
         SELECT d.dataset_id, d.name, d.source_path, COUNT(i.item_id)::BIGINT AS items
         FROM analytics.eval_datasets d
         JOIN analytics.eval_dataset_items i
-          ON i.dataset_id = d.dataset_id AND i.workspace_id = $1
+          ON i.dataset_id = d.dataset_id AND i.storage_partition_id = $1
         GROUP BY d.dataset_id, d.name, d.source_path, d.created_at
         ORDER BY d.created_at DESC
         "#,
     )
-    .bind(workspace_id.as_str())
+    .bind(&storage_partition_id)
     .fetch_all(pool)
     .await?;
 
@@ -209,7 +209,7 @@ pub(super) async fn list_datasets_for_workspace(
 #[derive(Clone, Debug)]
 pub(crate) struct ScopedDatasetItem {
     pub(crate) item_id: Uuid,
-    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) tenant_id: TenantId,
     #[cfg(feature = "internal-eval-runner")]
     pub(crate) query: String,
     pub(crate) expected_answer: Option<String>,
@@ -217,35 +217,42 @@ pub(crate) struct ScopedDatasetItem {
 }
 
 #[cfg(feature = "internal-eval-runner")]
-pub(super) async fn load_dataset_items_for_workspace(
+pub(super) async fn load_dataset_items_for_tenant(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     dataset_id: Uuid,
     limit: Option<usize>,
 ) -> Result<Vec<ScopedDatasetItem>, EvalServiceError> {
+    let storage_partition_id = tenant_id.to_string();
     let limit = i64::try_from(limit.unwrap_or(1000))
         .map_err(|_| EvalServiceError::IntegerTooLarge { field: "limit" })?;
     let rows = sqlx::query(
         r#"
-        SELECT item_id, workspace_id, query, expected_answer, expected_chunk_ids
+        SELECT item_id, storage_partition_id, query, expected_answer, expected_chunk_ids
         FROM analytics.eval_dataset_items
-        WHERE dataset_id = $1 AND workspace_id = $2
+        WHERE dataset_id = $1 AND storage_partition_id = $2
         ORDER BY created_at ASC, item_id ASC
         LIMIT $3
         "#,
     )
     .bind(dataset_id)
-    .bind(workspace_id.as_str())
+    .bind(&storage_partition_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
     rows.into_iter()
         .map(|row| {
-            let row_workspace_id: String = row.try_get("workspace_id")?;
+            let row_storage_partition_id: String = row.try_get("storage_partition_id")?;
+            let tenant_id = Uuid::parse_str(&row_storage_partition_id)
+                .map(TenantId::from)
+                .map_err(|error| EvalServiceError::InvalidDocument {
+                    document_source: "analytics.eval_dataset_items".to_string(),
+                    message: format!("stored dataset item tenant id is invalid: {error}"),
+                })?;
             Ok(ScopedDatasetItem {
                 item_id: row.try_get("item_id")?,
-                workspace_id: WorkspaceId::new(row_workspace_id),
+                tenant_id,
                 query: row.try_get("query")?,
                 expected_answer: row.try_get("expected_answer")?,
                 expected_chunk_ids: row.try_get("expected_chunk_ids")?,

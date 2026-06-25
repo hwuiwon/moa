@@ -7,7 +7,6 @@ curl -sS "$MOA_EDGE_URL/v1/privacy/erase" \
   -H "Authorization: Bearer $MOA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "workspace_id": "<workspace-uuid>",
     "subject_user_id": "<subject-user-uuid>",
     "reason": "GDPR Art.17 request <ticket>",
     "dry_run": false,
@@ -25,7 +24,7 @@ For agent-facing contacts, set `subject_user_id` to either the contact UUID or
 
 - `specified_contact`: erase only the requested contact subject.
 - `specified_and_linked_contacts`: erase the requested verified contact plus
-  linked unverified contact subjects in the same workspace.
+  linked unverified contact subjects in the same tenant.
 
 Do not set `contact_erasure_scope` for normal MOA operator/admin users.
 
@@ -38,8 +37,8 @@ The request requires an Ed25519-signed approval JWT with:
 - `exp`: expiration timestamp
 - `op`: `erase`
 - `subject_user_id`: the erased user UUID, contact UUID, or `contact:<uuid>`
+- `tenant_id`: the request tenant UUID
 - `role` or `roles`: includes `platform_admin`
-- optional `workspace_id`: when present, it must match `--workspace`
 
 The hosted privacy erase API verifies the token with `MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX`. For
 non-dry-run erasures with matching candidates, it records the JTI in
@@ -47,7 +46,7 @@ non-dry-run erasures with matching candidates, it records the JTI in
 
 ## What gets erased
 
-For every active `moa.node_index` row in the workspace whose `user_id` or
+For every active `moa.node_index` row in the authenticated tenant whose `user_id` or
 `properties_summary.user_id` matches the subject, MOA calls the graph
 hard-purge path. That path deletes:
 
@@ -58,6 +57,9 @@ hard-purge path. That path deletes:
 The operation does not decrypt data and has no crypto-shred mode. ADR 0001
 deferred envelope encryption; erasure is hard-purge only.
 
+If `MOA_PII_VAULT_SECRET_HEX` is configured, the erase call also erases matching
+PII-vault subject pseudonyms for the tenant.
+
 Contact sessions store memory under `contact:<contact-uuid>`. A bare contact
 UUID in the erasure request resolves to that stored subject id before candidate
 enumeration. Linked contact deletion is never implicit; it only happens when
@@ -67,7 +69,7 @@ enumeration. Linked contact deletion is never implicit; it only happens when
 
 Each purged node leaves a redacted `op='erase'` changelog row with a redaction
 marker and an audit metadata object containing the reason, approver id, approval
-token JTI, subject user id, and workspace id. After at least one node is erased,
+token JTI, and subject user id. After at least one node is erased,
 the API writes one summary `op='erase'` row targeting the subject user.
 
 Re-running after all matching nodes are gone returns `erased_count: 0` and writes
@@ -75,12 +77,13 @@ no new changelog rows.
 
 ## Operational checks
 
-1. Confirm the erasure ticket, subject identity, and workspace.
+1. Confirm the erasure ticket, subject identity, and tenant.
 2. Call `POST /v1/privacy/erase` with `"dry_run": true` and attach the
    candidate count to the ticket.
 3. For contacts, record whether the approval covers only the specified contact
    or specified plus linked contacts.
-4. Generate a short-lived approval JWT with `op='erase'`.
+4. Generate a short-lived approval JWT with `op='erase'` and matching
+   `tenant_id`.
 5. Call `POST /v1/privacy/erase` with `"dry_run": false`.
 6. Confirm `erased_count` matches the approved candidate count.
 7. Confirm a summary `op='erase'` changelog row exists for the subject.

@@ -1,4 +1,4 @@
-//! Retrieval perf-gate stack construction and workspace fixtures.
+//! Retrieval perf-gate stack construction and tenant fixtures.
 
 use super::*;
 
@@ -8,8 +8,8 @@ pub(super) struct Stack {
     pub(super) schema_name: String,
     pub(super) pool: PgPool,
     pub(super) embedder: Arc<CohereV4Embedder>,
-    pub(super) workspaces: Vec<WorkspaceFixture>,
-    pub(super) retrievers: Vec<Arc<WorkspaceRetriever>>,
+    pub(super) tenants: Vec<TenantFixture>,
+    pub(super) retrievers: Vec<Arc<TenantRetriever>>,
 }
 
 impl Stack {
@@ -25,16 +25,15 @@ impl Stack {
             schema_name,
             pool,
             embedder,
-            workspaces: Vec::new(),
+            tenants: Vec::new(),
             retrievers: Vec::new(),
         })
     }
 
-    pub(super) async fn seed_workspaces(&mut self, cfg: &PerfGateConfig) -> Result<()> {
-        let mut fixtures = Vec::with_capacity(cfg.workspaces);
-        for workspace_index in 0..cfg.workspaces {
-            let workspace_id = Uuid::now_v7();
-            let tenant_id = TenantId::from(workspace_id);
+    pub(super) async fn seed_tenants(&mut self, cfg: &PerfGateConfig) -> Result<()> {
+        let mut fixtures = Vec::with_capacity(cfg.tenants);
+        for tenant_index in 0..cfg.tenants {
+            let tenant_id = TenantId::new();
             let scope = ScopeContext::tenant(tenant_id);
             let vector = Arc::new(PgvectorStore::new_for_app_role(
                 self.pool.clone(),
@@ -43,8 +42,8 @@ impl Stack {
             let graph = AgeGraphStore::scoped_for_app_role(self.pool.clone(), scope)
                 .with_vector_store(vector);
 
-            let fact_texts = (0..cfg.facts_per_workspace)
-                .map(|fact_index| fact_text(workspace_index, fact_index))
+            let fact_texts = (0..cfg.facts_per_tenant)
+                .map(|fact_index| fact_text(tenant_index, fact_index))
                 .collect::<Vec<_>>();
             let embeddings = embed_texts(self.embedder.as_ref(), &fact_texts).await?;
             let mut first_uid = None;
@@ -59,13 +58,13 @@ impl Stack {
                     .create_node(NodeWriteIntent {
                         uid,
                         label: NodeLabel::Fact,
-                        workspace_id: Some(workspace_id.to_string()),
-                        user_id: None,
+                        storage_partition_id: Some(tenant_id.to_string()),
+                        contact_id: None,
                         scope: "tenant".to_string(),
                         name: text.clone(),
                         properties: json!({
                             "summary": text,
-                            "workspace_index": workspace_index,
+                            "tenant_index": tenant_index,
                             "fact_index": fact_index,
                             "source": "perf_gate",
                         }),
@@ -81,26 +80,21 @@ impl Stack {
                     .await
                     .map_err(|error| anyhow!("failed to seed graph node: {error}"))?;
             }
-            seed_attack_dlq(&self.pool, workspace_id).await?;
-            fixtures.push(WorkspaceFixture {
-                workspace_id,
-                first_uid: first_uid.context("workspace seeded no facts")?,
+            seed_attack_dlq(&self.pool, tenant_id).await?;
+            fixtures.push(TenantFixture {
+                tenant_id,
+                first_uid: first_uid.context("tenant seeded no facts")?,
             });
         }
-        self.workspaces = fixtures;
+        self.tenants = fixtures;
         Ok(())
     }
 
     pub(super) fn build_retrievers(&mut self) {
         self.retrievers = self
-            .workspaces
+            .tenants
             .iter()
-            .map(|workspace| {
-                Arc::new(WorkspaceRetriever::new(
-                    self.pool.clone(),
-                    workspace.workspace_id,
-                ))
-            })
+            .map(|tenant| Arc::new(TenantRetriever::new(self.pool.clone(), tenant.tenant_id)))
             .collect();
     }
 
@@ -113,19 +107,18 @@ impl Stack {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct WorkspaceFixture {
-    pub(super) workspace_id: Uuid,
+pub(super) struct TenantFixture {
+    pub(super) tenant_id: TenantId,
     pub(super) first_uid: Uuid,
 }
 
-pub(super) struct WorkspaceRetriever {
+pub(super) struct TenantRetriever {
     scope: MemoryScope,
     cache: CachedHybridRetriever,
 }
 
-impl WorkspaceRetriever {
-    fn new(pool: PgPool, workspace_id: Uuid) -> Self {
-        let tenant_id = TenantId::from(workspace_id);
+impl TenantRetriever {
+    fn new(pool: PgPool, tenant_id: TenantId) -> Self {
         let scope_ctx = ScopeContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             pool.clone(),
@@ -196,11 +189,11 @@ pub(super) async fn embed_texts(
     Ok(embeddings)
 }
 
-pub(super) fn fact_text(workspace_index: usize, fact_index: usize) -> String {
+pub(super) fn fact_text(tenant_index: usize, fact_index: usize) -> String {
     format!(
-        "workspace {workspace_index} fact {fact_index} topic {} shard {} owner team{} retrieval memory record",
+        "tenant {tenant_index} fact {fact_index} topic {} shard {} owner team{} retrieval memory record",
         fact_index % 17,
         fact_index % 31,
-        workspace_index % 5
+        tenant_index % 5
     )
 }

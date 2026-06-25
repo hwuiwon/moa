@@ -30,7 +30,6 @@ pub(crate) struct RemoteTarget {
     client: RemoteHttpClient,
     fga: FgaClient,
     identity: Identity,
-    workspace_id: WorkspaceId,
     tenant_id: TenantId,
     model: ModelId,
 }
@@ -38,7 +37,7 @@ pub(crate) struct RemoteTarget {
 #[async_trait]
 impl SessionTarget for RemoteTarget {
     async fn start_session(&self, plan: &SessionPlan) -> Result<SessionId> {
-        self.grant_workspace_member().await?;
+        self.grant_tenant_operator().await?;
         let session_id = SessionId::new();
         let now = chrono::Utc::now();
         let meta = SessionMeta {
@@ -161,11 +160,11 @@ impl SessionTarget for RemoteTarget {
 }
 
 impl RemoteTarget {
-    async fn grant_workspace_member(&self) -> Result<()> {
+    async fn grant_tenant_operator(&self) -> Result<()> {
         self.grant_raw_tuple(
             format!("user:{}", self.identity.id),
-            "member",
-            format!("workspace:{}", self.workspace_id),
+            "operator",
+            format!("tenant:{}", self.tenant_id),
         )
         .await
     }
@@ -222,7 +221,6 @@ pub(crate) async fn build_backend(
         client,
         fga,
         identity,
-        workspace_id: WorkspaceId::new(tenant_id.to_string()),
         tenant_id,
         model: ModelId::new(model),
     }))

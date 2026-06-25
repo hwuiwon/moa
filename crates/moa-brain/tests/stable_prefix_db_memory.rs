@@ -9,7 +9,7 @@ use moa_brain::{
 use moa_core::{
     AgentContext, CompletionRequest, ContactId, ContactRef, ContactVerificationState, Event,
     MessageRole, ModelCapabilities, ModelId, Result, SessionActorRef, SessionMeta, SessionStore,
-    TenantId, TokenPricing, ToolCallFormat, UserId, WorkspaceId,
+    StoragePartitionId, TenantId, TokenPricing, ToolCallFormat, UserId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::ScriptedProvider;
@@ -36,13 +36,12 @@ async fn system_prompt_bytes_are_stable_across_compiles() -> Result<()> {
         testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
-    let workspace_id = WorkspaceId::new("stable-prefix");
-    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
-    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new("stable-prefix");
+    let tenant_id = tenant_id_from_storage_partition_id(&storage_partition_id);
     let user_id = UserId::new("stable-prefix-user");
     let router = Arc::new(ToolRouter::new_local(&workspace).await?);
     router
-        .remember_workspace_root(runtime_workspace_id, workspace.clone())
+        .remember_workspace_root(tenant_id, workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider());
@@ -207,10 +206,10 @@ fn session_meta(tenant_id: TenantId, user_id: &UserId, model: ModelId) -> Sessio
     }
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    uuid::Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    uuid::Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {

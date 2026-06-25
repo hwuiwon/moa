@@ -164,7 +164,7 @@ pub struct ContactRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionActorRef {
-    /// Workspace-admin-or-higher MOA identity.
+    /// Tenant-admin-or-higher MOA identity.
     Identity {
         /// Authenticated MOA identity UUID.
         id: Uuid,

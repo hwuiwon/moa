@@ -16,11 +16,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -54,9 +54,9 @@ async fn cypher_template_create_uses_bound_params() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = format!("entity-{run_id}");
-    let ctx = tenant_scope(workspace_id.clone());
+    let ctx = tenant_scope(storage_partition_id.clone());
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped template transaction");
@@ -64,9 +64,9 @@ async fn cypher_template_create_uses_bound_params() {
 
     let params = json!({
         "uid": uid,
-        "workspace_id": workspace_id,
+        "storage_partition_id": storage_partition_id,
         "user_id": "",
-        "scope": "workspace",
+        "scope": "tenant",
         "name": "template smoke",
         "pii_class": "none",
         "valid_from": Utc::now().to_rfc3339(),
@@ -92,20 +92,20 @@ async fn cypher_template_create_uses_bound_params() {
         .expect("drop isolated schema");
 }
 
-async fn seed_node(pool: &sqlx::PgPool, workspace_id: &str, uid: Uuid, name: &str) {
-    let ctx = tenant_scope(workspace_id);
+async fn seed_node(pool: &sqlx::PgPool, storage_partition_id: &str, uid: Uuid, name: &str) {
+    let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped seed transaction");
     set_app_role(conn.as_mut()).await;
     sqlx::query(
         "INSERT INTO moa.node_index \
-         (uid, label, workspace_id, name, pii_class, confidence) \
+         (uid, label, storage_partition_id, name, pii_class, confidence) \
          VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(uid)
     .bind(NodeLabel::Fact.as_str())
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(name)
     .bind(PiiClass::None.as_str())
     .bind(0.99_f64)
@@ -130,7 +130,7 @@ fn utc(value: &str) -> DateTime<Utc> {
 }
 
 fn node_intent(
-    workspace_id: &str,
+    storage_partition_id: &str,
     label: NodeLabel,
     uid: Uuid,
     name: &str,
@@ -139,8 +139,8 @@ fn node_intent(
     NodeWriteIntent {
         uid,
         label,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "read_smoke" }),
@@ -157,14 +157,14 @@ fn node_intent(
 
 async fn create_superseded_neighbor_case(
     graph: &AgeGraphStore,
-    workspace_id: &str,
+    storage_partition_id: &str,
     run_id: &str,
 ) -> (Uuid, Uuid, Uuid, DateTime<Utc>, DateTime<Utc>) {
     let old_valid_from = utc("2026-02-01T00:00:00Z");
     let new_valid_from = utc("2026-04-01T00:00:00Z");
     let old_uid = Uuid::now_v7();
     let old = node_intent(
-        workspace_id,
+        storage_partition_id,
         NodeLabel::Fact,
         old_uid,
         &format!("temporal neighbor fact {run_id}"),
@@ -173,7 +173,7 @@ async fn create_superseded_neighbor_case(
     graph.create_node(old).await.expect("create old graph node");
     let new_uid = Uuid::now_v7();
     let new = node_intent(
-        workspace_id,
+        storage_partition_id,
         NodeLabel::Fact,
         new_uid,
         &format!("temporal neighbor fact {run_id}"),
@@ -186,7 +186,7 @@ async fn create_superseded_neighbor_case(
 
     let target_uid = Uuid::now_v7();
     let target = node_intent(
-        workspace_id,
+        storage_partition_id,
         NodeLabel::Entity,
         target_uid,
         &format!("active neighbor entity {run_id}"),
@@ -203,8 +203,8 @@ async fn create_superseded_neighbor_case(
             start_uid: new_uid,
             end_uid: target_uid,
             properties: json!({ "kind": "read_smoke" }),
-            workspace_id: Some(workspace_id.to_string()),
-            user_id: None,
+            storage_partition_id: Some(storage_partition_id.to_string()),
+            contact_id: None,
             scope: "tenant".to_string(),
             actor_id: Uuid::now_v7().to_string(),
             actor_kind: "system".to_string(),
@@ -222,14 +222,14 @@ async fn read_smoke_get_node_and_lookup_seeds() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
     let name = format!("auth service graph smoke {run_id}");
-    seed_node(store.pool(), &workspace_id, uid, &name).await;
+    seed_node(store.pool(), &storage_partition_id, uid, &name).await;
 
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let row = graph
         .get_node(uid)
@@ -238,7 +238,10 @@ async fn read_smoke_get_node_and_lookup_seeds() {
         .expect("seeded node is visible");
     assert_eq!(row.uid, uid);
     assert_eq!(row.label, NodeLabel::Fact);
-    assert_eq!(row.workspace_id.as_deref(), Some(workspace_id.as_str()));
+    assert_eq!(
+        row.storage_partition_id.as_deref(),
+        Some(storage_partition_id.as_str())
+    );
 
     let seeds = graph
         .lookup_seeds("auth", 10, None)
@@ -260,19 +263,19 @@ async fn lookup_seeds_prefers_exact_name_over_same_shape_siblings() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let exact_uid = Uuid::now_v7();
     let sibling_uid = Uuid::now_v7();
     seed_node(
         store.pool(),
-        &workspace_id,
+        &storage_partition_id,
         sibling_uid,
         "audit-shipper-dep-0-4-0",
     )
     .await;
     seed_node(
         store.pool(),
-        &workspace_id,
+        &storage_partition_id,
         exact_uid,
         "audit-shipper-dep-0-0-0",
     )
@@ -280,7 +283,7 @@ async fn lookup_seeds_prefers_exact_name_over_same_shape_siblings() {
 
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let seeds = graph
         .lookup_seeds("audit-shipper-dep-0-0-0", 10, None)
@@ -305,13 +308,13 @@ async fn graph_neighbors_with_no_as_of_returns_active_rows_only() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let (old_uid, new_uid, target_uid, _, _) =
-        create_superseded_neighbor_case(&graph, &workspace_id, &run_id).await;
+        create_superseded_neighbor_case(&graph, &storage_partition_id, &run_id).await;
 
     let neighbors = graph
         .neighbors(new_uid, 1, None, None)
@@ -336,13 +339,13 @@ async fn graph_neighbors_as_of_returns_superseded_node_inside_window() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let (old_uid, new_uid, _, old_valid_from, _) =
-        create_superseded_neighbor_case(&graph, &workspace_id, &run_id).await;
+        create_superseded_neighbor_case(&graph, &storage_partition_id, &run_id).await;
 
     let neighbors = graph
         .neighbors(
@@ -371,13 +374,13 @@ async fn lookup_seeds_as_of_includes_invalidated_node_inside_window() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let (old_uid, new_uid, _, old_valid_from, _) =
-        create_superseded_neighbor_case(&graph, &workspace_id, &run_id).await;
+        create_superseded_neighbor_case(&graph, &storage_partition_id, &run_id).await;
     let query = format!("temporal neighbor fact {run_id}");
 
     let historical = graph
@@ -412,10 +415,10 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let valid_from = utc("2026-02-01T00:00:00Z");
     let source_uid = Uuid::now_v7();
@@ -423,7 +426,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
     let related_uid = Uuid::now_v7();
     graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Fact,
             source_uid,
             &format!("source fact {run_id}"),
@@ -433,7 +436,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         .expect("create source fact");
     graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Entity,
             entity_uid,
             &format!("shared library {run_id}"),
@@ -443,7 +446,7 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         .expect("create shared entity");
     graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Fact,
             related_uid,
             &format!("related owner fact {run_id}"),
@@ -451,8 +454,22 @@ async fn expand_seeds_returns_two_hop_fact_via_shared_entity() {
         ))
         .await
         .expect("create related fact");
-    create_edge(&graph, &workspace_id, source_uid, entity_uid, "object").await;
-    create_edge(&graph, &workspace_id, entity_uid, related_uid, "subject").await;
+    create_edge(
+        &graph,
+        &storage_partition_id,
+        source_uid,
+        entity_uid,
+        "object",
+    )
+    .await;
+    create_edge(
+        &graph,
+        &storage_partition_id,
+        entity_uid,
+        related_uid,
+        "subject",
+    )
+    .await;
 
     let hits = graph
         .expand_seeds(&[source_uid], 3, None)
@@ -494,10 +511,10 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         .await
         .expect("create isolated Postgres store");
     let run_id = Uuid::now_v7().simple().to_string();
-    let workspace_id = Uuid::now_v7().to_string();
+    let storage_partition_id = Uuid::now_v7().to_string();
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let old_valid_from = utc("2026-02-01T00:00:00Z");
     let new_valid_from = utc("2026-04-01T00:00:00Z");
@@ -506,7 +523,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
     let target_uid = Uuid::now_v7();
     graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Fact,
             seed_uid,
             &format!("seed fact {run_id}"),
@@ -516,7 +533,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         .expect("create seed fact");
     graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Entity,
             old_entity_uid,
             &format!("old intermediate entity {run_id}"),
@@ -526,7 +543,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         .expect("create old intermediate");
     graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Fact,
             target_uid,
             &format!("target fact {run_id}"),
@@ -534,10 +551,24 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
         ))
         .await
         .expect("create target fact");
-    create_edge(&graph, &workspace_id, seed_uid, old_entity_uid, "object").await;
-    create_edge(&graph, &workspace_id, old_entity_uid, target_uid, "subject").await;
+    create_edge(
+        &graph,
+        &storage_partition_id,
+        seed_uid,
+        old_entity_uid,
+        "object",
+    )
+    .await;
+    create_edge(
+        &graph,
+        &storage_partition_id,
+        old_entity_uid,
+        target_uid,
+        "subject",
+    )
+    .await;
     let mut replacement = node_intent(
-        &workspace_id,
+        &storage_partition_id,
         NodeLabel::Entity,
         Uuid::now_v7(),
         &format!("new intermediate entity {run_id}"),
@@ -585,7 +616,7 @@ async fn expand_seeds_respects_as_of_validity_at_every_hop() {
 
 async fn create_edge(
     graph: &AgeGraphStore,
-    workspace_id: &str,
+    storage_partition_id: &str,
     start_uid: Uuid,
     end_uid: Uuid,
     role: &str,
@@ -597,8 +628,8 @@ async fn create_edge(
             start_uid,
             end_uid,
             properties: json!({ "role": role, "source": "read_smoke_expand" }),
-            workspace_id: Some(workspace_id.to_string()),
-            user_id: None,
+            storage_partition_id: Some(storage_partition_id.to_string()),
+            contact_id: None,
             scope: "tenant".to_string(),
             actor_id: Uuid::now_v7().to_string(),
             actor_kind: "system".to_string(),

@@ -13,7 +13,7 @@ pub(super) const K_BUDGET_REMAINING: &str = "budget_remaining";
 pub(super) const K_TOKENS_USED: &str = "tokens_used";
 pub(super) const K_TASK: &str = "task";
 pub(super) const K_TOOL_SUBSET: &str = "tool_subset";
-pub(super) const K_WORKSPACE_ID: &str = "workspace_id";
+pub(super) const K_TENANT_ID: &str = "tenant_id";
 pub(super) const K_USER_ID: &str = "user_id";
 pub(super) const K_MODEL: &str = "model";
 pub(super) const K_MAX_TURNS: &str = "max_turns";
@@ -45,8 +45,8 @@ pub struct SubAgentVoState {
     pub task: Option<String>,
     /// Tool names the child may invoke.
     pub tool_subset: Vec<String>,
-    /// Workspace scope inherited from the parent.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant scope inherited from the parent.
+    pub tenant_id: Option<TenantId>,
     /// User scope inherited from the parent.
     pub user_id: Option<UserId>,
     /// Model inherited from the parent.
@@ -86,7 +86,7 @@ impl SubAgentVoState {
             parent_session,
             parent_sub_agent,
             depth,
-            workspace_id,
+            tenant_id,
             user_id,
             model,
         } = msg
@@ -109,7 +109,7 @@ impl SubAgentVoState {
         self.tokens_used = 0;
         self.task = Some(task.clone());
         self.tool_subset = tool_subset.clone();
-        self.workspace_id = Some(workspace_id.clone());
+        self.tenant_id = Some(*tenant_id);
         self.user_id = Some(user_id.clone());
         self.model = Some(model.clone());
         self.max_turns = *max_turns;
@@ -139,7 +139,7 @@ impl SubAgentVoState {
     pub(super) fn ensure_initialized(&self) -> moa_core::Result<()> {
         if self.parent_session.is_some()
             && self.task.is_some()
-            && self.workspace_id.is_some()
+            && self.tenant_id.is_some()
             && self.user_id.is_some()
             && self.model.is_some()
         {
@@ -290,7 +290,7 @@ impl VoState for SubAgentVoState {
             tokens_used: reader.get_json(K_TOKENS_USED).await?.unwrap_or_default(),
             task: reader.get_json(K_TASK).await?,
             tool_subset: reader.get_json(K_TOOL_SUBSET).await?.unwrap_or_default(),
-            workspace_id: reader.get_json(K_WORKSPACE_ID).await?,
+            tenant_id: reader.get_json(K_TENANT_ID).await?,
             user_id: reader.get_json(K_USER_ID).await?,
             model: reader.get_json(K_MODEL).await?,
             max_turns: reader.get_json(K_MAX_TURNS).await?,
@@ -319,7 +319,7 @@ impl VoState for SubAgentVoState {
         set_or_clear_scalar(ctx, K_TOKENS_USED, self.tokens_used, 0);
         set_or_clear_opt(ctx, K_TASK, self.task.as_ref());
         set_or_clear_vec(ctx, K_TOOL_SUBSET, &self.tool_subset);
-        set_or_clear_opt(ctx, K_WORKSPACE_ID, self.workspace_id.as_ref());
+        set_or_clear_opt(ctx, K_TENANT_ID, self.tenant_id.as_ref());
         set_or_clear_opt(ctx, K_USER_ID, self.user_id.as_ref());
         set_or_clear_opt(ctx, K_MODEL, self.model.as_ref());
         set_or_clear_opt(ctx, K_MAX_TURNS, self.max_turns.as_ref());
@@ -417,7 +417,7 @@ impl SubAgentVoState {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ModelId, SessionId, SubAgentMessage, TurnOutcome, UserId, WorkspaceId};
+    use moa_core::{ModelId, SessionId, SubAgentMessage, TenantId, TurnOutcome, UserId};
 
     use super::SubAgentVoState;
     use moa_core::SubAgentState;
@@ -431,7 +431,7 @@ mod tests {
             parent_session: SessionId::new(),
             parent_sub_agent: None,
             depth: 1,
-            workspace_id: WorkspaceId::new("workspace-1"),
+            tenant_id: TenantId::new(),
             user_id: UserId::new("user-1"),
             model: ModelId::new("test-model"),
         }

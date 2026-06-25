@@ -45,7 +45,7 @@ pub struct FgaTuple {
     pub user: String,
     /// Relation name.
     pub relation: String,
-    /// Wire-format object, such as `workspace:<uuid>`.
+    /// Wire-format object, such as `tenant:<uuid>`.
     pub object: String,
 }
 

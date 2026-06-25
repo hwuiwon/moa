@@ -4,14 +4,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::traits::Identity;
 use moa_core::wire::{
-    SkillBootstrapWorkspaceDefaultRequest, SkillBootstrapWorkspaceDefaultResponse,
     SkillExportRequest, SkillExportResponse, SkillImportRequest, SkillImportResponse,
     SkillListRequest, SkillListResponse, SkillPackageDocument, SkillPackageDocumentFile,
     SkillSummary,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_skills::package::{SkillPackage, SkillPackageFile};
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry, StoredSkillPackage};
@@ -30,7 +29,7 @@ pub trait Skills {
         request: Json<SkillExportRequest>,
     ) -> Result<Json<SkillExportResponse>, HandlerError>;
 
-    /// Imports workspace-default or tenant-scoped skill packages after the matching authz check.
+    /// Imports tenant-scoped skill packages after the matching authz check.
     async fn import(
         request: Json<SkillImportRequest>,
     ) -> Result<Json<SkillImportResponse>, HandlerError>;
@@ -38,11 +37,6 @@ pub trait Skills {
     /// Lists visible tenant skills after a tenant operator check.
     async fn list(request: Json<SkillListRequest>)
     -> Result<Json<SkillListResponse>, HandlerError>;
-
-    /// Imports workspace-default skill packages after a service-operator check.
-    async fn bootstrap_workspace_default(
-        request: Json<SkillBootstrapWorkspaceDefaultRequest>,
-    ) -> Result<Json<SkillBootstrapWorkspaceDefaultResponse>, HandlerError>;
 }
 
 /// Concrete skill service implementation.
@@ -96,27 +90,6 @@ impl Skills for SkillsImpl {
         Ok(ctx
             .run(|| async move { list_inner(request).await.map(Json::from) })
             .name("skills_list")
-            .await?)
-    }
-
-    #[tracing::instrument(skip(self, ctx, request))]
-    async fn bootstrap_workspace_default(
-        &self,
-        ctx: Context<'_>,
-        request: Json<SkillBootstrapWorkspaceDefaultRequest>,
-    ) -> Result<Json<SkillBootstrapWorkspaceDefaultResponse>, HandlerError> {
-        annotate_restate_handler_span("Skills", "bootstrap_workspace_default");
-        authorize_deployment_skill_admin(&ctx).await?;
-        let packages = request.into_inner().packages;
-
-        Ok(ctx
-            .run(|| async move {
-                let response = import_inner(ActionRuleScope::WorkspaceDefault, packages).await?;
-                Ok(Json(SkillBootstrapWorkspaceDefaultResponse {
-                    imported: response.imported,
-                }))
-            })
-            .name("skills_bootstrap_workspace_default")
             .await?)
     }
 }
@@ -195,33 +168,11 @@ fn skill_registry() -> SkillRegistry {
     SkillRegistry::new(OrchestratorCtx::current_graph_pool())
 }
 
-async fn authorize_workspace_default_admin(
-    ctx: &impl RequestHeaders,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    let workspace_id = global_workspace_id();
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        &workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
 async fn authorized_import_scope(
     ctx: &impl RequestHeaders,
     scope: ActionRuleScope,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => {
-            authorize_workspace_default_admin(ctx, Relation::Admin).await?;
-        }
         ActionRuleScope::Tenant { tenant_id } => {
             authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
         }
@@ -242,41 +193,16 @@ async fn authorize_tenant(
     Ok(identity)
 }
 
-fn tenant_id_from_storage_workspace_id(
-    workspace_id: &WorkspaceId,
-) -> Result<TenantId, HandlerError> {
-    uuid::Uuid::parse_str(workspace_id.as_str())
-        .map(TenantId::from)
-        .map_err(|error| {
-            TerminalError::new_with_code(
-                400,
-                format!("stored skill workspace_id is not a tenant id: {error}"),
-            )
-            .into()
-        })
-}
-
-fn global_workspace_id() -> WorkspaceId {
-    WorkspaceId::new("workspace")
-}
-
-fn tenant_id_from_stored_workspace_id(workspace_id: WorkspaceId) -> Result<TenantId, HandlerError> {
-    tenant_id_from_storage_workspace_id(&workspace_id)
-}
-
 fn reject_user_scoped_skill() -> HandlerError {
     TerminalError::new_with_code(500, "contact-scoped skill rows are not supported").into()
 }
 
 fn skill_scope_from_stored_parts(
     scope: &str,
-    workspace_id: Option<WorkspaceId>,
+    tenant_id: Option<TenantId>,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
-        "workspace_default" | "global" => Ok(ActionRuleScope::WorkspaceDefault),
-        "tenant" | "workspace" => workspace_id
-            .map(tenant_id_from_stored_workspace_id)
-            .transpose()?
+        "tenant" => tenant_id
             .map(|tenant_id| ActionRuleScope::Tenant { tenant_id })
             .ok_or_else(|| {
                 TerminalError::new_with_code(500, "tenant skill row missing tenant id").into()
@@ -286,27 +212,6 @@ fn skill_scope_from_stored_parts(
             Err(TerminalError::new_with_code(500, format!("unknown skill scope `{other}`")).into())
         }
     }
-}
-
-async fn authorize_deployment_skill_admin(ctx: &impl RequestHeaders) -> Result<(), HandlerError> {
-    let identity = require_identity(ctx)?;
-    if identity.identity_type != IdentityType::Service {
-        return Err(TerminalError::new_with_code(
-            403,
-            "global skill import requires a service identity",
-        )
-        .into());
-    }
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        identity.tenant_id,
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)
 }
 
 fn skill_package_document_from_stored(stored: StoredSkillPackage) -> SkillPackageDocument {
@@ -363,7 +268,7 @@ fn decode_skill_package_files(
 }
 
 fn memory_scope_from_skill(skill: &Skill) -> Result<ActionRuleScope, HandlerError> {
-    skill_scope_from_stored_parts(&skill.scope, skill.workspace_id.clone())
+    skill_scope_from_stored_parts(&skill.scope, skill.tenant_id)
 }
 
 fn skill_handler_error(error: MoaError) -> HandlerError {

@@ -9,7 +9,7 @@ fn prepare_lineage_sql_scopes_logical_source_to_workspace_and_since() {
         .expect("lineage query should prepare");
 
     assert!(sql.contains("analytics.turn_lineage"));
-    assert!(sql.contains("workspace_id = $1"));
+    assert!(sql.contains("storage_partition_id = $1"));
     assert!(sql.contains("($2::text)::interval"));
     assert!(sql.contains("record_kind = 4"));
 }

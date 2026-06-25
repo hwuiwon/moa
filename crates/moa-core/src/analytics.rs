@@ -116,7 +116,7 @@ pub struct TenantAnalyticsSummary {
     pub cache_hit_rate: f64,
 }
 
-/// One daily cache trend point sourced from `daily_workspace_metrics`.
+/// One daily cache trend point sourced from `daily_storage_partition_metrics`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheDailyMetric {
     /// Tenant identifier.

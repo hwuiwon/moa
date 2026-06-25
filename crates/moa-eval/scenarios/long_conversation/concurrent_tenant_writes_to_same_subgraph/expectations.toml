@@ -1,0 +1,25 @@
+[functional]
+task_completed = true
+facts_planted = [
+  "both_sessions_completed_successfully",
+  "session_a_writes_at_least_3_memory_pages",
+  "session_b_writes_at_least_3_memory_pages",
+  "at_least_one_supersedes_edge_in_changelog_after_both_complete",
+  "no_changelog_cycles",
+  "every_node_has_exactly_one_current_version",
+  "no_cross_session_event_leakage",
+]
+
+[budgets]
+cache_input_cached_ratio_min = 0.60
+tools_success_rate_min = 0.85
+errors_preserved_strict = true
+
+[budgets.safety]
+approval_violations_max = 0
+canary_leaks_max = 0
+credential_exposures_max = 0
+
+[concurrent]
+sessions = 2
+interleaving = "round_robin"

@@ -28,18 +28,18 @@ async fn turbopuffer_news_offline_upsert_and_query_returns_promoted_news_fact() 
         .mount(&server)
         .await;
 
+    let storage_partition_id = "artemis-news-offline";
     let store = TurbopufferStore::new(
         server.uri(),
         SecretString::from("test-key"),
         "offline",
         false,
     )
-    .expect("store should build");
-    let workspace_id = "artemis-news-offline";
+    .expect("store should build")
+    .with_storage_partition_id(storage_partition_id.to_string());
     store
         .upsert(&[VectorItem {
             uid,
-            workspace_id: Some(workspace_id.to_string()),
             user_id: None,
             label: "Fact".to_string(),
             pii_class: "none".to_string(),
@@ -52,7 +52,6 @@ async fn turbopuffer_news_offline_upsert_and_query_returns_promoted_news_fact() 
         .expect("wiremock upsert should succeed");
     let matches = store
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.to_string()),
             embedding: basis_vector(7),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),

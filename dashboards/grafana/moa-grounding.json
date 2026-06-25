@@ -12,7 +12,7 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT bucket AS time, workspace_id::text AS metric, verified_rate AS value FROM analytics.grounding_hourly WHERE $__timeFilter(bucket) AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') ORDER BY 1",
+          "rawSql": "SELECT bucket AS time, storage_partition_id::text AS metric, verified_rate AS value FROM analytics.grounding_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -28,7 +28,7 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT bucket AS time, workspace_id::text || ' p50' AS metric, p50 AS value FROM analytics.nli_hourly WHERE $__timeFilter(bucket) AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') UNION ALL SELECT bucket AS time, workspace_id::text || ' p95' AS metric, p95 AS value FROM analytics.nli_hourly WHERE $__timeFilter(bucket) AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') ORDER BY 1",
+          "rawSql": "SELECT bucket AS time, storage_partition_id::text || ' p50' AS metric, p50 AS value FROM analytics.nli_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') UNION ALL SELECT bucket AS time, storage_partition_id::text || ' p95' AS metric, p95 AS value FROM analytics.nli_hourly WHERE $__timeFilter(bucket) AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -44,7 +44,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT model_or_evaluator AS metric, count(*) AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'citation_verified' AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1 ORDER BY 2 DESC",
+          "rawSql": "SELECT model_or_evaluator AS metric, count(*) AS value FROM analytics.scores WHERE $__timeFilter(ts) AND name = 'citation_verified' AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') GROUP BY 1 ORDER BY 2 DESC",
           "refId": "A"
         }
       ],
@@ -60,7 +60,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT jsonb_array_length(payload #> '{record,citations}') AS citations, count(*) FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 4 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1 ORDER BY 1",
+          "rawSql": "SELECT jsonb_array_length(payload #> '{record,citations}') AS citations, count(*) FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 4 AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') GROUP BY 1 ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -76,12 +76,12 @@
       {
         "current": { "selected": true, "text": "all", "value": "all" },
         "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-        "definition": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "definition": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT storage_partition_id::text AS tenant_id FROM analytics.turn_lineage ORDER BY 1",
         "includeAll": false,
-        "label": "workspace_id",
+        "label": "tenant_id",
         "multi": false,
-        "name": "workspace_id",
-        "query": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "name": "tenant_id",
+        "query": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT storage_partition_id::text AS tenant_id FROM analytics.turn_lineage ORDER BY 1",
         "refresh": 1,
         "type": "query"
       }

@@ -16,7 +16,7 @@ use moa_core::wire::{
     ArtifactImportResponse, ArtifactListRequest, ArtifactListResponse, ArtifactPublishRequest,
     ArtifactPublishResponse, ArtifactSummary, ArtifactValidateRequest, ArtifactValidateResponse,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, TenantId};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 
@@ -362,9 +362,6 @@ async fn authorized_write_scope(
     scope: ActionRuleScope,
 ) -> Result<ActionRuleScope, HandlerError> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => {
-            authorize_workspace_default_admin(ctx, Relation::Admin).await?;
-        }
         ActionRuleScope::Tenant { tenant_id } => {
             authorize_tenant(ctx, tenant_id, Relation::Operator).await?;
         }
@@ -377,33 +374,11 @@ async fn authorize_read_scope(
     scope: &ActionRuleScope,
 ) -> Result<(), HandlerError> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => {
-            authorize_workspace_default_admin(ctx, Relation::Admin).await?;
-        }
         ActionRuleScope::Tenant { tenant_id } => {
             authorize_tenant(ctx, *tenant_id, Relation::Operator).await?;
         }
     }
     Ok(())
-}
-
-async fn authorize_workspace_default_admin(
-    ctx: &impl RequestHeaders,
-    relation: Relation,
-) -> Result<Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    let workspace_id = global_workspace_id();
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        &workspace_id,
-        relation,
-    )
-    .await
-    .map_err(translate_authz_error)?;
-    Ok(identity)
 }
 
 async fn authorize_tenant(
@@ -417,10 +392,6 @@ async fn authorize_tenant(
         .await
         .map_err(translate_authz_error)?;
     Ok(identity)
-}
-
-fn global_workspace_id() -> WorkspaceId {
-    WorkspaceId::new("workspace")
 }
 
 fn artifact_handler_error(error: MoaError) -> HandlerError {

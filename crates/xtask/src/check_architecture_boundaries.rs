@@ -72,31 +72,38 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
-        "crates/moa-orchestrator/src/objects/workspace.rs",
-        "OrchestratorCtx::current()",
-        1,
-        "Workspace VO still owns a narrow memory-summary read pending a workspace repository seam"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/workspace.rs",
-        ".graph_pool()",
-        1,
-        "Workspace VO memory-summary read currently obtains the graph pool from grouped deps"
-    ),
-    allow!(
-        RuntimeContext,
-        "crates/moa-orchestrator/src/objects/workspace.rs",
+        "crates/moa-orchestrator/src/objects/session/handlers.rs",
         "OrchestratorCtx::current_session_store",
         1,
-        "Workspace VO workflow listing still reads through the session-store seam"
+        "Session handlers still use the session-store seam for direct status and progress reads"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/tenant.rs",
+        "OrchestratorCtx::current()",
+        1,
+        "Tenant VO still owns a narrow memory-summary read pending a repository seam"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/tenant.rs",
+        ".graph_pool()",
+        1,
+        "Tenant VO memory-summary read currently obtains the graph pool from grouped deps"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/objects/tenant.rs",
+        "OrchestratorCtx::current_session_store",
+        1,
+        "Tenant VO workflow listing still reads through the session-store seam"
     ),
     allow!(
         DirectSql,
-        "crates/moa-orchestrator/src/objects/workspace.rs",
+        "crates/moa-orchestrator/src/objects/tenant.rs",
         "sqlx::query_scalar",
         1,
-        "Workspace VO memory summary has one direct graph-node count pending repository extraction"
+        "Tenant VO memory summary has one direct graph-node count pending repository extraction"
     ),
     allow!(
         RuntimeContext,
@@ -242,14 +249,14 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/services/contacts.rs",
         "OrchestratorCtx::current_graph_pool",
-        8,
+        10,
         "Contact service constructs the initial in-process contact repository operations"
     ),
     allow!(
         RuntimeContext,
         "crates/moa-orchestrator/src/services/contacts.rs",
         "OrchestratorCtx::current_session_store",
-        5,
+        7,
         "Contact service validates and updates session contact bindings through the session-store seam"
     ),
     allow!(
@@ -369,7 +376,7 @@ const ALLOWANCES: &[Allowance] = &[
         "crates/moa-orchestrator/src/services/graph_memory_maint.rs",
         "sqlx::query_scalar",
         1,
-        "Graph-memory maintenance scans workspaces until a maintenance repository owns it"
+        "Graph-memory maintenance scans storage partitions until a maintenance repository owns it"
     ),
     allow!(
         RuntimeContext,
@@ -660,6 +667,27 @@ const ALLOWANCES: &[Allowance] = &[
     ),
     allow!(
         RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/progress_delivery.rs",
+        "OrchestratorCtx::current_channel_adapter",
+        1,
+        "Progress delivery resolves the target channel adapter through the runtime registry"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/progress_delivery.rs",
+        "OrchestratorCtx::current_session_store",
+        1,
+        "Progress delivery reads active channel bindings through the session-store seam"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/sub_agent_turn_execution.rs",
+        "OrchestratorCtx::current_config",
+        2,
+        "Sub-agent turn execution still reads session limits from runtime config"
+    ),
+    allow!(
+        RuntimeContext,
         "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         "OrchestratorCtx::current()",
         3,
@@ -689,6 +717,13 @@ const ALLOWANCES: &[Allowance] = &[
     allow!(
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/turn_execution.rs",
+        "OrchestratorCtx::current_tool_schemas",
+        1,
+        "TurnExecution reports available tool count from the runtime tool schema registry"
+    ),
+    allow!(
+        RuntimeContext,
+        "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         "OrchestratorCtx::current_lineage",
         1,
         "TurnExecution still obtains the lineage handle while generation lineage is emitted inline"
@@ -697,7 +732,7 @@ const ALLOWANCES: &[Allowance] = &[
         RuntimeContext,
         "crates/moa-orchestrator/src/workflows/turn_execution.rs",
         "OrchestratorCtx::current_config",
-        6,
+        7,
         "TurnExecution still reads session and resolution config from the runtime singleton"
     ),
 ];

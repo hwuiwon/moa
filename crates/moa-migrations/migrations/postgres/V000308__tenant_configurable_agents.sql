@@ -39,7 +39,7 @@ ALTER TABLE moa.artifact
     );
 
 INSERT INTO moa.artifact (
-    artifact_uid, workspace_id, user_id, kind, name, description, tags, latest_revision_uid
+    artifact_uid, storage_partition_id, user_id, kind, name, description, tags, latest_revision_uid
 )
 VALUES (
     '00000000-0000-4000-8000-000000000a01',
@@ -54,7 +54,7 @@ VALUES (
 ON CONFLICT (artifact_uid) DO NOTHING;
 
 INSERT INTO moa.artifact_revision (
-    revision_uid, artifact_uid, workspace_id, user_id, definition,
+    revision_uid, artifact_uid, storage_partition_id, user_id, definition,
     canonical_hash, source_format, source_text, status, validation_report,
     version, published_at
 )
@@ -108,9 +108,9 @@ WHERE artifact_uid = '00000000-0000-4000-8000-000000000a01'
 
 CREATE TABLE IF NOT EXISTS moa.agent_installation (
     installation_uid UUID PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     agent_id UUID,
     artifact_uid UUID NOT NULL REFERENCES moa.artifact(artifact_uid) ON DELETE RESTRICT,
     definition_ref TEXT NOT NULL,
@@ -129,19 +129,19 @@ CREATE TABLE IF NOT EXISTS moa.agent_installation (
     CHECK (definition_ref <> '')
 );
 
-CREATE INDEX IF NOT EXISTS agent_installation_workspace_status_idx
-    ON moa.agent_installation (workspace_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS agent_installation_storage_partition_status_idx
+    ON moa.agent_installation (storage_partition_id, status, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS agent_installation_current_revision_idx
     ON moa.agent_installation (current_revision_uid)
     WHERE current_revision_uid IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS agent_installation_artifact_idx
-    ON moa.agent_installation (artifact_uid, workspace_id, status);
+    ON moa.agent_installation (artifact_uid, storage_partition_id, status);
 
 CREATE UNIQUE INDEX IF NOT EXISTS agent_installation_active_ref_uniq
     ON moa.agent_installation (
-        workspace_id,
+        storage_partition_id,
         coalesce(user_id, ''),
         definition_ref
     )
@@ -152,9 +152,9 @@ SELECT moa.apply_three_tier_rls('moa.agent_installation'::REGCLASS);
 CREATE TABLE IF NOT EXISTS moa.agent_deployment (
     deployment_uid UUID PRIMARY KEY,
     installation_uid UUID NOT NULL REFERENCES moa.agent_installation(installation_uid) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     revision_uid UUID NOT NULL REFERENCES moa.artifact_revision(revision_uid) ON DELETE RESTRICT,
     deployed_by TEXT,
     deployed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -174,7 +174,7 @@ CREATE INDEX IF NOT EXISTS agent_deployment_revision_idx
     ON moa.agent_deployment (revision_uid, deployed_at DESC);
 
 CREATE INDEX IF NOT EXISTS agent_deployment_scope_idx
-    ON moa.agent_deployment (workspace_id, scope, user_id, status);
+    ON moa.agent_deployment (storage_partition_id, scope, user_id, status);
 
 SELECT moa.apply_three_tier_rls('moa.agent_deployment'::REGCLASS);
 
@@ -186,9 +186,9 @@ ALTER TABLE sessions
 
 CREATE TABLE IF NOT EXISTS session_agent_context (
     session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     agent_id UUID,
     installation_uid UUID REFERENCES moa.agent_installation(installation_uid) ON DELETE SET NULL,
     deployment_uid UUID REFERENCES moa.agent_deployment(deployment_uid) ON DELETE SET NULL,
@@ -218,12 +218,12 @@ ALTER TABLE session_agent_context
     ADD CONSTRAINT session_agent_context_user_id_nonempty CHECK (btrim(user_id) <> '');
 
 INSERT INTO session_agent_context (
-    session_id, workspace_id, user_id, agent_definition_ref, agent_revision_uid,
+    session_id, storage_partition_id, user_id, agent_definition_ref, agent_revision_uid,
     policy_hash, display_name, policy_snapshot, artifact_dependencies, tool_dependencies
 )
 SELECT
     sessions.id,
-    sessions.workspace_id,
+    sessions.storage_partition_id,
     sessions.user_id,
     'agent://system-default',
     '00000000-0000-4000-8000-000000000a02',
@@ -252,7 +252,7 @@ CREATE INDEX IF NOT EXISTS session_agent_context_revision_idx
     ON session_agent_context (agent_revision_uid);
 
 CREATE INDEX IF NOT EXISTS session_agent_context_scope_idx
-    ON session_agent_context (workspace_id, scope, user_id, agent_revision_uid);
+    ON session_agent_context (storage_partition_id, scope, user_id, agent_revision_uid);
 
 SELECT moa.apply_three_tier_rls('session_agent_context'::REGCLASS);
 

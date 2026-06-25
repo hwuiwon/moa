@@ -8,7 +8,7 @@ How provider implementations get secrets, and how MCP servers proxy user-supplie
 
 This indirection matters because:
 
-- The same MOA process serves multiple workspaces and users; one global env var is not enough.
+- The same MOA process serves multiple tenants and users; one global env var is not enough.
 - Test fixtures inject a fake vault that returns scripted secrets; without the indirection, tests would set process-wide env vars, which interleave badly under parallel `cargo test`.
 - The vault rotates secrets and audits access; raw env vars cannot.
 

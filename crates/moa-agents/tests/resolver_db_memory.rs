@@ -5,7 +5,7 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::validate_for_status;
 use moa_core::{
     ActionRuleScope, AgentGuardrailPolicy, AgentRevisionLock, ModelId, Result, SessionActorRef,
-    SessionMeta, SessionStore, TenantId, WorkspaceId,
+    SessionMeta, SessionStore, StoragePartitionId, TenantId,
 };
 use serde_json::json;
 use sqlx::types::Json;
@@ -23,7 +23,7 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
     let artifact_resolver = ArtifactResolver::new(ArtifactRegistry::new(pool.clone()));
     let agent_resolver = AgentResolver::new(pool.clone());
     let tenant_id = TenantId::new();
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let scope = ActionRuleScope::Tenant { tenant_id };
     let skill_name = format!("support-skill-{}", Uuid::now_v7());
     let agent_name = format!("support-agent-{}", Uuid::now_v7());
@@ -51,7 +51,7 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
     let agent_id = Uuid::now_v7();
     insert_installation(
         &pool,
-        &workspace_id,
+        &storage_partition_id,
         installation_uid,
         agent_id,
         &agent_revision,
@@ -61,7 +61,7 @@ async fn installed_agent_resolution_uses_deployment_lock_instead_of_latest_depen
     .await?;
     insert_deployment(
         &pool,
-        &workspace_id,
+        &storage_partition_id,
         installation_uid,
         deployment_uid,
         agent_revision.revision_uid,
@@ -365,7 +365,7 @@ fn agent_doc_with_output_guardrail_prompt(
 
 async fn insert_installation(
     pool: &sqlx::PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     installation_uid: Uuid,
     agent_id: Uuid,
     revision: &StoredArtifactRevision,
@@ -375,14 +375,14 @@ async fn insert_installation(
     sqlx::query(
         r#"
         INSERT INTO moa.agent_installation (
-            installation_uid, workspace_id, agent_id, artifact_uid, definition_ref,
+            installation_uid, storage_partition_id, agent_id, artifact_uid, definition_ref,
             display_name, current_revision_uid, last_deployment_uid, last_deployed_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
         "#,
     )
     .bind(installation_uid)
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(agent_id)
     .bind(revision.artifact_uid)
     .bind(format!("agent://{agent_name}"))
@@ -397,7 +397,7 @@ async fn insert_installation(
 
 async fn insert_deployment(
     pool: &sqlx::PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     installation_uid: Uuid,
     deployment_uid: Uuid,
     revision_uid: Uuid,
@@ -406,7 +406,7 @@ async fn insert_deployment(
     sqlx::query(
         r#"
         INSERT INTO moa.agent_deployment (
-            deployment_uid, installation_uid, workspace_id, revision_uid,
+            deployment_uid, installation_uid, storage_partition_id, revision_uid,
             status, dependency_lock, dependency_lock_hash
         )
         VALUES ($1, $2, $3, $4, 'active', $5, $6)
@@ -414,7 +414,7 @@ async fn insert_deployment(
     )
     .bind(deployment_uid)
     .bind(installation_uid)
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(revision_uid)
     .bind(Json(revision_lock))
     .bind(&revision_lock.canonical_policy_hash)

@@ -12,7 +12,7 @@ pub mod pgvector_store;
 pub mod promotion;
 pub mod turbopuffer;
 
-pub use backend::vector_store_for_workspace;
+pub use backend::vector_store_for_storage_partition;
 pub use embedder::CohereV4Embedder;
 pub use gemini::{
     EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, build_embedder_from_config,
@@ -20,7 +20,7 @@ pub use gemini::{
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,
-    WorkspacePromotion, finalize_promotion, rollback_promotion,
+    VectorPartitionPromotion, finalize_promotion, rollback_promotion,
 };
 pub use turbopuffer::TurbopufferStore;
 
@@ -63,13 +63,13 @@ pub enum Error {
     /// Embedder configuration is invalid.
     #[error("invalid embedder configuration: {0}")]
     EmbedderConfig(String),
-    /// The workspace embedder configuration does not match the pgvector index shape.
+    /// The storage-partition embedder configuration does not match the pgvector index shape.
     #[error(
-        "workspace {workspace_id} embedder `{configured_model}` uses {configured_dimension} dimensions, but pgvector KNN requires {required_dimension}"
+        "storage partition {storage_partition_id} embedder `{configured_model}` uses {configured_dimension} dimensions, but pgvector KNN requires {required_dimension}"
     )]
     EmbedderMismatch {
-        /// Workspace with the mismatched embedder.
-        workspace_id: String,
+        /// Storage partition with the mismatched embedder.
+        storage_partition_id: String,
         /// Configured embedder model.
         configured_model: String,
         /// Configured embedding dimensionality.
@@ -77,29 +77,29 @@ pub enum Error {
         /// Dimensionality required by the active vector index.
         required_dimension: usize,
     },
-    /// The workspace has no persisted embedder state row.
-    #[error("workspace {workspace_id} has no configured embedder state")]
-    WorkspaceEmbedderStateMissing {
-        /// Workspace missing embedder state.
-        workspace_id: String,
+    /// The storage partition has no persisted embedder state row.
+    #[error("storage partition {storage_partition_id} has no configured embedder state")]
+    StoragePartitionEmbedderStateMissing {
+        /// Storage partition missing embedder state.
+        storage_partition_id: String,
     },
-    /// A write attempted to mix embedding models inside one workspace vector space.
+    /// A write attempted to mix embedding models inside one storage partition vector space.
     #[error(
-        "workspace {workspace_id} embedder `{configured_model}` cannot accept `{requested_model}` vectors"
+        "storage partition {storage_partition_id} embedder `{configured_model}` cannot accept `{requested_model}` vectors"
     )]
     EmbedderModelMismatch {
-        /// Workspace with the mismatched embedder model.
-        workspace_id: String,
+        /// Storage partition with the mismatched embedder model.
+        storage_partition_id: String,
         /// Configured embedder model.
         configured_model: String,
         /// Model used by the embedding write.
         requested_model: String,
     },
-    /// The workspace is being re-embedded and cannot serve stale KNN reads.
-    #[error("workspace {workspace_id} re-embedding is in progress")]
+    /// The storage partition is being re-embedded and cannot serve stale KNN reads.
+    #[error("storage partition {storage_partition_id} re-embedding is in progress")]
     ReembedInProgress {
-        /// Workspace whose vectors are being rewritten.
-        workspace_id: String,
+        /// Storage partition whose vectors are being rewritten.
+        storage_partition_id: String,
     },
     /// The vector provider returned a non-success status.
     #[error("vector provider `{provider}` returned HTTP {status}: {body}")]
@@ -114,25 +114,29 @@ pub enum Error {
     /// The configured query limit is too large for Postgres.
     #[error("vector query limit {0} does not fit into i64")]
     QueryLimitTooLarge(usize),
-    /// The vector backend needs an explicit workspace namespace.
-    #[error("vector backend `{backend}` requires an explicit workspace id for {operation}")]
-    WorkspaceRequired {
+    /// The vector backend needs a scoped storage partition.
+    #[error("vector backend `{backend}` requires a scoped storage partition for {operation}")]
+    StoragePartitionRequired {
         /// Vector backend identifier.
         backend: &'static str,
-        /// Operation that requires a workspace id.
+        /// Operation that requires a storage partition.
         operation: &'static str,
     },
     /// The requested vector backend is not configured.
-    #[error("workspace {workspace_id} is configured for turbopuffer, but no client is configured")]
+    #[error(
+        "storage partition {storage_partition_id} is configured for turbopuffer, but no client is configured"
+    )]
     TurbopufferUnavailable {
-        /// Workspace that requested Turbopuffer.
-        workspace_id: String,
+        /// Storage partition that requested Turbopuffer.
+        storage_partition_id: String,
     },
-    /// A HIPAA workspace requested Turbopuffer without a BAA-enabled client.
-    #[error("workspace {workspace_id} is HIPAA-tier and requires a Turbopuffer BAA")]
+    /// A HIPAA storage partition requested Turbopuffer without a BAA-enabled client.
+    #[error(
+        "storage partition {storage_partition_id} is HIPAA-tier and requires a Turbopuffer BAA"
+    )]
     TurbopufferBaaRequired {
-        /// Workspace that requested Turbopuffer.
-        workspace_id: String,
+        /// Storage partition that requested Turbopuffer.
+        storage_partition_id: String,
     },
     /// Turbopuffer returned a malformed response.
     #[error("invalid turbopuffer response: {0}")]
@@ -140,16 +144,18 @@ pub enum Error {
     /// Turbopuffer configuration is invalid.
     #[error("invalid turbopuffer configuration: {0}")]
     TurbopufferConfig(String),
-    /// Workspace promotion validation failed.
-    #[error("workspace promotion validation failed: overlap {overlap:.3} below {required:.3}")]
+    /// Vector partition promotion validation failed.
+    #[error(
+        "vector partition promotion validation failed: overlap {overlap:.3} below {required:.3}"
+    )]
     PromotionValidationFailed {
         /// Observed top-K overlap.
         overlap: f64,
         /// Required top-K overlap.
         required: f64,
     },
-    /// Workspace promotion state does not allow the requested operation.
-    #[error("workspace promotion state `{state}` does not allow {operation}")]
+    /// Vector partition promotion state does not allow the requested operation.
+    #[error("vector partition promotion state `{state}` does not allow {operation}")]
     InvalidPromotionState {
         /// Current promotion state.
         state: String,
@@ -208,8 +214,6 @@ impl From<Error> for moa_core::MoaError {
 pub struct VectorItem {
     /// Stable graph node identity.
     pub uid: Uuid,
-    /// Workspace owner for workspace and user scoped rows.
-    pub workspace_id: Option<String>,
     /// User owner for user scoped rows.
     pub user_id: Option<String>,
     /// Graph vertex label.
@@ -229,8 +233,6 @@ pub struct VectorItem {
 /// KNN vector query parameters.
 #[derive(Debug, Clone)]
 pub struct VectorQuery {
-    /// Workspace namespace for backends that require explicit tenant routing.
-    pub workspace_id: Option<String>,
     /// Dense 1024-dimensional query embedding.
     pub embedding: Vec<f32>,
     /// Number of nearest neighbors to return.

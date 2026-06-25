@@ -6,9 +6,9 @@ BEGIN
     EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
 
     EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
@@ -21,49 +21,49 @@ BEGIN
         )
     $policy$, target_table);
     EXECUTE format($policy$
-        CREATE POLICY rd_workspace ON %s FOR SELECT TO moa_app
+        CREATE POLICY rd_tenant ON %s FOR SELECT TO moa_app
         USING (
             moa.age_property(properties, 'scope') OPERATOR(ag_catalog.=) '"tenant"'::ag_catalog.agtype
-            AND moa.age_property(properties, 'workspace_id')
-                OPERATOR(ag_catalog.=) ('"' || moa.current_workspace() || '"')::ag_catalog.agtype
+            AND moa.age_property(properties, 'storage_partition_id')
+                OPERATOR(ag_catalog.=) ('"' || moa.current_storage_partition() || '"')::ag_catalog.agtype
         )
     $policy$, target_table);
     EXECUTE format($policy$
         CREATE POLICY rd_user ON %s FOR SELECT TO moa_app
         USING (
             moa.age_property(properties, 'scope') OPERATOR(ag_catalog.=) '"contact"'::ag_catalog.agtype
-            AND moa.age_property(properties, 'workspace_id')
-                OPERATOR(ag_catalog.=) ('"' || moa.current_workspace() || '"')::ag_catalog.agtype
+            AND moa.age_property(properties, 'storage_partition_id')
+                OPERATOR(ag_catalog.=) ('"' || moa.current_storage_partition() || '"')::ag_catalog.agtype
             AND moa.age_property(properties, 'user_id')
                 OPERATOR(ag_catalog.=) ('"' || moa.current_user_id() || '"')::ag_catalog.agtype
         )
     $policy$, target_table);
     EXECUTE format($policy$
-        CREATE POLICY wr_workspace ON %s FOR ALL TO moa_app
+        CREATE POLICY wr_tenant ON %s FOR ALL TO moa_app
         USING (
             moa.age_property(properties, 'scope') OPERATOR(ag_catalog.=) '"tenant"'::ag_catalog.agtype
-            AND moa.age_property(properties, 'workspace_id')
-                OPERATOR(ag_catalog.=) ('"' || moa.current_workspace() || '"')::ag_catalog.agtype
+            AND moa.age_property(properties, 'storage_partition_id')
+                OPERATOR(ag_catalog.=) ('"' || moa.current_storage_partition() || '"')::ag_catalog.agtype
         )
         WITH CHECK (
             moa.age_property(properties, 'scope') OPERATOR(ag_catalog.=) '"tenant"'::ag_catalog.agtype
-            AND moa.age_property(properties, 'workspace_id')
-                OPERATOR(ag_catalog.=) ('"' || moa.current_workspace() || '"')::ag_catalog.agtype
+            AND moa.age_property(properties, 'storage_partition_id')
+                OPERATOR(ag_catalog.=) ('"' || moa.current_storage_partition() || '"')::ag_catalog.agtype
         )
     $policy$, target_table);
     EXECUTE format($policy$
         CREATE POLICY wr_user ON %s FOR ALL TO moa_app
         USING (
             moa.age_property(properties, 'scope') OPERATOR(ag_catalog.=) '"contact"'::ag_catalog.agtype
-            AND moa.age_property(properties, 'workspace_id')
-                OPERATOR(ag_catalog.=) ('"' || moa.current_workspace() || '"')::ag_catalog.agtype
+            AND moa.age_property(properties, 'storage_partition_id')
+                OPERATOR(ag_catalog.=) ('"' || moa.current_storage_partition() || '"')::ag_catalog.agtype
             AND moa.age_property(properties, 'user_id')
                 OPERATOR(ag_catalog.=) ('"' || moa.current_user_id() || '"')::ag_catalog.agtype
         )
         WITH CHECK (
             moa.age_property(properties, 'scope') OPERATOR(ag_catalog.=) '"contact"'::ag_catalog.agtype
-            AND moa.age_property(properties, 'workspace_id')
-                OPERATOR(ag_catalog.=) ('"' || moa.current_workspace() || '"')::ag_catalog.agtype
+            AND moa.age_property(properties, 'storage_partition_id')
+                OPERATOR(ag_catalog.=) ('"' || moa.current_storage_partition() || '"')::ag_catalog.agtype
             AND moa.age_property(properties, 'user_id')
                 OPERATOR(ag_catalog.=) ('"' || moa.current_user_id() || '"')::ag_catalog.agtype
         )

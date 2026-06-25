@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
-use moa_core::{UserId, WorkspaceId};
+use moa_core::{StoragePartitionId, UserId};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -34,13 +34,13 @@ pub(super) enum PrivacySubjectKind {
     Contact,
 }
 
-/// Resolved privacy subjects and effective workspace.
+/// Resolved privacy subjects and effective storage partition.
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedPrivacySubjects {
     /// Subject kind used for erasure-scope validation.
     pub(super) kind: PrivacySubjectKind,
-    /// Workspace partition that should constrain reads, if any.
-    pub(super) effective_workspace: Option<String>,
+    /// Storage partition that should constrain reads, if any.
+    pub(super) effective_storage_partition: Option<String>,
     /// Primary and linked subjects included in the operation.
     pub(super) subjects: Vec<PrivacySubject>,
 }
@@ -78,19 +78,20 @@ pub(super) async fn consume_approval_jti(
 pub(super) async fn resolve_privacy_subjects(
     pool: &PgPool,
     tenant_id: Uuid,
-    workspace_id: Option<&WorkspaceId>,
+    storage_partition_id: Option<&StoragePartitionId>,
     requested_subject_user_id: &UserId,
     linked_policy: ContactLinkedSubjectPolicy,
 ) -> Result<ResolvedPrivacySubjects, HandlerError> {
     let parsed = parse_privacy_subject_id(requested_subject_user_id)?;
-    let contact_row = load_privacy_contact_row(pool, tenant_id, workspace_id, parsed.uuid).await?;
+    let contact_row =
+        load_privacy_contact_row(pool, tenant_id, storage_partition_id, parsed.uuid).await?;
     let Some(contact_row) = contact_row else {
         if parsed.is_contact_prefixed {
             return Err(TerminalError::new_with_code(404, "contact not found").into());
         }
         return Ok(ResolvedPrivacySubjects {
             kind: PrivacySubjectKind::User,
-            effective_workspace: workspace_id.map(ToString::to_string),
+            effective_storage_partition: storage_partition_id.map(ToString::to_string),
             subjects: vec![PrivacySubject::primary(
                 requested_subject_user_id.to_string(),
                 parsed.uuid,
@@ -105,15 +106,19 @@ pub(super) async fn resolve_privacy_subjects(
     if contact_row.state == "verified"
         && linked_policy == ContactLinkedSubjectPolicy::IncludeVerifiedLinks
     {
-        let linked =
-            load_linked_contact_ids(pool, tenant_id, &contact_row.workspace_id, contact_row.id)
-                .await?;
+        let linked = load_linked_contact_ids(
+            pool,
+            tenant_id,
+            &contact_row.storage_partition_id,
+            contact_row.id,
+        )
+        .await?;
         subjects.extend(linked.into_iter().map(PrivacySubject::linked_contact));
     }
 
     Ok(ResolvedPrivacySubjects {
         kind: PrivacySubjectKind::Contact,
-        effective_workspace: Some(contact_row.workspace_id),
+        effective_storage_partition: Some(contact_row.storage_partition_id),
         subjects,
     })
 }
@@ -148,28 +153,28 @@ pub(super) fn parse_privacy_subject_id(
 #[derive(Debug, Clone)]
 struct PrivacyContactRow {
     id: Uuid,
-    workspace_id: String,
+    storage_partition_id: String,
     state: String,
 }
 
 async fn load_privacy_contact_row(
     pool: &PgPool,
     tenant_id: Uuid,
-    workspace_id: Option<&WorkspaceId>,
+    storage_partition_id: Option<&StoragePartitionId>,
     contact_id: Uuid,
 ) -> Result<Option<PrivacyContactRow>, HandlerError> {
     let row = sqlx::query(
         r#"
-        SELECT id, workspace_id, state
+        SELECT id, storage_partition_id, state
         FROM contacts
         WHERE id = $1
           AND tenant_id = $2
-          AND ($3::text IS NULL OR workspace_id = $3)
+          AND ($3::text IS NULL OR storage_partition_id = $3)
         "#,
     )
     .bind(contact_id)
     .bind(tenant_id)
-    .bind(workspace_id.map(WorkspaceId::as_str))
+    .bind(storage_partition_id.map(StoragePartitionId::as_str))
     .fetch_optional(pool)
     .await
     .map_err(|error| db_handler_error("load privacy contact subject", error))?;
@@ -178,9 +183,9 @@ async fn load_privacy_contact_row(
             id: row
                 .try_get::<Uuid, _>("id")
                 .map_err(|error| db_handler_error("read privacy contact id", error))?,
-            workspace_id: row
-                .try_get::<String, _>("workspace_id")
-                .map_err(|error| db_handler_error("read privacy contact workspace", error))?,
+            storage_partition_id: row.try_get::<String, _>("storage_partition_id").map_err(
+                |error| db_handler_error("read privacy contact storage partition", error),
+            )?,
             state: row
                 .try_get::<String, _>("state")
                 .map_err(|error| db_handler_error("read privacy contact state", error))?,
@@ -192,7 +197,7 @@ async fn load_privacy_contact_row(
 async fn load_linked_contact_ids(
     pool: &PgPool,
     tenant_id: Uuid,
-    workspace_id: &str,
+    storage_partition_id: &str,
     contact_id: Uuid,
 ) -> Result<Vec<Uuid>, HandlerError> {
     sqlx::query_scalar::<_, Uuid>(
@@ -201,13 +206,13 @@ async fn load_linked_contact_ids(
         FROM contacts
         WHERE canonical_contact_id = $1
           AND tenant_id = $2
-          AND workspace_id = $3
+          AND storage_partition_id = $3
         ORDER BY merged_at NULLS LAST, updated_at DESC, id
         "#,
     )
     .bind(contact_id)
     .bind(tenant_id)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .fetch_all(pool)
     .await
     .map_err(|error| db_handler_error("load linked privacy contacts", error))
@@ -272,7 +277,7 @@ async fn collect_nodes(
                 SELECT jsonb_build_object(
                     'uid', uid,
                     'label', label,
-                    'workspace_id', workspace_id,
+                    'storage_partition_id', storage_partition_id,
                     'user_id', user_id,
                     'scope', scope,
                     'name', name,
@@ -289,16 +294,16 @@ async fn collect_nodes(
                 FROM moa.node_index
                 WHERE valid_to IS NULL
                   AND label = ANY($3)
-                  AND ($1::text IS NULL OR workspace_id = $1)
+                  AND ($1::text IS NULL OR storage_partition_id = $1)
                   AND (
                       user_id = $2
                       OR properties_summary->>'user_id' = $2
                       OR properties_summary::text LIKE ('%' || $2 || '%')
                   )
-                ORDER BY workspace_id NULLS FIRST, label, name, uid
+                ORDER BY storage_partition_id NULLS FIRST, label, name, uid
                 "#,
             )
-            .bind(ctx.workspace.as_deref())
+            .bind(ctx.storage_partition.as_deref())
             .bind(&subject.user_id)
             .bind(label_filter.clone())
             .bind(subject.provenance.as_str())
@@ -323,7 +328,7 @@ async fn collect_relationships(
                 r#"
                 SELECT jsonb_build_object(
                     'change_id', change_id,
-                    'workspace_id', workspace_id,
+                    'storage_partition_id', storage_partition_id,
                     'user_id', user_id,
                     'scope', scope,
                     'actor_id', actor_id,
@@ -342,7 +347,7 @@ async fn collect_relationships(
                 )
                 FROM moa.graph_changelog
                 WHERE target_kind = 'edge'
-                  AND ($1::text IS NULL OR workspace_id = $1)
+                  AND ($1::text IS NULL OR storage_partition_id = $1)
                   AND (
                       user_id = $2
                       OR actor_id = $2
@@ -352,7 +357,7 @@ async fn collect_relationships(
                 ORDER BY created_at, change_id
                 "#,
             )
-            .bind(ctx.workspace.as_deref())
+            .bind(ctx.storage_partition.as_deref())
             .bind(&subject.user_id)
             .bind(subject.provenance.as_str())
             .fetch_all(&mut *tx)
@@ -376,7 +381,7 @@ async fn collect_embeddings(
                 r#"
                 SELECT jsonb_build_object(
                     'uid', e.uid,
-                    'workspace_id', e.workspace_id,
+                    'storage_partition_id', e.storage_partition_id,
                     'user_id', e.user_id,
                     'scope', e.scope,
                     'label', e.label,
@@ -393,17 +398,17 @@ async fn collect_embeddings(
                 JOIN moa.node_index n ON n.uid = e.uid
                 WHERE e.valid_to IS NULL
                   AND n.valid_to IS NULL
-                  AND ($1::text IS NULL OR e.workspace_id = $1)
+                  AND ($1::text IS NULL OR e.storage_partition_id = $1)
                   AND (
                       e.user_id = $2
                       OR n.user_id = $2
                       OR n.properties_summary->>'user_id' = $2
                       OR n.properties_summary::text LIKE ('%' || $2 || '%')
                   )
-                ORDER BY e.workspace_id NULLS FIRST, e.label, e.uid
+                ORDER BY e.storage_partition_id NULLS FIRST, e.label, e.uid
                 "#,
             )
-            .bind(ctx.workspace.as_deref())
+            .bind(ctx.storage_partition.as_deref())
             .bind(&subject.user_id)
             .bind(subject.provenance.as_str())
             .fetch_all(&mut *tx)
@@ -428,7 +433,7 @@ async fn collect_skills(
                 SELECT jsonb_build_object(
                     'artifact_uid', a.artifact_uid,
                     'revision_uid', r.revision_uid,
-                    'workspace_id', a.workspace_id,
+                    'storage_partition_id', a.storage_partition_id,
                     'user_id', a.user_id,
                     'scope', a.scope,
                     'name', a.name,
@@ -465,7 +470,7 @@ async fn collect_skills(
                   AND r.valid_to IS NULL
                   AND a.kind = 'skill'
                   AND r.status = 'published'
-                  AND ($1::text IS NULL OR a.workspace_id = $1)
+                  AND ($1::text IS NULL OR a.storage_partition_id = $1)
                   AND (
                       a.user_id = $2
                       OR a.description LIKE ('%' || $2 || '%')
@@ -478,10 +483,10 @@ async fn collect_skills(
                             AND encode(f.content, 'escape') LIKE ('%' || $2 || '%')
                       )
                   )
-                ORDER BY a.workspace_id NULLS FIRST, a.scope, a.name, r.version
+                ORDER BY a.storage_partition_id NULLS FIRST, a.scope, a.name, r.version
                 "#,
             )
-            .bind(ctx.workspace.as_deref())
+            .bind(ctx.storage_partition.as_deref())
             .bind(&subject.user_id)
             .bind(subject.provenance.as_str())
             .fetch_all(&mut *tx)
@@ -505,7 +510,7 @@ pub(super) async fn collect_changelog(
                 r#"
                 SELECT jsonb_build_object(
                     'change_id', change_id,
-                    'workspace_id', workspace_id,
+                    'storage_partition_id', storage_partition_id,
                     'user_id', user_id,
                     'scope', scope,
                     'actor_id', actor_id,
@@ -524,7 +529,7 @@ pub(super) async fn collect_changelog(
                     'privacy_subject_provenance', $3
                 )
                 FROM moa.graph_changelog
-                WHERE ($1::text IS NULL OR workspace_id = $1)
+                WHERE ($1::text IS NULL OR storage_partition_id = $1)
                   AND (
                       user_id = $2
                       OR actor_id = $2
@@ -535,7 +540,7 @@ pub(super) async fn collect_changelog(
                 ORDER BY created_at, change_id
                 "#,
             )
-            .bind(ctx.workspace.as_deref())
+            .bind(ctx.storage_partition.as_deref())
             .bind(&subject.user_id)
             .bind(subject.provenance.as_str())
             .fetch_all(&mut *tx)

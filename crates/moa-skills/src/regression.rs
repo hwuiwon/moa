@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use moa_core::{Event, EventRecord, MoaConfig, MoaError, Result, SessionMeta, WorkspaceId};
+use moa_core::{Event, EventRecord, MoaConfig, MoaError, Result, SessionMeta, TenantId};
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use tokio::fs;
 
@@ -76,7 +76,7 @@ impl SkillRegressionReport {
 
 /// Generates regression suite TOML for a newly proposed skill without writing files.
 pub fn generate_skill_test_suite_source(
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     skill: &SkillDocument,
     events: &[EventRecord],
 ) -> Result<GeneratedSkillSuite> {
@@ -84,7 +84,7 @@ pub fn generate_skill_test_suite_source(
     let source_toml = toml::to_string_pretty(&suite)
         .map_err(|error| MoaError::StorageError(error.to_string()))?;
     Ok(GeneratedSkillSuite {
-        relative_path: skill_suite_relative_path(workspace_id, &skill.frontmatter.name),
+        relative_path: skill_suite_relative_path(tenant_id, &skill.frontmatter.name),
         source_toml,
     })
 }
@@ -96,8 +96,7 @@ pub async fn generate_skill_test_suite(
     skill: &SkillDocument,
     events: &[EventRecord],
 ) -> Result<PathBuf> {
-    let workspace_id = WorkspaceId::new(session.tenant_id.to_string());
-    let generated = generate_skill_test_suite_source(&workspace_id, skill, events)?;
+    let generated = generate_skill_test_suite_source(session.tenant_id, skill, events)?;
     let suite_path = PathBuf::from(&config.local.memory_dir).join(&generated.relative_path);
     if let Some(parent) = suite_path.parent() {
         fs::create_dir_all(parent).await?;
@@ -149,9 +148,9 @@ fn build_generated_suite(skill: &SkillDocument, events: &[EventRecord]) -> TestS
     }
 }
 
-fn skill_suite_relative_path(workspace_id: &WorkspaceId, skill_name: &str) -> String {
-    PathBuf::from("workspaces")
-        .join(workspace_id.as_str())
+fn skill_suite_relative_path(tenant_id: TenantId, skill_name: &str) -> String {
+    PathBuf::from("tenants")
+        .join(tenant_id.to_string())
         .join("skills")
         .join(slugify_skill_name(skill_name))
         .join("tests")

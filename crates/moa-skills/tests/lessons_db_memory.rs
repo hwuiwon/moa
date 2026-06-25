@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use support::skill_graph::{
     DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, map_sqlx_error, memory_scope, set_app_role,
-    workspace_scope,
+    tenant_scope,
 };
 
 #[tokio::test]
@@ -22,7 +22,7 @@ async fn learn_lesson_writes_graph_node() -> Result<()> {
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let workspace_name = format!("skills-lesson-{}", Uuid::now_v7());
-    let artifact_scope = workspace_scope(&workspace_name);
+    let artifact_scope = tenant_scope(&workspace_name);
     let scope = memory_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
     let skill_uid = registry

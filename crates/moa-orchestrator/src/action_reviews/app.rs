@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use moa_core::{
-    ActionClass, ActionReviewDecision, ActionReviewStatus, Event, ToolCallId, ToolCallRequest,
-    WorkspaceId,
+    ActionClass, ActionReviewDecision, ActionReviewStatus, Event, StoragePartitionId, ToolCallId,
+    ToolCallRequest,
 };
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::{HandlerError, TerminalError};
@@ -31,8 +31,8 @@ pub(crate) struct RequestedReview {
 pub(crate) struct DecidedReview {
     /// Review identifier.
     pub(crate) review_id: Uuid,
-    /// Workspace that owns the review.
-    pub(crate) workspace_id: WorkspaceId,
+    /// Storage partition that owns the review.
+    pub(crate) storage_partition_id: StoragePartitionId,
     /// Owning session, when present.
     pub(crate) session_id: Option<moa_core::SessionId>,
     /// Admin decision.
@@ -82,12 +82,12 @@ pub(crate) async fn request_review(
     })
 }
 
-/// List pending reviews for one workspace.
+/// List pending reviews for one tenant storage partition.
 pub(crate) async fn list_pending_reviews(
     pool: sqlx::PgPool,
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
 ) -> Result<Vec<ActionReviewSummary>, HandlerError> {
-    store::list_pending_reviews(pool, workspace_id).await
+    store::list_pending_reviews(pool, storage_partition_id).await
 }
 
 /// Apply a tenant-admin decision to one action review.
@@ -102,8 +102,9 @@ pub(crate) async fn decide_review(
         .begin()
         .await
         .map_err(|error| TerminalError::new(format!("db begin: {error}")))?;
-    let workspace_id = storage_workspace_id(request.tenant_id);
-    let row = store::load_review_for_update(&mut tx, &workspace_id, request.review_id).await?;
+    let storage_partition_id = storage_partition_id(request.tenant_id);
+    let row =
+        store::load_review_for_update(&mut tx, &storage_partition_id, request.review_id).await?;
     let newly_decided = validate_review_transition(row.status, desired_status)?;
     let decided_at = row.decided_at.unwrap_or_else(Utc::now);
     let decided_by = row.decided_by.clone().unwrap_or(decided_by);
@@ -114,7 +115,7 @@ pub(crate) async fn decide_review(
         store::update_review_decision(
             &mut tx,
             ReviewDecisionUpdate {
-                workspace_id: workspace_id.clone(),
+                storage_partition_id: storage_partition_id.clone(),
                 review_id: request.review_id,
                 status: desired_status,
                 decided_by: decided_by.clone(),
@@ -133,7 +134,7 @@ pub(crate) async fn decide_review(
         execution_tool_request_for_decision(&decision, &row, execution_tool_call_id)?;
     Ok(DecidedReview {
         review_id: request.review_id,
-        workspace_id,
+        storage_partition_id,
         session_id: row.session_id,
         decision,
         status: desired_status,
@@ -146,35 +147,35 @@ pub(crate) async fn decide_review(
     })
 }
 
-fn storage_workspace_id(tenant_id: moa_core::TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
+fn storage_partition_id(tenant_id: moa_core::TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }
 
 /// Mark the requested event as recorded.
 pub(crate) async fn mark_requested_event_recorded(
     pool: sqlx::PgPool,
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
     review_id: Uuid,
 ) -> Result<(), HandlerError> {
-    store::mark_requested_event_recorded(pool, workspace_id, review_id).await
+    store::mark_requested_event_recorded(pool, storage_partition_id, review_id).await
 }
 
 /// Mark the decision event as recorded.
 pub(crate) async fn mark_decision_event_recorded(
     pool: sqlx::PgPool,
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
     review_id: Uuid,
 ) -> Result<(), HandlerError> {
-    store::mark_decision_event_recorded(pool, workspace_id, review_id).await
+    store::mark_decision_event_recorded(pool, storage_partition_id, review_id).await
 }
 
 /// Mark cleared execution as requested.
 pub(crate) async fn mark_execution_requested(
     pool: sqlx::PgPool,
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
     review_id: Uuid,
 ) -> Result<(), HandlerError> {
-    store::mark_execution_requested(pool, workspace_id, review_id).await
+    store::mark_execution_requested(pool, storage_partition_id, review_id).await
 }
 
 fn decision_from_request(request: &DecideActionReviewRequest) -> ActionReviewDecision {

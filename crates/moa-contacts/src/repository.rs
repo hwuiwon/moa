@@ -5,7 +5,7 @@ use moa_core::{
     Channel, ChannelAccountId, ChannelAccountRef, ChannelRef, ContactId, ContactPointId,
     ContactPointInput, ContactPointKind, ContactPointRef, ContactRef, ContactTokenClaims,
     ContactTokenIssueRequest, ContactVerificationChallengeId, ContactVerificationStartResponse,
-    ContactVerificationState, MessagingConfig, MoaError, SessionMeta, TenantId, WorkspaceId,
+    ContactVerificationState, MessagingConfig, MoaError, SessionMeta, StoragePartitionId, TenantId,
 };
 use moa_messaging::{DeliveryMessage, DeliverySink, ProviderDeliverySink};
 use sqlx::Row;
@@ -19,10 +19,10 @@ use crate::{ContactError, Result};
 
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
-/// Returns the graph-memory workspace id used for tenant-scoped contact rows.
+/// Returns the storage partition used for tenant-scoped contact rows.
 #[must_use]
-pub fn storage_workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
+pub fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }
 
 /// Issues a contact row and any unverified contact points in one transaction.
@@ -45,14 +45,14 @@ pub async fn issue_contact(
     sqlx::query(
         r#"
         INSERT INTO contacts (
-            id, tenant_id, workspace_id, contact_id, state, display_name, profile, metadata
+            id, tenant_id, storage_partition_id, contact_id, state, display_name, profile, metadata
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(contact_id.0)
     .bind(tenant_id.0)
-    .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
+    .bind(storage_partition_id_for_tenant(tenant_id).as_str())
     .bind(contact_id.0)
     .bind(state.as_str())
     .bind(request.display_name.as_deref())
@@ -154,7 +154,7 @@ pub async fn create_contact_token_grant(
     sqlx::query(
         r#"
         INSERT INTO contact_token_grants
-            (id, token_jti, tenant_id, workspace_id, contact_id, state, scopes, permissions,
+            (id, token_jti, tenant_id, storage_partition_id, contact_id, state, scopes, permissions,
              agent_ids, session_ids, issued_by_actor_type, issued_by_actor_id, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT (token_jti) DO NOTHING
@@ -163,7 +163,7 @@ pub async fn create_contact_token_grant(
     .bind(Uuid::now_v7())
     .bind(&claims.jti)
     .bind(claims.tenant_id.0)
-    .bind(storage_workspace_id_for_tenant(claims.tenant_id).as_str())
+    .bind(storage_partition_id_for_tenant(claims.tenant_id).as_str())
     .bind(contact_id.0)
     .bind(claims.state.as_str())
     .bind(&claims.scopes)
@@ -294,7 +294,7 @@ pub async fn start_contact_verification(
     sqlx::query(
         r#"
         INSERT INTO contact_verification_challenges
-            (id, contact_id, contact_point_id, tenant_id, workspace_id, code_hash, expires_at)
+            (id, contact_id, contact_point_id, tenant_id, storage_partition_id, code_hash, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
@@ -302,7 +302,7 @@ pub async fn start_contact_verification(
     .bind(command.contact_id.0)
     .bind(contact_point.id.0)
     .bind(command.tenant_id.0)
-    .bind(storage_workspace_id_for_tenant(command.tenant_id).as_str())
+    .bind(storage_partition_id_for_tenant(command.tenant_id).as_str())
     .bind(hash_verification_code(challenge_id, &code))
     .bind(expires_at)
     .execute(&mut *transaction)
@@ -313,7 +313,7 @@ pub async fn start_contact_verification(
         .await
         .map_err(|error| ContactError::database("commit contact verification", error))?;
     let sink = match ProviderDeliverySink::from_env(
-        storage_workspace_id_for_tenant(command.tenant_id).as_str(),
+        storage_partition_id_for_tenant(command.tenant_id).as_str(),
         &command.messaging_config,
     )
     .await
@@ -334,7 +334,6 @@ pub async fn start_contact_verification(
     };
     let delivery_message = DeliveryMessage::contact_verification_otp(
         command.tenant_id.0,
-        storage_workspace_id_for_tenant(command.tenant_id),
         command.contact_id,
         delivery.channel,
         delivery.destination,
@@ -771,14 +770,14 @@ async fn upsert_verified_contact_point_channel_account(
     sqlx::query(
         r#"
         INSERT INTO contact_channel_accounts
-            (id, tenant_id, workspace_id, contact_id, contact_point_id, channel,
+            (id, tenant_id, storage_partition_id, contact_id, contact_point_id, channel,
              external_user_key, display_name, assurance, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'otp_verified', $9)
         "#,
     )
     .bind(account_id.0)
     .bind(tenant_id.0)
-    .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
+    .bind(storage_partition_id_for_tenant(tenant_id).as_str())
     .bind(contact_id.0)
     .bind(point_id.0)
     .bind(channel.as_str())
@@ -891,14 +890,14 @@ async fn upsert_external_channel_account(
     sqlx::query(
         r#"
         INSERT INTO contact_channel_accounts
-            (id, tenant_id, workspace_id, contact_id, channel, external_tenant_key,
+            (id, tenant_id, storage_partition_id, contact_id, channel, external_tenant_key,
              external_user_key, display_name, assurance, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'provider_asserted', $9)
         "#,
     )
     .bind(account_id.0)
     .bind(contact.tenant_id.0)
-    .bind(storage_workspace_id_for_tenant(contact.tenant_id).as_str())
+    .bind(storage_partition_id_for_tenant(contact.tenant_id).as_str())
     .bind(contact.contact_id.0)
     .bind(channel.as_str())
     .bind(external_tenant_key)
@@ -1103,9 +1102,9 @@ async fn insert_contact_point(
     let row = sqlx::query(
         r#"
         INSERT INTO contact_points
-            (id, contact_id, tenant_id, workspace_id, kind, normalized_hash, display_value, verified, verified_at)
+            (id, contact_id, tenant_id, storage_partition_id, kind, normalized_hash, display_value, verified, verified_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (tenant_id, workspace_id, contact_id, kind, normalized_hash)
+        ON CONFLICT (tenant_id, storage_partition_id, contact_id, kind, normalized_hash)
         DO UPDATE SET
             display_value = COALESCE(EXCLUDED.display_value, contact_points.display_value),
             verified = contact_points.verified OR EXCLUDED.verified,
@@ -1117,7 +1116,7 @@ async fn insert_contact_point(
     .bind(point_id.0)
     .bind(contact_id.0)
     .bind(tenant_id.0)
-    .bind(storage_workspace_id_for_tenant(tenant_id).as_str())
+    .bind(storage_partition_id_for_tenant(tenant_id).as_str())
     .bind(point.kind.as_str())
     .bind(&normalized_hash)
     .bind(point.display_value.as_deref())

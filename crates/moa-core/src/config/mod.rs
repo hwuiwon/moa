@@ -98,7 +98,7 @@ pub struct MoaConfig {
     pub observability: ObservabilityConfig,
     /// Prometheus metrics export settings.
     pub metrics: MetricsConfig,
-    /// Workspace budget enforcement settings.
+    /// Tenant budget enforcement settings.
     pub budgets: BudgetConfig,
     /// Per-session turn and loop guardrails.
     pub session_limits: SessionLimitsConfig,

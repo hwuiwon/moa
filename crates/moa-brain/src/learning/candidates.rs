@@ -85,7 +85,6 @@ fn base_candidate(
     LearningCandidate {
         id: Uuid::now_v7(),
         tenant_id: experience.tenant_id,
-        workspace_id: experience.workspace_id.clone(),
         user_id: Some(experience.user_id.clone()),
         candidate_type,
         status: LearningCandidateStatus::Proposed,
@@ -148,9 +147,7 @@ fn should_propose_policy(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{
-        SegmentId, SessionId, TaskFacetSet, TaskFingerprint, TenantId, UserId, WorkspaceId,
-    };
+    use moa_core::{SegmentId, SessionId, TaskFacetSet, TaskFingerprint, TenantId, UserId};
 
     use super::*;
 
@@ -166,7 +163,6 @@ mod tests {
             segment_id: SegmentId::new(),
             session_id: SessionId::new(),
             tenant_id: TenantId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
             user_id: UserId::new("user"),
             task_summary: Some("Fix deploy".to_string()),
             task_fingerprint: TaskFingerprint {
@@ -193,7 +189,6 @@ mod tests {
             id: Uuid::now_v7(),
             experience_id: experience.id,
             tenant_id: TenantId::new(),
-            workspace_id: WorkspaceId::new("workspace"),
             user_id: None,
             subject_type: AttributionSubjectType::Tool,
             subject_id: "bash".to_string(),

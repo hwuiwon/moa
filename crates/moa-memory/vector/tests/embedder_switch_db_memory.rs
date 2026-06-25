@@ -13,11 +13,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -51,24 +51,24 @@ fn basis_vector(index: usize) -> Vec<f32> {
     vector
 }
 
-fn scope(workspace_id: &str) -> ScopeContext {
-    tenant_scope(workspace_id)
+fn scope(storage_partition_id: &str) -> ScopeContext {
+    tenant_scope(storage_partition_id)
 }
 
-fn store(test_db: &TestDb, workspace_id: &str) -> PgvectorStore {
-    PgvectorStore::new_for_app_role(test_db.store().pool().clone(), scope(workspace_id))
+fn store(test_db: &TestDb, storage_partition_id: &str) -> PgvectorStore {
+    PgvectorStore::new_for_app_role(test_db.store().pool().clone(), scope(storage_partition_id))
 }
 
 fn item(
     uid: Uuid,
-    workspace_id: &str,
+    storage_partition_id: &str,
     embedding: Vec<f32>,
     model: &str,
     version: i32,
 ) -> VectorItem {
+    let _ = storage_partition_id;
     VectorItem {
         uid,
-        workspace_id: Some(workspace_id.to_string()),
         user_id: None,
         label: "Fact".to_string(),
         pii_class: "none".to_string(),
@@ -79,8 +79,8 @@ fn item(
     }
 }
 
-async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a> {
-    let mut conn = ScopedConn::begin(pool, &scope(workspace_id))
+async fn scoped_conn<'a>(pool: &'a PgPool, storage_partition_id: &str) -> ScopedConn<'a> {
+    let mut conn = ScopedConn::begin(pool, &scope(storage_partition_id))
         .await
         .expect("begin scoped vector transaction");
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -90,14 +90,14 @@ async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a>
     conn
 }
 
-async fn seed_node_index(pool: &PgPool, workspace_id: &str, uid: Uuid) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn seed_node_index(pool: &PgPool, storage_partition_id: &str, uid: Uuid) {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
-        "INSERT INTO moa.node_index (uid, label, workspace_id, name, pii_class) \
+        "INSERT INTO moa.node_index (uid, label, storage_partition_id, name, pii_class) \
          VALUES ($1, 'Fact', $2, $3, 'none')",
     )
     .bind(uid)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(format!("embedder switch {uid}"))
     .execute(conn.as_mut())
     .await
@@ -107,24 +107,24 @@ async fn seed_node_index(pool: &PgPool, workspace_id: &str, uid: Uuid) {
 
 async fn set_embedder_state(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     model: &str,
     dimension: i32,
     state: &str,
 ) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension, reembed_state)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension, reembed_state)
         VALUES ($1, $2, 1, $3, $4)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = EXCLUDED.reembed_state
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(model)
     .bind(dimension)
     .bind(state)
@@ -134,9 +134,9 @@ async fn set_embedder_state(
     conn.commit().await.expect("commit embedder state");
 }
 
-fn query(workspace_id: &str, embedding: Vec<f32>) -> VectorQuery {
+fn query(storage_partition_id: &str, embedding: Vec<f32>) -> VectorQuery {
+    let _ = storage_partition_id;
     VectorQuery {
-        workspace_id: Some(workspace_id.to_string()),
         embedding,
         k: 5,
         label_filter: Some(vec!["Fact".to_string()]),
@@ -153,22 +153,22 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-mismatch-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "cohere-embed-v4",
         1024,
         "steady",
     )
     .await;
-    let store = store(&test_db, &workspace_id);
+    let store = store(&test_db, &storage_partition_id);
     store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(0),
             "cohere-embed-v4",
             1,
@@ -178,14 +178,14 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
 
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "gemini-embedding-2",
         768,
         "steady",
     )
     .await;
     let error = store
-        .knn(&query(&workspace_id, basis_vector(0)))
+        .knn(&query(&storage_partition_id, basis_vector(0)))
         .await
         .expect_err("dimension switch must block KNN");
 
@@ -206,22 +206,22 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-reembed-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "cohere-embed-v4",
         1024,
         "steady",
     )
     .await;
-    let store = store(&test_db, &workspace_id);
+    let store = store(&test_db, &storage_partition_id);
     store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(0),
             "cohere-embed-v4",
             1,
@@ -231,7 +231,7 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
 
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "replacement-embedder",
         1024,
         "steady",
@@ -240,7 +240,7 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
     store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(7),
             "replacement-embedder",
             2,
@@ -249,12 +249,12 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
         .expect("overwrite vector with replacement embedder");
 
     let matches = store
-        .knn(&query(&workspace_id, basis_vector(7)))
+        .knn(&query(&storage_partition_id, basis_vector(7)))
         .await
         .expect("KNN succeeds after reembed state is steady");
     assert_eq!(matches.first().map(|hit| hit.uid), Some(uid));
 
-    let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
+    let mut conn = scoped_conn(test_db.store().pool(), &storage_partition_id).await;
     let row = sqlx::query(
         "SELECT embedding_model, embedding_model_version FROM moa.embeddings WHERE uid = $1",
     )
@@ -282,22 +282,22 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-progress-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "cohere-embed-v4",
         1024,
         "steady",
     )
     .await;
-    let store = store(&test_db, &workspace_id);
+    let store = store(&test_db, &storage_partition_id);
     store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(0),
             "cohere-embed-v4",
             1,
@@ -306,7 +306,7 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
         .expect("seed vector");
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "cohere-embed-v4",
         1024,
         "in_progress",
@@ -314,7 +314,7 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
     .await;
 
     let error = store
-        .knn(&query(&workspace_id, basis_vector(0)))
+        .knn(&query(&storage_partition_id, basis_vector(0)))
         .await
         .expect_err("in-progress reembed must block KNN");
     assert!(matches!(error, Error::ReembedInProgress { .. }));
@@ -327,23 +327,23 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-same-model-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "cohere-embed-v4",
         1024,
         "steady",
     )
     .await;
 
-    let store = store(&test_db, &workspace_id);
+    let store = store(&test_db, &storage_partition_id);
     store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(0),
             "cohere-embed-v4",
             1,
@@ -351,7 +351,7 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
         .await
         .expect("upsert with configured embedder");
 
-    let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
+    let mut conn = scoped_conn(test_db.store().pool(), &storage_partition_id).await;
     let row = sqlx::query(
         "SELECT embedding_model, embedding_model_version FROM moa.embeddings WHERE uid = $1",
     )
@@ -374,34 +374,37 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
 }
 
 #[tokio::test]
-async fn missing_workspace_embedder_state_rejects_vector_write() {
-    // Pins: direct vector writes fail closed when workspace_state has not been explicitly seeded.
+async fn missing_storage_partition_embedder_state_rejects_vector_write() {
+    // Pins: direct vector writes fail closed when storage embedder state has not been explicitly seeded.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-missing-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
 
-    let store = store(&test_db, &workspace_id);
+    let store = store(&test_db, &storage_partition_id);
     let error = store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(0),
             "cohere-embed-v4",
             1,
         )])
         .await
-        .expect_err("missing workspace_state must reject vector writes");
-    assert!(matches!(error, Error::WorkspaceEmbedderStateMissing { .. }));
+        .expect_err("missing storage_partition_state must reject vector writes");
+    assert!(matches!(
+        error,
+        Error::StoragePartitionEmbedderStateMissing { .. }
+    ));
 
-    let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
+    let mut conn = scoped_conn(test_db.store().pool(), &storage_partition_id).await;
     let row_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM moa.embeddings WHERE workspace_id = $1 AND uid = $2",
+        "SELECT COUNT(*) FROM moa.embeddings WHERE storage_partition_id = $1 AND uid = $2",
     )
-    .bind(&workspace_id)
+    .bind(&storage_partition_id)
     .bind(uid)
     .fetch_one(conn.as_mut())
     .await
@@ -417,23 +420,23 @@ async fn configured_workspace_embedder_rejects_mixed_model_vector_write() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("embedder-mixed-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let uid = Uuid::now_v7();
-    seed_node_index(test_db.store().pool(), &workspace_id, uid).await;
+    seed_node_index(test_db.store().pool(), &storage_partition_id, uid).await;
     set_embedder_state(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         "cohere-embed-v4",
         1024,
         "steady",
     )
     .await;
 
-    let store = store(&test_db, &workspace_id);
+    let store = store(&test_db, &storage_partition_id);
     let error = store
         .upsert(&[item(
             uid,
-            &workspace_id,
+            &storage_partition_id,
             basis_vector(0),
             "replacement-embedder",
             1,

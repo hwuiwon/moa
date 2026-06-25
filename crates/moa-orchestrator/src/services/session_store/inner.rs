@@ -281,9 +281,8 @@ impl SessionStoreImpl {
         &self,
         request: TenantCostSinceRequest,
     ) -> Result<u32, HandlerError> {
-        let storage_workspace_id = WorkspaceId::new(request.tenant_id.to_string());
         self.store
-            .workspace_cost_since(&storage_workspace_id, request.since)
+            .tenant_cost_since(&request.tenant_id, request.since)
             .await
             .map_err(HandlerError::from)
     }
@@ -425,9 +424,8 @@ impl SessionStoreImpl {
         &self,
         request: GetLearningCandidateRequest,
     ) -> Result<LearningCandidate, HandlerError> {
-        let workspace_id = WorkspaceId::new(request.tenant_id.to_string());
         self.store
-            .get_learning_candidate(&workspace_id, request.candidate_id)
+            .get_learning_candidate(&request.tenant_id, request.candidate_id)
             .await
             .map_err(HandlerError::from)?
             .ok_or_else(|| {

@@ -13,8 +13,8 @@ fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
-        workspace_id: Some(tenant_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(tenant_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "contact_write_db_memory" }),
@@ -77,7 +77,7 @@ async fn contact_scoped_graph_write_sets_contact_and_blocks_other_contact_db_mem
     let forged = sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, workspace_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
+            (uid, label, storage_partition_id, tenant_id, contact_id, name, pii_class, confidence, properties_summary)
         VALUES ($1, 'Fact', $2, $3, $4, 'forged contact B fact', 'none', 0.9, $5)
         "#,
     )

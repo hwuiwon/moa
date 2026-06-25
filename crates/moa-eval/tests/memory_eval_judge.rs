@@ -33,9 +33,9 @@ async fn deterministic_judge_scores_closed_form_probe_types() -> TestResult {
             false,
         ),
         (
-            ProbeType::WorkspaceSharedFact,
-            "Use RUNBOOK-42 for this workspace deploy.",
-            "Use RUNBOOK-42 for this workspace deploy.",
+            ProbeType::TenantSharedFact,
+            "Use RUNBOOK-42 for this tenant deploy.",
+            "Use RUNBOOK-42 for this tenant deploy.",
             true,
         ),
     ] {

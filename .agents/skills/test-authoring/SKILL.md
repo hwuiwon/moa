@@ -93,7 +93,7 @@ Choose the file name, test function name, and lane before writing setup code.
 
 Assume `cargo nextest` may run this test alongside unrelated tests. Make the test parallel-safe unless the production behavior under test requires serialization.
 
-- Use unique workspace IDs, user IDs, session IDs, database schemas, temporary directories, ports, fixture names, and mock servers per test.
+- Use unique tenant IDs, storage partitions, user IDs, session IDs, database schemas, temporary directories, ports, fixture names, and mock servers per test.
 - Avoid shared mutable files, fixed ports, global env mutation, singleton containers, wall-clock sleeps, and assumptions about test order.
 - Prefer deterministic fakes, per-test fixtures, or isolated databases over serializing a broad test group.
 - If serialization is unavoidable, document the shared resource and put the test in the narrowest nextest lane or test group. Do not serialize the whole crate for one global resource.

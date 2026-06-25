@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{SegmentEvidence, SegmentId, SegmentOutcome, SessionId, TenantId, UserId, WorkspaceId};
+use super::{SegmentEvidence, SegmentId, SegmentOutcome, SessionId, TenantId, UserId};
 
 /// Stable task grouping key used for task-conditioned learning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,8 +70,6 @@ pub struct ExperienceRecord {
     pub session_id: SessionId,
     /// Tenant scope for task-conditioned learning.
     pub tenant_id: TenantId,
-    /// Workspace scope for data isolation.
-    pub workspace_id: WorkspaceId,
     /// User scope for user-personal learning evidence.
     pub user_id: UserId,
     /// Best-effort task summary.
@@ -191,8 +189,6 @@ pub struct ExperienceAttribution {
     pub experience_id: Uuid,
     /// Tenant scope for aggregation.
     pub tenant_id: TenantId,
-    /// Workspace scope for data isolation.
-    pub workspace_id: WorkspaceId,
     /// Optional user scope for user-personal learning.
     pub user_id: Option<UserId>,
     /// Subject type being attributed.
@@ -320,8 +316,6 @@ pub struct LearningCandidate {
     pub id: Uuid,
     /// Tenant scope for the candidate.
     pub tenant_id: TenantId,
-    /// Workspace scope for the candidate.
-    pub workspace_id: WorkspaceId,
     /// Optional user scope for user-personal candidates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<UserId>,

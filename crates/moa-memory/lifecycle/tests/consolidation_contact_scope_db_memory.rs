@@ -1,7 +1,7 @@
 //! Postgres-backed checks for contact-local memory consolidation.
 
 use chrono::{Duration, TimeZone, Utc};
-use moa_core::{ContactId, TenantId, WorkspaceId};
+use moa_core::{ContactId, TenantId};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_lifecycle::merge_duplicates;
 use moa_memory_types::ScopeContext;
@@ -27,7 +27,6 @@ async fn duplicate_merge_keeps_contact_collisions_separate_db_memory() {
         return;
     };
     let tenant_id = TenantId::from(Uuid::now_v7());
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
     let contact_a = ContactId(Uuid::now_v7());
     let contact_b = ContactId(Uuid::now_v7());
     let base = Utc
@@ -67,7 +66,7 @@ async fn duplicate_merge_keeps_contact_collisions_separate_db_memory() {
 
     let stats = merge_duplicates(
         test_db.store().pool(),
-        &workspace_id,
+        &tenant_id,
         base + Duration::hours(1),
     )
     .await
@@ -97,8 +96,8 @@ async fn create_contact_fact(
         .create_node(NodeWriteIntent {
             uid,
             label: NodeLabel::Fact,
-            workspace_id: Some(tenant_id.to_string()),
-            user_id: Some(contact_id.to_string()),
+            storage_partition_id: Some(tenant_id.to_string()),
+            contact_id: Some(contact_id.to_string()),
             scope: "contact".to_string(),
             name: name.to_string(),
             properties: json!({

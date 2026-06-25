@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use clap::ValueEnum;
 use moa_core::{
     Channel, Event, EventRecord, MoaConfig, MoaError, ModelId, ModelTask, Result, SessionActorRef,
-    SessionId, SessionMeta, SessionStatus, TenantId, WorkspaceId,
+    SessionId, SessionMeta, SessionStatus, TenantId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, mpsc};

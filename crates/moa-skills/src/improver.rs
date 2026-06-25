@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use moa_core::{
     ActionRuleScope, CompletionRequest, ContextMessage, Event, EventRecord, MoaConfig, ModelTask,
-    Result, SessionMeta, SkillMetadata, WorkspaceId,
+    Result, SessionMeta, SkillMetadata,
 };
 use moa_providers::ModelRouter;
 use moa_session::{PostgresSessionStore, create_session_store};
@@ -183,8 +183,7 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
     let candidate_package =
         package_with_replaced_skill_md(&stored_package.files, candidate_markdown).validate()?;
-    let workspace_id = WorkspaceId::new(session.tenant_id.to_string());
-    let generated_suite = generate_skill_test_suite_source(&workspace_id, &improved, events)?;
+    let generated_suite = generate_skill_test_suite_source(session.tenant_id, &improved, events)?;
     let proposal = store_skill_draft_proposal(
         store.as_ref(),
         session,

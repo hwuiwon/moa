@@ -9,7 +9,7 @@ use moa_core::{
     BrainId, Channel, CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
     ContextSnapshot, Event, EventFilter, EventRange, EventRecord, LLMProvider, ModelCapabilities,
     ModelId, Result, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
-    SessionSummary, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat, WorkspaceId,
+    SessionSummary, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat,
 };
 use tokio::sync::Mutex;
 
@@ -104,11 +104,7 @@ impl SessionStore for MockSessionStore {
         Ok(Vec::new())
     }
 
-    async fn workspace_cost_since(
-        &self,
-        _workspace_id: &WorkspaceId,
-        _since: DateTime<Utc>,
-    ) -> Result<u32> {
+    async fn tenant_cost_since(&self, _tenant_id: &TenantId, _since: DateTime<Utc>) -> Result<u32> {
         Ok(0)
     }
 

@@ -229,9 +229,9 @@ fn row(uid: Uuid, name: &str) -> NodeIndexRow {
     NodeIndexRow {
         uid,
         label: NodeLabel::Entity,
-        workspace_id: Some("planner-workspace".to_string()),
-        user_id: None,
-        scope: "workspace".to_string(),
+        storage_partition_id: Some("planner-workspace".to_string()),
+        contact_id: None,
+        scope: "tenant".to_string(),
         name: name.to_string(),
         pii_class: PiiClass::None,
         valid_to: None,

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
-use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_core::{SessionId, StoragePartitionId, UserId};
 use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use serde::de::DeserializeOwned;
@@ -22,9 +22,9 @@ use moa_eval_core::{EvalError, Result};
 
 const REQUIRED_SEED_COUNT: usize = 3;
 const PR_USER_COUNT: usize = 5;
-const PR_WORKSPACE_COUNT: usize = 2;
+const PR_TENANT_COUNT: usize = 2;
 const FULL_USER_COUNT: usize = 50;
-const FULL_WORKSPACE_COUNT: usize = 3;
+const FULL_TENANT_COUNT: usize = 3;
 const FULL_MIN_PROBES: usize = 600;
 const FULL_MAX_PROBES: usize = 1_000;
 const BASE_UNIX_SECONDS: i64 = 1_767_225_600;
@@ -180,23 +180,23 @@ pub fn generate_memory_eval_corpus_with_style(
     validate_seeds(&seeds)?;
     let settings = ProfileSettings::new(profile);
     let users = build_users(profile, settings.user_count);
-    let workspaces = build_workspaces(profile, settings.workspace_count);
+    let storage_partitions = build_storage_partitions(profile, settings.tenant_count);
     let mut builder = ScheduleBuilder::default();
-    let mut workspace_refs = BTreeMap::new();
+    let mut tenant_refs = BTreeMap::new();
     let mut user_refs = BTreeMap::new();
 
     for (seed_index, seed) in seeds.iter().copied().enumerate() {
-        for workspace_index in 0..settings.workspace_count {
-            let refs = schedule_workspace_facts(
+        for tenant_index in 0..settings.tenant_count {
+            let refs = schedule_tenant_facts(
                 &mut builder,
                 profile,
                 seed_index,
                 seed,
-                workspace_index,
+                tenant_index,
                 &users,
-                &workspaces,
+                &storage_partitions,
             )?;
-            workspace_refs.insert((seed_index, workspace_index), refs);
+            tenant_refs.insert((seed_index, tenant_index), refs);
         }
 
         for user_index in 0..settings.user_count {
@@ -207,7 +207,7 @@ pub fn generate_memory_eval_corpus_with_style(
                 seed,
                 user_index,
                 &users,
-                &workspaces,
+                &storage_partitions,
             )?;
             user_refs.insert((seed_index, user_index), refs);
         }
@@ -220,8 +220,8 @@ pub fn generate_memory_eval_corpus_with_style(
         profile,
         &seeds,
         &users,
-        &workspaces,
-        &workspace_refs,
+        &storage_partitions,
+        &tenant_refs,
         &user_refs,
     )?;
     let mut ledger = schedule.ledger();
@@ -304,7 +304,7 @@ pub async fn write_embedding_inputs_jsonl(
 #[derive(Debug, Clone, Copy)]
 struct ProfileSettings {
     user_count: usize,
-    workspace_count: usize,
+    tenant_count: usize,
     multi_hop_pairs_per_user: usize,
 }
 
@@ -313,12 +313,12 @@ impl ProfileSettings {
         match profile {
             CorpusProfile::Pr => Self {
                 user_count: PR_USER_COUNT,
-                workspace_count: PR_WORKSPACE_COUNT,
+                tenant_count: PR_TENANT_COUNT,
                 multi_hop_pairs_per_user: 2,
             },
             CorpusProfile::Full => Self {
                 user_count: FULL_USER_COUNT,
-                workspace_count: FULL_WORKSPACE_COUNT,
+                tenant_count: FULL_TENANT_COUNT,
                 multi_hop_pairs_per_user: 1,
             },
         }
@@ -329,7 +329,7 @@ impl ProfileSettings {
 enum FactCategory {
     Supersession,
     Contradiction,
-    WorkspaceShared,
+    TenantShared,
     UserPrivate,
     Temporal,
     Preference,
@@ -346,7 +346,7 @@ struct ScheduledFact {
 #[derive(Debug, Clone)]
 struct SessionPlan {
     session_id: SessionId,
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
     user_id: UserId,
 }
 
@@ -371,7 +371,7 @@ impl ScheduleBuilder {
         let turn_seq = next_turn_seq(&mut self.next_turn_seq, &assignment.key)?;
         let fact_id = draft.fact_id;
         let fact = LedgerFact {
-            workspace_id: assignment.plan.workspace_id,
+            storage_partition_id: assignment.plan.storage_partition_id,
             user_id: assignment.plan.user_id,
             scope: draft.scope,
             fact_id: fact_id.clone(),
@@ -410,7 +410,7 @@ impl ScheduleBuilder {
         let turn_seq = next_turn_seq(&mut self.next_turn_seq, &assignment.key)?;
         let fact_id = draft.fact_id;
         let fact = LedgerFact {
-            workspace_id: assignment.plan.workspace_id,
+            storage_partition_id: assignment.plan.storage_partition_id,
             user_id: assignment.plan.user_id,
             scope: draft.scope,
             fact_id: fact_id.clone(),
@@ -500,7 +500,7 @@ impl FactSchedule {
                     }
                     Some(SyntheticSession {
                         session_id: plan.session_id,
-                        workspace_id: plan.workspace_id.clone(),
+                        storage_partition_id: plan.storage_partition_id.clone(),
                         user_id: plan.user_id.clone(),
                         turns,
                     })
@@ -527,7 +527,7 @@ struct FactDraft {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspaceFactRefs {
+struct TenantFactRefs {
     component: String,
     deploy_old_fact_id: String,
     deploy_new_fact_id: String,
@@ -549,7 +549,7 @@ struct WorkspaceFactRefs {
 
 #[derive(Debug, Clone)]
 struct UserFactRefs {
-    workspace_index: usize,
+    tenant_index: usize,
     private_fact_id: String,
     private_answer: String,
     preference_fact_id: String,
@@ -593,48 +593,42 @@ impl StableRng {
     }
 }
 
-fn schedule_workspace_facts(
+fn schedule_tenant_facts(
     builder: &mut ScheduleBuilder,
     profile: CorpusProfile,
     seed_index: usize,
     seed: u64,
-    workspace_index: usize,
+    tenant_index: usize,
     users: &[UserId],
-    workspaces: &[WorkspaceId],
-) -> Result<WorkspaceFactRefs> {
-    let mut rng = StableRng::new(seed ^ mix_u64(workspace_index as u64) ^ 0xA11C_E5ED);
+    storage_partitions: &[StoragePartitionId],
+) -> Result<TenantFactRefs> {
+    let mut rng = StableRng::new(seed ^ mix_u64(tenant_index as u64) ^ 0xA11C_E5ED);
     let component = choose(&mut rng, COMPONENTS)?;
     let (old_target, new_target) = choose_pair(&mut rng, DEPLOY_TARGETS)?;
     let (cache_a, cache_b) = choose_pair(&mut rng, CACHE_BACKENDS)?;
     let runbook = choose(&mut rng, RUNBOOKS)?;
     let (old_on_call, new_on_call) = choose_pair(&mut rng, ON_CALLS)?;
-    let author_index = first_user_for_workspace(workspace_index, users, workspaces.len())?;
-    let assignment = workspace_session(
+    let author_index = first_user_for_tenant(tenant_index, users, storage_partitions.len())?;
+    let assignment = tenant_session(
         profile,
         seed_index,
         seed,
-        workspace_index,
+        tenant_index,
         author_index,
         users,
-        workspaces,
+        storage_partitions,
     );
-    let base_day = seed_index as i64 * 40 + workspace_index as i64 * 10;
+    let base_day = seed_index as i64 * 40 + tenant_index as i64 * 10;
     let deploy_old_from = fixed_time(base_day, 0)?;
     let deploy_new_from = fixed_time(base_day + 7, 0)?;
-    let temporal_old_from = first_day_after_months(seed_index * 8 + workspace_index * 2)?;
+    let temporal_old_from = first_day_after_months(seed_index * 8 + tenant_index * 2)?;
     let temporal_new_from = first_day_of_next_month(temporal_old_from)?;
     let temporal_iso_as_of = temporal_old_from + Duration::days(5);
     let temporal_month_as_of = temporal_old_from;
     let temporal_current_as_of = temporal_new_from + Duration::days(1);
     let temporal_subject = format!("{component}-support-rotation");
 
-    let deploy_old_fact_id = fact_id(
-        profile,
-        seed_index,
-        workspace_index,
-        None,
-        "deploy-target-v1",
-    );
+    let deploy_old_fact_id = fact_id(profile, seed_index, tenant_index, None, "deploy-target-v1");
     builder.push_fact(
         assignment.clone(),
         FactDraft {
@@ -653,13 +647,7 @@ fn schedule_workspace_facts(
         },
     )?;
 
-    let deploy_new_fact_id = fact_id(
-        profile,
-        seed_index,
-        workspace_index,
-        None,
-        "deploy-target-v2",
-    );
+    let deploy_new_fact_id = fact_id(profile, seed_index, tenant_index, None, "deploy-target-v2");
     builder.push_fact(
         assignment.clone(),
         FactDraft {
@@ -678,17 +666,11 @@ fn schedule_workspace_facts(
         },
     )?;
 
-    let runbook_fact_id = fact_id(
-        profile,
-        seed_index,
-        workspace_index,
-        None,
-        "workspace-runbook",
-    );
+    let runbook_fact_id = fact_id(profile, seed_index, tenant_index, None, "tenant-runbook");
     builder.push_fact(
         assignment.clone(),
         FactDraft {
-            category: FactCategory::WorkspaceShared,
+            category: FactCategory::TenantShared,
             fact_id: runbook_fact_id.clone(),
             scope: ScopeTier::Tenant,
             valid_from: fixed_time(base_day + 1, 0)?,
@@ -704,13 +686,8 @@ fn schedule_workspace_facts(
     )?;
 
     let contradiction_subject = format!("{component} cache backend");
-    let contradiction_a_fact_id = fact_id(
-        profile,
-        seed_index,
-        workspace_index,
-        None,
-        "cache-conflict-a",
-    );
+    let contradiction_a_fact_id =
+        fact_id(profile, seed_index, tenant_index, None, "cache-conflict-a");
     builder.push_fact(
         assignment.clone(),
         FactDraft {
@@ -729,13 +706,8 @@ fn schedule_workspace_facts(
         },
     )?;
 
-    let contradiction_b_fact_id = fact_id(
-        profile,
-        seed_index,
-        workspace_index,
-        None,
-        "cache-conflict-b",
-    );
+    let contradiction_b_fact_id =
+        fact_id(profile, seed_index, tenant_index, None, "cache-conflict-b");
     builder.push_fact(
         assignment.clone(),
         FactDraft {
@@ -757,7 +729,7 @@ fn schedule_workspace_facts(
     let temporal_old_fact_id = fact_id(
         profile,
         seed_index,
-        workspace_index,
+        tenant_index,
         None,
         "on-call-primary-v1",
     );
@@ -782,7 +754,7 @@ fn schedule_workspace_facts(
     let temporal_new_fact_id = fact_id(
         profile,
         seed_index,
-        workspace_index,
+        tenant_index,
         None,
         "on-call-primary-v2",
     );
@@ -804,7 +776,7 @@ fn schedule_workspace_facts(
         },
     )?;
 
-    Ok(WorkspaceFactRefs {
+    Ok(TenantFactRefs {
         component: component.to_string(),
         deploy_old_fact_id,
         deploy_new_fact_id,
@@ -834,10 +806,10 @@ fn schedule_user_facts(
     seed: u64,
     user_index: usize,
     users: &[UserId],
-    workspaces: &[WorkspaceId],
+    storage_partitions: &[StoragePartitionId],
 ) -> Result<UserFactRefs> {
     let settings = ProfileSettings::new(profile);
-    let workspace_index = workspace_index_for_user(user_index, workspaces.len());
+    let tenant_index = tenant_index_for_user(user_index, storage_partitions.len());
     let mut rng = StableRng::new(seed ^ mix_u64(user_index as u64) ^ 0x515E_D123);
     let repository = choose(&mut rng, REPOSITORIES)?;
     let style = choose(&mut rng, RESPONSE_STYLES)?;
@@ -846,10 +818,10 @@ fn schedule_user_facts(
         profile,
         seed_index,
         seed,
-        workspace_index,
+        tenant_index,
         user_index,
         users,
-        workspaces,
+        storage_partitions,
     );
     let base_day = seed_index as i64 * 40 + user_index as i64;
     let user_label = user_label(user_index);
@@ -857,7 +829,7 @@ fn schedule_user_facts(
     let private_fact_id = fact_id(
         profile,
         seed_index,
-        workspace_index,
+        tenant_index,
         Some(user_index),
         "private-repository",
     );
@@ -883,7 +855,7 @@ fn schedule_user_facts(
     let preference_fact_id = fact_id(
         profile,
         seed_index,
-        workspace_index,
+        tenant_index,
         Some(user_index),
         "response-style",
     );
@@ -909,7 +881,7 @@ fn schedule_user_facts(
     let pii_fact_id = fact_id(
         profile,
         seed_index,
-        workspace_index,
+        tenant_index,
         Some(user_index),
         "contact-email",
     );
@@ -947,7 +919,7 @@ fn schedule_user_facts(
         let dependency_fact_id = fact_id(
             profile,
             seed_index,
-            workspace_index,
+            tenant_index,
             Some(user_index),
             &format!("depends-on-{pair_index}"),
         );
@@ -956,13 +928,13 @@ fn schedule_user_facts(
                 profile,
                 seed_index,
                 seed,
-                workspace_index,
+                tenant_index,
                 user_index,
                 users,
-                workspaces,
+                storage_partitions,
             ),
             FactDraft {
-                category: FactCategory::WorkspaceShared,
+                category: FactCategory::TenantShared,
                 fact_id: dependency_fact_id.clone(),
                 scope: ScopeTier::Tenant,
                 valid_from: fixed_time(base_day + 8 + pair_index as i64 * 2, 0)?,
@@ -980,7 +952,7 @@ fn schedule_user_facts(
             let restatement_fact_id = fact_id(
                 profile,
                 seed_index,
-                workspace_index,
+                tenant_index,
                 Some(user_index),
                 &format!("depends-on-{pair_index}-restatement"),
             );
@@ -992,11 +964,11 @@ fn schedule_user_facts(
                     user_index,
                     19 + pair_index as u128,
                     users,
-                    workspaces,
+                    storage_partitions,
                 ),
                 &dependency_fact_id,
                 FactDraft {
-                    category: FactCategory::WorkspaceShared,
+                    category: FactCategory::TenantShared,
                     fact_id: restatement_fact_id,
                     scope: ScopeTier::Tenant,
                     valid_from: fixed_time(base_day + 35 + pair_index as i64 * 2, 0)?,
@@ -1015,7 +987,7 @@ fn schedule_user_facts(
         let owner_fact_id = fact_id(
             profile,
             seed_index,
-            workspace_index,
+            tenant_index,
             Some(user_index),
             &format!("owned-by-{pair_index}"),
         );
@@ -1027,10 +999,10 @@ fn schedule_user_facts(
                 user_index,
                 3 + pair_index as u128,
                 users,
-                workspaces,
+                storage_partitions,
             ),
             FactDraft {
-                category: FactCategory::WorkspaceShared,
+                category: FactCategory::TenantShared,
                 fact_id: owner_fact_id.clone(),
                 scope: ScopeTier::Tenant,
                 valid_from: fixed_time(base_day + 9 + pair_index as i64 * 2, 0)?,
@@ -1054,7 +1026,7 @@ fn schedule_user_facts(
     }
 
     Ok(UserFactRefs {
-        workspace_index,
+        tenant_index,
         private_fact_id,
         private_answer,
         preference_fact_id,
@@ -1069,8 +1041,8 @@ fn build_probes(
     profile: CorpusProfile,
     seeds: &[u64],
     users: &[UserId],
-    workspaces: &[WorkspaceId],
-    workspace_refs: &BTreeMap<(usize, usize), WorkspaceFactRefs>,
+    storage_partitions: &[StoragePartitionId],
+    tenant_refs: &BTreeMap<(usize, usize), TenantFactRefs>,
     user_refs: &BTreeMap<(usize, usize), UserFactRefs>,
 ) -> Result<Vec<Probe>> {
     let mut probes = Vec::new();
@@ -1079,22 +1051,22 @@ fn build_probes(
             let refs = user_refs
                 .get(&(seed_index, user_index))
                 .ok_or_else(|| missing_reference("user fact refs", seed_index, user_index))?;
-            let workspace = workspaces
-                .get(refs.workspace_index)
-                .ok_or_else(|| missing_reference("workspace", seed_index, refs.workspace_index))?;
-            let workspace_fact_refs = workspace_refs
-                .get(&(seed_index, refs.workspace_index))
+            let storage_partition = storage_partitions.get(refs.tenant_index).ok_or_else(|| {
+                missing_reference("storage partition", seed_index, refs.tenant_index)
+            })?;
+            let tenant_fact_refs = tenant_refs
+                .get(&(seed_index, refs.tenant_index))
                 .ok_or_else(|| {
-                    missing_reference("workspace fact refs", seed_index, refs.workspace_index)
+                    missing_reference("tenant fact refs", seed_index, refs.tenant_index)
                 })?;
             let user = users
                 .get(user_index)
                 .ok_or_else(|| missing_reference("user", seed_index, user_index))?;
-            let target_user_index = next_user_in_workspace(
+            let target_user_index = next_user_in_tenant(
                 user_index,
-                refs.workspace_index,
+                refs.tenant_index,
                 users.len(),
-                workspaces.len(),
+                storage_partitions.len(),
             )?;
             let target_refs = user_refs
                 .get(&(seed_index, target_user_index))
@@ -1102,12 +1074,12 @@ fn build_probes(
                     missing_reference("target user refs", seed_index, target_user_index)
                 })?;
             let user_prefix =
-                probe_prefix(profile, seed_index, refs.workspace_index, Some(user_index));
+                probe_prefix(profile, seed_index, refs.tenant_index, Some(user_index));
 
             probes.push(Probe {
                 probe_id: format!("{user_prefix}-point-private-repository"),
                 probe_type: ProbeType::PointRecall,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: "Which private work repository should you use for me?".to_string(),
                 rewrite_query: None,
@@ -1123,21 +1095,21 @@ fn build_probes(
             probes.push(Probe {
                 probe_id: format!("{user_prefix}-latest-deploy-target"),
                 probe_type: ProbeType::LatestValueAfterUpdate,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: format!(
                     "After the latest deploy-target update, where should {} deploy?",
-                    workspace_fact_refs.component
+                    tenant_fact_refs.component
                 ),
                 rewrite_query: None,
                 expected_rewrite: None,
                 query_class: None,
                 answer: format!(
                     "The latest deploy target is {}.",
-                    workspace_fact_refs.deploy_target
+                    tenant_fact_refs.deploy_target
                 ),
-                expected_fact_ids: vec![workspace_fact_refs.deploy_new_fact_id.clone()],
-                blocked_fact_ids: vec![workspace_fact_refs.deploy_old_fact_id.clone()],
+                expected_fact_ids: vec![tenant_fact_refs.deploy_new_fact_id.clone()],
+                blocked_fact_ids: vec![tenant_fact_refs.deploy_old_fact_id.clone()],
                 as_of: None,
                 expected_redacted: false,
             });
@@ -1145,7 +1117,7 @@ fn build_probes(
             probes.push(Probe {
                 probe_id: format!("{user_prefix}-cross-user-private-repository"),
                 probe_type: ProbeType::CrossUserIsolation,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: "Which private repository does my teammate use?".to_string(),
                 rewrite_query: None,
@@ -1161,7 +1133,7 @@ fn build_probes(
             probes.push(Probe {
                 probe_id: format!("{user_prefix}-preference-application"),
                 probe_type: ProbeType::PreferenceApplication,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: "Format your next implementation answer the way I prefer.".to_string(),
                 rewrite_query: None,
@@ -1177,7 +1149,7 @@ fn build_probes(
             probes.push(Probe {
                 probe_id: format!("{user_prefix}-pii-redaction"),
                 probe_type: ProbeType::PiiRedaction,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: "What contact email should be displayed for me?".to_string(),
                 rewrite_query: None,
@@ -1194,7 +1166,7 @@ fn build_probes(
                 probes.push(Probe {
                     probe_id: format!("{user_prefix}-multi-hop-library-owner-{pair_index}"),
                     probe_type: ProbeType::MultiHop,
-                    workspace_id: workspace.clone(),
+                    storage_partition_id: storage_partition.clone(),
                     user_id: user.clone(),
                     query: format!(
                         "Which team owns the library that {} depends on?",
@@ -1218,31 +1190,30 @@ fn build_probes(
             }
         }
 
-        for workspace_index in 0..workspaces.len() {
-            let refs = workspace_refs
-                .get(&(seed_index, workspace_index))
-                .ok_or_else(|| {
-                    missing_reference("workspace fact refs", seed_index, workspace_index)
-                })?;
-            let workspace = workspaces
-                .get(workspace_index)
-                .ok_or_else(|| missing_reference("workspace", seed_index, workspace_index))?;
-            let author_index = first_user_for_workspace(workspace_index, users, workspaces.len())?;
-            let user = users.get(author_index).ok_or_else(|| {
-                missing_reference("workspace probe user", seed_index, author_index)
-            })?;
-            let workspace_prefix = probe_prefix(profile, seed_index, workspace_index, None);
+        for tenant_index in 0..storage_partitions.len() {
+            let refs = tenant_refs
+                .get(&(seed_index, tenant_index))
+                .ok_or_else(|| missing_reference("tenant fact refs", seed_index, tenant_index))?;
+            let storage_partition = storage_partitions
+                .get(tenant_index)
+                .ok_or_else(|| missing_reference("storage partition", seed_index, tenant_index))?;
+            let author_index =
+                first_user_for_tenant(tenant_index, users, storage_partitions.len())?;
+            let user = users
+                .get(author_index)
+                .ok_or_else(|| missing_reference("tenant probe user", seed_index, author_index))?;
+            let tenant_prefix = probe_prefix(profile, seed_index, tenant_index, None);
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-workspace-runbook"),
-                probe_type: ProbeType::WorkspaceSharedFact,
-                workspace_id: workspace.clone(),
+                probe_id: format!("{tenant_prefix}-tenant-runbook"),
+                probe_type: ProbeType::TenantSharedFact,
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
-                query: "Which runbook is required for this workspace deploy?".to_string(),
+                query: "Which runbook is required for this tenant deploy?".to_string(),
                 rewrite_query: None,
                 expected_rewrite: None,
                 query_class: None,
-                answer: format!("Use {} for this workspace deploy.", refs.runbook),
+                answer: format!("Use {} for this tenant deploy.", refs.runbook),
                 expected_fact_ids: vec![refs.runbook_fact_id.clone()],
                 blocked_fact_ids: Vec::new(),
                 as_of: None,
@@ -1250,9 +1221,9 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-temporal-on-call-month"),
+                probe_id: format!("{tenant_prefix}-temporal-on-call-month"),
                 probe_type: ProbeType::TemporalAsOf,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: format!(
                     "What was the on_call_primary for {} as of {}?",
@@ -1270,9 +1241,9 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-temporal-on-call-date"),
+                probe_id: format!("{tenant_prefix}-temporal-on-call-date"),
                 probe_type: ProbeType::TemporalAsOf,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: format!(
                     "What was the on_call_primary for {} on {}?",
@@ -1290,9 +1261,9 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-temporal-on-call-current"),
+                probe_id: format!("{tenant_prefix}-temporal-on-call-current"),
                 probe_type: ProbeType::TemporalAsOf,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: format!(
                     "What was the on_call_primary for {} as of {}?",
@@ -1310,9 +1281,9 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-temporal-on-call-back-in"),
+                probe_id: format!("{tenant_prefix}-temporal-on-call-back-in"),
                 probe_type: ProbeType::TemporalAsOf,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: format!(
                     "What was the on_call_primary for {} back in {}?",
@@ -1330,9 +1301,9 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-abstain-missing-secret"),
+                probe_id: format!("{tenant_prefix}-abstain-missing-secret"),
                 probe_type: ProbeType::Abstention,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: "What is the production database password?".to_string(),
                 rewrite_query: None,
@@ -1346,9 +1317,9 @@ fn build_probes(
             });
 
             probes.push(Probe {
-                probe_id: format!("{workspace_prefix}-contradiction-cache-backend"),
+                probe_id: format!("{tenant_prefix}-contradiction-cache-backend"),
                 probe_type: ProbeType::PointRecall,
-                workspace_id: workspace.clone(),
+                storage_partition_id: storage_partition.clone(),
                 user_id: user.clone(),
                 query: format!(
                     "Which cache backend claims conflict for {}?",
@@ -1420,7 +1391,7 @@ fn rewrite_query_for_probe(probe: &Probe, query_class: &str) -> String {
     match query_class {
         "vague_followup" => format!("Latest active memory for: {}", probe.query),
         "vector_first" => format!(
-            "Semantic memory search for user/workspace context: {}",
+            "Semantic memory search for user/tenant context: {}",
             probe.query
         ),
         "multi_hop" => format!("Graph relationship retrieval query: {}", probe.query),
@@ -1468,7 +1439,7 @@ fn link_recurring_fact_eras(ledger: &mut [LedgerFact], probes: &mut [Probe]) {
             (fact.scope == ScopeTier::Contact).then(|| fact.user_id.as_str().to_string());
         families
             .entry((
-                fact.workspace_id.as_str().to_string(),
+                fact.storage_partition_id.as_str().to_string(),
                 user_key,
                 fact.predicate.clone(),
             ))
@@ -1562,7 +1533,7 @@ fn assign_quality_priors(ledger: &mut [LedgerFact], probes: &[Probe]) -> Result<
 
 fn quality_prior_group_key(fact: &LedgerFact) -> (String, Option<String>, &'static str, String) {
     (
-        fact.workspace_id.to_string(),
+        fact.storage_partition_id.to_string(),
         (fact.scope == ScopeTier::Contact).then(|| fact.user_id.to_string()),
         scope_tier_str(fact.scope),
         fact.subject.clone(),
@@ -1633,7 +1604,7 @@ fn build_embedding_inputs(facts: &[LedgerFact], probes: &[Probe]) -> Vec<Embeddi
 }
 
 fn should_restate_dependency(fact_id: &str) -> bool {
-    matches!(natural_frames::workspace_frame_index(fact_id), 1 | 3)
+    matches!(natural_frames::tenant_frame_index(fact_id), 1 | 3)
 }
 
 fn validate_seeds(seeds: &[u64]) -> Result<()> {
@@ -1658,7 +1629,7 @@ fn validate_schedule_categories(scheduled_facts: &[ScheduledFact]) -> Result<()>
     for category in [
         FactCategory::Supersession,
         FactCategory::Contradiction,
-        FactCategory::WorkspaceShared,
+        FactCategory::TenantShared,
         FactCategory::UserPrivate,
         FactCategory::Temporal,
         FactCategory::Preference,
@@ -1674,7 +1645,7 @@ fn validate_schedule_categories(scheduled_facts: &[ScheduledFact]) -> Result<()>
 fn validate_profile_shape(corpus: &GeneratedMemoryEvalCorpus) -> Result<()> {
     validate_seeds(&corpus.manifest.seeds)?;
     let user_count = distinct_user_count(corpus);
-    let workspace_count = distinct_workspace_count(corpus);
+    let tenant_count = distinct_storage_partition_count(corpus);
     match corpus.manifest.profile {
         CorpusProfile::Pr => {
             if user_count != PR_USER_COUNT {
@@ -1682,9 +1653,9 @@ fn validate_profile_shape(corpus: &GeneratedMemoryEvalCorpus) -> Result<()> {
                     "PR corpus must contain {PR_USER_COUNT} users; got {user_count}"
                 ));
             }
-            if workspace_count != PR_WORKSPACE_COUNT {
+            if tenant_count != PR_TENANT_COUNT {
                 return invalid_config(format!(
-                    "PR corpus must contain {PR_WORKSPACE_COUNT} workspaces; got {workspace_count}"
+                    "PR corpus must contain {PR_TENANT_COUNT} tenants; got {tenant_count}"
                 ));
             }
             if corpus.probes.len() < 60 {
@@ -1700,9 +1671,9 @@ fn validate_profile_shape(corpus: &GeneratedMemoryEvalCorpus) -> Result<()> {
                     "full corpus must contain {FULL_USER_COUNT} users; got {user_count}"
                 ));
             }
-            if workspace_count != FULL_WORKSPACE_COUNT {
+            if tenant_count != FULL_TENANT_COUNT {
                 return invalid_config(format!(
-                    "full corpus must contain {FULL_WORKSPACE_COUNT} workspaces; got {workspace_count}"
+                    "full corpus must contain {FULL_TENANT_COUNT} tenants; got {tenant_count}"
                 ));
             }
             if !(FULL_MIN_PROBES..=FULL_MAX_PROBES).contains(&corpus.probes.len()) {
@@ -1801,7 +1772,7 @@ fn render_marked_fact_transcript(category: FactCategory, fact: &LedgerFact) -> S
             "Fact: {scope_marker}{} {} is {}. This is an unresolved contradictory claim.",
             fact.subject, fact.predicate, fact.object
         ),
-        FactCategory::WorkspaceShared => format!(
+        FactCategory::TenantShared => format!(
             "Fact: tenant shared {} {} is {}.",
             fact.subject, fact.predicate, fact.object
         ),
@@ -1850,7 +1821,7 @@ mod natural_frames {
         "I switched my {subject} to {object} recently.",
         "My {subject} {predicate_phrase} {object} these days.",
     ];
-    const WORKSPACE_FRAMES: &[&str] = &[
+    const TENANT_FRAMES: &[&str] = &[
         "The team agreed that {subject} {predicate_phrase} {object}.",
         "Heads up everyone: {subject} now {predicate_phrase} {object}.",
         "We standardized {subject} on {object} last sprint.",
@@ -1887,7 +1858,7 @@ mod natural_frames {
         let frames = if fact.scope == ScopeTier::Contact {
             USER_FRAMES
         } else {
-            WORKSPACE_FRAMES
+            TENANT_FRAMES
         };
         apply_frame(
             select(&fact.fact_id, frames),
@@ -1917,9 +1888,9 @@ mod natural_frames {
         }
     }
 
-    /// Returns the deterministic workspace-frame index selected for a fact key.
-    pub(super) fn workspace_frame_index(key: &str) -> usize {
-        stable_index(key, WORKSPACE_FRAMES.len())
+    /// Returns the deterministic tenant-frame index selected for a fact key.
+    pub(super) fn tenant_frame_index(key: &str) -> usize {
+        stable_index(key, TENANT_FRAMES.len())
     }
 
     fn select<'a>(key: &str, frames: &'a [&str]) -> &'a str {
@@ -1978,73 +1949,73 @@ fn build_users(profile: CorpusProfile, count: usize) -> Vec<UserId> {
         .collect()
 }
 
-fn build_workspaces(profile: CorpusProfile, count: usize) -> Vec<WorkspaceId> {
+fn build_storage_partitions(profile: CorpusProfile, count: usize) -> Vec<StoragePartitionId> {
     (0..count)
         .map(|index| {
-            WorkspaceId::new(format!(
-                "memory-eval-{}-workspace-{index:02}",
+            StoragePartitionId::new(format!(
+                "memory-eval-{}-tenant-{index:02}",
                 profile_slug(profile)
             ))
         })
         .collect()
 }
 
-fn workspace_index_for_user(user_index: usize, workspace_count: usize) -> usize {
-    user_index % workspace_count
+fn tenant_index_for_user(user_index: usize, tenant_count: usize) -> usize {
+    user_index % tenant_count
 }
 
-fn first_user_for_workspace(
-    workspace_index: usize,
+fn first_user_for_tenant(
+    tenant_index: usize,
     users: &[UserId],
-    workspace_count: usize,
+    tenant_count: usize,
 ) -> Result<usize> {
     (0..users.len())
-        .find(|candidate| workspace_index_for_user(*candidate, workspace_count) == workspace_index)
+        .find(|candidate| tenant_index_for_user(*candidate, tenant_count) == tenant_index)
         .ok_or_else(|| {
             EvalError::InvalidConfig(format!(
-                "no generated user belongs to workspace index {workspace_index}"
+                "no generated user belongs to tenant index {tenant_index}"
             ))
         })
 }
 
-fn next_user_in_workspace(
+fn next_user_in_tenant(
     user_index: usize,
-    workspace_index: usize,
+    tenant_index: usize,
     user_count: usize,
-    workspace_count: usize,
+    tenant_count: usize,
 ) -> Result<usize> {
     for offset in 1..user_count {
         let candidate = (user_index + offset) % user_count;
-        if workspace_index_for_user(candidate, workspace_count) == workspace_index {
+        if tenant_index_for_user(candidate, tenant_count) == tenant_index {
             return Ok(candidate);
         }
     }
     invalid_config(format!(
-        "workspace index {workspace_index} needs at least two users for cross-user probes"
+        "tenant index {tenant_index} needs at least two users for cross-user probes"
     ))
 }
 
-fn workspace_session(
+fn tenant_session(
     profile: CorpusProfile,
     seed_index: usize,
     seed: u64,
-    workspace_index: usize,
+    tenant_index: usize,
     author_index: usize,
     users: &[UserId],
-    workspaces: &[WorkspaceId],
+    storage_partitions: &[StoragePartitionId],
 ) -> SessionAssignment {
     SessionAssignment {
-        key: format!("s{seed_index:02}-w{workspace_index:02}-workspace"),
+        key: format!("s{seed_index:02}-t{tenant_index:02}-tenant"),
         plan: SessionPlan {
             session_id: deterministic_session_id(
                 profile,
                 seed_index,
                 seed,
-                workspace_index,
+                tenant_index,
                 author_index,
                 1,
             ),
-            workspace_id: workspaces[workspace_index].clone(),
+            storage_partition_id: storage_partitions[tenant_index].clone(),
             user_id: users[author_index].clone(),
         },
     }
@@ -2054,23 +2025,23 @@ fn user_session(
     profile: CorpusProfile,
     seed_index: usize,
     seed: u64,
-    workspace_index: usize,
+    tenant_index: usize,
     user_index: usize,
     users: &[UserId],
-    workspaces: &[WorkspaceId],
+    storage_partitions: &[StoragePartitionId],
 ) -> SessionAssignment {
     SessionAssignment {
-        key: format!("s{seed_index:02}-w{workspace_index:02}-u{user_index:02}"),
+        key: format!("s{seed_index:02}-t{tenant_index:02}-u{user_index:02}"),
         plan: SessionPlan {
             session_id: deterministic_session_id(
                 profile,
                 seed_index,
                 seed,
-                workspace_index,
+                tenant_index,
                 user_index,
                 2,
             ),
-            workspace_id: workspaces[workspace_index].clone(),
+            storage_partition_id: storage_partitions[tenant_index].clone(),
             user_id: users[user_index].clone(),
         },
     }
@@ -2083,21 +2054,21 @@ fn user_aux_session(
     user_index: usize,
     purpose: u128,
     users: &[UserId],
-    workspaces: &[WorkspaceId],
+    storage_partitions: &[StoragePartitionId],
 ) -> SessionAssignment {
-    let workspace_index = workspace_index_for_user(user_index, workspaces.len());
+    let tenant_index = tenant_index_for_user(user_index, storage_partitions.len());
     SessionAssignment {
-        key: format!("s{seed_index:02}-w{workspace_index:02}-u{user_index:02}-aux-{purpose}"),
+        key: format!("s{seed_index:02}-t{tenant_index:02}-u{user_index:02}-aux-{purpose}"),
         plan: SessionPlan {
             session_id: deterministic_session_id(
                 profile,
                 seed_index,
                 seed,
-                workspace_index,
+                tenant_index,
                 user_index,
                 purpose,
             ),
-            workspace_id: workspaces[workspace_index].clone(),
+            storage_partition_id: storage_partitions[tenant_index].clone(),
             user_id: users[user_index].clone(),
         },
     }
@@ -2107,7 +2078,7 @@ fn deterministic_session_id(
     profile: CorpusProfile,
     seed_index: usize,
     seed: u64,
-    workspace_index: usize,
+    tenant_index: usize,
     user_index: usize,
     purpose: u128,
 ) -> SessionId {
@@ -2119,7 +2090,7 @@ fn deterministic_session_id(
     let value = (0xA11C_u128 << 112)
         | (profile_code << 104)
         | ((seed_index as u128) << 96)
-        | ((workspace_index as u128) << 88)
+        | ((tenant_index as u128) << 88)
         | ((user_index as u128) << 72)
         | (purpose << 64)
         | (seed_hash & 0xFFFF_FFFF_FFFF_FFFF);
@@ -2129,17 +2100,17 @@ fn deterministic_session_id(
 fn fact_id(
     profile: CorpusProfile,
     seed_index: usize,
-    workspace_index: usize,
+    tenant_index: usize,
     user_index: Option<usize>,
     suffix: &str,
 ) -> String {
     match user_index {
         Some(user_index) => format!(
-            "{}-s{seed_index:02}-w{workspace_index:02}-u{user_index:02}-{suffix}",
+            "{}-s{seed_index:02}-t{tenant_index:02}-u{user_index:02}-{suffix}",
             profile_slug(profile)
         ),
         None => format!(
-            "{}-s{seed_index:02}-w{workspace_index:02}-{suffix}",
+            "{}-s{seed_index:02}-t{tenant_index:02}-{suffix}",
             profile_slug(profile)
         ),
     }
@@ -2148,16 +2119,16 @@ fn fact_id(
 fn probe_prefix(
     profile: CorpusProfile,
     seed_index: usize,
-    workspace_index: usize,
+    tenant_index: usize,
     user_index: Option<usize>,
 ) -> String {
     match user_index {
         Some(user_index) => format!(
-            "{}-s{seed_index:02}-w{workspace_index:02}-u{user_index:02}",
+            "{}-s{seed_index:02}-t{tenant_index:02}-u{user_index:02}",
             profile_slug(profile)
         ),
         None => format!(
-            "{}-s{seed_index:02}-w{workspace_index:02}",
+            "{}-s{seed_index:02}-t{tenant_index:02}",
             profile_slug(profile)
         ),
     }
@@ -2296,18 +2267,18 @@ fn distinct_user_count(corpus: &GeneratedMemoryEvalCorpus) -> usize {
     users.len()
 }
 
-fn distinct_workspace_count(corpus: &GeneratedMemoryEvalCorpus) -> usize {
-    let mut workspaces = BTreeSet::new();
+fn distinct_storage_partition_count(corpus: &GeneratedMemoryEvalCorpus) -> usize {
+    let mut storage_partitions = BTreeSet::new();
     for fact in &corpus.ledger {
-        workspaces.insert(fact.workspace_id.as_str().to_string());
+        storage_partitions.insert(fact.storage_partition_id.as_str().to_string());
     }
     for session in &corpus.sessions {
-        workspaces.insert(session.workspace_id.as_str().to_string());
+        storage_partitions.insert(session.storage_partition_id.as_str().to_string());
     }
     for probe in &corpus.probes {
-        workspaces.insert(probe.workspace_id.as_str().to_string());
+        storage_partitions.insert(probe.storage_partition_id.as_str().to_string());
     }
-    workspaces.len()
+    storage_partitions.len()
 }
 
 fn sessions_per_user(sessions: &[SyntheticSession]) -> BTreeMap<String, usize> {

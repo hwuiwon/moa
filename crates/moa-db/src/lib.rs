@@ -8,6 +8,7 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 struct DbScopeGucs {
     tenant_id: Option<String>,
+    storage_partition_id: Option<String>,
     contact_id: Option<String>,
     control_plane: bool,
 }
@@ -55,7 +56,7 @@ impl<'p> ScopedConn<'p> {
         Self::begin(pool, &ScopeContext::contact(tenant_id, contact_id)).await
     }
 
-    /// Begins an explicit workspace control-plane transaction.
+    /// Begins an explicit tenant control-plane transaction.
     pub async fn begin_control_plane(pool: &'p PgPool) -> Result<Self> {
         let begin_started = Instant::now();
         let tx = pool.begin().await;
@@ -67,6 +68,7 @@ impl<'p> ScopedConn<'p> {
             &mut tx,
             &DbScopeGucs {
                 tenant_id: None,
+                storage_partition_id: None,
                 contact_id: None,
                 control_plane: true,
             },
@@ -80,6 +82,7 @@ impl<'p> ScopedConn<'p> {
 
     /// Applies MOA scope GUCs to an existing transaction.
     pub async fn apply_gucs(tx: &mut Transaction<'_, Postgres>, ctx: &ScopeContext) -> Result<()> {
+        let tenant_id = ctx.tenant_id().to_string();
         let contact_id = ctx
             .contact_id()
             .map(|contact_id| contact_id.to_string())
@@ -87,7 +90,8 @@ impl<'p> ScopedConn<'p> {
         Self::apply_guc_values(
             tx,
             &DbScopeGucs {
-                tenant_id: Some(ctx.tenant_id().to_string()),
+                storage_partition_id: Some(tenant_id.clone()),
+                tenant_id: Some(tenant_id),
                 contact_id: Some(contact_id),
                 control_plane: false,
             },
@@ -103,12 +107,14 @@ impl<'p> ScopedConn<'p> {
             r#"
             SELECT
                 pg_catalog.set_config('moa.tenant_id', $1, true),
-                pg_catalog.set_config('moa.contact_id', $2, true),
-                pg_catalog.set_config('moa.control_plane', $3, true),
+                pg_catalog.set_config('moa.storage_partition_id', $2, true),
+                pg_catalog.set_config('moa.contact_id', $3, true),
+                pg_catalog.set_config('moa.control_plane', $4, true),
                 pg_catalog.set_config('search_path', 'ag_catalog, "$user", public', true)
             "#,
         )
         .bind(gucs.tenant_id.as_deref().unwrap_or(""))
+        .bind(gucs.storage_partition_id.as_deref().unwrap_or(""))
         .bind(gucs.contact_id.as_deref().unwrap_or(""))
         .bind(if gucs.control_plane { "true" } else { "false" })
         .execute(&mut **tx)

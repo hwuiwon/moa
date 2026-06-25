@@ -20,7 +20,7 @@ async fn dsar_export_for_user_with_5_records_writes_5_jsonl_lines_with_correct_s
 
     exporter
         .export_jsonl_records(
-            "workspace-001",
+            "tenant-001",
             "user-001",
             fixture_jsonl("audit_records_with_user_data.jsonl"),
             &out_path,
@@ -48,7 +48,7 @@ async fn dsar_export_for_unknown_user_writes_empty_file_with_zero_lines() {
 
     let export = exporter
         .export_jsonl_records(
-            "workspace-001",
+            "tenant-001",
             "user-999",
             fixture_jsonl("audit_records_with_user_data.jsonl"),
             &out_path,
@@ -74,7 +74,7 @@ async fn dsar_export_excludes_records_belonging_to_other_users() {
 
     exporter
         .export_jsonl_records(
-            "workspace-001",
+            "tenant-001",
             "user-001",
             fixture_jsonl("audit_records_with_user_data.jsonl"),
             &out_path,
@@ -96,7 +96,7 @@ async fn dsar_export_includes_redaction_for_phi_class_fields_when_redaction_enab
 
     exporter
         .export_jsonl_records(
-            "workspace-001",
+            "tenant-001",
             "user-001",
             fixture_jsonl("audit_records_with_user_data.jsonl"),
             &out_path,
@@ -130,7 +130,7 @@ async fn dsar_export_signed_manifest_accompanies_jsonl_with_valid_signature() {
 
     let export = exporter
         .export_jsonl_records(
-            "workspace-001",
+            "tenant-001",
             "user-001",
             fixture_jsonl("audit_records_with_user_data.jsonl"),
             &out_path,
@@ -168,7 +168,7 @@ async fn dsar_export_signed_manifest_accompanies_jsonl_with_valid_signature() {
                 .expect("signature should exist"),
         )
         .expect("signature should decode");
-    key.verify_root(&signed_root, "workspace-001", &signature)
+    key.verify_root(&signed_root, "tenant-001", &signature)
         .expect("manifest signature should verify");
 }
 
@@ -186,7 +186,7 @@ async fn dsar_export_with_concurrent_writes_to_audit_log_produces_consistent_sna
 
     let (export, _) = tokio::join!(
         exporter.export_jsonl_records(
-            "workspace-001",
+            "tenant-001",
             "user-001",
             records_at_export_start,
             &out_path,

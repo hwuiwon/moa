@@ -1,10 +1,10 @@
 //! Turbopuffer-backed graph-memory vector store.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
-use moa_core::MoaConfig;
+use moa_core::{MoaConfig, TenantId};
 use reqwest::{Client, Method};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -34,6 +34,7 @@ pub struct TurbopufferStore {
     api_key: SecretString,
     env: String,
     baa_enabled: bool,
+    storage_partition_id: Option<String>,
 }
 
 impl TurbopufferStore {
@@ -111,31 +112,55 @@ impl TurbopufferStore {
             api_key,
             env,
             baa_enabled,
+            storage_partition_id: None,
         })
     }
 
-    /// Returns whether this client may be used for HIPAA-tier workspaces.
+    /// Returns whether this client may be used for HIPAA-tier storage partitions.
     #[must_use]
     pub fn has_baa(&self) -> bool {
         self.baa_enabled
     }
 
-    /// Returns the Turbopuffer namespace for a workspace.
-    pub fn namespace_for_workspace(&self, workspace_id: &str) -> Result<String> {
-        let workspace_segment = namespace_segment(workspace_id);
-        if workspace_segment.is_empty() {
+    /// Returns a clone scoped to one tenant's storage partition.
+    #[must_use]
+    pub fn scoped_to_tenant(&self, tenant_id: TenantId) -> Self {
+        self.with_storage_partition_id(tenant_id.to_string())
+    }
+
+    /// Returns a clone scoped to one explicit storage partition.
+    #[must_use]
+    pub fn with_storage_partition_id(&self, storage_partition_id: impl Into<String>) -> Self {
+        let mut store = self.clone();
+        store.storage_partition_id = Some(storage_partition_id.into());
+        store
+    }
+
+    /// Returns the Turbopuffer namespace for one storage partition.
+    pub fn namespace_for_storage_partition(&self, storage_partition_id: &str) -> Result<String> {
+        let storage_partition_segment = namespace_segment(storage_partition_id);
+        if storage_partition_segment.is_empty() {
             return Err(Error::TurbopufferConfig(
-                "workspace namespace segment must not be empty".to_string(),
+                "storage partition namespace segment must not be empty".to_string(),
             ));
         }
 
-        let namespace = format!("moa-{}-{}", self.env, workspace_segment);
+        let namespace = format!("moa-{}-{}", self.env, storage_partition_segment);
         if namespace.len() > 128 {
             return Err(Error::TurbopufferConfig(format!(
                 "namespace `{namespace}` exceeds Turbopuffer's 128-byte limit"
             )));
         }
         Ok(namespace)
+    }
+
+    fn storage_partition_id(&self, operation: &'static str) -> Result<&str> {
+        self.storage_partition_id
+            .as_deref()
+            .ok_or(Error::StoragePartitionRequired {
+                backend: BACKEND,
+                operation,
+            })
     }
 
     /// Validates a namespace before issuing a write.
@@ -159,12 +184,16 @@ impl TurbopufferStore {
         Ok(())
     }
 
-    /// Deletes embeddings in one explicit workspace namespace.
-    pub async fn delete_in_workspace(&self, workspace_id: &str, uids: &[Uuid]) -> Result<()> {
+    /// Deletes embeddings in one explicit storage partition namespace.
+    pub async fn delete_in_storage_partition(
+        &self,
+        storage_partition_id: &str,
+        uids: &[Uuid],
+    ) -> Result<()> {
         if uids.is_empty() {
             return Ok(());
         }
-        let namespace = self.namespace_for_workspace(workspace_id)?;
+        let namespace = self.namespace_for_storage_partition(storage_partition_id)?;
         self.ensure_namespace(&namespace).await?;
         let body = json!({
             "deletes": uids.iter().map(Uuid::to_string).collect::<Vec<_>>(),
@@ -232,34 +261,21 @@ impl VectorStore for TurbopufferStore {
             return Ok(());
         }
 
-        let mut groups: HashMap<&str, Vec<&VectorItem>> = HashMap::new();
+        let storage_partition_id = self.storage_partition_id("upsert")?;
         for item in items {
             validate_dimension(&item.embedding)?;
             pii_rank(&item.pii_class)?;
-            let workspace_id = item
-                .workspace_id
-                .as_deref()
-                .ok_or(Error::WorkspaceRequired {
-                    backend: BACKEND,
-                    operation: "upsert",
-                })?;
-            groups.entry(workspace_id).or_default().push(item);
         }
 
-        for (workspace_id, batch) in groups {
-            let namespace = self.namespace_for_workspace(workspace_id)?;
-            self.ensure_namespace(&namespace).await?;
-            let upsert_rows = batch
-                .into_iter()
-                .map(upsert_row)
-                .collect::<Result<Vec<_>>>()?;
-            let body = json!({
-                "upsert_rows": upsert_rows,
-                "distance_metric": "cosine_distance",
-            });
-            self.request_value(Method::POST, write_path(&namespace), body)
-                .await?;
-        }
+        let namespace = self.namespace_for_storage_partition(storage_partition_id)?;
+        self.ensure_namespace(&namespace).await?;
+        let upsert_rows = items.iter().map(upsert_row).collect::<Result<Vec<_>>>()?;
+        let body = json!({
+            "upsert_rows": upsert_rows,
+            "distance_metric": "cosine_distance",
+        });
+        self.request_value(Method::POST, write_path(&namespace), body)
+            .await?;
 
         Ok(())
     }
@@ -278,14 +294,8 @@ impl VectorStore for TurbopufferStore {
         if query.k > 10_000 {
             return Err(Error::QueryLimitTooLarge(query.k));
         }
-        let workspace_id = query
-            .workspace_id
-            .as_deref()
-            .ok_or(Error::WorkspaceRequired {
-                backend: BACKEND,
-                operation: "knn",
-            })?;
-        let namespace = self.namespace_for_workspace(workspace_id)?;
+        let storage_partition_id = self.storage_partition_id("knn")?;
+        let namespace = self.namespace_for_storage_partition(storage_partition_id)?;
         self.ensure_namespace(&namespace).await?;
 
         let mut body = json!({
@@ -307,10 +317,9 @@ impl VectorStore for TurbopufferStore {
         if uids.is_empty() {
             return Ok(());
         }
-        Err(Error::WorkspaceRequired {
-            backend: BACKEND,
-            operation: "delete",
-        })
+        let storage_partition_id = self.storage_partition_id("delete")?;
+        self.delete_in_storage_partition(storage_partition_id, uids)
+            .await
     }
 }
 
@@ -465,16 +474,17 @@ mod tests {
             r#"{"rows_affected":1,"rows_upserted":1}"#,
         )])
         .await;
+        let storage_partition_id = Uuid::now_v7().to_string();
         let store = TurbopufferStore::new(
             server.base_url(),
             SecretString::from("test-key".to_string()),
             "test",
             false,
         )
-        .expect("store");
-        let workspace_id = Uuid::now_v7().to_string();
+        .expect("store")
+        .with_storage_partition_id(storage_partition_id.clone());
         store
-            .upsert(&[test_item(Uuid::now_v7(), &workspace_id)])
+            .upsert(&[test_item(Uuid::now_v7(), &storage_partition_id)])
             .await
             .expect("upsert");
 
@@ -482,7 +492,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].path,
-            format!("/v2/namespaces/moa-test-{workspace_id}")
+            format!("/v2/namespaces/moa-test-{storage_partition_id}")
         );
         assert!(requests[0].body.contains("\"upsert_rows\""));
         assert!(requests[0].body.contains("\"valid_to\":\"open\""));
@@ -505,10 +515,10 @@ mod tests {
             "test",
             false,
         )
-        .expect("store");
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
         let matches = store
             .knn(&VectorQuery {
-                workspace_id: Some(Uuid::now_v7().to_string()),
                 embedding: basis_vector(0),
                 k: 1,
                 label_filter: None,
@@ -534,21 +544,21 @@ mod tests {
             ),
         ])
         .await;
+        let storage_partition_id = Uuid::now_v7().to_string();
         let store = TurbopufferStore::new(
             server.base_url(),
             SecretString::from("test-key".to_string()),
             "test",
             false,
         )
-        .expect("store");
-        let workspace_id = Uuid::now_v7().to_string();
+        .expect("store")
+        .with_storage_partition_id(storage_partition_id.clone());
         store
-            .upsert(&[test_item(uid, &workspace_id)])
+            .upsert(&[test_item(uid, &storage_partition_id)])
             .await
             .expect("upsert");
         let matches = store
             .knn(&VectorQuery {
-                workspace_id: Some(workspace_id),
                 embedding: basis_vector(0),
                 k: 10,
                 label_filter: Some(vec!["Fact".to_string()]),
@@ -574,11 +584,11 @@ mod tests {
             "test",
             false,
         )
-        .expect("store");
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
 
         let error = store
             .knn(&VectorQuery {
-                workspace_id: Some(Uuid::now_v7().to_string()),
                 embedding: basis_vector(0),
                 k: 10,
                 label_filter: Some(vec!["Fact".to_string()]),
@@ -603,10 +613,10 @@ mod tests {
         assert_eq!(server.requests().await.len(), 0);
     }
 
-    fn test_item(uid: Uuid, workspace_id: &str) -> VectorItem {
+    fn test_item(uid: Uuid, storage_partition_id: &str) -> VectorItem {
+        let _ = storage_partition_id;
         VectorItem {
             uid,
-            workspace_id: Some(workspace_id.to_string()),
             user_id: None,
             label: "Fact".to_string(),
             pii_class: "none".to_string(),

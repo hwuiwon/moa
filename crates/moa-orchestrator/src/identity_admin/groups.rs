@@ -594,15 +594,6 @@ struct GroupTarget {
 fn group_targets(tenant_id: Uuid, display_name: &str) -> Vec<GroupTarget> {
     let parts: Vec<&str> = display_name.split(':').collect();
     match parts.as_slice() {
-        ["tenant", tenant, "workspace", workspace, relation]
-            if Uuid::parse_str(tenant).ok() == Some(tenant_id)
-                && Uuid::parse_str(workspace).is_ok() =>
-        {
-            vec![GroupTarget {
-                relation: (*relation).to_string(),
-                object: format!("workspace:{workspace}"),
-            }]
-        }
         ["tenant", tenant, relation] if Uuid::parse_str(tenant).ok() == Some(tenant_id) => {
             vec![GroupTarget {
                 relation: (*relation).to_string(),

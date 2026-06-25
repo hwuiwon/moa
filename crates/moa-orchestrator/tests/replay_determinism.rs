@@ -55,7 +55,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
         request: &ConsolidateRequest,
     ) -> Result<(), HandlerError> {
         self.recorder.invoke(
-            "Workspace",
+            "Tenant",
             "mark_consolidation_started",
             &json!({
                 "key": request.tenant_id.to_string(),
@@ -160,7 +160,7 @@ impl ConsolidateDurableSteps for RecordedConsolidateSteps<'_> {
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError> {
         self.recorder.invoke(
-            "Workspace",
+            "Tenant",
             "consolidation_completed",
             &json!({
                 "key": report.tenant_id.to_string(),
@@ -189,7 +189,8 @@ async fn consolidate_workflow_first_run_and_replay_emit_identical_durable_steps_
 }
 
 #[tokio::test]
-async fn consolidate_workflow_replay_with_realistic_workspace_state_emits_identical_steps() {
+async fn consolidate_workflow_replay_with_realistic_storage_partition_state_emits_identical_steps()
+{
     let fixture = realistic_workspace_fixture();
     assert_eq!(fixture.graph_nodes.len(), 16);
     assert_eq!(fixture.pending_changes.len(), 6);

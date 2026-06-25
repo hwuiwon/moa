@@ -24,9 +24,10 @@ use crate::{
         cron_job::{CronJob, CronJobImpl},
         session::{Session, SessionImpl},
         sub_agent::{SubAgent, SubAgentImpl},
-        workspace::{WorkspaceImpl, WorkspaceObject},
+        tenant::{TenantImpl, TenantObject},
     },
     services::{
+        action_policy::{ActionPolicy, ActionPolicyImpl},
         action_reviews::{ActionReviews, ActionReviewsImpl},
         admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
         agent_definitions::{AgentDefinitions, AgentDefinitionsImpl},
@@ -52,7 +53,6 @@ use crate::{
         tool_executor::{ToolExecutor, ToolExecutorImpl},
         whoami::{Whoami, WhoamiImpl},
         workflows::{Workflows, WorkflowsImpl},
-        workspace_store::{WorkspaceStore, WorkspaceStoreImpl},
     },
     workflows::{
         artifact_workflow_execution::{ArtifactWorkflowExecution, ArtifactWorkflowExecutionImpl},
@@ -94,8 +94,8 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Tenants",
     "ToolExecutor",
     "TurnExecution",
-    "Workspace",
-    "WorkspaceStore",
+    "Tenant",
+    "ActionPolicy",
     "Whoami",
     "Workflows",
 ];
@@ -157,7 +157,7 @@ pub fn build_endpoint(
     let endpoint = endpoint
         .bind(IngestionVOImpl.serve())
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
-        .bind(WorkspaceStoreImpl::new(tool_router.clone()).serve())
+        .bind(ActionPolicyImpl::new(tool_router.clone()).serve())
         .bind(GraphMemoryMaintImpl.serve())
         .bind(LearningReviewImpl.serve())
         .bind(LineageAdminImpl.serve())
@@ -169,7 +169,7 @@ pub fn build_endpoint(
         .bind(SessionImpl.serve())
         .bind(SubAgentImpl.serve())
         .bind(TenantsImpl.serve())
-        .bind(WorkspaceImpl.serve())
+        .bind(TenantImpl.serve())
         .bind(WhoamiImpl.serve())
         .bind(WorkflowsImpl.serve())
         .bind(ArtifactWorkflowExecutionImpl.serve())

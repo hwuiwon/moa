@@ -8,7 +8,7 @@ use moa_core::{
     ActionRuleScope, AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
     AgentSkillPolicyMode, ContactId, ContactRef, ContactVerificationState, ContextMessage,
     ContextProcessor, LockedToolRef, ModelCapabilities, ResolvedArtifactRevisionRef, Result,
-    SessionActorRef, SessionMeta, TenantId, UserId, WorkingContext, WorkspaceId,
+    SessionActorRef, SessionMeta, StoragePartitionId, TenantId, UserId, WorkingContext,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -19,8 +19,8 @@ async fn pinned_agent_skill_policy_injects_artifact_revision_files_db_memory() -
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
-    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
+    let storage_partition_id = StoragePartitionId::new(format!("workspace-{}", Uuid::now_v7()));
+    let tenant_id = tenant_id_from_storage_partition_id(&storage_partition_id);
     let user_id = UserId::new("artifact-skill-user");
     let skill_name = format!("artifact-injected-skill-{}", Uuid::now_v7().simple());
     let scope = ActionRuleScope::Tenant { tenant_id };
@@ -102,10 +102,10 @@ async fn publish_skill_revision(
         .await
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {

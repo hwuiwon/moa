@@ -68,7 +68,7 @@ fn check_body(user: &str, relation: &str, object: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn workspace_admin_administers_tenant() {
+async fn tenant_admin_administers_tenant() {
     // Pins: runtime tenant administration checks ask OpenFGA for tenant#admin.
     let server = MockServer::start();
     let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid user uuid");
@@ -92,7 +92,7 @@ async fn workspace_admin_administers_tenant() {
         Relation::Admin,
     )
     .await
-    .expect("workspace-inherited tenant admin check should be allowed by FGA");
+    .expect("tenant admin check should be allowed by FGA");
 
     allowed.assert_hits(1);
 }

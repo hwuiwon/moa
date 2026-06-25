@@ -12,8 +12,8 @@ use moa_core::wire::{
 };
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, LearningRiskClass, MoaConfig, MoaError, TenantId,
-    WorkspaceId,
+    LearningCandidateType, LearningEntry, LearningRiskClass, MoaConfig, MoaError,
+    StoragePartitionId, TenantId,
 };
 use moa_orchestrator::services::learning_review::{
     accept_skill_candidate_after_authz, get_learning_candidate_after_authz,
@@ -37,14 +37,14 @@ mod skill_learning_review {
     async fn accept_skill_candidate_publishes_draft_for_artifact_backed_registry() {
         // Pins: accepting a skill candidate publishes its draft artifact for artifact-backed skill loading.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
-        let workspace_id = unique_workspace("review-accept");
-        let scope = workspace_scope(&workspace_id);
+        let storage_partition_id = unique_workspace("review-accept");
+        let scope = tenant_scope(&storage_partition_id);
         let skill_name = unique_skill_name("review-accept");
         let package = skill_package(&skill_name, "Review accepted draft skills");
         let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
         let candidate = append_candidate(
             &test_db,
-            &workspace_id,
+            &storage_partition_id,
             LearningCandidateType::Skill,
             LearningCandidateStatus::Proposed,
             "skill_created",
@@ -58,14 +58,17 @@ mod skill_learning_review {
         let loaded = get_learning_candidate_after_authz(
             store.clone(),
             GetLearningCandidateRequest {
-                tenant_id: tenant_id_from_workspace(&workspace_id),
+                tenant_id: tenant_id_from_workspace(&storage_partition_id),
                 candidate_id: candidate.id,
             },
         )
         .await
         .expect("load review candidate");
         assert_eq!(loaded.id, candidate.id);
-        assert_eq!(loaded.workspace_id, workspace_id);
+        assert_eq!(
+            loaded.tenant_id,
+            tenant_id_from_workspace(&storage_partition_id)
+        );
 
         let response = accept_skill_candidate_after_authz(
             store.clone(),
@@ -74,7 +77,7 @@ mod skill_learning_review {
             #[cfg(feature = "internal-eval-runner")]
             review_providers(),
             LearningCandidateReviewRequest {
-                tenant_id: tenant_id_from_workspace(&workspace_id),
+                tenant_id: tenant_id_from_workspace(&storage_partition_id),
                 candidate_id: candidate.id,
                 action: LearningCandidateReviewAction::Accept,
                 reviewer_subject: "user:reviewer".to_string(),
@@ -105,7 +108,10 @@ mod skill_learning_review {
 
         let promoted = test_db
             .store()
-            .get_learning_candidate(&workspace_id, candidate.id)
+            .get_learning_candidate(
+                &tenant_id_from_workspace(&storage_partition_id),
+                candidate.id,
+            )
             .await
             .expect("reload promoted candidate")
             .expect("promoted candidate exists");
@@ -144,7 +150,7 @@ mod skill_learning_review {
 
         let learnings = test_db
             .store()
-            .list_learnings(workspace_id.as_str(), Some("skill_created"), 10)
+            .list_learnings(storage_partition_id.as_str(), Some("skill_created"), 10)
             .await
             .expect("list accepted skill learning");
         assert_eq!(learnings.len(), 1);
@@ -163,14 +169,14 @@ mod skill_learning_review {
     async fn reject_skill_candidate_preserves_draft_without_publishing() {
         // Pins: rejecting a skill candidate marks it rejected but keeps the draft artifact for audit.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
-        let workspace_id = unique_workspace("review-reject");
-        let scope = workspace_scope(&workspace_id);
+        let storage_partition_id = unique_workspace("review-reject");
+        let scope = tenant_scope(&storage_partition_id);
         let skill_name = unique_skill_name("review-reject");
         let package = skill_package(&skill_name, "Review rejected draft skills");
         let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
         let candidate = append_candidate(
             &test_db,
-            &workspace_id,
+            &storage_partition_id,
             LearningCandidateType::Skill,
             LearningCandidateStatus::Proposed,
             "skill_created",
@@ -182,7 +188,7 @@ mod skill_learning_review {
         let response = reject_learning_candidate_after_authz(
             Arc::new(test_db.store().clone()),
             LearningCandidateReviewRequest {
-                tenant_id: tenant_id_from_workspace(&workspace_id),
+                tenant_id: tenant_id_from_workspace(&storage_partition_id),
                 candidate_id: candidate.id,
                 action: LearningCandidateReviewAction::Reject,
                 reviewer_subject: "user:reviewer".to_string(),
@@ -209,7 +215,10 @@ mod skill_learning_review {
 
         let rejected = test_db
             .store()
-            .get_learning_candidate(&workspace_id, candidate.id)
+            .get_learning_candidate(
+                &tenant_id_from_workspace(&storage_partition_id),
+                candidate.id,
+            )
             .await
             .expect("reload rejected candidate")
             .expect("rejected candidate exists");
@@ -223,7 +232,7 @@ mod skill_learning_review {
 
         let learnings = test_db
             .store()
-            .list_learnings(workspace_id.as_str(), Some("skill_created"), 10)
+            .list_learnings(storage_partition_id.as_str(), Some("skill_created"), 10)
             .await
             .expect("list rejected skill learning");
         assert!(
@@ -236,14 +245,14 @@ mod skill_learning_review {
     async fn promotion_rolls_back_artifact_publish_when_learning_append_fails() {
         // Pins: accept promotion publishes, promotes, and appends learning in one transaction.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
-        let workspace_id = unique_workspace("review-rollback");
-        let scope = workspace_scope(&workspace_id);
+        let storage_partition_id = unique_workspace("review-rollback");
+        let scope = tenant_scope(&storage_partition_id);
         let skill_name = unique_skill_name("review-rollback");
         let package = skill_package(&skill_name, "Review rollback draft skills");
         let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
         let candidate = append_candidate(
             &test_db,
-            &workspace_id,
+            &storage_partition_id,
             LearningCandidateType::Skill,
             LearningCandidateStatus::Proposed,
             "skill_created",
@@ -255,7 +264,7 @@ mod skill_learning_review {
             store: Arc::new(test_db.store().clone()),
         };
         let request = SkillReviewRequest {
-            workspace_id: workspace_id.clone(),
+            tenant_id: tenant_id_from_workspace(&storage_partition_id),
             candidate_id: candidate.id,
             action: SkillReviewAction::Accept,
             reviewer_subject: "user:reviewer".to_string(),
@@ -294,7 +303,10 @@ mod skill_learning_review {
         );
         let reloaded = test_db
             .store()
-            .get_learning_candidate(&workspace_id, candidate.id)
+            .get_learning_candidate(
+                &tenant_id_from_workspace(&storage_partition_id),
+                candidate.id,
+            )
             .await
             .expect("reload candidate")
             .expect("candidate remains");
@@ -305,7 +317,7 @@ mod skill_learning_review {
         );
         let learnings = test_db
             .store()
-            .list_learnings(workspace_id.as_str(), Some("skill_created"), 10)
+            .list_learnings(storage_partition_id.as_str(), Some("skill_created"), 10)
             .await
             .expect("list learning entries");
         assert!(
@@ -360,14 +372,14 @@ mod skill_learning_review {
     async fn accept_refuses_non_skill_and_reject_handles_workflow_candidate() {
         // Pins: accept stays skill-specific, while reject can disposition workflow proposals.
         let test_db = bootstrap_test_db().await.expect("bootstrap review test db");
-        let workspace_id = unique_workspace("review-guard");
-        let scope = workspace_scope(&workspace_id);
+        let storage_partition_id = unique_workspace("review-guard");
+        let scope = tenant_scope(&storage_partition_id);
         let skill_name = unique_skill_name("review-guard");
         let package = skill_package(&skill_name, "Review guard draft skills");
         let draft = create_draft_skill_artifact(&test_db, &scope, &package).await;
         let workflow_candidate = append_candidate(
             &test_db,
-            &workspace_id,
+            &storage_partition_id,
             LearningCandidateType::Workflow,
             LearningCandidateStatus::Proposed,
             "workflow_improved",
@@ -377,7 +389,7 @@ mod skill_learning_review {
         .await;
         let non_proposed = append_candidate(
             &test_db,
-            &workspace_id,
+            &storage_partition_id,
             LearningCandidateType::Skill,
             LearningCandidateStatus::Rejected,
             "skill_created",
@@ -397,7 +409,7 @@ mod skill_learning_review {
                 #[cfg(feature = "internal-eval-runner")]
                 review_providers(),
                 review_request(
-                    &workspace_id,
+                    &storage_partition_id,
                     workflow_candidate.id,
                     LearningCandidateReviewAction::Accept,
                 ),
@@ -409,7 +421,7 @@ mod skill_learning_review {
         let rejected_workflow = reject_learning_candidate_after_authz(
             store.clone(),
             review_request(
-                &workspace_id,
+                &storage_partition_id,
                 workflow_candidate.id,
                 LearningCandidateReviewAction::Reject,
             ),
@@ -425,7 +437,7 @@ mod skill_learning_review {
                 #[cfg(feature = "internal-eval-runner")]
                 review_providers(),
                 review_request(
-                    &workspace_id,
+                    &storage_partition_id,
                     non_proposed.id,
                     LearningCandidateReviewAction::Accept
                 ),
@@ -438,7 +450,7 @@ mod skill_learning_review {
             reject_learning_candidate_after_authz(
                 store,
                 review_request(
-                    &workspace_id,
+                    &storage_partition_id,
                     non_proposed.id,
                     LearningCandidateReviewAction::Reject
                 ),
@@ -449,17 +461,17 @@ mod skill_learning_review {
         );
     }
 
-    fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+    fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
         ActionRuleScope::Tenant {
-            tenant_id: tenant_id_from_workspace(workspace_id),
+            tenant_id: tenant_id_from_workspace(storage_partition_id),
         }
     }
 
-    fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> TenantId {
-        uuid::Uuid::parse_str(workspace_id.as_str())
+    fn tenant_id_from_workspace(storage_partition_id: &StoragePartitionId) -> TenantId {
+        uuid::Uuid::parse_str(storage_partition_id.as_str())
             .map(TenantId::from)
             .unwrap_or_else(|_| {
-                let hash = blake3::hash(workspace_id.as_str().as_bytes());
+                let hash = blake3::hash(storage_partition_id.as_str().as_bytes());
                 let mut bytes = [0_u8; 16];
                 bytes.copy_from_slice(&hash.as_bytes()[..16]);
                 bytes[6] = (bytes[6] & 0x0f) | 0x80;
@@ -476,12 +488,12 @@ mod skill_learning_review {
     impl LearningReviewStore for FailingLearningAppendStore {
         fn get_learning_candidate<'a>(
             &'a self,
-            workspace_id: &'a WorkspaceId,
+            tenant_id: &'a TenantId,
             candidate_id: Uuid,
         ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
             Box::pin(async move {
                 self.store
-                    .get_learning_candidate(workspace_id, candidate_id)
+                    .get_learning_candidate(tenant_id, candidate_id)
                     .await
             })
         }
@@ -543,8 +555,8 @@ mod skill_learning_review {
         Arc::new(moa_providers::ProviderRegistry::default())
     }
 
-    fn unique_workspace(_prefix: &str) -> WorkspaceId {
-        WorkspaceId::new(Uuid::now_v7().to_string())
+    fn unique_workspace(_prefix: &str) -> StoragePartitionId {
+        StoragePartitionId::new(Uuid::now_v7().to_string())
     }
 
     fn unique_skill_name(prefix: &str) -> String {
@@ -613,7 +625,7 @@ mod skill_learning_review {
 
     async fn append_candidate(
         test_db: &moa_test_support::postgres::TestDb,
-        workspace_id: &WorkspaceId,
+        storage_partition_id: &StoragePartitionId,
         candidate_type: LearningCandidateType,
         status: LearningCandidateStatus,
         operation: &str,
@@ -623,8 +635,7 @@ mod skill_learning_review {
         let now = Utc::now();
         let candidate = LearningCandidate {
             id: Uuid::now_v7(),
-            tenant_id: tenant_id_from_workspace(workspace_id),
-            workspace_id: workspace_id.clone(),
+            tenant_id: tenant_id_from_workspace(storage_partition_id),
             user_id: None,
             candidate_type,
             status,
@@ -642,7 +653,7 @@ mod skill_learning_review {
                 "artifact_path": format!("skills/{skill_name}/SKILL.md"),
                 "source_session_id": Uuid::now_v7(),
                 "generated_regression_suite": {
-                    "relative_path": format!("workspaces/{}/skills/{skill_name}/tests/suite.toml", workspace_id.as_str()),
+                    "relative_path": format!("tenants/{}/skills/{skill_name}/tests/suite.toml", tenant_id_from_workspace(storage_partition_id)),
                     "source_format": "toml",
                     "source_text": format!(
                         "[suite]\nname = \"{skill_name}-regression\"\n\n[[cases]]\nname = \"smoke\"\ninput = \"run it\"\n"
@@ -668,12 +679,12 @@ mod skill_learning_review {
     }
 
     fn review_request(
-        workspace_id: &WorkspaceId,
+        storage_partition_id: &StoragePartitionId,
         candidate_id: Uuid,
         action: LearningCandidateReviewAction,
     ) -> LearningCandidateReviewRequest {
         LearningCandidateReviewRequest {
-            tenant_id: tenant_id_from_workspace(workspace_id),
+            tenant_id: tenant_id_from_workspace(storage_partition_id),
             candidate_id,
             action,
             reviewer_subject: "user:reviewer".to_string(),

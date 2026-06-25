@@ -30,7 +30,7 @@ expected_indexes(indexname) AS (
         VALUES
             ('_id_idx'),
             ('_uid_idx'),
-            ('_workspace_idx'),
+            ('_storage_partition_idx'),
             ('_scope_idx'),
             ('_validto_partial_idx'),
             ('_props_gin')
@@ -46,7 +46,7 @@ expected_indexes(indexname) AS (
         VALUES
             ('_start_idx'),
             ('_end_idx'),
-            ('_workspace_idx')
+            ('_storage_partition_idx')
     ) AS suffixes(suffix)
 ),
 missing_labels AS (

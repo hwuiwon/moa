@@ -23,7 +23,7 @@ This reference condenses the repository-specific instructions that matter when a
 
 ## Project Conventions
 
-- IDs are `uuid::Uuid` wrapped in MOA newtypes such as `SessionId`, `UserId`, and `WorkspaceId`.
+- IDs are `uuid::Uuid` wrapped in MOA newtypes such as `SessionId`, `UserId`, and `TenantId`.
 - Timestamps are `chrono::DateTime<Utc>`.
 - Filesystem paths use `PathBuf`; logical wiki paths use `String`.
 - Dynamic JSON payloads use `serde_json::Value`.

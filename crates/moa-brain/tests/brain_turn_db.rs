@@ -11,8 +11,8 @@ use moa_core::{
     ContactRef, ContactVerificationState, Event, EventFilter, EventRange, EventRecord, EventType,
     LLMProvider, MoaConfig, ModelCapabilities, Result, RuntimeEvent, SequenceNum, SessionActorRef,
     SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, StopReason,
-    TenantId, TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat, ToolCallId,
-    ToolInvocation, ToolOutput, UserId, WorkspaceId,
+    StoragePartitionId, TenantId, TokenPricing, TokenUsage, ToolCallContent, ToolCallFormat,
+    ToolCallId, ToolInvocation, ToolOutput, UserId,
 };
 use moa_hands::ToolRouter;
 use moa_security::ActionPolicies;
@@ -52,7 +52,7 @@ fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
 }
 
 fn test_tenant_id() -> TenantId {
-    tenant_id_from_workspace_id(&WorkspaceId::new("workspace"))
+    tenant_id_from_storage_partition_id(&StoragePartitionId::new("workspace"))
 }
 
 fn test_contact_id() -> ContactId {
@@ -63,14 +63,10 @@ fn test_contact_ref() -> ContactRef {
     contact_ref(test_tenant_id(), test_contact_id())
 }
 
-fn test_runtime_workspace_id() -> WorkspaceId {
-    WorkspaceId::new(test_tenant_id().to_string())
-}
-
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn contact_id_from_label(label: &str) -> ContactId {
@@ -185,13 +181,9 @@ impl SessionStore for MockSessionStore {
         Ok(Vec::new())
     }
 
-    async fn workspace_cost_since(
-        &self,
-        workspace_id: &WorkspaceId,
-        since: DateTime<Utc>,
-    ) -> Result<u32> {
+    async fn tenant_cost_since(&self, tenant_id: &TenantId, since: DateTime<Utc>) -> Result<u32> {
         let session = self.session.lock().await.clone();
-        if session.tenant_id != tenant_id_from_workspace_id(workspace_id) {
+        if session.tenant_id != *tenant_id {
             return Ok(0);
         }
 
@@ -1421,7 +1413,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
     ];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let mut config = MoaConfig::default();
-    config.budgets.daily_workspace_cents = 5;
+    config.budgets.daily_tenant_cents = 5;
     let pipeline = build_default_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("should not run"));
 
@@ -1430,7 +1422,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
         .expect_err("budget should stop the turn");
     match error {
         moa_core::MoaError::BudgetExhausted(message) => {
-            assert!(message.contains("Daily workspace budget exhausted"));
+            assert!(message.contains("Daily tenant budget exhausted"));
         }
         other => panic!("expected budget exhaustion, got {other:?}"),
     }
@@ -1444,7 +1436,7 @@ async fn run_brain_turn_stops_when_workspace_budget_is_exhausted() {
             message,
             recoverable,
         } => {
-            assert!(message.contains("Daily workspace budget exhausted"));
+            assert!(message.contains("Daily tenant budget exhausted"));
             assert!(!recoverable);
         }
         other => panic!("expected error event, got {other:?}"),
@@ -1491,7 +1483,7 @@ async fn run_brain_turn_skips_budget_enforcement_when_limit_is_zero() {
     ];
     let store = Arc::new(MockSessionStore::new(session.clone(), initial_events));
     let mut config = MoaConfig::default();
-    config.budgets.daily_workspace_cents = 0;
+    config.budgets.daily_tenant_cents = 0;
     let pipeline = build_default_pipeline(&config, store.clone());
     let llm = Arc::new(CapturingTextLlmProvider::new("still runs"));
 
@@ -2289,10 +2281,9 @@ async fn auto_mode_repeated_tool_runs_without_persisted_action_policy_rules() {
     .await
     .unwrap();
     assert_eq!(first, TurnResult::Complete);
-    let runtime_workspace_id = test_runtime_workspace_id();
     assert_eq!(
         store
-            .list_action_policy_rules_for_tool(&runtime_workspace_id, &UserId::new("user"), "bash",)
+            .list_action_policy_rules_for_tool(&test_tenant_id(), &UserId::new("user"), "bash",)
             .await
             .unwrap()
             .len(),
@@ -2392,10 +2383,7 @@ async fn malicious_tool_results_are_wrapped_as_untrusted_content() {
     .unwrap();
     let tool_router = Arc::new(ToolRouter::new_local(sandbox_dir.path()).await.unwrap());
     tool_router
-        .remember_workspace_root(
-            test_runtime_workspace_id(),
-            sandbox_dir.path().to_path_buf(),
-        )
+        .remember_workspace_root(test_tenant_id(), sandbox_dir.path().to_path_buf())
         .await;
     let session = SessionMeta {
         tenant_id: test_tenant_id(),

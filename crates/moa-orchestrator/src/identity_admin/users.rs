@@ -623,25 +623,6 @@ async fn enqueue_direct_user_tuple_deletes(
         .await?;
     }
 
-    if table_exists(tx, "workspaces").await? {
-        let workspaces: Vec<(String,)> = sqlx::query_as("SELECT id::TEXT FROM workspaces")
-            .fetch_all(&mut **tx)
-            .await?;
-        for (workspace_id,) in workspaces {
-            for relation in ["member", "editor", "admin"] {
-                enqueue_raw(
-                    &mut **tx,
-                    TupleOp::Delete,
-                    &user_wire,
-                    relation,
-                    &format!("workspace:{workspace_id}"),
-                    Some(tenant_id),
-                )
-                .await?;
-            }
-        }
-    }
-
     Ok(())
 }
 

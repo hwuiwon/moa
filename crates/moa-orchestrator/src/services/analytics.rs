@@ -360,7 +360,7 @@ pub fn tool_stats_response_from_rows(
     }
 }
 
-/// Converts workspace and daily cache analytics into the public wire response.
+/// Converts tenant and daily cache analytics into the public wire response.
 #[must_use]
 pub fn cache_stats_response_from_parts(
     summary: TenantAnalyticsSummary,
@@ -403,8 +403,8 @@ async fn experiment_stats_inner(
         r#"
         SELECT status, COUNT(*)::BIGINT AS count
         FROM moa.experiment_run
-        WHERE scope = 'workspace'
-          AND workspace_id = $1
+        WHERE scope = 'tenant'
+          AND storage_partition_id = $1
           AND user_id IS NULL
           AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
           AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
@@ -422,8 +422,8 @@ async fn experiment_stats_inner(
         r#"
         SELECT run_uid, name, status, score_run_id, created_at
         FROM moa.experiment_run
-        WHERE scope = 'workspace'
-          AND workspace_id = $1
+        WHERE scope = 'tenant'
+          AND storage_partition_id = $1
           AND user_id IS NULL
           AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
           AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
@@ -444,8 +444,8 @@ async fn experiment_stats_inner(
                status,
                COUNT(*)::BIGINT AS count
         FROM moa.experiment_run
-        WHERE scope = 'workspace'
-          AND workspace_id = $1
+        WHERE scope = 'tenant'
+          AND storage_partition_id = $1
           AND user_id IS NULL
           AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
           AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)
@@ -467,8 +467,8 @@ async fn experiment_stats_inner(
                scenario_id,
                COUNT(*)::BIGINT AS count
         FROM moa.experiment_trial
-        WHERE scope = 'workspace'
-          AND workspace_id = $1
+        WHERE scope = 'tenant'
+          AND storage_partition_id = $1
           AND user_id IS NULL
           AND ($2::TIMESTAMPTZ IS NULL OR created_at >= $2)
           AND ($3::TIMESTAMPTZ IS NULL OR created_at <= $3)

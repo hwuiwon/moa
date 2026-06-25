@@ -217,7 +217,6 @@ pub async fn vector_leg(
 
     let hits = vector
         .knn(&VectorQuery {
-            workspace_id: Some(req.scope.tenant_id().to_string()),
             embedding: req.query_embedding.clone(),
             k: VECTOR_LIMIT,
             label_filter: Some(effective_label_filter_values(req.label_filter.as_deref())),
@@ -423,7 +422,7 @@ pub async fn hydrate_nodes(
     let mut conn = begin_scoped(pool, scope, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at,
                COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
@@ -477,7 +476,7 @@ pub async fn write_retrieval_lineage(
     let mut conn = begin_scoped(&pool, &scope, assume_app_role).await?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "INSERT INTO moa.retrieval_lineage \
-         (tenant_id, contact_id, workspace_id, user_id, session_id, turn_seq, turn_id, uid, rank, retrieved_at) ",
+         (tenant_id, contact_id, storage_partition_id, user_id, session_id, turn_seq, turn_id, uid, rank, retrieved_at) ",
     );
     builder.push_values(ranked_uids.iter().enumerate(), |mut row, (index, uid)| {
         row.push_bind(tenant_id.0)
@@ -1061,9 +1060,9 @@ mod tests {
         NodeIndexRow {
             uid,
             label,
-            workspace_id: Some("workspace".to_string()),
-            user_id: None,
-            scope: "workspace".to_string(),
+            storage_partition_id: Some("tenant".to_string()),
+            contact_id: None,
+            scope: "tenant".to_string(),
             name: name.to_string(),
             pii_class: PiiClass::None,
             valid_to: None,

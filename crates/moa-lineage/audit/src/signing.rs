@@ -17,8 +17,8 @@ use moa_lineage_core::chain::canonical_json_bytes;
 pub struct AuditRootSignaturePayload {
     /// Published root identifier.
     pub root_id: Uuid,
-    /// Workspace ID covered by the root.
-    pub workspace_id: String,
+    /// Storage partition ID covered by the root.
+    pub storage_partition_id: String,
     /// Root window start timestamp.
     pub window_start: DateTime<Utc>,
     /// Root window end timestamp.
@@ -41,7 +41,7 @@ impl AuditRootSignaturePayload {
     #[must_use]
     pub fn new(
         root_id: Uuid,
-        workspace_id: impl Into<String>,
+        storage_partition_id: impl Into<String>,
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
         record_count: u64,
@@ -52,7 +52,7 @@ impl AuditRootSignaturePayload {
     ) -> Self {
         Self {
             root_id,
-            workspace_id: workspace_id.into(),
+            storage_partition_id: storage_partition_id.into(),
             window_start,
             window_end,
             record_count,
@@ -98,9 +98,9 @@ impl SigningKey {
     }
 
     /// Signs the legacy root-shaped message used by DSAR bundle metadata.
-    pub fn sign_root(&self, root: &[u8], workspace_id: &str) -> Result<Vec<u8>> {
+    pub fn sign_root(&self, root: &[u8], storage_partition_id: &str) -> Result<Vec<u8>> {
         let metadata = serde_json::json!({
-            "workspace_id": workspace_id,
+            "storage_partition_id": storage_partition_id,
             "signing_key_label": self.label,
         });
         let mut message = Vec::with_capacity(root.len() + 128);
@@ -132,9 +132,14 @@ impl SigningKey {
     }
 
     /// Verifies the legacy root-shaped message used by DSAR bundle metadata.
-    pub fn verify_root(&self, root: &[u8], workspace_id: &str, signature: &[u8]) -> Result<()> {
+    pub fn verify_root(
+        &self,
+        root: &[u8],
+        storage_partition_id: &str,
+        signature: &[u8],
+    ) -> Result<()> {
         let metadata = serde_json::json!({
-            "workspace_id": workspace_id,
+            "storage_partition_id": storage_partition_id,
             "signing_key_label": self.label,
         });
         let mut message = Vec::with_capacity(root.len() + 128);
@@ -254,23 +259,24 @@ mod tests {
     fn signing_roundtrip_rejects_tampering() {
         let key = SigningKey::from_seed("dev", [7_u8; 32]);
         let root = [9_u8; 32];
-        let signature = key.sign_root(&root, "workspace").expect("sign");
+        let storage_partition = "tenant-storage-partition";
+        let signature = key.sign_root(&root, storage_partition).expect("sign");
 
-        key.verify_root(&root, "workspace", &signature)
+        key.verify_root(&root, storage_partition, &signature)
             .expect("verify");
         assert!(
-            key.verify_root(&[8_u8; 32], "workspace", &signature)
+            key.verify_root(&[8_u8; 32], storage_partition, &signature)
                 .is_err()
         );
     }
 
     #[test]
     fn audit_root_signature_binds_window_and_object_lock_metadata() {
-        // Pins: audit-root signatures cover more than the Merkle root and workspace label.
+        // Pins: audit-root signatures cover more than the Merkle root and storage-partition label.
         let key = SigningKey::from_seed("audit-root", [11_u8; 32]);
         let payload = AuditRootSignaturePayload::new(
             Uuid::now_v7(),
-            "workspace",
+            "tenant-storage-partition",
             Utc::now(),
             Utc::now(),
             42,

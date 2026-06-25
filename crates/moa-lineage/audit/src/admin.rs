@@ -42,8 +42,8 @@ pub struct VerificationReport {
 pub struct AuditRootRow {
     /// Audit root identifier.
     pub root_id: Uuid,
-    /// Workspace covered by the root.
-    pub workspace_id: String,
+    /// Storage partition covered by the root.
+    pub storage_partition_id: String,
     /// Root window start timestamp.
     pub window_start: DateTime<Utc>,
     /// Root window end timestamp.
@@ -70,7 +70,7 @@ impl AuditRootRow {
     pub fn signature_payload(&self) -> AuditRootSignaturePayload {
         AuditRootSignaturePayload::new(
             self.root_id,
-            self.workspace_id.clone(),
+            self.storage_partition_id.clone(),
             self.window_start,
             self.window_end,
             self.record_count,
@@ -85,34 +85,34 @@ impl AuditRootRow {
 /// Loads a published audit root by root UUID or S3 object URI.
 pub async fn load_audit_root(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     id_or_uri: &str,
 ) -> Result<AuditRootRow> {
     let row = if let Ok(root_id) = Uuid::parse_str(id_or_uri) {
         sqlx::query(
             r#"
-            SELECT root_id, workspace_id, window_start, window_end, record_count,
+            SELECT root_id, storage_partition_id, window_start, window_end, record_count,
                    merkle_root, signature, signing_key_label, s3_object_etag,
                    object_lock_mode, retain_until
             FROM analytics.audit_roots
-            WHERE workspace_id = $1 AND root_id = $2
+            WHERE storage_partition_id = $1 AND root_id = $2
             "#,
         )
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(root_id)
         .fetch_one(pool)
         .await?
     } else {
         sqlx::query(
             r#"
-            SELECT root_id, workspace_id, window_start, window_end, record_count,
+            SELECT root_id, storage_partition_id, window_start, window_end, record_count,
                    merkle_root, signature, signing_key_label, s3_object_etag,
                    object_lock_mode, retain_until
             FROM analytics.audit_roots
-            WHERE workspace_id = $1 AND s3_object_uri = $2
+            WHERE storage_partition_id = $1 AND s3_object_uri = $2
             "#,
         )
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(id_or_uri)
         .fetch_one(pool)
         .await?
@@ -122,7 +122,7 @@ pub async fn load_audit_root(
         .map_err(|_| AuditError::Invalid("audit root record_count is negative".to_string()))?;
     Ok(AuditRootRow {
         root_id: row.try_get("root_id")?,
-        workspace_id: row.try_get("workspace_id")?,
+        storage_partition_id: row.try_get("storage_partition_id")?,
         window_start: row.try_get("window_start")?,
         window_end: row.try_get("window_end")?,
         merkle_root: row.try_get("merkle_root")?,
@@ -138,7 +138,7 @@ pub async fn load_audit_root(
 /// Loads compliance rows for a relative hot-store interval.
 pub async fn load_compliance_rows_for_interval(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     since: &str,
 ) -> Result<Vec<ComplianceRow>> {
     load_compliance_rows(
@@ -146,13 +146,13 @@ pub async fn load_compliance_rows_for_interval(
             r#"
             SELECT turn_id, record_kind, ts, payload, integrity_hash, prev_hash
             FROM analytics.turn_lineage
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND prev_hash IS NOT NULL
               AND ts > now() - ($2::text)::interval
             ORDER BY ts ASC, turn_id ASC, record_kind ASC
             "#,
         )
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(since)
         .fetch_all(pool)
         .await?,
@@ -162,7 +162,7 @@ pub async fn load_compliance_rows_for_interval(
 /// Loads compliance rows for an exact audit-root window.
 pub async fn load_compliance_rows_for_window(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
 ) -> Result<Vec<ComplianceRow>> {
@@ -171,14 +171,14 @@ pub async fn load_compliance_rows_for_window(
             r#"
             SELECT turn_id, record_kind, ts, payload, integrity_hash, prev_hash
             FROM analytics.turn_lineage
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND prev_hash IS NOT NULL
               AND ts >= $2
               AND ts <= $3
             ORDER BY ts ASC, turn_id ASC, record_kind ASC
             "#,
         )
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(window_start)
         .bind(window_end)
         .fetch_all(pool)
@@ -186,10 +186,10 @@ pub async fn load_compliance_rows_for_window(
     )
 }
 
-/// Counts visible dead-lettered lineage rows for one workspace and optional root window.
+/// Counts visible dead-lettered lineage rows for one storage partition and optional root window.
 pub async fn count_lineage_dead_letter_rows(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     window: Option<(DateTime<Utc>, DateTime<Utc>)>,
 ) -> Result<u64> {
     let (window_start, window_end) = match window {
@@ -202,8 +202,8 @@ pub async fn count_lineage_dead_letter_rows(
         FROM analytics.lineage_dead_letters dead
         CROSS JOIN LATERAL jsonb_array_elements(dead.rows) AS pending(row_json)
         WHERE COALESCE(
-            pending.row_json -> 'row' ->> 'workspace_id',
-            dead.first_workspace_id
+            pending.row_json -> 'row' ->> 'storage_partition_id',
+            dead.first_storage_partition_id
         ) = $1
           AND (
             $2::timestamptz IS NULL
@@ -215,7 +215,7 @@ pub async fn count_lineage_dead_letter_rows(
           )
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(window_start)
     .bind(window_end)
     .fetch_one(pool)
@@ -311,7 +311,7 @@ pub fn verify_audit_root_window(
 /// Writes a DSAR bundle from already-collected lineage records.
 pub async fn export_dsar_bundle(
     signing: SigningKey,
-    workspace_id: &str,
+    storage_partition_id: &str,
     subject: &str,
     records: Vec<Value>,
     bundle_path: &Path,
@@ -319,7 +319,7 @@ pub async fn export_dsar_bundle(
     let exporter = DsarExporter::new(signing);
     exporter
         .export_records(
-            workspace_id,
+            storage_partition_id,
             subject.as_bytes().to_vec(),
             records,
             Vec::new(),
@@ -331,13 +331,15 @@ pub async fn export_dsar_bundle(
 /// Marks a lineage PII-vault subject pseudonym as erased.
 pub async fn erase_subject_pseudonym(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     subject_pseudonym: &[u8],
     secret: Vec<u8>,
     key_handle: &str,
 ) -> Result<u64> {
     let vault = PiiVault::with_pool(pool.clone(), secret, key_handle);
-    vault.erase_subject(workspace_id, subject_pseudonym).await
+    vault
+        .erase_subject(storage_partition_id, subject_pseudonym)
+        .await
 }
 
 fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<ComplianceRow>> {
@@ -448,7 +450,7 @@ mod tests {
         let now = Utc::now();
         let mut root = AuditRootRow {
             root_id: Uuid::now_v7(),
-            workspace_id: "workspace".to_string(),
+            storage_partition_id: "tenant-storage-partition".to_string(),
             window_start: now,
             window_end: now,
             merkle_root: root_hash.as_bytes().to_vec(),
@@ -489,7 +491,7 @@ mod tests {
         let now = Utc::now();
         let mut root = AuditRootRow {
             root_id: Uuid::now_v7(),
-            workspace_id: "workspace".to_string(),
+            storage_partition_id: "tenant-storage-partition".to_string(),
             window_start: now,
             window_end: now,
             merkle_root: root_hash.as_bytes().to_vec(),

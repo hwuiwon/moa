@@ -33,9 +33,9 @@ fn candidate_with(
     NodeIndexRow {
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
-        workspace_id: Some(Uuid::now_v7().to_string()),
-        user_id: None,
-        scope: "workspace".to_string(),
+        storage_partition_id: Some(Uuid::now_v7().to_string()),
+        contact_id: None,
+        scope: "tenant".to_string(),
         name: summary.to_string(),
         pii_class: PiiClass::None,
         valid_to,

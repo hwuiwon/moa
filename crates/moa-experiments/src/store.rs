@@ -73,20 +73,20 @@ impl ExperimentStore {
         let row = sqlx::query(
             r#"
             INSERT INTO moa.experiment_run (
-                run_uid, workspace_id, user_id, name, target_kind, status,
+                run_uid, storage_partition_id, user_id, name, target_kind, status,
                 target, variant, scorecard, score_run_id, session_id,
                 workflow_run_uid, artifact_revision_uids, idempotency_key,
                 created_by_identity
             )
             VALUES ($1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            RETURNING run_uid, workspace_id, user_id, scope, name, target_kind, status,
+            RETURNING run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
                       target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                       artifact_revision_uids, idempotency_key, created_by_identity, error,
                       started_at, completed_at, created_at, updated_at
             "#,
         )
         .bind(Uuid::now_v7())
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run.name)
         .bind(target_kind.as_str())
@@ -106,7 +106,7 @@ impl ExperimentStore {
             sqlx::query(
                 r#"
                 INSERT INTO moa.experiment_run_artifact_revision (
-                    run_uid, revision_uid, workspace_id, user_id
+                    run_uid, revision_uid, storage_partition_id, user_id
                 )
                 SELECT $1, revision_uid, $3, $4
                 FROM UNNEST($2::UUID[]) AS revisions(revision_uid)
@@ -115,7 +115,7 @@ impl ExperimentStore {
             )
             .bind(row.get::<Uuid, _>("run_uid"))
             .bind(&artifact_revision_uids)
-            .bind(parts.workspace_id.as_deref())
+            .bind(parts.storage_partition_id.as_deref())
             .bind(parts.user_id.as_deref())
             .execute(conn.as_mut())
             .await
@@ -148,13 +148,13 @@ impl ExperimentStore {
         let mut conn = ScopedConn::begin(&self.pool, &experiment_scope_context(scope)).await?;
         let rows = sqlx::query(
             r#"
-            SELECT run_uid, workspace_id, user_id, scope, name, target_kind, status,
+            SELECT run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
                    target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                    artifact_revision_uids, idempotency_key, created_by_identity, error,
                    started_at, completed_at, created_at, updated_at
             FROM moa.experiment_run
             WHERE scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND ($4::TEXT IS NULL OR status = $4)
             ORDER BY created_at DESC
@@ -162,7 +162,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(status.map(ExperimentRunStatus::as_str))
         .bind(limit)
@@ -204,17 +204,17 @@ impl ExperimentStore {
                 updated_at = now()
             WHERE run_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $5)
-            RETURNING run_uid, workspace_id, user_id, scope, name, target_kind, status,
+            RETURNING run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
                       target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                       artifact_revision_uids, idempotency_key, created_by_identity, error,
                       started_at, completed_at, created_at, updated_at
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(status.as_str())
@@ -294,7 +294,7 @@ impl ExperimentStore {
         let row = sqlx::query(
             r#"
             INSERT INTO moa.experiment_trial (
-                trial_uid, run_uid, workspace_id, user_id, trial_key, status,
+                trial_uid, run_uid, storage_partition_id, user_id, trial_key, status,
                 target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                 scenario_id, data_bundle_ids, artifact_revision_uids,
                 simulator, simulator_model, target_model, seed, score_run_id
@@ -303,7 +303,7 @@ impl ExperimentStore {
                 $1, $2, $3, $4, $5, 'accepted', $6, $7, $8, $9, $10, $11,
                 $12, $13, $14, $15, $16, $17, $18
             )
-            RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
                       simulator, target_model, seed, session_id, workflow_run_uid,
@@ -313,7 +313,7 @@ impl ExperimentStore {
         )
         .bind(Uuid::now_v7())
         .bind(trial.run_uid)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(trial.trial_key)
         .bind(trial.target_kind.as_str())
@@ -374,7 +374,7 @@ impl ExperimentStore {
         ensure_run_exists_in_scope(conn.as_mut(), scope, run_uid).await?;
         let rows = sqlx::query(
             r#"
-            SELECT trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            SELECT trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                    target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                    scenario_id, data_bundle_ids, artifact_revision_uids,
                    simulator, target_model, seed, session_id, workflow_run_uid,
@@ -383,7 +383,7 @@ impl ExperimentStore {
             FROM moa.experiment_trial
             WHERE run_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND ($5::TEXT IS NULL OR status = $5)
             ORDER BY created_at DESC
@@ -391,7 +391,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(status.map(ExperimentTrialStatus::as_str))
@@ -425,7 +425,7 @@ impl ExperimentStore {
                 FROM moa.experiment_trial trial
                 WHERE trial.run_uid = $4
                   AND trial.scope = $1
-                  AND trial.workspace_id IS NOT DISTINCT FROM $2
+                  AND trial.storage_partition_id IS NOT DISTINCT FROM $2
                   AND trial.user_id IS NOT DISTINCT FROM $3
                   AND trial.trial_key = ANY($5)
                   AND trial.status = 'accepted'
@@ -434,7 +434,7 @@ impl ExperimentStore {
                       FROM moa.experiment_run run
                       WHERE run.run_uid = trial.run_uid
                         AND run.scope = $1
-                        AND run.workspace_id IS NOT DISTINCT FROM $2
+                        AND run.storage_partition_id IS NOT DISTINCT FROM $2
                         AND run.user_id IS NOT DISTINCT FROM $3
                         AND run.status NOT IN ('completed', 'failed', 'cancelled')
                   )
@@ -447,7 +447,7 @@ impl ExperimentStore {
                 started_at = COALESCE(started_at, now()),
                 updated_at = now()
             WHERE trial_uid IN (SELECT trial_uid FROM selected)
-            RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
                       simulator, target_model, seed, session_id, workflow_run_uid,
@@ -456,7 +456,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(trial_keys)
@@ -504,10 +504,10 @@ impl ExperimentStore {
                 updated_at = now()
             WHERE trial_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND (status NOT IN ('completed', 'failed', 'cancelled') OR status = $5)
-            RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
                       simulator, target_model, seed, session_id, workflow_run_uid,
@@ -516,7 +516,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(trial_uid)
         .bind(status.as_str())
@@ -551,10 +551,10 @@ impl ExperimentStore {
                 updated_at = now()
             WHERE run_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
               AND status IN ('accepted', 'dispatched', 'running')
-            RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
                       simulator, target_model, seed, session_id, workflow_run_uid,
@@ -563,7 +563,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(reason)
@@ -625,9 +625,9 @@ impl ExperimentStore {
                 updated_at = now()
             WHERE trial_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-            RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
                       simulator, target_model, seed, session_id, workflow_run_uid,
@@ -636,7 +636,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(trial_uid)
         .fetch_optional(conn.as_mut())
@@ -665,9 +665,9 @@ impl ExperimentStore {
                 updated_at = now()
             WHERE trial_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-            RETURNING trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+            RETURNING trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                       target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                       scenario_id, data_bundle_ids, artifact_revision_uids,
                       simulator, target_model, seed, session_id, workflow_run_uid,
@@ -676,7 +676,7 @@ impl ExperimentStore {
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(trial_uid)
         .bind(session_id)
@@ -706,16 +706,16 @@ impl ExperimentStore {
                 updated_at = now()
             WHERE run_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
-            RETURNING run_uid, workspace_id, user_id, scope, name, target_kind, status,
+            RETURNING run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
                       target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                       artifact_revision_uids, idempotency_key, created_by_identity, error,
                       started_at, completed_at, created_at, updated_at
             "#,
         )
         .bind(parts.scope)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(session_id)
@@ -730,21 +730,16 @@ impl ExperimentStore {
 
 struct ScopeParts {
     scope: &'static str,
-    workspace_id: Option<String>,
+    storage_partition_id: Option<String>,
     user_id: Option<String>,
 }
 
 impl ScopeParts {
     fn from_scope(scope: &ActionRuleScope) -> Self {
         match scope {
-            ActionRuleScope::WorkspaceDefault => Self {
-                scope: "global",
-                workspace_id: None,
-                user_id: None,
-            },
             ActionRuleScope::Tenant { tenant_id } => Self {
-                scope: "workspace",
-                workspace_id: Some(tenant_id.to_string()),
+                scope: "tenant",
+                storage_partition_id: Some(tenant_id.to_string()),
                 user_id: None,
             },
         }
@@ -759,20 +754,20 @@ async fn load_scoped_run(
     let parts = ScopeParts::from_scope(scope);
     sqlx::query(
         r#"
-        SELECT run_uid, workspace_id, user_id, scope, name, target_kind, status,
+        SELECT run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
                target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                artifact_revision_uids, idempotency_key, created_by_identity, error,
                started_at, completed_at, created_at, updated_at
         FROM moa.experiment_run
         WHERE run_uid = $4
           AND scope = $1
-          AND workspace_id IS NOT DISTINCT FROM $2
+          AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
         "#,
     )
     .bind(parts.scope)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(run_uid)
     .fetch_optional(conn)
@@ -788,20 +783,20 @@ async fn load_scoped_run_by_idempotency_key(
     let parts = ScopeParts::from_scope(scope);
     sqlx::query(
         r#"
-        SELECT run_uid, workspace_id, user_id, scope, name, target_kind, status,
+        SELECT run_uid, storage_partition_id, user_id, scope, name, target_kind, status,
                target, variant, scorecard, score_run_id, session_id, workflow_run_uid,
                artifact_revision_uids, idempotency_key, created_by_identity, error,
                started_at, completed_at, created_at, updated_at
         FROM moa.experiment_run
         WHERE idempotency_key = $4
           AND scope = $1
-          AND workspace_id IS NOT DISTINCT FROM $2
+          AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
         "#,
     )
     .bind(parts.scope)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(idempotency_key)
     .fetch_optional(conn)
@@ -831,7 +826,7 @@ async fn load_scoped_trial(
     let parts = ScopeParts::from_scope(scope);
     sqlx::query(
         r#"
-        SELECT trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+        SELECT trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                scenario_id, data_bundle_ids, artifact_revision_uids,
                simulator, target_model, seed, session_id, workflow_run_uid,
@@ -840,13 +835,13 @@ async fn load_scoped_trial(
         FROM moa.experiment_trial
         WHERE trial_uid = $4
           AND scope = $1
-          AND workspace_id IS NOT DISTINCT FROM $2
+          AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
         "#,
     )
     .bind(parts.scope)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(trial_uid)
     .fetch_optional(conn)
@@ -863,7 +858,7 @@ async fn load_scoped_trial_by_key(
     let parts = ScopeParts::from_scope(scope);
     sqlx::query(
         r#"
-        SELECT trial_uid, run_uid, workspace_id, user_id, scope, trial_key, status,
+        SELECT trial_uid, run_uid, storage_partition_id, user_id, scope, trial_key, status,
                target_kind, variant_key, plan_revision_uid, persona_id, profile_id,
                scenario_id, data_bundle_ids, artifact_revision_uids,
                simulator, target_model, seed, session_id, workflow_run_uid,
@@ -873,13 +868,13 @@ async fn load_scoped_trial_by_key(
         WHERE run_uid = $4
           AND trial_key = $5
           AND scope = $1
-          AND workspace_id IS NOT DISTINCT FROM $2
+          AND storage_partition_id IS NOT DISTINCT FROM $2
           AND user_id IS NOT DISTINCT FROM $3
         LIMIT 1
         "#,
     )
     .bind(parts.scope)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(run_uid)
     .bind(trial_key)
@@ -901,13 +896,13 @@ async fn ensure_workflow_run_visible(
             FROM moa.artifact_run
             WHERE run_uid = $4
               AND scope = $1
-              AND workspace_id IS NOT DISTINCT FROM $2
+              AND storage_partition_id IS NOT DISTINCT FROM $2
               AND user_id IS NOT DISTINCT FROM $3
         )
         "#,
     )
     .bind(parts.scope)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(workflow_run_uid)
     .fetch_one(conn)
@@ -937,18 +932,13 @@ async fn ensure_artifact_revisions_visible(
         SELECT revision_uid
         FROM moa.artifact_revision
         WHERE revision_uid = ANY($1)
-          AND (
-              scope = 'global'
-              OR (
-                  scope = 'workspace'
-                  AND workspace_id IS NOT DISTINCT FROM $2
-                  AND user_id IS NULL
-              )
-          )
+          AND scope = 'tenant'
+          AND storage_partition_id IS NOT DISTINCT FROM $2
+          AND user_id IS NULL
         "#,
     )
     .bind(revision_uids)
-    .bind(ScopeParts::from_scope(scope).workspace_id)
+    .bind(ScopeParts::from_scope(scope).storage_partition_id)
     .bind(Option::<String>::None)
     .fetch_all(conn)
     .await
@@ -972,7 +962,9 @@ async fn ensure_artifact_revisions_visible(
 
 fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
     let scope_text: String = row.try_get("scope").map_err(map_sqlx_error)?;
-    let workspace_id: Option<String> = row.try_get("workspace_id").map_err(map_sqlx_error)?;
+    let storage_partition_id: Option<String> = row
+        .try_get("storage_partition_id")
+        .map_err(map_sqlx_error)?;
     let user_id: Option<String> = row.try_get("user_id").map_err(map_sqlx_error)?;
     let target_kind_text: String = row.try_get("target_kind").map_err(map_sqlx_error)?;
     let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
@@ -981,7 +973,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentRunRecord> {
     let scorecard: Value = row.try_get("scorecard").map_err(map_sqlx_error)?;
 
     Ok(ExperimentRunRecord {
-        scope: scope_from_parts(&scope_text, workspace_id, user_id)?,
+        scope: scope_from_parts(&scope_text, storage_partition_id, user_id)?,
         run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
         target_kind: ExperimentTargetKind::from_db(&target_kind_text).ok_or_else(|| {
@@ -1028,7 +1020,9 @@ fn trial_artifact_revision_refs(trial: &NewExperimentTrial) -> Vec<Uuid> {
 
 fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecord> {
     let scope_text: String = row.try_get("scope").map_err(map_sqlx_error)?;
-    let workspace_id: Option<String> = row.try_get("workspace_id").map_err(map_sqlx_error)?;
+    let storage_partition_id: Option<String> = row
+        .try_get("storage_partition_id")
+        .map_err(map_sqlx_error)?;
     let user_id: Option<String> = row.try_get("user_id").map_err(map_sqlx_error)?;
     let target_kind_text: String = row.try_get("target_kind").map_err(map_sqlx_error)?;
     let status_text: String = row.try_get("status").map_err(map_sqlx_error)?;
@@ -1037,7 +1031,7 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
     let target_model: Option<String> = row.try_get("target_model").map_err(map_sqlx_error)?;
 
     Ok(ExperimentTrialRecord {
-        scope: scope_from_parts(&scope_text, workspace_id, user_id)?,
+        scope: scope_from_parts(&scope_text, storage_partition_id, user_id)?,
         trial_uid: row.try_get("trial_uid").map_err(map_sqlx_error)?,
         run_uid: row.try_get("run_uid").map_err(map_sqlx_error)?,
         trial_key: row.try_get("trial_key").map_err(map_sqlx_error)?,
@@ -1091,12 +1085,11 @@ fn trial_from_row(row: &sqlx::postgres::PgRow) -> MoaResult<ExperimentTrialRecor
 
 fn scope_from_parts(
     scope: &str,
-    workspace_id: Option<String>,
+    storage_partition_id: Option<String>,
     user_id: Option<String>,
 ) -> MoaResult<ActionRuleScope> {
-    match (scope, workspace_id, user_id) {
-        ("global", None, None) => Ok(ActionRuleScope::WorkspaceDefault),
-        ("workspace", Some(tenant_id), None) => Ok(ActionRuleScope::Tenant {
+    match (scope, storage_partition_id, user_id) {
+        ("tenant", Some(tenant_id), None) => Ok(ActionRuleScope::Tenant {
             tenant_id: parse_tenant_storage_key(&tenant_id)?,
         }),
         _ => Err(MoaError::StorageError(format!(
@@ -1107,7 +1100,6 @@ fn scope_from_parts(
 
 fn experiment_scope_context(scope: &ActionRuleScope) -> ScopeContext {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId(uuid::Uuid::nil())),
         ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }

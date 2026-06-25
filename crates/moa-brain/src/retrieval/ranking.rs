@@ -32,7 +32,7 @@ pub struct RankingWeights {
     /// Additive score for contact-scoped rows.
     pub scope_user: f64,
     /// Additive score for tenant-scoped rows.
-    pub scope_workspace: f64,
+    pub scope_tenant: f64,
     /// Half-life in days for valid-from recency.
     pub recency_half_life_days: f64,
     /// Half-life in days for access recency.
@@ -50,7 +50,7 @@ impl Default for RankingWeights {
             graph_rescue: 0.6,
             quality: 0.6,
             scope_user: 0.2,
-            scope_workspace: 0.1,
+            scope_tenant: 0.1,
             recency_half_life_days: 90.0,
             access_half_life_days: 14.0,
         }
@@ -83,7 +83,7 @@ impl From<&MemoryRankingWeights> for RankingWeights {
             graph_rescue: value.graph_rescue,
             quality: value.quality,
             scope_user: value.scope_user,
-            scope_workspace: value.scope_workspace,
+            scope_tenant: value.scope_tenant,
             recency_half_life_days: value.recency_half_life_days,
             access_half_life_days: value.access_half_life_days,
         }
@@ -120,7 +120,7 @@ impl<'a> FeatureRanker<'a> {
     /// Doubles the caller's user-scope term for first-person queries.
     ///
     /// "What do I prefer" should favor the caller's own facts over
-    /// workspace facts with similar text.
+    /// tenant facts with similar text.
     #[must_use]
     pub fn with_first_person_query(mut self, query_text: &str) -> Self {
         self.first_person_query = is_first_person_query(query_text);
@@ -162,7 +162,7 @@ impl<'a> FeatureRanker<'a> {
         let scope_term = match row.scope.as_str() {
             "contact" if self.contact_row_matches_request(row) => user_scope_weight,
             "contact" if self.request_scope.is_none() => user_scope_weight,
-            "tenant" => weights.scope_workspace,
+            "tenant" => weights.scope_tenant,
             _ => 0.0,
         };
 
@@ -185,8 +185,8 @@ impl<'a> FeatureRanker<'a> {
         };
         let tenant_id = tenant_id.to_string();
         let contact_id = contact_id.to_string();
-        row.workspace_id.as_deref() == Some(tenant_id.as_str())
-            && row.user_id.as_deref() == Some(contact_id.as_str())
+        row.storage_partition_id.as_deref() == Some(tenant_id.as_str())
+            && row.contact_id.as_deref() == Some(contact_id.as_str())
     }
 }
 
@@ -378,7 +378,7 @@ mod tests {
         config.weights.recency = 0.0;
         config.weights.access = 0.0;
         config.weights.overlap = 0.0;
-        config.weights.scope_workspace = 0.0;
+        config.weights.scope_tenant = 0.0;
         let ranker = FeatureRanker::new(&config, reference_time);
         let query_tokens = normalize_tokens("fact01 fact04 auth deploy release cadence");
         let explicit_identifier = row(
@@ -414,7 +414,7 @@ mod tests {
         config.weights.recency = 0.0;
         config.weights.access = 0.0;
         config.weights.overlap = 0.0;
-        config.weights.scope_workspace = 0.0;
+        config.weights.scope_tenant = 0.0;
         let ranker = FeatureRanker::new(&config, reference_time);
         let query_tokens = normalize_tokens(
             "Which team owns the library that audit-shipper-dep-0-0-0 depends on?",
@@ -517,8 +517,8 @@ mod tests {
             reference_time,
             None,
         );
-        caller.workspace_id = Some(Uuid::from_u128(0x100).to_string());
-        caller.user_id = Some(Uuid::from_u128(0x101).to_string());
+        caller.storage_partition_id = Some(Uuid::from_u128(0x100).to_string());
+        caller.contact_id = Some(Uuid::from_u128(0x101).to_string());
         let mut other_contact = row(
             "contact",
             "checkout service",
@@ -526,8 +526,8 @@ mod tests {
             reference_time,
             None,
         );
-        other_contact.workspace_id = Some(Uuid::from_u128(0x100).to_string());
-        other_contact.user_id = Some(Uuid::from_u128(0x102).to_string());
+        other_contact.storage_partition_id = Some(Uuid::from_u128(0x100).to_string());
+        other_contact.contact_id = Some(Uuid::from_u128(0x102).to_string());
 
         assert!(
             ranker.score(1.0, 1.0, &query_tokens, &caller)
@@ -572,7 +572,7 @@ mod tests {
         config.weights.subject_match = 0.0;
         config.weights.overlap = 0.0;
         config.weights.scope_user = 0.0;
-        config.weights.scope_workspace = 0.0;
+        config.weights.scope_tenant = 0.0;
         let ranker = FeatureRanker::new(&config, reference_time);
         let query_tokens = normalize_tokens("checkout service");
         let future_access = row(
@@ -739,8 +739,8 @@ mod tests {
         NodeIndexRow {
             uid,
             label: NodeLabel::Fact,
-            workspace_id: Some("workspace".to_string()),
-            user_id: None,
+            storage_partition_id: Some("tenant".to_string()),
+            contact_id: None,
             scope: scope.to_string(),
             name: name.to_string(),
             pii_class: PiiClass::None,

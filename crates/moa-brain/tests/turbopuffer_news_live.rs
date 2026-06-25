@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
-use moa_core::{ContactId, SessionId, TenantId, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{ContactId, SessionId, StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
 use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{
-    CohereV4Embedder, PgvectorStore, PromotionOptions, TurbopufferStore, WorkspacePromotion,
+    CohereV4Embedder, PgvectorStore, PromotionOptions, TurbopufferStore, VectorPartitionPromotion,
     finalize_promotion,
 };
 use moa_session::testing;
@@ -77,8 +77,8 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let pool = session_store.pool().clone();
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
-    let workspace_text = workspace_id.to_string();
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
+    let workspace_text = storage_partition_id.to_string();
     let tenant_scope = ScopeContext::tenant(tenant_id);
     let contact_scope = ScopeContext::contact(tenant_id, contact_id);
     let embedder = CohereV4Embedder::new(SecretString::from(cohere_api_key()?));
@@ -102,11 +102,12 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         "expected at least three news facts, got {ingest:?}"
     );
 
-    let embedding_count =
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.embeddings WHERE workspace_id = $1")
-            .bind(&workspace_text)
-            .fetch_one(&pool)
-            .await?;
+    let embedding_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM moa.embeddings WHERE storage_partition_id = $1",
+    )
+    .bind(&workspace_text)
+    .fetch_one(&pool)
+    .await?;
     assert!(
         embedding_count >= 3,
         "expected Cohere-backed embeddings for ingested facts"
@@ -117,10 +118,13 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
         tenant_scope.clone(),
     ));
     let turbopuffer = Arc::new(TurbopufferStore::from_env()?);
-    let promotion = WorkspacePromotion::new(pool.clone(), promotion_pgvector, turbopuffer.clone());
+    let scoped_turbopuffer =
+        Arc::new(turbopuffer.with_storage_partition_id(workspace_text.clone()));
+    let promotion =
+        VectorPartitionPromotion::new(pool.clone(), promotion_pgvector, scoped_turbopuffer.clone());
     let report = promotion
         .promote(PromotionOptions {
-            workspace_id: workspace_text.clone(),
+            storage_partition_id: workspace_text.clone(),
             target_backend: "turbopuffer".to_string(),
             validate_percent: 100,
             dual_read_hours: 1,
@@ -178,13 +182,14 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let steady_hits = retriever.retrieve(req).await?;
     assert_contains_artemis_core_stage(&steady_hits, "steady Turbopuffer retrieval");
 
-    let uids =
-        sqlx::query_scalar::<_, Uuid>("SELECT uid FROM moa.node_index WHERE workspace_id = $1")
-            .bind(&workspace_text)
-            .fetch_all(&pool)
-            .await?;
-    turbopuffer
-        .delete_in_workspace(&workspace_text, &uids)
+    let uids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT uid FROM moa.node_index WHERE storage_partition_id = $1",
+    )
+    .bind(&workspace_text)
+    .fetch_all(&pool)
+    .await?;
+    scoped_turbopuffer
+        .delete_in_storage_partition(&workspace_text, &uids)
         .await?;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name).await?;
@@ -195,7 +200,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
 async fn seed_workspace_embedder_state(
     pool: &sqlx::PgPool,
     scope: &ScopeContext,
-    workspace_id: &str,
+    storage_partition_id: &str,
     embedder: &CohereV4Embedder,
 ) -> TestResult {
     let mut conn = ScopedConn::begin(pool, scope).await?;
@@ -204,17 +209,17 @@ async fn seed_workspace_embedder_state(
         .await?;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(embedder.model_name())
     .bind(embedder.model_version())
     .bind(embedder.dimension() as i32)

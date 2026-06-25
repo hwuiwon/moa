@@ -103,7 +103,7 @@ impl ContextProcessor for RuntimeContextProcessor {
 
 async fn build_runtime_reminder(now: DateTime<Utc>, ctx: &WorkingContext) -> String {
     let workspace_root = workspace_root_from_context(ctx);
-    let workspace_name = workspace_root
+    let project_name = workspace_root
         .as_ref()
         .and_then(|path| path.file_name())
         .and_then(|segment| segment.to_str())
@@ -118,8 +118,8 @@ async fn build_runtime_reminder(now: DateTime<Utc>, ctx: &WorkingContext) -> Str
         format!("Current date: {}", now.format("%Y-%m-%d")),
     ];
 
-    if let Some(name) = workspace_name {
-        lines.push(format!("Current workspace: {name}"));
+    if let Some(name) = project_name {
+        lines.push(format!("Current project: {name}"));
     }
 
     if let Some(path) = workspace_root {

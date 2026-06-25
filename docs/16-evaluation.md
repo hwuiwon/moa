@@ -134,7 +134,7 @@ actual value.
 ## Multi-Session Scenarios
 
 Long cases may include a `secondary_session` block. The runner creates the
-secondary session in the same eval store and workspace as the primary session.
+secondary session in the same eval store and tenant as the primary session.
 Supported interleavings are `sequential`, `round_robin`, and `phased`.
 
 ## Local Reproduction

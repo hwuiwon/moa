@@ -353,9 +353,9 @@ mod tests {
 
     #[tokio::test]
     async fn llm_extractor_corrects_user_subject_scope() {
-        // Pins: model workspace scope is corrected for user-subject preference facts.
+        // Pins: model tenant scope is corrected for user-subject preference facts.
         let extractor = extractor_for_response(
-            r#"[{"subject":"User 04","predicate":"should use","object":"repo/control-plane","summary":"User 04 should use repo/control-plane.","scope":"workspace","confidence":0.9}]"#,
+            r#"[{"subject":"User 04","predicate":"should use","object":"repo/control-plane","summary":"User 04 should use repo/control-plane.","scope":"tenant","confidence":0.9}]"#,
             12,
         )
         .await;
@@ -371,8 +371,8 @@ mod tests {
         let extractor = extractor_for_response(
             r#"[
 {"subject":"week","predicate":"was busy","object":"user","summary":"The user had a busy week.","scope":"user","confidence":0.8},
-{"subject":"standardization","predicate":"occurred during","object":"last sprint","summary":"The standardization occurred during last sprint.","scope":"workspace","confidence":0.8},
-{"subject":"auth","predicate":"uses","object":"JWT","summary":"auth uses JWT.","scope":"workspace","confidence":0.9}
+{"subject":"standardization","predicate":"occurred during","object":"last sprint","summary":"The standardization occurred during last sprint.","scope":"tenant","confidence":0.8},
+{"subject":"auth","predicate":"uses","object":"JWT","summary":"auth uses JWT.","scope":"tenant","confidence":0.9}
 ]"#,
             12,
         )

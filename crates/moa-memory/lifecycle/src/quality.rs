@@ -1,6 +1,6 @@
 //! Outcome-weighted memory quality-score computation.
 
-use moa_core::WorkspaceId;
+use moa_core::TenantId;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 
@@ -13,7 +13,7 @@ const EPSILON: f64 = 1e-9;
 pub struct QualityStats {
     /// Active node-index rows updated with a non-neutral quality score.
     pub scored: u64,
-    /// Workspaces skipped because no task-segment outcome source is visible.
+    /// Tenants skipped because no task-segment outcome source is visible.
     pub skipped_no_outcome_source: u64,
 }
 
@@ -26,12 +26,13 @@ pub fn beta_smoothed_quality(uses: u64, successes: u64) -> f64 {
 /// Recomputes quality scores from retrieval lineage and resolved task segments.
 pub async fn compute_quality_scores(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     lookback_days: i64,
 ) -> Result<QualityStats> {
+    let storage_partition_id = tenant_id.to_string();
     if !task_segment_outcome_source_exists(pool).await? {
         tracing::warn!(
-            workspace_id = %workspace_id,
+            tenant_id = %tenant_id,
             "no task-segment outcome source found for memory quality scoring"
         );
         return Ok(QualityStats {
@@ -45,7 +46,7 @@ pub async fn compute_quality_scores(
         WITH segment_ranges AS (
             SELECT
                 session_id,
-                workspace_id,
+                storage_partition_id,
                 outcome,
                 1 + COALESCE(
                     SUM(turn_count) OVER (
@@ -61,7 +62,7 @@ pub async fn compute_quality_scores(
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                 ) AS end_turn
             FROM task_segments
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND outcome IS NOT NULL
               AND turn_count > 0
         ),
@@ -72,10 +73,10 @@ pub async fn compute_quality_scores(
                 COUNT(*) FILTER (WHERE segment_ranges.outcome = 'resolved')::bigint AS successes
             FROM moa.retrieval_lineage AS lineage
             LEFT JOIN segment_ranges
-              ON segment_ranges.workspace_id = lineage.workspace_id
+              ON segment_ranges.storage_partition_id = lineage.storage_partition_id
              AND segment_ranges.session_id = lineage.session_id
              AND lineage.turn_seq BETWEEN segment_ranges.start_turn AND segment_ranges.end_turn
-            WHERE lineage.workspace_id = $1
+            WHERE lineage.storage_partition_id = $1
               AND lineage.retrieved_at >= now() - ($2::text::interval)
             GROUP BY lineage.uid
         ),
@@ -85,7 +86,7 @@ pub async fn compute_quality_scores(
                               / (2.0 + scored.uses::double precision)
             FROM scored
             WHERE node.uid = scored.uid
-              AND node.workspace_id = $1
+              AND node.storage_partition_id = $1
               AND ABS(
                     node.quality_score
                     - ((1.0 + scored.successes::double precision)
@@ -94,18 +95,18 @@ pub async fn compute_quality_scores(
             RETURNING node.uid
         ),
         bumped AS (
-            INSERT INTO moa.workspace_state (workspace_id, changelog_version)
+            INSERT INTO moa.storage_partition_state (storage_partition_id, changelog_version)
             SELECT $1, 1
             WHERE EXISTS (SELECT 1 FROM updates)
-            ON CONFLICT (workspace_id) DO UPDATE
-                SET changelog_version = moa.workspace_state.changelog_version + 1,
+            ON CONFLICT (storage_partition_id) DO UPDATE
+                SET changelog_version = moa.storage_partition_state.changelog_version + 1,
                     updated_at = now()
             RETURNING 1
         )
         SELECT COUNT(*)::bigint FROM updates
         "#,
     )
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id)
     .bind(format!("{} days", lookback_days.max(0)))
     .bind(EPSILON)
     .fetch_one(pool)

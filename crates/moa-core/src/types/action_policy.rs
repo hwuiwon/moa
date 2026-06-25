@@ -118,9 +118,7 @@ impl ActionPolicyEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionRuleScope {
-    /// Rule applies as the workspace-level inherited default.
-    WorkspaceDefault,
-    /// Rule overrides the workspace default inside one tenant.
+    /// Rule applies inside one tenant.
     Tenant {
         /// Tenant that owns the override.
         tenant_id: TenantId,
@@ -132,7 +130,6 @@ impl ActionRuleScope {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::WorkspaceDefault => "workspace_default",
             Self::Tenant { .. } => "tenant",
         }
     }
@@ -241,7 +238,7 @@ pub struct ActionReviewFileDiff {
     pub language_hint: Option<String>,
 }
 
-/// Workspace-admin decision for one action review.
+/// Tenant-admin decision for one action review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionReviewDecision {
@@ -270,7 +267,7 @@ pub enum ActionReviewDecision {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ActionReviewStatus {
-    /// Review is waiting for a workspace-admin decision.
+    /// Review is waiting for a tenant-admin decision.
     Pending,
     /// Review was cleared.
     Cleared,

@@ -260,7 +260,6 @@ pub struct RetrievalMetrics {
     pub scope_match_rate_contact: MetricSummary,
     /// Fraction of resolved tenant-expected ledger facts stored with tenant scope.
     #[serde(default)]
-    #[serde(alias = "scope_match_rate_workspace")]
     pub scope_match_rate_tenant: MetricSummary,
     /// Fraction of stored Fact nodes that mapped back to a ledger fact.
     #[serde(default)]
@@ -301,11 +300,11 @@ pub struct RetrievalMetrics {
 pub struct ExtractionPrecisionCounts {
     /// Stored Fact nodes resolved to at least one ledger fact.
     pub mapped_fact_nodes: usize,
-    /// Total stored Fact nodes observed in the eval workspace.
+    /// Total stored Fact nodes observed in the eval tenant.
     pub total_fact_nodes: usize,
 }
 
-/// Counts used to compute entity fragmentation in eval workspaces.
+/// Counts used to compute entity fragmentation in eval tenants.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EntityFragmentationCounts {
     /// Active Entity nodes stored by ingestion.

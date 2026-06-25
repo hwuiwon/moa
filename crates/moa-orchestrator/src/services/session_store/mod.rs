@@ -20,7 +20,7 @@ use moa_core::wire::{
 use moa_core::{
     Event, EventRecord, ExperienceAttribution, ExperienceRecord, LearningCandidate,
     SegmentBaseline, SessionId, SessionMeta, SessionStore as CoreSessionStore, SessionSummary,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, WorkspaceId,
+    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
 };
 use moa_observability::record_session_error;
 use moa_session::PostgresSessionStore;
@@ -138,7 +138,7 @@ pub trait RestateSessionStore {
         request: Json<AppendLearningCandidateRequest>,
     ) -> Result<(), HandlerError>;
 
-    /// Loads one full learning candidate by workspace and candidate ID.
+    /// Loads one full learning candidate by tenant and candidate ID.
     async fn get_learning_candidate(
         request: Json<GetLearningCandidateRequest>,
     ) -> Result<Json<LearningCandidate>, HandlerError>;

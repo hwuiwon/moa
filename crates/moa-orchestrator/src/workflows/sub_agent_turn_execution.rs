@@ -33,11 +33,11 @@ use tracing::Instrument;
 use crate::OrchestratorCtx;
 use crate::objects::sub_agent::{MAX_SUB_AGENT_TURNS_PER_WORKFLOW, SubAgentClient};
 use crate::services::{
+    action_policy::{ActionPolicyClient, PrepareActionReviewRequest},
     action_reviews::{ActionReviewsClient, RequestActionReview},
     llm_gateway::LLMGatewayClient,
     session_store::RestateSessionStoreClient,
     tool_executor::ToolExecutorClient,
-    workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient},
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification, blocked_canary_tool_output,
@@ -554,7 +554,7 @@ async fn handle_tool_call(
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
 
     let prepared_action = ctx
-        .service_client::<WorkspaceStoreClient>()
+        .service_client::<ActionPolicyClient>()
         .prepare_action_review(Json(PrepareActionReviewRequest {
             session: meta.clone(),
             invocation: invocation.clone(),
@@ -1151,7 +1151,7 @@ mod tests {
             parent_session: session_id,
             parent_sub_agent: Some("parent".to_string()),
             depth: 2,
-            workspace_id: moa_core::WorkspaceId::new("workspace"),
+            tenant_id: moa_core::TenantId::new(),
             user_id: moa_core::UserId::new("user"),
             model: moa_core::ModelId::new("model"),
         };

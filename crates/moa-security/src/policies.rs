@@ -5,16 +5,16 @@ use globset::{Glob, GlobMatcher};
 use moa_core::shell::{has_action_policy_unsafe_shell_syntax, split_shell_chain};
 use moa_core::{
     ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaConfig, MoaError, Result,
-    SessionMeta, TenantId, ToolPolicyInput, UserId, WorkspaceId,
+    SessionMeta, TenantId, ToolPolicyInput, UserId,
 };
 
 /// Persistent action-policy rule storage used by policy-aware tool routing.
 #[async_trait]
 pub trait ActionPolicyRuleStore: Send + Sync {
-    /// Lists action-policy rules visible to one workspace user and tool.
+    /// Lists action-policy rules visible to one tenant user and tool.
     async fn list_action_policy_rules_for_tool(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         user_id: &UserId,
         tool: &str,
     ) -> Result<Vec<ActionPolicyRule>>;
@@ -25,7 +25,7 @@ pub trait ActionPolicyRuleStore: Send + Sync {
     /// Deletes an action-policy rule by tool and pattern.
     async fn delete_action_policy_rule(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         user_id: Option<&UserId>,
         tool: &str,
         pattern: &str,
@@ -273,7 +273,6 @@ pub fn parse_and_match_command(command: &str, rule_pattern: &str) -> Result<bool
 
 fn rule_visible_to_context(rule: &ActionPolicyRule, ctx: &ActionPolicyContext) -> bool {
     match rule.scope {
-        ActionRuleScope::WorkspaceDefault => true,
         ActionRuleScope::Tenant { tenant_id } => tenant_id == ctx.tenant_id,
     }
 }
@@ -720,7 +719,7 @@ mod tests {
 
     #[test]
     fn configured_tool_policy_cannot_be_weakened_by_persisted_allow_rule() {
-        // Pins: deployment-level deny/review config is a floor, not a workspace-rule suggestion.
+        // Pins: deployment-level deny/review config is a floor, not a tenant-rule suggestion.
         let policies = ActionPolicies {
             default_effect: ActionPolicyEffect::Allow,
             admin_review: Vec::new(),
@@ -764,41 +763,6 @@ mod tests {
             check.matched_rule.expect("matched rule").pattern,
             "git status"
         );
-    }
-
-    #[test]
-    fn workspace_default_rules_apply_to_all_tenants() {
-        // Pins: workspace-default action-policy rules remain inherited tenant defaults.
-        let policies = ActionPolicies::default();
-        let ctx = ActionPolicyContext::from_session(&SessionMeta {
-            tenant_id: other_tenant_id(),
-            model: ModelId::new("claude-sonnet-4-6"),
-            ..SessionMeta::default()
-        });
-        let input = ToolPolicyInput {
-            tool_name: "bash".to_string(),
-            normalized_input: "git push".to_string(),
-            input_summary: "Command: git push".to_string(),
-            risk_level: RiskLevel::High,
-            default_effect: ActionPolicyEffect::Allow,
-            action_class: moa_core::ActionClass::CommandExecution,
-        };
-        let default_rule = ActionPolicyRule {
-            id: Uuid::now_v7(),
-            scope: ActionRuleScope::WorkspaceDefault,
-            tool: "bash".to_string(),
-            pattern: "git push".to_string(),
-            effect: ActionPolicyEffect::Deny,
-            reason: Some("workspace default".to_string()),
-            created_by: UserId::new("admin"),
-            created_at: Utc::now(),
-        };
-
-        let check = policies
-            .check(&input, &ctx, &[default_rule])
-            .expect("workspace default check");
-        assert_eq!(check.effect, ActionPolicyEffect::Deny);
-        assert_eq!(check.reason.as_deref(), Some("workspace default"));
     }
 
     #[test]

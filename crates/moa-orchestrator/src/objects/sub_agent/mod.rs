@@ -11,8 +11,8 @@ use moa_core::{
     RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent, SessionId,
     SessionMeta, SessionStatus, SubAgentChildRef, SubAgentId, SubAgentMessage, SubAgentResult,
     SubAgentState, SubAgentStatus, SubAgentTerminalResult, SubAgentToolRecord,
-    SubAgentTurnOutcomeRecord, SubAgentTurnPreparation, SubAgentTurnResponseRecord, TurnOutcome,
-    UserId, UserMessage, WorkspaceId, delegation_tool_schemas,
+    SubAgentTurnOutcomeRecord, SubAgentTurnPreparation, SubAgentTurnResponseRecord, TenantId,
+    TurnOutcome, UserId, UserMessage, delegation_tool_schemas,
 };
 use restate_sdk::prelude::*;
 use serde_json::json;

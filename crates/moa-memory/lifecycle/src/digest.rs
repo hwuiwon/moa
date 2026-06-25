@@ -1,9 +1,9 @@
-//! Deterministic standing user/workspace digest rendering and rebuilds.
+//! Deterministic standing contact and tenant digest rendering and rebuilds.
 
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{MemoryDigestConfig, WorkspaceId};
+use moa_core::{MemoryDigestConfig, StoragePartitionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -33,17 +33,17 @@ const EPSILON: f64 = 1e-9;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DigestScopeKind {
-    /// Workspace-bound facts for one user.
+    /// Tenant-bound facts for one contact.
     User,
-    /// Workspace-wide facts with no user owner.
-    Workspace,
+    /// Tenant-wide facts with no contact owner.
+    Tenant,
 }
 
 impl DigestScopeKind {
     fn header(self) -> &'static str {
         match self {
             Self::User => "What I know about this user:",
-            Self::Workspace => "What I know about this workspace:",
+            Self::Tenant => "What I know about this tenant:",
         }
     }
 }
@@ -123,26 +123,26 @@ pub fn render_digest(
     }
 }
 
-/// Rebuilds workspace and user digest rows for one workspace.
-pub async fn rebuild_digests(
+/// Rebuilds tenant and contact digest rows for one storage partition.
+pub(crate) async fn rebuild_storage_digests(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     now: DateTime<Utc>,
     config: &MemoryDigestConfig,
 ) -> Result<DigestStats> {
-    let rows = active_digest_fact_rows(pool, workspace_id).await?;
+    let rows = active_digest_fact_rows(pool, storage_partition_id).await?;
     let mut groups = BTreeMap::<DigestIdentity, Vec<DigestFact>>::new();
     for row in rows {
         let identity = match row.scope.as_str() {
             "tenant" if row.user_id.is_none() => DigestIdentity {
-                scope_kind: DigestScopeKind::Workspace,
+                scope_kind: DigestScopeKind::Tenant,
                 user_id: None,
             },
             "contact" => {
                 let Some(user_id) = row.user_id.clone() else {
                     tracing::warn!(
                         uid = %row.fact.uid,
-                        workspace_id = %workspace_id,
+                        storage_partition_id = %storage_partition_id,
                         "skipping contact-scope digest fact without user_id"
                     );
                     continue;
@@ -159,7 +159,15 @@ pub async fn rebuild_digests(
 
     let mut stats = DigestStats::default();
     for (identity, facts) in groups {
-        if digest_is_fresh(pool, workspace_id, identity.user_id.as_deref(), now, config).await? {
+        if digest_is_fresh(
+            pool,
+            storage_partition_id,
+            identity.user_id.as_deref(),
+            now,
+            config,
+        )
+        .await?
+        {
             stats.digests_skipped_fresh += 1;
             continue;
         }
@@ -171,7 +179,7 @@ pub async fn rebuild_digests(
         );
         upsert_digest(
             pool,
-            workspace_id,
+            storage_partition_id,
             identity.user_id.as_deref(),
             now,
             &rendered,
@@ -218,7 +226,7 @@ fn is_fresh(updated_at: DateTime<Utc>, now: DateTime<Utc>, config: &MemoryDigest
 
 async fn digest_is_fresh(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     user_id: Option<&str>,
     now: DateTime<Utc>,
     config: &MemoryDigestConfig,
@@ -227,11 +235,11 @@ async fn digest_is_fresh(
         r#"
         SELECT updated_at
         FROM moa.memory_digests
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND (($2::text IS NULL AND user_id IS NULL) OR user_id = $2)
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(user_id)
     .fetch_optional(pool)
     .await?;
@@ -240,7 +248,7 @@ async fn digest_is_fresh(
 
 async fn upsert_digest(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     user_id: Option<&str>,
     now: DateTime<Utc>,
     rendered: &RenderedDigest,
@@ -255,9 +263,9 @@ async fn upsert_digest(
     sqlx::query(
         r#"
         INSERT INTO moa.memory_digests
-            (workspace_id, user_id, content, source_fact_uids, version, updated_at)
+            (storage_partition_id, user_id, content, source_fact_uids, version, updated_at)
         VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (workspace_id, scope, (COALESCE(user_id, '')))
+        ON CONFLICT (storage_partition_id, scope, (COALESCE(user_id, '')))
         DO UPDATE SET
             content = EXCLUDED.content,
             source_fact_uids = EXCLUDED.source_fact_uids,
@@ -265,7 +273,7 @@ async fn upsert_digest(
             updated_at = EXCLUDED.updated_at
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(user_id)
     .bind(&rendered.content)
     .bind(source_fact_uids)
@@ -278,7 +286,7 @@ async fn upsert_digest(
 
 async fn active_digest_fact_rows(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) -> Result<Vec<DigestFactRow>> {
     let rows = sqlx::query(
         r#"
@@ -289,7 +297,7 @@ async fn active_digest_fact_rows(
                valid_from,
                properties_summary
         FROM moa.node_index
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND label = 'Fact'
           AND valid_to IS NULL
           AND scope IN ('contact', 'tenant')
@@ -297,7 +305,7 @@ async fn active_digest_fact_rows(
         ORDER BY scope ASC, user_id ASC NULLS FIRST, valid_from DESC, uid ASC
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(DEFAULT_DECAY_FLOOR)
     .fetch_all(pool)
     .await?;
@@ -402,18 +410,8 @@ mod tests {
             fact("00000000-0000-8000-8000-000000000001", "owned_by", 1),
         ];
 
-        let first = render_digest(
-            &facts,
-            DigestScopeKind::Workspace,
-            600,
-            DIGEST_RENDER_VERSION,
-        );
-        let second = render_digest(
-            &facts,
-            DigestScopeKind::Workspace,
-            600,
-            DIGEST_RENDER_VERSION,
-        );
+        let first = render_digest(&facts, DigestScopeKind::Tenant, 600, DIGEST_RENDER_VERSION);
+        let second = render_digest(&facts, DigestScopeKind::Tenant, 600, DIGEST_RENDER_VERSION);
 
         assert_eq!(first, second);
     }
@@ -425,7 +423,7 @@ mod tests {
         floor.confidence = Some(DEFAULT_DECAY_FLOOR);
         let active = fact("00000000-0000-8000-8000-000000000002", "owned_by", 2);
 
-        let rendered = render_digest(&[floor, active], DigestScopeKind::Workspace, 600, 1);
+        let rendered = render_digest(&[floor, active], DigestScopeKind::Tenant, 600, 1);
 
         assert_eq!(
             rendered.source_fact_uids,
@@ -447,12 +445,12 @@ mod tests {
     }
 
     #[test]
-    fn workspace_digest_input_filter_excludes_user_scope_facts() {
-        // Pins: workspace and user digest identities are separate before rendering.
+    fn tenant_digest_input_filter_excludes_user_scope_facts() {
+        // Pins: tenant and user digest identities are separate before rendering.
         let rows = vec![
             DigestFactRow {
                 user_id: None,
-                scope: "workspace".to_string(),
+                scope: "tenant".to_string(),
                 fact: fact("00000000-0000-8000-8000-000000000001", "owned_by", 1),
             },
             DigestFactRow {
@@ -463,9 +461,9 @@ mod tests {
         ];
         let mut identities = BTreeMap::<DigestIdentity, Vec<DigestFact>>::new();
         for row in rows {
-            let identity = if row.scope == "workspace" {
+            let identity = if row.scope == "tenant" {
                 DigestIdentity {
-                    scope_kind: DigestScopeKind::Workspace,
+                    scope_kind: DigestScopeKind::Tenant,
                     user_id: None,
                 }
             } else {
@@ -477,18 +475,15 @@ mod tests {
             identities.entry(identity).or_default().push(row.fact);
         }
 
-        let workspace = identities
+        let tenant = identities
             .get(&DigestIdentity {
-                scope_kind: DigestScopeKind::Workspace,
+                scope_kind: DigestScopeKind::Tenant,
                 user_id: None,
             })
-            .expect("workspace digest group");
+            .expect("tenant digest group");
 
-        assert_eq!(workspace.len(), 1);
-        assert_eq!(
-            workspace[0].uid,
-            uuid("00000000-0000-8000-8000-000000000001")
-        );
+        assert_eq!(tenant.len(), 1);
+        assert_eq!(tenant[0].uid, uuid("00000000-0000-8000-8000-000000000001"));
     }
 
     fn fact(uid: &str, predicate: &str, day: i64) -> DigestFact {

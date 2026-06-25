@@ -17,8 +17,8 @@ use moa_core::workspace::discover_workspace_instructions;
 use moa_core::{
     CompletionRequest, CompletionResponse, CompletionStream, ContactId, ContactRef,
     ContactVerificationState, ContextMessage, Event, EventRange, LLMProvider, MessageRole,
-    MoaConfig, Result, SessionActorRef, SessionMeta, SessionStore, TenantId, ToolContent, UserId,
-    WorkspaceId, estimate_text_tokens,
+    MoaConfig, Result, SessionActorRef, SessionMeta, SessionStore, StoragePartitionId, TenantId,
+    ToolContent, UserId, estimate_text_tokens,
 };
 use moa_hands::ToolRouter;
 use moa_providers::build_provider_from_config;
@@ -215,7 +215,7 @@ struct AuditedProvider {
 async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
     let repo_root = repo_root()?;
 
-    let workspace_id = WorkspaceId::new("cache-audit-matrix");
+    let storage_partition_id = StoragePartitionId::new("cache-audit-matrix");
     let user_id = UserId::new("cache-audit-user");
     let discovered_instructions = discover_workspace_instructions(&repo_root);
 
@@ -259,8 +259,13 @@ async fn live_cache_audit_reports_hits_for_available_providers() -> Result<()> {
             },
         );
 
-        let session_id =
-            create_session(store.clone(), &workspace_id, &user_id, &config.models.main).await?;
+        let session_id = create_session(
+            store.clone(),
+            &storage_partition_id,
+            &user_id,
+            &config.models.main,
+        )
+        .await?;
         run_turn(
             store.clone(),
             session_id,
@@ -402,7 +407,7 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
 
     let repo_root = repo_root()?;
 
-    let workspace_id = WorkspaceId::new("cache-audit");
+    let storage_partition_id = StoragePartitionId::new("cache-audit");
     let user_id = UserId::new("cache-audit-user");
     let discovered_instructions = discover_workspace_instructions(&repo_root);
 
@@ -420,7 +425,10 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             .with_session_store(store.clone()),
     );
     tool_router
-        .remember_workspace_root(runtime_workspace_id(&workspace_id), repo_root.clone())
+        .remember_workspace_root(
+            tenant_id_from_storage_partition_id(&storage_partition_id),
+            repo_root.clone(),
+        )
         .await;
 
     let same_session_audits = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -453,8 +461,13 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
             },
         );
 
-    let session_a =
-        create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
+    let session_a = create_session(
+        store.clone(),
+        &storage_partition_id,
+        &user_id,
+        "claude-sonnet-4-6",
+    )
+    .await?;
     run_turn(
         store.clone(),
         session_a,
@@ -508,8 +521,13 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 lineage: Arc::new(moa_core::NullLineageHandle),
             },
         );
-    let session_b =
-        create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
+    let session_b = create_session(
+        store.clone(),
+        &storage_partition_id,
+        &user_id,
+        "claude-sonnet-4-6",
+    )
+    .await?;
     run_turn(
         store.clone(),
         session_b,
@@ -549,8 +567,13 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
                 lineage: Arc::new(moa_core::NullLineageHandle),
             },
         );
-    let session_c =
-        create_session(store.clone(), &workspace_id, &user_id, "claude-sonnet-4-6").await?;
+    let session_c = create_session(
+        store.clone(),
+        &storage_partition_id,
+        &user_id,
+        "claude-sonnet-4-6",
+    )
+    .await?;
     run_turn(
         store.clone(),
         session_c,
@@ -675,17 +698,21 @@ async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -
 
 async fn create_session(
     store: Arc<dyn SessionStore>,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     user_id: &UserId,
     model: &str,
 ) -> Result<moa_core::SessionId> {
     store
-        .create_session(session_meta(workspace_id, user_id, model))
+        .create_session(session_meta(storage_partition_id, user_id, model))
         .await
 }
 
-fn session_meta(workspace_id: &WorkspaceId, user_id: &UserId, model: &str) -> SessionMeta {
-    let tenant_id = tenant_id_from_workspace_id(workspace_id);
+fn session_meta(
+    storage_partition_id: &StoragePartitionId,
+    user_id: &UserId,
+    model: &str,
+) -> SessionMeta {
+    let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
     let contact_id = contact_id_from_user_id(user_id);
     SessionMeta {
         tenant_id,
@@ -696,14 +723,10 @@ fn session_meta(workspace_id: &WorkspaceId, user_id: &UserId, model: &str) -> Se
     }
 }
 
-fn runtime_workspace_id(workspace_id: &WorkspaceId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id_from_workspace_id(workspace_id).to_string())
-}
-
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {

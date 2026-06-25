@@ -13,8 +13,8 @@ use chrono::Utc;
 use moa_core::{
     ActionRuleScope, Attachment, Channel, CompletionContent, CompletionRequest, CompletionResponse,
     CompletionStream, Event, EventRecord, LLMProvider, MoaConfig, MoaError, ModelCapabilities,
-    ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, TenantId, TokenPricing,
-    TokenUsage, ToolCallFormat, ToolCallId, ToolOutput, WorkspaceId,
+    ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, StoragePartitionId,
+    TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
 };
 use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use moa_providers::ModelRouter;
@@ -45,7 +45,7 @@ pub const REGRESSED_SKILL: &str = include_str!("fixtures/regressed_skill_diff.md
 #[derive(Debug, Deserialize)]
 struct SessionFixture {
     session_id: Uuid,
-    workspace_id: String,
+    storage_partition_id: String,
     user_id: String,
     task: String,
     final_response: String,
@@ -100,15 +100,15 @@ pub fn learning_store(test_db: &TestDb) -> Arc<PostgresSessionStore> {
 pub fn load_session_fixture(json_text: &str) -> LoadedSession {
     let fixture: SessionFixture =
         serde_json::from_str(json_text).expect("parse skill session fixture");
-    let workspace_id = WorkspaceId::new(format!(
+    let storage_partition_id = StoragePartitionId::new(format!(
         "{}-{}",
-        fixture.workspace_id,
+        fixture.storage_partition_id,
         Uuid::now_v7().simple()
     ));
     let _user_id = fixture.user_id;
     let session = SessionMeta {
         id: SessionId(fixture.session_id),
-        tenant_id: tenant_id_from_workspace_id(&workspace_id),
+        tenant_id: tenant_id_from_storage_partition(&storage_partition_id),
         title: Some(fixture.task.clone()),
         status: SessionStatus::Completed,
         channel: Channel::Chat,
@@ -277,7 +277,11 @@ pub async fn load_active_skill_markdown(
 }
 
 /// Writes a compact output-matching regression suite for a skill.
-pub async fn write_output_suite(config: &MoaConfig, workspace_id: &WorkspaceId, skill_name: &str) {
+pub async fn write_output_suite(
+    config: &MoaConfig,
+    storage_partition_id: &StoragePartitionId,
+    skill_name: &str,
+) {
     let suite = TestSuite {
         name: format!("{skill_name}-quality"),
         description: Some("Skill regression fixture suite".to_string()),
@@ -294,7 +298,7 @@ pub async fn write_output_suite(config: &MoaConfig, workspace_id: &WorkspaceId, 
         default_timeout_seconds: 10,
         tags: vec!["skill".to_string(), skill_name.to_string()],
     };
-    let path = suite_path(config, workspace_id, skill_name);
+    let path = suite_path(config, storage_partition_id, skill_name);
     tokio::fs::create_dir_all(path.parent().expect("suite path has parent"))
         .await
         .expect("create suite directory");
@@ -315,28 +319,28 @@ pub async fn active_semantic_version(
         .version()
 }
 
-/// Counts artifact revisions for one workspace skill name.
+/// Counts artifact revisions for one tenant skill name.
 pub async fn skill_row_count(
     test_db: &TestDb,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     skill_name: &str,
 ) -> i64 {
-    artifact_revision_count(test_db, workspace_id, skill_name).await
+    artifact_revision_count(test_db, storage_partition_id, skill_name).await
 }
 
-/// Counts artifact revisions for one workspace skill artifact.
+/// Counts artifact revisions for one tenant skill artifact.
 pub async fn artifact_revision_count(
     test_db: &TestDb,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     skill_name: &str,
 ) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) \
          FROM moa.artifact a \
          JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid \
-         WHERE a.workspace_id = $1 AND a.kind = 'skill' AND a.name = $2",
+         WHERE a.storage_partition_id = $1 AND a.kind = 'skill' AND a.name = $2",
     )
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(skill_name)
     .fetch_one(test_db.store().pool())
     .await
@@ -366,10 +370,14 @@ fn push_event(events: &mut Vec<EventRecord>, session_id: SessionId, event: Event
     });
 }
 
-fn suite_path(config: &MoaConfig, workspace_id: &WorkspaceId, skill_name: &str) -> PathBuf {
+fn suite_path(
+    config: &MoaConfig,
+    storage_partition_id: &StoragePartitionId,
+    skill_name: &str,
+) -> PathBuf {
     PathBuf::from(&config.local.memory_dir)
         .join("workspaces")
-        .join(workspace_id.as_str())
+        .join(storage_partition_id.as_str())
         .join("skills")
         .join(slugify_skill_name(skill_name))
         .join("tests")
@@ -443,22 +451,22 @@ impl LLMProvider for TestProvider {
 }
 
 /// Returns a tenant artifact-visibility scope for tests.
-pub fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+pub fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
     ActionRuleScope::Tenant {
-        tenant_id: tenant_id_from_workspace_id(workspace_id),
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id),
     }
 }
 
 /// Returns the tenant storage key for session-scoped learning rows.
-pub fn session_workspace_id(session: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(session.tenant_id.to_string())
+pub fn session_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
+    StoragePartitionId::new(session.tenant_id.to_string())
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    if let Ok(uuid) = Uuid::parse_str(workspace_id.as_str()) {
+fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> TenantId {
+    if let Ok(uuid) = Uuid::parse_str(storage_partition_id.as_str()) {
         return TenantId::from(uuid);
     }
-    let digest = Sha256::digest(workspace_id.as_str().as_bytes());
+    let digest = Sha256::digest(storage_partition_id.as_str().as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x80;

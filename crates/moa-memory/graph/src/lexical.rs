@@ -86,7 +86,7 @@ pub(crate) async fn lookup_seed_rows(
 
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at,
                COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index

@@ -76,10 +76,6 @@ mod tests {
             ActionPolicyEffect::Deny
         );
         assert_eq!(
-            ActionRuleScope::WorkspaceDefault.as_str(),
-            "workspace_default"
-        );
-        assert_eq!(
             ActionRuleScope::Tenant {
                 tenant_id: moa_core::TenantId::new()
             }

@@ -13,8 +13,8 @@ string_id!(
     pub struct UserId
 );
 string_id!(
-    /// Identifier for a workspace.
-    pub struct WorkspaceId
+    /// Identifier for a persisted storage partition.
+    pub struct StoragePartitionId
 );
 uuid_id!(
     /// Identifier for a tenant runtime boundary.

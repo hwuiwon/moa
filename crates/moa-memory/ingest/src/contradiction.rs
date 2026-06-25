@@ -631,7 +631,6 @@ async fn vector_candidate_uids(
     let hits = ctx
         .vector()
         .knn(&VectorQuery {
-            workspace_id: Some(ctx.scope().tenant_id().to_string()),
             embedding: embedding.to_vec(),
             k: VECTOR_K,
             label_filter: Some(vec![label.as_str().to_string()]),
@@ -684,7 +683,7 @@ async fn hydrate_candidates(
     let mut conn = ctx.begin().await?;
     let rows = sqlx::query_as::<_, NodeIndexRow>(
         r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at,
                COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
@@ -1142,9 +1141,9 @@ mod tests {
         NodeIndexRow {
             uid: Uuid::now_v7(),
             label: NodeLabel::Fact,
-            workspace_id: Some(Uuid::now_v7().to_string()),
-            user_id: None,
-            scope: "workspace".to_string(),
+            storage_partition_id: Some(Uuid::now_v7().to_string()),
+            contact_id: None,
+            scope: "tenant".to_string(),
             name: name.to_string(),
             pii_class: PiiClass::None,
             valid_to: None,

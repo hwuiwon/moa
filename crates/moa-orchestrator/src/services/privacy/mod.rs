@@ -18,7 +18,7 @@ use moa_core::wire::{
     ContactErasureScope, PrivacyEraseRequest, PrivacyEraseResponse, PrivacyExportRequest,
     PrivacyExportResponse,
 };
-use moa_core::{TenantId, UserId, WorkspaceId};
+use moa_core::{StoragePartitionId, TenantId, UserId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{ChangelogRecord, write_and_bump};
 use moa_memory_pii::erasure::{
@@ -46,7 +46,7 @@ use crate::handlers::authz_shim::{require_fga_client, require_identity, translat
 const APPROVAL_PUBLIC_KEY_ENV: &str = "MOA_PRIVACY_APPROVAL_PUBLIC_KEY_HEX";
 const EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
 const EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
-const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
+const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_SECRET_HEX";
 const ERASE_SAMPLE_LIMIT: usize = 20;
 const CONTACT_SUBJECT_PREFIX: &str = "contact:";
 
@@ -78,15 +78,13 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyExportResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "export");
         let request = request.into_inner();
-        authorize_tenant_or_workspace_admin(&ctx, request.tenant_id, Relation::Admin).await?;
+        authorize_tenant_admin(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let storage_workspace_id = storage_workspace_id_for_tenant(request.tenant_id);
-        let workspace = Some(storage_workspace_id.as_str());
         let claims = ApprovalTokenVerifier::from_env()?.verify(
             &request.approval_token,
             "export",
             &subject_user_id,
-            workspace,
+            request.tenant_id,
         )?;
         let pool = OrchestratorCtx::current_graph_pool();
 
@@ -108,15 +106,13 @@ impl Privacy for PrivacyImpl {
     ) -> Result<Json<PrivacyEraseResponse>, HandlerError> {
         annotate_restate_handler_span("Privacy", "erase");
         let request = request.into_inner();
-        authorize_tenant_or_workspace_admin(&ctx, request.tenant_id, Relation::Admin).await?;
+        authorize_tenant_admin(&ctx, request.tenant_id, Relation::Admin).await?;
         let subject_user_id = request.subject_user_id.to_string();
-        let storage_workspace_id = storage_workspace_id_for_tenant(request.tenant_id);
-        let workspace = Some(storage_workspace_id.as_str());
         let claims = ApprovalTokenVerifier::from_env()?.verify(
             &request.approval_token,
             "erase",
             &subject_user_id,
-            workspace,
+            request.tenant_id,
         )?;
         let pool = OrchestratorCtx::current_graph_pool();
         let erase_ctx = PrivacyEraseContext::from_request(pool, request, claims)?;
@@ -130,6 +126,7 @@ impl Privacy for PrivacyImpl {
 
 /// Signed approval-token claims required before privacy operations touch data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalClaims {
     /// Approving administrator subject identifier.
     pub sub: String,
@@ -141,9 +138,8 @@ pub struct ApprovalClaims {
     pub op: String,
     /// Subject user identifier covered by the approval.
     pub subject_user_id: String,
-    /// Optional workspace identifier covered by the approval.
-    #[serde(default)]
-    pub workspace_id: Option<String>,
+    /// Tenant identifier covered by the approval.
+    pub tenant_id: TenantId,
     /// Optional single role claim.
     #[serde(default)]
     pub role: Option<String>,
@@ -189,13 +185,13 @@ impl ApprovalTokenVerifier {
         })
     }
 
-    /// Verifies an approval JWT for one operation, subject, and optional workspace.
+    /// Verifies an approval JWT for one operation, subject, and tenant.
     pub fn verify(
         &self,
         token: &str,
         expected_op: &str,
         subject_user_id: &str,
-        workspace: Option<&str>,
+        tenant_id: TenantId,
     ) -> Result<ApprovalClaims, HandlerError> {
         let parts = token.split('.').collect::<Vec<_>>();
         if parts.len() != 3 {
@@ -210,9 +206,10 @@ impl ApprovalTokenVerifier {
             return Err(TerminalError::new_with_code(400, "approval token must use EdDSA").into());
         }
 
+        let claims_payload = decode_base64url(parts[1])?;
         let claims: ApprovalClaims =
-            serde_json::from_slice(&decode_base64url(parts[1])?).map_err(handler_error)?;
-        validate_claims(&claims, expected_op, subject_user_id, workspace)?;
+            serde_json::from_slice(&claims_payload).map_err(handler_error)?;
+        validate_claims(&claims, expected_op, subject_user_id, tenant_id)?;
 
         let signature_bytes = decode_base64url(parts[2])?;
         let signature_bytes: [u8; 64] = signature_bytes.as_slice().try_into().map_err(|_| {
@@ -293,8 +290,8 @@ pub struct PrivacyExportContext {
     pub pool: PgPool,
     /// Tenant that authorized the privacy operation.
     pub tenant_id: TenantId,
-    /// Storage workspace partition derived from the tenant id.
-    pub workspace: Option<String>,
+    /// Storage partition derived from the tenant id.
+    pub storage_partition: Option<String>,
     /// Subject user UUID.
     pub subject_user: Uuid,
     /// Subject user id as stored in text columns.
@@ -314,8 +311,8 @@ pub struct PrivacyEraseContext {
     pub pool: PgPool,
     /// Tenant that authorized the privacy operation.
     pub tenant_id: TenantId,
-    /// Storage workspace partition derived from the tenant id.
-    pub workspace_id: String,
+    /// Storage partition derived from the tenant id.
+    pub storage_partition_id: String,
     /// Subject user UUID.
     pub subject_user: Uuid,
     /// Subject user id as stored in text columns.
@@ -340,11 +337,11 @@ impl PrivacyEraseContext {
         claims: ApprovalClaims,
     ) -> Result<Self, HandlerError> {
         let subject_user = parse_subject_uuid(&request.subject_user_id)?;
-        let storage_workspace_id = storage_workspace_id_for_tenant(request.tenant_id);
+        let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
         Ok(Self {
             pool,
             tenant_id: request.tenant_id,
-            workspace_id: storage_workspace_id.to_string(),
+            storage_partition_id: storage_partition_id.to_string(),
             subject_user,
             subject_user_id: request.subject_user_id.to_string(),
             reason: request.reason,
@@ -405,37 +402,21 @@ impl PrivacySubjectProvenance {
     }
 }
 
-async fn authorize_tenant_or_workspace_admin(
+async fn authorize_tenant_admin(
     ctx: &impl RequestHeaders,
     tenant_id: TenantId,
     relation: Relation,
 ) -> Result<Identity, HandlerError> {
     let identity = require_identity(ctx)?;
     let fga = require_fga_client()?;
-    if require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
+    require_authz_with_delegation(&fga, &identity, ObjectType::Tenant, tenant_id, relation)
         .await
-        .is_ok()
-    {
-        return Ok(identity);
-    }
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Workspace,
-        &global_workspace_id(),
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)?;
+        .map_err(translate_authz_error)?;
     Ok(identity)
 }
 
-fn global_workspace_id() -> WorkspaceId {
-    WorkspaceId::new("workspace")
-}
-
-fn storage_workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
+fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }
 
 async fn execute_privacy_export(
@@ -448,11 +429,11 @@ async fn execute_privacy_export(
         return Err(TerminalError::new_with_code(400, "--reason is required").into());
     }
     consume_approval_jti(&pool, &claims).await?;
-    let storage_workspace_id = storage_workspace_id_for_tenant(tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
     let resolved = resolve_privacy_subjects(
         &pool,
         tenant_id.0,
-        Some(&storage_workspace_id),
+        Some(&storage_partition_id),
         &request.subject_user_id,
         ContactLinkedSubjectPolicy::IncludeVerifiedLinks,
     )
@@ -462,7 +443,7 @@ async fn execute_privacy_export(
         .first()
         .map(|subject| subject.target_uid)
         .ok_or_else(|| TerminalError::new("privacy subject resolution returned no subjects"))?;
-    let workspace = resolved.effective_workspace.clone();
+    let storage_partition = resolved.effective_storage_partition.clone();
     let signer = Ed25519ManifestSigner::from_env()?;
     let base_dir = create_temp_dir("moa-privacy-export").await?;
     let export_dir = base_dir.join("export");
@@ -472,7 +453,7 @@ async fn execute_privacy_export(
     let ctx = PrivacyExportContext {
         pool,
         tenant_id,
-        workspace,
+        storage_partition,
         subject_user,
         subject_user_id: request.subject_user_id.to_string(),
         subjects: resolved.subjects,
@@ -527,7 +508,7 @@ pub async fn run_privacy_erase(
     let resolved = resolve_privacy_subjects(
         &ctx.pool,
         ctx.tenant_id.0,
-        Some(&WorkspaceId::new(ctx.workspace_id.clone())),
+        Some(&StoragePartitionId::new(ctx.storage_partition_id.clone())),
         &UserId::new(ctx.subject_user_id.clone()),
         linked_policy,
     )
@@ -584,7 +565,7 @@ fn validate_claims(
     claims: &ApprovalClaims,
     expected_op: &str,
     subject_user_id: &str,
-    workspace: Option<&str>,
+    tenant_id: TenantId,
 ) -> Result<(), HandlerError> {
     if claims.sub.trim().is_empty() {
         return Err(TerminalError::new_with_code(400, "approval token missing sub").into());
@@ -604,6 +585,9 @@ fn validate_claims(
             TerminalError::new_with_code(400, "approval token subject_user_id mismatch").into(),
         );
     }
+    if claims.tenant_id != tenant_id {
+        return Err(TerminalError::new_with_code(400, "approval token tenant_id mismatch").into());
+    }
     if !claims.has_platform_admin_role() {
         return Err(TerminalError::new_with_code(
             403,
@@ -614,13 +598,6 @@ fn validate_claims(
     let now = Utc::now().timestamp();
     if claims.exp <= now {
         return Err(TerminalError::new_with_code(401, "approval token expired").into());
-    }
-    if let Some(token_workspace) = claims.workspace_id.as_deref()
-        && Some(token_workspace) != workspace
-    {
-        return Err(
-            TerminalError::new_with_code(400, "approval token workspace_id mismatch").into(),
-        );
     }
     Ok(())
 }
@@ -691,7 +668,7 @@ async fn enumerate_subject_erase_candidates(
 ) -> Result<Vec<(PrivacySubject, Vec<EraseCandidate>)>, HandlerError> {
     let mut groups = Vec::with_capacity(subjects.len());
     for subject in subjects {
-        let candidates = enumerate_erase_candidates(&ctx.pool, &ctx.workspace_id, &subject.user_id)
+        let candidates = enumerate_erase_candidates(&ctx.pool, ctx.tenant_id, &subject.user_id)
             .await
             .map_err(handler_error)?;
         groups.push((subject.clone(), candidates));
@@ -728,7 +705,7 @@ async fn erase_pii_vault_subjects(
 ) -> Result<u64, HandlerError> {
     let Some(secret) = ctx.pii_vault_secret.clone() else {
         tracing::warn!(
-            workspace_id = %ctx.workspace_id,
+            storage_partition_id = %ctx.storage_partition_id,
             subject_user_id = %ctx.subject_user_id,
             "skipping PII vault erase because no PII vault secret is configured"
         );
@@ -743,7 +720,7 @@ async fn erase_pii_vault_subjects(
             .map_err(handler_error)?;
         erased = erased.saturating_add(
             vault
-                .erase_subject(&ctx.workspace_id, &subject_pseudonym)
+                .erase_subject(&ctx.storage_partition_id, &subject_pseudonym)
                 .await
                 .map_err(handler_error)?,
         );
@@ -753,7 +730,7 @@ async fn erase_pii_vault_subjects(
 
 fn graph_erasure_audit(ctx: &PrivacyEraseContext, subject: &PrivacySubject) -> GraphErasureAudit {
     GraphErasureAudit {
-        workspace_id: ctx.workspace_id.clone(),
+        tenant_id: ctx.tenant_id,
         subject_user: subject.target_uid,
         subject_user_id: subject.user_id.clone(),
         reason: ctx.reason.clone(),
@@ -803,10 +780,7 @@ pub async fn write_export_readme(
     lines.push(String::new());
     lines.push(format!("Created at: {}", Utc::now().to_rfc3339()));
     lines.push(format!("Subject user id: {}", ctx.subject_user_id));
-    lines.push(format!(
-        "Workspace: {}",
-        ctx.workspace.as_deref().unwrap_or("all")
-    ));
+    lines.push(format!("Tenant: {}", ctx.tenant_id));
     lines.push("Included subjects:".to_string());
     for subject in &ctx.subjects {
         lines.push(format!(
@@ -846,18 +820,13 @@ async fn emit_export_audit(
     counts: &BTreeMap<&'static str, usize>,
 ) -> Result<(), HandlerError> {
     let mut tx = ctx.pool.begin().await.map_err(handler_error)?;
-    let scope = if ctx.workspace.is_some() {
-        "workspace"
-    } else {
-        "global"
-    };
     let file_count = counts.len().saturating_add(4);
     write_and_bump(
         &mut tx,
         ChangelogRecord {
-            workspace_id: ctx.workspace.clone(),
-            user_id: None,
-            scope: scope.to_string(),
+            storage_partition_id: ctx.storage_partition.clone(),
+            contact_id: None,
+            scope: "tenant".to_string(),
             actor_id: Some(ctx.claims.sub.clone()),
             actor_kind: "admin".to_string(),
             op: "export".to_string(),
@@ -868,7 +837,7 @@ async fn emit_export_audit(
                 "reason": ctx.reason,
                 "subject_user_id": ctx.subject_user_id,
                 "subjects": privacy_subjects_json(&ctx.subjects),
-                "workspace": ctx.workspace.as_deref(),
+                "storage_partition": ctx.storage_partition.as_deref(),
                 "artifact_counts": counts,
                 "files": file_count,
             }),
@@ -911,7 +880,7 @@ struct Manifest<'a> {
     created_at: String,
     subject_user_id: &'a str,
     subjects: Vec<ManifestSubject<'a>>,
-    workspace: Option<&'a str>,
+    storage_partition: Option<&'a str>,
     encryption: &'static str,
     signature: ManifestSignature<'a>,
     files: Vec<ManifestFile>,
@@ -984,7 +953,7 @@ pub async fn write_manifest(
                 provenance: subject.provenance.as_str(),
             })
             .collect(),
-        workspace: ctx.workspace.as_deref(),
+        storage_partition: ctx.storage_partition.as_deref(),
         encryption: "none",
         signature: ManifestSignature {
             algorithm: "Ed25519",

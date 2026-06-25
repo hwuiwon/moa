@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS analytics.turn_lineage (
     turn_id        UUID        NOT NULL,
     session_id     UUID        NOT NULL,
     user_id        TEXT        NOT NULL,
-    workspace_id   TEXT        NOT NULL,
+    storage_partition_id   TEXT        NOT NULL,
     ts             TIMESTAMPTZ NOT NULL,
     tier           SMALLINT    NOT NULL DEFAULT 1,
     record_kind    SMALLINT    NOT NULL,
@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS analytics.turn_lineage (
 CREATE INDEX IF NOT EXISTS ix_lineage_session_ts
     ON analytics.turn_lineage (session_id, ts DESC);
 
-CREATE INDEX IF NOT EXISTS ix_lineage_workspace_user_ts
-    ON analytics.turn_lineage (workspace_id, user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_lineage_storage_partition_user_ts
+    ON analytics.turn_lineage (storage_partition_id, user_id, ts DESC);
 
 CREATE INDEX IF NOT EXISTS ix_lineage_zero_recall
     ON analytics.turn_lineage (ts DESC)
@@ -59,7 +59,7 @@ BEGIN
         EXECUTE $ddl$
             ALTER TABLE analytics.turn_lineage SET (
                 timescaledb.compress,
-                timescaledb.compress_segmentby = 'workspace_id',
+                timescaledb.compress_segmentby = 'storage_partition_id',
                 timescaledb.compress_orderby = 'ts DESC, turn_id'
             )
         $ddl$;
@@ -79,7 +79,7 @@ BEGIN
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.turn_recall_hourly
             WITH (timescaledb.continuous) AS
             SELECT time_bucket('1 hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    COUNT(*) AS turns,
                    COUNT(*) FILTER (
                        WHERE record_kind = 1
@@ -87,7 +87,7 @@ BEGIN
                          AND jsonb_array_length(payload #> '{record,top_k}') = 0
                    ) AS zero_recall
             FROM analytics.turn_lineage
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
@@ -102,7 +102,7 @@ BEGIN
         EXECUTE $ddl$
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.turn_recall_hourly AS
             SELECT date_trunc('hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    COUNT(*) AS turns,
                    COUNT(*) FILTER (
                        WHERE record_kind = 1
@@ -110,7 +110,7 @@ BEGIN
                          AND jsonb_array_length(payload #> '{record,top_k}') = 0
                    ) AS zero_recall
             FROM analytics.turn_lineage
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
     END IF;
@@ -122,7 +122,7 @@ $$;
 CREATE TABLE IF NOT EXISTS analytics.scores (
     score_id           UUID             NOT NULL,
     ts                 TIMESTAMPTZ      NOT NULL,
-    workspace_id       TEXT             NOT NULL,
+    storage_partition_id       TEXT             NOT NULL,
     user_id            TEXT,
     target_kind        TEXT             NOT NULL,
     turn_id            UUID,
@@ -141,8 +141,8 @@ CREATE TABLE IF NOT EXISTS analytics.scores (
     PRIMARY KEY (score_id, ts)
 );
 
-CREATE INDEX IF NOT EXISTS ix_scores_workspace_name_ts
-    ON analytics.scores (workspace_id, name, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_scores_storage_partition_name_ts
+    ON analytics.scores (storage_partition_id, name, ts DESC);
 
 CREATE INDEX IF NOT EXISTS ix_scores_turn
     ON analytics.scores (turn_id)
@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS analytics.eval_datasets (
 CREATE TABLE IF NOT EXISTS analytics.eval_dataset_items (
     item_id         UUID        PRIMARY KEY,
     dataset_id      UUID        NOT NULL REFERENCES analytics.eval_datasets(dataset_id) ON DELETE CASCADE,
-    workspace_id    TEXT        NOT NULL,
+    storage_partition_id    TEXT        NOT NULL,
     scope           JSONB       NOT NULL,
     query           TEXT        NOT NULL,
     expected_answer TEXT,
@@ -187,7 +187,7 @@ BEGIN
         EXECUTE $ddl$
             ALTER TABLE analytics.scores SET (
                 timescaledb.compress,
-                timescaledb.compress_segmentby = 'workspace_id, name',
+                timescaledb.compress_segmentby = 'storage_partition_id, name',
                 timescaledb.compress_orderby = 'ts DESC'
             )
         $ddl$;
@@ -207,12 +207,12 @@ BEGIN
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.grounding_hourly
             WITH (timescaledb.continuous) AS
             SELECT time_bucket('1 hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END) AS verified_rate,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'citation_verified' AND value_type = 'boolean'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
@@ -228,14 +228,14 @@ BEGIN
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.nli_hourly
             WITH (timescaledb.continuous) AS
             SELECT time_bucket('1 hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    AVG(value_numeric) AS p50,
                    MAX(value_numeric) AS p95,
                    AVG(value_numeric) AS mean,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'nli_entailment' AND value_type = 'numeric'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
@@ -250,26 +250,26 @@ BEGIN
         EXECUTE $ddl$
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.grounding_hourly AS
             SELECT date_trunc('hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END) AS verified_rate,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'citation_verified' AND value_type = 'boolean'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
         EXECUTE $ddl$
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.nli_hourly AS
             SELECT date_trunc('hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY value_numeric) AS p50,
                    percentile_cont(0.95) WITHIN GROUP (ORDER BY value_numeric) AS p95,
                    AVG(value_numeric) AS mean,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'nli_entailment' AND value_type = 'numeric'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
     END IF;
@@ -278,8 +278,8 @@ $$;
 
 -- Source: 026_lineage_audit.sql
 
-CREATE TABLE IF NOT EXISTS analytics.compliance_workspaces (
-    workspace_id       TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS analytics.compliance_tenants (
+    storage_partition_id       TEXT PRIMARY KEY,
     enabled            BOOLEAN     NOT NULL DEFAULT TRUE,
     enabled_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     retention_years    INT         NOT NULL DEFAULT 10,
@@ -289,8 +289,8 @@ CREATE TABLE IF NOT EXISTS analytics.compliance_workspaces (
     notes              TEXT
 );
 
-CREATE TABLE IF NOT EXISTS analytics.compliance_workspace_state (
-    workspace_id          TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS analytics.compliance_storage_partition_state (
+    storage_partition_id          TEXT PRIMARY KEY,
     last_integrity_hash   BYTEA,
     last_ts               TIMESTAMPTZ,
     record_count          BIGINT NOT NULL DEFAULT 0,
@@ -299,7 +299,7 @@ CREATE TABLE IF NOT EXISTS analytics.compliance_workspace_state (
 
 CREATE TABLE IF NOT EXISTS analytics.audit_roots (
     root_id            UUID PRIMARY KEY,
-    workspace_id       TEXT        NOT NULL,
+    storage_partition_id       TEXT        NOT NULL,
     window_start       TIMESTAMPTZ NOT NULL,
     window_end         TIMESTAMPTZ NOT NULL,
     record_count       BIGINT      NOT NULL,
@@ -313,14 +313,14 @@ CREATE TABLE IF NOT EXISTS analytics.audit_roots (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ix_audit_roots_workspace_window
-    ON analytics.audit_roots (workspace_id, window_end DESC);
+CREATE INDEX IF NOT EXISTS ix_audit_roots_storage_partition_window
+    ON analytics.audit_roots (storage_partition_id, window_end DESC);
 
 CREATE SCHEMA IF NOT EXISTS pii_vault;
 
 CREATE TABLE IF NOT EXISTS pii_vault.subject_keys (
     subject_pseudonym BYTEA PRIMARY KEY,
-    workspace_id      TEXT        NOT NULL,
+    storage_partition_id      TEXT        NOT NULL,
     hmac_key_handle   TEXT        NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     erased_at         TIMESTAMPTZ
@@ -329,7 +329,7 @@ CREATE TABLE IF NOT EXISTS pii_vault.subject_keys (
 CREATE TABLE IF NOT EXISTS pii_vault.plaintext_side (
     record_id          UUID PRIMARY KEY,
     subject_pseudonym  BYTEA       NOT NULL,
-    workspace_id       TEXT        NOT NULL,
+    storage_partition_id       TEXT        NOT NULL,
     field_name         TEXT        NOT NULL,
     ciphertext         BYTEA       NOT NULL,
     encryption_context JSONB       NOT NULL,
@@ -340,8 +340,8 @@ CREATE TABLE IF NOT EXISTS pii_vault.plaintext_side (
 CREATE INDEX IF NOT EXISTS ix_plaintext_subject
     ON pii_vault.plaintext_side (subject_pseudonym);
 
-CREATE INDEX IF NOT EXISTS ix_plaintext_workspace
-    ON pii_vault.plaintext_side (workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_plaintext_storage_partition
+    ON pii_vault.plaintext_side (storage_partition_id, created_at);
 
 -- Source: 028_lineage_dead_letters.sql
 
@@ -353,7 +353,7 @@ CREATE TABLE IF NOT EXISTS analytics.lineage_dead_letters (
     error               TEXT        NOT NULL,
     attempts            INTEGER     NOT NULL,
     row_count           INTEGER     NOT NULL,
-    first_workspace_id  TEXT,
+    first_storage_partition_id  TEXT,
     first_session_id    UUID,
     first_turn_id       UUID,
     rows                JSONB       NOT NULL

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::error::{MoaError, Result};
 
 use super::{
-    CompletionRequest, CompletionResponse, ModelId, SessionId, SessionMeta, ToolCallId,
-    ToolInvocation, ToolOutput, TurnOutcome, UserId, WorkspaceId,
+    CompletionRequest, CompletionResponse, ModelId, SessionId, SessionMeta, TenantId, ToolCallId,
+    ToolInvocation, ToolOutput, TurnOutcome, UserId,
 };
 
 /// Stable sub-agent identifier keyed under the parent session or sub-agent.
@@ -36,8 +36,8 @@ pub enum SubAgentMessage {
         parent_sub_agent: Option<SubAgentId>,
         /// Current depth in the sub-agent tree.
         depth: u32,
-        /// Workspace scope inherited from the parent.
-        workspace_id: WorkspaceId,
+        /// Tenant scope inherited from the parent.
+        tenant_id: TenantId,
         /// User scope inherited from the parent.
         user_id: UserId,
         /// Model inherited from the parent.
@@ -484,7 +484,7 @@ impl SubAgentChildRequest {
         parent_session: SessionId,
         parent_sub_agent: Option<SubAgentId>,
         depth: u32,
-        workspace_id: WorkspaceId,
+        tenant_id: TenantId,
         user_id: UserId,
         model: ModelId,
     ) -> SubAgentMessage {
@@ -496,7 +496,7 @@ impl SubAgentChildRequest {
             parent_session,
             parent_sub_agent,
             depth,
-            workspace_id,
+            tenant_id,
             user_id,
             model,
         }

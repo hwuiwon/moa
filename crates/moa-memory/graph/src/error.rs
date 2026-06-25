@@ -36,16 +36,16 @@ pub enum GraphError {
     /// A PII class stored in Postgres is not part of the supported class set.
     #[error("unknown PII class `{0}`")]
     UnknownPiiClass(String),
-    /// A changelog record's explicit scope does not match its workspace/user shape.
+    /// A changelog record's explicit scope does not match its storage-partition/user shape.
     #[error("changelog scope `{actual}` does not match computed scope `{expected}`")]
     ChangelogScopeMismatch {
         /// Caller-provided scope string.
         actual: String,
-        /// Scope computed from `workspace_id` and `user_id`.
+        /// Scope computed from `storage_partition_id` and `user_id`.
         expected: &'static str,
     },
-    /// A changelog record used an unsupported workspace/user shape.
-    #[error("changelog user scope requires a workspace_id")]
+    /// A changelog record used an unsupported storage-partition/user shape.
+    #[error("changelog user scope requires a storage_partition_id")]
     InvalidChangelogScope,
     /// A scoped Postgres transaction could not be started or committed.
     #[error("scope transaction: {0}")]

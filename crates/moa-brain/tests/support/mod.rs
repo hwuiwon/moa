@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, Event, EventFilter,
     EventRange, EventRecord, ModelCapabilities, ModelId, Result, SequenceNum, SessionActorRef,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, TenantId,
-    TokenPricing, ToolCallFormat, WorkingContext, WorkspaceId,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
+    StoragePartitionId, TenantId, TokenPricing, ToolCallFormat, WorkingContext,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -24,7 +24,7 @@ const WORKSPACE_ROOT_METADATA_KEY: &str = "_moa.runtime.workspace_root";
 
 /// Builds a deterministic [`WorkingContext`] fixture for one-stage pipeline tests.
 pub struct WorkingContextFixture {
-    workspace_id: String,
+    storage_partition_id: String,
     user_id: String,
     model_id: String,
     tool_names: Vec<String>,
@@ -38,7 +38,7 @@ impl WorkingContextFixture {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            workspace_id: "ws-fixture".to_string(),
+            storage_partition_id: "ws-fixture".to_string(),
             user_id: "user-fixture".to_string(),
             model_id: "claude-sonnet-4-6".to_string(),
             tool_names: Vec::new(),
@@ -50,8 +50,8 @@ impl WorkingContextFixture {
 
     /// Sets the workspace id used by the compiled context and workspace-root fixture.
     #[must_use]
-    pub fn with_workspace_id(mut self, workspace_id: &str) -> Self {
-        self.workspace_id = workspace_id.to_string();
+    pub fn with_storage_partition_id(mut self, storage_partition_id: &str) -> Self {
+        self.storage_partition_id = storage_partition_id.to_string();
         self
     }
 
@@ -108,8 +108,8 @@ impl WorkingContextFixture {
     #[must_use]
     pub fn build(self) -> BuiltWorkingContextFixture {
         let tempdir = tempfile::tempdir().expect("pipeline fixture tempdir should be created");
-        let workspace_root = tempdir.path().join(&self.workspace_id);
-        let tenant_id = tenant_id_from_label(&self.workspace_id);
+        let workspace_root = tempdir.path().join(&self.storage_partition_id);
+        let tenant_id = tenant_id_from_label(&self.storage_partition_id);
         let contact_id = contact_id_from_label(&self.user_id);
         let session = SessionMeta {
             id: SessionId(Uuid::from_u128(0x100)),
@@ -370,13 +370,9 @@ impl SessionStore for MockSessionStore {
         Ok(Vec::new())
     }
 
-    async fn workspace_cost_since(
-        &self,
-        workspace_id: &WorkspaceId,
-        since: DateTime<Utc>,
-    ) -> Result<u32> {
+    async fn tenant_cost_since(&self, tenant_id: &TenantId, since: DateTime<Utc>) -> Result<u32> {
         let session = self.session.lock().await.clone();
-        if session.tenant_id != tenant_id_from_workspace_id(workspace_id) {
+        if session.tenant_id != *tenant_id {
             return Ok(0);
         }
 
@@ -414,8 +410,8 @@ pub fn session_meta(label: &str, model: &str) -> SessionMeta {
     }
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    tenant_id_from_label(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    tenant_id_from_label(storage_partition_id.as_str())
 }
 
 fn tenant_id_from_label(label: &str) -> TenantId {

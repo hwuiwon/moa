@@ -5,7 +5,7 @@ use moa_core::{
     ExperienceAttribution, ExperienceRecord, LearningCandidate, LearningEntry, MoaError, ModelId,
     Result, SegmentAssessment, SegmentId, SessionActorRef, SessionChannelBindingId, SessionId,
     SessionMeta, SessionSummary, TaskFingerprint, TaskSegment, TaskStrategySuccessRate, TenantId,
-    UserId, WorkspaceId,
+    UserId,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Row, postgres::PgRow};

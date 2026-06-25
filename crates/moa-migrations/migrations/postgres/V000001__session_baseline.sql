@@ -43,23 +43,23 @@ GRANT moa_promoter TO CURRENT_USER;
 GRANT moa_auditor TO CURRENT_USER;
 
 CREATE OR REPLACE FUNCTION moa.compute_scope_tier(
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT
 ) RETURNS TEXT
 LANGUAGE SQL IMMUTABLE
 AS $$
     SELECT CASE
-        WHEN workspace_id IS NULL AND user_id IS NULL THEN 'global'
-        WHEN workspace_id IS NOT NULL AND user_id IS NOT NULL THEN 'contact'
-        WHEN workspace_id IS NOT NULL AND user_id IS NULL THEN 'tenant'
+        WHEN storage_partition_id IS NULL AND user_id IS NULL THEN 'global'
+        WHEN storage_partition_id IS NOT NULL AND user_id IS NOT NULL THEN 'contact'
+        WHEN storage_partition_id IS NOT NULL AND user_id IS NULL THEN 'tenant'
         ELSE NULL
     END;
 $$;
 
-CREATE OR REPLACE FUNCTION moa.current_workspace() RETURNS TEXT
+CREATE OR REPLACE FUNCTION moa.current_storage_partition() RETURNS TEXT
 LANGUAGE SQL STABLE
 AS $$
-    SELECT NULLIF(current_setting('moa.workspace_id', TRUE), '');
+    SELECT NULLIF(current_setting('moa.storage_partition_id', TRUE), '');
 $$;
 
 CREATE OR REPLACE FUNCTION moa.current_user_id() RETURNS TEXT
@@ -78,11 +78,11 @@ CREATE OR REPLACE FUNCTION moa.drop_three_tier_policies(target_table REGCLASS) R
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    EXECUTE format('DROP POLICY IF EXISTS workspace_isolation ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS storage_partition_isolation ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
@@ -102,14 +102,14 @@ BEGIN
         target_table
     );
     EXECUTE format(
-        'CREATE POLICY rd_workspace ON %s FOR SELECT TO moa_app
-         USING (scope = ''tenant'' AND workspace_id = moa.current_workspace())',
+        'CREATE POLICY rd_tenant ON %s FOR SELECT TO moa_app
+         USING (scope = ''tenant'' AND storage_partition_id = moa.current_storage_partition())',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY rd_user ON %s FOR SELECT TO moa_app
          USING (scope = ''contact''
-                AND workspace_id = moa.current_workspace()
+                AND storage_partition_id = moa.current_storage_partition()
                 AND user_id = moa.current_user_id())',
         target_table
     );
@@ -124,18 +124,18 @@ BEGIN
     PERFORM moa.apply_three_tier_read_policies(target_table);
 
     EXECUTE format(
-        'CREATE POLICY wr_workspace ON %s FOR ALL TO moa_app
-         USING (scope = ''tenant'' AND workspace_id = moa.current_workspace())
-         WITH CHECK (scope = ''tenant'' AND workspace_id = moa.current_workspace())',
+        'CREATE POLICY wr_tenant ON %s FOR ALL TO moa_app
+         USING (scope = ''tenant'' AND storage_partition_id = moa.current_storage_partition())
+         WITH CHECK (scope = ''tenant'' AND storage_partition_id = moa.current_storage_partition())',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY wr_user ON %s FOR ALL TO moa_app
          USING (scope = ''contact''
-                AND workspace_id = moa.current_workspace()
+                AND storage_partition_id = moa.current_storage_partition()
                 AND user_id = moa.current_user_id())
          WITH CHECK (scope = ''contact''
-                     AND workspace_id = moa.current_workspace()
+                     AND storage_partition_id = moa.current_storage_partition()
                      AND user_id = moa.current_user_id())',
         target_table
     );
@@ -159,9 +159,9 @@ $$;
 
 CREATE TABLE IF NOT EXISTS sessions (
     id UUID PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     title TEXT,
     status TEXT NOT NULL DEFAULT 'created',
     platform TEXT NOT NULL,
@@ -178,17 +178,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_checkpoint_seq BIGINT
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_storage_partition ON sessions(storage_partition_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(workspace_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_scope ON sessions(storage_partition_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
 CREATE TABLE IF NOT EXISTS events (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id),
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     sequence_num BIGINT NOT NULL,
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
@@ -204,25 +204,16 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_session_type ON events(session_id, event_type);
-CREATE INDEX IF NOT EXISTS idx_events_scope ON events(workspace_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS idx_events_scope ON events(storage_partition_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_fts ON events USING GIN(search_vector);
-
-CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    path TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    session_count BIGINT DEFAULT 0
-);
 
 CREATE TABLE IF NOT EXISTS pending_signals (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id),
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     signal_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -232,7 +223,7 @@ CREATE TABLE IF NOT EXISTS pending_signals (
 CREATE INDEX IF NOT EXISTS idx_pending_signals_session
     ON pending_signals(session_id, resolved_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_pending_signals_scope
-    ON pending_signals(workspace_id, scope, user_id);
+    ON pending_signals(storage_partition_id, scope, user_id);
 
 -- Source: V000003__session_add_session_cache_columns.sql
 
@@ -245,9 +236,9 @@ ALTER TABLE sessions
 
 CREATE TABLE IF NOT EXISTS context_snapshots (
     session_id UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     format_version INTEGER NOT NULL,
     last_sequence_num BIGINT NOT NULL,
     payload JSONB NOT NULL,
@@ -257,11 +248,11 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
 CREATE INDEX IF NOT EXISTS idx_context_snapshots_last_seq
     ON context_snapshots(session_id, last_sequence_num);
 CREATE INDEX IF NOT EXISTS idx_context_snapshots_scope
-    ON context_snapshots(workspace_id, scope, user_id);
+    ON context_snapshots(storage_partition_id, scope, user_id);
 
 -- Source: V000005__session_generated_columns.sql
 
-DROP MATERIALIZED VIEW IF EXISTS daily_workspace_metrics;
+DROP MATERIALIZED VIEW IF EXISTS daily_storage_partition_metrics;
 DROP MATERIALIZED VIEW IF EXISTS session_turn_metrics;
 DROP VIEW IF EXISTS session_summary;
 DROP VIEW IF EXISTS tool_call_summary;
@@ -430,7 +421,7 @@ WHERE s.id = a.id;
 CREATE OR REPLACE VIEW tool_call_analytics AS
 WITH tool_calls AS (
     SELECT
-        s.workspace_id,
+        s.storage_partition_id,
         s.user_id,
         e.session_id,
         e.sequence_num AS call_sequence_num,
@@ -442,7 +433,7 @@ WITH tool_calls AS (
     WHERE e.event_type = 'ToolCall'
 )
 SELECT
-    tc.workspace_id,
+    tc.storage_partition_id,
     tc.user_id,
     tc.session_id,
     tc.call_sequence_num,
@@ -498,7 +489,7 @@ GROUP BY tool_name;
 CREATE OR REPLACE VIEW session_summary AS
 SELECT
     s.id,
-    s.workspace_id,
+    s.storage_partition_id,
     s.user_id,
     s.status,
     s.turn_count,
@@ -590,7 +581,7 @@ tool_metrics AS (
     GROUP BY bt.session_id, bt.turn_number
 )
 SELECT
-    s.workspace_id,
+    s.storage_partition_id,
     s.user_id,
     bt.session_id,
     bt.turn_number,
@@ -620,13 +611,13 @@ LEFT JOIN tool_metrics tm
 CREATE UNIQUE INDEX idx_session_turn_metrics_session_turn
     ON session_turn_metrics(session_id, turn_number);
 
--- Source: V000007__session_daily_workspace_metrics.sql
+-- Source: V000007__session_daily_storage_partition_metrics.sql
 
-DROP MATERIALIZED VIEW IF EXISTS daily_workspace_metrics;
+DROP MATERIALIZED VIEW IF EXISTS daily_storage_partition_metrics;
 
-CREATE MATERIALIZED VIEW daily_workspace_metrics AS
+CREATE MATERIALIZED VIEW daily_storage_partition_metrics AS
 SELECT
-    workspace_id,
+    storage_partition_id,
     DATE_TRUNC('day', created_at) AS day,
     COUNT(*)::BIGINT AS session_count,
     SUM(turn_count)::BIGINT AS turn_count,
@@ -636,17 +627,17 @@ SELECT
     SUM(total_cost_cents)::BIGINT AS total_cost_cents,
     AVG(cache_hit_rate)::DOUBLE PRECISION AS avg_cache_hit_rate
 FROM sessions
-GROUP BY workspace_id, DATE_TRUNC('day', created_at);
+GROUP BY storage_partition_id, DATE_TRUNC('day', created_at);
 
-CREATE UNIQUE INDEX idx_daily_workspace_metrics_workspace_day
-    ON daily_workspace_metrics(workspace_id, day);
+CREATE UNIQUE INDEX idx_daily_storage_partition_metrics_partition_day
+    ON daily_storage_partition_metrics(storage_partition_id, day);
 
 -- Source: V000008__session_model_tier_analytics.sql
 
 CREATE OR REPLACE VIEW tool_call_analytics AS
 WITH tool_calls AS (
     SELECT
-        s.workspace_id,
+        s.storage_partition_id,
         s.user_id,
         e.session_id,
         e.sequence_num AS call_sequence_num,
@@ -658,7 +649,7 @@ WITH tool_calls AS (
     WHERE e.event_type = 'ToolCall'
 )
 SELECT
-    tc.workspace_id,
+    tc.storage_partition_id,
     tc.user_id,
     tc.session_id,
     tc.call_sequence_num,
@@ -703,7 +694,7 @@ LEFT JOIN LATERAL (
 CREATE OR REPLACE VIEW session_summary AS
 SELECT
     s.id,
-    s.workspace_id,
+    s.storage_partition_id,
     s.user_id,
     s.status,
     s.turn_count,
@@ -772,9 +763,9 @@ LEFT JOIN (
 CREATE TABLE IF NOT EXISTS task_segments (
     id UUID PRIMARY KEY,
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     tenant_id TEXT NOT NULL,
     segment_index INT NOT NULL,
     task_summary TEXT,
@@ -798,7 +789,7 @@ CREATE INDEX IF NOT EXISTS idx_task_segments_session
 CREATE INDEX IF NOT EXISTS idx_task_segments_tenant_time
     ON task_segments (tenant_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_segments_scope
-    ON task_segments (workspace_id, scope, user_id);
+    ON task_segments (storage_partition_id, scope, user_id);
 
 -- Source: V000010__session_resolution_views.sql
 
@@ -846,9 +837,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_segment_baselines_unique
 CREATE TABLE IF NOT EXISTS learning_log (
     id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     learning_type TEXT NOT NULL,
     target_id TEXT NOT NULL,
     target_label TEXT,
@@ -870,7 +861,7 @@ CREATE INDEX IF NOT EXISTS idx_learning_log_target
 CREATE INDEX IF NOT EXISTS idx_learning_log_batch
     ON learning_log (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_learning_log_scope
-    ON learning_log (workspace_id, scope, user_id);
+    ON learning_log (storage_partition_id, scope, user_id);
 
 -- Source: V000012__session_three_tier_rls.sql
 
@@ -951,9 +942,9 @@ BEGIN
     EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
 
     EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
@@ -965,41 +956,41 @@ BEGIN
         target_table
     );
     EXECUTE format(
-        'CREATE POLICY rd_workspace ON %s FOR SELECT TO moa_app
+        'CREATE POLICY rd_tenant ON %s FOR SELECT TO moa_app
          USING (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''workspace_id'')
-                    = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype)',
+                AND moa.age_property(properties, ''storage_partition_id'')
+                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype)',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY rd_user ON %s FOR SELECT TO moa_app
          USING (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''workspace_id'')
-                    = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype
+                AND moa.age_property(properties, ''storage_partition_id'')
+                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype
                 AND moa.age_property(properties, ''user_id'')
                     = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)',
         target_table
     );
     EXECUTE format(
-        'CREATE POLICY wr_workspace ON %s FOR ALL TO moa_app
+        'CREATE POLICY wr_tenant ON %s FOR ALL TO moa_app
          USING (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''workspace_id'')
-                    = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype)
+                AND moa.age_property(properties, ''storage_partition_id'')
+                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype)
          WITH CHECK (moa.age_property(properties, ''scope'') = ''"tenant"''::ag_catalog.agtype
-                     AND moa.age_property(properties, ''workspace_id'')
-                         = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype)',
+                     AND moa.age_property(properties, ''storage_partition_id'')
+                         = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype)',
         target_table
     );
     EXECUTE format(
         'CREATE POLICY wr_user ON %s FOR ALL TO moa_app
          USING (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
-                AND moa.age_property(properties, ''workspace_id'')
-                    = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype
+                AND moa.age_property(properties, ''storage_partition_id'')
+                    = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype
                 AND moa.age_property(properties, ''user_id'')
                     = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)
          WITH CHECK (moa.age_property(properties, ''scope'') = ''"contact"''::ag_catalog.agtype
-                     AND moa.age_property(properties, ''workspace_id'')
-                         = (''"'' || moa.current_workspace() || ''"'')::ag_catalog.agtype
+                     AND moa.age_property(properties, ''storage_partition_id'')
+                         = (''"'' || moa.current_storage_partition() || ''"'')::ag_catalog.agtype
                      AND moa.age_property(properties, ''user_id'')
                          = (''"'' || moa.current_user_id() || ''"'')::ag_catalog.agtype)',
         target_table
@@ -1057,8 +1048,8 @@ BEGIN
         );
         EXECUTE format(
             'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"workspace_id"''::ag_catalog.agtype])))',
-            label_name || '_workspace_idx',
+             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"storage_partition_id"''::ag_catalog.agtype])))',
+            label_name || '_storage_partition_idx',
             label_name
         );
         EXECUTE format(
@@ -1099,8 +1090,8 @@ BEGIN
         );
         EXECUTE format(
             'CREATE INDEX IF NOT EXISTS %I ON moa_graph.%I USING BTREE
-             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"workspace_id"''::ag_catalog.agtype])))',
-            label_name || '_workspace_idx',
+             ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, ''"storage_partition_id"''::ag_catalog.agtype])))',
+            label_name || '_storage_partition_idx',
             label_name
         );
     END LOOP;
@@ -1137,9 +1128,9 @@ CREATE TABLE IF NOT EXISTS moa.node_index (
     uid UUID PRIMARY KEY,
     gid BIGINT,
     label TEXT NOT NULL CHECK (label = ANY(moa.age_vertex_labels())),
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     name TEXT NOT NULL,
     name_tsv TSVECTOR GENERATED ALWAYS AS (
         to_tsvector('simple', coalesce(name, ''))
@@ -1162,7 +1153,7 @@ ALTER TABLE moa.node_index
     ADD COLUMN IF NOT EXISTS reference_count BIGINT NOT NULL DEFAULT 0 CHECK (reference_count >= 0);
 
 CREATE INDEX IF NOT EXISTS node_index_ws_scope_label
-    ON moa.node_index (workspace_id, scope, label)
+    ON moa.node_index (storage_partition_id, scope, label)
     WHERE valid_to IS NULL;
 CREATE INDEX IF NOT EXISTS node_index_name_tsv_idx
     ON moa.node_index USING GIN (name_tsv);
@@ -1190,9 +1181,9 @@ DROP TABLE IF EXISTS moa.embeddings_old CASCADE;
 
 CREATE TABLE IF NOT EXISTS moa.embeddings (
     uid UUID NOT NULL REFERENCES moa.node_index(uid) ON DELETE CASCADE,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     label TEXT NOT NULL CHECK (label = ANY(moa.age_vertex_labels())),
     pii_class TEXT NOT NULL DEFAULT 'none'
         CHECK (pii_class IN ('none', 'pii', 'phi', 'restricted')),
@@ -1202,7 +1193,7 @@ CREATE TABLE IF NOT EXISTS moa.embeddings (
     valid_to TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (scope IS NOT NULL)
-) PARTITION BY HASH (workspace_id);
+) PARTITION BY HASH (storage_partition_id);
 
 DO $$
 DECLARE
@@ -1219,13 +1210,13 @@ BEGIN
     END LOOP;
 END $$;
 
-CREATE UNIQUE INDEX IF NOT EXISTS embeddings_workspace_uid_unique
-    ON moa.embeddings (workspace_id, uid) NULLS NOT DISTINCT;
+CREATE UNIQUE INDEX IF NOT EXISTS embeddings_storage_partition_uid_unique
+    ON moa.embeddings (storage_partition_id, uid) NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS embeddings_embedding_hnsw_idx
     ON moa.embeddings USING hnsw (embedding public.halfvec_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 CREATE INDEX IF NOT EXISTS embeddings_ws_scope_label_idx
-    ON moa.embeddings (workspace_id, scope, label)
+    ON moa.embeddings (storage_partition_id, scope, label)
     WHERE valid_to IS NULL;
 CREATE INDEX IF NOT EXISTS embeddings_uid_idx
     ON moa.embeddings (uid);
@@ -1237,9 +1228,9 @@ SELECT moa.apply_three_tier_rls('moa.embeddings'::REGCLASS);
 
 CREATE TABLE IF NOT EXISTS moa.graph_changelog (
     change_id BIGSERIAL,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     actor_id TEXT,
     actor_kind TEXT NOT NULL
         CHECK (actor_kind IN ('user', 'agent', 'system', 'promoter', 'admin')),
@@ -1291,7 +1282,7 @@ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS changelog_ws_idx
-    ON moa.graph_changelog (workspace_id, created_at DESC);
+    ON moa.graph_changelog (storage_partition_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS changelog_target_uid_idx
     ON moa.graph_changelog (target_uid);
 CREATE INDEX IF NOT EXISTS changelog_actor_idx
@@ -1303,10 +1294,10 @@ CREATE INDEX IF NOT EXISTS changelog_cause_idx
     ON moa.graph_changelog (cause_change_id)
     WHERE cause_change_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS moa.workspace_state (
-    workspace_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS moa.storage_partition_state (
+    storage_partition_id TEXT PRIMARY KEY,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     changelog_version BIGINT NOT NULL DEFAULT 0,
     vector_backend TEXT NOT NULL DEFAULT 'pgvector'
         CHECK (vector_backend IN ('pgvector', 'turbopuffer')),
@@ -1325,46 +1316,46 @@ CREATE TABLE IF NOT EXISTS moa.workspace_state (
     CHECK (scope = 'tenant')
 );
 
-ALTER TABLE moa.workspace_state
+ALTER TABLE moa.storage_partition_state
     ADD COLUMN IF NOT EXISTS embedding_model TEXT NOT NULL DEFAULT 'cohere-embed-v4',
     ADD COLUMN IF NOT EXISTS embedding_model_version INT NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS embedding_dimension INT NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
     ADD COLUMN IF NOT EXISTS reembed_state TEXT NOT NULL DEFAULT 'steady'
         CHECK (reembed_state IN ('steady', 'in_progress'));
 
-CREATE INDEX IF NOT EXISTS workspace_state_version_idx
-    ON moa.workspace_state (workspace_id, changelog_version);
+CREATE INDEX IF NOT EXISTS storage_partition_state_version_idx
+    ON moa.storage_partition_state (storage_partition_id, changelog_version);
 
-CREATE OR REPLACE FUNCTION moa.bump_workspace_state_from_changelog() RETURNS TRIGGER
+CREATE OR REPLACE FUNCTION moa.bump_storage_partition_state_from_changelog() RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NEW.workspace_id IS NULL THEN
+    IF NEW.storage_partition_id IS NULL THEN
         RETURN NEW;
     END IF;
 
-    INSERT INTO moa.workspace_state (workspace_id, changelog_version)
-    VALUES (NEW.workspace_id, 1)
-    ON CONFLICT (workspace_id) DO UPDATE
-        SET changelog_version = moa.workspace_state.changelog_version + 1,
+    INSERT INTO moa.storage_partition_state (storage_partition_id, changelog_version)
+    VALUES (NEW.storage_partition_id, 1)
+    ON CONFLICT (storage_partition_id) DO UPDATE
+        SET changelog_version = moa.storage_partition_state.changelog_version + 1,
             updated_at = now();
 
     RETURN NEW;
 END;
 $$;
 
-DROP TRIGGER IF EXISTS graph_changelog_bump_workspace_state ON moa.graph_changelog;
-CREATE TRIGGER graph_changelog_bump_workspace_state
+DROP TRIGGER IF EXISTS graph_changelog_bump_storage_partition_state ON moa.graph_changelog;
+CREATE TRIGGER graph_changelog_bump_storage_partition_state
     AFTER INSERT ON moa.graph_changelog
     FOR EACH ROW
-    EXECUTE FUNCTION moa.bump_workspace_state_from_changelog();
+    EXECUTE FUNCTION moa.bump_storage_partition_state_from_changelog();
 
 ALTER TABLE moa.graph_changelog ENABLE ROW LEVEL SECURITY;
 ALTER TABLE moa.graph_changelog FORCE ROW LEVEL SECURITY;
 SELECT moa.drop_three_tier_policies('moa.graph_changelog'::REGCLASS);
 DROP POLICY IF EXISTS rd_auditor ON moa.graph_changelog;
 DROP POLICY IF EXISTS ins_app ON moa.graph_changelog;
-DROP POLICY IF EXISTS ins_app_workspace ON moa.graph_changelog;
+DROP POLICY IF EXISTS ins_app_tenant ON moa.graph_changelog;
 DROP POLICY IF EXISTS ins_app_user ON moa.graph_changelog;
 DROP POLICY IF EXISTS ins_promoter ON moa.graph_changelog;
 DROP POLICY IF EXISTS ins_promoter_global ON moa.graph_changelog;
@@ -1373,41 +1364,41 @@ SELECT moa.apply_three_tier_read_policies('moa.graph_changelog'::REGCLASS);
 CREATE POLICY rd_auditor ON moa.graph_changelog
     FOR SELECT TO moa_auditor
     USING (true);
-CREATE POLICY ins_app_workspace ON moa.graph_changelog
+CREATE POLICY ins_app_tenant ON moa.graph_changelog
     FOR INSERT TO moa_app
     WITH CHECK (
         scope = 'tenant'
-        AND workspace_id = moa.current_workspace()
+        AND storage_partition_id = moa.current_storage_partition()
     );
 CREATE POLICY ins_app_user ON moa.graph_changelog
     FOR INSERT TO moa_app
     WITH CHECK (
         scope = 'contact'
-        AND workspace_id = moa.current_workspace()
+        AND storage_partition_id = moa.current_storage_partition()
         AND user_id = moa.current_user_id()
     );
 CREATE POLICY ins_promoter_global ON moa.graph_changelog
     FOR INSERT TO moa_promoter
     WITH CHECK (scope = 'global');
 
-ALTER TABLE moa.workspace_state ENABLE ROW LEVEL SECURITY;
-ALTER TABLE moa.workspace_state FORCE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS ws_self_select ON moa.workspace_state;
-DROP POLICY IF EXISTS ws_self_insert ON moa.workspace_state;
-DROP POLICY IF EXISTS ws_self_update ON moa.workspace_state;
-DROP POLICY IF EXISTS ws_promoter ON moa.workspace_state;
-DROP POLICY IF EXISTS owner_dev_access ON moa.workspace_state;
-CREATE POLICY ws_self_select ON moa.workspace_state
+ALTER TABLE moa.storage_partition_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE moa.storage_partition_state FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ws_self_select ON moa.storage_partition_state;
+DROP POLICY IF EXISTS ws_self_insert ON moa.storage_partition_state;
+DROP POLICY IF EXISTS ws_self_update ON moa.storage_partition_state;
+DROP POLICY IF EXISTS ws_promoter ON moa.storage_partition_state;
+DROP POLICY IF EXISTS owner_dev_access ON moa.storage_partition_state;
+CREATE POLICY ws_self_select ON moa.storage_partition_state
     FOR SELECT TO moa_app
-    USING (workspace_id = moa.current_workspace());
-CREATE POLICY ws_self_insert ON moa.workspace_state
+    USING (storage_partition_id = moa.current_storage_partition());
+CREATE POLICY ws_self_insert ON moa.storage_partition_state
     FOR INSERT TO moa_app
-    WITH CHECK (workspace_id = moa.current_workspace());
-CREATE POLICY ws_self_update ON moa.workspace_state
+    WITH CHECK (storage_partition_id = moa.current_storage_partition());
+CREATE POLICY ws_self_update ON moa.storage_partition_state
     FOR UPDATE TO moa_app
-    USING (workspace_id = moa.current_workspace())
-    WITH CHECK (workspace_id = moa.current_workspace());
-CREATE POLICY ws_promoter ON moa.workspace_state
+    USING (storage_partition_id = moa.current_storage_partition())
+    WITH CHECK (storage_partition_id = moa.current_storage_partition());
+CREATE POLICY ws_promoter ON moa.storage_partition_state
     FOR ALL TO moa_promoter
     USING (true)
     WITH CHECK (true);
@@ -1423,8 +1414,8 @@ GRANT SELECT, INSERT ON moa.graph_changelog TO moa_promoter;
 GRANT SELECT ON moa.graph_changelog TO moa_auditor;
 GRANT USAGE, SELECT ON SEQUENCE moa.graph_changelog_change_id_seq TO moa_app, moa_promoter;
 
-GRANT SELECT, INSERT, UPDATE ON moa.workspace_state TO moa_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON moa.workspace_state TO moa_promoter;
+GRANT SELECT, INSERT, UPDATE ON moa.storage_partition_state TO moa_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON moa.storage_partition_state TO moa_promoter;
 
 GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter, moa_auditor, moa_replicator;
 GRANT SELECT ON moa.graph_changelog TO moa_replicator;
@@ -1473,15 +1464,15 @@ GRANT EXECUTE ON FUNCTION moa.ensure_changelog_replication_slot() TO moa_owner;
 -- Source: V000017__session_ingest.sql
 
 CREATE TABLE IF NOT EXISTS moa.ingest_dedup (
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     session_id UUID NOT NULL,
     turn_seq BIGINT NOT NULL,
     fact_hash BYTEA NOT NULL,
     fact_uid UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (workspace_id, session_id, turn_seq, fact_hash),
+    PRIMARY KEY (storage_partition_id, session_id, turn_seq, fact_hash),
     CHECK (scope IS NOT NULL)
 );
 
@@ -1490,9 +1481,9 @@ CREATE INDEX IF NOT EXISTS ingest_dedup_fact_uid_idx
 
 CREATE TABLE IF NOT EXISTS moa.ingest_dlq (
     dlq_id BIGSERIAL PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     session_id UUID,
     turn_seq BIGINT,
     payload JSONB NOT NULL,
@@ -1504,9 +1495,9 @@ CREATE TABLE IF NOT EXISTS moa.ingest_dlq (
 );
 
 CREATE INDEX IF NOT EXISTS ingest_dlq_retry_idx
-    ON moa.ingest_dlq (workspace_id, next_retry_at, retry_count);
+    ON moa.ingest_dlq (storage_partition_id, next_retry_at, retry_count);
 CREATE INDEX IF NOT EXISTS ingest_dlq_session_idx
-    ON moa.ingest_dlq (workspace_id, session_id, turn_seq);
+    ON moa.ingest_dlq (storage_partition_id, session_id, turn_seq);
 
 GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter;
 GRANT USAGE, SELECT ON SEQUENCE moa.ingest_dlq_dlq_id_seq TO moa_app, moa_promoter;
@@ -1514,17 +1505,17 @@ GRANT USAGE, SELECT ON SEQUENCE moa.ingest_dlq_dlq_id_seq TO moa_app, moa_promot
 SELECT moa.apply_three_tier_rls('moa.ingest_dedup'::REGCLASS);
 SELECT moa.apply_three_tier_rls('moa.ingest_dlq'::REGCLASS);
 
-ALTER TABLE moa.workspace_state
+ALTER TABLE moa.storage_partition_state
     ADD COLUMN IF NOT EXISTS slow_path_degraded BOOLEAN NOT NULL DEFAULT false;
 
-ALTER TABLE moa.workspace_state
+ALTER TABLE moa.storage_partition_state
     ADD COLUMN IF NOT EXISTS ingest_concurrency INT NOT NULL DEFAULT 8;
 
-ALTER TABLE moa.workspace_state
-    DROP CONSTRAINT IF EXISTS workspace_state_ingest_concurrency_positive;
+ALTER TABLE moa.storage_partition_state
+    DROP CONSTRAINT IF EXISTS storage_partition_state_ingest_concurrency_positive;
 
-ALTER TABLE moa.workspace_state
-    ADD CONSTRAINT workspace_state_ingest_concurrency_positive
+ALTER TABLE moa.storage_partition_state
+    ADD CONSTRAINT storage_partition_state_ingest_concurrency_positive
     CHECK (ingest_concurrency > 0);
 
 -- Source: V000020__session_pgaudit.sql
@@ -1632,16 +1623,16 @@ ALTER TABLE moa.graph_changelog
 
 -- M26: Turbopuffer is an opt-in vector backend.
 --
--- `moa.workspace_state.vector_backend` was introduced in 015_graph_changelog.sql
+-- `moa.storage_partition_state.vector_backend` was introduced in 015_graph_changelog.sql
 -- with CHECK (vector_backend IN ('pgvector', 'turbopuffer')). This migration is
 -- intentionally schema-neutral and documents that M26 uses the existing column.
 SELECT 1;
 
--- Source: V000024__session_workspace_vector_promotion.sql
+-- Source: V000024__session_storage_partition_vector_promotion.sql
 
--- M27: Workspace vector-backend promotion state lookup.
-CREATE INDEX IF NOT EXISTS workspace_state_dual_read_idx
-    ON moa.workspace_state (vector_backend_state)
+-- M27: Storage-partition vector-backend promotion state lookup.
+CREATE INDEX IF NOT EXISTS storage_partition_state_dual_read_idx
+    ON moa.storage_partition_state (vector_backend_state)
     WHERE vector_backend_state != 'steady';
 
 -- Source: V000025__session_lineage.sql
@@ -1664,7 +1655,7 @@ CREATE TABLE IF NOT EXISTS analytics.turn_lineage (
     turn_id        UUID        NOT NULL,
     session_id     UUID        NOT NULL,
     user_id        TEXT        NOT NULL,
-    workspace_id   TEXT        NOT NULL,
+    storage_partition_id   TEXT        NOT NULL,
     ts             TIMESTAMPTZ NOT NULL,
     tier           SMALLINT    NOT NULL DEFAULT 1,
     record_kind    SMALLINT    NOT NULL,
@@ -1678,8 +1669,8 @@ CREATE TABLE IF NOT EXISTS analytics.turn_lineage (
 CREATE INDEX IF NOT EXISTS ix_lineage_session_ts
     ON analytics.turn_lineage (session_id, ts DESC);
 
-CREATE INDEX IF NOT EXISTS ix_lineage_workspace_user_ts
-    ON analytics.turn_lineage (workspace_id, user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_lineage_storage_partition_user_ts
+    ON analytics.turn_lineage (storage_partition_id, user_id, ts DESC);
 
 CREATE INDEX IF NOT EXISTS ix_lineage_zero_recall
     ON analytics.turn_lineage (ts DESC)
@@ -1704,7 +1695,7 @@ BEGIN
         EXECUTE $ddl$
             ALTER TABLE analytics.turn_lineage SET (
                 timescaledb.compress,
-                timescaledb.compress_segmentby = 'workspace_id',
+                timescaledb.compress_segmentby = 'storage_partition_id',
                 timescaledb.compress_orderby = 'ts DESC, turn_id'
             )
         $ddl$;
@@ -1724,7 +1715,7 @@ BEGIN
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.turn_recall_hourly
             WITH (timescaledb.continuous) AS
             SELECT time_bucket('1 hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    COUNT(*) AS turns,
                    COUNT(*) FILTER (
                        WHERE record_kind = 1
@@ -1732,7 +1723,7 @@ BEGIN
                          AND jsonb_array_length(payload #> '{record,top_k}') = 0
                    ) AS zero_recall
             FROM analytics.turn_lineage
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
@@ -1747,7 +1738,7 @@ BEGIN
         EXECUTE $ddl$
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.turn_recall_hourly AS
             SELECT date_trunc('hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    COUNT(*) AS turns,
                    COUNT(*) FILTER (
                        WHERE record_kind = 1
@@ -1755,7 +1746,7 @@ BEGIN
                          AND jsonb_array_length(payload #> '{record,top_k}') = 0
                    ) AS zero_recall
             FROM analytics.turn_lineage
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
     END IF;
@@ -1767,7 +1758,7 @@ $$;
 CREATE TABLE IF NOT EXISTS analytics.scores (
     score_id           UUID             NOT NULL,
     ts                 TIMESTAMPTZ      NOT NULL,
-    workspace_id       TEXT             NOT NULL,
+    storage_partition_id       TEXT             NOT NULL,
     user_id            TEXT,
     target_kind        TEXT             NOT NULL,
     turn_id            UUID,
@@ -1786,8 +1777,8 @@ CREATE TABLE IF NOT EXISTS analytics.scores (
     PRIMARY KEY (score_id, ts)
 );
 
-CREATE INDEX IF NOT EXISTS ix_scores_workspace_name_ts
-    ON analytics.scores (workspace_id, name, ts DESC);
+CREATE INDEX IF NOT EXISTS ix_scores_storage_partition_name_ts
+    ON analytics.scores (storage_partition_id, name, ts DESC);
 
 CREATE INDEX IF NOT EXISTS ix_scores_turn
     ON analytics.scores (turn_id)
@@ -1807,7 +1798,7 @@ CREATE TABLE IF NOT EXISTS analytics.eval_datasets (
 CREATE TABLE IF NOT EXISTS analytics.eval_dataset_items (
     item_id         UUID        PRIMARY KEY,
     dataset_id      UUID        NOT NULL REFERENCES analytics.eval_datasets(dataset_id) ON DELETE CASCADE,
-    workspace_id    TEXT        NOT NULL,
+    storage_partition_id    TEXT        NOT NULL,
     scope           JSONB       NOT NULL,
     query           TEXT        NOT NULL,
     expected_answer TEXT,
@@ -1832,7 +1823,7 @@ BEGIN
         EXECUTE $ddl$
             ALTER TABLE analytics.scores SET (
                 timescaledb.compress,
-                timescaledb.compress_segmentby = 'workspace_id, name',
+                timescaledb.compress_segmentby = 'storage_partition_id, name',
                 timescaledb.compress_orderby = 'ts DESC'
             )
         $ddl$;
@@ -1852,12 +1843,12 @@ BEGIN
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.grounding_hourly
             WITH (timescaledb.continuous) AS
             SELECT time_bucket('1 hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END) AS verified_rate,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'citation_verified' AND value_type = 'boolean'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
@@ -1873,14 +1864,14 @@ BEGIN
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.nli_hourly
             WITH (timescaledb.continuous) AS
             SELECT time_bucket('1 hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    AVG(value_numeric) AS p50,
                    MAX(value_numeric) AS p95,
                    AVG(value_numeric) AS mean,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'nli_entailment' AND value_type = 'numeric'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
@@ -1895,26 +1886,26 @@ BEGIN
         EXECUTE $ddl$
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.grounding_hourly AS
             SELECT date_trunc('hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    AVG(CASE WHEN value_boolean THEN 1.0 ELSE 0.0 END) AS verified_rate,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'citation_verified' AND value_type = 'boolean'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
 
         EXECUTE $ddl$
             CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.nli_hourly AS
             SELECT date_trunc('hour', ts) AS bucket,
-                   workspace_id,
+                   storage_partition_id,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY value_numeric) AS p50,
                    percentile_cont(0.95) WITHIN GROUP (ORDER BY value_numeric) AS p95,
                    AVG(value_numeric) AS mean,
                    COUNT(*) AS n
             FROM analytics.scores
             WHERE name = 'nli_entailment' AND value_type = 'numeric'
-            GROUP BY bucket, workspace_id
+            GROUP BY bucket, storage_partition_id
             WITH NO DATA
         $ddl$;
     END IF;
@@ -1923,8 +1914,8 @@ $$;
 
 -- Source: V000027__session_lineage_audit.sql
 
-CREATE TABLE IF NOT EXISTS analytics.compliance_workspaces (
-    workspace_id       TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS analytics.compliance_tenants (
+    storage_partition_id       TEXT PRIMARY KEY,
     enabled            BOOLEAN     NOT NULL DEFAULT TRUE,
     enabled_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     retention_years    INT         NOT NULL DEFAULT 10,
@@ -1934,8 +1925,8 @@ CREATE TABLE IF NOT EXISTS analytics.compliance_workspaces (
     notes              TEXT
 );
 
-CREATE TABLE IF NOT EXISTS analytics.compliance_workspace_state (
-    workspace_id          TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS analytics.compliance_storage_partition_state (
+    storage_partition_id          TEXT PRIMARY KEY,
     last_integrity_hash   BYTEA,
     last_ts               TIMESTAMPTZ,
     record_count          BIGINT NOT NULL DEFAULT 0,
@@ -1944,7 +1935,7 @@ CREATE TABLE IF NOT EXISTS analytics.compliance_workspace_state (
 
 CREATE TABLE IF NOT EXISTS analytics.audit_roots (
     root_id            UUID PRIMARY KEY,
-    workspace_id       TEXT        NOT NULL,
+    storage_partition_id       TEXT        NOT NULL,
     window_start       TIMESTAMPTZ NOT NULL,
     window_end         TIMESTAMPTZ NOT NULL,
     record_count       BIGINT      NOT NULL,
@@ -1958,14 +1949,14 @@ CREATE TABLE IF NOT EXISTS analytics.audit_roots (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ix_audit_roots_workspace_window
-    ON analytics.audit_roots (workspace_id, window_end DESC);
+CREATE INDEX IF NOT EXISTS ix_audit_roots_storage_partition_window
+    ON analytics.audit_roots (storage_partition_id, window_end DESC);
 
 CREATE SCHEMA IF NOT EXISTS pii_vault;
 
 CREATE TABLE IF NOT EXISTS pii_vault.subject_keys (
     subject_pseudonym BYTEA PRIMARY KEY,
-    workspace_id      TEXT        NOT NULL,
+    storage_partition_id      TEXT        NOT NULL,
     hmac_key_handle   TEXT        NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     erased_at         TIMESTAMPTZ
@@ -1974,7 +1965,7 @@ CREATE TABLE IF NOT EXISTS pii_vault.subject_keys (
 CREATE TABLE IF NOT EXISTS pii_vault.plaintext_side (
     record_id          UUID PRIMARY KEY,
     subject_pseudonym  BYTEA       NOT NULL,
-    workspace_id       TEXT        NOT NULL,
+    storage_partition_id       TEXT        NOT NULL,
     field_name         TEXT        NOT NULL,
     ciphertext         BYTEA       NOT NULL,
     encryption_context JSONB       NOT NULL,
@@ -1985,8 +1976,8 @@ CREATE TABLE IF NOT EXISTS pii_vault.plaintext_side (
 CREATE INDEX IF NOT EXISTS ix_plaintext_subject
     ON pii_vault.plaintext_side (subject_pseudonym);
 
-CREATE INDEX IF NOT EXISTS ix_plaintext_workspace
-    ON pii_vault.plaintext_side (workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_plaintext_storage_partition
+    ON pii_vault.plaintext_side (storage_partition_id, created_at);
 
 -- Source: V000028__session_events_append_only.sql
 
@@ -2030,7 +2021,7 @@ CREATE TABLE IF NOT EXISTS analytics.lineage_dead_letters (
     error               TEXT        NOT NULL,
     attempts            INTEGER     NOT NULL,
     row_count           INTEGER     NOT NULL,
-    first_workspace_id  TEXT,
+    first_storage_partition_id  TEXT,
     first_session_id    UUID,
     first_turn_id       UUID,
     rows                JSONB       NOT NULL
@@ -2052,8 +2043,8 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS OWNED_BY_start_idx ON moa_graph."OWNED_BY" USING BTREE (start_id);
 CREATE INDEX IF NOT EXISTS OWNED_BY_end_idx ON moa_graph."OWNED_BY" USING BTREE (end_id);
-CREATE INDEX IF NOT EXISTS OWNED_BY_workspace_idx ON moa_graph."OWNED_BY" USING BTREE
-    ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"workspace_id"'::ag_catalog.agtype])));
+CREATE INDEX IF NOT EXISTS OWNED_BY_storage_partition_idx ON moa_graph."OWNED_BY" USING BTREE
+    ((ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"storage_partition_id"'::ag_catalog.agtype])));
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON moa_graph."OWNED_BY" TO moa_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON moa_graph."OWNED_BY" TO moa_promoter;
@@ -2065,9 +2056,9 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA moa_graph TO moa_app, moa_promote
 -- Source: V000033__session_memory_digests.sql
 
 CREATE TABLE IF NOT EXISTS moa.memory_digests (
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     content TEXT NOT NULL,
     source_fact_uids JSONB NOT NULL DEFAULT '[]'::jsonb,
     version INTEGER NOT NULL,
@@ -2077,10 +2068,10 @@ CREATE TABLE IF NOT EXISTS moa.memory_digests (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS memory_digests_identity
-    ON moa.memory_digests (workspace_id, scope, COALESCE(user_id, ''));
+    ON moa.memory_digests (storage_partition_id, scope, COALESCE(user_id, ''));
 
 CREATE INDEX IF NOT EXISTS memory_digests_updated_at_idx
-    ON moa.memory_digests (workspace_id, updated_at);
+    ON moa.memory_digests (storage_partition_id, updated_at);
 
 GRANT USAGE ON SCHEMA moa TO moa_app, moa_promoter;
 
@@ -2092,9 +2083,9 @@ ALTER TABLE moa.node_index
     ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.5;
 
 CREATE TABLE IF NOT EXISTS moa.retrieval_lineage (
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     session_id UUID NOT NULL,
     turn_seq BIGINT NOT NULL,
     uid UUID NOT NULL,
@@ -2104,7 +2095,7 @@ CREATE TABLE IF NOT EXISTS moa.retrieval_lineage (
 );
 
 CREATE INDEX IF NOT EXISTS retrieval_lineage_ws_time
-    ON moa.retrieval_lineage (workspace_id, retrieved_at);
+    ON moa.retrieval_lineage (storage_partition_id, retrieved_at);
 CREATE INDEX IF NOT EXISTS retrieval_lineage_uid_time
     ON moa.retrieval_lineage (uid, retrieved_at);
 
@@ -2217,9 +2208,9 @@ CREATE TABLE IF NOT EXISTS experience_records (
     id UUID PRIMARY KEY,
     segment_id UUID NOT NULL REFERENCES task_segments(id) ON DELETE CASCADE,
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     tenant_id TEXT NOT NULL,
     task_summary TEXT,
     task_fingerprint TEXT NOT NULL,
@@ -2246,15 +2237,15 @@ CREATE INDEX IF NOT EXISTS idx_experience_records_session
 CREATE INDEX IF NOT EXISTS idx_experience_records_tenant_task
     ON experience_records (tenant_id, task_fingerprint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_experience_records_scope
-    ON experience_records (workspace_id, scope, user_id);
+    ON experience_records (storage_partition_id, scope, user_id);
 
 CREATE TABLE IF NOT EXISTS experience_attributions (
     id UUID PRIMARY KEY,
     experience_id UUID NOT NULL REFERENCES experience_records(id) ON DELETE CASCADE,
     tenant_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     subject_type TEXT NOT NULL,
     subject_id TEXT NOT NULL,
     effect TEXT NOT NULL,
@@ -2269,14 +2260,14 @@ CREATE INDEX IF NOT EXISTS idx_experience_attributions_experience
 CREATE INDEX IF NOT EXISTS idx_experience_attributions_subject
     ON experience_attributions (tenant_id, subject_type, subject_id);
 CREATE INDEX IF NOT EXISTS idx_experience_attributions_scope
-    ON experience_attributions (workspace_id, scope, user_id);
+    ON experience_attributions (storage_partition_id, scope, user_id);
 
 CREATE TABLE IF NOT EXISTS learning_candidates (
     id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     candidate_type TEXT NOT NULL,
     status TEXT NOT NULL,
     target_id TEXT,
@@ -2303,7 +2294,7 @@ CREATE INDEX IF NOT EXISTS idx_learning_candidates_task
 CREATE INDEX IF NOT EXISTS idx_learning_candidates_batch
     ON learning_candidates (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_learning_candidates_scope
-    ON learning_candidates (workspace_id, scope, user_id);
+    ON learning_candidates (storage_partition_id, scope, user_id);
 
 DROP MATERIALIZED VIEW IF EXISTS task_strategy_success_rates;
 
@@ -2349,9 +2340,9 @@ CREATE TABLE IF NOT EXISTS experience_records (
     id UUID PRIMARY KEY,
     segment_id UUID NOT NULL REFERENCES task_segments(id) ON DELETE CASCADE,
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     tenant_id TEXT NOT NULL,
     task_summary TEXT,
     task_fingerprint TEXT NOT NULL,
@@ -2378,15 +2369,15 @@ CREATE INDEX IF NOT EXISTS idx_experience_records_session
 CREATE INDEX IF NOT EXISTS idx_experience_records_tenant_task
     ON experience_records (tenant_id, task_fingerprint, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_experience_records_scope
-    ON experience_records (workspace_id, scope, user_id);
+    ON experience_records (storage_partition_id, scope, user_id);
 
 CREATE TABLE IF NOT EXISTS experience_attributions (
     id UUID PRIMARY KEY,
     experience_id UUID NOT NULL REFERENCES experience_records(id) ON DELETE CASCADE,
     tenant_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     subject_type TEXT NOT NULL,
     subject_id TEXT NOT NULL,
     effect TEXT NOT NULL,
@@ -2401,14 +2392,14 @@ CREATE INDEX IF NOT EXISTS idx_experience_attributions_experience
 CREATE INDEX IF NOT EXISTS idx_experience_attributions_subject
     ON experience_attributions (tenant_id, subject_type, subject_id);
 CREATE INDEX IF NOT EXISTS idx_experience_attributions_scope
-    ON experience_attributions (workspace_id, scope, user_id);
+    ON experience_attributions (storage_partition_id, scope, user_id);
 
 CREATE TABLE IF NOT EXISTS learning_candidates (
     id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     candidate_type TEXT NOT NULL,
     status TEXT NOT NULL,
     target_id TEXT,
@@ -2435,7 +2426,7 @@ CREATE INDEX IF NOT EXISTS idx_learning_candidates_task
 CREATE INDEX IF NOT EXISTS idx_learning_candidates_batch
     ON learning_candidates (batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_learning_candidates_scope
-    ON learning_candidates (workspace_id, scope, user_id);
+    ON learning_candidates (storage_partition_id, scope, user_id);
 
 DROP MATERIALIZED VIEW IF EXISTS task_strategy_success_rates;
 
@@ -2470,9 +2461,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS moa.artifact (
     artifact_uid UUID PRIMARY KEY,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     kind TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
@@ -2488,7 +2479,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact (
 
 CREATE UNIQUE INDEX IF NOT EXISTS artifact_active_name_uniq
     ON moa.artifact (
-        coalesce(workspace_id, ''),
+        coalesce(storage_partition_id, ''),
         coalesce(user_id, ''),
         kind,
         name
@@ -2496,7 +2487,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS artifact_active_name_uniq
     WHERE valid_to IS NULL;
 
 CREATE INDEX IF NOT EXISTS artifact_scope_idx
-    ON moa.artifact (workspace_id, scope, user_id, kind, name)
+    ON moa.artifact (storage_partition_id, scope, user_id, kind, name)
     WHERE valid_to IS NULL;
 
 CREATE INDEX IF NOT EXISTS artifact_tags_gin
@@ -2505,9 +2496,9 @@ CREATE INDEX IF NOT EXISTS artifact_tags_gin
 CREATE TABLE IF NOT EXISTS moa.artifact_revision (
     revision_uid UUID PRIMARY KEY,
     artifact_uid UUID NOT NULL REFERENCES moa.artifact(artifact_uid) ON DELETE CASCADE,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     definition JSONB NOT NULL,
     canonical_hash BYTEA NOT NULL,
     source_format TEXT NOT NULL,
@@ -2540,16 +2531,16 @@ CREATE INDEX IF NOT EXISTS artifact_revision_artifact_idx
     WHERE valid_to IS NULL;
 
 CREATE INDEX IF NOT EXISTS artifact_revision_scope_idx
-    ON moa.artifact_revision (workspace_id, scope, user_id, status)
+    ON moa.artifact_revision (storage_partition_id, scope, user_id, status)
     WHERE valid_to IS NULL;
 
 CREATE TABLE IF NOT EXISTS moa.artifact_file (
     file_uid UUID PRIMARY KEY,
     artifact_uid UUID NOT NULL REFERENCES moa.artifact(artifact_uid) ON DELETE CASCADE,
     revision_uid UUID NOT NULL REFERENCES moa.artifact_revision(revision_uid) ON DELETE CASCADE,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     path TEXT NOT NULL,
     content BYTEA NOT NULL,
     content_sha256 BYTEA NOT NULL,
@@ -2571,16 +2562,16 @@ CREATE INDEX IF NOT EXISTS artifact_file_artifact_idx
     ON moa.artifact_file (artifact_uid);
 
 CREATE INDEX IF NOT EXISTS artifact_file_scope_idx
-    ON moa.artifact_file (workspace_id, scope, user_id);
+    ON moa.artifact_file (storage_partition_id, scope, user_id);
 
 CREATE TABLE IF NOT EXISTS moa.artifact_run (
     run_uid UUID PRIMARY KEY,
     artifact_uid UUID REFERENCES moa.artifact(artifact_uid) ON DELETE SET NULL,
     revision_uid UUID REFERENCES moa.artifact_revision(revision_uid) ON DELETE SET NULL,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
     session_id UUID,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     workflow_ref TEXT NOT NULL,
     status TEXT NOT NULL,
     current_node_id TEXT,
@@ -2598,7 +2589,7 @@ CREATE TABLE IF NOT EXISTS moa.artifact_run (
 );
 
 CREATE INDEX IF NOT EXISTS artifact_run_scope_idx
-    ON moa.artifact_run (workspace_id, scope, user_id, status, started_at DESC);
+    ON moa.artifact_run (storage_partition_id, scope, user_id, status, started_at DESC);
 
 CREATE INDEX IF NOT EXISTS artifact_run_session_idx
     ON moa.artifact_run (session_id, started_at DESC)
@@ -2606,7 +2597,7 @@ CREATE INDEX IF NOT EXISTS artifact_run_session_idx
 
 CREATE UNIQUE INDEX IF NOT EXISTS artifact_run_idempotency_uniq
     ON moa.artifact_run (
-        coalesce(workspace_id, ''),
+        coalesce(storage_partition_id, ''),
         coalesce(user_id, ''),
         workflow_ref,
         idempotency_key
@@ -2616,9 +2607,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS artifact_run_idempotency_uniq
 CREATE TABLE IF NOT EXISTS moa.artifact_node_run (
     node_run_uid UUID PRIMARY KEY,
     run_uid UUID NOT NULL REFERENCES moa.artifact_run(run_uid) ON DELETE CASCADE,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     node_id TEXT NOT NULL,
     status TEXT NOT NULL,
     input JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -2636,7 +2627,7 @@ CREATE INDEX IF NOT EXISTS artifact_node_run_run_idx
     ON moa.artifact_node_run (run_uid, started_at ASC);
 
 CREATE INDEX IF NOT EXISTS artifact_node_run_scope_idx
-    ON moa.artifact_node_run (workspace_id, scope, user_id, status);
+    ON moa.artifact_node_run (storage_partition_id, scope, user_id, status);
 
 SELECT moa.apply_three_tier_rls('moa.artifact'::REGCLASS);
 SELECT moa.apply_three_tier_rls('moa.artifact_revision'::REGCLASS);
@@ -2667,9 +2658,9 @@ GRANT SELECT ON moa.artifact_file TO moa_auditor;
 
 CREATE TABLE IF NOT EXISTS analytics.score_run (
     run_id UUID PRIMARY KEY,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     source TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -2677,15 +2668,15 @@ CREATE TABLE IF NOT EXISTS analytics.score_run (
 );
 
 CREATE INDEX IF NOT EXISTS score_run_scope_source_idx
-    ON analytics.score_run (workspace_id, scope, user_id, source, created_at DESC);
+    ON analytics.score_run (storage_partition_id, scope, user_id, source, created_at DESC);
 
 SELECT moa.apply_three_tier_rls('analytics.score_run'::REGCLASS);
 
 CREATE TABLE IF NOT EXISTS moa.experiment_run (
     run_uid UUID PRIMARY KEY,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     name TEXT NOT NULL,
     target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'workflow')),
     status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'cancelled')),
@@ -2706,8 +2697,8 @@ CREATE TABLE IF NOT EXISTS moa.experiment_run (
     CHECK (scope IS NOT NULL)
 );
 
-INSERT INTO analytics.score_run (run_id, workspace_id, user_id, source)
-SELECT DISTINCT score_run_id, workspace_id, user_id, 'experiment_run'
+INSERT INTO analytics.score_run (run_id, storage_partition_id, user_id, source)
+SELECT DISTINCT score_run_id, storage_partition_id, user_id, 'experiment_run'
 FROM moa.experiment_run
 WHERE score_run_id IS NOT NULL
 ON CONFLICT (run_id) DO NOTHING;
@@ -2720,7 +2711,7 @@ ALTER TABLE moa.experiment_run
         ON DELETE RESTRICT;
 
 CREATE INDEX IF NOT EXISTS experiment_run_scope_idx
-    ON moa.experiment_run (workspace_id, scope, user_id, status, started_at DESC);
+    ON moa.experiment_run (storage_partition_id, scope, user_id, status, started_at DESC);
 
 CREATE INDEX IF NOT EXISTS experiment_run_score_run_idx
     ON moa.experiment_run (score_run_id);
@@ -2735,7 +2726,7 @@ CREATE INDEX IF NOT EXISTS experiment_run_workflow_run_idx
 
 CREATE UNIQUE INDEX IF NOT EXISTS experiment_run_idempotency_uniq
     ON moa.experiment_run (
-        coalesce(workspace_id, ''),
+        coalesce(storage_partition_id, ''),
         coalesce(user_id, ''),
         idempotency_key
     )
@@ -2746,9 +2737,9 @@ SELECT moa.apply_three_tier_rls('moa.experiment_run'::REGCLASS);
 CREATE TABLE IF NOT EXISTS moa.experiment_run_artifact_revision (
     run_uid UUID NOT NULL REFERENCES moa.experiment_run(run_uid) ON DELETE CASCADE,
     revision_uid UUID NOT NULL REFERENCES moa.artifact_revision(revision_uid) ON DELETE RESTRICT,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (run_uid, revision_uid),
     CHECK (scope IS NOT NULL)
@@ -2758,7 +2749,7 @@ CREATE INDEX IF NOT EXISTS experiment_run_artifact_revision_revision_idx
     ON moa.experiment_run_artifact_revision (revision_uid);
 
 CREATE INDEX IF NOT EXISTS experiment_run_artifact_revision_scope_idx
-    ON moa.experiment_run_artifact_revision (workspace_id, scope, user_id, revision_uid);
+    ON moa.experiment_run_artifact_revision (storage_partition_id, scope, user_id, revision_uid);
 
 SELECT moa.apply_three_tier_rls('moa.experiment_run_artifact_revision'::REGCLASS);
 
@@ -2792,9 +2783,9 @@ ALTER TABLE moa.artifact
 CREATE TABLE IF NOT EXISTS moa.experiment_trial (
     trial_uid UUID PRIMARY KEY,
     run_uid UUID NOT NULL REFERENCES moa.experiment_run(run_uid) ON DELETE CASCADE,
-    workspace_id TEXT,
+    storage_partition_id TEXT,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     trial_key TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'cancelled')),
     target_kind TEXT NOT NULL CHECK (target_kind IN ('agent_loop', 'workflow')),
@@ -2835,7 +2826,7 @@ CREATE TABLE IF NOT EXISTS moa.experiment_trial (
 );
 
 CREATE INDEX IF NOT EXISTS experiment_trial_scope_run_status_idx
-    ON moa.experiment_trial (workspace_id, scope, user_id, run_uid, status, created_at DESC);
+    ON moa.experiment_trial (storage_partition_id, scope, user_id, run_uid, status, created_at DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS experiment_trial_run_key_uniq
     ON moa.experiment_trial (run_uid, trial_key);
@@ -2911,8 +2902,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_parent_session_id
     ON sessions(parent_session_id)
     WHERE parent_session_id IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS ix_subject_keys_workspace
-    ON pii_vault.subject_keys(workspace_id);
+CREATE INDEX IF NOT EXISTS ix_subject_keys_storage_partition
+    ON pii_vault.subject_keys(storage_partition_id);
 
 CREATE INDEX IF NOT EXISTS ix_scores_item
     ON analytics.scores(item_id)
@@ -2922,9 +2913,9 @@ CREATE INDEX IF NOT EXISTS ix_scores_dataset
     ON analytics.scores(dataset_id)
     WHERE dataset_id IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_events_workspace_type_timestamp
-    ON events(workspace_id, event_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_events_storage_partition_type_timestamp
+    ON events(storage_partition_id, event_type, timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_events_tool_id
-    ON events(workspace_id, event_type, ((payload -> 'data' ->> 'tool_id')), timestamp DESC)
+    ON events(storage_partition_id, event_type, ((payload -> 'data' ->> 'tool_id')), timestamp DESC)
     WHERE payload -> 'data' ? 'tool_id';

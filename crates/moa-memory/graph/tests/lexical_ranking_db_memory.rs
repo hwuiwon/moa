@@ -13,11 +13,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -46,20 +46,20 @@ async fn configured_test_db() -> Option<TestDb> {
     )
 }
 
-fn scope(workspace_id: &str) -> ScopeContext {
-    tenant_scope(workspace_id)
+fn scope(storage_partition_id: &str) -> ScopeContext {
+    tenant_scope(storage_partition_id)
 }
 
-fn graph_store(test_db: &TestDb, workspace_id: &str) -> AgeGraphStore {
-    AgeGraphStore::scoped_for_app_role(test_db.store().pool().clone(), scope(workspace_id))
+fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> AgeGraphStore {
+    AgeGraphStore::scoped_for_app_role(test_db.store().pool().clone(), scope(storage_partition_id))
 }
 
-fn lexical_store(test_db: &TestDb, workspace_id: &str) -> LexicalStore {
-    LexicalStore::scoped_for_app_role(test_db.store().pool().clone(), scope(workspace_id))
+fn lexical_store(test_db: &TestDb, storage_partition_id: &str) -> LexicalStore {
+    LexicalStore::scoped_for_app_role(test_db.store().pool().clone(), scope(storage_partition_id))
 }
 
 fn fact(
-    workspace_id: &str,
+    storage_partition_id: &str,
     uid: Uuid,
     valid_from: DateTime<Utc>,
     confidence: f64,
@@ -68,8 +68,8 @@ fn fact(
     NodeWriteIntent {
         uid,
         label: NodeLabel::Fact,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         name: "ranking alpha memory".to_string(),
         properties: json!({
@@ -89,7 +89,7 @@ fn fact(
 
 async fn insert_fact(
     graph: &AgeGraphStore,
-    workspace_id: &str,
+    storage_partition_id: &str,
     valid_from: DateTime<Utc>,
     confidence: f64,
     reference_count: i64,
@@ -97,7 +97,7 @@ async fn insert_fact(
     let uid = Uuid::now_v7();
     graph
         .create_node(fact(
-            workspace_id,
+            storage_partition_id,
             uid,
             valid_from,
             confidence,
@@ -108,8 +108,8 @@ async fn insert_fact(
     uid
 }
 
-async fn lookup_uids(test_db: &TestDb, workspace_id: &str, top_k: i64) -> Vec<Uuid> {
-    lexical_store(test_db, workspace_id)
+async fn lookup_uids(test_db: &TestDb, storage_partition_id: &str, top_k: i64) -> Vec<Uuid> {
+    lexical_store(test_db, storage_partition_id)
         .lookup_seeds("ranking alpha", top_k)
         .await
         .expect("lookup lexical ranking seeds")
@@ -125,18 +125,46 @@ async fn lexical_search_orders_results_by_combined_recency_confidence_reference_
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("lexical-ranking-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("lexical-ranking-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let now = Utc::now();
 
-    let medium = insert_fact(&graph, &workspace_id, now - Duration::days(1), 0.7, 2).await;
-    let recent_low = insert_fact(&graph, &workspace_id, now, 0.1, 0).await;
-    let old_high = insert_fact(&graph, &workspace_id, now - Duration::days(4), 1.0, 100).await;
-    let balanced = insert_fact(&graph, &workspace_id, now - Duration::hours(12), 0.8, 10).await;
-    let low = insert_fact(&graph, &workspace_id, now - Duration::days(2), 0.4, 50).await;
+    let medium = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::days(1),
+        0.7,
+        2,
+    )
+    .await;
+    let recent_low = insert_fact(&graph, &storage_partition_id, now, 0.1, 0).await;
+    let old_high = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::days(4),
+        1.0,
+        100,
+    )
+    .await;
+    let balanced = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::hours(12),
+        0.8,
+        10,
+    )
+    .await;
+    let low = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::days(2),
+        0.4,
+        50,
+    )
+    .await;
 
     assert_eq!(
-        lookup_uids(&test_db, &workspace_id, 10).await,
+        lookup_uids(&test_db, &storage_partition_id, 10).await,
         vec![balanced, recent_low, old_high, medium, low]
     );
 }
@@ -148,16 +176,37 @@ async fn lexical_search_recency_weight_dominates_when_confidence_and_refs_equal(
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("lexical-recency-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("lexical-recency-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let now = Utc::now();
 
-    let old = insert_fact(&graph, &workspace_id, now - Duration::days(5), 0.7, 3).await;
-    let recent = insert_fact(&graph, &workspace_id, now - Duration::hours(1), 0.7, 3).await;
-    let middle = insert_fact(&graph, &workspace_id, now - Duration::days(2), 0.7, 3).await;
+    let old = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::days(5),
+        0.7,
+        3,
+    )
+    .await;
+    let recent = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::hours(1),
+        0.7,
+        3,
+    )
+    .await;
+    let middle = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::days(2),
+        0.7,
+        3,
+    )
+    .await;
 
     assert_eq!(
-        lookup_uids(&test_db, &workspace_id, 10).await,
+        lookup_uids(&test_db, &storage_partition_id, 10).await,
         vec![recent, middle, old]
     );
 }
@@ -169,16 +218,16 @@ async fn lexical_search_confidence_weight_dominates_when_recency_and_refs_equal(
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("lexical-confidence-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("lexical-confidence-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let valid_from = Utc::now() - Duration::days(1);
 
-    let low = insert_fact(&graph, &workspace_id, valid_from, 0.2, 8).await;
-    let high = insert_fact(&graph, &workspace_id, valid_from, 0.9, 8).await;
-    let middle = insert_fact(&graph, &workspace_id, valid_from, 0.5, 8).await;
+    let low = insert_fact(&graph, &storage_partition_id, valid_from, 0.2, 8).await;
+    let high = insert_fact(&graph, &storage_partition_id, valid_from, 0.9, 8).await;
+    let middle = insert_fact(&graph, &storage_partition_id, valid_from, 0.5, 8).await;
 
     assert_eq!(
-        lookup_uids(&test_db, &workspace_id, 10).await,
+        lookup_uids(&test_db, &storage_partition_id, 10).await,
         vec![high, middle, low]
     );
 }
@@ -190,16 +239,16 @@ async fn lexical_search_reference_count_breaks_ties_when_recency_and_confidence_
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("lexical-refs-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("lexical-refs-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let valid_from = Utc::now() - Duration::days(1);
 
-    let few = insert_fact(&graph, &workspace_id, valid_from, 0.7, 1).await;
-    let many = insert_fact(&graph, &workspace_id, valid_from, 0.7, 30).await;
-    let some = insert_fact(&graph, &workspace_id, valid_from, 0.7, 10).await;
+    let few = insert_fact(&graph, &storage_partition_id, valid_from, 0.7, 1).await;
+    let many = insert_fact(&graph, &storage_partition_id, valid_from, 0.7, 30).await;
+    let some = insert_fact(&graph, &storage_partition_id, valid_from, 0.7, 10).await;
 
     assert_eq!(
-        lookup_uids(&test_db, &workspace_id, 10).await,
+        lookup_uids(&test_db, &storage_partition_id, 10).await,
         vec![many, some, few]
     );
 }
@@ -211,15 +260,15 @@ async fn lexical_search_returns_top_k_when_more_than_k_match() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("lexical-topk-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("lexical-topk-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let now = Utc::now();
     let mut expected = Vec::new();
 
     for offset in (0..20).rev() {
         let uid = insert_fact(
             &graph,
-            &workspace_id,
+            &storage_partition_id,
             now - Duration::minutes(offset),
             0.5,
             0,
@@ -231,7 +280,7 @@ async fn lexical_search_returns_top_k_when_more_than_k_match() {
     }
     expected.reverse();
 
-    let actual = lookup_uids(&test_db, &workspace_id, 5).await;
+    let actual = lookup_uids(&test_db, &storage_partition_id, 5).await;
     assert_eq!(actual.len(), 5);
     assert_eq!(actual, expected);
 }
@@ -243,15 +292,50 @@ async fn lexical_search_excludes_invalidated_nodes_with_valid_to_set() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("lexical-validto-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("lexical-validto-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let now = Utc::now();
 
-    let keep_a = insert_fact(&graph, &workspace_id, now - Duration::minutes(1), 0.7, 0).await;
-    let drop_a = insert_fact(&graph, &workspace_id, now - Duration::minutes(2), 0.7, 0).await;
-    let keep_b = insert_fact(&graph, &workspace_id, now - Duration::minutes(3), 0.7, 0).await;
-    let drop_b = insert_fact(&graph, &workspace_id, now - Duration::minutes(4), 0.7, 0).await;
-    let keep_c = insert_fact(&graph, &workspace_id, now - Duration::minutes(5), 0.7, 0).await;
+    let keep_a = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::minutes(1),
+        0.7,
+        0,
+    )
+    .await;
+    let drop_a = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::minutes(2),
+        0.7,
+        0,
+    )
+    .await;
+    let keep_b = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::minutes(3),
+        0.7,
+        0,
+    )
+    .await;
+    let drop_b = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::minutes(4),
+        0.7,
+        0,
+    )
+    .await;
+    let keep_c = insert_fact(
+        &graph,
+        &storage_partition_id,
+        now - Duration::minutes(5),
+        0.7,
+        0,
+    )
+    .await;
 
     graph
         .invalidate_node(drop_a, "lexical invalidated")
@@ -263,7 +347,7 @@ async fn lexical_search_excludes_invalidated_nodes_with_valid_to_set() {
         .expect("invalidate second lexical row");
 
     assert_eq!(
-        lookup_uids(&test_db, &workspace_id, 10).await,
+        lookup_uids(&test_db, &storage_partition_id, 10).await,
         vec![keep_a, keep_b, keep_c]
     );
 }

@@ -15,4 +15,5 @@ serde_json.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "runtime-tokio-rustls", "postgres"] }
 tokio.workspace = true
 toml.workspace = true
+uuid.workspace = true
 workspace-hack = { workspace = true }

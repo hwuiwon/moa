@@ -127,7 +127,7 @@ impl PostgresSessionStore {
         sqlx::query(&format!(
             r#"
             INSERT INTO {table} (
-                session_id, workspace_id, user_id, agent_id, installation_uid,
+                session_id, storage_partition_id, user_id, agent_id, installation_uid,
                 deployment_uid, agent_definition_ref, agent_revision_uid,
                 policy_hash, display_name, policy_snapshot, artifact_dependencies,
                 tool_dependencies
@@ -179,14 +179,14 @@ impl PostgresSessionStore {
 
         sqlx::query(&format!(
             "INSERT INTO {bindings} \
-                 (id, tenant_id, workspace_id, session_id, contact_id, channel_account_id, \
+                 (id, tenant_id, storage_partition_id, session_id, contact_id, channel_account_id, \
                   contact_point_id, channel, external_tenant_key, external_conversation_key, \
                   external_thread_key, route, reason) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(binding_id.0)
         .bind(replacement.tenant_id.0)
-        .bind(replacement.workspace_id.as_str())
+        .bind(replacement.storage_partition_id.as_str())
         .bind(replacement.session_id.0)
         .bind(replacement.contact_id.0)
         .bind(replacement.channel_account_id.map(|id| id.0))
@@ -307,7 +307,7 @@ impl PostgresSessionStore {
     /// Returns whether a persisted tool event exists without decoding matching payloads.
     pub async fn tool_event_exists(
         &self,
-        workspace_id: &WorkspaceId,
+        storage_partition_id: &StoragePartitionId,
         session_id: moa_core::SessionId,
         event_type: EventType,
         tool_call_id: ToolCallId,
@@ -317,14 +317,14 @@ impl PostgresSessionStore {
             "SELECT EXISTS (\
                  SELECT 1 \
                  FROM {events} \
-                 WHERE workspace_id = $1 \
+                 WHERE storage_partition_id = $1 \
                    AND event_type = $2 \
                    AND payload -> 'data' ? 'tool_id' \
                    AND payload -> 'data' ->> 'tool_id' = $3 \
                    AND session_id = $4\
              )"
         ))
-        .bind(workspace_id.as_str())
+        .bind(storage_partition_id.as_str())
         .bind(event_type.as_str())
         .bind(tool_call_id.to_string())
         .bind(session_id.0)
@@ -336,7 +336,7 @@ impl PostgresSessionStore {
     /// Returns whether a persisted action-review event exists without decoding matching payloads.
     pub async fn action_review_event_exists(
         &self,
-        workspace_id: &WorkspaceId,
+        storage_partition_id: &StoragePartitionId,
         session_id: moa_core::SessionId,
         event_type: EventType,
         review_id: Uuid,
@@ -346,14 +346,14 @@ impl PostgresSessionStore {
             "SELECT EXISTS (\
                  SELECT 1 \
                  FROM {events} \
-                 WHERE workspace_id = $1 \
+                 WHERE storage_partition_id = $1 \
                    AND event_type = $2 \
                    AND payload -> 'data' ? 'review_id' \
                    AND payload -> 'data' ->> 'review_id' = $3 \
                    AND session_id = $4\
              )"
         ))
-        .bind(workspace_id.as_str())
+        .bind(storage_partition_id.as_str())
         .bind(event_type.as_str())
         .bind(review_id.to_string())
         .bind(session_id.0)
@@ -513,7 +513,7 @@ impl SessionStore for PostgresSessionStore {
         let events = self.table_name("events");
 
         let locked_session = sqlx::query(&format!(
-            "SELECT event_count, tenant_id, workspace_id, user_id, contact_id FROM {sessions} WHERE id = $1 FOR UPDATE"
+            "SELECT event_count, tenant_id, storage_partition_id, user_id, contact_id FROM {sessions} WHERE id = $1 FOR UPDATE"
         ))
         .bind(session_id.0)
         .fetch_optional(&mut *transaction)
@@ -526,8 +526,8 @@ impl SessionStore for PostgresSessionStore {
         let tenant_id = locked_session
             .try_get::<Uuid, _>("tenant_id")
             .map_err(map_sqlx_error)?;
-        let legacy_workspace_key = locked_session
-            .try_get::<String, _>("workspace_id")
+        let storage_partition_id = locked_session
+            .try_get::<String, _>("storage_partition_id")
             .map_err(map_sqlx_error)?;
         let actor_storage_key = locked_session
             .try_get::<String, _>("user_id")
@@ -538,14 +538,14 @@ impl SessionStore for PostgresSessionStore {
 
         sqlx::query(&format!(
             "INSERT INTO {events} \
-             (id, session_id, tenant_id, contact_id, workspace_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
+             (id, session_id, tenant_id, contact_id, storage_partition_id, user_id, sequence_num, event_type, payload, timestamp, brain_id, hand_id, token_count) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(event_id)
         .bind(session_id.0)
         .bind(tenant_id)
         .bind(contact_id)
-        .bind(legacy_workspace_key)
+        .bind(storage_partition_id)
         .bind(actor_storage_key)
         .bind(sequence_num as i64)
         .bind(event_type)
@@ -778,11 +778,11 @@ impl SessionStore for PostgresSessionStore {
         let sessions = self.table_name("sessions");
         let affected = sqlx::query(&format!(
             "INSERT INTO {context_snapshots} \
-             (session_id, workspace_id, user_id, format_version, last_sequence_num, payload, created_at) \
-             SELECT $1, s.workspace_id, s.user_id, $2, $3, $4, $5 \
+             (session_id, storage_partition_id, user_id, format_version, last_sequence_num, payload, created_at) \
+             SELECT $1, s.storage_partition_id, s.user_id, $2, $3, $4, $5 \
              FROM {sessions} s WHERE s.id = $1 \
              ON CONFLICT (session_id) DO UPDATE SET \
-                 workspace_id = EXCLUDED.workspace_id, \
+                 storage_partition_id = EXCLUDED.storage_partition_id, \
                  user_id = EXCLUDED.user_id, \
                  format_version = EXCLUDED.format_version, \
                  last_sequence_num = EXCLUDED.last_sequence_num, \
@@ -919,7 +919,7 @@ impl SessionStore for PostgresSessionStore {
         Ok(events)
     }
 
-    /// Lists sessions filtered by workspace, user, status, or channel.
+    /// Lists sessions filtered by tenant, contact, status, or channel.
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>> {
         let sessions = self.table_name("sessions");
         let mut query = QueryBuilder::<Postgres>::new(format!(
@@ -970,12 +970,8 @@ impl SessionStore for PostgresSessionStore {
         rows.iter().map(session_summary_from_row).collect()
     }
 
-    /// Returns aggregate workspace spend in cents since the provided UTC timestamp.
-    async fn workspace_cost_since(
-        &self,
-        workspace_id: &WorkspaceId,
-        since: DateTime<Utc>,
-    ) -> Result<u32> {
+    /// Returns aggregate tenant spend in cents since the provided UTC timestamp.
+    async fn tenant_cost_since(&self, tenant_id: &TenantId, since: DateTime<Utc>) -> Result<u32> {
         let events = self.table_name("events");
         let total = sqlx::query_scalar::<_, i64>(&format!(
             "SELECT COALESCE( \
@@ -983,11 +979,11 @@ impl SessionStore for PostgresSessionStore {
                  0 \
              )::BIGINT \
              FROM {events} e \
-             WHERE e.workspace_id = $1 \
+             WHERE e.tenant_id = $1 \
                AND e.event_type = $2 \
                AND e.timestamp >= $3"
         ))
-        .bind(workspace_id.to_string())
+        .bind(tenant_id.0)
         .bind("BrainResponse")
         .bind(since)
         .fetch_one(&self.pool)
@@ -995,7 +991,7 @@ impl SessionStore for PostgresSessionStore {
         .map_err(map_sqlx_error)?;
 
         u32::try_from(total)
-            .map_err(|_| MoaError::StorageError("workspace spend exceeded u32 range".to_string()))
+            .map_err(|_| MoaError::StorageError("tenant spend exceeded u32 range".to_string()))
     }
 
     /// Deletes a session only when it has no append-only events.
@@ -1172,10 +1168,10 @@ impl LearningCandidateStore for PostgresSessionStore {
 
     async fn get_learning_candidate(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         candidate_id: Uuid,
     ) -> Result<Option<LearningCandidate>> {
-        PostgresSessionStore::get_learning_candidate(self, workspace_id, candidate_id).await
+        PostgresSessionStore::get_learning_candidate(self, tenant_id, candidate_id).await
     }
 
     async fn list_learning_candidates(

@@ -51,7 +51,7 @@ memory executor hooks live behind async locks so the router can be shared
 across handlers.
 
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
-It includes the review id, workspace, user, session or sub-agent origin, tool
+It includes the review id, tenant, user, session or sub-agent origin, tool
 call id, tool name, normalized input, input summary, risk level, action class,
 optional workflow/artifact origin metadata, idempotency key, and creation time.
 The envelope is persisted only when action policy returns
@@ -59,7 +59,7 @@ The envelope is persisted only when action policy returns
 
 Action-policy decisions are ordered:
 
-1. Workspace-visible persistent rules match by tool name and normalized input;
+1. Tenant-visible persistent rules match by tool name and normalized input;
    the strictest matching rule wins.
 2. Configured `always_deny` and `admin_review` tool-name globs can tighten the
    matched rule result.
@@ -70,8 +70,8 @@ Action-policy decisions are ordered:
 tenant-admin action review through `ActionReviews/request`, writes an
 `ActionReviewRequested` event for session history, returns a pending-review
 tool result to preserve LLM protocol continuity, and continues the root or
-sub-agent turn without moving the session into a waiting state. Workspace
-admins list pending reviews through `ActionReviews/list_pending`. Review
+sub-agent turn without moving the session into a waiting state. Tenant admins
+list pending reviews through `ActionReviews/list_pending`. Review
 requests are canary-screened before persistence and store no canary token; a
 cleared review rewrites the stored tool request with a fresh tool-call id before
 invoking `ToolExecutor`, while a denied review records the decision without

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use moa_core::{LearningEntry, TenantId, WorkspaceId};
+use moa_core::{LearningEntry, TenantId};
 use moa_memory_lifecycle::{
     BackfillStats, ConsolidationOptions, ConsolidationOutcome, DecayStats, DigestStats, MergeStats,
     SweepStats,
@@ -11,7 +11,7 @@ use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::ctx::OrchestratorCtx;
-use crate::objects::workspace::WorkspaceObjectClient;
+use crate::objects::tenant::TenantObjectClient;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Returns the durable workflow ID for a tenant/date consolidation pass.
@@ -114,7 +114,7 @@ impl ConsolidateReport {
         }
     }
 
-    /// Builds a failure report that still lets the workspace reschedule future runs.
+    /// Builds a failure report that still lets the tenant reschedule future runs.
     #[must_use]
     pub fn failed(
         tenant_id: TenantId,
@@ -324,7 +324,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         request: &ConsolidateRequest,
     ) -> Result<(), HandlerError> {
         self.ctx
-            .object_client::<WorkspaceObjectClient>(request.tenant_id.to_string())
+            .object_client::<TenantObjectClient>(request.tenant_id.to_string())
             .mark_consolidation_started(Json::from(request.target_date))
             .call()
             .await
@@ -346,10 +346,10 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<MergeStats, HandlerError> {
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = storage_workspace_id(request.tenant_id);
+        let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::merge_duplicates(&pool, &workspace_id, now)
+                moa_memory_lifecycle::merge_duplicates(&pool, &tenant_id, now)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)
@@ -366,12 +366,12 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<DecayStats, HandlerError> {
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = storage_workspace_id(request.tenant_id);
+        let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
                 moa_memory_lifecycle::decay_confidence(
                     &pool,
-                    &workspace_id,
+                    &tenant_id,
                     now,
                     &ConsolidationOptions::default(),
                 )
@@ -391,10 +391,10 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         now: DateTime<Utc>,
     ) -> Result<SweepStats, HandlerError> {
         let pool = OrchestratorCtx::current_graph_pool();
-        let workspace_id = storage_workspace_id(request.tenant_id);
+        let tenant_id = request.tenant_id;
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::sweep_contradictions(&pool, &workspace_id, now)
+                moa_memory_lifecycle::sweep_contradictions(&pool, &tenant_id, now)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)
@@ -411,11 +411,11 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
     ) -> Result<BackfillStats, HandlerError> {
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
-        let workspace_id = storage_workspace_id(request.tenant_id);
+        let tenant_id = request.tenant_id;
         let embedder = runtime.embedding_provider();
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::backfill_entities(&pool, &workspace_id, embedder)
+                moa_memory_lifecycle::backfill_entities(&pool, &tenant_id, embedder)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)
@@ -433,11 +433,11 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
     ) -> Result<DigestStats, HandlerError> {
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
-        let workspace_id = storage_workspace_id(request.tenant_id);
+        let tenant_id = request.tenant_id;
         let digest_config = runtime.config().memory.digest.clone();
         self.ctx
             .run(|| async move {
-                moa_memory_lifecycle::rebuild_digests(&pool, &workspace_id, now, &digest_config)
+                moa_memory_lifecycle::rebuild_digests(&pool, &tenant_id, now, &digest_config)
                     .await
                     .map(Json::from)
                     .map_err(lifecycle_handler_error)
@@ -483,7 +483,7 @@ impl ConsolidateDurableSteps for RestateConsolidateSteps<'_, '_> {
         report: &ConsolidateReport,
     ) -> Result<(), HandlerError> {
         self.ctx
-            .object_client::<WorkspaceObjectClient>(report.tenant_id.to_string())
+            .object_client::<TenantObjectClient>(report.tenant_id.to_string())
             .consolidation_completed(Json::from(report.clone()))
             .call()
             .await
@@ -549,10 +549,6 @@ async fn record_memory_learning(
     .name("record_memory_learning")
     .await?;
     Ok(())
-}
-
-fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn lifecycle_handler_error(error: moa_memory_lifecycle::consolidate::Error) -> HandlerError {

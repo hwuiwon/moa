@@ -4,10 +4,8 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use moa_core::{TenantId, WorkspaceId};
-use moa_orchestrator::objects::workspace::{
-    WorkspaceActionPolicy, WorkspaceConfig, WorkspaceStatus,
-};
+use moa_core::TenantId;
+use moa_orchestrator::objects::tenant::{TenantActionPolicy, TenantConfig, TenantStatus};
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
 use moa_test_support::postgres::test_database_url;
 use tempfile::TempDir;
@@ -42,9 +40,9 @@ fn spawn_orchestrator(
         .context("spawn moa-orchestrator binary for Restate integration")
 }
 
-fn object_url(ingress: &str, workspace_id: &WorkspaceId, handler: &str) -> String {
+fn object_url(ingress: &str, tenant_id: TenantId, handler: &str) -> String {
     format!(
-        "{}/Workspace/{workspace_id}/{handler}",
+        "{}/Tenant/{tenant_id}/{handler}",
         ingress.trim_end_matches('/')
     )
 }
@@ -58,7 +56,7 @@ fn workflow_url(ingress: &str, workflow_id: &str) -> String {
 
 #[tokio::test]
 #[ignore = "requires a local restate-server and a reachable Postgres instance"]
-async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
+async fn tenant_consolidation_round_trip_through_restate() -> Result<()> {
     let _guard = RESTATE_E2E_LOCK.lock().await;
     let memory_dir = tempfile::tempdir().context("create temporary memory root")?;
     let sandbox_dir = tempfile::tempdir().context("create temporary sandbox root")?;
@@ -68,12 +66,11 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
     let ingress = ingress.as_str();
     let client = reqwest::Client::new();
     let tenant_id = TenantId::new();
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
-    let config = WorkspaceConfig {
-        id: workspace_id.clone(),
-        name: "Workspace Consolidate E2E".to_string(),
+    let config = TenantConfig {
+        id: tenant_id,
+        name: "Tenant Consolidate E2E".to_string(),
         consolidation_hour_utc: 2,
-        action_policy: WorkspaceActionPolicy::default(),
+        action_policy: TenantActionPolicy::default(),
     };
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 
@@ -81,24 +78,24 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
 
         client
-            .post(object_url(ingress, &workspace_id, "init"))
+            .post(object_url(ingress, tenant_id, "init"))
             .json(&config)
             .send()
             .await
-            .context("initialize workspace VO")?
+            .context("initialize tenant VO")?
             .error_for_status()
-            .context("workspace init should succeed")?;
+            .context("tenant init should succeed")?;
 
         let initial_status = client
-            .post(object_url(ingress, &workspace_id, "status"))
+            .post(object_url(ingress, tenant_id, "status"))
             .send()
             .await
-            .context("read workspace status after init")?
+            .context("read tenant status after init")?
             .error_for_status()
-            .context("workspace status should succeed after init")?
-            .json::<WorkspaceStatus>()
+            .context("tenant status should succeed after init")?
+            .json::<TenantStatus>()
             .await
-            .context("deserialize workspace status")?;
+            .context("deserialize tenant status")?;
         assert!(
             initial_status.next_consolidation_at.is_some(),
             "expected the next consolidation to be scheduled after init"
@@ -107,7 +104,7 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         let target_date = Utc::now().date_naive();
         let workflow_id = format!(
             "{}:{target_date}:manual-{}",
-            workspace_id,
+            tenant_id,
             uuid::Uuid::now_v7()
         );
         let report = client
@@ -131,15 +128,15 @@ async fn workspace_consolidation_round_trip_through_restate() -> Result<()> {
         assert!(report.errors.is_empty(), "unexpected consolidation errors");
 
         let final_status = client
-            .post(object_url(ingress, &workspace_id, "status"))
+            .post(object_url(ingress, tenant_id, "status"))
             .send()
             .await
-            .context("read workspace status after consolidation")?
+            .context("read tenant status after consolidation")?
             .error_for_status()
-            .context("workspace status should succeed after consolidation")?
-            .json::<WorkspaceStatus>()
+            .context("tenant status should succeed after consolidation")?
+            .json::<TenantStatus>()
             .await
-            .context("deserialize final workspace status")?;
+            .context("deserialize final tenant status")?;
         assert!(final_status.last_consolidation_at.is_some());
         assert!(final_status.next_consolidation_at.is_some());
         assert!(!final_status.consolidation_in_progress);

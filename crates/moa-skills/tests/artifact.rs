@@ -128,12 +128,13 @@ fn published_skill_artifact_revision_files_convert_to_skill_package() {
     let document = skill_artifact_document_from_package(&original, ArtifactStatus::Published)
         .expect("skill artifact document");
     let now = Utc::now();
+    let tenant_id = uuid::Uuid::now_v7();
     let revision = StoredArtifactRevision {
         artifact_uid: Uuid::now_v7(),
         revision_uid: Uuid::now_v7(),
-        workspace_id: None,
+        storage_partition_id: Some(moa_core::StoragePartitionId::new(tenant_id.to_string())),
         user_id: None,
-        scope: "global".to_string(),
+        scope: "tenant".to_string(),
         kind: ArtifactKind::Skill,
         name: "refund-helper".to_string(),
         description: "Refund support helper".to_string(),

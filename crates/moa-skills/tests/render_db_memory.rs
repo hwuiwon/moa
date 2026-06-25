@@ -2,7 +2,7 @@
 
 mod support;
 
-use moa_core::{MoaError, Result, WorkspaceId};
+use moa_core::{MoaError, Result, TenantId};
 use moa_memory_graph::GraphStore;
 use moa_skills::lessons::{LessonContext, learn_lesson};
 use moa_skills::registry::{NewSkill, SkillRegistry};
@@ -10,7 +10,7 @@ use moa_skills::render::{SkillRenderContext, render};
 use uuid::Uuid;
 
 use support::skill_graph::{
-    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, memory_scope, workspace_scope,
+    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, memory_scope, tenant_scope,
 };
 
 #[tokio::test]
@@ -19,7 +19,7 @@ async fn render_with_graph_lessons() -> Result<()> {
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let workspace_name = format!("skills-render-{}", Uuid::now_v7());
-    let artifact_scope = workspace_scope(&workspace_name);
+    let artifact_scope = tenant_scope(&workspace_name);
     let scope = memory_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());
     let skill_uid = registry
@@ -41,11 +41,11 @@ async fn render_with_graph_lessons() -> Result<()> {
     )
     .await?;
     let skill = registry
-        .load_by_name(&workspace_scope(&workspace_name), "debug-oauth-refresh")
+        .load_by_name(&tenant_scope(&workspace_name), "debug-oauth-refresh")
         .await?
         .ok_or_else(|| MoaError::StorageError("skill should exist".to_string()))?;
     let skill_md = registry
-        .load_skill_markdown(&workspace_scope(&workspace_name), skill.skill_uid)
+        .load_skill_markdown(&tenant_scope(&workspace_name), skill.skill_uid)
         .await?;
     let rendered = render(
         &skill,
@@ -61,7 +61,7 @@ async fn render_with_graph_lessons() -> Result<()> {
 
     let loaded = registry
         .load_full(
-            &WorkspaceId::new(workspace_name.clone()),
+            TenantId::from(Uuid::parse_str(&workspace_name).expect("tenant fixture is a UUID")),
             "debug-oauth-refresh",
         )
         .await?;

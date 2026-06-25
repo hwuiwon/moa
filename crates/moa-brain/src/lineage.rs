@@ -2,7 +2,7 @@
 
 use moa_core::{
     CompletionContent, CompletionResponse, ContextMessage, EventRecord, LineageHandle, MessageRole,
-    SessionMeta, UserId, WorkingContext, WorkspaceId,
+    SessionMeta, StoragePartitionId, UserId, WorkingContext,
 };
 use moa_lineage_citation::{CascadeConfig, CascadeVerifier, ChunkRef, NliVerifier};
 use moa_lineage_core::{
@@ -38,7 +38,7 @@ pub fn emit_context_lineage(
     let record = ContextLineage {
         turn_id,
         session_id: session.id,
-        workspace_id: lineage_workspace_id(session),
+        storage_partition_id: lineage_storage_partition_id(session),
         user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
         chunks_in_window: chunks,
@@ -64,7 +64,7 @@ pub fn emit_context_lineage(
         score_id: uuid::Uuid::now_v7(),
         ts: chrono::Utc::now(),
         target: ScoreTarget::Turn { turn_id },
-        workspace_id: lineage_workspace_id(session),
+        storage_partition_id: lineage_storage_partition_id(session),
         user_id: Some(lineage_user_id(session)),
         name: "retrieval_recall_proxy".to_string(),
         value: ScoreValue::Numeric(recall_proxy),
@@ -98,8 +98,8 @@ fn context_chunk(session: &SessionMeta, idx: usize, message: &ContextMessage) ->
     }
 }
 
-fn lineage_workspace_id(session: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(session.tenant_id.to_string())
+fn lineage_storage_partition_id(session: &SessionMeta) -> StoragePartitionId {
+    StoragePartitionId::new(session.tenant_id.to_string())
 }
 
 fn lineage_user_id(session: &SessionMeta) -> UserId {
@@ -174,7 +174,7 @@ pub async fn emit_generation_lineage(
     let record = GenerationLineage {
         turn_id,
         session_id: session.id,
-        workspace_id: lineage_workspace_id(session),
+        storage_partition_id: lineage_storage_partition_id(session),
         user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
         provider: provider.to_string(),
@@ -209,7 +209,7 @@ pub async fn emit_generation_lineage(
         score_id: uuid::Uuid::now_v7(),
         ts: chrono::Utc::now(),
         target: ScoreTarget::Turn { turn_id },
-        workspace_id: lineage_workspace_id(session),
+        storage_partition_id: lineage_storage_partition_id(session),
         user_id: Some(lineage_user_id(session)),
         name: "cost_micros".to_string(),
         value: ScoreValue::Numeric(record.cost_micros as f64),
@@ -279,7 +279,7 @@ async fn build_citation_lineage(
     CitationLineage {
         turn_id,
         session_id: session.id,
-        workspace_id: lineage_workspace_id(session),
+        storage_partition_id: lineage_storage_partition_id(session),
         user_id: lineage_user_id(session),
         ts: chrono::Utc::now(),
         answer_text: response.text.clone(),
@@ -314,7 +314,7 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
             target: ScoreTarget::Turn {
                 turn_id: citation.turn_id,
             },
-            workspace_id: citation.workspace_id.clone(),
+            storage_partition_id: citation.storage_partition_id.clone(),
             user_id: Some(citation.user_id.clone()),
             name: "citation_verified".to_string(),
             value: ScoreValue::Boolean(source.verifier.verified),
@@ -330,7 +330,7 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
         }
         metrics::gauge!(
             "moa_grounding_verified_rate",
-            "tenant_id" => citation.workspace_id.to_string()
+            "tenant_id" => citation.storage_partition_id.to_string()
         )
         .set(if source.verifier.verified { 1.0 } else { 0.0 });
 
@@ -341,7 +341,7 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
                 target: ScoreTarget::Turn {
                     turn_id: citation.turn_id,
                 },
-                workspace_id: citation.workspace_id.clone(),
+                storage_partition_id: citation.storage_partition_id.clone(),
                 user_id: Some(citation.user_id.clone()),
                 name: "lexical_overlap".to_string(),
                 value: ScoreValue::Numeric(f64::from(entailment)),

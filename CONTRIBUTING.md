@@ -32,7 +32,7 @@ Restate-backed integration tests should use `moa-test-support`'s
 files, and keep stack setup inside shared fixture helpers.
 
 Use `OrchestratorTestFixture::shared().await?.isolated().await` for tests that
-only need unique session/workspace IDs. Use `serialized()` only for tests that
+only need unique session/tenant IDs. Use `serialized()` only for tests that
 mutate shared orchestrator state, such as cron configuration or provider
 fixture replacement.
 

@@ -12,7 +12,7 @@ type instead of defining a lookalike.
 `moa-core` owns tenant primitives, session/event DTOs, shared errors, config,
 and trait surfaces. It does not depend on the memory subsystem.
 
-- IDs: `WorkspaceId`, `UserId`, `SessionId`
+- IDs: `TenantId`, `StoragePartitionId` for storage partition internals, `UserId`, `SessionId`
 - Scopes: `MemoryScope`, `ScopeTier`, `ScopeContext`
 - Config and errors: `MoaConfig`, `MoaError`, `Result`
 - Session and event DTOs: `SessionMeta`, `SessionStatus`, `Event`,
@@ -117,7 +117,7 @@ Status: Accepted.
 Date: 2026-05-05.
 Supersedes: original M21 design.
 
-The original M21 design specified per-workspace KEK plus per-fact DEK envelope
+The original M21 design specified per-tenant KEK plus per-fact DEK envelope
 encryption. After the PII model changed, ingestion redacts sensitive text before
 embedding and graph storage, so original PHI no longer persists in the
 canonical store.
@@ -130,7 +130,7 @@ Consequences:
 - ingestion and erasure stay simpler;
 - v1 has less KMS dependency surface;
 - a PII service miss can still put cleartext into persisted graph fields;
-- workspaces cannot yet opt into defense-in-depth encryption for restricted
+- tenants cannot yet opt into defense-in-depth encryption for restricted
   slices.
 
 Mitigations:
@@ -141,9 +141,9 @@ Mitigations:
 - `pii_class` remains on every node so encryption can later target restricted
   rows without reclassification.
 
-Revisit when a workspace needs restricted-row encryption, a redaction miss
-reaches storage, an audit requires per-record key destruction, or multi-tenant
-deployment requires per-workspace KMS isolation.
+Revisit when a tenant needs restricted-row encryption, a redaction miss reaches
+storage, an audit requires per-record key destruction, or multi-tenant
+deployment requires per-tenant KMS isolation.
 
 ### ADR 0002 - Auth Architecture
 

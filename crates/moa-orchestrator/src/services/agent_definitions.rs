@@ -12,7 +12,7 @@ use moa_core::wire::{
     AgentDeploymentListResponse, AgentDeploymentSummary, AgentInstallRequest, AgentInstallResponse,
     AgentInstallationListRequest, AgentInstallationListResponse, AgentInstallationSummary,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
@@ -206,7 +206,7 @@ pub async fn install_inner(
     identity: Identity,
 ) -> Result<AgentInstallResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let revision =
         load_published_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
     let definition = agent_definition(&revision)?;
@@ -235,7 +235,7 @@ pub async fn install_inner(
     sqlx::query(
         r#"
         INSERT INTO moa.agent_installation (
-            installation_uid, workspace_id, user_id, agent_id, artifact_uid, definition_ref,
+            installation_uid, storage_partition_id, user_id, agent_id, artifact_uid, definition_ref,
             display_name, status, current_revision_uid, last_deployment_uid, last_deployed_at,
             installed_by, deployment_metadata
         )
@@ -243,7 +243,7 @@ pub async fn install_inner(
         "#,
     )
     .bind(installation_uid)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(request.agent_id)
     .bind(revision.artifact_uid)
@@ -261,7 +261,7 @@ pub async fn install_inner(
         NewDeployment {
             deployment_uid,
             installation_uid,
-            workspace_id: storage_workspace_id.as_str(),
+            storage_partition_id: storage_partition_id.as_str(),
             user_id: parts.user_id.as_deref(),
             revision_uid: request.revision_uid,
             deployed_by: installed_by.as_deref(),
@@ -287,7 +287,7 @@ pub async fn list_installations_inner(
     request: AgentInstallationListRequest,
 ) -> Result<AgentInstallationListResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let mut conn = scoped_conn_for_scope(&pool, &scope)
         .await
         .map_err(moa_error_to_handler_error)?;
@@ -296,12 +296,12 @@ pub async fn list_installations_inner(
         SELECT installation_uid, agent_id, artifact_uid, definition_ref, display_name, status,
                current_revision_uid, last_deployment_uid, last_deployed_at, created_at, updated_at
         FROM moa.agent_installation
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND status <> 'retired'
         ORDER BY updated_at DESC, installation_uid DESC
         "#,
     )
-    .bind(storage_workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .fetch_all(conn.as_mut())
     .await
     .map_err(sqlx_handler_error)?;
@@ -324,7 +324,7 @@ pub async fn deploy_inner(
     identity: Identity,
 ) -> Result<AgentDeployResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let revision =
         load_published_agent_revision(pool.clone(), &scope, request.revision_uid).await?;
     let policy = AgentResolver::new(pool.clone())
@@ -338,7 +338,7 @@ pub async fn deploy_inner(
         .map_err(moa_error_to_handler_error)?;
     let installation = load_installation_for_update(
         conn.as_mut(),
-        &storage_workspace_id,
+        &storage_partition_id,
         request.installation_uid,
     )
     .await?;
@@ -366,7 +366,7 @@ pub async fn deploy_inner(
         NewDeployment {
             deployment_uid,
             installation_uid: request.installation_uid,
-            workspace_id: storage_workspace_id.as_str(),
+            storage_partition_id: storage_partition_id.as_str(),
             user_id: installation.user_id.as_deref(),
             revision_uid: request.revision_uid,
             deployed_by: deployed_by.as_deref(),
@@ -408,7 +408,7 @@ pub async fn list_deployments_inner(
     request: AgentDeploymentListRequest,
 ) -> Result<AgentDeploymentListResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let storage_workspace_id = workspace_id_for_tenant(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let limit = request
         .limit
         .map(|limit| i64::try_from(limit).map_err(|_| bad_request("limit is too large")))
@@ -419,7 +419,7 @@ pub async fn list_deployments_inner(
         .map_err(moa_error_to_handler_error)?;
     ensure_installation_visible(
         conn.as_mut(),
-        &storage_workspace_id,
+        &storage_partition_id,
         request.installation_uid,
     )
     .await?;
@@ -428,13 +428,13 @@ pub async fn list_deployments_inner(
         SELECT deployment_uid, revision_uid, deployed_by, deployed_at, status, reason,
                dependency_lock_hash
         FROM moa.agent_deployment
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND installation_uid = $2
         ORDER BY deployed_at DESC, deployment_uid DESC
         LIMIT $3
         "#,
     )
-    .bind(storage_workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(request.installation_uid)
     .bind(limit)
     .fetch_all(conn.as_mut())
@@ -461,7 +461,7 @@ struct InstallationForDeploy {
 struct NewDeployment<'a> {
     deployment_uid: Uuid,
     installation_uid: Uuid,
-    workspace_id: &'a str,
+    storage_partition_id: &'a str,
     user_id: Option<&'a str>,
     revision_uid: Uuid,
     deployed_by: Option<&'a str>,
@@ -476,7 +476,7 @@ async fn insert_deployment(
     sqlx::query(
         r#"
         INSERT INTO moa.agent_deployment (
-            deployment_uid, installation_uid, workspace_id, user_id, revision_uid,
+            deployment_uid, installation_uid, storage_partition_id, user_id, revision_uid,
             deployed_by, status, reason, dependency_lock, dependency_lock_hash
         )
         VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)
@@ -484,7 +484,7 @@ async fn insert_deployment(
     )
     .bind(deployment.deployment_uid)
     .bind(deployment.installation_uid)
-    .bind(deployment.workspace_id)
+    .bind(deployment.storage_partition_id)
     .bind(deployment.user_id)
     .bind(deployment.revision_uid)
     .bind(deployment.deployed_by)
@@ -507,14 +507,14 @@ async fn ensure_no_active_installation(
         SELECT EXISTS (
             SELECT 1
             FROM moa.agent_installation
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND user_id IS NOT DISTINCT FROM $2
               AND definition_ref = $3
               AND status <> 'retired'
         )
         "#,
     )
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(definition_ref)
     .fetch_one(conn)
@@ -532,20 +532,20 @@ async fn ensure_no_active_installation(
 
 async fn load_installation_for_update(
     conn: &mut sqlx::PgConnection,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     installation_uid: Uuid,
 ) -> Result<InstallationForDeploy, HandlerError> {
     let row = sqlx::query(
         r#"
         SELECT artifact_uid, user_id
         FROM moa.agent_installation
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND installation_uid = $2
           AND status = 'active'
         FOR UPDATE
         "#,
     )
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(installation_uid)
     .fetch_optional(conn)
     .await
@@ -560,7 +560,7 @@ async fn load_installation_for_update(
 
 async fn ensure_installation_visible(
     conn: &mut sqlx::PgConnection,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     installation_uid: Uuid,
 ) -> Result<(), HandlerError> {
     let exists = sqlx::query_scalar::<_, bool>(
@@ -568,13 +568,13 @@ async fn ensure_installation_visible(
         SELECT EXISTS (
             SELECT 1
             FROM moa.agent_installation
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND installation_uid = $2
               AND status <> 'retired'
         )
         "#,
     )
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(installation_uid)
     .fetch_one(conn)
     .await
@@ -659,8 +659,8 @@ fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
     ActionRuleScope::Tenant { tenant_id }
 }
 
-fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
+fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }
 
 async fn scoped_conn_for_scope<'p>(
@@ -668,7 +668,6 @@ async fn scoped_conn_for_scope<'p>(
     scope: &ActionRuleScope,
 ) -> moa_core::Result<ScopedConn<'p>> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopedConn::begin_control_plane(pool).await,
         ActionRuleScope::Tenant { tenant_id } => ScopedConn::begin_tenant(pool, *tenant_id).await,
     }
 }

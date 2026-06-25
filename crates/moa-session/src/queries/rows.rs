@@ -226,13 +226,17 @@ fn tenant_id_from_storage(value: String) -> TenantId {
     TenantId::from(Uuid::from_bytes(bytes))
 }
 
-fn action_rule_scope_from_columns(scope: &str, workspace_id: &str) -> ActionRuleScope {
+fn action_rule_scope_from_columns(
+    scope: &str,
+    storage_partition_id: &str,
+) -> Result<ActionRuleScope> {
     match scope {
-        "global" | "workspace_default" => ActionRuleScope::WorkspaceDefault,
-        "tenant" => ActionRuleScope::Tenant {
-            tenant_id: tenant_id_from_storage(workspace_id.to_string()),
-        },
-        _ => ActionRuleScope::WorkspaceDefault,
+        "tenant" => Ok(ActionRuleScope::Tenant {
+            tenant_id: tenant_id_from_storage(storage_partition_id.to_string()),
+        }),
+        _ => Err(MoaError::StorageError(format!(
+            "unsupported action policy scope `{scope}`; tenant scope is required"
+        ))),
     }
 }
 
@@ -348,10 +352,6 @@ pub(crate) fn experience_record_from_row(row: &PgRow) -> Result<ExperienceRecord
             row.try_get::<String, _>("tenant_id")
                 .map_err(map_sqlx_error)?,
         ),
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
-                .map_err(map_sqlx_error)?,
-        ),
         user_id: UserId(user_id),
         task_summary: row
             .try_get::<Option<String>, _>("task_summary")
@@ -410,10 +410,6 @@ pub(crate) fn experience_attribution_from_row(row: &PgRow) -> Result<ExperienceA
             row.try_get::<String, _>("tenant_id")
                 .map_err(map_sqlx_error)?,
         ),
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
-                .map_err(map_sqlx_error)?,
-        ),
         user_id: row
             .try_get::<Option<String>, _>("user_id")
             .map_err(map_sqlx_error)?
@@ -446,10 +442,6 @@ pub(crate) fn learning_candidate_from_row(row: &PgRow) -> Result<LearningCandida
         id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
         tenant_id: tenant_id_from_storage(
             row.try_get::<String, _>("tenant_id")
-                .map_err(map_sqlx_error)?,
-        ),
-        workspace_id: WorkspaceId(
-            row.try_get::<String, _>("workspace_id")
                 .map_err(map_sqlx_error)?,
         ),
         user_id: row
@@ -581,13 +573,13 @@ fn parse_segment_assessment(value: Option<String>) -> Result<Option<SegmentAsses
 
 /// Maps an `action_policy_rules` row into an `ActionPolicyRule`.
 pub(crate) fn action_policy_rule_from_row(row: &PgRow) -> Result<ActionPolicyRule> {
-    let workspace_id = row
-        .try_get::<String, _>("workspace_id")
+    let storage_partition_id = row
+        .try_get::<String, _>("storage_partition_id")
         .map_err(map_sqlx_error)?;
     let scope = row.try_get::<String, _>("scope").map_err(map_sqlx_error)?;
     Ok(ActionPolicyRule {
         id: row.try_get::<Uuid, _>("id").map_err(map_sqlx_error)?,
-        scope: action_rule_scope_from_columns(&scope, &workspace_id),
+        scope: action_rule_scope_from_columns(&scope, &storage_partition_id)?,
         tool: row.try_get::<String, _>("tool").map_err(map_sqlx_error)?,
         pattern: row
             .try_get::<String, _>("pattern")

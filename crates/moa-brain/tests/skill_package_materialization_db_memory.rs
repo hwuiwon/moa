@@ -13,8 +13,8 @@ use moa_core::{
     ActionRuleScope, AgentContext, AgentPolicySnapshot, AgentRevisionLock, AgentSkillPolicy,
     AgentSkillPolicyMode, AgentToolPolicy, AgentToolPolicyMode, ContactId, ContactRef,
     ContactVerificationState, Event, EventRange, LockedToolRef, ModelCapabilities, ModelId,
-    ResolvedArtifactRevisionRef, Result, SessionActorRef, SessionMeta, SessionStore, TenantId,
-    TokenPricing, ToolCallFormat, ToolOutput, UserId, WorkspaceId,
+    ResolvedArtifactRevisionRef, Result, SessionActorRef, SessionMeta, SessionStore,
+    StoragePartitionId, TenantId, TokenPricing, ToolCallFormat, ToolOutput, UserId,
 };
 use moa_hands::ToolRouter;
 use moa_providers::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
@@ -39,12 +39,11 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
-    let workspace_id = WorkspaceId::new(format!(
+    let storage_partition_id = StoragePartitionId::new(format!(
         "skill-package-materialization-{}",
         Uuid::now_v7().simple()
     ));
-    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
-    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let tenant_id = tenant_id_from_storage_partition_id(&storage_partition_id);
     let user_id = UserId::new("skill-package-user");
     let skill_name = format!("db-backed-package-{}", Uuid::now_v7().simple());
     let session_id = session_store
@@ -84,7 +83,7 @@ async fn db_backed_selected_skill_package_is_materialized_before_first_tool_call
             .with_policies(ActionPolicies::from_config(&config)?),
     );
     router
-        .remember_workspace_root(runtime_workspace_id, workspace.clone())
+        .remember_workspace_root(tenant_id, workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider(&skill_name));
@@ -184,9 +183,9 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store().await?;
     let graph_pool = session_store.pool().clone();
     let session_store: Arc<dyn SessionStore> = Arc::new(session_store);
-    let workspace_id = WorkspaceId::new(format!("agent-locked-skill-{}", Uuid::now_v7().simple()));
-    let tenant_id = tenant_id_from_workspace_id(&workspace_id);
-    let runtime_workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id =
+        StoragePartitionId::new(format!("agent-locked-skill-{}", Uuid::now_v7().simple()));
+    let tenant_id = tenant_id_from_storage_partition_id(&storage_partition_id);
     let user_id = UserId::new("agent-locked-skill-user");
     let skill_name = format!("agent-locked-skill-{}", Uuid::now_v7().simple());
     let scope = ActionRuleScope::Tenant { tenant_id };
@@ -273,7 +272,7 @@ async fn agent_locked_skill_revision_materializes_exact_files_after_newer_publis
             .with_policies(ActionPolicies::from_config(&config)?),
     );
     router
-        .remember_workspace_root(runtime_workspace_id, workspace.clone())
+        .remember_workspace_root(tenant_id, workspace.clone())
         .await;
 
     let provider = Arc::new(scripted_provider_read_checklist(&skill_name));
@@ -569,10 +568,10 @@ fn session_meta(
     }
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {

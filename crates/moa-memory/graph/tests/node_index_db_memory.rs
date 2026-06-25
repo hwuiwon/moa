@@ -11,11 +11,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -44,12 +44,12 @@ async fn set_app_role(conn: &mut sqlx::PgConnection) {
 
 async fn insert_workspace_rows(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     prefix: &str,
     label: NodeLabel,
     count: usize,
 ) -> Vec<Uuid> {
-    let ctx = tenant_scope(workspace_id);
+    let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped node_index insert transaction");
@@ -58,15 +58,15 @@ async fn insert_workspace_rows(
     let mut uids = Vec::with_capacity(count);
     for index in 0..count {
         let uid = Uuid::now_v7();
-        let name = format!("{prefix} auth service {workspace_id} {index}");
+        let name = format!("{prefix} auth service {storage_partition_id} {index}");
         sqlx::query(
             "INSERT INTO moa.node_index \
-             (uid, label, workspace_id, name, pii_class, confidence) \
+             (uid, label, storage_partition_id, name, pii_class, confidence) \
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(uid)
         .bind(label.as_str())
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(name)
         .bind(PiiClass::None.as_str())
         .bind(0.91_f64)
@@ -128,7 +128,7 @@ async fn node_index_rls_scopes_seed_lookup_and_bump() {
     assert!(
         seeds
             .iter()
-            .all(|row| row.workspace_id.as_deref() == Some(workspace_a.as_str()))
+            .all(|row| row.storage_partition_id.as_deref() == Some(workspace_a.as_str()))
     );
 
     bump_last_accessed(conn.as_mut(), &workspace_a_uids[..2])
@@ -183,7 +183,7 @@ async fn node_index_workspace_scope_query_uses_partial_index() {
 
     let plan = sqlx::query_scalar::<_, String>(&format!(
         "EXPLAIN SELECT * FROM moa.node_index \
-         WHERE workspace_id = '{target_workspace}' \
+         WHERE storage_partition_id = '{target_workspace}' \
            AND scope = 'tenant' \
            AND label = 'Fact' \
            AND valid_to IS NULL"

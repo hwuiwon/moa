@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::WorkspaceId;
+use moa_core::StoragePartitionId;
 use moa_lineage_core::{
     Citation, LineageEvent, LineageSink, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue, TurnId,
     VerifierResult,
@@ -258,13 +258,13 @@ pub fn emit_verifier_scores(
     sink: &dyn LineageSink,
     citation: &Citation,
     turn_id: TurnId,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) {
     sink.record(LineageEvent::Eval(ScoreRecord {
         score_id: Uuid::now_v7(),
         ts: Utc::now(),
         target: ScoreTarget::Turn { turn_id },
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         user_id: None,
         name: "citation_verified".to_string(),
         value: ScoreValue::Boolean(citation.verifier.verified),
@@ -276,7 +276,7 @@ pub fn emit_verifier_scores(
     }));
     metrics::gauge!(
         "moa_grounding_verified_rate",
-        "workspace_id" => workspace_id.to_string()
+        "tenant_id" => storage_partition_id.to_string()
     )
     .set(if citation.verifier.verified { 1.0 } else { 0.0 });
 
@@ -285,7 +285,7 @@ pub fn emit_verifier_scores(
             score_id: Uuid::now_v7(),
             ts: Utc::now(),
             target: ScoreTarget::Turn { turn_id },
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: None,
             name: "lexical_overlap".to_string(),
             value: ScoreValue::Numeric(f64::from(entailment)),

@@ -28,7 +28,7 @@ session_preload_libraries=age
 AGE still requires transaction-local search path setup for Cypher. MOA's
 `ScopedConn` installs `search_path = ag_catalog, "$user", public` alongside
 tenant row-level-security GUCs before tenant queries run. The tenant is the
-hard runtime isolation boundary; workspace control-plane reads must use an
+hard runtime isolation boundary; deployment maintenance reads must use an
 explicit control-plane scope instead of the default tenant connection.
 
 ## Graph Changelog Replication

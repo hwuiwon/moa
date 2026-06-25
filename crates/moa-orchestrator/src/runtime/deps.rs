@@ -49,7 +49,7 @@ pub struct RuntimeDeps {
     pub providers: Arc<ProviderRegistry>,
     /// Optional embedding provider.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
-    /// Tool router used by ToolExecutor and workspace services.
+    /// Tool router used by ToolExecutor and runtime services.
     pub tool_router: Arc<ToolRouter>,
     /// Precompiled tool schemas.
     pub tool_schemas: Arc<Vec<Value>>,

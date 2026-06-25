@@ -39,7 +39,7 @@ impl Default for MemoryConfig {
     }
 }
 
-/// Standing user/workspace digest configuration.
+/// Standing contact/tenant digest configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryDigestConfig {
@@ -130,7 +130,7 @@ pub struct MemoryRankingWeights {
     /// Additive score for contact-scoped rows.
     pub scope_user: f64,
     /// Additive score for tenant-scoped rows.
-    pub scope_workspace: f64,
+    pub scope_tenant: f64,
     /// Half-life in days for valid-from recency.
     pub recency_half_life_days: f64,
     /// Half-life in days for access recency.
@@ -148,7 +148,7 @@ impl Default for MemoryRankingWeights {
             graph_rescue: 0.6,
             quality: 0.6,
             scope_user: 0.2,
-            scope_workspace: 0.1,
+            scope_tenant: 0.1,
             recency_half_life_days: 90.0,
             access_half_life_days: 14.0,
         }
@@ -204,7 +204,7 @@ impl Default for TurbopufferVectorConfig {
     }
 }
 
-/// Per-workspace embedder selection.
+/// Per-tenant embedder selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VectorEmbedderConfig {

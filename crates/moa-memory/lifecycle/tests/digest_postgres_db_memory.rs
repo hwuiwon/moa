@@ -5,9 +5,9 @@ use moa_brain::pipeline::digest::DigestProcessor;
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
     MemoryDigestConfig, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
-    ToolCallFormat, WorkingContext, WorkspaceId,
+    ToolCallFormat, WorkingContext,
 };
-use moa_memory_lifecycle::digest::rebuild_digests;
+use moa_memory_lifecycle::rebuild_digests;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -24,13 +24,15 @@ async fn configured_test_db() -> Option<TestDb> {
 
 #[tokio::test]
 #[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
-async fn digest_rls_blocks_cross_user_and_cross_workspace_reads() {
-    // Pins: app-role digest reads reveal only the caller's user digest plus workspace digest.
+async fn digest_rls_blocks_cross_contact_and_cross_tenant_reads() {
+    // Pins: app-role digest reads reveal only the caller's contact digest plus tenant digest.
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_a = format!("digest-rls-a-{}", Uuid::now_v7().simple());
-    let workspace_b = format!("digest-rls-b-{}", Uuid::now_v7().simple());
+    let tenant_a = TenantId::new();
+    let tenant_b = TenantId::new();
+    let workspace_a = tenant_a.to_string();
+    let workspace_b = tenant_b.to_string();
     let user_a = "digest-user-a";
     let user_b = "digest-user-b";
     let now = Utc
@@ -80,22 +82,12 @@ async fn digest_rls_blocks_cross_user_and_cross_workspace_reads() {
         max_tokens: 600,
         rebuild_min_interval_hours: 6,
     };
-    rebuild_digests(
-        test_db.store().pool(),
-        &WorkspaceId::new(&workspace_a),
-        now,
-        &config,
-    )
-    .await
-    .expect("rebuild workspace A digests");
-    rebuild_digests(
-        test_db.store().pool(),
-        &WorkspaceId::new(&workspace_b),
-        now,
-        &config,
-    )
-    .await
-    .expect("rebuild workspace B digests");
+    rebuild_digests(test_db.store().pool(), &tenant_a, now, &config)
+        .await
+        .expect("rebuild tenant A digests");
+    rebuild_digests(test_db.store().pool(), &tenant_b, now, &config)
+        .await
+        .expect("rebuild tenant B digests");
 
     let visible = visible_digest_contents(test_db.store().pool(), &workspace_a, user_a).await;
 
@@ -115,7 +107,8 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("digest-schema-{}", Uuid::now_v7().simple());
+    let tenant_id = TenantId::new();
+    let storage_partition_id = tenant_id.to_string();
     let user_id = "digest-reader-user";
     let now = Utc
         .with_ymd_and_hms(2026, 6, 11, 0, 0, 0)
@@ -124,7 +117,7 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
 
     seed_fact(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         Some(user_id),
         "answer format",
         "prefers",
@@ -133,7 +126,7 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
     .await;
     seed_fact(
         test_db.store().pool(),
-        &workspace_id,
+        &storage_partition_id,
         None,
         "release train",
         "uses",
@@ -146,18 +139,13 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
         max_tokens: 600,
         rebuild_min_interval_hours: 6,
     };
-    let stats = rebuild_digests(
-        test_db.store().pool(),
-        &WorkspaceId::new(&workspace_id),
-        now,
-        &config,
-    )
-    .await
-    .expect("rebuild digests");
+    let stats = rebuild_digests(test_db.store().pool(), &tenant_id, now, &config)
+        .await
+        .expect("rebuild digests");
     assert_eq!(stats.digests_rebuilt, 2);
 
     let processor = DigestProcessor::new(test_db.store().pool().clone(), config);
-    let mut ctx = working_context(&workspace_id, user_id);
+    let mut ctx = working_context(&storage_partition_id, user_id);
     ctx.append_message(ContextMessage::user("What should I remember?"));
 
     let output = processor
@@ -167,7 +155,7 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
 
     assert_eq!(
         output.items_included,
-        vec!["digest:user".to_string(), "digest:workspace".to_string()]
+        vec!["digest:contact".to_string(), "digest:tenant".to_string()]
     );
     assert_eq!(ctx.messages.len(), 2);
     let digest_block = &ctx.messages[0].content;
@@ -176,15 +164,13 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
     assert!(digest_block.contains("weekly deploys"));
     assert!(
         digest_block.find("this user").expect("user digest")
-            < digest_block
-                .find("this workspace")
-                .expect("workspace digest")
+            < digest_block.find("this tenant").expect("tenant digest")
     );
 
     let source_fact_count = sqlx::query_scalar::<_, i32>(
-        "SELECT jsonb_array_length(source_fact_uids) FROM moa.memory_digests WHERE workspace_id = $1",
+        "SELECT jsonb_array_length(source_fact_uids) FROM moa.memory_digests WHERE storage_partition_id = $1",
     )
-    .bind(&workspace_id)
+    .bind(&storage_partition_id)
     .fetch_all(test_db.store().pool())
     .await
     .expect("read source uid counts")
@@ -192,12 +178,12 @@ async fn digest_row_schema_pinned_across_writer_and_reader() {
     .sum::<i32>();
     assert_eq!(source_fact_count, 2);
 
-    cleanup_workspaces(test_db.store().pool(), &[&workspace_id]).await;
+    cleanup_workspaces(test_db.store().pool(), &[&storage_partition_id]).await;
 }
 
 async fn seed_fact(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     user_id: Option<&str>,
     subject: &str,
     predicate: &str,
@@ -208,12 +194,12 @@ async fn seed_fact(
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, workspace_id, user_id, name, pii_class, confidence, valid_from, properties_summary)
+            (uid, label, storage_partition_id, user_id, name, pii_class, confidence, valid_from, properties_summary)
         VALUES ($1, 'Fact', $2, $3, $4, 'none', 0.9, $5, $6)
         "#,
     )
     .bind(uid)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(user_id)
     .bind(&name)
     .bind(
@@ -231,14 +217,18 @@ async fn seed_fact(
     .expect("seed digest fact");
 }
 
-async fn visible_digest_contents(pool: &PgPool, workspace_id: &str, user_id: &str) -> Vec<String> {
+async fn visible_digest_contents(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    user_id: &str,
+) -> Vec<String> {
     let mut tx = pool.begin().await.expect("begin app-role digest read");
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(&mut *tx)
         .await
         .expect("set app role");
-    sqlx::query("SELECT pg_catalog.set_config('moa.workspace_id', $1, true)")
-        .bind(workspace_id)
+    sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+        .bind(storage_partition_id)
         .execute(&mut *tx)
         .await
         .expect("set workspace GUC");
@@ -253,7 +243,7 @@ async fn visible_digest_contents(pool: &PgPool, workspace_id: &str, user_id: &st
         .expect("set scope GUC");
 
     let rows = sqlx::query(
-        "SELECT content FROM moa.memory_digests ORDER BY workspace_id, scope, user_id NULLS FIRST",
+        "SELECT content FROM moa.memory_digests ORDER BY storage_partition_id, scope, user_id NULLS FIRST",
     )
     .fetch_all(&mut *tx)
     .await
@@ -265,21 +255,21 @@ async fn visible_digest_contents(pool: &PgPool, workspace_id: &str, user_id: &st
         .collect()
 }
 
-async fn cleanup_workspaces(pool: &PgPool, workspace_ids: &[&str]) {
-    sqlx::query("DELETE FROM moa.memory_digests WHERE workspace_id = ANY($1)")
-        .bind(workspace_ids)
+async fn cleanup_workspaces(pool: &PgPool, storage_partition_ids: &[&str]) {
+    sqlx::query("DELETE FROM moa.memory_digests WHERE storage_partition_id = ANY($1)")
+        .bind(storage_partition_ids)
         .execute(pool)
         .await
         .expect("cleanup digest rows");
-    sqlx::query("DELETE FROM moa.node_index WHERE workspace_id = ANY($1)")
-        .bind(workspace_ids)
+    sqlx::query("DELETE FROM moa.node_index WHERE storage_partition_id = ANY($1)")
+        .bind(storage_partition_ids)
         .execute(pool)
         .await
         .expect("cleanup node rows");
 }
 
-fn working_context(workspace_id: &str, user_id: &str) -> WorkingContext {
-    let tenant_id = tenant_id_from_workspace_id(workspace_id);
+fn working_context(storage_partition_id: &str, user_id: &str) -> WorkingContext {
+    let tenant_id = tenant_id_from_storage_partition_id(storage_partition_id);
     let contact_id = contact_id_from_user_id(user_id);
     WorkingContext::new(
         &SessionMeta {
@@ -294,10 +284,10 @@ fn working_context(workspace_id: &str, user_id: &str) -> WorkingContext {
     )
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &str) -> TenantId {
-    Uuid::parse_str(workspace_id)
+fn tenant_id_from_storage_partition_id(storage_partition_id: &str) -> TenantId {
+    Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)))
 }
 
 fn contact_id_from_user_id(user_id: &str) -> ContactId {

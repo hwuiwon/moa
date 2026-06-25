@@ -250,7 +250,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 8,
           "score": 1.4212846608042975,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -1082,7 +1082,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 8,
           "score": 0.9068273486366097,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -1270,7 +1270,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 10,
           "score": 0.9518702758475203,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -3800,7 +3800,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 9,
           "score": 1.2721371095251106,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -4676,7 +4676,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 11,
           "score": 0.9017572542436997,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -4908,7 +4908,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 14,
           "score": 0.9295458377316264,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -6539,7 +6539,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 7,
           "score": 0.9209549975158625,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -6738,7 +6738,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 10,
           "score": 0.9565932420144928,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -7625,7 +7625,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 12,
           "score": 1.2535475834588945,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -8534,7 +8534,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 13,
           "score": 0.902885103476068,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -9429,22 +9429,22 @@
       "temporal_filter_parsed": null
     },
     {
-      "probe_id": "pr-s00-w00-workspace-runbook",
+      "probe_id": "pr-s00-w00-tenant-runbook",
       "user_id": "memory-eval-pr-user-00",
-      "probe_type": "workspace_shared_fact",
+      "probe_type": "tenant_shared_fact",
       "expected_fact_ids": [
-        "pr-s00-w00-workspace-runbook"
+        "pr-s00-w00-tenant-runbook"
       ],
       "blocked_fact_ids": [
-        "pr-s01-w00-workspace-runbook",
-        "pr-s02-w00-workspace-runbook"
+        "pr-s01-w00-tenant-runbook",
+        "pr-s02-w00-tenant-runbook"
       ],
       "candidates": [
         {
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 1,
           "score": 1.566833645730455,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -9490,7 +9490,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 1,
           "score": 1.566833645730455,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -9630,7 +9630,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 2,
           "score": 1.6433118739740626,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -9698,7 +9698,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 2,
           "score": 1.6433118739740626,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -9762,7 +9762,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 2,
           "score": 1.659808652477083,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -9984,7 +9984,7 @@
           "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
           "rank": 2,
           "score": 1.659808652477083,
-          "fact_id": "pr-s00-w00-workspace-runbook",
+          "fact_id": "pr-s00-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -10742,15 +10742,15 @@
       "temporal_filter_parsed": null
     },
     {
-      "probe_id": "pr-s00-w01-workspace-runbook",
+      "probe_id": "pr-s00-w01-tenant-runbook",
       "user_id": "memory-eval-pr-user-01",
-      "probe_type": "workspace_shared_fact",
+      "probe_type": "tenant_shared_fact",
       "expected_fact_ids": [
-        "pr-s00-w01-workspace-runbook"
+        "pr-s00-w01-tenant-runbook"
       ],
       "blocked_fact_ids": [
-        "pr-s01-w01-workspace-runbook",
-        "pr-s02-w01-workspace-runbook"
+        "pr-s01-w01-tenant-runbook",
+        "pr-s02-w01-tenant-runbook"
       ],
       "candidates": [
         {
@@ -10790,7 +10790,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 4,
           "score": 1.4283540000369643,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -10935,7 +10935,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 4,
           "score": 1.4283540000369643,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -11009,7 +11009,7 @@
           "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
           "rank": 5,
           "score": 1.5790108600346857,
-          "fact_id": "pr-s01-w01-workspace-runbook",
+          "fact_id": "pr-s01-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -11317,7 +11317,7 @@
           "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
           "rank": 5,
           "score": 1.5745236805475062,
-          "fact_id": "pr-s01-w01-workspace-runbook",
+          "fact_id": "pr-s01-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -11790,7 +11790,7 @@
           "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
           "rank": 5,
           "score": 1.5745236805475062,
-          "fact_id": "pr-s01-w01-workspace-runbook",
+          "fact_id": "pr-s01-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": true,
@@ -12840,7 +12840,7 @@
           "uid": "7a2e79be-0b18-8248-9982-2085f96bb902",
           "rank": 13,
           "score": 1.2805806036646428,
-          "fact_id": "pr-s01-w00-workspace-runbook",
+          "fact_id": "pr-s01-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -14967,7 +14967,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 14,
           "score": 1.2656590594921706,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -15799,7 +15799,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 5,
           "score": 1.2792842187930384,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -16075,7 +16075,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 17,
           "score": 0.9164108827989585,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -17017,7 +17017,7 @@
           "uid": "7a2e79be-0b18-8248-9982-2085f96bb902",
           "rank": 15,
           "score": 1.205001058355221,
-          "fact_id": "pr-s01-w00-workspace-runbook",
+          "fact_id": "pr-s01-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -19177,7 +19177,7 @@
           "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
           "rank": 17,
           "score": 1.1903773329948062,
-          "fact_id": "pr-s00-w01-workspace-runbook",
+          "fact_id": "pr-s00-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -20009,7 +20009,7 @@
           "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
           "rank": 5,
           "score": 1.2805958692283905,
-          "fact_id": "pr-s01-w01-workspace-runbook",
+          "fact_id": "pr-s01-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -21238,7 +21238,7 @@
           "uid": "7a2e79be-0b18-8248-9982-2085f96bb902",
           "rank": 14,
           "score": 1.171998213233334,
-          "fact_id": "pr-s01-w00-workspace-runbook",
+          "fact_id": "pr-s01-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -23251,15 +23251,15 @@
       "temporal_filter_parsed": null
     },
     {
-      "probe_id": "pr-s01-w00-workspace-runbook",
+      "probe_id": "pr-s01-w00-tenant-runbook",
       "user_id": "memory-eval-pr-user-00",
-      "probe_type": "workspace_shared_fact",
+      "probe_type": "tenant_shared_fact",
       "expected_fact_ids": [
-        "pr-s01-w00-workspace-runbook"
+        "pr-s01-w00-tenant-runbook"
       ],
       "blocked_fact_ids": [
-        "pr-s00-w00-workspace-runbook",
-        "pr-s02-w00-workspace-runbook"
+        "pr-s00-w00-tenant-runbook",
+        "pr-s02-w00-tenant-runbook"
       ],
       "candidates": [
         {
@@ -23343,7 +23343,7 @@
           "uid": "7a2e79be-0b18-8248-9982-2085f96bb902",
           "rank": 8,
           "score": 1.4209792308243163,
-          "fact_id": "pr-s01-w00-workspace-runbook",
+          "fact_id": "pr-s01-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -25609,15 +25609,15 @@
       "temporal_filter_parsed": null
     },
     {
-      "probe_id": "pr-s01-w01-workspace-runbook",
+      "probe_id": "pr-s01-w01-tenant-runbook",
       "user_id": "memory-eval-pr-user-01",
-      "probe_type": "workspace_shared_fact",
+      "probe_type": "tenant_shared_fact",
       "expected_fact_ids": [
-        "pr-s01-w01-workspace-runbook"
+        "pr-s01-w01-tenant-runbook"
       ],
       "blocked_fact_ids": [
-        "pr-s00-w01-workspace-runbook",
-        "pr-s02-w01-workspace-runbook"
+        "pr-s00-w01-tenant-runbook",
+        "pr-s02-w01-tenant-runbook"
       ],
       "candidates": [
         {
@@ -25646,7 +25646,7 @@
           "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
           "rank": 3,
           "score": 1.381681821860662,
-          "fact_id": "pr-s01-w01-workspace-runbook",
+          "fact_id": "pr-s01-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -25923,7 +25923,7 @@
           "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
           "rank": 3,
           "score": 1.381681821860662,
-          "fact_id": "pr-s01-w01-workspace-runbook",
+          "fact_id": "pr-s01-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": true,
@@ -27981,7 +27981,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 2,
           "score": 1.6131796187221923,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -28258,7 +28258,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 2,
           "score": 1.6131796187221923,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -30372,7 +30372,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 3,
           "score": 1.591618390406121,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -30649,7 +30649,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 3,
           "score": 1.591618390406121,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -32741,7 +32741,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 2,
           "score": 1.6096602601376684,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -33018,7 +33018,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 2,
           "score": 1.6096602601376684,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -35132,7 +35132,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 3,
           "score": 1.591618390406121,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -35409,7 +35409,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 3,
           "score": 1.591618390406121,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -37501,7 +37501,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 2,
           "score": 1.6131796187221923,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -37778,7 +37778,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 2,
           "score": 1.6131796187221923,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -39515,15 +39515,15 @@
       "temporal_filter_parsed": null
     },
     {
-      "probe_id": "pr-s02-w00-workspace-runbook",
+      "probe_id": "pr-s02-w00-tenant-runbook",
       "user_id": "memory-eval-pr-user-00",
-      "probe_type": "workspace_shared_fact",
+      "probe_type": "tenant_shared_fact",
       "expected_fact_ids": [
-        "pr-s02-w00-workspace-runbook"
+        "pr-s02-w00-tenant-runbook"
       ],
       "blocked_fact_ids": [
-        "pr-s00-w00-workspace-runbook",
-        "pr-s01-w00-workspace-runbook"
+        "pr-s00-w00-tenant-runbook",
+        "pr-s01-w00-tenant-runbook"
       ],
       "candidates": [
         {
@@ -39574,7 +39574,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 5,
           "score": 1.3993444786140792,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": false,
@@ -41602,7 +41602,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 4,
           "score": 1.6101147758648082,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -41879,7 +41879,7 @@
           "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
           "rank": 4,
           "score": 1.6101147758648082,
-          "fact_id": "pr-s02-w00-workspace-runbook",
+          "fact_id": "pr-s02-w00-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -41895,15 +41895,15 @@
       "temporal_filter_parsed": null
     },
     {
-      "probe_id": "pr-s02-w01-workspace-runbook",
+      "probe_id": "pr-s02-w01-tenant-runbook",
       "user_id": "memory-eval-pr-user-01",
-      "probe_type": "workspace_shared_fact",
+      "probe_type": "tenant_shared_fact",
       "expected_fact_ids": [
-        "pr-s02-w01-workspace-runbook"
+        "pr-s02-w01-tenant-runbook"
       ],
       "blocked_fact_ids": [
-        "pr-s00-w01-workspace-runbook",
-        "pr-s01-w01-workspace-runbook"
+        "pr-s00-w01-tenant-runbook",
+        "pr-s01-w01-tenant-runbook"
       ],
       "candidates": [
         {
@@ -41943,7 +41943,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 4,
           "score": 1.4013610948505542,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": false,
@@ -42220,7 +42220,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 4,
           "score": 1.4013610948505542,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": false,
             "vector": false,
@@ -43597,7 +43597,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 4,
           "score": 1.616101138479044,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -43874,7 +43874,7 @@
           "uid": "c758309d-e31a-8b22-814a-83e868d66067",
           "rank": 4,
           "score": 1.616101138479044,
-          "fact_id": "pr-s02-w01-workspace-runbook",
+          "fact_id": "pr-s02-w01-tenant-runbook",
           "legs": {
             "graph": true,
             "vector": false,
@@ -43969,7 +43969,7 @@
         "session_id": "a11c0100-0000-0001-5692-161d100b05e5",
         "turn_seq": 3,
         "fact_ids": [
-          "pr-s00-w00-workspace-runbook"
+          "pr-s00-w00-tenant-runbook"
         ],
         "inserted": 1,
         "superseded": 0,
@@ -44277,7 +44277,7 @@
         "session_id": "a11c0100-0100-0101-5692-161d100b05e5",
         "turn_seq": 3,
         "fact_ids": [
-          "pr-s00-w01-workspace-runbook"
+          "pr-s00-w01-tenant-runbook"
         ],
         "inserted": 1,
         "superseded": 0,
@@ -44508,7 +44508,7 @@
         "session_id": "a11c0101-0000-0001-dbd2-38973a2b148a",
         "turn_seq": 3,
         "fact_ids": [
-          "pr-s01-w00-workspace-runbook"
+          "pr-s01-w00-tenant-runbook"
         ],
         "inserted": 1,
         "superseded": 0,
@@ -44816,7 +44816,7 @@
         "session_id": "a11c0101-0100-0101-dbd2-38973a2b148a",
         "turn_seq": 3,
         "fact_ids": [
-          "pr-s01-w01-workspace-runbook"
+          "pr-s01-w01-tenant-runbook"
         ],
         "inserted": 1,
         "superseded": 0,
@@ -45069,7 +45069,7 @@
         "session_id": "a11c0102-0000-0001-1e53-5eede31428f0",
         "turn_seq": 3,
         "fact_ids": [
-          "pr-s02-w00-workspace-runbook"
+          "pr-s02-w00-tenant-runbook"
         ],
         "inserted": 1,
         "superseded": 0,
@@ -45388,7 +45388,7 @@
         "session_id": "a11c0102-0100-0101-1e53-5eede31428f0",
         "turn_seq": 3,
         "fact_ids": [
-          "pr-s02-w01-workspace-runbook"
+          "pr-s02-w01-tenant-runbook"
         ],
         "inserted": 1,
         "superseded": 0,
@@ -45710,12 +45710,12 @@
         "node_uids": [
           "d462c152-40c0-8fae-9bd7-5cd0e4e0b652"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-04T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-04T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -45730,7 +45730,7 @@
         "nodes": [
           {
             "uid": "d462c152-40c0-8fae-9bd7-5cd0e4e0b652",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-04T00:00:00Z",
             "valid_to": null,
@@ -45743,12 +45743,12 @@
         "node_uids": [
           "43cb4d19-483b-8134-a19e-2ded4b59c61b"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-05T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-05T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -45763,7 +45763,7 @@
         "nodes": [
           {
             "uid": "43cb4d19-483b-8134-a19e-2ded4b59c61b",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-05T00:00:00Z",
             "valid_to": null,
@@ -45776,12 +45776,12 @@
         "node_uids": [
           "8d698764-61ee-8cc7-89d4-e9083c863495"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-01-01T00:00:00Z",
         "valid_to": "2026-01-08T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-01T00:00:00Z",
         "expected_valid_to": "2026-01-08T00:00:00Z",
         "pii_status": "not_expected",
@@ -45799,7 +45799,7 @@
         "nodes": [
           {
             "uid": "8d698764-61ee-8cc7-89d4-e9083c863495",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-01-01T00:00:00Z",
             "valid_to": "2026-01-08T00:00:00Z",
@@ -45812,12 +45812,12 @@
         "node_uids": [
           "5121bdaf-ae73-8dac-9e35-08fc1ab61fba"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-08T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-08T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -45835,7 +45835,7 @@
         "nodes": [
           {
             "uid": "5121bdaf-ae73-8dac-9e35-08fc1ab61fba",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-08T00:00:00Z",
             "valid_to": null,
@@ -45848,12 +45848,12 @@
         "node_uids": [
           "d47cb784-44c2-8596-9c23-acbd011a98c7"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-01-01T00:00:00Z",
         "valid_to": "2026-02-01T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-01T00:00:00Z",
         "expected_valid_to": "2026-02-01T00:00:00Z",
         "pii_status": "not_expected",
@@ -45871,7 +45871,7 @@
         "nodes": [
           {
             "uid": "d47cb784-44c2-8596-9c23-acbd011a98c7",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-01-01T00:00:00Z",
             "valid_to": "2026-02-01T00:00:00Z",
@@ -45884,12 +45884,12 @@
         "node_uids": [
           "a9013e11-1044-8a5a-9772-f87546a0a8c2"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -45907,7 +45907,7 @@
         "nodes": [
           {
             "uid": "a9013e11-1044-8a5a-9772-f87546a0a8c2",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-01T00:00:00Z",
             "valid_to": null,
@@ -45956,12 +45956,12 @@
         "node_uids": [
           "8f732154-1205-8d73-a166-8db5b1dc2da4"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-09T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-09T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -45976,7 +45976,7 @@
         "nodes": [
           {
             "uid": "8f732154-1205-8d73-a166-8db5b1dc2da4",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-09T00:00:00Z",
             "valid_to": null,
@@ -45989,12 +45989,12 @@
         "node_uids": [
           "6db5c346-01d9-8b9b-9392-dd69576ca50d"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-11T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-11T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46009,7 +46009,7 @@
         "nodes": [
           {
             "uid": "6db5c346-01d9-8b9b-9392-dd69576ca50d",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-11T00:00:00Z",
             "valid_to": null,
@@ -46022,12 +46022,12 @@
         "node_uids": [
           "23b0a469-284f-8b2d-ac05-2b05021c8c26"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-07T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-07T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46042,7 +46042,7 @@
         "nodes": [
           {
             "uid": "23b0a469-284f-8b2d-ac05-2b05021c8c26",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-07T00:00:00Z",
             "valid_to": null,
@@ -46055,12 +46055,12 @@
         "node_uids": [
           "8454d479-9eea-84cb-b568-cd8e83a128c4"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-10T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-10T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46075,7 +46075,7 @@
         "nodes": [
           {
             "uid": "8454d479-9eea-84cb-b568-cd8e83a128c4",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-10T00:00:00Z",
             "valid_to": null,
@@ -46088,12 +46088,12 @@
         "node_uids": [
           "23cbac82-64ed-8678-82af-737d1b858e4d"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-12T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-12T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46108,7 +46108,7 @@
         "nodes": [
           {
             "uid": "23cbac82-64ed-8678-82af-737d1b858e4d",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-12T00:00:00Z",
             "valid_to": null,
@@ -46229,12 +46229,12 @@
         "node_uids": [
           "12f7f44f-dc00-8daa-ab8a-df41824460c2"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-11T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-11T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46249,7 +46249,7 @@
         "nodes": [
           {
             "uid": "12f7f44f-dc00-8daa-ab8a-df41824460c2",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-11T00:00:00Z",
             "valid_to": null,
@@ -46262,12 +46262,12 @@
         "node_uids": [
           "e59dfffa-2e14-8072-866a-b1ae951a51df"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-13T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-13T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46282,7 +46282,7 @@
         "nodes": [
           {
             "uid": "e59dfffa-2e14-8072-866a-b1ae951a51df",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-13T00:00:00Z",
             "valid_to": null,
@@ -46295,12 +46295,12 @@
         "node_uids": [
           "4dcd8ff2-a71e-8425-bb21-e6468953ed25"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-12T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-12T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46315,7 +46315,7 @@
         "nodes": [
           {
             "uid": "4dcd8ff2-a71e-8425-bb21-e6468953ed25",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-12T00:00:00Z",
             "valid_to": null,
@@ -46328,12 +46328,12 @@
         "node_uids": [
           "82fbe36a-2b69-87b6-bbe9-04cf2397b3af"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-14T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-14T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46348,7 +46348,7 @@
         "nodes": [
           {
             "uid": "82fbe36a-2b69-87b6-bbe9-04cf2397b3af",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-14T00:00:00Z",
             "valid_to": null,
@@ -46469,12 +46469,12 @@
         "node_uids": [
           "821bd5de-b3a2-875c-98f5-9b481374ae5c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-13T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-13T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46489,7 +46489,7 @@
         "nodes": [
           {
             "uid": "821bd5de-b3a2-875c-98f5-9b481374ae5c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-13T00:00:00Z",
             "valid_to": null,
@@ -46502,12 +46502,12 @@
         "node_uids": [
           "f0cfa27f-fe22-8795-a29e-f0cf26510d3d"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-15T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-15T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46522,7 +46522,7 @@
         "nodes": [
           {
             "uid": "f0cfa27f-fe22-8795-a29e-f0cf26510d3d",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-15T00:00:00Z",
             "valid_to": null,
@@ -46535,12 +46535,12 @@
         "node_uids": [
           "8c911543-dd99-87d0-85cc-3e3682f5f8c2"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-14T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-14T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46555,7 +46555,7 @@
         "nodes": [
           {
             "uid": "8c911543-dd99-87d0-85cc-3e3682f5f8c2",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-14T00:00:00Z",
             "valid_to": null,
@@ -46568,12 +46568,12 @@
         "node_uids": [
           "8fc11eef-8d81-8b94-b35e-f504619bc36e"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-16T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-16T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46588,7 +46588,7 @@
         "nodes": [
           {
             "uid": "8fc11eef-8d81-8b94-b35e-f504619bc36e",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-16T00:00:00Z",
             "valid_to": null,
@@ -46669,16 +46669,16 @@
         ]
       },
       {
-        "fact_id": "pr-s00-w00-workspace-runbook",
+        "fact_id": "pr-s00-w00-tenant-runbook",
         "node_uids": [
           "781a3818-cbff-83f6-a86b-52c79afdab0a"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-01-02T00:00:00Z",
         "valid_to": "2026-02-11T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-02T00:00:00Z",
         "expected_valid_to": "2026-02-11T00:00:00Z",
         "pii_status": "not_expected",
@@ -46687,16 +46687,16 @@
         ],
         "supersedes": [],
         "superseded_by": [
-          "pr-s01-w00-workspace-runbook"
+          "pr-s01-w00-tenant-runbook"
         ],
         "supersession_chain": [
-          "pr-s00-w00-workspace-runbook",
-          "pr-s01-w00-workspace-runbook"
+          "pr-s00-w00-tenant-runbook",
+          "pr-s01-w00-tenant-runbook"
         ],
         "nodes": [
           {
             "uid": "781a3818-cbff-83f6-a86b-52c79afdab0a",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-01-02T00:00:00Z",
             "valid_to": "2026-02-11T00:00:00Z",
@@ -46709,12 +46709,12 @@
         "node_uids": [
           "a4e32f46-995c-8052-9002-b205722c49e4"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-14T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-14T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46729,7 +46729,7 @@
         "nodes": [
           {
             "uid": "a4e32f46-995c-8052-9002-b205722c49e4",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-14T00:00:00Z",
             "valid_to": null,
@@ -46742,12 +46742,12 @@
         "node_uids": [
           "71c4266e-41a1-8f4c-b3a9-15af91b6ccc6"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-15T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-15T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46762,7 +46762,7 @@
         "nodes": [
           {
             "uid": "71c4266e-41a1-8f4c-b3a9-15af91b6ccc6",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-15T00:00:00Z",
             "valid_to": null,
@@ -46775,12 +46775,12 @@
         "node_uids": [
           "3696f156-45dd-8b19-8877-208a9781d3a0"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-01-11T00:00:00Z",
         "valid_to": "2026-01-18T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-11T00:00:00Z",
         "expected_valid_to": "2026-01-18T00:00:00Z",
         "pii_status": "not_expected",
@@ -46798,7 +46798,7 @@
         "nodes": [
           {
             "uid": "3696f156-45dd-8b19-8877-208a9781d3a0",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-01-11T00:00:00Z",
             "valid_to": "2026-01-18T00:00:00Z",
@@ -46811,12 +46811,12 @@
         "node_uids": [
           "3b61f772-68ab-8baa-8c6e-8131d3e1d4fc"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-18T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-18T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46834,7 +46834,7 @@
         "nodes": [
           {
             "uid": "3b61f772-68ab-8baa-8c6e-8131d3e1d4fc",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-18T00:00:00Z",
             "valid_to": null,
@@ -46847,12 +46847,12 @@
         "node_uids": [
           "1e2eed01-8830-8b0b-a5be-616d972145e3"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-03-01T00:00:00Z",
         "valid_to": "2026-04-01T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-01T00:00:00Z",
         "expected_valid_to": "2026-04-01T00:00:00Z",
         "pii_status": "not_expected",
@@ -46870,7 +46870,7 @@
         "nodes": [
           {
             "uid": "1e2eed01-8830-8b0b-a5be-616d972145e3",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-03-01T00:00:00Z",
             "valid_to": "2026-04-01T00:00:00Z",
@@ -46883,12 +46883,12 @@
         "node_uids": [
           "fcadd8cb-b9a4-85c0-bf3a-9102fde13aa1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46906,7 +46906,7 @@
         "nodes": [
           {
             "uid": "fcadd8cb-b9a4-85c0-bf3a-9102fde13aa1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-01T00:00:00Z",
             "valid_to": null,
@@ -46955,12 +46955,12 @@
         "node_uids": [
           "1ea128bb-ee33-8bdd-b3c0-09df588f9651"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-10T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-10T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -46975,7 +46975,7 @@
         "nodes": [
           {
             "uid": "1ea128bb-ee33-8bdd-b3c0-09df588f9651",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-10T00:00:00Z",
             "valid_to": null,
@@ -46988,12 +46988,12 @@
         "node_uids": [
           "2f483a70-3a46-8747-b0ba-d9dedcede80a"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-12T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-12T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47008,7 +47008,7 @@
         "nodes": [
           {
             "uid": "2f483a70-3a46-8747-b0ba-d9dedcede80a",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-12T00:00:00Z",
             "valid_to": null,
@@ -47021,12 +47021,12 @@
         "node_uids": [
           "51a480b6-d117-828d-8294-075e78f603e1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-11T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-11T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47041,7 +47041,7 @@
         "nodes": [
           {
             "uid": "51a480b6-d117-828d-8294-075e78f603e1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-11T00:00:00Z",
             "valid_to": null,
@@ -47054,12 +47054,12 @@
         "node_uids": [
           "ede9747f-1fd8-8eba-8b18-dcff2c850bca"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-13T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-13T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47074,7 +47074,7 @@
         "nodes": [
           {
             "uid": "ede9747f-1fd8-8eba-8b18-dcff2c850bca",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-13T00:00:00Z",
             "valid_to": null,
@@ -47195,12 +47195,12 @@
         "node_uids": [
           "7032fc9f-d058-8959-928f-6e5c465f85a5"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-12T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-12T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47215,7 +47215,7 @@
         "nodes": [
           {
             "uid": "7032fc9f-d058-8959-928f-6e5c465f85a5",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-12T00:00:00Z",
             "valid_to": null,
@@ -47228,12 +47228,12 @@
         "node_uids": [
           "72ba5d90-ad3f-8b71-81a7-e9c522ec8e41"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-08T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-08T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47248,7 +47248,7 @@
         "nodes": [
           {
             "uid": "72ba5d90-ad3f-8b71-81a7-e9c522ec8e41",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-08T00:00:00Z",
             "valid_to": null,
@@ -47261,12 +47261,12 @@
         "node_uids": [
           "609c8e98-182e-8fa3-b503-d0488c985f48"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-14T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-14T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47281,7 +47281,7 @@
         "nodes": [
           {
             "uid": "609c8e98-182e-8fa3-b503-d0488c985f48",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-14T00:00:00Z",
             "valid_to": null,
@@ -47294,12 +47294,12 @@
         "node_uids": [
           "38472588-8771-8c93-927a-7d17914f14fd"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-10T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-10T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47314,7 +47314,7 @@
         "nodes": [
           {
             "uid": "38472588-8771-8c93-927a-7d17914f14fd",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-10T00:00:00Z",
             "valid_to": null,
@@ -47327,12 +47327,12 @@
         "node_uids": [
           "6e13c852-ba22-80fb-9a10-65cdccee1b2b"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-13T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-13T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47347,7 +47347,7 @@
         "nodes": [
           {
             "uid": "6e13c852-ba22-80fb-9a10-65cdccee1b2b",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-13T00:00:00Z",
             "valid_to": null,
@@ -47360,12 +47360,12 @@
         "node_uids": [
           "c9179f7a-4256-8210-97d4-348134376ca7"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-01-15T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-15T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47380,7 +47380,7 @@
         "nodes": [
           {
             "uid": "c9179f7a-4256-8210-97d4-348134376ca7",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-01-15T00:00:00Z",
             "valid_to": null,
@@ -47461,16 +47461,16 @@
         ]
       },
       {
-        "fact_id": "pr-s00-w01-workspace-runbook",
+        "fact_id": "pr-s00-w01-tenant-runbook",
         "node_uids": [
           "301bbe42-e68c-8a1c-b70d-44ed1b2fb781"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-01-12T00:00:00Z",
         "valid_to": "2026-02-21T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-01-12T00:00:00Z",
         "expected_valid_to": "2026-02-21T00:00:00Z",
         "pii_status": "not_expected",
@@ -47479,16 +47479,16 @@
         ],
         "supersedes": [],
         "superseded_by": [
-          "pr-s01-w01-workspace-runbook"
+          "pr-s01-w01-tenant-runbook"
         ],
         "supersession_chain": [
-          "pr-s00-w01-workspace-runbook",
-          "pr-s01-w01-workspace-runbook"
+          "pr-s00-w01-tenant-runbook",
+          "pr-s01-w01-tenant-runbook"
         ],
         "nodes": [
           {
             "uid": "301bbe42-e68c-8a1c-b70d-44ed1b2fb781",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-01-12T00:00:00Z",
             "valid_to": "2026-02-21T00:00:00Z",
@@ -47501,12 +47501,12 @@
         "node_uids": [
           "ba17a350-b951-8c9c-8bcc-c713c499614a"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-13T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-13T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47521,7 +47521,7 @@
         "nodes": [
           {
             "uid": "ba17a350-b951-8c9c-8bcc-c713c499614a",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-13T00:00:00Z",
             "valid_to": null,
@@ -47534,12 +47534,12 @@
         "node_uids": [
           "a0e364dd-90e9-88e7-88b6-e33fcbad9cbf"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-14T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-14T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47554,7 +47554,7 @@
         "nodes": [
           {
             "uid": "a0e364dd-90e9-88e7-88b6-e33fcbad9cbf",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-14T00:00:00Z",
             "valid_to": null,
@@ -47567,12 +47567,12 @@
         "node_uids": [
           "c5152834-59a9-87c6-a192-59835d70fa47"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-02-10T00:00:00Z",
         "valid_to": "2026-02-17T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-10T00:00:00Z",
         "expected_valid_to": "2026-02-17T00:00:00Z",
         "pii_status": "not_expected",
@@ -47590,7 +47590,7 @@
         "nodes": [
           {
             "uid": "c5152834-59a9-87c6-a192-59835d70fa47",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-02-10T00:00:00Z",
             "valid_to": "2026-02-17T00:00:00Z",
@@ -47603,12 +47603,12 @@
         "node_uids": [
           "18370528-9aef-8e4e-b266-ff87592cf2bc"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-17T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-17T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47626,7 +47626,7 @@
         "nodes": [
           {
             "uid": "18370528-9aef-8e4e-b266-ff87592cf2bc",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-17T00:00:00Z",
             "valid_to": null,
@@ -47639,12 +47639,12 @@
         "node_uids": [
           "701d9bfd-bd4f-8ad5-ad92-37143079adfc"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-09-01T00:00:00Z",
         "valid_to": "2026-10-01T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-09-01T00:00:00Z",
         "expected_valid_to": "2026-10-01T00:00:00Z",
         "pii_status": "not_expected",
@@ -47662,7 +47662,7 @@
         "nodes": [
           {
             "uid": "701d9bfd-bd4f-8ad5-ad92-37143079adfc",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-09-01T00:00:00Z",
             "valid_to": "2026-10-01T00:00:00Z",
@@ -47675,12 +47675,12 @@
         "node_uids": [
           "ca6a48fb-16f5-8115-b67e-c044473d7248"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-10-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-10-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47698,7 +47698,7 @@
         "nodes": [
           {
             "uid": "ca6a48fb-16f5-8115-b67e-c044473d7248",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-10-01T00:00:00Z",
             "valid_to": null,
@@ -47750,12 +47750,12 @@
         "node_uids": [
           "482f1f07-61e0-8f16-a93c-009b35e83af1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-18T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-18T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47770,7 +47770,7 @@
         "nodes": [
           {
             "uid": "482f1f07-61e0-8f16-a93c-009b35e83af1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-18T00:00:00Z",
             "valid_to": null,
@@ -47783,12 +47783,12 @@
         "node_uids": [
           "2dd368fc-9dfa-8ac7-8754-a53c998070b9"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-20T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-20T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47803,7 +47803,7 @@
         "nodes": [
           {
             "uid": "2dd368fc-9dfa-8ac7-8754-a53c998070b9",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-20T00:00:00Z",
             "valid_to": null,
@@ -47816,12 +47816,12 @@
         "node_uids": [
           "145f3305-7ece-8ef1-a076-899730583ae1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-19T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-19T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47836,7 +47836,7 @@
         "nodes": [
           {
             "uid": "145f3305-7ece-8ef1-a076-899730583ae1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-19T00:00:00Z",
             "valid_to": null,
@@ -47849,12 +47849,12 @@
         "node_uids": [
           "5597bb7f-7028-83f8-8666-c3a7bc60346d"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-19T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-19T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47869,7 +47869,7 @@
         "nodes": [
           {
             "uid": "5597bb7f-7028-83f8-8666-c3a7bc60346d",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-19T00:00:00Z",
             "valid_to": null,
@@ -47882,12 +47882,12 @@
         "node_uids": [
           "6be904f5-2518-8cfb-8fef-969060a68b2c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-21T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-21T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -47902,7 +47902,7 @@
         "nodes": [
           {
             "uid": "6be904f5-2518-8cfb-8fef-969060a68b2c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-21T00:00:00Z",
             "valid_to": null,
@@ -48032,12 +48032,12 @@
         "node_uids": [
           "bc37da13-761d-844b-befc-6f54e555c31e"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-20T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-20T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48052,7 +48052,7 @@
         "nodes": [
           {
             "uid": "bc37da13-761d-844b-befc-6f54e555c31e",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-20T00:00:00Z",
             "valid_to": null,
@@ -48065,12 +48065,12 @@
         "node_uids": [
           "474730ff-2a44-821c-ba5e-2cf3326a5364"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-22T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-22T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48085,7 +48085,7 @@
         "nodes": [
           {
             "uid": "474730ff-2a44-821c-ba5e-2cf3326a5364",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-22T00:00:00Z",
             "valid_to": null,
@@ -48098,12 +48098,12 @@
         "node_uids": [
           "88c239f8-9be5-8cce-b8cc-03430bf71e4c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-21T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-21T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48118,7 +48118,7 @@
         "nodes": [
           {
             "uid": "88c239f8-9be5-8cce-b8cc-03430bf71e4c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-21T00:00:00Z",
             "valid_to": null,
@@ -48131,12 +48131,12 @@
         "node_uids": [
           "024d604f-46c1-8daf-804a-ab6a6703b2b1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-21T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-21T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48151,7 +48151,7 @@
         "nodes": [
           {
             "uid": "024d604f-46c1-8daf-804a-ab6a6703b2b1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-21T00:00:00Z",
             "valid_to": null,
@@ -48164,12 +48164,12 @@
         "node_uids": [
           "2f3c3916-2f8b-88fb-a1ef-cbe341dbb8f8"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-23T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-23T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48184,7 +48184,7 @@
         "nodes": [
           {
             "uid": "2f3c3916-2f8b-88fb-a1ef-cbe341dbb8f8",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-23T00:00:00Z",
             "valid_to": null,
@@ -48314,12 +48314,12 @@
         "node_uids": [
           "71b961c2-7102-8895-aab2-83ad02ddaad6"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-22T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-22T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48334,7 +48334,7 @@
         "nodes": [
           {
             "uid": "71b961c2-7102-8895-aab2-83ad02ddaad6",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-22T00:00:00Z",
             "valid_to": null,
@@ -48347,12 +48347,12 @@
         "node_uids": [
           "8c532e97-9cbe-8297-9ec2-dd8b1d332cbb"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-24T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-24T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48367,7 +48367,7 @@
         "nodes": [
           {
             "uid": "8c532e97-9cbe-8297-9ec2-dd8b1d332cbb",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-24T00:00:00Z",
             "valid_to": null,
@@ -48380,12 +48380,12 @@
         "node_uids": [
           "f7503194-07db-83bb-a55f-8d27036989ef"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-23T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-23T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48400,7 +48400,7 @@
         "nodes": [
           {
             "uid": "f7503194-07db-83bb-a55f-8d27036989ef",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-23T00:00:00Z",
             "valid_to": null,
@@ -48413,12 +48413,12 @@
         "node_uids": [
           "b2b97172-3df3-8331-8dad-f8e9523a1e45"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-23T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-23T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48433,7 +48433,7 @@
         "nodes": [
           {
             "uid": "b2b97172-3df3-8331-8dad-f8e9523a1e45",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-23T00:00:00Z",
             "valid_to": null,
@@ -48446,12 +48446,12 @@
         "node_uids": [
           "bd43f854-1249-8313-8d7b-bbacc83f822c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-25T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-25T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48466,7 +48466,7 @@
         "nodes": [
           {
             "uid": "bd43f854-1249-8313-8d7b-bbacc83f822c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-25T00:00:00Z",
             "valid_to": null,
@@ -48553,16 +48553,16 @@
         ]
       },
       {
-        "fact_id": "pr-s01-w00-workspace-runbook",
+        "fact_id": "pr-s01-w00-tenant-runbook",
         "node_uids": [
           "7a2e79be-0b18-8248-9982-2085f96bb902"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-02-11T00:00:00Z",
         "valid_to": "2026-03-23T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-11T00:00:00Z",
         "expected_valid_to": "2026-03-23T00:00:00Z",
         "pii_status": "not_expected",
@@ -48570,20 +48570,20 @@
           "none"
         ],
         "supersedes": [
-          "pr-s00-w00-workspace-runbook"
+          "pr-s00-w00-tenant-runbook"
         ],
         "superseded_by": [
-          "pr-s02-w00-workspace-runbook"
+          "pr-s02-w00-tenant-runbook"
         ],
         "supersession_chain": [
-          "pr-s00-w00-workspace-runbook",
-          "pr-s01-w00-workspace-runbook",
-          "pr-s02-w00-workspace-runbook"
+          "pr-s00-w00-tenant-runbook",
+          "pr-s01-w00-tenant-runbook",
+          "pr-s02-w00-tenant-runbook"
         ],
         "nodes": [
           {
             "uid": "7a2e79be-0b18-8248-9982-2085f96bb902",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-02-11T00:00:00Z",
             "valid_to": "2026-03-23T00:00:00Z",
@@ -48596,12 +48596,12 @@
         "node_uids": [
           "69d0ae13-608a-820d-bb16-46666edf10b4"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-23T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-23T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48616,7 +48616,7 @@
         "nodes": [
           {
             "uid": "69d0ae13-608a-820d-bb16-46666edf10b4",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-23T00:00:00Z",
             "valid_to": null,
@@ -48629,12 +48629,12 @@
         "node_uids": [
           "58919666-ceff-8a75-9b63-9cee9031ad8f"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-24T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-24T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48649,7 +48649,7 @@
         "nodes": [
           {
             "uid": "58919666-ceff-8a75-9b63-9cee9031ad8f",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-24T00:00:00Z",
             "valid_to": null,
@@ -48662,12 +48662,12 @@
         "node_uids": [
           "ba62d5c0-6889-889c-89ae-7567c6fe2cde"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-02-20T00:00:00Z",
         "valid_to": "2026-02-27T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-20T00:00:00Z",
         "expected_valid_to": "2026-02-27T00:00:00Z",
         "pii_status": "not_expected",
@@ -48685,7 +48685,7 @@
         "nodes": [
           {
             "uid": "ba62d5c0-6889-889c-89ae-7567c6fe2cde",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-02-20T00:00:00Z",
             "valid_to": "2026-02-27T00:00:00Z",
@@ -48698,12 +48698,12 @@
         "node_uids": [
           "bb60f6cc-c44d-8d7c-84b5-9f7df0b7e66c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-27T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-27T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48721,7 +48721,7 @@
         "nodes": [
           {
             "uid": "bb60f6cc-c44d-8d7c-84b5-9f7df0b7e66c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-27T00:00:00Z",
             "valid_to": null,
@@ -48734,12 +48734,12 @@
         "node_uids": [
           "194569f0-6cfb-8cb9-88fc-661c28a96313"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-11-01T00:00:00Z",
         "valid_to": "2026-12-01T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-11-01T00:00:00Z",
         "expected_valid_to": "2026-12-01T00:00:00Z",
         "pii_status": "not_expected",
@@ -48757,7 +48757,7 @@
         "nodes": [
           {
             "uid": "194569f0-6cfb-8cb9-88fc-661c28a96313",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-11-01T00:00:00Z",
             "valid_to": "2026-12-01T00:00:00Z",
@@ -48770,12 +48770,12 @@
         "node_uids": [
           "567a74d8-4b6f-83ad-8f48-d58637c43f68"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-12-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-12-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48793,7 +48793,7 @@
         "nodes": [
           {
             "uid": "567a74d8-4b6f-83ad-8f48-d58637c43f68",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-12-01T00:00:00Z",
             "valid_to": null,
@@ -48845,12 +48845,12 @@
         "node_uids": [
           "b549486f-84db-8618-920a-06469551bded"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-19T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-19T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48865,7 +48865,7 @@
         "nodes": [
           {
             "uid": "b549486f-84db-8618-920a-06469551bded",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-19T00:00:00Z",
             "valid_to": null,
@@ -48878,12 +48878,12 @@
         "node_uids": [
           "6f3cb060-a14f-8385-821c-a81cc9789cb5"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-18T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-18T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48898,7 +48898,7 @@
         "nodes": [
           {
             "uid": "6f3cb060-a14f-8385-821c-a81cc9789cb5",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-18T00:00:00Z",
             "valid_to": null,
@@ -48911,12 +48911,12 @@
         "node_uids": [
           "0d242791-7a4b-8247-9108-24231ab227bf"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-21T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-21T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48931,7 +48931,7 @@
         "nodes": [
           {
             "uid": "0d242791-7a4b-8247-9108-24231ab227bf",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-21T00:00:00Z",
             "valid_to": null,
@@ -48944,12 +48944,12 @@
         "node_uids": [
           "16c84852-26f6-8526-a072-e26f6bae259b"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-20T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-20T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48964,7 +48964,7 @@
         "nodes": [
           {
             "uid": "16c84852-26f6-8526-a072-e26f6bae259b",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-20T00:00:00Z",
             "valid_to": null,
@@ -48977,12 +48977,12 @@
         "node_uids": [
           "2c5a6b0a-d660-89ac-8bab-e81ff9045de1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-20T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-20T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -48997,7 +48997,7 @@
         "nodes": [
           {
             "uid": "2c5a6b0a-d660-89ac-8bab-e81ff9045de1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-20T00:00:00Z",
             "valid_to": null,
@@ -49010,12 +49010,12 @@
         "node_uids": [
           "43f67305-0de9-8c4f-8642-9c29eaf41b86"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-22T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-22T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49030,7 +49030,7 @@
         "nodes": [
           {
             "uid": "43f67305-0de9-8c4f-8642-9c29eaf41b86",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-22T00:00:00Z",
             "valid_to": null,
@@ -49160,12 +49160,12 @@
         "node_uids": [
           "b56d6f90-6c2a-8c69-98c1-0f7b337f086a"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-21T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-21T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49180,7 +49180,7 @@
         "nodes": [
           {
             "uid": "b56d6f90-6c2a-8c69-98c1-0f7b337f086a",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-21T00:00:00Z",
             "valid_to": null,
@@ -49193,12 +49193,12 @@
         "node_uids": [
           "5a698c9d-d790-8bc1-8512-4a401d7634a9"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-23T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-23T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49213,7 +49213,7 @@
         "nodes": [
           {
             "uid": "5a698c9d-d790-8bc1-8512-4a401d7634a9",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-23T00:00:00Z",
             "valid_to": null,
@@ -49226,12 +49226,12 @@
         "node_uids": [
           "e35cca64-2814-8da0-a860-6c8844e6a64c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-22T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-22T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49246,7 +49246,7 @@
         "nodes": [
           {
             "uid": "e35cca64-2814-8da0-a860-6c8844e6a64c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-22T00:00:00Z",
             "valid_to": null,
@@ -49259,12 +49259,12 @@
         "node_uids": [
           "f3967dd5-6a91-8e40-963d-81ad7a4ca263"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-02-24T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-24T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49279,7 +49279,7 @@
         "nodes": [
           {
             "uid": "f3967dd5-6a91-8e40-963d-81ad7a4ca263",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-02-24T00:00:00Z",
             "valid_to": null,
@@ -49366,16 +49366,16 @@
         ]
       },
       {
-        "fact_id": "pr-s01-w01-workspace-runbook",
+        "fact_id": "pr-s01-w01-tenant-runbook",
         "node_uids": [
           "6c9fb65f-d498-87f6-b487-ecefb84e2afa"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-02-21T00:00:00Z",
         "valid_to": "2026-04-02T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-02-21T00:00:00Z",
         "expected_valid_to": "2026-04-02T00:00:00Z",
         "pii_status": "not_expected",
@@ -49383,20 +49383,20 @@
           "none"
         ],
         "supersedes": [
-          "pr-s00-w01-workspace-runbook"
+          "pr-s00-w01-tenant-runbook"
         ],
         "superseded_by": [
-          "pr-s02-w01-workspace-runbook"
+          "pr-s02-w01-tenant-runbook"
         ],
         "supersession_chain": [
-          "pr-s00-w01-workspace-runbook",
-          "pr-s01-w01-workspace-runbook",
-          "pr-s02-w01-workspace-runbook"
+          "pr-s00-w01-tenant-runbook",
+          "pr-s01-w01-tenant-runbook",
+          "pr-s02-w01-tenant-runbook"
         ],
         "nodes": [
           {
             "uid": "6c9fb65f-d498-87f6-b487-ecefb84e2afa",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-02-21T00:00:00Z",
             "valid_to": "2026-04-02T00:00:00Z",
@@ -49409,12 +49409,12 @@
         "node_uids": [
           "beeca3b1-c3c2-8a1c-95a3-159e66e2a7b6"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-25T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-25T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49429,7 +49429,7 @@
         "nodes": [
           {
             "uid": "beeca3b1-c3c2-8a1c-95a3-159e66e2a7b6",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-25T00:00:00Z",
             "valid_to": null,
@@ -49442,12 +49442,12 @@
         "node_uids": [
           "9dd9aeaf-fad1-87ce-b5f3-6d1487dbc9c4"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-26T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-26T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49462,7 +49462,7 @@
         "nodes": [
           {
             "uid": "9dd9aeaf-fad1-87ce-b5f3-6d1487dbc9c4",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-26T00:00:00Z",
             "valid_to": null,
@@ -49475,12 +49475,12 @@
         "node_uids": [
           "c4959680-455b-8ad4-b5d7-6cd810e0a4d0"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-03-22T00:00:00Z",
         "valid_to": "2026-03-29T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-22T00:00:00Z",
         "expected_valid_to": "2026-03-29T00:00:00Z",
         "pii_status": "not_expected",
@@ -49498,7 +49498,7 @@
         "nodes": [
           {
             "uid": "c4959680-455b-8ad4-b5d7-6cd810e0a4d0",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-03-22T00:00:00Z",
             "valid_to": "2026-03-29T00:00:00Z",
@@ -49511,12 +49511,12 @@
         "node_uids": [
           "0d55c77d-4c53-8981-8183-e14ca6a437f3"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-29T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-29T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49534,7 +49534,7 @@
         "nodes": [
           {
             "uid": "0d55c77d-4c53-8981-8183-e14ca6a437f3",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-29T00:00:00Z",
             "valid_to": null,
@@ -49547,12 +49547,12 @@
         "node_uids": [
           "03802c4a-9214-89a8-ac3e-c8bf80a2b64c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2027-05-01T00:00:00Z",
         "valid_to": "2027-06-01T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2027-05-01T00:00:00Z",
         "expected_valid_to": "2027-06-01T00:00:00Z",
         "pii_status": "not_expected",
@@ -49570,7 +49570,7 @@
         "nodes": [
           {
             "uid": "03802c4a-9214-89a8-ac3e-c8bf80a2b64c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2027-05-01T00:00:00Z",
             "valid_to": "2027-06-01T00:00:00Z",
@@ -49583,12 +49583,12 @@
         "node_uids": [
           "98cc4d23-ecca-8fa5-8d9e-f2c12f6bb73b"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2027-06-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2027-06-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49606,7 +49606,7 @@
         "nodes": [
           {
             "uid": "98cc4d23-ecca-8fa5-8d9e-f2c12f6bb73b",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2027-06-01T00:00:00Z",
             "valid_to": null,
@@ -49655,12 +49655,12 @@
         "node_uids": [
           "8fc623cf-5863-838b-b7ef-9660eb89959a"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-30T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-30T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49675,7 +49675,7 @@
         "nodes": [
           {
             "uid": "8fc623cf-5863-838b-b7ef-9660eb89959a",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-30T00:00:00Z",
             "valid_to": null,
@@ -49688,12 +49688,12 @@
         "node_uids": [
           "73ab9277-6a0e-801e-8172-fdfc6dd44764"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49708,7 +49708,7 @@
         "nodes": [
           {
             "uid": "73ab9277-6a0e-801e-8172-fdfc6dd44764",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-01T00:00:00Z",
             "valid_to": null,
@@ -49721,12 +49721,12 @@
         "node_uids": [
           "07d7eb1f-5b24-808d-a66c-ab8820eef0ad"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-31T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-31T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49741,7 +49741,7 @@
         "nodes": [
           {
             "uid": "07d7eb1f-5b24-808d-a66c-ab8820eef0ad",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-31T00:00:00Z",
             "valid_to": null,
@@ -49754,12 +49754,12 @@
         "node_uids": [
           "1c4c9cba-3b10-8295-ad93-5aab3452449b"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-02T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-02T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49774,7 +49774,7 @@
         "nodes": [
           {
             "uid": "1c4c9cba-3b10-8295-ad93-5aab3452449b",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-02T00:00:00Z",
             "valid_to": null,
@@ -49895,12 +49895,12 @@
         "node_uids": [
           "f7c6c44e-e954-84cc-a726-da89cc629966"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49915,7 +49915,7 @@
         "nodes": [
           {
             "uid": "f7c6c44e-e954-84cc-a726-da89cc629966",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-01T00:00:00Z",
             "valid_to": null,
@@ -49928,12 +49928,12 @@
         "node_uids": [
           "3352d9d4-cb25-8fb4-9be5-a3601bd3ab08"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-28T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-28T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49948,7 +49948,7 @@
         "nodes": [
           {
             "uid": "3352d9d4-cb25-8fb4-9be5-a3601bd3ab08",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-28T00:00:00Z",
             "valid_to": null,
@@ -49961,12 +49961,12 @@
         "node_uids": [
           "f931b274-bc9a-863a-ae7b-50ada5669826"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-03T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-03T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -49981,7 +49981,7 @@
         "nodes": [
           {
             "uid": "f931b274-bc9a-863a-ae7b-50ada5669826",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-03T00:00:00Z",
             "valid_to": null,
@@ -49994,12 +49994,12 @@
         "node_uids": [
           "a4da1ff0-225f-8f38-9b6f-e4d55172bf5d"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-30T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-30T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50014,7 +50014,7 @@
         "nodes": [
           {
             "uid": "a4da1ff0-225f-8f38-9b6f-e4d55172bf5d",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-30T00:00:00Z",
             "valid_to": null,
@@ -50027,12 +50027,12 @@
         "node_uids": [
           "639ac69c-5a5f-8f05-8926-42baf4f5fb4d"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-02T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-02T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50047,7 +50047,7 @@
         "nodes": [
           {
             "uid": "639ac69c-5a5f-8f05-8926-42baf4f5fb4d",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-02T00:00:00Z",
             "valid_to": null,
@@ -50060,12 +50060,12 @@
         "node_uids": [
           "c4549dd3-cbbe-84c3-a637-ac40724b7414"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-04T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-04T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50080,7 +50080,7 @@
         "nodes": [
           {
             "uid": "c4549dd3-cbbe-84c3-a637-ac40724b7414",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-04T00:00:00Z",
             "valid_to": null,
@@ -50201,12 +50201,12 @@
         "node_uids": [
           "2fb2cbb8-7526-8981-a65f-71bfd737cc9a"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-03T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-03T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50221,7 +50221,7 @@
         "nodes": [
           {
             "uid": "2fb2cbb8-7526-8981-a65f-71bfd737cc9a",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-03T00:00:00Z",
             "valid_to": null,
@@ -50234,12 +50234,12 @@
         "node_uids": [
           "695dc7d0-567d-89ca-983d-d8c0b787b6f1"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-30T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-30T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50254,7 +50254,7 @@
         "nodes": [
           {
             "uid": "695dc7d0-567d-89ca-983d-d8c0b787b6f1",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-30T00:00:00Z",
             "valid_to": null,
@@ -50267,12 +50267,12 @@
         "node_uids": [
           "97954924-09ab-815c-a83e-3298b987ac5e"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-05T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-05T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50287,7 +50287,7 @@
         "nodes": [
           {
             "uid": "97954924-09ab-815c-a83e-3298b987ac5e",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-05T00:00:00Z",
             "valid_to": null,
@@ -50300,12 +50300,12 @@
         "node_uids": [
           "dad356f9-62d8-8370-be04-27dc8504ad9c"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-04T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-04T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50320,7 +50320,7 @@
         "nodes": [
           {
             "uid": "dad356f9-62d8-8370-be04-27dc8504ad9c",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-04T00:00:00Z",
             "valid_to": null,
@@ -50333,12 +50333,12 @@
         "node_uids": [
           "8f5a3b22-3335-866e-9798-317f1bc32935"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-06T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-06T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50353,7 +50353,7 @@
         "nodes": [
           {
             "uid": "8f5a3b22-3335-866e-9798-317f1bc32935",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-06T00:00:00Z",
             "valid_to": null,
@@ -50434,16 +50434,16 @@
         ]
       },
       {
-        "fact_id": "pr-s02-w00-workspace-runbook",
+        "fact_id": "pr-s02-w00-tenant-runbook",
         "node_uids": [
           "8c84388d-2355-8983-b4e4-a8613d575df9"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-23T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-23T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50451,17 +50451,17 @@
           "none"
         ],
         "supersedes": [
-          "pr-s01-w00-workspace-runbook"
+          "pr-s01-w00-tenant-runbook"
         ],
         "superseded_by": [],
         "supersession_chain": [
-          "pr-s01-w00-workspace-runbook",
-          "pr-s02-w00-workspace-runbook"
+          "pr-s01-w00-tenant-runbook",
+          "pr-s02-w00-tenant-runbook"
         ],
         "nodes": [
           {
             "uid": "8c84388d-2355-8983-b4e4-a8613d575df9",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-23T00:00:00Z",
             "valid_to": null,
@@ -50474,12 +50474,12 @@
         "node_uids": [
           "adc39d7a-4460-87b8-9a96-d7b4338f70fc"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-04T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-04T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50494,7 +50494,7 @@
         "nodes": [
           {
             "uid": "adc39d7a-4460-87b8-9a96-d7b4338f70fc",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-04T00:00:00Z",
             "valid_to": null,
@@ -50507,12 +50507,12 @@
         "node_uids": [
           "43db5765-68e7-8961-b682-1380e2871770"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-05T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-05T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50527,7 +50527,7 @@
         "nodes": [
           {
             "uid": "43db5765-68e7-8961-b682-1380e2871770",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-05T00:00:00Z",
             "valid_to": null,
@@ -50540,12 +50540,12 @@
         "node_uids": [
           "ad391f75-0807-8c5f-b8bd-19b9cef763b8"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2026-04-01T00:00:00Z",
         "valid_to": "2026-04-08T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-01T00:00:00Z",
         "expected_valid_to": "2026-04-08T00:00:00Z",
         "pii_status": "not_expected",
@@ -50563,7 +50563,7 @@
         "nodes": [
           {
             "uid": "ad391f75-0807-8c5f-b8bd-19b9cef763b8",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2026-04-01T00:00:00Z",
             "valid_to": "2026-04-08T00:00:00Z",
@@ -50576,12 +50576,12 @@
         "node_uids": [
           "162bde2c-fc3c-848d-a14d-bb8c7111c9bd"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-08T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-08T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50599,7 +50599,7 @@
         "nodes": [
           {
             "uid": "162bde2c-fc3c-848d-a14d-bb8c7111c9bd",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-08T00:00:00Z",
             "valid_to": null,
@@ -50612,12 +50612,12 @@
         "node_uids": [
           "dfc79aa8-7dc3-8505-a814-3882c4e9b24e"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": false,
         "valid_from": "2027-07-01T00:00:00Z",
         "valid_to": "2027-08-01T00:00:00Z",
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2027-07-01T00:00:00Z",
         "expected_valid_to": "2027-08-01T00:00:00Z",
         "pii_status": "not_expected",
@@ -50635,7 +50635,7 @@
         "nodes": [
           {
             "uid": "dfc79aa8-7dc3-8505-a814-3882c4e9b24e",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": false,
             "valid_from": "2027-07-01T00:00:00Z",
             "valid_to": "2027-08-01T00:00:00Z",
@@ -50648,12 +50648,12 @@
         "node_uids": [
           "31dc8bea-b139-8d00-b7ab-b4cf0423abdc"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2027-08-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2027-08-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50671,7 +50671,7 @@
         "nodes": [
           {
             "uid": "31dc8bea-b139-8d00-b7ab-b4cf0423abdc",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2027-08-01T00:00:00Z",
             "valid_to": null,
@@ -50720,12 +50720,12 @@
         "node_uids": [
           "0a2b4ffa-c4c3-8161-bdec-fe8f8ec92bd4"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-03-31T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-03-31T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50740,7 +50740,7 @@
         "nodes": [
           {
             "uid": "0a2b4ffa-c4c3-8161-bdec-fe8f8ec92bd4",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-03-31T00:00:00Z",
             "valid_to": null,
@@ -50753,12 +50753,12 @@
         "node_uids": [
           "326f8f73-f6ac-8ad5-9a56-9157b5ddeb18"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-02T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-02T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50773,7 +50773,7 @@
         "nodes": [
           {
             "uid": "326f8f73-f6ac-8ad5-9a56-9157b5ddeb18",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-02T00:00:00Z",
             "valid_to": null,
@@ -50786,12 +50786,12 @@
         "node_uids": [
           "86844276-2c1e-8bf2-887c-7d53594056c6"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-29T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-29T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50806,7 +50806,7 @@
         "nodes": [
           {
             "uid": "86844276-2c1e-8bf2-887c-7d53594056c6",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-29T00:00:00Z",
             "valid_to": null,
@@ -50819,12 +50819,12 @@
         "node_uids": [
           "d9815d70-c4f0-850a-8e62-5a4056e05d96"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50839,7 +50839,7 @@
         "nodes": [
           {
             "uid": "d9815d70-c4f0-850a-8e62-5a4056e05d96",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-01T00:00:00Z",
             "valid_to": null,
@@ -50852,12 +50852,12 @@
         "node_uids": [
           "22d30923-c582-8391-a4ca-ea8ea427a774"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-03T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-03T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -50872,7 +50872,7 @@
         "nodes": [
           {
             "uid": "22d30923-c582-8391-a4ca-ea8ea427a774",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-03T00:00:00Z",
             "valid_to": null,
@@ -50993,12 +50993,12 @@
         "node_uids": [
           "edb0cef9-21b3-874b-96fc-6a817601efb0"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-02T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-02T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -51013,7 +51013,7 @@
         "nodes": [
           {
             "uid": "edb0cef9-21b3-874b-96fc-6a817601efb0",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-02T00:00:00Z",
             "valid_to": null,
@@ -51026,12 +51026,12 @@
         "node_uids": [
           "75c24969-a4cc-840f-9dcb-180868d8b75f"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-04T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-04T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -51046,7 +51046,7 @@
         "nodes": [
           {
             "uid": "75c24969-a4cc-840f-9dcb-180868d8b75f",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-04T00:00:00Z",
             "valid_to": null,
@@ -51059,12 +51059,12 @@
         "node_uids": [
           "4b7485c5-a0b8-8bb8-8670-19198ca34e13"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-05-01T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-05-01T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -51079,7 +51079,7 @@
         "nodes": [
           {
             "uid": "4b7485c5-a0b8-8bb8-8670-19198ca34e13",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-05-01T00:00:00Z",
             "valid_to": null,
@@ -51092,12 +51092,12 @@
         "node_uids": [
           "2cdb1ec3-7df1-8131-8451-2d1efe35b4cb"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-03T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-03T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -51112,7 +51112,7 @@
         "nodes": [
           {
             "uid": "2cdb1ec3-7df1-8131-8451-2d1efe35b4cb",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-03T00:00:00Z",
             "valid_to": null,
@@ -51125,12 +51125,12 @@
         "node_uids": [
           "a46926ef-82ac-8e5e-a19e-5948ad9e2324"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-05T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-05T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -51145,7 +51145,7 @@
         "nodes": [
           {
             "uid": "a46926ef-82ac-8e5e-a19e-5948ad9e2324",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-05T00:00:00Z",
             "valid_to": null,
@@ -51226,16 +51226,16 @@
         ]
       },
       {
-        "fact_id": "pr-s02-w01-workspace-runbook",
+        "fact_id": "pr-s02-w01-tenant-runbook",
         "node_uids": [
           "c758309d-e31a-8b22-814a-83e868d66067"
         ],
-        "scope": "workspace",
+        "scope": "tenant",
         "active": true,
         "valid_from": "2026-04-02T00:00:00Z",
         "valid_to": null,
         "resolution_status": "resolved",
-        "expected_scope": "workspace",
+        "expected_scope": "tenant",
         "expected_valid_from": "2026-04-02T00:00:00Z",
         "expected_valid_to": null,
         "pii_status": "not_expected",
@@ -51243,17 +51243,17 @@
           "none"
         ],
         "supersedes": [
-          "pr-s01-w01-workspace-runbook"
+          "pr-s01-w01-tenant-runbook"
         ],
         "superseded_by": [],
         "supersession_chain": [
-          "pr-s01-w01-workspace-runbook",
-          "pr-s02-w01-workspace-runbook"
+          "pr-s01-w01-tenant-runbook",
+          "pr-s02-w01-tenant-runbook"
         ],
         "nodes": [
           {
             "uid": "c758309d-e31a-8b22-814a-83e868d66067",
-            "scope": "workspace",
+            "scope": "tenant",
             "active": true,
             "valid_from": "2026-04-02T00:00:00Z",
             "valid_to": null,

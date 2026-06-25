@@ -72,7 +72,7 @@ pub fn build_default_pipeline_with_tools(
 
     ContextPipeline::with_runtime_limits(
         stages,
-        config.budgets.daily_workspace_cents,
+        config.budgets.daily_tenant_cents,
         config.context_snapshot.clone(),
     )
 }
@@ -263,7 +263,7 @@ pub fn build_default_graph_memory_pipeline_with_rewriter_runtime_and_instruction
 
     let pipeline = ContextPipeline::with_runtime_limits(
         stages,
-        config.budgets.daily_workspace_cents,
+        config.budgets.daily_tenant_cents,
         config.context_snapshot.clone(),
     );
     record_context_pipeline_construction(pipeline_started.elapsed());

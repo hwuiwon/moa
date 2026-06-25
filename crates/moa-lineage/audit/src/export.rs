@@ -98,7 +98,7 @@ impl DsarExporter {
     /// caller includes them in `records`.
     pub async fn export_jsonl_records(
         &self,
-        workspace_id: &str,
+        storage_partition_id: &str,
         user_id: &str,
         records: Vec<Value>,
         out_path: &Path,
@@ -126,7 +126,7 @@ impl DsarExporter {
         let exported_at = options.exported_at.unwrap_or_else(Utc::now);
         let manifest_claims = serde_json::json!({
             "version": "1",
-            "workspace_id": workspace_id,
+            "storage_partition_id": storage_partition_id,
             "user_id": user_id,
             "record_count": filtered.len() as u64,
             "file_hash_b3": file_hash,
@@ -135,10 +135,10 @@ impl DsarExporter {
         let signed_root = blake3::hash(&canonical_json_bytes(&manifest_claims)?);
         let signature = self
             .signing
-            .sign_root(signed_root.as_bytes(), workspace_id)?;
+            .sign_root(signed_root.as_bytes(), storage_partition_id)?;
         let manifest = serde_json::json!({
             "version": "1",
-            "workspace_id": workspace_id,
+            "storage_partition_id": storage_partition_id,
             "user_id": user_id,
             "record_count": filtered.len() as u64,
             "file_hash_b3": file_hash,
@@ -164,7 +164,7 @@ impl DsarExporter {
     /// Writes a DSAR bundle to `out_path` from already-collected records.
     pub async fn export_records(
         &self,
-        workspace_id: &str,
+        storage_partition_id: &str,
         subject_pseudonym: Vec<u8>,
         records: Vec<serde_json::Value>,
         windows: Vec<RootWindow>,
@@ -173,15 +173,16 @@ impl DsarExporter {
         let record_count = records.len() as u64;
         let manifest = serde_json::json!({
             "version": "1",
-            "workspace_id": workspace_id,
+            "storage_partition_id": storage_partition_id,
             "subject_pseudonym_b3": blake3::hash(&subject_pseudonym).to_hex().to_string(),
             "record_count": record_count,
             "windows": windows,
         });
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-        let signature = self
-            .signing
-            .sign_root(&blake3::hash(&manifest_bytes).as_bytes()[..], workspace_id)?;
+        let signature = self.signing.sign_root(
+            &blake3::hash(&manifest_bytes).as_bytes()[..],
+            storage_partition_id,
+        )?;
         let records_bytes = serde_json::to_vec_pretty(&records)?;
         let signature_bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "signing_key_label": self.signing.label(),
@@ -282,7 +283,7 @@ mod tests {
         let exporter = DsarExporter::new(key);
         let bundle = exporter
             .export_records(
-                "workspace",
+                "tenant-storage-partition",
                 b"subject".to_vec(),
                 vec![serde_json::json!({"record": 1})],
                 Vec::new(),
@@ -303,7 +304,7 @@ mod tests {
 
         let export = exporter
             .export_jsonl_records(
-                "workspace",
+                "tenant-storage-partition",
                 "user-1",
                 vec![serde_json::json!({
                     "user_id": "user-1",

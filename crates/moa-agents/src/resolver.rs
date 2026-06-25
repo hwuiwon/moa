@@ -206,15 +206,12 @@ impl AgentResolver {
             WHERE i.installation_uid = $3
               AND i.status = 'active'
               AND i.current_revision_uid IS NOT NULL
-              AND (
-                i.scope = 'global'
-                OR (i.workspace_id = $1 AND i.user_id IS NULL)
-                OR (i.workspace_id = $1 AND i.user_id = $2)
-              )
+              AND i.storage_partition_id = $1
+              AND (i.user_id IS NULL OR i.user_id = $2)
             LIMIT 1
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(installation_uid)
         .fetch_optional(conn.as_mut())
@@ -326,7 +323,6 @@ async fn scoped_conn_for_artifact_scope<'p>(
     scope: &ActionRuleScope,
 ) -> Result<ScopedConn<'p>> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopedConn::begin_control_plane(pool).await,
         ActionRuleScope::Tenant { tenant_id } => ScopedConn::begin_tenant(pool, *tenant_id).await,
     }
 }

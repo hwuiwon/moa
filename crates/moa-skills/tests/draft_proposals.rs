@@ -12,8 +12,8 @@ use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, SESSION_WITH_5_TOOL_CALLS, active_semantic_version,
     artifact_revision_count, configured_test_db, learning_store, load_optional_active_skill,
-    load_session_fixture, scripted_router, seed_skill, session_workspace_id, skill_markdown,
-    skill_row_count, test_config, workspace_scope,
+    load_session_fixture, scripted_router, seed_skill, session_storage_partition_id,
+    skill_markdown, skill_row_count, tenant_scope, test_config,
 };
 
 #[tokio::test]
@@ -46,8 +46,8 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
         panic!("expected creation proposal");
     };
     assert_eq!(proposal.metadata.name, "draft-oauth-refresh");
-    let workspace_id = session_workspace_id(&loaded.session);
-    let scope = workspace_scope(&workspace_id);
+    let storage_partition_id = session_storage_partition_id(&loaded.session);
+    let scope = tenant_scope(&storage_partition_id);
     assert!(
         load_optional_active_skill(&test_db, &scope, "draft-oauth-refresh")
             .await
@@ -56,7 +56,7 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
     );
 
     let candidate = store
-        .get_learning_candidate(&workspace_id, proposal.candidate_id)
+        .get_learning_candidate(&loaded.session.tenant_id, proposal.candidate_id)
         .await
         .expect("load proposed candidate")
         .expect("candidate exists");
@@ -79,7 +79,7 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
             .contains("[[cases]]")
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &workspace_id, "draft-oauth-refresh").await,
+        artifact_revision_count(&test_db, &storage_partition_id, "draft-oauth-refresh").await,
         1
     );
 
@@ -100,8 +100,8 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
     };
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
-    let workspace_id = session_workspace_id(&loaded.session);
-    let scope = workspace_scope(&workspace_id);
+    let storage_partition_id = session_storage_partition_id(&loaded.session);
+    let scope = tenant_scope(&storage_partition_id);
     let existing = seed_skill(&test_db, scope, BASELINE_SKILL).await;
     let store = learning_store(&test_db);
 
@@ -131,12 +131,12 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
         "1.2"
     );
     assert_eq!(
-        skill_row_count(&test_db, &workspace_id, "auth-flow").await,
+        skill_row_count(&test_db, &storage_partition_id, "auth-flow").await,
         1
     );
 
     let candidate = store
-        .get_learning_candidate(&workspace_id, proposal.candidate_id)
+        .get_learning_candidate(&loaded.session.tenant_id, proposal.candidate_id)
         .await
         .expect("load improvement candidate")
         .expect("candidate exists");
@@ -148,7 +148,7 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
         proposal.draft_artifact_revision_uid.to_string()
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &workspace_id, "auth-flow").await,
+        artifact_revision_count(&test_db, &storage_partition_id, "auth-flow").await,
         2,
         "seeded published artifact plus one draft improvement revision"
     );
@@ -195,14 +195,14 @@ async fn skill_proposal_retry_reuses_candidate_id() {
     let DistillationOutcome::NewSkillProposed { proposal: second } = second else {
         panic!("expected second proposal");
     };
-    let workspace_id = session_workspace_id(&loaded.session);
+    let storage_partition_id = session_storage_partition_id(&loaded.session);
     assert_eq!(first.candidate_id, second.candidate_id);
     assert_eq!(
         first.draft_artifact_revision_uid,
         second.draft_artifact_revision_uid
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &workspace_id, "retry-stable-draft").await,
+        artifact_revision_count(&test_db, &storage_partition_id, "retry-stable-draft").await,
         1
     );
 }
@@ -250,14 +250,14 @@ async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
     else {
         panic!("expected second proposal");
     };
-    let workspace_id = session_workspace_id(&loaded.session);
+    let storage_partition_id = session_storage_partition_id(&loaded.session);
     assert_eq!(first.candidate_id, second.candidate_id);
     assert_eq!(
         first.draft_artifact_revision_uid,
         second.draft_artifact_revision_uid
     );
     assert_eq!(
-        artifact_revision_count(&test_db, &workspace_id, "concurrent-stable-draft").await,
+        artifact_revision_count(&test_db, &storage_partition_id, "concurrent-stable-draft").await,
         1
     );
 }

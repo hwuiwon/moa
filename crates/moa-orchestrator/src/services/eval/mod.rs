@@ -21,7 +21,7 @@ use moa_core::wire::{
     EvalScoreSummaryRow, EvalScoresRequest, EvalScoresResponse, EvalSuiteListRequest,
     EvalSuiteListResponse, EvalSuiteSummary,
 };
-use moa_core::{MoaConfig, TenantId, WorkspaceId};
+use moa_core::{MoaConfig, TenantId};
 use moa_db::ScopedConn;
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval::EvalEngine;
@@ -44,13 +44,13 @@ use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
 use moa_scoring::{
     ScoreCompare, ScoreCompareRef, ScoreRunRef, ScoreSummary, ScoringError,
-    compare_score_runs_for_workspace, score_summaries_for_workspace,
+    compare_score_runs_for_tenant, score_summaries_for_tenant,
 };
 #[cfg(any(feature = "internal-eval-runner", test))]
 use repository::ScopedDatasetItem;
 #[cfg(feature = "internal-eval-runner")]
-use repository::load_dataset_items_for_workspace;
-use repository::{list_datasets_for_workspace, register_dataset_for_workspace};
+use repository::load_dataset_items_for_tenant;
+use repository::{list_datasets_for_tenant, register_dataset_for_tenant};
 use restate_sdk::prelude::*;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -242,7 +242,7 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                register_dataset_for_workspace(&pool, request)
+                register_dataset_for_tenant(&pool, request)
                     .await
                     .map(Json::from)
                     .map_err(eval_error_to_handler_error)
@@ -264,7 +264,7 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                list_datasets_for_workspace(&pool, request)
+                list_datasets_for_tenant(&pool, request)
                     .await
                     .map(Json::from)
                     .map_err(eval_error_to_handler_error)
@@ -318,10 +318,10 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                score_summaries_for_workspace(
+                score_summaries_for_tenant(
                     &pool,
                     ScoreRunRef {
-                        workspace_id: workspace_id_for_tenant(request.tenant_id),
+                        tenant_id: request.tenant_id,
                         run_id: request.run_id,
                     },
                 )
@@ -348,10 +348,10 @@ impl Eval for EvalImpl {
 
         Ok(ctx
             .run(|| async move {
-                compare_score_runs_for_workspace(
+                compare_score_runs_for_tenant(
                     &pool,
                     ScoreCompareRef {
-                        workspace_id: workspace_id_for_tenant(request.tenant_id),
+                        tenant_id: request.tenant_id,
                         base_run: request.base_run,
                         new_run: request.new_run,
                     },
@@ -402,33 +402,33 @@ pub enum EvalServiceError {
         /// Runtime or task failure message.
         message: String,
     },
-    /// A dataset item attempted to target a different workspace.
+    /// A dataset item attempted to target a different tenant.
     #[error(
-        "dataset item at line {line} targets workspace {item_workspace_id}, not authorized workspace {request_workspace_id}"
+        "dataset item at line {line} targets tenant {item_tenant_id}, not authorized tenant {request_tenant_id}"
     )]
-    DatasetWorkspaceMismatch {
+    DatasetTenantMismatch {
         /// One-indexed JSONL line number.
         line: usize,
-        /// Authorized request workspace.
-        request_workspace_id: WorkspaceId,
-        /// Workspace supplied by the dataset item.
-        item_workspace_id: WorkspaceId,
+        /// Authorized request tenant.
+        request_tenant_id: TenantId,
+        /// Tenant supplied by the dataset item.
+        item_tenant_id: TenantId,
     },
-    /// A dataset had no items in the authorized workspace.
-    #[error("dataset {dataset_id} has no items in workspace {workspace_id}")]
-    EmptyWorkspaceDataset {
+    /// A dataset had no items in the authorized tenant.
+    #[error("dataset {dataset_id} has no items in tenant {tenant_id}")]
+    EmptyTenantDataset {
         /// Dataset identifier.
         dataset_id: Uuid,
-        /// Authorized request workspace.
-        workspace_id: WorkspaceId,
+        /// Authorized request tenant.
+        tenant_id: TenantId,
     },
-    /// A stored run belongs to a different workspace than the request.
-    #[error("eval run {run_id} was not found in workspace {request_workspace_id}")]
-    RunWorkspaceMismatch {
+    /// A stored run belongs to a different tenant than the request.
+    #[error("eval run {run_id} was not found in tenant {request_tenant_id}")]
+    RunTenantMismatch {
         /// Hosted eval run identifier.
         run_id: Uuid,
-        /// Authorized request workspace.
-        request_workspace_id: WorkspaceId,
+        /// Authorized request tenant.
+        request_tenant_id: TenantId,
     },
 }
 
@@ -444,9 +444,9 @@ pub fn verify_run_status_tenant(
     response: &EvalRunStatusResponse,
 ) -> Result<(), EvalServiceError> {
     if response.tenant_id != request_tenant_id {
-        return Err(EvalServiceError::RunWorkspaceMismatch {
+        return Err(EvalServiceError::RunTenantMismatch {
             run_id: response.run_id,
-            request_workspace_id: workspace_id_for_tenant(request_tenant_id),
+            request_tenant_id,
         });
     }
     Ok(())
@@ -754,12 +754,11 @@ fn attach_summary_field(summary: &mut Value, field: &str, value: Value) {
 }
 
 #[cfg(feature = "internal-eval-runner")]
-async fn replay_dataset_for_workspace(
+async fn replay_dataset_for_tenant(
     config: MoaConfig,
     pool: PgPool,
     request: EvalReplayRequest,
 ) -> Result<EvalReplayResponse, EvalServiceError> {
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let run_id = request.run_id.unwrap_or_else(Uuid::now_v7);
     let limit = option_u64_to_usize(request.limit, "limit")?;
     let replay_config = ReplayConfig {
@@ -769,17 +768,17 @@ async fn replay_dataset_for_workspace(
         embedder_override: request.embedder.clone(),
         limit,
     };
-    let items = load_dataset_items_for_workspace(
+    let items = load_dataset_items_for_tenant(
         &pool,
-        &workspace_id,
+        &request.tenant_id,
         request.dataset_id,
         replay_config.limit,
     )
     .await?;
     if items.is_empty() {
-        return Err(EvalServiceError::EmptyWorkspaceDataset {
+        return Err(EvalServiceError::EmptyTenantDataset {
             dataset_id: request.dataset_id,
-            workspace_id,
+            tenant_id: request.tenant_id,
         });
     }
     ensure_eval_replay_score_run_parent(&pool, request.tenant_id, run_id).await?;
@@ -839,9 +838,7 @@ async fn run_replay_request_isolated(
     request: EvalReplayRequest,
 ) -> Result<EvalReplayResponse, EvalServiceError> {
     tokio::task::spawn_blocking(move || {
-        block_on_current_thread(Box::pin(replay_dataset_for_workspace(
-            config, pool, request,
-        )))
+        block_on_current_thread(Box::pin(replay_dataset_for_tenant(config, pool, request)))
     })
     .await
     .map_err(|error| EvalServiceError::Runtime {
@@ -982,7 +979,7 @@ fn dataset_run_item_score_record(
             run_id: replay_config.run_id,
             item_id: item.item_id,
         },
-        workspace_id: item.workspace_id.clone(),
+        storage_partition_id: moa_core::StoragePartitionId::new(item.tenant_id.to_string()),
         user_id: None,
         name: name.to_string(),
         value,
@@ -1091,19 +1088,15 @@ async fn authorize_tenant(
         .map_err(translate_authz_error)
 }
 
-fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
-}
-
 fn eval_error_to_handler_error(error: EvalServiceError) -> HandlerError {
     match error {
         EvalServiceError::InvalidDocument { .. }
-        | EvalServiceError::DatasetWorkspaceMismatch { .. }
+        | EvalServiceError::DatasetTenantMismatch { .. }
         | EvalServiceError::IntegerTooLarge { .. } => {
             TerminalError::new_with_code(400, error.to_string()).into()
         }
-        EvalServiceError::EmptyWorkspaceDataset { .. }
-        | EvalServiceError::RunWorkspaceMismatch { .. } => {
+        EvalServiceError::EmptyTenantDataset { .. }
+        | EvalServiceError::RunTenantMismatch { .. } => {
             TerminalError::new_with_code(404, error.to_string()).into()
         }
         EvalServiceError::Json(_)
@@ -1186,9 +1179,10 @@ mod tests {
         let run_id = uuid("11111111-1111-1111-1111-111111111111");
         let dataset_id = uuid("22222222-2222-2222-2222-222222222222");
         let item_id = uuid("33333333-3333-3333-3333-333333333333");
+        let tenant_id = TenantId::from(uuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
         let item = ScopedDatasetItem {
             item_id,
-            workspace_id: WorkspaceId::new("workspace-a"),
+            tenant_id,
             #[cfg(feature = "internal-eval-runner")]
             query: "alpha?".to_string(),
             expected_answer: Some("alpha beta".to_string()),
@@ -1222,7 +1216,10 @@ mod tests {
         );
         for record in &records {
             assert_dataset_run_item_target(record, run_id, item_id);
-            assert_eq!(record.workspace_id, WorkspaceId::new("workspace-a"));
+            assert_eq!(
+                record.storage_partition_id,
+                moa_core::StoragePartitionId::new(tenant_id.to_string())
+            );
             assert_eq!(record.run_id, Some(run_id));
             assert_eq!(record.dataset_id, Some(dataset_id));
             assert_eq!(record.source, ScoreSource::OfflineReplay);
@@ -1243,7 +1240,7 @@ mod tests {
         let item_id = uuid("33333333-3333-3333-3333-333333333333");
         let item = ScopedDatasetItem {
             item_id,
-            workspace_id: WorkspaceId::new("workspace-a"),
+            tenant_id: TenantId::from(uuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")),
             #[cfg(feature = "internal-eval-runner")]
             query: "alpha?".to_string(),
             expected_answer: Some("alpha beta".to_string()),

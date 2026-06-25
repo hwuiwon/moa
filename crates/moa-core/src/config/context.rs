@@ -2,18 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Workspace-level cost budget settings.
+/// Tenant-level cost budget settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudgetConfig {
-    /// Maximum daily spend per workspace in cents. `0` disables budget enforcement.
-    pub daily_workspace_cents: u32,
+    /// Maximum daily spend per tenant in cents. `0` disables budget enforcement.
+    pub daily_tenant_cents: u32,
 }
 
 impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
-            daily_workspace_cents: 2_000,
+            daily_tenant_cents: 2_000,
         }
     }
 }

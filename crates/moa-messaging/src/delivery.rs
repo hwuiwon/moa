@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_core::{
-    Channel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError, Result, WorkspaceId,
+    Channel, ContactId, Credential, CredentialVault, MessagingConfig, MoaError, Result,
 };
 use tracing::Instrument;
 use uuid::Uuid;
@@ -47,8 +47,6 @@ impl DeliveryPurpose {
 pub struct DeliveryMessage {
     /// Tenant boundary that owns the recipient contact.
     pub tenant_id: Uuid,
-    /// Workspace boundary that owns the recipient contact.
-    pub workspace_id: WorkspaceId,
     /// Contact receiving the message.
     pub contact_id: ContactId,
     /// Delivery use case.
@@ -72,7 +70,6 @@ impl DeliveryMessage {
     #[must_use]
     pub fn contact_verification_otp(
         tenant_id: Uuid,
-        workspace_id: WorkspaceId,
         contact_id: ContactId,
         channel: Channel,
         to: impl Into<String>,
@@ -90,11 +87,9 @@ impl DeliveryMessage {
         );
         let mut metadata = BTreeMap::new();
         metadata.insert("purpose".to_string(), "contact_verification".to_string());
-        metadata.insert("workspace_id".to_string(), workspace_id.to_string());
         metadata.insert("contact_id".to_string(), contact_id.to_string());
         Self {
             tenant_id,
-            workspace_id,
             contact_id,
             purpose: DeliveryPurpose::ContactVerification,
             channel,
@@ -438,7 +433,6 @@ fn delivery_span(message: &DeliveryMessage) -> tracing::Span {
         messaging.operation = "deliver",
         messaging.channel = message.channel.as_str(),
         moa.tenant.id = %message.tenant_id,
-        moa.workspace.id = %message.workspace_id,
         moa.contact.id = %message.contact_id,
         moa.delivery.purpose = message.purpose.as_str(),
     )
@@ -447,7 +441,7 @@ fn delivery_span(message: &DeliveryMessage) -> tracing::Span {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use moa_core::{Channel, ContactId, WorkspaceId};
+    use moa_core::{Channel, ContactId};
     use uuid::Uuid;
 
     use super::{DeliveryMessage, DeliveryPurpose};
@@ -456,7 +450,6 @@ mod tests {
     fn contact_verification_otp_builds_channel_specific_message() {
         // Pins: OTP rendering includes the code only in the provider payload, not metadata.
         let tenant_id = Uuid::now_v7();
-        let workspace_id = WorkspaceId::new("workspace");
         let contact_id = ContactId::new();
         let expires_at = chrono::Utc
             .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
@@ -465,7 +458,6 @@ mod tests {
 
         let message = DeliveryMessage::contact_verification_otp(
             tenant_id,
-            workspace_id.clone(),
             contact_id,
             Channel::Sms,
             "+15005550006",
@@ -474,7 +466,6 @@ mod tests {
         );
 
         assert_eq!(message.tenant_id, tenant_id);
-        assert_eq!(message.workspace_id, workspace_id);
         assert_eq!(message.contact_id, contact_id);
         assert_eq!(message.purpose, DeliveryPurpose::ContactVerification);
         assert_eq!(message.channel, Channel::Sms);

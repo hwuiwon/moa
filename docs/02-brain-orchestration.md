@@ -32,8 +32,8 @@ Default production Restate bindings:
 
 | Restate primitive | Handlers |
 |---|---|
-| Virtual Object | `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `WorkspaceStore`, `Whoami` |
+| Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`, `Whoami` |
 | Workflow | `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Feature-gated Restate bindings:
@@ -165,7 +165,7 @@ Delegation is bounded by depth, active fan-out, repeated active task detection, 
 
 MOA has two workflow-shaped execution surfaces. Restate workflows run internal durable jobs:
 
-- `Consolidate`: one workspace/date memory consolidation pass.
+- `Consolidate`: one tenant/date memory consolidation pass.
 - `EvalRun`: one eval replay run.
 - `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
 - `SubAgentTurnExecution`: one admitted sub-agent turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `SubAgent` with turn-scoped mutations.
@@ -213,7 +213,7 @@ counter that invalidates stale delayed ticks after reconfiguration.
 
 On boot, the orchestrator installs two periodic jobs via the `CronJob` virtual object:
 
-- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes `GraphMemoryMaint/compact`, which queues one `Consolidate` workflow for each active graph-memory workspace.
+- `graph_memory_compact`: fires at HH:00 UTC every hour and invokes `GraphMemoryMaint/compact`, which queues one `Consolidate` workflow for each active graph-memory tenant.
 - `neon_prune_branches`: fires at 00:00, 06:00, 12:00, and 18:00 UTC and invokes `NeonMaint/prune_branches`. It is a no-op when `MOA_NEON_API_KEY` is unset.
 
 To inspect the schedule:

@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn registry_preserves_scope_precedence_and_published_revision_history() -> Result<()> {
-    // Pins: artifact visibility resolves tenant overrides before workspace defaults.
+async fn registry_preserves_tenant_published_revision_history() -> Result<()> {
+    // Pins: artifact visibility and revision history are tenant-scoped.
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
     let registry = ArtifactRegistry::new(store.pool().clone());
@@ -21,75 +21,46 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         tenant_id: TenantId::from(Uuid::now_v7()),
     };
 
-    let global_doc = skill_doc(&name, "global");
-    let global_source = global_doc.to_yaml().expect("serialize global doc");
-    let global = registry
+    let tenant_doc = skill_doc(&name, "tenant-v1");
+    let tenant_source = tenant_doc.to_yaml().expect("serialize tenant doc");
+    let tenant_v1 = registry
         .create_draft(
-            &ActionRuleScope::WorkspaceDefault,
+            &tenant_scope,
             NewArtifactDraft {
-                document: &global_doc,
+                document: &tenant_doc,
                 source_format: "yaml",
-                source_text: global_source.as_bytes(),
+                source_text: tenant_source.as_bytes(),
                 files: &[NewArtifactFile::new(
                     "SKILL.md",
-                    b"# Global skill\n".to_vec(),
+                    b"# Tenant skill\n".to_vec(),
                 )],
             },
         )
         .await?;
     registry
         .publish_revision(
-            &ActionRuleScope::WorkspaceDefault,
-            global.revision_uid,
-            &validate_for_status(&global_doc, ArtifactStatus::Published),
-        )
-        .await?;
-
-    let visible_global = registry
-        .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
-        .await?
-        .expect("workspace-default artifact visible to tenant");
-    assert_eq!(visible_global.scope, "global");
-
-    let workspace_doc = skill_doc(&name, "workspace-v1");
-    let workspace_source = workspace_doc.to_yaml().expect("serialize workspace doc");
-    let workspace_v1 = registry
-        .create_draft(
             &tenant_scope,
-            NewArtifactDraft {
-                document: &workspace_doc,
-                source_format: "yaml",
-                source_text: workspace_source.as_bytes(),
-                files: &[],
-            },
-        )
-        .await?;
-    registry
-        .publish_revision(
-            &tenant_scope,
-            workspace_v1.revision_uid,
-            &validate_for_status(&workspace_doc, ArtifactStatus::Published),
+            tenant_v1.revision_uid,
+            &validate_for_status(&tenant_doc, ArtifactStatus::Published),
         )
         .await?;
 
-    let visible_workspace = registry
+    let visible_tenant = registry
         .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
         .expect("tenant artifact visible");
-    assert_eq!(visible_workspace.scope, "workspace");
-    assert_eq!(visible_workspace.version, 1);
+    assert_eq!(visible_tenant.scope, "tenant");
+    assert_eq!(visible_tenant.version, 1);
 
-    let workspace_v2_doc = skill_doc(&name, "workspace-v2");
-    let workspace_v2_source = workspace_v2_doc
-        .to_yaml()
-        .expect("serialize workspace v2 doc");
-    let workspace_v2 = registry
+    let tenant_v2_doc = skill_doc(&name, "tenant-v2");
+    let tenant_v2_source = tenant_v2_doc.to_yaml().expect("serialize tenant v2 doc");
+    let tenant_v2 = registry
         .create_draft(
             &tenant_scope,
             NewArtifactDraft {
-                document: &workspace_v2_doc,
+                document: &tenant_v2_doc,
                 source_format: "yaml",
-                source_text: workspace_v2_source.as_bytes(),
+                source_text: tenant_v2_source.as_bytes(),
                 files: &[],
             },
         )
@@ -97,23 +68,23 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
     registry
         .publish_revision(
             &tenant_scope,
-            workspace_v2.revision_uid,
-            &validate_for_status(&workspace_v2_doc, ArtifactStatus::Published),
+            tenant_v2.revision_uid,
+            &validate_for_status(&tenant_v2_doc, ArtifactStatus::Published),
         )
         .await?;
-    let visible_workspace_v2 = registry
+    let visible_tenant_v2 = registry
         .load_visible_published(&tenant_scope, ArtifactKind::Skill, &name)
         .await?
         .expect("tenant artifact v2 visible");
-    assert_eq!(visible_workspace_v2.version, 2);
-    assert_eq!(visible_workspace_v2.description, "workspace-v2");
-    let loaded_workspace_v1 = registry
-        .load_revision(&tenant_scope, workspace_v1.revision_uid)
+    assert_eq!(visible_tenant_v2.version, 2);
+    assert_eq!(visible_tenant_v2.description, "tenant-v2");
+    let loaded_tenant_v1 = registry
+        .load_revision(&tenant_scope, tenant_v1.revision_uid)
         .await?
         .expect("tenant v1 remains loadable by exact revision id");
-    assert_eq!(loaded_workspace_v1.version, 1);
-    assert_eq!(loaded_workspace_v1.status, ArtifactStatus::Published);
-    assert_eq!(loaded_workspace_v1.valid_to, None);
+    assert_eq!(loaded_tenant_v1.version, 1);
+    assert_eq!(loaded_tenant_v1.status, ArtifactStatus::Published);
+    assert_eq!(loaded_tenant_v1.valid_to, None);
 
     let summaries = registry
         .list_visible(
@@ -127,10 +98,10 @@ async fn registry_preserves_scope_precedence_and_published_revision_history() ->
         .filter(|summary| summary.name == name)
         .collect::<Vec<_>>();
     assert_eq!(matching.len(), 1);
-    assert_eq!(matching[0].scope, "workspace");
+    assert_eq!(matching[0].scope, "tenant");
 
     let files = registry
-        .load_files(&tenant_scope, global.revision_uid)
+        .load_files(&tenant_scope, tenant_v1.revision_uid)
         .await?;
     assert_eq!(files[0].path, "SKILL.md");
 

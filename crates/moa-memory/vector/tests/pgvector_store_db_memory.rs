@@ -12,11 +12,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -42,10 +42,15 @@ fn basis_vector(index: usize) -> Vec<f32> {
     vector
 }
 
-fn vector_item(uid: Uuid, workspace_id: &str, label: &str, embedding: Vec<f32>) -> VectorItem {
+fn vector_item(
+    uid: Uuid,
+    storage_partition_id: &str,
+    label: &str,
+    embedding: Vec<f32>,
+) -> VectorItem {
+    let _ = storage_partition_id;
     VectorItem {
         uid,
-        workspace_id: Some(workspace_id.to_string()),
         user_id: None,
         label: label.to_string(),
         pii_class: "none".to_string(),
@@ -63,8 +68,8 @@ async fn set_app_role(conn: &mut sqlx::PgConnection) {
         .expect("set moa_app role");
 }
 
-async fn insert_node_index_rows(pool: &PgPool, workspace_id: &str, items: &[VectorItem]) {
-    let ctx = tenant_scope(workspace_id);
+async fn insert_node_index_rows(pool: &PgPool, storage_partition_id: &str, items: &[VectorItem]) {
+    let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin node_index seed transaction");
@@ -72,12 +77,12 @@ async fn insert_node_index_rows(pool: &PgPool, workspace_id: &str, items: &[Vect
 
     for item in items {
         sqlx::query(
-            "INSERT INTO moa.node_index (uid, label, workspace_id, name, pii_class) \
+            "INSERT INTO moa.node_index (uid, label, storage_partition_id, name, pii_class) \
              VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(item.uid)
         .bind(&item.label)
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(format!("vector seed {}", item.uid))
         .bind(&item.pii_class)
         .execute(conn.as_mut())
@@ -92,11 +97,12 @@ async fn insert_node_index_rows(pool: &PgPool, workspace_id: &str, items: &[Vect
 
 async fn insert_contact_node_index_rows(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     contact_id: ContactId,
     items: &[VectorItem],
 ) {
-    let tenant_id = Uuid::parse_str(workspace_id).expect("test workspace id should be a UUID");
+    let tenant_id =
+        Uuid::parse_str(storage_partition_id).expect("test storage partition id should be a UUID");
     let ctx = ScopeContext::contact(TenantId::from(tenant_id), contact_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
@@ -105,12 +111,12 @@ async fn insert_contact_node_index_rows(
 
     for item in items {
         sqlx::query(
-            "INSERT INTO moa.node_index (uid, label, workspace_id, user_id, name, pii_class) \
+            "INSERT INTO moa.node_index (uid, label, storage_partition_id, user_id, name, pii_class) \
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(item.uid)
         .bind(&item.label)
-        .bind(workspace_id)
+        .bind(storage_partition_id)
         .bind(item.user_id.as_deref())
         .bind(format!("contact vector seed {}", item.uid))
         .bind(&item.pii_class)
@@ -124,25 +130,25 @@ async fn insert_contact_node_index_rows(
         .expect("commit contact node_index seed transaction");
 }
 
-async fn set_workspace_embedder_state(pool: &PgPool, workspace_id: &str, model: &str) {
-    let ctx = tenant_scope(workspace_id);
+async fn set_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str, model: &str) {
+    let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
-        .expect("begin workspace_state seed transaction");
+        .expect("begin storage_partition_state seed transaction");
     set_app_role(conn.as_mut()).await;
 
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, $2, 1, 1024)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(model)
     .execute(conn.as_mut())
     .await
@@ -150,17 +156,17 @@ async fn set_workspace_embedder_state(pool: &PgPool, workspace_id: &str, model: 
 
     conn.commit()
         .await
-        .expect("commit workspace_state seed transaction");
+        .expect("commit storage_partition_state seed transaction");
 }
 
 async fn insert_node_index_row_with_validity(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     item: &VectorItem,
     valid_from: DateTime<Utc>,
     valid_to: Option<DateTime<Utc>>,
 ) {
-    let ctx = tenant_scope(workspace_id);
+    let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin historical node_index seed transaction");
@@ -168,12 +174,12 @@ async fn insert_node_index_row_with_validity(
 
     sqlx::query(
         "INSERT INTO moa.node_index \
-            (uid, label, workspace_id, name, pii_class, valid_from, valid_to) \
+            (uid, label, storage_partition_id, name, pii_class, valid_from, valid_to) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(item.uid)
     .bind(&item.label)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(format!("historical vector seed {}", item.uid))
     .bind(&item.pii_class)
     .bind(valid_from)
@@ -201,24 +207,30 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("vector-round-trip-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let items: Vec<_> = (0..100)
-        .map(|index| vector_item(Uuid::now_v7(), &workspace_id, "Fact", basis_vector(index)))
+        .map(|index| {
+            vector_item(
+                Uuid::now_v7(),
+                &storage_partition_id,
+                "Fact",
+                basis_vector(index),
+            )
+        })
         .collect();
     let uids: Vec<_> = items.iter().map(|item| item.uid).collect();
-    insert_node_index_rows(session_store.pool(), &workspace_id, &items).await;
-    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
+    insert_node_index_rows(session_store.pool(), &storage_partition_id, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
 
     let store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     store.upsert(&items).await.expect("upsert vectors");
 
     let seed = &items[42];
     let matches = store
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.clone()),
             embedding: seed.embedding.clone(),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -246,8 +258,8 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_a = format!("vector-tenant-a-{}", Uuid::now_v7().simple());
-    let workspace_b = format!("vector-tenant-b-{}", Uuid::now_v7().simple());
+    let workspace_a = Uuid::now_v7().to_string();
+    let workspace_b = Uuid::now_v7().to_string();
     let item_a = vector_item(Uuid::now_v7(), &workspace_a, "Fact", basis_vector(0));
     insert_node_index_rows(
         session_store.pool(),
@@ -273,7 +285,6 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
     );
     let matches = store_b
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_b),
             embedding: item_a.embedding.clone(),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -294,24 +305,29 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
 
 #[tokio::test]
 async fn control_plane_knn_can_validate_contact_workspace_vectors() {
-    // Pins: workspace vector promotion validates contact-owned embeddings through control-plane RLS.
+    // Pins: storage-partition vector promotion validates contact-owned embeddings through control-plane RLS.
     let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7().to_string();
-    let tenant_id = TenantId::from(Uuid::parse_str(&workspace_id).expect("workspace uuid"));
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let tenant_id = TenantId::from(Uuid::parse_str(&storage_partition_id).expect("workspace uuid"));
     let contact_id = ContactId::new();
-    let mut item = vector_item(Uuid::now_v7(), &workspace_id, "Fact", basis_vector(11));
+    let mut item = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        basis_vector(11),
+    );
     item.user_id = Some(contact_id.to_string());
     insert_contact_node_index_rows(
         session_store.pool(),
-        &workspace_id,
+        &storage_partition_id,
         contact_id,
         std::slice::from_ref(&item),
     )
     .await;
-    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
 
     let contact_store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
@@ -323,7 +339,6 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
         .expect("upsert contact vector");
 
     let query = VectorQuery {
-        workspace_id: Some(workspace_id.clone()),
         embedding: item.embedding.clone(),
         k: 10,
         label_filter: Some(vec!["Fact".to_string()]),
@@ -376,18 +391,28 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = format!("vector-as-of-{}", Uuid::now_v7().simple());
+    let storage_partition_id = Uuid::now_v7().to_string();
     let old_valid_from = utc("2026-02-01T00:00:00Z");
     let new_valid_from = utc("2026-04-01T00:00:00Z");
     let old = VectorItem {
         valid_to: Some(new_valid_from),
-        ..vector_item(Uuid::now_v7(), &workspace_id, "Fact", basis_vector(0))
+        ..vector_item(
+            Uuid::now_v7(),
+            &storage_partition_id,
+            "Fact",
+            basis_vector(0),
+        )
     };
-    let new = vector_item(Uuid::now_v7(), &workspace_id, "Fact", basis_vector(1));
+    let new = vector_item(
+        Uuid::now_v7(),
+        &storage_partition_id,
+        "Fact",
+        basis_vector(1),
+    );
 
     insert_node_index_row_with_validity(
         session_store.pool(),
-        &workspace_id,
+        &storage_partition_id,
         &old,
         old_valid_from,
         Some(new_valid_from),
@@ -395,17 +420,17 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
     .await;
     insert_node_index_row_with_validity(
         session_store.pool(),
-        &workspace_id,
+        &storage_partition_id,
         &new,
         new_valid_from,
         None,
     )
     .await;
-    set_workspace_embedder_state(session_store.pool(), &workspace_id, "test-model").await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
 
     let store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     store
         .upsert(&[old.clone(), new.clone()])
@@ -414,7 +439,6 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
 
     let matches = store
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.clone()),
             embedding: old.embedding.clone(),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),

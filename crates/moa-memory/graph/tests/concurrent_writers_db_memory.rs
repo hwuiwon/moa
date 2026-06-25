@@ -17,11 +17,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -56,16 +56,16 @@ async fn configured_test_db() -> Option<TestDb> {
     )
 }
 
-fn scope(workspace_id: &str) -> ScopeContext {
-    tenant_scope(workspace_id)
+fn scope(storage_partition_id: &str) -> ScopeContext {
+    tenant_scope(storage_partition_id)
 }
 
-fn graph_store(test_db: &TestDb, workspace_id: &str) -> AgeGraphStore {
-    AgeGraphStore::scoped_for_app_role(test_db.store().pool().clone(), scope(workspace_id))
+fn graph_store(test_db: &TestDb, storage_partition_id: &str) -> AgeGraphStore {
+    AgeGraphStore::scoped_for_app_role(test_db.store().pool().clone(), scope(storage_partition_id))
 }
 
 fn node_intent(
-    workspace_id: &str,
+    storage_partition_id: &str,
     uid: Uuid,
     name: impl Into<String>,
     valid_from: DateTime<Utc>,
@@ -74,8 +74,8 @@ fn node_intent(
     NodeWriteIntent {
         uid,
         label: NodeLabel::Fact,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         name: name.into(),
         properties: json!({ "value": value.into() }),
@@ -90,8 +90,8 @@ fn node_intent(
     }
 }
 
-async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a> {
-    let mut conn = ScopedConn::begin(pool, &scope(workspace_id))
+async fn scoped_conn<'a>(pool: &'a PgPool, storage_partition_id: &str) -> ScopedConn<'a> {
+    let mut conn = ScopedConn::begin(pool, &scope(storage_partition_id))
         .await
         .expect("begin scoped graph transaction");
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -101,12 +101,12 @@ async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a>
     conn
 }
 
-async fn changelog_version(pool: &PgPool, workspace_id: &str) -> i64 {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn changelog_version(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let version = sqlx::query_scalar::<_, i64>(
-        "SELECT changelog_version FROM moa.workspace_state WHERE workspace_id = $1",
+        "SELECT changelog_version FROM moa.storage_partition_state WHERE storage_partition_id = $1",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .fetch_one(conn.as_mut())
     .await
     .expect("read changelog version");
@@ -116,10 +116,10 @@ async fn changelog_version(pool: &PgPool, workspace_id: &str) -> i64 {
 
 async fn active_nodes_named(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     name_prefix: &str,
 ) -> Vec<(Uuid, DateTime<Utc>)> {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query(
         "SELECT uid, valid_from FROM moa.node_index \
          WHERE name LIKE $1 AND valid_to IS NULL ORDER BY valid_from, uid",
@@ -140,13 +140,13 @@ async fn active_nodes_named(
         .collect()
 }
 
-async fn changelog_edges(pool: &PgPool, workspace_id: &str) -> Vec<ChangelogEdge> {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn changelog_edges(pool: &PgPool, storage_partition_id: &str) -> Vec<ChangelogEdge> {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let rows = sqlx::query(
         "SELECT change_id, cause_change_id FROM moa.graph_changelog \
-         WHERE workspace_id = $1 ORDER BY change_id",
+         WHERE storage_partition_id = $1 ORDER BY change_id",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .fetch_all(conn.as_mut())
     .await
     .expect("read changelog edges");
@@ -183,13 +183,13 @@ fn assert_changelog_forms_dag(edges: &[ChangelogEdge]) {
 
 async fn create_seed(
     graph: &AgeGraphStore,
-    workspace_id: &str,
+    storage_partition_id: &str,
     name: &str,
     t0: DateTime<Utc>,
 ) -> Uuid {
     let uid = Uuid::now_v7();
     graph
-        .create_node(node_intent(workspace_id, uid, name, t0, "seed"))
+        .create_node(node_intent(storage_partition_id, uid, name, t0, "seed"))
         .await
         .expect("create concurrent writer seed");
     uid
@@ -201,22 +201,22 @@ async fn concurrent_supersedes_of_same_node_serialize_with_monotonic_changelog_v
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("concurrent-chain-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("concurrent-chain-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let t0 = Utc::now();
-    let old_uid = create_seed(&graph, &workspace_id, "chain node", t0).await;
+    let old_uid = create_seed(&graph, &storage_partition_id, "chain node", t0).await;
 
     let mut tasks = Vec::new();
     for index in 0..10 {
         let graph = graph.clone();
-        let workspace_id = workspace_id.clone();
+        let storage_partition_id = storage_partition_id.clone();
         tasks.push(tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(index * 5)).await;
             graph
                 .supersede_node(
                     old_uid,
                     node_intent(
-                        &workspace_id,
+                        &storage_partition_id,
                         Uuid::now_v7(),
                         format!("chain node {index}"),
                         t0 + Duration::seconds(i64::try_from(index).expect("index fits") + 1),
@@ -234,13 +234,16 @@ async fn concurrent_supersedes_of_same_node_serialize_with_monotonic_changelog_v
     }
 
     assert_eq!(
-        changelog_version(test_db.store().pool(), &workspace_id).await,
+        changelog_version(test_db.store().pool(), &storage_partition_id).await,
         21
     );
-    let active = active_nodes_named(test_db.store().pool(), &workspace_id, "chain node").await;
+    let active =
+        active_nodes_named(test_db.store().pool(), &storage_partition_id, "chain node").await;
     assert_eq!(active.len(), 1);
     assert!(active[0].1 > t0);
-    assert_changelog_forms_dag(&changelog_edges(test_db.store().pool(), &workspace_id).await);
+    assert_changelog_forms_dag(
+        &changelog_edges(test_db.store().pool(), &storage_partition_id).await,
+    );
 }
 
 #[tokio::test]
@@ -249,19 +252,19 @@ async fn concurrent_writes_to_different_nodes_in_same_workspace_do_not_interfere
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("concurrent-different-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("concurrent-different-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let t0 = Utc::now();
 
     let mut tasks = Vec::new();
     for index in 0..10 {
         let graph = graph.clone();
-        let workspace_id = workspace_id.clone();
+        let storage_partition_id = storage_partition_id.clone();
         tasks.push(tokio::spawn(async move {
             let uid = Uuid::now_v7();
             graph
                 .create_node(node_intent(
-                    &workspace_id,
+                    &storage_partition_id,
                     uid,
                     format!("different node {index}"),
                     t0 + Duration::seconds(i64::from(index)),
@@ -281,7 +284,7 @@ async fn concurrent_writes_to_different_nodes_in_same_workspace_do_not_interfere
         );
     }
 
-    let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
+    let mut conn = scoped_conn(test_db.store().pool(), &storage_partition_id).await;
     for uid in uids {
         let count = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM moa.graph_changelog WHERE target_uid = $1 AND op = 'create'",
@@ -345,10 +348,10 @@ async fn concurrent_writes_to_same_node_across_workspaces_isolate_via_rls() {
         .expect("join workspace B write")
         .expect("workspace B write succeeds");
 
-    for workspace_id in [&workspace_a, &workspace_b] {
-        let mut conn = scoped_conn(test_db.store().pool(), workspace_id).await;
+    for storage_partition_id in [&workspace_a, &workspace_b] {
+        let mut conn = scoped_conn(test_db.store().pool(), storage_partition_id).await;
         let visible = sqlx::query(
-            "SELECT workspace_id, properties_summary->>'value' AS value \
+            "SELECT storage_partition_id, properties_summary->>'value' AS value \
              FROM moa.node_index WHERE name = $1 AND valid_to IS NULL",
         )
         .bind(logical_name)
@@ -359,9 +362,9 @@ async fn concurrent_writes_to_same_node_across_workspaces_isolate_via_rls() {
         assert_eq!(visible.len(), 1);
         assert_eq!(
             visible[0]
-                .try_get::<String, _>("workspace_id")
+                .try_get::<String, _>("storage_partition_id")
                 .expect("decode workspace id"),
-            *workspace_id
+            *storage_partition_id
         );
     }
 }
@@ -372,20 +375,20 @@ async fn concurrent_supersede_with_contradicting_facts_chooses_one_deterministic
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = format!("concurrent-conflict-{}", Uuid::now_v7().simple());
-    let graph = graph_store(&test_db, &workspace_id);
+    let storage_partition_id = format!("concurrent-conflict-{}", Uuid::now_v7().simple());
+    let graph = graph_store(&test_db, &storage_partition_id);
     let t0 = Utc::now();
-    let old_uid = create_seed(&graph, &workspace_id, "conflicting node", t0).await;
+    let old_uid = create_seed(&graph, &storage_partition_id, "conflicting node", t0).await;
 
     let first = tokio::spawn({
         let graph = graph.clone();
-        let workspace_id = workspace_id.clone();
+        let storage_partition_id = storage_partition_id.clone();
         async move {
             graph
                 .supersede_node(
                     old_uid,
                     node_intent(
-                        &workspace_id,
+                        &storage_partition_id,
                         Uuid::now_v7(),
                         "conflicting node first",
                         t0 + Duration::seconds(1),
@@ -397,14 +400,14 @@ async fn concurrent_supersede_with_contradicting_facts_chooses_one_deterministic
     });
     let second = tokio::spawn({
         let graph = graph.clone();
-        let workspace_id = workspace_id.clone();
+        let storage_partition_id = storage_partition_id.clone();
         async move {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             graph
                 .supersede_node(
                     old_uid,
                     node_intent(
-                        &workspace_id,
+                        &storage_partition_id,
                         Uuid::now_v7(),
                         "conflicting node second",
                         t0 + Duration::seconds(2),
@@ -424,10 +427,14 @@ async fn concurrent_supersede_with_contradicting_facts_chooses_one_deterministic
         .expect("join second conflicting writer")
         .expect("second conflicting write supersedes first");
 
-    let active =
-        active_nodes_named(test_db.store().pool(), &workspace_id, "conflicting node").await;
+    let active = active_nodes_named(
+        test_db.store().pool(),
+        &storage_partition_id,
+        "conflicting node",
+    )
+    .await;
     assert_eq!(active.len(), 1);
-    let mut conn = scoped_conn(test_db.store().pool(), &workspace_id).await;
+    let mut conn = scoped_conn(test_db.store().pool(), &storage_partition_id).await;
     let value = sqlx::query_scalar::<_, String>(
         "SELECT properties_summary->>'value' FROM moa.node_index WHERE uid = $1",
     )
@@ -458,15 +465,15 @@ async fn proptest_arbitrary_concurrent_supersedes_yield_valid_dag() {
 }
 
 async fn run_concurrent_case(test_db: &TestDb, case_index: usize, writes_per_node: &[usize]) {
-    let workspace_id = format!("concurrent-prop-{case_index}-{}", Uuid::now_v7().simple());
-    let graph = graph_store(test_db, &workspace_id);
+    let storage_partition_id = format!("concurrent-prop-{case_index}-{}", Uuid::now_v7().simple());
+    let graph = graph_store(test_db, &storage_partition_id);
     let t0 = Utc::now();
     let mut seed_by_node = HashMap::new();
 
     for node_index in 0..writes_per_node.len() {
         let seed = create_seed(
             &graph,
-            &workspace_id,
+            &storage_partition_id,
             &format!("prop node {case_index}-{node_index}"),
             t0,
         )
@@ -478,7 +485,7 @@ async fn run_concurrent_case(test_db: &TestDb, case_index: usize, writes_per_nod
     for (node_index, write_count) in writes_per_node.iter().copied().enumerate() {
         for write_index in 0..write_count {
             let graph = graph.clone();
-            let workspace_id = workspace_id.clone();
+            let storage_partition_id = storage_partition_id.clone();
             let old_uid = seed_by_node[&node_index];
             tasks.push(tokio::spawn(async move {
                 let delay = (node_index * 100 + write_index) as u64;
@@ -487,7 +494,7 @@ async fn run_concurrent_case(test_db: &TestDb, case_index: usize, writes_per_nod
                     .supersede_node(
                         old_uid,
                         node_intent(
-                            &workspace_id,
+                            &storage_partition_id,
                             Uuid::now_v7(),
                             format!("prop node {case_index}-{node_index}-{write_index}"),
                             t0 + Duration::seconds(
@@ -507,11 +514,13 @@ async fn run_concurrent_case(test_db: &TestDb, case_index: usize, writes_per_nod
             .expect("generated supersede should serialize");
     }
 
-    assert_changelog_forms_dag(&changelog_edges(test_db.store().pool(), &workspace_id).await);
+    assert_changelog_forms_dag(
+        &changelog_edges(test_db.store().pool(), &storage_partition_id).await,
+    );
     for node_index in 0..writes_per_node.len() {
         let active = active_nodes_named(
             test_db.store().pool(),
-            &workspace_id,
+            &storage_partition_id,
             &format!("prop node {case_index}-{node_index}"),
         )
         .await;

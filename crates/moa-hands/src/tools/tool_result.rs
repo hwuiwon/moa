@@ -509,7 +509,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use moa_core::{
         ClaimCheck, EventFilter, SessionFilter, SessionId, SessionMeta, SessionStatus,
-        SessionSummary, TenantId, WorkspaceId,
+        SessionSummary, TenantId,
     };
 
     use super::*;
@@ -585,9 +585,9 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn workspace_cost_since(
+        async fn tenant_cost_since(
             &self,
-            _workspace_id: &WorkspaceId,
+            _tenant_id: &TenantId,
             _since: DateTime<Utc>,
         ) -> Result<u32> {
             Ok(0)

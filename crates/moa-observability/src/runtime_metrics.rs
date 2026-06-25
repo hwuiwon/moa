@@ -725,7 +725,7 @@ fn register_metric_descriptions() {
     );
     describe_counter!(
         "moa_sessions_total",
-        "Total sessions created, labeled by workspace and initial status."
+        "Total sessions created, labeled by tenant and initial status."
     );
     describe_counter!(
         "moa_turns_total",
@@ -797,7 +797,7 @@ fn register_metric_descriptions() {
     );
     describe_gauge!(
         "moa_grounding_verified_rate",
-        "Latest citation verifier outcome per workspace, encoded as 0 or 1."
+        "Latest citation verifier outcome per tenant, encoded as 0 or 1."
     );
     describe_counter!(
         "moa_zero_recall_count",

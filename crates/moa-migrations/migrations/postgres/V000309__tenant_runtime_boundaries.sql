@@ -25,11 +25,11 @@ AS $$
 BEGIN
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS contact_isolation ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS workspace_default_tenant_override ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS global_tenant_override ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
@@ -94,7 +94,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION moa.apply_workspace_default_tenant_override_rls(target_table REGCLASS)
+CREATE OR REPLACE FUNCTION moa.apply_global_tenant_override_rls(target_table REGCLASS)
 RETURNS VOID
 LANGUAGE plpgsql
 AS $$
@@ -103,7 +103,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', target_table);
     EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
     EXECUTE format(
-        'CREATE POLICY workspace_default_tenant_override ON %s FOR ALL TO moa_app
+        'CREATE POLICY global_tenant_override ON %s FOR ALL TO moa_app
          USING (
              moa.current_control_plane()
              OR tenant_id::TEXT = moa.current_tenant_id()::TEXT
@@ -132,9 +132,9 @@ BEGIN
     EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', target_table);
 
     EXECUTE format('DROP POLICY IF EXISTS rd_global ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS rd_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS rd_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS rd_user ON %s', target_table);
-    EXECUTE format('DROP POLICY IF EXISTS wr_workspace ON %s', target_table);
+    EXECUTE format('DROP POLICY IF EXISTS wr_tenant ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_user ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS wr_global_promoter ON %s', target_table);
     EXECUTE format('DROP POLICY IF EXISTS owner_dev_access ON %s', target_table);
@@ -144,12 +144,12 @@ BEGIN
         'CREATE POLICY tenant_isolation ON %s FOR ALL TO moa_app
          USING (
              moa.current_control_plane()
-             OR moa.age_property(properties, ''workspace_id'')::TEXT
+             OR moa.age_property(properties, ''storage_partition_id'')::TEXT
                 = moa.current_tenant_id()::TEXT
          )
          WITH CHECK (
              moa.current_control_plane()
-             OR moa.age_property(properties, ''workspace_id'')::TEXT
+             OR moa.age_property(properties, ''storage_partition_id'')::TEXT
                 = moa.current_tenant_id()::TEXT
          )',
         target_table
@@ -159,14 +159,14 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION moa.workspace_text_to_tenant_uuid(value TEXT, table_name TEXT)
+CREATE OR REPLACE FUNCTION moa.storage_partition_text_to_tenant_uuid(value TEXT, table_name TEXT)
 RETURNS UUID
 LANGUAGE plpgsql IMMUTABLE
 AS $$
 BEGIN
     IF value IS NULL OR value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
         RAISE EXCEPTION
-            'cannot infer tenant_id for %.workspace_id value %, manual tenant migration required',
+            'cannot infer tenant_id for %.storage_partition_id value %, manual tenant migration required',
             table_name,
             value
             USING ERRCODE = 'P0001';
@@ -189,10 +189,10 @@ BEGIN
     END IF;
 
     EXECUTE format(
-        'SELECT workspace_id FROM %s
+        'SELECT storage_partition_id FROM %s
          WHERE tenant_id IS NULL
-           AND workspace_id IS NOT NULL
-           AND workspace_id !~* %L
+           AND storage_partition_id IS NOT NULL
+           AND storage_partition_id !~* %L
          LIMIT 1',
         target_table,
         '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -201,7 +201,7 @@ BEGIN
 
     IF ambiguous_value IS NOT NULL THEN
         RAISE EXCEPTION
-            'cannot infer tenant_id for %.workspace_id value %, manual tenant migration required',
+            'cannot infer tenant_id for %.storage_partition_id value %, manual tenant migration required',
             table_name,
             ambiguous_value
             USING ERRCODE = 'P0001';
@@ -222,10 +222,10 @@ BEGIN
 
     EXECUTE format(
         'UPDATE %s
-         SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, %L)
+         SET tenant_id = moa.storage_partition_text_to_tenant_uuid(storage_partition_id, %L)
          WHERE tenant_id IS NULL
-           AND workspace_id IS NOT NULL
-           AND workspace_id ~* %L',
+           AND storage_partition_id IS NOT NULL
+           AND storage_partition_id ~* %L',
         target_table,
         table_name,
         '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -234,7 +234,7 @@ BEGIN
     IF current_schema() <> 'public' THEN
         EXECUTE format(
             'UPDATE %s
-             SET tenant_id = md5(%L || '':'' || COALESCE(workspace_id, '''') || '':'' || ctid::TEXT)::UUID
+             SET tenant_id = md5(%L || '':'' || COALESCE(storage_partition_id, '''') || '':'' || ctid::TEXT)::UUID
              WHERE tenant_id IS NULL',
             target_table,
             table_name
@@ -256,7 +256,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION moa.apply_workspace_default_tenant_constraint(
+CREATE OR REPLACE FUNCTION moa.apply_global_tenant_constraint(
     target_table REGCLASS,
     constraint_name TEXT
 ) RETURNS VOID
@@ -270,7 +270,7 @@ BEGIN
              OR (
                  tenant_id IS NULL
                  AND user_id IS NULL
-                 AND COALESCE(scope, '''') IN (''workspace_default'', ''global'')
+                 AND COALESCE(scope, '''') = ''global''
              )
          )',
         target_table,
@@ -299,20 +299,20 @@ BEGIN
             END IF;
         ELSE
             NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
-                WHEN NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    THEN NEW.workspace_id::UUID
+                WHEN NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN NEW.storage_partition_id::UUID
                 WHEN current_schema() <> 'public'
                     THEN gen_random_uuid()
-                ELSE moa.workspace_text_to_tenant_uuid(NEW.workspace_id, TG_TABLE_NAME)
+                ELSE moa.storage_partition_text_to_tenant_uuid(NEW.storage_partition_id, TG_TABLE_NAME)
             END);
         END IF;
     END IF;
 
     IF moa.current_tenant_id() IS NOT NULL
-       AND NEW.workspace_id IS NOT NULL
-       AND NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-       AND NEW.workspace_id::UUID <> moa.current_tenant_id() THEN
-        RAISE EXCEPTION 'workspace_id % does not match current tenant %', NEW.workspace_id, moa.current_tenant_id()
+       AND NEW.storage_partition_id IS NOT NULL
+       AND NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       AND NEW.storage_partition_id::UUID <> moa.current_tenant_id() THEN
+        RAISE EXCEPTION 'storage_partition_id % does not match current tenant %', NEW.storage_partition_id, moa.current_tenant_id()
             USING ERRCODE = '42501';
     END IF;
 
@@ -342,11 +342,11 @@ BEGIN
     ELSE
         IF NEW.tenant_id IS NULL THEN
             NEW.tenant_id := COALESCE(moa.current_tenant_id(), CASE
-                WHEN NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    THEN NEW.workspace_id::UUID
+                WHEN NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN NEW.storage_partition_id::UUID
                 WHEN current_schema() <> 'public'
                     THEN gen_random_uuid()
-                ELSE moa.workspace_text_to_tenant_uuid(NEW.workspace_id, TG_TABLE_NAME)
+                ELSE moa.storage_partition_text_to_tenant_uuid(NEW.storage_partition_id, TG_TABLE_NAME)
             END);
         END IF;
         IF NEW.contact_id IS NULL THEN
@@ -355,10 +355,10 @@ BEGIN
     END IF;
 
     IF moa.current_tenant_id() IS NOT NULL
-       AND NEW.workspace_id IS NOT NULL
-       AND NEW.workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-       AND NEW.workspace_id::UUID <> moa.current_tenant_id() THEN
-        RAISE EXCEPTION 'workspace_id % does not match current tenant %', NEW.workspace_id, moa.current_tenant_id()
+       AND NEW.storage_partition_id IS NOT NULL
+       AND NEW.storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       AND NEW.storage_partition_id::UUID <> moa.current_tenant_id() THEN
+        RAISE EXCEPTION 'storage_partition_id % does not match current tenant %', NEW.storage_partition_id, moa.current_tenant_id()
             USING ERRCODE = '42501';
     END IF;
 
@@ -368,7 +368,7 @@ $$;
 
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tenant_id UUID;
 UPDATE sessions
-SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, 'sessions')
+SET tenant_id = moa.storage_partition_text_to_tenant_uuid(storage_partition_id, 'sessions')
 WHERE tenant_id IS NULL;
 ALTER TABLE sessions ALTER COLUMN tenant_id SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_tenant_updated ON sessions(tenant_id, updated_at DESC);
@@ -402,7 +402,7 @@ CREATE VIEW session_summary AS
 SELECT
     s.id,
     s.tenant_id,
-    s.workspace_id,
+    s.storage_partition_id,
     s.contact_id,
     s.user_id,
     s.status,
@@ -529,7 +529,7 @@ tool_metrics AS (
 )
 SELECT
     s.tenant_id,
-    s.workspace_id,
+    s.storage_partition_id,
     s.contact_id,
     s.user_id,
     bt.session_id,
@@ -590,7 +590,7 @@ CREATE TRIGGER context_snapshots_set_tenant_columns
 
 ALTER TABLE session_agent_context ADD COLUMN IF NOT EXISTS tenant_id UUID;
 UPDATE session_agent_context
-SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, 'session_agent_context')
+SET tenant_id = moa.storage_partition_text_to_tenant_uuid(storage_partition_id, 'session_agent_context')
 WHERE tenant_id IS NULL;
 ALTER TABLE session_agent_context ALTER COLUMN tenant_id SET NOT NULL;
 CREATE INDEX IF NOT EXISTS session_agent_context_tenant_idx
@@ -685,14 +685,14 @@ CREATE TRIGGER graph_changelog_set_memory_runtime_columns
 CREATE INDEX IF NOT EXISTS graph_changelog_tenant_created_idx
     ON moa.graph_changelog(tenant_id, created_at DESC);
 
-ALTER TABLE moa.workspace_state ADD COLUMN IF NOT EXISTS tenant_id UUID;
-SELECT moa.backfill_required_tenant_id('moa.workspace_state'::REGCLASS, 'moa.workspace_state');
-DROP TRIGGER IF EXISTS workspace_state_set_tenant_columns ON moa.workspace_state;
-CREATE TRIGGER workspace_state_set_tenant_columns
-    BEFORE INSERT OR UPDATE ON moa.workspace_state
+ALTER TABLE moa.storage_partition_state ADD COLUMN IF NOT EXISTS tenant_id UUID;
+SELECT moa.backfill_required_tenant_id('moa.storage_partition_state'::REGCLASS, 'moa.storage_partition_state');
+DROP TRIGGER IF EXISTS storage_partition_state_set_tenant_columns ON moa.storage_partition_state;
+CREATE TRIGGER storage_partition_state_set_tenant_columns
+    BEFORE INSERT OR UPDATE ON moa.storage_partition_state
     FOR EACH ROW
     EXECUTE FUNCTION moa.set_runtime_tenant_columns();
-CREATE INDEX IF NOT EXISTS workspace_state_tenant_idx ON moa.workspace_state(tenant_id);
+CREATE INDEX IF NOT EXISTS storage_partition_state_tenant_idx ON moa.storage_partition_state(tenant_id);
 
 DO $$
 DECLARE
@@ -723,54 +723,54 @@ END $$;
 
 ALTER TABLE action_policy_rules ADD COLUMN IF NOT EXISTS tenant_id UUID;
 UPDATE action_policy_rules
-SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, 'action_policy_rules')
+SET tenant_id = moa.storage_partition_text_to_tenant_uuid(storage_partition_id, 'action_policy_rules')
 WHERE tenant_id IS NULL
-  AND workspace_id <> 'global'
-  AND workspace_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+  AND storage_partition_id <> 'global'
+  AND storage_partition_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 DO $$
 DECLARE
     ambiguous_value TEXT;
 BEGIN
-    SELECT workspace_id
+    SELECT storage_partition_id
     INTO ambiguous_value
     FROM action_policy_rules
     WHERE tenant_id IS NULL
-      AND workspace_id <> 'global'
-      AND workspace_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND storage_partition_id <> 'global'
+      AND storage_partition_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     LIMIT 1;
 
     IF ambiguous_value IS NOT NULL AND current_schema() = 'public' THEN
         RAISE EXCEPTION
-            'cannot infer tenant_id for action_policy_rules.workspace_id value %, manual tenant migration required',
+            'cannot infer tenant_id for action_policy_rules.storage_partition_id value %, manual tenant migration required',
             ambiguous_value
             USING ERRCODE = 'P0001';
     END IF;
 
     IF current_schema() <> 'public' THEN
         UPDATE action_policy_rules
-        SET tenant_id = md5('action_policy_rules:' || workspace_id || ':' || id::TEXT)::UUID
+        SET tenant_id = md5('action_policy_rules:' || storage_partition_id || ':' || id::TEXT)::UUID
         WHERE tenant_id IS NULL
-          AND workspace_id <> 'global';
+          AND storage_partition_id <> 'global';
     END IF;
 END $$;
 ALTER TABLE action_policy_rules
-    DROP CONSTRAINT IF EXISTS action_policy_rules_global_workspace_check;
+    DROP CONSTRAINT IF EXISTS action_policy_rules_global_partition_check;
 ALTER TABLE action_policy_rules
     DROP CONSTRAINT IF EXISTS action_policy_rules_scope_check;
 ALTER TABLE action_policy_rules
     ADD CONSTRAINT action_policy_rules_scope_check
-        CHECK (scope IN ('workspace_default', 'tenant', 'global'));
-SELECT moa.apply_workspace_default_tenant_constraint(
-    'action_policy_rules'::REGCLASS,
-    'action_policy_rules_tenant_or_workspace_default_check'
-);
+        CHECK (scope = 'tenant');
+ALTER TABLE action_policy_rules
+    ADD CONSTRAINT action_policy_rules_tenant_storage_partition_check
+        CHECK (storage_partition_id <> 'global');
+ALTER TABLE action_policy_rules ALTER COLUMN tenant_id SET NOT NULL;
 CREATE INDEX IF NOT EXISTS action_policy_rules_tenant_rls_idx
     ON action_policy_rules(tenant_id, tool, created_at);
 
-ALTER TABLE workspace_action_reviews ADD COLUMN IF NOT EXISTS tenant_id UUID;
-SELECT moa.backfill_required_tenant_id('workspace_action_reviews'::REGCLASS, 'workspace_action_reviews');
-CREATE INDEX IF NOT EXISTS workspace_action_reviews_tenant_rls_idx
-    ON workspace_action_reviews(tenant_id, created_at DESC);
+ALTER TABLE tenant_action_reviews ADD COLUMN IF NOT EXISTS tenant_id UUID;
+SELECT moa.backfill_required_tenant_id('tenant_action_reviews'::REGCLASS, 'tenant_action_reviews');
+CREATE INDEX IF NOT EXISTS tenant_action_reviews_tenant_rls_idx
+    ON tenant_action_reviews(tenant_id, created_at DESC);
 
 DO $$
 DECLARE
@@ -803,10 +803,10 @@ BEGIN
             PERFORM moa.raise_ambiguous_tenant_rows_if_public(table_name::REGCLASS, table_name);
             EXECUTE format(
                 'UPDATE %s
-                 SET tenant_id = moa.workspace_text_to_tenant_uuid(workspace_id, %L)
+                 SET tenant_id = moa.storage_partition_text_to_tenant_uuid(storage_partition_id, %L)
                  WHERE tenant_id IS NULL
-                   AND workspace_id IS NOT NULL
-                   AND workspace_id ~* %L',
+                   AND storage_partition_id IS NOT NULL
+                   AND storage_partition_id ~* %L',
                 table_name::REGCLASS,
                 table_name,
                 '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -814,17 +814,17 @@ BEGIN
             IF current_schema() <> 'public' THEN
                 EXECUTE format(
                     'UPDATE %s
-                     SET tenant_id = md5(%L || '':'' || workspace_id || '':'' || ctid::TEXT)::UUID
+                     SET tenant_id = md5(%L || '':'' || storage_partition_id || '':'' || ctid::TEXT)::UUID
                      WHERE tenant_id IS NULL
-                       AND workspace_id IS NOT NULL',
+                       AND storage_partition_id IS NOT NULL',
                     table_name::REGCLASS,
                     table_name
                 );
             END IF;
             SET CONSTRAINTS ALL IMMEDIATE;
-            PERFORM moa.apply_workspace_default_tenant_constraint(
+            PERFORM moa.apply_global_tenant_constraint(
                 table_name::REGCLASS,
-                replace(table_name, '.', '_') || '_tenant_or_workspace_default_check'
+                replace(table_name, '.', '_') || '_tenant_or_global_check'
             );
             EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id)', replace(table_name, '.', '_') || '_tenant_rls_idx', table_name::REGCLASS);
         END IF;
@@ -883,16 +883,16 @@ SELECT moa.apply_contact_rls('moa.embeddings'::REGCLASS);
 SELECT moa.apply_contact_rls('moa.memory_digests'::REGCLASS);
 SELECT moa.apply_contact_rls('moa.retrieval_lineage'::REGCLASS);
 SELECT moa.apply_contact_rls('moa.graph_changelog'::REGCLASS);
-SELECT moa.apply_tenant_rls('moa.workspace_state'::REGCLASS);
+SELECT moa.apply_tenant_rls('moa.storage_partition_state'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.ingest_dedup'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.ingest_dlq'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.agent_installation'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.agent_deployment'::REGCLASS);
-SELECT moa.apply_workspace_default_tenant_override_rls('action_policy_rules'::REGCLASS);
-SELECT moa.apply_tenant_rls('workspace_action_reviews'::REGCLASS);
-SELECT moa.apply_workspace_default_tenant_override_rls('moa.artifact'::REGCLASS);
-SELECT moa.apply_workspace_default_tenant_override_rls('moa.artifact_revision'::REGCLASS);
-SELECT moa.apply_workspace_default_tenant_override_rls('moa.artifact_file'::REGCLASS);
+SELECT moa.apply_tenant_rls('action_policy_rules'::REGCLASS);
+SELECT moa.apply_tenant_rls('tenant_action_reviews'::REGCLASS);
+SELECT moa.apply_global_tenant_override_rls('moa.artifact'::REGCLASS);
+SELECT moa.apply_global_tenant_override_rls('moa.artifact_revision'::REGCLASS);
+SELECT moa.apply_global_tenant_override_rls('moa.artifact_file'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.artifact_run'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.artifact_node_run'::REGCLASS);
 SELECT moa.apply_tenant_rls('moa.experiment_run'::REGCLASS);

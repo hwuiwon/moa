@@ -1,8 +1,8 @@
 {
   "uid_seed": "60",
   "label": "Fact",
-  "name": "fact60 alice stack-choice alice keeps workspace promotion explicit",
-  "summary": "fact60 alice stack-choice alice keeps workspace promotion explicit",
+  "name": "fact60 alice stack-choice alice keeps tenant vector promotion explicit",
+  "summary": "fact60 alice stack-choice alice keeps tenant vector promotion explicit",
   "entity_uids": [
     "alice",
     "stack-choice"

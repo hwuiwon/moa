@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ActionRuleScope, MoaError, Result, SessionId, UserId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, Result, SessionId, StoragePartitionId, UserId};
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
 use serde_json::Value;
@@ -21,7 +21,7 @@ pub struct ArtifactScopeParts {
     /// Tenant override owner used by RLS for tenant-owned artifacts.
     pub tenant_id: Option<Uuid>,
     /// Storage column used to route tenant-owned artifacts.
-    pub workspace_id: Option<String>,
+    pub storage_partition_id: Option<String>,
     /// User ownership column; canonical artifact defaults do not use users.
     pub user_id: Option<String>,
 }
@@ -31,14 +31,9 @@ impl ArtifactScopeParts {
     #[must_use]
     pub fn from_scope(scope: &ActionRuleScope) -> Self {
         match scope {
-            ActionRuleScope::WorkspaceDefault => Self {
-                tenant_id: None,
-                workspace_id: None,
-                user_id: None,
-            },
             ActionRuleScope::Tenant { tenant_id } => Self {
                 tenant_id: Some(tenant_id.0),
-                workspace_id: Some(tenant_id.to_string()),
+                storage_partition_id: Some(tenant_id.to_string()),
                 user_id: None,
             },
         }
@@ -47,7 +42,6 @@ impl ArtifactScopeParts {
 
 fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(moa_core::TenantId(Uuid::nil())),
         ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }
@@ -59,8 +53,8 @@ pub struct StoredArtifactRevision {
     pub artifact_uid: Uuid,
     /// Revision row identifier.
     pub revision_uid: Uuid,
-    /// Workspace owning workspace and user scoped artifacts.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Storage partition owning tenant-scoped artifacts.
+    pub storage_partition_id: Option<StoragePartitionId>,
     /// User owning user scoped artifacts.
     pub user_id: Option<UserId>,
     /// Generated SQL scope tier.
@@ -442,7 +436,7 @@ impl ArtifactRegistry {
         sqlx::query(
             r#"
             INSERT INTO moa.artifact_revision (
-                revision_uid, artifact_uid, tenant_id, workspace_id, user_id, definition,
+                revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id, definition,
                 canonical_hash, source_format, source_text, status,
                 validation_report, version
             )
@@ -452,7 +446,7 @@ impl ArtifactRegistry {
         .bind(revision_uid)
         .bind(artifact_uid)
         .bind(parts.tenant_id)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(definition)
         .bind(&canonical_hash)
@@ -581,7 +575,7 @@ impl ArtifactRegistry {
         let parts = ArtifactScopeParts::from_scope(scope);
         let row = sqlx::query(
             r#"
-            SELECT a.artifact_uid, r.revision_uid, a.workspace_id, a.user_id, a.scope,
+            SELECT a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope,
                    a.kind, a.name, a.description, a.tags, r.definition,
                    r.canonical_hash, r.source_format, r.source_text, r.status,
                    r.validation_report, r.version, r.published_at, r.valid_to,
@@ -591,15 +585,12 @@ impl ArtifactRegistry {
             WHERE a.valid_to IS NULL
               AND r.revision_uid = $3
               AND r.valid_to IS NULL
-              AND (
-                a.scope = 'global'
-                OR (a.workspace_id = $1 AND a.user_id IS NULL)
-                OR (a.workspace_id = $1 AND a.user_id = $2)
-              )
+              AND a.storage_partition_id = $1
+              AND (a.user_id IS NULL OR a.user_id = $2)
             LIMIT 1
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(revision_uid)
         .fetch_optional(&mut *conn.as_mut())
@@ -629,18 +620,15 @@ impl ArtifactRegistry {
               AND r.valid_to IS NULL
               AND ($3::TEXT IS NULL OR a.kind = $3)
               AND ($4::TEXT IS NULL OR r.status = $4)
-              AND (
-                a.scope = 'global'
-                OR (a.workspace_id = $1 AND a.user_id IS NULL)
-              )
+              AND a.storage_partition_id = $1
+              AND a.user_id IS NULL
             ORDER BY
               a.kind ASC,
               a.name ASC,
-              CASE a.scope WHEN 'workspace' THEN 1 ELSE 0 END DESC,
               r.version DESC
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(kind.as_ref().map(ToString::to_string))
         .bind(status.as_ref().map(ToString::to_string))
@@ -675,13 +663,13 @@ impl ArtifactRegistry {
         let row = sqlx::query(
             r#"
             INSERT INTO moa.artifact_run (
-                run_uid, artifact_uid, revision_uid, tenant_id, workspace_id, user_id, session_id,
+                run_uid, artifact_uid, revision_uid, tenant_id, storage_partition_id, user_id, session_id,
                 workflow_ref, status, current_node_id, input, state, output,
                 error, idempotency_key
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (
-                coalesce(workspace_id, ''),
+                coalesce(storage_partition_id, ''),
                 coalesce(user_id, ''),
                 workflow_ref,
                 idempotency_key
@@ -696,7 +684,7 @@ impl ArtifactRegistry {
         .bind(run.artifact_uid)
         .bind(run.revision_uid)
         .bind(parts.tenant_id)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run.session_id.map(|session_id| session_id.0))
         .bind(&run.workflow_ref)
@@ -728,14 +716,12 @@ impl ArtifactRegistry {
                    current_node_id, input, state, output, error, started_at, completed_at
             FROM moa.artifact_run
             WHERE run_uid = $3
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             LIMIT 1
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .fetch_optional(&mut *conn.as_mut())
@@ -785,15 +771,13 @@ impl ArtifactRegistry {
                 completed_at = CASE WHEN $12 THEN $13::TIMESTAMPTZ ELSE completed_at END,
                 updated_at = now()
             WHERE run_uid = $14
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(status_present)
         .bind(status_value)
         .bind(current_node_id_present)
@@ -832,15 +816,13 @@ impl ArtifactRegistry {
                 updated_at = now()
             WHERE run_uid = $3
               AND status NOT IN ('completed', 'failed', 'cancelled')
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             RETURNING run_uid, artifact_uid, revision_uid, session_id, workflow_ref, status,
                       current_node_id, input, state, output, error, started_at, completed_at
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(run_uid)
         .bind(reason)
@@ -865,15 +847,13 @@ impl ArtifactRegistry {
             FROM moa.artifact_node_run
             WHERE run_uid = $2
               AND node_id = $3
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             ORDER BY started_at ASC, node_run_uid ASC
             LIMIT 1
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(node_run.run_uid)
         .bind(&node_run.node_id)
         .fetch_optional(&mut *conn.as_mut())
@@ -887,7 +867,7 @@ impl ArtifactRegistry {
         sqlx::query(
             r#"
             INSERT INTO moa.artifact_node_run (
-                node_run_uid, run_uid, tenant_id, workspace_id, user_id, node_id, status,
+                node_run_uid, run_uid, tenant_id, storage_partition_id, user_id, node_id, status,
                 input, output, error, completed_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -896,7 +876,7 @@ impl ArtifactRegistry {
         .bind(node_run_uid)
         .bind(node_run.run_uid)
         .bind(parts.tenant_id)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(&node_run.node_id)
         .bind(node_run.status.as_str())
@@ -938,14 +918,12 @@ impl ArtifactRegistry {
             FROM moa.artifact_node_run
             WHERE run_uid = $2
               AND node_id = ANY($3)
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             ORDER BY started_at ASC, node_run_uid ASC
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(run_uid)
         .bind(&node_ids)
         .fetch_all(&mut *conn.as_mut())
@@ -970,7 +948,7 @@ impl ArtifactRegistry {
             sqlx::query(
                 r#"
                 INSERT INTO moa.artifact_node_run (
-                    node_run_uid, run_uid, tenant_id, workspace_id, user_id, node_id, status,
+                    node_run_uid, run_uid, tenant_id, storage_partition_id, user_id, node_id, status,
                     input, output, error, completed_at
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -979,7 +957,7 @@ impl ArtifactRegistry {
             .bind(node_run_uid)
             .bind(node_run.run_uid)
             .bind(parts.tenant_id)
-            .bind(parts.workspace_id.as_deref())
+            .bind(parts.storage_partition_id.as_deref())
             .bind(parts.user_id.as_deref())
             .bind(&node_run.node_id)
             .bind(node_run.status.as_str())
@@ -1030,15 +1008,13 @@ impl ArtifactRegistry {
                 completed_at = CASE WHEN $8 THEN $9::TIMESTAMPTZ ELSE completed_at END,
                 updated_at = now()
             WHERE node_run_uid = $10
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             RETURNING node_run_uid, run_uid, node_id, status, input, output, error,
                       started_at, completed_at
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(status_present)
         .bind(status_value)
         .bind(output_present)
@@ -1069,14 +1045,12 @@ impl ArtifactRegistry {
                    started_at, completed_at
             FROM moa.artifact_node_run
             WHERE run_uid = $2
-              AND (
-                scope = 'global'
-                OR (workspace_id = $1 AND user_id IS NULL)
-              )
+              AND storage_partition_id = $1
+              AND user_id IS NULL
             ORDER BY started_at ASC, node_run_uid ASC
             "#,
         )
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(run_uid)
         .fetch_all(&mut *conn.as_mut())
         .await
@@ -1114,7 +1088,7 @@ pub async fn insert_published_revision(
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, tenant_id, workspace_id, user_id, definition,
+            revision_uid, artifact_uid, tenant_id, storage_partition_id, user_id, definition,
             canonical_hash, source_format, source_text, status, validation_report,
             version, published_at
         )
@@ -1124,7 +1098,7 @@ pub async fn insert_published_revision(
     .bind(revision_uid)
     .bind(artifact_uid)
     .bind(parts.tenant_id)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(definition)
     .bind(canonical_hash)
@@ -1160,7 +1134,7 @@ async fn load_visible_with_status(
     let parts = ArtifactScopeParts::from_scope(scope);
     let row = sqlx::query(
         r#"
-        SELECT a.artifact_uid, r.revision_uid, a.workspace_id, a.user_id, a.scope,
+        SELECT a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope,
                a.kind, a.name, a.description, a.tags, r.definition,
                r.canonical_hash, r.source_format, r.source_text, r.status,
                r.validation_report, r.version, r.published_at, r.valid_to,
@@ -1172,17 +1146,14 @@ async fn load_visible_with_status(
           AND a.kind = $3
           AND a.name = $4
           AND ($5::TEXT IS NULL OR r.status = $5)
-          AND (
-            a.scope = 'global'
-            OR (a.workspace_id = $1 AND a.user_id IS NULL)
-          )
+          AND a.storage_partition_id = $1
+          AND a.user_id IS NULL
         ORDER BY
-          CASE a.scope WHEN 'workspace' THEN 1 ELSE 0 END DESC,
           r.version DESC
         LIMIT 1
         "#,
     )
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(kind.to_string())
     .bind(name)
@@ -1204,14 +1175,14 @@ async fn ensure_artifact(
         SELECT artifact_uid
         FROM moa.artifact
         WHERE valid_to IS NULL
-          AND workspace_id IS NOT DISTINCT FROM $1
+          AND storage_partition_id IS NOT DISTINCT FROM $1
           AND user_id IS NOT DISTINCT FROM $2
           AND kind = $3
           AND name = $4
         FOR UPDATE
         "#,
     )
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(document.kind.to_string())
     .bind(&document.metadata.name)
@@ -1240,14 +1211,14 @@ async fn ensure_artifact(
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, tenant_id, workspace_id, user_id, kind, name, description, tags
+            artifact_uid, tenant_id, storage_partition_id, user_id, kind, name, description, tags
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(artifact_uid)
     .bind(parts.tenant_id)
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(document.kind.to_string())
     .bind(&document.metadata.name)
@@ -1288,7 +1259,7 @@ async fn insert_files(
         sqlx::query(
             r#"
             INSERT INTO moa.artifact_file (
-                file_uid, artifact_uid, revision_uid, tenant_id, workspace_id, user_id,
+                file_uid, artifact_uid, revision_uid, tenant_id, storage_partition_id, user_id,
                 path, content, content_sha256, content_type, executable,
                 file_size_bytes
             )
@@ -1299,7 +1270,7 @@ async fn insert_files(
         .bind(artifact_uid)
         .bind(revision_uid)
         .bind(parts.tenant_id)
-        .bind(parts.workspace_id.as_deref())
+        .bind(parts.storage_partition_id.as_deref())
         .bind(parts.user_id.as_deref())
         .bind(&file.path)
         .bind(&file.content)
@@ -1320,7 +1291,7 @@ async fn load_revision_by_uid(
 ) -> Result<StoredArtifactRevision> {
     let row = sqlx::query(
         r#"
-        SELECT a.artifact_uid, r.revision_uid, a.workspace_id, a.user_id, a.scope,
+        SELECT a.artifact_uid, r.revision_uid, a.storage_partition_id, a.user_id, a.scope,
                a.kind, a.name, a.description, a.tags, r.definition,
                r.canonical_hash, r.source_format, r.source_text, r.status,
                r.validation_report, r.version, r.published_at, r.valid_to,
@@ -1350,14 +1321,12 @@ async fn load_files(
         FROM moa.artifact_file f
         JOIN moa.artifact a ON a.artifact_uid = f.artifact_uid
         WHERE f.revision_uid = $3
-          AND (
-            a.scope = 'global'
-            OR (a.workspace_id = $1 AND a.user_id IS NULL)
-          )
+          AND a.storage_partition_id = $1
+          AND a.user_id IS NULL
         ORDER BY f.path ASC
         "#,
     )
-    .bind(parts.workspace_id.as_deref())
+    .bind(parts.storage_partition_id.as_deref())
     .bind(parts.user_id.as_deref())
     .bind(revision_uid)
     .fetch_all(&mut *conn)
@@ -1374,10 +1343,10 @@ fn revision_from_row(row: &sqlx::postgres::PgRow) -> Result<StoredArtifactRevisi
     Ok(StoredArtifactRevision {
         artifact_uid: row.try_get("artifact_uid").map_err(map_sqlx_error)?,
         revision_uid: row.try_get("revision_uid").map_err(map_sqlx_error)?,
-        workspace_id: row
-            .try_get::<Option<String>, _>("workspace_id")
+        storage_partition_id: row
+            .try_get::<Option<String>, _>("storage_partition_id")
             .map_err(map_sqlx_error)?
-            .map(WorkspaceId::new),
+            .map(StoragePartitionId::new),
         user_id: row
             .try_get::<Option<String>, _>("user_id")
             .map_err(map_sqlx_error)?

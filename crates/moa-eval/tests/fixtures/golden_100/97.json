@@ -1,8 +1,8 @@
 {
   "uid_seed": "97",
   "label": "Fact",
-  "name": "fact97 caching read-through caching readthrough evicts entries on workspace promotion",
-  "summary": "fact97 caching read-through caching readthrough evicts entries on workspace promotion",
+  "name": "fact97 caching read-through caching readthrough evicts entries on tenant vector promotion",
+  "summary": "fact97 caching read-through caching readthrough evicts entries on tenant vector promotion",
   "entity_uids": [
     "caching",
     "read-through"

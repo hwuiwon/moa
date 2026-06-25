@@ -76,8 +76,8 @@ pub struct AuditRootManifest {
     pub version: String,
     /// Published root identifier.
     pub root_id: Uuid,
-    /// Workspace ID.
-    pub workspace_id: String,
+    /// Storage partition ID.
+    pub storage_partition_id: String,
     /// Window start timestamp.
     pub window_start: DateTime<Utc>,
     /// Window end timestamp.
@@ -102,17 +102,17 @@ pub struct MerkleRootPublisher {
     pool: sqlx::PgPool,
     store: Arc<dyn ObjectStore>,
     signing: SigningKey,
-    workspace_id: String,
+    storage_partition_id: String,
 }
 
 impl MerkleRootPublisher {
-    /// Creates a publisher for one compliance-enabled workspace.
+    /// Creates a publisher for one compliance-enabled storage partition.
     #[must_use]
     pub fn new(
         pool: sqlx::PgPool,
         store: Arc<dyn ObjectStore>,
         signing: SigningKey,
-        workspace_id: impl Into<String>,
+        storage_partition_id: impl Into<String>,
         cfg: RootPublisherConfig,
     ) -> Self {
         Self {
@@ -120,7 +120,7 @@ impl MerkleRootPublisher {
             pool,
             store,
             signing,
-            workspace_id: workspace_id.into(),
+            storage_partition_id: storage_partition_id.into(),
         }
     }
 
@@ -133,7 +133,7 @@ impl MerkleRootPublisher {
                 _ = interval.tick() => {}
             }
             if let Err(error) = self.publish_one_window().await {
-                tracing::error!(%error, workspace_id = %self.workspace_id, "merkle root publish failed");
+                tracing::error!(%error, storage_partition_id = %self.storage_partition_id, "merkle root publish failed");
             }
         }
     }
@@ -144,12 +144,12 @@ impl MerkleRootPublisher {
             r#"
             SELECT turn_id, record_kind, ts, integrity_hash
             FROM analytics.turn_lineage
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND prev_hash IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1
                   FROM analytics.audit_roots r
-                  WHERE r.workspace_id = analytics.turn_lineage.workspace_id
+                  WHERE r.storage_partition_id = analytics.turn_lineage.storage_partition_id
                     AND analytics.turn_lineage.ts >= r.window_start
                     AND analytics.turn_lineage.ts <= r.window_end
               )
@@ -157,7 +157,7 @@ impl MerkleRootPublisher {
             LIMIT $2
             "#,
         )
-        .bind(&self.workspace_id)
+        .bind(&self.storage_partition_id)
         .bind(i64::try_from(self.cfg.max_window_records).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await?;
@@ -186,7 +186,7 @@ impl MerkleRootPublisher {
             + chrono::Duration::days(i64::from(self.cfg.retention_years).saturating_mul(365));
         let signature_payload = AuditRootSignaturePayload::new(
             root_id,
-            self.workspace_id.clone(),
+            self.storage_partition_id.clone(),
             window_start,
             window_end,
             leaves.len() as u64,
@@ -199,7 +199,7 @@ impl MerkleRootPublisher {
         let manifest = AuditRootManifest {
             version: "1".to_string(),
             root_id,
-            workspace_id: self.workspace_id.clone(),
+            storage_partition_id: self.storage_partition_id.clone(),
             window_start,
             window_end,
             record_count: leaves.len() as u64,
@@ -210,8 +210,8 @@ impl MerkleRootPublisher {
             retain_until,
         };
         let object_path = object_store::path::Path::from(format!(
-            "workspace={}/window={}.json",
-            self.workspace_id, root_id
+            "storage_partition={}/window={}.json",
+            self.storage_partition_id, root_id
         ));
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
         self.store
@@ -222,7 +222,7 @@ impl MerkleRootPublisher {
         sqlx::query(
             r#"
             INSERT INTO analytics.audit_roots (
-                root_id, workspace_id, window_start, window_end, record_count,
+                root_id, storage_partition_id, window_start, window_end, record_count,
                 merkle_root, signature, signing_key_label, s3_object_uri,
                 s3_object_etag, object_lock_mode, retain_until
             )
@@ -231,7 +231,7 @@ impl MerkleRootPublisher {
             "#,
         )
         .bind(root_id)
-        .bind(&self.workspace_id)
+        .bind(&self.storage_partition_id)
         .bind(window_start)
         .bind(window_end)
         .bind(leaves.len() as i64)
@@ -247,12 +247,12 @@ impl MerkleRootPublisher {
 
         sqlx::query(
             r#"
-            INSERT INTO analytics.compliance_workspace_state (workspace_id, last_root_id)
+            INSERT INTO analytics.compliance_storage_partition_state (storage_partition_id, last_root_id)
             VALUES ($1, $2)
-            ON CONFLICT (workspace_id) DO UPDATE SET last_root_id = EXCLUDED.last_root_id
+            ON CONFLICT (storage_partition_id) DO UPDATE SET last_root_id = EXCLUDED.last_root_id
             "#,
         )
-        .bind(&self.workspace_id)
+        .bind(&self.storage_partition_id)
         .bind(root_id)
         .execute(&self.pool)
         .await?;

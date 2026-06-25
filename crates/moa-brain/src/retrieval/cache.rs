@@ -14,11 +14,11 @@ use crate::planning::PlannedQuery;
 use crate::retrieval::hybrid::{HybridRetriever, Result};
 use crate::retrieval::{RetrievalHit, RetrievalRequest};
 
-const DEFAULT_MAX_WORKSPACES: u64 = 1_000;
-const DEFAULT_WORKSPACE_CAPACITY: u64 = 200;
+const DEFAULT_MAX_TENANTS: u64 = 1_000;
+const DEFAULT_TENANT_CAPACITY: u64 = 200;
 const DEFAULT_TTL: Duration = Duration::from_secs(300);
 
-type WorkspaceCache = Cache<CacheKey, CachedEntry>;
+type TenantCache = Cache<CacheKey, CachedEntry>;
 
 /// Backend abstraction used by the read-time cache.
 #[async_trait]
@@ -74,7 +74,7 @@ impl ChangelogVersionReader for PostgresChangelogVersionReader {
                 .await?;
         }
         let version = sqlx::query_scalar::<_, i64>(
-            "SELECT changelog_version FROM moa.workspace_state WHERE tenant_id = $1",
+            "SELECT changelog_version FROM moa.storage_partition_state WHERE tenant_id = $1",
         )
         .bind(scope.tenant_id().0)
         .fetch_optional(conn.as_mut())
@@ -88,10 +88,10 @@ impl ChangelogVersionReader for PostgresChangelogVersionReader {
 /// Configuration for `CachedHybridRetriever`.
 #[derive(Debug, Clone)]
 pub struct CachedHybridRetrieverConfig {
-    /// Maximum number of workspace caches retained by the outer LRU.
-    pub max_workspaces: u64,
-    /// Maximum retrieval entries retained per workspace.
-    pub workspace_capacity: u64,
+    /// Maximum number of tenant caches retained by the outer LRU.
+    pub max_tenants: u64,
+    /// Maximum retrieval entries retained per tenant.
+    pub tenant_capacity: u64,
     /// Time-to-live for each cached retrieval entry.
     pub ttl: Duration,
     /// Whether user-scope queries may be cached.
@@ -101,19 +101,19 @@ pub struct CachedHybridRetrieverConfig {
 impl Default for CachedHybridRetrieverConfig {
     fn default() -> Self {
         Self {
-            max_workspaces: DEFAULT_MAX_WORKSPACES,
-            workspace_capacity: DEFAULT_WORKSPACE_CAPACITY,
+            max_tenants: DEFAULT_MAX_TENANTS,
+            tenant_capacity: DEFAULT_TENANT_CAPACITY,
             ttl: DEFAULT_TTL,
             cache_user_scope: false,
         }
     }
 }
 
-/// Per-workspace cache key for one planned retrieval.
+/// Per-tenant cache key for one planned retrieval.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CacheKey {
-    /// Workspace cache namespace. Global-only queries use `global`.
-    pub workspace_id: String,
+    /// Tenant cache namespace.
+    pub tenant_cache_id: String,
     /// Hash over canonical scope, plan, and retrieval parameters.
     pub fingerprint: [u8; 32],
 }
@@ -123,7 +123,7 @@ pub struct CacheKey {
 pub struct CachedEntry {
     /// Retrieval hits returned by the inner retriever.
     pub hits: Vec<RetrievalHit>,
-    /// `workspace_state.changelog_version` observed before retrieval.
+    /// `storage_partition_state.changelog_version` observed before retrieval.
     pub changelog_version: i64,
     /// Wall-clock time when this entry was inserted.
     pub cached_at: DateTime<Utc>,
@@ -134,7 +134,7 @@ pub struct CachedEntry {
 pub struct CachedHybridRetriever {
     inner: Arc<dyn RetrievalBackend>,
     version_reader: Arc<dyn ChangelogVersionReader>,
-    workspaces: Cache<String, WorkspaceCache>,
+    tenants: Cache<String, TenantCache>,
     config: CachedHybridRetrieverConfig,
 }
 
@@ -192,14 +192,14 @@ impl CachedHybridRetriever {
         version_reader: Arc<dyn ChangelogVersionReader>,
         config: CachedHybridRetrieverConfig,
     ) -> Self {
-        let workspaces = Cache::builder()
-            .max_capacity(config.max_workspaces)
+        let tenants = Cache::builder()
+            .max_capacity(config.max_tenants)
             .time_to_live(config.ttl)
             .build();
         Self {
             inner,
             version_reader,
-            workspaces,
+            tenants,
             config,
         }
     }
@@ -216,31 +216,31 @@ impl CachedHybridRetriever {
             return self.inner.retrieve(req).await;
         }
 
-        let workspace_id = workspace_cache_id(&req.scope);
+        let tenant_cache_id = tenant_cache_id(&req.scope);
         let current_version = self.version_reader.current_version(&req.scope).await?;
         let key = CacheKey {
-            workspace_id: workspace_id.clone(),
+            tenant_cache_id: tenant_cache_id.clone(),
             fingerprint: fingerprint(planned, &req, self.inner.ranking_fingerprint()),
         };
-        let workspace_cache = self.workspace_cache(&workspace_id).await;
+        let tenant_cache = self.tenant_cache(&tenant_cache_id).await;
 
-        if let Some(entry) = workspace_cache.get(&key).await {
+        if let Some(entry) = tenant_cache.get(&key).await {
             if entry.changelog_version == current_version {
                 metrics::histogram!("moa_retrieval_cache_hit_seconds")
                     .record(started.elapsed().as_secs_f64());
                 metrics::counter!("moa_retrieval_cache_total", "outcome" => "hit").increment(1);
                 metrics::gauge!("moa_retrieval_cache_entries")
-                    .set(workspace_cache.entry_count() as f64);
+                    .set(tenant_cache.entry_count() as f64);
                 return Ok(entry.hits);
             }
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "stale").increment(1);
-            workspace_cache.invalidate(&key).await;
+            tenant_cache.invalidate(&key).await;
         } else {
             metrics::counter!("moa_retrieval_cache_total", "outcome" => "miss").increment(1);
         }
 
         let hits = self.inner.retrieve(req).await?;
-        workspace_cache
+        tenant_cache
             .insert(
                 key,
                 CachedEntry {
@@ -250,21 +250,21 @@ impl CachedHybridRetriever {
                 },
             )
             .await;
-        metrics::gauge!("moa_retrieval_cache_entries").set(workspace_cache.entry_count() as f64);
+        metrics::gauge!("moa_retrieval_cache_entries").set(tenant_cache.entry_count() as f64);
         Ok(hits)
     }
 
-    async fn workspace_cache(&self, workspace_id: &str) -> WorkspaceCache {
-        if let Some(cache) = self.workspaces.get(workspace_id).await {
+    async fn tenant_cache(&self, tenant_cache_id: &str) -> TenantCache {
+        if let Some(cache) = self.tenants.get(tenant_cache_id).await {
             return cache;
         }
 
         let cache = Cache::builder()
-            .max_capacity(self.config.workspace_capacity)
+            .max_capacity(self.config.tenant_capacity)
             .time_to_live(self.config.ttl)
             .build();
-        self.workspaces
-            .insert(workspace_id.to_string(), cache.clone())
+        self.tenants
+            .insert(tenant_cache_id.to_string(), cache.clone())
             .await;
         cache
     }
@@ -285,7 +285,7 @@ impl PlannedRetriever for CachedHybridRetriever {
     }
 }
 
-fn workspace_cache_id(scope: &MemoryScope) -> String {
+fn tenant_cache_id(scope: &MemoryScope) -> String {
     scope.tenant_id().to_string()
 }
 
@@ -405,7 +405,7 @@ mod tests {
     use crate::retrieval::ranking::{RANKING_PIPELINE_VERSION, RankingConfig, ranking_fingerprint};
 
     #[tokio::test]
-    async fn cache_hit_reuses_successful_workspace_retrieval() {
+    async fn cache_hit_reuses_successful_tenant_retrieval() {
         let backend = Arc::new(CountingBackend::new());
         let version = Arc::new(MockVersionReader::new(7));
         let cache = CachedHybridRetriever::with_parts(
@@ -413,7 +413,7 @@ mod tests {
             version,
             CachedHybridRetrieverConfig::default(),
         );
-        let planned = planned_query(workspace_scope(), "auth service");
+        let planned = planned_query(tenant_scope(), "auth service");
         let req = request(&planned, "what owns auth?");
 
         let first = cache
@@ -438,7 +438,7 @@ mod tests {
             version.clone(),
             CachedHybridRetrieverConfig::default(),
         );
-        let planned = planned_query(workspace_scope(), "auth service");
+        let planned = planned_query(tenant_scope(), "auth service");
         let req = request(&planned, "what owns auth?");
 
         cache
@@ -490,12 +490,12 @@ mod tests {
             backend,
             version,
             CachedHybridRetrieverConfig {
-                workspace_capacity: 1,
+                tenant_capacity: 1,
                 ..CachedHybridRetrieverConfig::default()
             },
         );
-        let planned_a = planned_query(workspace_scope(), "auth service");
-        let planned_b = planned_query(workspace_scope(), "deploy service");
+        let planned_a = planned_query(tenant_scope(), "auth service");
+        let planned_b = planned_query(tenant_scope(), "deploy service");
 
         cache
             .retrieve(&planned_a, request(&planned_a, "what owns auth?"))
@@ -511,7 +511,7 @@ mod tests {
     fn canonicalization_is_order_insensitive_for_seed_and_label_sets() {
         let seed_a = Uuid::now_v7();
         let seed_b = Uuid::now_v7();
-        let mut left = planned_query(workspace_scope(), "auth service");
+        let mut left = planned_query(tenant_scope(), "auth service");
         left.seeds = vec![seed_b, seed_a];
         left.label_hint = Some(vec![NodeLabel::Fact, NodeLabel::Decision]);
         let mut right = left.clone();
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn temporal_cache_fingerprint_uses_request_as_of() {
         // Pins: cache identity follows the executable retrieval request, not stale plan state.
-        let planned = planned_query(workspace_scope(), "auth service");
+        let planned = planned_query(tenant_scope(), "auth service");
         let current = request(&planned, "what owned auth?");
         let mut historical = current.clone();
         historical.as_of = Some(
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn cache_key_changes_with_ranking_fingerprint() {
         // Pins: final ranked hits cannot be reused across ranking-weight changes.
-        let planned = planned_query(workspace_scope(), "auth service");
+        let planned = planned_query(tenant_scope(), "auth service");
         let req = request(&planned, "what owns auth?");
         let baseline = RankingConfig::default();
         let mut tuned = RankingConfig::default();
@@ -614,9 +614,9 @@ mod tests {
                 node: NodeIndexRow {
                     uid,
                     label: NodeLabel::Fact,
-                    workspace_id: Some("workspace-a".to_string()),
-                    user_id: None,
-                    scope: "workspace".to_string(),
+                    storage_partition_id: Some("tenant-a".to_string()),
+                    contact_id: None,
+                    scope: "tenant".to_string(),
                     name: format!("hit {call}"),
                     pii_class: PiiClass::None,
                     valid_to: None,
@@ -652,7 +652,7 @@ mod tests {
         }
     }
 
-    fn workspace_scope() -> MemoryScope {
+    fn tenant_scope() -> MemoryScope {
         MemoryScope::Tenant {
             tenant_id: test_tenant_id(),
         }

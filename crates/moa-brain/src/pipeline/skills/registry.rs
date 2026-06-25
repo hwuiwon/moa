@@ -45,12 +45,9 @@ async fn load_visible_skills(pool: &PgPool, ctx: &WorkingContext) -> Result<Vec<
           AND r.valid_to IS NULL
           AND a.kind = 'skill'
           AND r.status = 'published'
-          AND (
-            a.scope = 'global'
-            OR (a.workspace_id = $1 AND a.user_id IS NULL)
-          )
+          AND a.storage_partition_id = $1
+          AND a.user_id IS NULL
         ORDER BY a.name ASC,
-                 CASE WHEN a.workspace_id = $1 AND a.user_id IS NULL THEN 1 ELSE 0 END DESC,
                  r.version DESC
         "#,
     )
@@ -87,10 +84,8 @@ async fn load_locked_skills(
           AND r.valid_to IS NULL
           AND a.kind = 'skill'
           AND r.status = 'published'
-          AND (
-            a.scope = 'global'
-            OR (a.workspace_id = $1 AND a.user_id IS NULL)
-          )
+          AND a.storage_partition_id = $1
+          AND a.user_id IS NULL
         ORDER BY array_position($2::uuid[], r.revision_uid), a.name ASC
         "#,
     )
@@ -179,10 +174,8 @@ pub(super) async fn load_selected_skill_files(
               AND r.valid_to IS NULL
               AND a.kind = 'skill'
               AND r.status = 'published'
-              AND (
-                a.scope = 'global'
-                OR (a.workspace_id = $1 AND a.user_id IS NULL)
-              )
+              AND a.storage_partition_id = $1
+              AND a.user_id IS NULL
             ORDER BY requested.ord ASC, f.path ASC
             "#,
         )
@@ -192,7 +185,7 @@ pub(super) async fn load_selected_skill_files(
         .await
     } else {
         sqlx::query(
-        r#"
+            r#"
         WITH requested AS (
             SELECT name, ord
             FROM unnest($2::text[]) WITH ORDINALITY AS requested(name, ord)
@@ -201,8 +194,7 @@ pub(super) async fn load_selected_skill_files(
             SELECT a.name, r.revision_uid, requested.ord,
                    row_number() OVER (
                        PARTITION BY a.name
-                       ORDER BY CASE WHEN a.workspace_id = $1 AND a.user_id IS NULL THEN 1 ELSE 0 END DESC,
-                                r.version DESC
+                       ORDER BY r.version DESC
                    ) AS rank
             FROM requested
             JOIN moa.artifact a ON a.name = requested.name
@@ -211,10 +203,8 @@ pub(super) async fn load_selected_skill_files(
               AND r.valid_to IS NULL
               AND a.kind = 'skill'
               AND r.status = 'published'
-              AND (
-                a.scope = 'global'
-                OR (a.workspace_id = $1 AND a.user_id IS NULL)
-              )
+              AND a.storage_partition_id = $1
+              AND a.user_id IS NULL
         )
         SELECT visible.name, f.path, f.content, f.executable
         FROM visible
@@ -222,11 +212,11 @@ pub(super) async fn load_selected_skill_files(
         WHERE visible.rank = 1
         ORDER BY visible.ord ASC, f.path ASC
         "#,
-    )
-    .bind(&tenant_id)
-    .bind(&selected_names)
-    .fetch_all(pool)
-    .await
+        )
+        .bind(&tenant_id)
+        .bind(&selected_names)
+        .fetch_all(pool)
+        .await
     }
     .map_err(|error| MoaError::StorageError(error.to_string()))?;
 

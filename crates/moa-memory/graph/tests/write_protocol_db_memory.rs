@@ -19,11 +19,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -49,14 +49,14 @@ fn basis_vector(index: usize) -> Vec<f32> {
     vector
 }
 
-fn graph_store(pool: &PgPool, workspace_id: &str) -> AgeGraphStore {
-    let scope = tenant_scope(workspace_id);
+fn graph_store(pool: &PgPool, storage_partition_id: &str) -> AgeGraphStore {
+    let scope = tenant_scope(storage_partition_id);
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
 fn node_intent(
-    workspace_id: &str,
+    storage_partition_id: &str,
     label: NodeLabel,
     name: &str,
     valid_from: chrono::DateTime<Utc>,
@@ -65,8 +65,8 @@ fn node_intent(
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "source": "write_protocol" }),
@@ -82,7 +82,7 @@ fn node_intent(
 }
 
 fn edge_intent(
-    workspace_id: &str,
+    storage_partition_id: &str,
     label: EdgeLabel,
     start_uid: Uuid,
     end_uid: Uuid,
@@ -94,16 +94,16 @@ fn edge_intent(
         start_uid,
         end_uid,
         properties: json!({ "kind": "test-edge", "index": index }),
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
     }
 }
 
-async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a> {
-    let ctx = tenant_scope(workspace_id);
+async fn scoped_conn<'a>(pool: &'a PgPool, storage_partition_id: &str) -> ScopedConn<'a> {
+    let ctx = tenant_scope(storage_partition_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin scoped test transaction");
@@ -114,34 +114,34 @@ async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: &str) -> ScopedConn<'a>
     conn
 }
 
-async fn workspace_version(pool: &PgPool, workspace_id: &str) -> i64 {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn workspace_version(pool: &PgPool, storage_partition_id: &str) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let version = sqlx::query_scalar::<_, i64>(
-        "SELECT changelog_version FROM moa.workspace_state WHERE workspace_id = $1",
+        "SELECT changelog_version FROM moa.storage_partition_state WHERE storage_partition_id = $1",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .fetch_one(conn.as_mut())
     .await
-    .expect("read workspace_state version");
+    .expect("read storage_partition_state version");
     conn.commit().await.expect("commit version read");
     version
 }
 
-async fn seed_workspace_embedder_state(pool: &PgPool, workspace_id: &str) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn seed_workspace_embedder_state(pool: &PgPool, storage_partition_id: &str) {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, 'test-model', 1, 1024)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .execute(conn.as_mut())
     .await
     .expect("seed workspace embedder state");
@@ -150,8 +150,8 @@ async fn seed_workspace_embedder_state(pool: &PgPool, workspace_id: &str) {
         .expect("commit workspace embedder state");
 }
 
-async fn vector_count(pool: &PgPool, workspace_id: &str, uid: Uuid) -> i64 {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn vector_count(pool: &PgPool, storage_partition_id: &str, uid: Uuid) -> i64 {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.embeddings WHERE uid = $1")
         .bind(uid)
         .fetch_one(conn.as_mut())
@@ -163,10 +163,10 @@ async fn vector_count(pool: &PgPool, workspace_id: &str, uid: Uuid) -> i64 {
 
 async fn node_valid_to(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     uid: Uuid,
 ) -> Option<chrono::DateTime<Utc>> {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let valid_to = sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
         "SELECT valid_to FROM moa.node_index WHERE uid = $1",
     )
@@ -178,8 +178,13 @@ async fn node_valid_to(
     valid_to
 }
 
-async fn supersedes_edge_exists(pool: &PgPool, workspace_id: &str, old_uid: Uuid, new_uid: Uuid) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn supersedes_edge_exists(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    old_uid: Uuid,
+    new_uid: Uuid,
+) {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let row = cypher::edge::SUPERSEDES_EXISTS
         .execute(&json!({
             "old_uid": old_uid.to_string(),
@@ -192,8 +197,13 @@ async fn supersedes_edge_exists(pool: &PgPool, workspace_id: &str, old_uid: Uuid
     conn.commit().await.expect("commit edge read");
 }
 
-async fn linked_supersede_rows(pool: &PgPool, workspace_id: &str, old_uid: Uuid, new_uid: Uuid) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn linked_supersede_rows(
+    pool: &PgPool,
+    storage_partition_id: &str,
+    old_uid: Uuid,
+    new_uid: Uuid,
+) {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let old_change = sqlx::query_scalar::<_, i64>(
         "SELECT change_id FROM moa.graph_changelog \
          WHERE target_uid = $1 AND op = 'supersede'",
@@ -215,8 +225,8 @@ async fn linked_supersede_rows(pool: &PgPool, workspace_id: &str, old_uid: Uuid,
     conn.commit().await.expect("commit changelog read");
 }
 
-async fn erase_payload_hash_exists(pool: &PgPool, workspace_id: &str, uid: Uuid) {
-    let mut conn = scoped_conn(pool, workspace_id).await;
+async fn erase_payload_hash_exists(pool: &PgPool, storage_partition_id: &str, uid: Uuid) {
+    let mut conn = scoped_conn(pool, storage_partition_id).await;
     let payload = sqlx::query(
         "SELECT payload FROM moa.graph_changelog WHERE target_uid = $1 AND op = 'erase'",
     )
@@ -236,13 +246,13 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7().to_string();
-    let graph = graph_store(session_store.pool(), &workspace_id);
-    seed_workspace_embedder_state(session_store.pool(), &workspace_id).await;
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    seed_workspace_embedder_state(session_store.pool(), &storage_partition_id).await;
 
     let t0 = Utc::now() - Duration::minutes(5);
     let old = node_intent(
-        &workspace_id,
+        &storage_partition_id,
         NodeLabel::Fact,
         "old write protocol fact",
         t0,
@@ -253,7 +263,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         .await
         .expect("create old node");
     let target = node_intent(
-        &workspace_id,
+        &storage_partition_id,
         NodeLabel::Entity,
         "target write protocol entity",
         t0,
@@ -264,17 +274,16 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         .await
         .expect("create target node");
     assert_eq!(
-        workspace_version(session_store.pool(), &workspace_id).await,
+        workspace_version(session_store.pool(), &storage_partition_id).await,
         2
     );
 
     let vector = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        tenant_scope(workspace_id.clone()),
+        tenant_scope(storage_partition_id.clone()),
     );
     let matches = vector
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.clone()),
             embedding: basis_vector(0),
             k: 1,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -287,7 +296,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
     assert_eq!(matches.first().map(|row| row.uid), Some(old_uid));
 
     let new = node_intent(
-        &workspace_id,
+        &storage_partition_id,
         NodeLabel::Fact,
         "new write protocol fact",
         t0 + Duration::minutes(1),
@@ -298,24 +307,23 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         .await
         .expect("supersede node");
     assert_eq!(
-        node_valid_to(session_store.pool(), &workspace_id, old_uid).await,
+        node_valid_to(session_store.pool(), &storage_partition_id, old_uid).await,
         Some(new.valid_from)
     );
     assert_eq!(
-        node_valid_to(session_store.pool(), &workspace_id, new_uid).await,
+        node_valid_to(session_store.pool(), &storage_partition_id, new_uid).await,
         None
     );
     assert_eq!(
-        vector_count(session_store.pool(), &workspace_id, old_uid).await,
+        vector_count(session_store.pool(), &storage_partition_id, old_uid).await,
         0
     );
     assert_eq!(
-        vector_count(session_store.pool(), &workspace_id, new_uid).await,
+        vector_count(session_store.pool(), &storage_partition_id, new_uid).await,
         1
     );
     let historical_vector_matches = vector
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.clone()),
             embedding: basis_vector(0),
             k: 5,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -331,16 +339,28 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
             .all(|row| row.uid != old_uid),
         "superseded pgvector row is deleted, so old uid should not be returned"
     );
-    supersedes_edge_exists(session_store.pool(), &workspace_id, old_uid, new_uid).await;
-    linked_supersede_rows(session_store.pool(), &workspace_id, old_uid, new_uid).await;
+    supersedes_edge_exists(
+        session_store.pool(),
+        &storage_partition_id,
+        old_uid,
+        new_uid,
+    )
+    .await;
+    linked_supersede_rows(
+        session_store.pool(),
+        &storage_partition_id,
+        old_uid,
+        new_uid,
+    )
+    .await;
     assert_eq!(
-        workspace_version(session_store.pool(), &workspace_id).await,
+        workspace_version(session_store.pool(), &storage_partition_id).await,
         4
     );
 
     graph
         .create_edge(edge_intent(
-            &workspace_id,
+            &storage_partition_id,
             EdgeLabel::RelatesTo,
             new_uid,
             target_uid,
@@ -349,7 +369,7 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         .await
         .expect("create graph edge");
     assert_eq!(
-        workspace_version(session_store.pool(), &workspace_id).await,
+        workspace_version(session_store.pool(), &storage_partition_id).await,
         5
     );
 
@@ -358,16 +378,16 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
         .await
         .expect("invalidate node");
     assert!(
-        node_valid_to(session_store.pool(), &workspace_id, new_uid)
+        node_valid_to(session_store.pool(), &storage_partition_id, new_uid)
             .await
             .is_some()
     );
     assert_eq!(
-        vector_count(session_store.pool(), &workspace_id, new_uid).await,
+        vector_count(session_store.pool(), &storage_partition_id, new_uid).await,
         0
     );
     assert_eq!(
-        workspace_version(session_store.pool(), &workspace_id).await,
+        workspace_version(session_store.pool(), &storage_partition_id).await,
         6
     );
 
@@ -382,9 +402,9 @@ async fn write_protocol_exercises_create_supersede_edge_invalidate_and_purge() {
             .expect("get purged node")
             .is_none()
     );
-    erase_payload_hash_exists(session_store.pool(), &workspace_id, new_uid).await;
+    erase_payload_hash_exists(session_store.pool(), &storage_partition_id, new_uid).await;
     assert_eq!(
-        workspace_version(session_store.pool(), &workspace_id).await,
+        workspace_version(session_store.pool(), &storage_partition_id).await,
         7
     );
 
@@ -403,12 +423,12 @@ async fn write_protocol_creates_every_edge_label() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7().to_string();
-    let graph = graph_store(session_store.pool(), &workspace_id);
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
     let now = Utc::now();
     let start_uid = graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Fact,
             "edge-label source",
             now,
@@ -418,7 +438,7 @@ async fn write_protocol_creates_every_edge_label() {
         .expect("create source node");
     let end_uid = graph
         .create_node(node_intent(
-            &workspace_id,
+            &storage_partition_id,
             NodeLabel::Entity,
             "edge-label target",
             now,
@@ -429,7 +449,7 @@ async fn write_protocol_creates_every_edge_label() {
     let labels = EdgeLabel::ALL;
 
     for (index, label) in labels.iter().copied().enumerate() {
-        let intent = edge_intent(&workspace_id, label, start_uid, end_uid, index);
+        let intent = edge_intent(&storage_partition_id, label, start_uid, end_uid, index);
         let expected_uid = intent.uid;
         let actual_uid = graph
             .create_edge(intent)
@@ -438,7 +458,7 @@ async fn write_protocol_creates_every_edge_label() {
         assert_eq!(actual_uid, expected_uid);
     }
     assert_eq!(
-        workspace_version(session_store.pool(), &workspace_id).await,
+        workspace_version(session_store.pool(), &storage_partition_id).await,
         2 + labels.len() as i64
     );
 
@@ -454,11 +474,11 @@ async fn rollback_on_failure_removes_age_and_sidecar_rows() {
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7().to_string();
-    let graph = graph_store(session_store.pool(), &workspace_id);
-    seed_workspace_embedder_state(session_store.pool(), &workspace_id).await;
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let graph = graph_store(session_store.pool(), &storage_partition_id);
+    seed_workspace_embedder_state(session_store.pool(), &storage_partition_id).await;
     let bad = node_intent(
-        &workspace_id,
+        &storage_partition_id,
         NodeLabel::Entity,
         "bad vector rollback",
         Utc::now(),
@@ -471,7 +491,7 @@ async fn rollback_on_failure_removes_age_and_sidecar_rows() {
         .await
         .expect_err("bad vector dimension should fail create_node");
 
-    let mut conn = scoped_conn(session_store.pool(), &workspace_id).await;
+    let mut conn = scoped_conn(session_store.pool(), &storage_partition_id).await;
     let sidecar_count =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM moa.node_index WHERE uid = $1")
             .bind(uid)

@@ -71,15 +71,14 @@ pub(super) fn configured_model_capabilities(
 }
 
 pub(super) fn synthetic_session_meta(state: &SubAgentVoState) -> Result<SessionMeta, HandlerError> {
-    let workspace_id = state
-        .workspace_id
-        .as_ref()
-        .ok_or_else(|| TerminalError::new("sub-agent workspace_id missing"))?;
+    let tenant_id = state
+        .tenant_id
+        .ok_or_else(|| TerminalError::new("sub-agent tenant_id missing"))?;
     Ok(SessionMeta {
         id: state
             .parent_session
             .ok_or_else(|| TerminalError::new("sub-agent parent session missing"))?,
-        tenant_id: tenant_id_from_workspace_id(workspace_id)?,
+        tenant_id,
         model: state
             .model
             .clone()
@@ -88,20 +87,6 @@ pub(super) fn synthetic_session_meta(state: &SubAgentVoState) -> Result<SessionM
         updated_at: Utc::now(),
         ..SessionMeta::default()
     })
-}
-
-fn tenant_id_from_workspace_id(
-    workspace_id: &WorkspaceId,
-) -> Result<moa_core::TenantId, HandlerError> {
-    uuid::Uuid::parse_str(workspace_id.as_str())
-        .map(moa_core::TenantId::from)
-        .map_err(|error| {
-            TerminalError::new_with_code(
-                400,
-                format!("sub-agent workspace_id must be a tenant UUID: {error}"),
-            )
-            .into()
-        })
 }
 
 const SUB_AGENT_SYSTEM_PROMPT: &str = "\

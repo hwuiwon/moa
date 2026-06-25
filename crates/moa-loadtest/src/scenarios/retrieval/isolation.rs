@@ -61,38 +61,35 @@ pub(super) async fn attack_unset_guc(stack: &Stack) -> Result<(), String> {
 }
 
 pub(super) async fn attack_cte_leak(stack: &Stack) -> Result<(), String> {
-    let workspace_a = stack.workspaces[0].workspace_id;
-    let workspace_b = stack.workspaces[1].workspace_id;
-    let mut conn = app_scoped_conn(&stack.pool, workspace_a)
+    let tenant_a = stack.tenants[0].tenant_id;
+    let tenant_b = stack.tenants[1].tenant_id;
+    let mut conn = app_scoped_conn(&stack.pool, tenant_a)
         .await
         .map_err(display)?;
     let leaked = sqlx::query_scalar::<_, i64>(
-        "WITH cte AS (SELECT * FROM moa.node_index) SELECT count(*) FROM cte WHERE workspace_id = $1",
+        "WITH cte AS (SELECT * FROM moa.node_index) SELECT count(*) FROM cte WHERE storage_partition_id = $1",
     )
-    .bind(workspace_b.to_string())
+    .bind(tenant_b.to_string())
     .fetch_one(conn.as_mut())
     .await
     .map_err(display)?;
     conn.commit().await.map_err(display)?;
     (leaked == 0)
         .then_some(())
-        .ok_or_else(|| format!("CTE leaked {leaked} workspace B rows"))
+        .ok_or_else(|| format!("CTE leaked {leaked} tenant B rows"))
 }
 
 pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
-    let workspace_a = stack.workspaces[0].workspace_id;
-    let workspace_b = stack.workspaces[1].workspace_id;
-    let embedding = first_embedding(&stack.pool, workspace_a)
+    let tenant_a = stack.tenants[0].tenant_id;
+    let tenant_b = stack.tenants[1].tenant_id;
+    let embedding = first_embedding(&stack.pool, tenant_a)
         .await
         .map_err(display)?;
-    let vector = PgvectorStore::new_for_app_role(
-        stack.pool.clone(),
-        ScopeContext::tenant(TenantId::from(workspace_b)),
-    );
+    let vector =
+        PgvectorStore::new_for_app_role(stack.pool.clone(), ScopeContext::tenant(tenant_b));
     let matches = moa_memory_vector::VectorStore::knn(
         &vector,
         &moa_memory_vector::VectorQuery {
-            workspace_id: Some(workspace_b.to_string()),
             embedding,
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -110,9 +107,9 @@ pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
 }
 
 pub(super) async fn attack_changelog_leak(stack: &Stack) -> Result<(), String> {
-    let a_uid = stack.workspaces[0].first_uid;
-    let workspace_b = stack.workspaces[1].workspace_id;
-    let mut conn = app_scoped_conn(&stack.pool, workspace_b)
+    let a_uid = stack.tenants[0].first_uid;
+    let tenant_b = stack.tenants[1].tenant_id;
+    let mut conn = app_scoped_conn(&stack.pool, tenant_b)
         .await
         .map_err(display)?;
     let count = sqlx::query_scalar::<_, i64>(
@@ -125,14 +122,14 @@ pub(super) async fn attack_changelog_leak(stack: &Stack) -> Result<(), String> {
     conn.commit().await.map_err(display)?;
     (count == 0)
         .then_some(())
-        .ok_or_else(|| format!("graph_changelog leaked {count} workspace A rows"))
+        .ok_or_else(|| format!("graph_changelog leaked {count} tenant A rows"))
 }
 
 pub(super) async fn attack_dlq_leak(stack: &Stack) -> Result<(), String> {
-    let workspace_a = stack.workspaces[0].workspace_id;
-    let workspace_b = stack.workspaces[1].workspace_id;
-    let a_dlq = first_dlq(&stack.pool, workspace_a).await.map_err(display)?;
-    let mut conn = app_scoped_conn(&stack.pool, workspace_b)
+    let tenant_a = stack.tenants[0].tenant_id;
+    let tenant_b = stack.tenants[1].tenant_id;
+    let a_dlq = first_dlq(&stack.pool, tenant_a).await.map_err(display)?;
+    let mut conn = app_scoped_conn(&stack.pool, tenant_b)
         .await
         .map_err(display)?;
     let leaked =
@@ -144,31 +141,33 @@ pub(super) async fn attack_dlq_leak(stack: &Stack) -> Result<(), String> {
     conn.commit().await.map_err(display)?;
     (leaked == 0)
         .then_some(())
-        .ok_or_else(|| format!("ingest_dlq leaked workspace A row {a_dlq}"))
+        .ok_or_else(|| format!("ingest_dlq leaked tenant A row {a_dlq}"))
 }
 
-pub(super) async fn seed_attack_dlq(pool: &PgPool, workspace_id: Uuid) -> Result<()> {
-    sqlx::query("INSERT INTO moa.ingest_dlq (workspace_id, payload, error) VALUES ($1, $2, $3)")
-        .bind(workspace_id.to_string())
-        .bind(json!({ "source": "perf_gate" }))
-        .bind("perf_gate_fixture")
-        .execute(pool)
-        .await
-        .context("seed perf gate DLQ fixture")?;
+pub(super) async fn seed_attack_dlq(pool: &PgPool, tenant_id: TenantId) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO moa.ingest_dlq (storage_partition_id, payload, error) VALUES ($1, $2, $3)",
+    )
+    .bind(tenant_id.to_string())
+    .bind(json!({ "source": "perf_gate" }))
+    .bind("perf_gate_fixture")
+    .execute(pool)
+    .await
+    .context("seed perf gate DLQ fixture")?;
     Ok(())
 }
 
 pub(super) async fn first_embedding(
     pool: &PgPool,
-    workspace_id: Uuid,
+    tenant_id: TenantId,
 ) -> Result<Vec<f32>, sqlx::Error> {
-    let mut conn = app_scoped_conn(pool, workspace_id)
+    let mut conn = app_scoped_conn(pool, tenant_id)
         .await
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
     let row = sqlx::query(
-        "SELECT embedding::vector::text AS embedding FROM moa.embeddings WHERE workspace_id = $1 LIMIT 1",
+        "SELECT embedding::vector::text AS embedding FROM moa.embeddings WHERE storage_partition_id = $1 LIMIT 1",
     )
-    .bind(workspace_id.to_string())
+    .bind(tenant_id.to_string())
     .fetch_one(conn.as_mut())
     .await?;
     conn.commit()
@@ -178,11 +177,11 @@ pub(super) async fn first_embedding(
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))
 }
 
-pub(super) async fn first_dlq(pool: &PgPool, workspace_id: Uuid) -> Result<i64, sqlx::Error> {
+pub(super) async fn first_dlq(pool: &PgPool, tenant_id: TenantId) -> Result<i64, sqlx::Error> {
     let row = sqlx::query_scalar::<_, i64>(
-        "SELECT dlq_id FROM moa.ingest_dlq WHERE workspace_id = $1 ORDER BY dlq_id LIMIT 1",
+        "SELECT dlq_id FROM moa.ingest_dlq WHERE storage_partition_id = $1 ORDER BY dlq_id LIMIT 1",
     )
-    .bind(workspace_id.to_string())
+    .bind(tenant_id.to_string())
     .fetch_one(pool)
     .await?;
     Ok(row)
@@ -190,9 +189,9 @@ pub(super) async fn first_dlq(pool: &PgPool, workspace_id: Uuid) -> Result<i64, 
 
 pub(super) async fn app_scoped_conn<'a>(
     pool: &'a PgPool,
-    workspace_id: Uuid,
+    tenant_id: TenantId,
 ) -> moa_core::Result<ScopedConn<'a>> {
-    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
+    let scope = ScopeContext::tenant(tenant_id);
     let mut conn = ScopedConn::begin(pool, &scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())

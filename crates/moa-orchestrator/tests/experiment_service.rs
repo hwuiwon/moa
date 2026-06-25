@@ -16,7 +16,7 @@ use moa_core::wire::{
     ExperimentTrialSummary, ExperimentTrialsRequest, ExperimentTrialsResponse,
     ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{ActionRuleScope, ModelId, SessionId, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, ModelId, SessionId, StoragePartitionId, TenantId};
 use moa_experiments::app::{
     ExperimentLearningProposalEvidence, build_experiment_learning_candidate,
 };
@@ -477,12 +477,12 @@ fn experiments_exposes_propose_improvements_without_candidate_read_endpoint() {
 #[test]
 fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
     // Pins: proposal candidates preserve experiment evidence without promoting learned state.
-    let workspace_id = WorkspaceId::new("workspace-a");
+    let storage_partition_id = StoragePartitionId::new("workspace-a");
     let tenant_id = TenantId::new();
-    let run = completed_run_record(workspace_id.clone());
+    let run = completed_run_record(storage_partition_id.clone());
     let trials = vec![completed_trial_record(run.run_uid)];
     let score_summary = moa_scoring::ScoreSummary {
-        workspace_id: workspace_id.clone(),
+        tenant_id,
         run_id: run.score_run_id,
         rows: vec![moa_scoring::ScoreSummaryRow {
             name: "quality".to_string(),
@@ -506,7 +506,6 @@ fn experiment_proposal_payload_carries_evidence_and_stays_proposed() {
 
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
         tenant_id,
-        workspace_id,
         run: &run,
         completed_trials: &trials,
         run_score_summary: &score_summary,
@@ -1056,7 +1055,7 @@ fn experiment_trial_run_supports_current_workflow_runtime_without_fake_stepping(
 
 #[test]
 fn experiment_score_handlers_resolve_run_uids_through_scoped_experiment_runs() {
-    // Pins: score APIs reject cross-workspace experiment IDs by resolving run_uid through a scoped experiment load.
+    // Pins: score APIs reject cross-tenant experiment IDs by resolving run_uid through a scoped experiment load.
     let service_source = normalized_source(include_str!("../src/services/experiments.rs"));
     let app_source = normalized_source(include_str!("../../moa-experiments/src/app.rs"));
 
@@ -1067,7 +1066,6 @@ fn experiment_score_handlers_resolve_run_uids_through_scoped_experiment_runs() {
     assert!(
         app_source.contains(&normalized_source(
             "let scope = tenant_scope(request.tenant_id);
-             let workspace_id = workspace_id_for_tenant(request.tenant_id);
              let run = load_required_run(&ExperimentStore::new(pool.clone()), &scope, request.run_uid).await?;"
         )),
         "experiment app must load the experiment run in the requested tenant before reading scores"
@@ -1089,7 +1087,6 @@ fn experiment_score_handlers_resolve_run_uids_through_scoped_experiment_runs() {
     assert!(
         app_source.contains(&normalized_source(
             "let scope = tenant_scope(request.tenant_id);
-             let workspace_id = workspace_id_for_tenant(request.tenant_id);
              let store = ExperimentStore::new(pool.clone());
              let base_run = load_required_run(&store, &scope, request.base_run_uid).await?;
              let new_run = load_required_run(&store, &scope, request.new_run_uid).await?;"
@@ -1185,13 +1182,13 @@ fn score_row(
     }
 }
 
-fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
+fn completed_run_record(storage_partition_id: StoragePartitionId) -> ExperimentRunRecord {
     ExperimentRunRecord {
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::new(),
         },
         run_uid: fixture_uuid(1),
-        name: format!("proposal fixture {workspace_id}"),
+        name: format!("proposal fixture {storage_partition_id}"),
         target_kind: ExperimentTargetKind::AgentLoop,
         status: ExperimentRunStatus::Completed,
         target: ExperimentTarget::AgentLoop {

@@ -69,7 +69,7 @@ pub mod node {
             pub const $name: Cypher = Cypher::new(cypher_sql!(
                 "CREATE (n:",
                 $label,
-                " {uid: $uid, workspace_id: $workspace_id, user_id: $user_id, ",
+                " {uid: $uid, storage_partition_id: $storage_partition_id, user_id: $user_id, ",
                 "scope: $scope, name: $name, pii_class: $pii_class, ",
                 "valid_from: $valid_from, created_at: $created_at, ",
                 "properties: $properties}) RETURN n.uid AS result"
@@ -96,11 +96,11 @@ pub mod node {
          SET old.valid_to = $now, old.invalidated_at = $now, \
              old.invalidated_by = $actor, old.invalidated_reason = 'superseded' \
          WITH old \
-         CREATE (new {uid: $uid, workspace_id: $workspace_id, user_id: $user_id, \
+         CREATE (new {uid: $uid, storage_partition_id: $storage_partition_id, user_id: $user_id, \
                       scope: $scope, name: $name, pii_class: $pii_class, \
                       valid_from: $valid_from, created_at: $created_at, \
                       properties: $properties}) \
-         CREATE (new)-[:SUPERSEDES {uid: $edge_uid, workspace_id: $workspace_id, \
+         CREATE (new)-[:SUPERSEDES {uid: $edge_uid, storage_partition_id: $storage_partition_id, \
                                     user_id: $user_id, scope: $scope}]->(old) \
          RETURN new.uid AS result"
     ));
@@ -118,7 +118,7 @@ pub mod node {
         "MATCH (old {uid: $old_uid}), (new {uid: $new_uid}) \
          SET old.valid_to = $valid_to, old.invalidated_at = $invalidated_at, \
              old.invalidated_by = $actor, old.invalidated_reason = $reason \
-         CREATE (new)-[:SUPERSEDES {uid: $edge_uid, workspace_id: $workspace_id, \
+         CREATE (new)-[:SUPERSEDES {uid: $edge_uid, storage_partition_id: $storage_partition_id, \
                                     user_id: $user_id, scope: $scope}]->(old) \
          RETURN old.uid AS result"
     ));
@@ -141,7 +141,7 @@ pub mod edge {
                 "MATCH (a {uid: $start_uid}), (b {uid: $end_uid}) ",
                 "CREATE (a)-[r:",
                 $label,
-                " {uid: $uid, workspace_id: $workspace_id, user_id: $user_id, ",
+                " {uid: $uid, storage_partition_id: $storage_partition_id, user_id: $user_id, ",
                 "scope: $scope, properties: $properties}]->(b) RETURN r.uid AS result"
             ));
         };

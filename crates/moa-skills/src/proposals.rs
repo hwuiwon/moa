@@ -5,7 +5,7 @@ use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_core::{
     ActionRuleScope, LearningCandidate, MoaError, Result, SessionMeta, SkillMetadata, TaskFacetSet,
-    TaskFingerprint, WorkspaceId,
+    TaskFingerprint,
 };
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
@@ -117,13 +117,12 @@ pub(crate) async fn store_skill_draft_proposal(
     let scope = ActionRuleScope::Tenant {
         tenant_id: session.tenant_id,
     };
-    let candidate_workspace_id = WorkspaceId::new(session.tenant_id.to_string());
     let mut conn =
         ScopedConn::begin(store.pool(), &ScopeContext::tenant(session.tenant_id)).await?;
     acquire_proposal_advisory_lock(conn.as_mut(), candidate_id).await?;
 
     if let Some(existing) = store
-        .get_learning_candidate_with_conn(conn.as_mut(), &candidate_workspace_id, candidate_id)
+        .get_learning_candidate_with_conn(conn.as_mut(), &session.tenant_id, candidate_id)
         .await?
     {
         let proposal = proposal_from_existing(existing, metadata, operation)?;

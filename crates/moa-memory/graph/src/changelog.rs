@@ -9,10 +9,10 @@ use crate::{GraphError, Result};
 /// One append-only mutation record for `moa.graph_changelog`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangelogRecord {
-    /// Tenant boundary for tenant and contact rows.
-    pub workspace_id: Option<String>,
-    /// Contact owner inside a tenant for contact-private rows.
-    pub user_id: Option<String>,
+    /// Storage partition boundary for tenant and contact rows.
+    pub storage_partition_id: Option<String>,
+    /// Contact owner for contact-private rows.
+    pub contact_id: Option<String>,
     /// Expected scope tier: `global`, `tenant`, or `contact`.
     pub scope: String,
     /// Principal identifier that triggered the change.
@@ -41,7 +41,7 @@ pub struct ChangelogRecord {
 
 /// Inserts a changelog row and returns its monotonic change id.
 ///
-/// `moa.graph_changelog` owns the workspace-version bump through an `AFTER INSERT` trigger, so
+/// `moa.graph_changelog` owns the storage-partition version bump through an `AFTER INSERT` trigger, so
 /// callers only need to write the immutable outbox record inside the same transaction as the graph
 /// mutation.
 pub async fn write_and_bump(conn: &mut PgConnection, rec: ChangelogRecord) -> Result<i64> {
@@ -49,14 +49,14 @@ pub async fn write_and_bump(conn: &mut PgConnection, rec: ChangelogRecord) -> Re
     let row = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO moa.graph_changelog
-            (workspace_id, user_id, actor_id, actor_kind, op, target_kind, target_label,
+            (storage_partition_id, user_id, actor_id, actor_kind, op, target_kind, target_label,
              target_uid, payload, redaction_marker, pii_class, audit_metadata, cause_change_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING change_id
         "#,
     )
-    .bind(rec.workspace_id.as_deref())
-    .bind(rec.user_id.as_deref())
+    .bind(rec.storage_partition_id.as_deref())
+    .bind(rec.contact_id.as_deref())
     .bind(rec.actor_id.as_deref())
     .bind(&rec.actor_kind)
     .bind(&rec.op)
@@ -74,7 +74,7 @@ pub async fn write_and_bump(conn: &mut PgConnection, rec: ChangelogRecord) -> Re
 }
 
 fn validate_scope(rec: &ChangelogRecord) -> Result<()> {
-    let expected = match (&rec.workspace_id, &rec.user_id) {
+    let expected = match (&rec.storage_partition_id, &rec.contact_id) {
         (None, None) => "global",
         (Some(_), None) => "tenant",
         (Some(_), Some(_)) => "contact",

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     Event, EventRecord, ExperienceRecord, ExperienceResource, QueryRewriteResult,
     SegmentAssessment, SessionMeta, TaskFacetSet, TaskFingerprint, TaskSegment, UserId,
-    WorkingContext, WorkspaceId,
+    WorkingContext,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -69,7 +69,6 @@ pub fn experience_from_assessment(
         segment_id: segment.id,
         session_id: segment.session_id,
         tenant_id: session.tenant_id,
-        workspace_id: experience_workspace_id(session),
         user_id: experience_user_id(session),
         task_summary: Some(summary.to_string()),
         task_fingerprint: fingerprint,
@@ -88,10 +87,6 @@ pub fn experience_from_assessment(
         extraction_policy_version: EXPERIENCE_EXTRACTION_POLICY_VERSION.to_string(),
         created_at: now,
     }
-}
-
-fn experience_workspace_id(session: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(session.tenant_id.to_string())
 }
 
 fn experience_user_id(session: &SessionMeta) -> UserId {

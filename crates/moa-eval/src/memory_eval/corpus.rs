@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use moa_core::{SessionId, UserId, WorkspaceId};
+use moa_core::{SessionId, StoragePartitionId, UserId};
 use moa_memory_graph::PiiClass;
 use moa_memory_types::ScopeTier;
 use serde::de::DeserializeOwned;
@@ -72,8 +72,8 @@ pub enum TranscriptStyle {
 /// A ledger-first fact that probes should be able to retrieve or suppress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerFact {
-    /// Workspace whose graph scope contains this fact.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition whose graph scope contains this fact.
+    pub storage_partition_id: StoragePartitionId,
     /// User who owns the fact for user scope, or authored it for broader scopes.
     pub user_id: UserId,
     /// Graph-memory scope tier for this fact.
@@ -117,7 +117,10 @@ pub struct LedgerFact {
 impl LedgerFact {
     /// Validates field-level invariants for one ledger fact.
     pub fn validate(&self) -> Result<()> {
-        ensure_non_empty("ledger fact workspace_id", self.workspace_id.as_str())?;
+        ensure_non_empty(
+            "ledger fact storage_partition_id",
+            self.storage_partition_id.as_str(),
+        )?;
         ensure_non_empty("ledger fact user_id", self.user_id.as_str())?;
         ensure_non_empty("ledger fact fact_id", &self.fact_id)?;
         ensure_non_empty("ledger fact subject", &self.subject)?;
@@ -153,8 +156,8 @@ impl LedgerFact {
 pub struct SyntheticSession {
     /// Session identifier used by source provenance fields.
     pub session_id: SessionId,
-    /// Workspace that owns this session.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition that owns this session.
+    pub storage_partition_id: StoragePartitionId,
     /// User that produced this session.
     pub user_id: UserId,
     /// Ordered synthetic turns in the session.
@@ -164,7 +167,10 @@ pub struct SyntheticSession {
 impl SyntheticSession {
     /// Validates the session and its turns.
     pub fn validate(&self) -> Result<()> {
-        ensure_non_empty("synthetic session workspace_id", self.workspace_id.as_str())?;
+        ensure_non_empty(
+            "synthetic session storage_partition_id",
+            self.storage_partition_id.as_str(),
+        )?;
         ensure_non_empty("synthetic session user_id", self.user_id.as_str())?;
         if self.turns.is_empty() {
             return invalid_config(format!(
@@ -217,8 +223,8 @@ pub struct Probe {
     pub probe_id: String,
     /// Probe behavior class.
     pub probe_type: ProbeType,
-    /// Workspace to query.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition to query.
+    pub storage_partition_id: StoragePartitionId,
     /// User asking the query.
     pub user_id: UserId,
     /// Natural-language query passed into retrieval.
@@ -250,7 +256,10 @@ impl Probe {
     /// Validates fields that do not require access to the ledger.
     pub fn validate(&self) -> Result<()> {
         ensure_non_empty("probe probe_id", &self.probe_id)?;
-        ensure_non_empty("probe workspace_id", self.workspace_id.as_str())?;
+        ensure_non_empty(
+            "probe storage_partition_id",
+            self.storage_partition_id.as_str(),
+        )?;
         ensure_non_empty("probe user_id", self.user_id.as_str())?;
         ensure_non_empty("probe query", &self.query)?;
         if let Some(rewrite_query) = &self.rewrite_query {
@@ -287,8 +296,8 @@ pub enum ProbeType {
     Abstention,
     /// Verify user-private memory does not leak across users.
     CrossUserIsolation,
-    /// Recall workspace-shared memory for a workspace member.
-    WorkspaceSharedFact,
+    /// Recall tenant-shared memory for a tenant member.
+    TenantSharedFact,
     /// Combine multiple retrieved facts.
     MultiHop,
     /// Retrieve the fact valid at a requested historical instant.
@@ -560,7 +569,7 @@ fn io_error(path: &Path, source: std::io::Error) -> EvalError {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use moa_core::{SessionId, UserId, WorkspaceId};
+    use moa_core::{SessionId, StoragePartitionId, UserId};
     use moa_memory_graph::PiiClass;
     use moa_memory_types::ScopeTier;
     use uuid::Uuid;
@@ -574,7 +583,7 @@ mod tests {
     fn ledger_fact_deserializes_without_optional_lifecycle_fields() {
         // Pins: old corpus ledger rows remain readable after adding lifecycle metadata.
         let raw = serde_json::json!({
-            "workspace_id": "workspace-a",
+            "storage_partition_id": "tenant-a",
             "user_id": "user-a",
             "scope": "tenant",
             "fact_id": "fact-a",
@@ -644,7 +653,7 @@ mod tests {
         session_suffix: u128,
     ) -> LedgerFact {
         LedgerFact {
-            workspace_id: WorkspaceId::new("workspace-a"),
+            storage_partition_id: StoragePartitionId::new("tenant-a"),
             user_id: UserId::new("user-a"),
             scope: ScopeTier::Contact,
             fact_id: fact_id.to_string(),

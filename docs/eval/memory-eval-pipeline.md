@@ -103,7 +103,7 @@ matches the ledger scope; `mixed` counts as a mismatch.
 `scope_match_rate_contact` and `scope_match_rate_tenant` split that tally by
 expected ledger scope so a one-sided privacy or recall drift cannot hide behind
 the overall rate. `extraction_precision` is the fraction of stored `Fact` nodes
-in the eval workspaces that map back to a ledger fact, including superseded
+in the eval tenants that map back to a ledger fact, including superseded
 nodes in both numerator and denominator. `entity_fragmentation` is active
 `Entity` nodes over distinct normalized ledger subject/object mentions in their
 storage scopes. A value near 1.0 means mentions are neither fragmented nor
@@ -188,7 +188,7 @@ blocks its family's other eras. Without this the corpus issued identical
 present-tense queries that expected three different gold facts, capping those
 slices near one third. Supersession and contradiction marked transcripts also
 carry the scope marker derived from the ledger scope; omitting it stored
-workspace facts as user scope and made them invisible to other users' probes.
+tenant facts as contact scope and made them invisible to other contacts' probes.
 
 The PR natural corpus also plants verbatim restatement pairs in later sessions
 for the same user. These restating facts carry `restates: <canonical fact_id>`
@@ -234,10 +234,11 @@ env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --output target/memory-eval/natural-recorded-consolidated.json
 ```
 
-The runner invokes `moa_memory_lifecycle::consolidate_workspace` once per eval
-workspace with the corpus reference time and the eval embedding provider, then
-runs a second pass in the same invocation. The second pass must report no
-mutating work; otherwise the run fails as non-idempotent. For every
+The runner invokes the storage-internal
+`moa_memory_lifecycle::consolidate_tenant` function once per eval tenant
+with the corpus reference time and the eval embedding provider, then runs a
+second pass in the same invocation. The second pass must report no mutating
+work; otherwise the run fails as non-idempotent. For every
 `restates` pair, the runner verifies via the gold UID map and a direct active
 row count that exactly one node remains active.
 
@@ -298,12 +299,12 @@ enabled.
 
 Lineage capture is dark by default. When
 `memory.retrieval.lineage_enabled = true`, retrieval writes best-effort rows to
-`moa.retrieval_lineage` with workspace, user, session, turn sequence, UID,
-rank, and timestamp; write errors trace and never fail retrieval. The dark
-scoring job is manual:
+`moa.retrieval_lineage` with tenant storage key, contact, session, turn
+sequence, UID, rank, and timestamp; write errors trace and never fail
+retrieval. The dark scoring job is manual:
 
 ```bash
-cargo run -p xtask -- compute-memory-quality-scores --workspace <workspace-uuid>
+cargo run -p xtask -- compute-memory-quality-scores --tenant-id <tenant-uuid>
 ```
 
 It applies Beta(1,1) smoothing, `(1 + successes) / (2 + uses)`, over lineage

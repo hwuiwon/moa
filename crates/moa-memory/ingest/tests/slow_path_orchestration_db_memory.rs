@@ -15,12 +15,11 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use support::{
-    SLOW_PATH_CONTACT_ID, TEST_LOCK, active_user_entity_rows, active_user_fact_rows,
-    active_workspace_entity_rows, active_workspace_fact_rows, configured_test_db,
-    contradiction_edge_count, create_changelog_payloads, create_fact, entity_resolution_edges,
-    entity_rows, fact_rows, fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence,
-    node_valid_to, relates_to_edges, supersede_protocol_count, supersedes_edge_exists, turn,
-    user_fact_rows,
+    SLOW_PATH_CONTACT_ID, TEST_LOCK, active_tenant_entity_rows, active_tenant_fact_rows,
+    active_user_entity_rows, active_user_fact_rows, configured_test_db, contradiction_edge_count,
+    create_changelog_payloads, create_fact, entity_resolution_edges, entity_rows, fact_rows,
+    fixed_time, ingest_ctx, ingest_ctx_with_pii, node_confidence, node_valid_to, relates_to_edges,
+    supersede_protocol_count, supersedes_edge_exists, turn, user_fact_rows,
 };
 
 #[derive(Debug, Deserialize)]
@@ -43,8 +42,8 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
     let expected: ExpectedFacts =
         serde_json::from_str(include_str!("support/fixtures/expected_facts_simple.json"))
             .expect("expected facts parse");
@@ -52,7 +51,7 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
     let report = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             include_str!("support/fixtures/document_simple.md"),
             1,
         ),
@@ -65,12 +64,12 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
     assert_eq!(
-        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+        active_tenant_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         0
     );
-    let rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    let rows = active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(rows.len(), expected.facts.len());
     for expected in expected.facts {
         let row = rows
@@ -91,20 +90,20 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
         assert_eq!(properties["object"], expected.object);
         assert_eq!(row.pii_class.as_str(), expected.pii_class);
         assert_eq!(
-            node_confidence(test_db.store().pool(), workspace_id, row.uid).await,
+            node_confidence(test_db.store().pool(), storage_partition_id, row.uid).await,
             expected.confidence
         );
         assert_eq!(row.scope.as_str(), "user");
-        assert_eq!(row.user_id.as_deref(), Some(SLOW_PATH_CONTACT_ID));
+        assert_eq!(row.contact_id.as_deref(), Some(SLOW_PATH_CONTACT_ID));
     }
     assert_eq!(
-        active_user_entity_rows(test_db.store().pool(), workspace_id)
+        active_user_entity_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         6
     );
     assert_eq!(
-        active_workspace_entity_rows(test_db.store().pool(), workspace_id)
+        active_tenant_entity_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         0
@@ -112,20 +111,20 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
 }
 
 #[tokio::test]
-async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
+async fn slow_path_respects_user_default_and_tenant_shared_scope_markers() {
     // Pins: unmarked and user-private slow-path facts stay user scoped, while explicit
-    // workspace-shared markers write workspace rows with the marker stripped.
+    // tenant-shared markers write tenant rows with the marker stripped.
     let _guard = TEST_LOCK.lock().await;
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             "Fact: editor_theme uses solarized\nFact: contact private shell uses zsh\nFact: tenant shared API runs_on_port 3000",
             10,
         ),
@@ -137,17 +136,17 @@ async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
     assert_eq!(report.superseded, 0);
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
-    let user_rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
-    let workspace_rows = active_workspace_fact_rows(test_db.store().pool(), workspace_id).await;
+    let user_rows = active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;
+    let tenant_rows = active_tenant_fact_rows(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(user_rows.len(), 2);
-    assert_eq!(workspace_rows.len(), 1);
+    assert_eq!(tenant_rows.len(), 1);
     assert_eq!(
         user_rows
             .iter()
             .map(|row| (
                 row.name.as_str(),
                 row.scope.as_str(),
-                row.user_id.as_deref()
+                row.contact_id.as_deref()
             ))
             .collect::<Vec<_>>(),
         vec![
@@ -155,22 +154,22 @@ async fn slow_path_respects_user_default_and_workspace_shared_scope_markers() {
             ("shell", "contact", Some(SLOW_PATH_CONTACT_ID)),
         ]
     );
-    assert_eq!(workspace_rows[0].name, "API");
-    assert_eq!(workspace_rows[0].scope.as_str(), "workspace");
-    assert_eq!(workspace_rows[0].user_id.as_deref(), None);
-    let workspace_properties = workspace_rows[0]
+    assert_eq!(tenant_rows[0].name, "API");
+    assert_eq!(tenant_rows[0].scope.as_str(), "tenant");
+    assert_eq!(tenant_rows[0].contact_id.as_deref(), None);
+    let tenant_properties = tenant_rows[0]
         .properties_summary
         .as_ref()
-        .expect("workspace fact properties projected");
-    assert_eq!(workspace_properties["summary"], "API runs_on_port 3000");
+        .expect("tenant fact properties projected");
+    assert_eq!(tenant_properties["summary"], "API runs_on_port 3000");
     assert_eq!(
-        active_user_entity_rows(test_db.store().pool(), workspace_id)
+        active_user_entity_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         4
     );
     assert_eq!(
-        active_workspace_entity_rows(test_db.store().pool(), workspace_id)
+        active_tenant_entity_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         2
@@ -183,20 +182,20 @@ async fn slow_path_ingests_document_with_contradictions_and_uses_supersedes_edge
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
+    let storage_partition_id = Uuid::now_v7();
     let old_uid = create_fact(
         test_db.store().pool(),
-        workspace_id,
+        storage_partition_id,
         "API runs_on_port 3000",
         fixed_time() - Duration::days(1),
     )
     .await;
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             "Fact: API runs_on_port 3000\nFact: API runs_on_port 8080",
             2,
         ),
@@ -209,14 +208,14 @@ async fn slow_path_ingests_document_with_contradictions_and_uses_supersedes_edge
     assert_eq!(report.skipped, 1);
     assert_eq!(report.failed, 0);
     assert!(
-        node_valid_to(test_db.store().pool(), workspace_id, old_uid)
+        node_valid_to(test_db.store().pool(), storage_partition_id, old_uid)
             .await
             .is_some()
     );
-    let user_rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    let user_rows = active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(user_rows.len(), 1);
     assert_eq!(
-        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+        active_tenant_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         0
@@ -224,18 +223,18 @@ async fn slow_path_ingests_document_with_contradictions_and_uses_supersedes_edge
     assert!(
         supersedes_edge_exists(
             test_db.store().pool(),
-            workspace_id,
+            storage_partition_id,
             old_uid,
             user_rows[0].uid
         )
         .await
     );
     assert_eq!(
-        supersede_protocol_count(test_db.store().pool(), workspace_id).await,
+        supersede_protocol_count(test_db.store().pool(), storage_partition_id).await,
         1
     );
     assert_eq!(
-        contradiction_edge_count(test_db.store().pool(), workspace_id).await,
+        contradiction_edge_count(test_db.store().pool(), storage_partition_id).await,
         0
     );
 }
@@ -246,20 +245,20 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
+    let storage_partition_id = Uuid::now_v7();
     let old_uid = create_fact(
         test_db.store().pool(),
-        workspace_id,
+        storage_partition_id,
         "API runs_on_port 3000",
         fixed_time() - Duration::days(1),
     )
     .await;
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             include_str!("support/fixtures/document_supersedes_existing.md"),
             3,
         ),
@@ -272,21 +271,24 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
     assert!(
-        node_valid_to(test_db.store().pool(), workspace_id, old_uid)
+        node_valid_to(test_db.store().pool(), storage_partition_id, old_uid)
             .await
             .is_some()
     );
     assert_eq!(
-        fact_rows(test_db.store().pool(), workspace_id).await.len(),
-        1
-    );
-    assert_eq!(
-        user_fact_rows(test_db.store().pool(), workspace_id)
+        fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         1
     );
-    let active_user_rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    assert_eq!(
+        user_fact_rows(test_db.store().pool(), storage_partition_id)
+            .await
+            .len(),
+        1
+    );
+    let active_user_rows =
+        active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(
         active_user_rows
             .iter()
@@ -295,7 +297,7 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
         vec!["API"]
     );
     assert_eq!(
-        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+        active_tenant_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         0
@@ -303,18 +305,18 @@ async fn slow_path_ingests_supersession_when_new_fact_replaces_existing() {
     assert!(
         supersedes_edge_exists(
             test_db.store().pool(),
-            workspace_id,
+            storage_partition_id,
             old_uid,
             active_user_rows[0].uid
         )
         .await
     );
     assert_eq!(
-        supersede_protocol_count(test_db.store().pool(), workspace_id).await,
+        supersede_protocol_count(test_db.store().pool(), storage_partition_id).await,
         1
     );
     assert_eq!(
-        contradiction_edge_count(test_db.store().pool(), workspace_id).await,
+        contradiction_edge_count(test_db.store().pool(), storage_partition_id).await,
         0
     );
 }
@@ -325,13 +327,13 @@ async fn slow_path_skips_chunks_that_yield_no_extractable_facts() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
 
     let report = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             "Fact: API runs_on_port 3000\nHello, hope you're well.",
             4,
         ),
@@ -344,12 +346,12 @@ async fn slow_path_skips_chunks_that_yield_no_extractable_facts() {
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
     assert_eq!(
-        active_workspace_fact_rows(test_db.store().pool(), workspace_id)
+        active_tenant_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         0
     );
-    let rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    let rows = active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "API");
 }
@@ -361,7 +363,7 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
+    let storage_partition_id = Uuid::now_v7();
     let transcript = "Should we retain the handoff note? Please review before standup.";
     let heuristic_probe = extract_facts(&[TurnChunk {
         index: 0,
@@ -369,13 +371,13 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
         token_estimate: 10,
     }]);
     assert_eq!(heuristic_probe, Vec::new());
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id)
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id)
         .await
         .with_extractor(Arc::new(ScriptedFactExtractor::from_summaries([
             "handoff note names standup owner",
         ])));
 
-    let report = ingest_turn_direct_with_ctx(ctx, turn(workspace_id, transcript, 7))
+    let report = ingest_turn_direct_with_ctx(ctx, turn(storage_partition_id, transcript, 7))
         .await
         .expect("slow path should ingest scripted extractor fact");
 
@@ -383,7 +385,7 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
     assert_eq!(report.superseded, 0);
     assert_eq!(report.skipped, 0);
     assert_eq!(report.failed, 0);
-    let rows = active_user_fact_rows(test_db.store().pool(), workspace_id).await;
+    let rows = active_user_fact_rows(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "handoff");
     let properties = rows[0]
@@ -403,32 +405,33 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id)
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id)
         .await
         .with_entity_merge_verifier(Arc::new(DeterministicEntityMergeVerifier));
 
     let first = ingest_turn_direct_with_ctx(
         ctx.clone(),
-        turn(workspace_id, "Fact: API runs_on_port 3000", 8),
+        turn(storage_partition_id, "Fact: API runs_on_port 3000", 8),
     )
     .await
     .expect("first fact ingests with entities");
-    let second = ingest_turn_direct_with_ctx(ctx, turn(workspace_id, "Fact: API uses Redis", 9))
-        .await
-        .expect("second fact reuses API entity");
+    let second =
+        ingest_turn_direct_with_ctx(ctx, turn(storage_partition_id, "Fact: API uses Redis", 9))
+            .await
+            .expect("second fact reuses API entity");
 
     assert_eq!(first.inserted, 1);
     assert_eq!(second.inserted, 1);
     assert_eq!(first.failed + second.failed, 0);
 
     assert_eq!(
-        entity_rows(test_db.store().pool(), workspace_id)
+        entity_rows(test_db.store().pool(), storage_partition_id)
             .await
             .len(),
         0
     );
-    let entities = active_user_entity_rows(test_db.store().pool(), workspace_id).await;
+    let entities = active_user_entity_rows(test_db.store().pool(), storage_partition_id).await;
     let entity_names = entities
         .iter()
         .map(|row| row.name.as_str())
@@ -446,13 +449,13 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
         .collect::<HashSet<_>>();
     assert_eq!(entity_uids.len(), 3);
 
-    let fact_uids = active_user_fact_rows(test_db.store().pool(), workspace_id)
+    let fact_uids = active_user_fact_rows(test_db.store().pool(), storage_partition_id)
         .await
         .into_iter()
         .map(|row| row.uid.to_string())
         .collect::<HashSet<_>>();
     assert_eq!(fact_uids.len(), 2);
-    let relates_to_edges = relates_to_edges(test_db.store().pool(), workspace_id).await;
+    let relates_to_edges = relates_to_edges(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(
         relates_to_edges
             .iter()
@@ -462,7 +465,8 @@ async fn slow_path_resolves_entity_nodes_and_reuses_subject_across_sessions() {
             .count(),
         2
     );
-    let all_entity_edges = entity_resolution_edges(test_db.store().pool(), workspace_id).await;
+    let all_entity_edges =
+        entity_resolution_edges(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(
         all_entity_edges
             .iter()
@@ -481,14 +485,14 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
     let graph = ctx.graph.clone();
 
     let dependency = ingest_turn_direct_with_ctx(
         ctx.clone(),
         turn(
-            workspace_id,
+            storage_partition_id,
             "Fact: tenant shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
             10,
         ),
@@ -498,7 +502,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     let ownership = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             "Fact: tenant shared lib-audit-wire-test owned_by is profile-experience-test.",
             11,
         ),
@@ -509,7 +513,7 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
     assert_eq!(dependency.inserted, 1, "{dependency:?}");
     assert_eq!(ownership.inserted, 1, "{ownership:?}");
 
-    let facts = active_workspace_fact_rows(test_db.store().pool(), workspace_id).await;
+    let facts = active_tenant_fact_rows(test_db.store().pool(), storage_partition_id).await;
     let dependency_uid = fact_uid_with_subject(&facts, "audit-shipper-dep-test");
     let owner_uid = fact_uid_with_subject(&facts, "lib-audit-wire-test");
 
@@ -517,8 +521,8 @@ async fn slow_path_multi_hop_facts_expand_through_shared_object_entity() {
         .expand_seeds(&[dependency_uid], 3, None)
         .await
         .expect("expand dependency fact");
-    let entities = active_workspace_entity_rows(test_db.store().pool(), workspace_id).await;
-    let edges = relates_to_edges(test_db.store().pool(), workspace_id).await;
+    let entities = active_tenant_entity_rows(test_db.store().pool(), storage_partition_id).await;
+    let edges = relates_to_edges(test_db.store().pool(), storage_partition_id).await;
     let owner_hit = expanded
         .iter()
         .find(|hit| hit.uid == owner_uid)
@@ -543,10 +547,10 @@ async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
+    let storage_partition_id = Uuid::now_v7();
     let ctx = ingest_ctx_with_pii(
         test_db.store().pool(),
-        workspace_id,
+        storage_partition_id,
         Arc::new(support::FailOnNthPiiClassifier::new(2)),
     )
     .await;
@@ -554,7 +558,7 @@ async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
     let error = ingest_turn_direct_with_ctx(
         ctx,
         turn(
-            workspace_id,
+            storage_partition_id,
             "Fact: API runs_on_port 3000\nFact: worker_queue uses Redis",
             5,
         ),
@@ -568,12 +572,12 @@ async fn slow_path_is_atomic_when_a_chunk_fails_partway_through_extraction() {
         "{error_text}"
     );
     assert!(
-        fact_rows(test_db.store().pool(), workspace_id)
+        fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .is_empty()
     );
     assert!(
-        user_fact_rows(test_db.store().pool(), workspace_id)
+        user_fact_rows(test_db.store().pool(), storage_partition_id)
             .await
             .is_empty()
     );
@@ -585,10 +589,10 @@ async fn slow_path_emits_lineage_events_for_each_extracted_fact() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
-    let workspace_id = Uuid::now_v7();
-    let ctx = ingest_ctx(test_db.store().pool(), workspace_id).await;
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
     let session_turn = turn(
-        workspace_id,
+        storage_partition_id,
         include_str!("support/fixtures/document_simple.md"),
         6,
     );
@@ -599,7 +603,7 @@ async fn slow_path_emits_lineage_events_for_each_extracted_fact() {
         .expect("slow path writes lineage changelog rows");
 
     assert_eq!(report.inserted, 3);
-    let payloads = create_changelog_payloads(test_db.store().pool(), workspace_id).await;
+    let payloads = create_changelog_payloads(test_db.store().pool(), storage_partition_id).await;
     assert_eq!(payloads.len(), 3);
     for payload in &payloads {
         let after = payload

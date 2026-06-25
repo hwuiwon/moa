@@ -20,15 +20,14 @@ use moa_core::wire::{
 use moa_core::{
     ActionRuleScope, CompletionRequest, ContextMessage, JsonResponseFormat, LearningCandidate,
     LearningCandidateStatus, LearningCandidateType, LearningRiskClass, MoaError, ModelId, TenantId,
-    WorkspaceId,
 };
 use moa_observability::{record_experiment_run, record_experiment_score_rows};
 use moa_scoring::{
     ExperimentRunCompareRef, ExperimentRunScoreRef, ScenarioScoreDeltaRow, ScenarioScoreSummary,
     ScoreCompareRef, ScoreCompareRow, ScoreRunRef, ScoreSummary, ScoreSummaryRow, ScoringError,
-    TrialScoreSummary, VariantScoreDeltaRow, compare_experiment_score_breakdown_for_workspace,
-    compare_score_runs_for_workspace, experiment_score_breakdown_for_workspace,
-    score_summaries_for_workspace,
+    TrialScoreSummary, VariantScoreDeltaRow, compare_experiment_score_breakdown_for_tenant,
+    compare_score_runs_for_tenant, experiment_score_breakdown_for_tenant,
+    score_summaries_for_tenant,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -220,7 +219,7 @@ pub async fn admit_run(
     })
 }
 
-/// Lists behavior-lab experiment runs in workspace scope.
+/// Lists behavior-lab experiment runs in tenant scope.
 pub async fn list_runs(
     pool: sqlx::PgPool,
     request: ExperimentListRequest,
@@ -341,7 +340,6 @@ pub async fn propose_improvement_candidate(
     request: ExperimentProposeImprovementsRequest,
 ) -> Result<ExperimentImprovementProposal> {
     let scope = tenant_scope(request.tenant_id);
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let run = load_required_run(&store, &scope, request.run_uid).await?;
     require_completed_run(&run)?;
@@ -359,10 +357,10 @@ pub async fn propose_improvement_candidate(
             "experiment learning proposals require at least one completed trial",
         ));
     }
-    let run_score_summary = score_summaries_for_workspace(
+    let run_score_summary = score_summaries_for_tenant(
         &pool,
         ScoreRunRef {
-            workspace_id: workspace_id.clone(),
+            tenant_id: request.tenant_id,
             run_id: run.score_run_id,
         },
     )
@@ -372,10 +370,10 @@ pub async fn propose_improvement_candidate(
             "experiment learning proposals require score rows for the run score run",
         ));
     }
-    let trial_breakdown = experiment_score_breakdown_for_workspace(
+    let trial_breakdown = experiment_score_breakdown_for_tenant(
         &pool,
         ExperimentRunScoreRef {
-            workspace_id: workspace_id.clone(),
+            tenant_id: request.tenant_id,
             run_uid: run.run_uid,
         },
     )
@@ -385,7 +383,6 @@ pub async fn propose_improvement_candidate(
     let draft_artifact_revision_uids = Vec::new();
     let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
         tenant_id: request.tenant_id,
-        workspace_id: workspace_id.clone(),
         run: &run,
         completed_trials: &completed_trials,
         run_score_summary: &run_score_summary,
@@ -416,22 +413,21 @@ pub async fn scores(
     request: ExperimentScoresRequest,
 ) -> Result<ExperimentScoresResponse> {
     let scope = tenant_scope(request.tenant_id);
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let run =
         load_required_run(&ExperimentStore::new(pool.clone()), &scope, request.run_uid).await?;
-    let score_response = score_summaries_for_workspace(
+    let score_response = score_summaries_for_tenant(
         &pool,
         ScoreRunRef {
-            workspace_id: workspace_id.clone(),
+            tenant_id: request.tenant_id,
             run_id: run.score_run_id,
         },
     )
     .await?;
     record_experiment_score_rows("scores", score_response.rows.len() as u64);
-    let trial_breakdown = experiment_score_breakdown_for_workspace(
+    let trial_breakdown = experiment_score_breakdown_for_tenant(
         &pool,
         ExperimentRunScoreRef {
-            workspace_id: workspace_id.clone(),
+            tenant_id: request.tenant_id,
             run_uid: run.run_uid,
         },
     )
@@ -490,24 +486,23 @@ pub async fn compare_runs(
     request: ExperimentCompareRequest,
 ) -> Result<ExperimentCompareResponse> {
     let scope = tenant_scope(request.tenant_id);
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let base_run = load_required_run(&store, &scope, request.base_run_uid).await?;
     let new_run = load_required_run(&store, &scope, request.new_run_uid).await?;
-    let compare_response = compare_score_runs_for_workspace(
+    let compare_response = compare_score_runs_for_tenant(
         &pool,
         ScoreCompareRef {
-            workspace_id: workspace_id.clone(),
+            tenant_id: request.tenant_id,
             base_run: base_run.score_run_id,
             new_run: new_run.score_run_id,
         },
     )
     .await?;
     record_experiment_score_rows("compare", compare_response.rows.len() as u64);
-    let breakdown_compare = compare_experiment_score_breakdown_for_workspace(
+    let breakdown_compare = compare_experiment_score_breakdown_for_tenant(
         &pool,
         ExperimentRunCompareRef {
-            workspace_id: workspace_id.clone(),
+            tenant_id: request.tenant_id,
             base_run_uid: base_run.run_uid,
             new_run_uid: new_run.run_uid,
         },
@@ -550,8 +545,6 @@ pub async fn compare_runs(
 pub struct ExperimentLearningProposalEvidence<'a> {
     /// Tenant that owns the candidate review lifecycle.
     pub tenant_id: TenantId,
-    /// Storage workspace key that owns the experiment run and candidate.
-    pub workspace_id: WorkspaceId,
     /// Completed experiment run that produced proposal evidence.
     pub run: &'a ExperimentRunRecord,
     /// Completed trials attached to the experiment run.
@@ -580,7 +573,7 @@ pub fn build_experiment_learning_candidate(
     evidence: ExperimentLearningProposalEvidence<'_>,
 ) -> LearningCandidate {
     let candidate_id = deterministic_candidate_id(
-        &evidence.workspace_id,
+        evidence.tenant_id,
         evidence.run.run_uid,
         evidence.idempotency_key.unwrap_or("default"),
     );
@@ -589,7 +582,6 @@ pub fn build_experiment_learning_candidate(
     LearningCandidate {
         id: candidate_id,
         tenant_id: evidence.tenant_id,
-        workspace_id: evidence.workspace_id,
         user_id: None,
         candidate_type: LearningCandidateType::Workflow,
         status: LearningCandidateStatus::Proposed,
@@ -620,10 +612,6 @@ pub fn build_experiment_learning_candidate(
 #[must_use]
 pub fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
     ActionRuleScope::Tenant { tenant_id }
-}
-
-fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
 }
 
 #[cfg(test)]
@@ -956,13 +944,9 @@ fn scenario_score_payload(scenario: &ScenarioScoreSummary) -> Value {
     })
 }
 
-fn deterministic_candidate_id(
-    workspace_id: &WorkspaceId,
-    run_uid: Uuid,
-    idempotency_key: &str,
-) -> Uuid {
+fn deterministic_candidate_id(tenant_id: TenantId, run_uid: Uuid, idempotency_key: &str) -> Uuid {
     let digest = blake3::hash(
-        format!("workflow_learning_proposal:{workspace_id}:{run_uid}:{idempotency_key}").as_bytes(),
+        format!("workflow_learning_proposal:{tenant_id}:{run_uid}:{idempotency_key}").as_bytes(),
     );
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
@@ -1275,11 +1259,11 @@ mod tests {
     #[test]
     fn experiment_proposal_candidate_stays_review_only() {
         // Pins: experiment-derived improvements create proposed candidates without active artifacts.
-        let workspace_id = WorkspaceId::new("workspace-a");
-        let run = completed_run_record(workspace_id.clone());
+        let tenant_id = tenant_id_from_str("tenant-a");
+        let run = completed_run_record(tenant_id);
         let trials = vec![completed_trial_record(run.run_uid)];
         let score_summary = ScoreSummary {
-            workspace_id: workspace_id.clone(),
+            tenant_id,
             run_id: run.score_run_id,
             rows: vec![ScoreSummaryRow {
                 name: "quality".to_string(),
@@ -1302,8 +1286,7 @@ mod tests {
         };
 
         let candidate = build_experiment_learning_candidate(ExperimentLearningProposalEvidence {
-            tenant_id: tenant_id_from_str("tenant-a"),
-            workspace_id,
+            tenant_id,
             run: &run,
             completed_trials: &trials,
             run_score_summary: &score_summary,
@@ -1341,11 +1324,9 @@ mod tests {
         );
     }
 
-    fn completed_run_record(workspace_id: WorkspaceId) -> ExperimentRunRecord {
+    fn completed_run_record(tenant_id: TenantId) -> ExperimentRunRecord {
         ExperimentRunRecord {
-            scope: ActionRuleScope::Tenant {
-                tenant_id: tenant_id_from_str(workspace_id.as_str()),
-            },
+            scope: ActionRuleScope::Tenant { tenant_id },
             run_uid: fixture_uuid(1),
             name: "support escalation comparison".to_string(),
             target_kind: ExperimentTargetKind::AgentLoop,

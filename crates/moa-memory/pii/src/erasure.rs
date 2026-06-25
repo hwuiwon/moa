@@ -1,6 +1,6 @@
 //! Memory-owned privacy erasure helpers.
 
-use moa_core::{ContactId, MoaError, TenantId};
+use moa_core::{ContactId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
@@ -46,8 +46,8 @@ pub struct EraseCandidate {
 /// Audit metadata required for a scoped graph erasure.
 #[derive(Debug, Clone)]
 pub struct GraphErasureAudit {
-    /// Workspace containing subject data.
-    pub workspace_id: String,
+    /// Tenant containing subject data.
+    pub tenant_id: TenantId,
     /// Subject user UUID.
     pub subject_user: Uuid,
     /// Subject user id as stored in text columns.
@@ -60,18 +60,19 @@ pub struct GraphErasureAudit {
     pub approval_token_jti: String,
 }
 
-/// Enumerates active graph-memory nodes attributable to one workspace-bound subject user.
+/// Enumerates active graph-memory nodes attributable to one tenant-bound subject user.
 pub async fn enumerate_erase_candidates(
     pool: &PgPool,
-    workspace_id: &str,
+    tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<Vec<EraseCandidate>> {
-    let mut tx = begin_app_scoped_tx(pool, workspace_id, subject_user_id).await?;
+    let storage_partition_id = tenant_id.to_string();
+    let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
     let rows = sqlx::query_as::<_, EraseCandidate>(
         r#"
         SELECT uid, label, name, pii_class
         FROM moa.node_index
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND valid_to IS NULL
           AND (
               user_id = $2
@@ -80,7 +81,7 @@ pub async fn enumerate_erase_candidates(
         ORDER BY uid
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(subject_user_id)
     .fetch_all(tx.as_mut())
     .await?;
@@ -98,7 +99,7 @@ pub async fn hard_purge_erase_candidates(
         return Ok(0);
     }
 
-    let graph = erase_graph_store(pool, &audit.workspace_id, &audit.subject_user_id)?;
+    let graph = erase_graph_store(pool, audit.tenant_id, &audit.subject_user_id)?;
     let redaction_marker = format!("erase:{}", audit.approval_token_jti);
     let mut erased_count = 0usize;
     for chunk in candidates.chunks(ERASE_CHUNK_SIZE) {
@@ -120,10 +121,10 @@ pub async fn hard_purge_erase_candidates(
 /// Begins a transaction scoped as `moa_app` for one tenant-bound contact subject.
 pub async fn begin_app_scoped_tx<'a>(
     pool: &'a PgPool,
-    workspace_id: &str,
+    tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<ScopedConn<'a>> {
-    let scope = contact_scope_from_subject(workspace_id, subject_user_id)?;
+    let scope = contact_scope_from_subject(tenant_id, subject_user_id)?;
     let mut tx = ScopedConn::begin(pool, &scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(tx.as_mut())
@@ -133,26 +134,21 @@ pub async fn begin_app_scoped_tx<'a>(
 
 fn erase_graph_store(
     pool: &PgPool,
-    workspace_id: &str,
+    tenant_id: TenantId,
     subject_user_id: &str,
 ) -> Result<AgeGraphStore> {
-    let scope = contact_scope_from_subject(workspace_id, subject_user_id)?;
+    let scope = contact_scope_from_subject(tenant_id, subject_user_id)?;
     Ok(AgeGraphStore::scoped_for_app_role(pool.clone(), scope))
 }
 
-fn contact_scope_from_subject(workspace_id: &str, subject_user_id: &str) -> Result<ScopeContext> {
-    let tenant_id = Uuid::parse_str(workspace_id).map(TenantId::from).map_err(|error| {
-        ErasureError::Scope(MoaError::ValidationError(format!(
-            "privacy erasure workspace_id must be a tenant UUID for tenant-scoped memory: {error}"
-        )))
-    })?;
+fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Result<ScopeContext> {
     let contact_subject = subject_user_id
         .strip_prefix(CONTACT_SUBJECT_PREFIX)
         .unwrap_or(subject_user_id);
     let contact_id = Uuid::parse_str(contact_subject)
         .map(ContactId)
         .map_err(|error| {
-            ErasureError::Scope(MoaError::ValidationError(format!(
+            ErasureError::Scope(moa_core::MoaError::ValidationError(format!(
                 "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"
             )))
         })?;
@@ -165,7 +161,7 @@ fn erase_audit_metadata(audit: &GraphErasureAudit) -> Value {
         "approver_id": audit.approver_id.as_str(),
         "approval_token_jti": audit.approval_token_jti.as_str(),
         "subject_user_id": audit.subject_user_id.as_str(),
-        "workspace_id": audit.workspace_id.as_str(),
+        "tenant_id": audit.tenant_id.to_string(),
         "op": "erase",
     })
 }
@@ -175,12 +171,13 @@ async fn emit_erase_summary(
     audit: &GraphErasureAudit,
     erased_count: usize,
 ) -> Result<()> {
-    let mut tx = begin_app_scoped_tx(pool, &audit.workspace_id, &audit.subject_user_id).await?;
+    let storage_partition_id = audit.tenant_id.to_string();
+    let mut tx = begin_app_scoped_tx(pool, audit.tenant_id, &audit.subject_user_id).await?;
     write_and_bump(
         tx.as_mut(),
         ChangelogRecord {
-            workspace_id: Some(audit.workspace_id.clone()),
-            user_id: None,
+            storage_partition_id: Some(storage_partition_id),
+            contact_id: None,
             scope: "tenant".to_string(),
             actor_id: Some(audit.approver_id.clone()),
             actor_kind: "admin".to_string(),
@@ -199,7 +196,7 @@ async fn emit_erase_summary(
                 "approver_id": audit.approver_id.as_str(),
                 "approval_token_jti": audit.approval_token_jti.as_str(),
                 "subject_user_id": audit.subject_user_id.as_str(),
-                "workspace_id": audit.workspace_id.as_str(),
+                "tenant_id": audit.tenant_id.to_string(),
                 "op": "erase",
             })),
             cause_change_id: None,

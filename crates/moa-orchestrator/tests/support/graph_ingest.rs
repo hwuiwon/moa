@@ -3,14 +3,14 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use moa_core::{Event, EventRecord, SessionId, WorkspaceId};
+use moa_core::{Event, EventRecord, SessionId, StoragePartitionId};
 use sqlx::PgPool;
 use tokio::time::sleep;
 
 /// Waits until the asynchronous turn-ingestion invocation has written graph nodes.
 pub async fn wait_for_ingested_turn(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     session_id: SessionId,
 ) -> Result<i64> {
     for _attempt in 0..60 {
@@ -18,12 +18,12 @@ pub async fn wait_for_ingested_turn(
             r#"
             SELECT count(*)::bigint
             FROM moa.node_index
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND valid_to IS NULL
               AND properties_summary->>'source_session_id' = $2
             "#,
         )
-        .bind(workspace_id.to_string())
+        .bind(storage_partition_id.to_string())
         .bind(session_id.to_string())
         .fetch_one(pool)
         .await
@@ -42,7 +42,7 @@ pub async fn wait_for_ingested_turn(
 /// Waits until graph ingestion has written nodes for every visible brain response.
 pub async fn wait_for_ingested_brain_responses(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     session_id: SessionId,
     events: &[EventRecord],
 ) -> Result<i64> {
@@ -62,13 +62,13 @@ pub async fn wait_for_ingested_brain_responses(
             r#"
             SELECT count(DISTINCT properties_summary->>'source_turn_seq')::bigint
             FROM moa.node_index
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND valid_to IS NULL
               AND properties_summary->>'source_session_id' = $2
               AND properties_summary->>'source_turn_seq' = ANY($3::text[])
             "#,
         )
-        .bind(workspace_id.to_string())
+        .bind(storage_partition_id.to_string())
         .bind(session_id.to_string())
         .bind(&turn_sequences)
         .fetch_one(pool)

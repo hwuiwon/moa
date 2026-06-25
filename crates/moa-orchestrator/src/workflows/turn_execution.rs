@@ -57,11 +57,11 @@ use crate::brain_bridge::{PreparedTurnRequest, QueryRewriteCacheEntry, prepare_t
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
 use crate::services::{
+    action_policy::{ActionPolicyClient, PrepareActionReviewRequest},
     action_reviews::{ActionReviewsClient, RequestActionReview},
     llm_gateway::LLMGatewayClient,
     session_store::RestateSessionStoreClient,
     tool_executor::ToolExecutorClient,
-    workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient},
 };
 use crate::turn::util::{
     TurnEvidence, allowed_tool_names, annotate_unresolved_verification, blocked_canary_tool_output,
@@ -1029,7 +1029,7 @@ async fn handle_tool_call(
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
 
     let prepared_action = ctx
-        .service_client::<WorkspaceStoreClient>()
+        .service_client::<ActionPolicyClient>()
         .prepare_action_review(Json(PrepareActionReviewRequest {
             session: meta.clone(),
             invocation: invocation.clone(),

@@ -3,11 +3,11 @@
 use super::*;
 
 pub(super) fn validate_config(cfg: &PerfGateConfig) -> Result<()> {
-    if cfg.workspaces < 2 {
-        bail!("perf_gate requires at least 2 workspaces for concurrent RLS probes");
+    if cfg.tenants < 2 {
+        bail!("perf_gate requires at least 2 tenants for concurrent RLS probes");
     }
-    if cfg.facts_per_workspace == 0 {
-        bail!("facts_per_workspace must be greater than zero");
+    if cfg.facts_per_tenant == 0 {
+        bail!("facts per tenant must be greater than zero");
     }
     if cfg.qps == 0 {
         bail!("qps must be greater than zero");

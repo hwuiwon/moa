@@ -58,10 +58,10 @@ const LEG_CEILINGS_MS: &[(&str, f64)] = &[
 /// Performance gate configuration parsed by the `perf_gate` binary.
 #[derive(Debug, Clone)]
 pub struct PerfGateConfig {
-    /// Number of tenant workspaces to seed and query.
-    pub workspaces: usize,
-    /// Number of facts to seed per workspace.
-    pub facts_per_workspace: usize,
+    /// Number of tenants to seed and query.
+    pub tenants: usize,
+    /// Number of facts to seed per tenant.
+    pub facts_per_tenant: usize,
     /// Target query rate.
     pub qps: u32,
     /// Load window duration.
@@ -104,7 +104,7 @@ async fn run_perf_gate_inner(cfg: &PerfGateConfig, metrics: &PrometheusHandle) -
 
     let mut stack = Stack::up(&database_url, embedder).await?;
     let run_result: Result<()> = async {
-        stack.seed_workspaces(cfg).await?;
+        stack.seed_tenants(cfg).await?;
         stack.build_retrievers();
         warm_cache(&stack, cfg).await?;
 

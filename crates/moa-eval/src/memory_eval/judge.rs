@@ -169,7 +169,7 @@ impl DeterministicJudge {
         match input.probe_type {
             ProbeType::PointRecall
             | ProbeType::LatestValueAfterUpdate
-            | ProbeType::WorkspaceSharedFact => {
+            | ProbeType::TenantSharedFact => {
                 let exact_match = normalized_answer_matches(input);
                 Ok(JudgeOutcome::deterministic(
                     Some(exact_match),

@@ -1,13 +1,13 @@
 //! Eval service helper coverage.
 
+use moa_core::TenantId;
 use moa_core::wire::{
     EvalRunResponse, EvalRunStatus, EvalRunStatusResponse, EvalSuiteListDocument,
 };
-use moa_core::{TenantId, WorkspaceId};
 use moa_eval_core::{
     AgentConfig, EvalResult, EvalRun, EvalStatus, RunSummary, TestCase, TestSuite,
 };
-use moa_orchestrator::services::eval::repository::parse_dataset_items_for_workspace;
+use moa_orchestrator::services::eval::repository::parse_dataset_items_for_tenant;
 use moa_orchestrator::services::eval::{
     EvalServiceError, accepted_eval_run_response, hosted_eval_report_artifacts,
     status_response_from_run_response, suite_summaries_from_documents, verify_run_status_tenant,
@@ -122,40 +122,40 @@ contains = ["done"]
 }
 
 #[test]
-fn dataset_jsonl_items_are_constrained_to_authorized_workspace() {
-    // Pins: dataset registration defaults missing item workspaces to the authorized workspace and rejects mismatches.
-    let workspace_id = WorkspaceId::new("workspace-a");
-    let items = parse_dataset_items_for_workspace(
-        &workspace_id,
+fn dataset_jsonl_items_are_constrained_to_authorized_tenant() {
+    // Pins: dataset registration defaults missing item tenants to the authorized tenant and rejects mismatches.
+    let tenant_id = tenant_fixture(1);
+    let items = parse_dataset_items_for_tenant(
+        tenant_id,
         Some("golden.jsonl"),
         r#"{"query":"alpha","expected_answer":"a"}
-{"workspace_id":"workspace-a","query":"beta","expected_answer":"b"}"#,
+{"tenant_id":"00000000-0000-0000-0000-000000000001","query":"beta","expected_answer":"b"}"#,
     )
-    .expect("matching workspace dataset should parse");
+    .expect("matching tenant dataset should parse");
 
     assert_eq!(items.len(), 2);
-    assert_eq!(items[0].workspace_id, workspace_id);
-    assert_eq!(items[1].workspace_id, WorkspaceId::new("workspace-a"));
+    assert_eq!(items[0].tenant_id, tenant_id);
+    assert_eq!(items[1].tenant_id, tenant_id);
     assert_eq!(items[0].query, "alpha");
 
-    let error = parse_dataset_items_for_workspace(
-        &WorkspaceId::new("workspace-a"),
+    let error = parse_dataset_items_for_tenant(
+        tenant_id,
         Some("golden.jsonl"),
-        r#"{"workspace_id":"workspace-b","query":"leak"}"#,
+        r#"{"tenant_id":"00000000-0000-0000-0000-000000000002","query":"leak"}"#,
     )
-    .expect_err("mismatched workspace should be rejected");
+    .expect_err("mismatched tenant should be rejected");
 
     match error {
-        EvalServiceError::DatasetWorkspaceMismatch {
+        EvalServiceError::DatasetTenantMismatch {
             line,
-            request_workspace_id,
-            item_workspace_id,
+            request_tenant_id,
+            item_tenant_id,
         } => {
             assert_eq!(line, 1);
-            assert_eq!(request_workspace_id, WorkspaceId::new("workspace-a"));
-            assert_eq!(item_workspace_id, WorkspaceId::new("workspace-b"));
+            assert_eq!(request_tenant_id, tenant_id);
+            assert_eq!(item_tenant_id, tenant_fixture(2));
         }
-        other => panic!("expected workspace mismatch error, got {other:?}"),
+        other => panic!("expected tenant mismatch error, got {other:?}"),
     }
 }
 
@@ -180,14 +180,14 @@ fn run_status_rejects_stored_tenant_mismatch() {
         verify_run_status_tenant(tenant_a, &response).expect_err("tenant mismatch should reject");
 
     match error {
-        EvalServiceError::RunWorkspaceMismatch {
+        EvalServiceError::RunTenantMismatch {
             run_id: actual_run_id,
-            request_workspace_id,
+            request_tenant_id,
         } => {
             assert_eq!(actual_run_id, run_id);
-            assert_eq!(request_workspace_id, workspace_fixture_for_tenant(tenant_a));
+            assert_eq!(request_tenant_id, tenant_a);
         }
-        other => panic!("expected run workspace mismatch, got {other:?}"),
+        other => panic!("expected run tenant mismatch, got {other:?}"),
     }
 }
 
@@ -236,8 +236,4 @@ fn accepted_run_response_is_non_terminal() {
 
 fn tenant_fixture(value: u128) -> TenantId {
     TenantId::from(Uuid::from_u128(value))
-}
-
-fn workspace_fixture_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
 }

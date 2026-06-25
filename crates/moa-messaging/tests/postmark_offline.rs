@@ -92,7 +92,7 @@ async fn postmark_offline_from_vault_uses_configured_token_and_message_stream() 
         .await;
     let vault = Arc::new(MockVault::with_credential(
         POSTMARK_SERVER_TOKEN_SERVICE,
-        "workspace-1",
+        "tenant-1",
         Credential::Bearer("vault-token".to_string()),
     ));
     let config = MessagingConfig {
@@ -100,7 +100,7 @@ async fn postmark_offline_from_vault_uses_configured_token_and_message_stream() 
         postmark_message_stream: "alerts".to_string(),
         ..MessagingConfig::default()
     };
-    let client = PostmarkEmailClient::from_vault(vault, "workspace-1", &config)
+    let client = PostmarkEmailClient::from_vault(vault, "tenant-1", &config)
         .await
         .expect("Postmark client should build from vault token");
     let message = PostmarkEmailMessage::new("moa@example.com", "ops@example.com", "Alert")

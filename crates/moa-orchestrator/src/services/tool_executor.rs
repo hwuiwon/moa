@@ -1,4 +1,4 @@
-//! Durable Restate façade over the workspace tool router.
+//! Durable Restate facade over the configured tool router.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -381,14 +381,14 @@ async fn prior_non_idempotent_result_exists(
         )))
     })?;
     let store = OrchestratorCtx::current_session_store();
-    let workspace_id = storage_workspace_id(session);
+    let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
     let exists = ctx
         .run(|| async move {
             store
                 .tool_event_exists(
-                    &workspace_id,
+                    &storage_partition_id,
                     session_id,
                     EventType::ToolResult,
                     tool_call_id,
@@ -414,13 +414,18 @@ async fn prior_tool_call_event_exists(
     };
 
     let store = OrchestratorCtx::current_session_store();
-    let workspace_id = storage_workspace_id(session);
+    let storage_partition_id = storage_partition_id_for_session(session);
     let tool_call_id = request.tool_call_id;
     let scan_started = Instant::now();
     let exists = ctx
         .run(|| async move {
             store
-                .tool_event_exists(&workspace_id, session_id, EventType::ToolCall, tool_call_id)
+                .tool_event_exists(
+                    &storage_partition_id,
+                    session_id,
+                    EventType::ToolCall,
+                    tool_call_id,
+                )
                 .await
                 .map(Json::from)
                 .map_err(HandlerError::from)
@@ -432,8 +437,8 @@ async fn prior_tool_call_event_exists(
     Ok(exists)
 }
 
-fn storage_workspace_id(session: &SessionMeta) -> moa_core::WorkspaceId {
-    moa_core::WorkspaceId::new(session.tenant_id.to_string())
+fn storage_partition_id_for_session(session: &SessionMeta) -> moa_core::StoragePartitionId {
+    moa_core::StoragePartitionId::new(session.tenant_id.to_string())
 }
 
 async fn append_tool_call_event(

@@ -27,8 +27,8 @@ curl -X POST http://localhost:10080/v1/authz/tuple-write \
 Configure the IdP SCIM base URL as `https://<edge-or-orchestrator>/scim/v2`
 and present the SCIM API key as `Authorization: Bearer <key>`.
 
-SCIM users are MOA operator/admin identities: workspace admins, tenant admins,
-and service users that need authenticated access to MOA control-plane APIs.
+SCIM users are MOA operator/admin identities: tenant admins and service users
+that need authenticated access to MOA control-plane APIs.
 Agent-facing contacts are not SCIM users and are not OpenFGA principals by
 default. Contacts are created, verified, linked, exported, and erased through
 the contact and privacy APIs; deleting or deactivating a SCIM user does not
@@ -67,7 +67,7 @@ Postgres transaction:
 - marks the user inactive
 - cancels active sessions
 - revokes local API keys with reason `deactivation_cascade`
-- enqueues OpenFGA tuple deletes for tenant, session, API-key, workspace, and
+- enqueues OpenFGA tuple deletes for tenant, session, API-key, and
   agent-operator edges
 - removes SCIM group memberships
 - leaves agent-facing contacts unchanged unless a separate privacy erasure
@@ -83,8 +83,6 @@ mapping is:
 
 - any group name maps membership to `user:<U> member tenant:<T>`
 - `tenant:<T>:<relation>` maps to `user:<U> <relation> tenant:<T>`
-- `tenant:<T>:workspace:<W>:<relation>` maps to
-  `user:<U> <relation> workspace:<W>`
 
 ## Okta SCIM Compliance Tester
 

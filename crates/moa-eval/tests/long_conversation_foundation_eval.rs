@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use moa_core::transcript::{ProviderEvent, Transcript, Turn, UserUtterance};
 use moa_core::{
-    CompletionRequest, MoaConfig, SessionId, StopReason, TokenUsage, UserId, WorkspaceId,
+    CompletionRequest, MoaConfig, SessionId, StopReason, StoragePartitionId, TokenUsage, UserId,
 };
 use moa_eval::EvalEngine;
 use moa_eval::long_conversation::{
@@ -245,7 +245,7 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     );
 
     let records = card.to_score_records(
-        WorkspaceId::new("workspace"),
+        StoragePartitionId::new("tenant"),
         UserId::new("user"),
         SessionId::new(),
     );
@@ -262,7 +262,7 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     );
 
     let lineage_events = card.to_lineage_events(
-        WorkspaceId::new("workspace"),
+        StoragePartitionId::new("tenant"),
         UserId::new("user"),
         SessionId::new(),
     );
@@ -276,7 +276,7 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     let sink = RecordingSink::default();
     let emitted = card.emit_to_lineage_sink(
         &sink,
-        WorkspaceId::new("workspace"),
+        StoragePartitionId::new("tenant"),
         UserId::new("user"),
         SessionId::new(),
     );

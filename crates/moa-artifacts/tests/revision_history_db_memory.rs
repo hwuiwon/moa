@@ -1,7 +1,7 @@
 use moa_artifacts::document::{ArtifactDocument, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
 use moa_artifacts::validation::validate_for_status;
-use moa_core::{ActionRuleScope, Result, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, Result, StoragePartitionId, TenantId};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -13,7 +13,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
         moa_session::testing::create_isolated_test_store().await?;
     let pool = store.pool().clone();
     let registry = ArtifactRegistry::new(pool.clone());
-    let workspace_id = WorkspaceId::new(format!("workspace-{}", Uuid::now_v7()));
+    let storage_partition_id = StoragePartitionId::new(format!("workspace-{}", Uuid::now_v7()));
     let scope = ActionRuleScope::Tenant {
         tenant_id: TenantId::from(Uuid::now_v7()),
     };
@@ -78,14 +78,14 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
     sqlx::query(
         r#"
         INSERT INTO moa.agent_installation (
-            installation_uid, workspace_id, artifact_uid, definition_ref,
+            installation_uid, storage_partition_id, artifact_uid, definition_ref,
             display_name, current_revision_uid, last_deployment_uid, last_deployed_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, now())
         "#,
     )
     .bind(installation_uid)
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(v1.artifact_uid)
     .bind(format!("agent://{name}"))
     .bind("Support Agent")
@@ -98,7 +98,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
         &pool,
         deploy_v1_uid,
         installation_uid,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         v1.revision_uid,
         "active",
     )
@@ -114,7 +114,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
         &pool,
         deploy_v2_uid,
         installation_uid,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         v2.revision_uid,
         "active",
     )
@@ -134,7 +134,7 @@ async fn agent_revisions_remain_loadable_while_installation_pointer_moves() -> R
         &pool,
         rollback_uid,
         installation_uid,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         v1.revision_uid,
         "active",
     )
@@ -178,14 +178,14 @@ async fn insert_deployment(
     pool: &sqlx::PgPool,
     deployment_uid: Uuid,
     installation_uid: Uuid,
-    workspace_id: &str,
+    storage_partition_id: &str,
     revision_uid: Uuid,
     status: &str,
 ) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO moa.agent_deployment (
-            deployment_uid, installation_uid, workspace_id, revision_uid,
+            deployment_uid, installation_uid, storage_partition_id, revision_uid,
             status, dependency_lock, dependency_lock_hash
         )
         VALUES ($1, $2, $3, $4, $5, '{}'::JSONB, $6)
@@ -193,7 +193,7 @@ async fn insert_deployment(
     )
     .bind(deployment_uid)
     .bind(installation_uid)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(revision_uid)
     .bind(status)
     .bind(format!("hash-{deployment_uid}"))

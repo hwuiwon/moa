@@ -11,8 +11,8 @@ use moa_brain::{
 };
 use moa_core::{
     ActionPolicyEffect, ExperienceStore, LLMProvider, LearningCandidateStore, LineageHandle,
-    MoaConfig, SegmentStore, SessionActorRef, SessionMeta, SessionStore, TenantId, UserId,
-    WorkspaceId,
+    MoaConfig, SegmentStore, SessionActorRef, SessionMeta, SessionStore, StoragePartitionId,
+    TenantId, UserId,
 };
 use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
 use moa_hands::ToolRouter;
@@ -22,6 +22,7 @@ use moa_providers::{
 use moa_security::{ActionPolicies, ActionPolicyRuleStore};
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use uuid::Uuid;
 
@@ -47,8 +48,8 @@ pub struct AgentEnvironment {
     pub workspace_dir: PathBuf,
     /// Persisted session identifier for the run.
     pub session_id: moa_core::SessionId,
-    /// Workspace identifier used inside the run.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier used inside the run.
+    pub storage_partition_id: StoragePartitionId,
     /// User identifier used inside the run.
     pub user_id: UserId,
     /// In-memory lineage handle used to retain eval-run lineage events.
@@ -111,8 +112,8 @@ pub(crate) async fn build_agent_environment_with_provider(
             source,
         })?;
 
-    let tenant_id = TenantId::new();
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let tenant_id = eval_tenant_id_for_agent(&agent_config.name);
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let user_id = UserId::new(DEFAULT_EVAL_USER);
     let lineage = Arc::new(EvalLineageHandle::default());
     let schema_name = format!("eval_{}", Uuid::now_v7().simple());
@@ -170,7 +171,7 @@ pub(crate) async fn build_agent_environment_with_provider(
         pipeline,
         workspace_dir,
         session_id,
-        workspace_id,
+        storage_partition_id,
         user_id,
         lineage,
     })
@@ -195,6 +196,42 @@ async fn seed_memory(base_config: &MoaConfig, agent_config: &AgentConfig) -> Res
         let _ = default_root;
     }
     Ok(())
+}
+
+fn eval_tenant_id_for_agent(agent_name: &str) -> TenantId {
+    TenantId::from(stable_uuid_from_label(
+        &eval_storage_partition_id_for_agent(agent_name),
+    ))
+}
+
+fn eval_storage_partition_id_for_agent(agent_name: &str) -> String {
+    let mut slug = String::from("eval");
+    let trimmed = agent_name.trim();
+    if trimmed.is_empty() {
+        return slug;
+    }
+
+    slug.push('-');
+    for character in trimmed.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+fn stable_uuid_from_label(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 async fn build_tool_router(
@@ -422,7 +459,10 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::{build_agent_environment_with_provider, seed_memory};
+    use super::{
+        build_agent_environment_with_provider, eval_storage_partition_id_for_agent,
+        eval_tenant_id_for_agent, seed_memory,
+    };
     use moa_eval_core::{ActionPolicyOverride, AgentConfig, MemoryOverride, ToolOverride};
 
     fn token_usage(input_tokens: usize, output_tokens: usize) -> TokenUsage {
@@ -480,6 +520,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn eval_tenant_id_is_stable_for_agent_name() {
+        // Pins: pre-seeded tenant-scoped eval artifacts use the same agent-name
+        // storage partition as the runtime session.
+        let first = eval_tenant_id_for_agent("Experience Learning Agent");
+        let second = eval_tenant_id_for_agent("Experience Learning Agent");
+        let slug = eval_storage_partition_id_for_agent("Experience Learning Agent");
+
+        assert_eq!(first, second);
+        assert_eq!(slug, "eval-experience-learning-agent");
+    }
+
     #[tokio::test]
     async fn setup_db_respects_tool_allowlist() {
         let temp = tempdir().unwrap();
@@ -505,8 +557,8 @@ mod tests {
 
         assert!(environment.tool_router.has_tool("file_read"));
         assert!(!environment.tool_router.has_tool("bash"));
-        uuid::Uuid::parse_str(environment.workspace_id.as_str())
-            .expect("eval workspace id should be the tenant UUID string");
+        uuid::Uuid::parse_str(environment.storage_partition_id.as_str())
+            .expect("eval tenant id should be the tenant UUID string");
     }
 
     #[tokio::test]

@@ -3,13 +3,13 @@
 use anyhow::Result;
 use moa_core::{
     ChannelRef, ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange,
-    ModelId, SessionActorRef, SessionFilter, SessionMeta, SessionStatus, SessionStore, TenantId,
-    WorkspaceId,
+    ModelId, SessionActorRef, SessionFilter, SessionMeta, SessionStatus, SessionStore,
+    StoragePartitionId, TenantId,
 };
 use moa_session::{PostgresSessionStore, store::SessionChannelBindingReplacement, testing};
 use uuid::Uuid;
 
-fn test_session_meta(_workspace_id: &str) -> SessionMeta {
+fn test_session_meta(_storage_partition_id: &str) -> SessionMeta {
     SessionMeta {
         tenant_id: TenantId::from(
             Uuid::parse_str("11111111-1111-1111-1111-111111111111")
@@ -76,7 +76,7 @@ async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()
     let (store, database_url, schema_name) = test_store().await?;
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let session_id = store
         .create_session(SessionMeta {
             tenant_id,
@@ -87,11 +87,11 @@ async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()
         })
         .await?;
     sqlx::query(
-        "INSERT INTO contacts (id, tenant_id, workspace_id, contact_id, state) VALUES ($1, $2, $3, $4, 'verified')",
+        "INSERT INTO contacts (id, tenant_id, storage_partition_id, contact_id, state) VALUES ($1, $2, $3, $4, 'verified')",
     )
     .bind(contact_id.0)
     .bind(tenant_id.0)
-    .bind(workspace_id.as_str())
+    .bind(storage_partition_id.as_str())
     .bind(contact_id.0)
     .execute(store.pool())
     .await?;
@@ -105,7 +105,7 @@ async fn active_session_channel_binding_returns_resolved_route_db() -> Result<()
     let binding_id = store
         .replace_session_channel_binding(SessionChannelBindingReplacement {
             tenant_id,
-            workspace_id: &workspace_id,
+            storage_partition_id: &storage_partition_id,
             session_id,
             contact_id,
             channel_account_id: None,

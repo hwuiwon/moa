@@ -374,8 +374,8 @@ fn build_intent(
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: req.label,
-        workspace_id: Some(req.tenant_id.to_string()),
-        user_id: req.contact_id.map(|contact_id| contact_id.to_string()),
+        storage_partition_id: Some(req.tenant_id.to_string()),
+        contact_id: req.contact_id.map(|contact_id| contact_id.to_string()),
         scope: req.scope.clone(),
         name: short_name(redacted_text),
         properties: json!({

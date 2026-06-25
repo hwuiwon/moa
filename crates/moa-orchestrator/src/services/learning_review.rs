@@ -10,7 +10,6 @@ use moa_core::wire::{
 };
 use moa_core::{
     LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, MoaError, TenantId,
-    WorkspaceId,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_session::PostgresSessionStore;
@@ -154,12 +153,12 @@ impl SessionLearningReviewStore {
 impl LearningReviewStore for SessionLearningReviewStore {
     fn get_learning_candidate<'a>(
         &'a self,
-        workspace_id: &'a WorkspaceId,
+        tenant_id: &'a TenantId,
         candidate_id: Uuid,
     ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>> {
         Box::pin(async move {
             self.store
-                .get_learning_candidate(workspace_id, candidate_id)
+                .get_learning_candidate(tenant_id, candidate_id)
                 .await
         })
     }
@@ -211,8 +210,7 @@ pub async fn get_learning_candidate_after_authz(
     request: GetLearningCandidateRequest,
 ) -> Result<LearningCandidate, HandlerError> {
     let review_store = SessionLearningReviewStore::new(store);
-    let workspace_id = storage_workspace_id(request.tenant_id);
-    get_learning_candidate_for_review(&review_store, &workspace_id, request.candidate_id)
+    get_learning_candidate_for_review(&review_store, &request.tenant_id, request.candidate_id)
         .await
         .map_err(skill_review_error_to_handler_error)
 }
@@ -313,10 +311,6 @@ async fn authorize_tenant_operator(
     Ok(identity)
 }
 
-fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
-}
-
 fn ensure_requested_action(
     actual: LearningCandidateReviewAction,
     expected: LearningCandidateReviewAction,
@@ -339,7 +333,7 @@ fn skill_review_request(
     action: SkillReviewAction,
 ) -> SkillReviewRequest {
     SkillReviewRequest {
-        workspace_id: storage_workspace_id(request.tenant_id),
+        tenant_id: request.tenant_id,
         candidate_id: request.candidate_id,
         action,
         reviewer_subject: request.reviewer_subject.clone(),

@@ -64,7 +64,7 @@ impl IngestionVO for IngestionVOImpl {
         let pii_service_url = runtime.pii_service_url().map(str::to_string);
         let cohere_api_key_env = runtime.cohere_api_key_env().to_string();
         let contradiction_detector = runtime.contradiction_detector();
-        let degraded = workspace_degraded(&pool, &turn).await?;
+        let degraded = storage_partition_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
             ctx.set(&done_key, Json::from(true));
             return Ok(Json::from(IngestApplyReport {
@@ -247,7 +247,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
         entity_blocking_embedder,
         contradiction_detector,
     } = deps;
-    let degraded = workspace_degraded(&pool, &turn).await?;
+    let degraded = storage_partition_degraded(&pool, &turn).await?;
     if degraded && !should_ingest_degraded(&turn) {
         return Ok(IngestApplyReport {
             skipped: 1,
@@ -288,7 +288,7 @@ pub async fn ingest_turn_direct_with_ctx(
     ctx: IngestCtx,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
-    let degraded = workspace_degraded(&ctx.pool, &turn).await?;
+    let degraded = storage_partition_degraded(&ctx.pool, &turn).await?;
     if degraded && !should_ingest_degraded(&turn) {
         return Ok(IngestApplyReport {
             skipped: 1,
@@ -687,21 +687,21 @@ fn node_intent(
     fact_uid: uuid::Uuid,
 ) -> NodeWriteIntent {
     let extracted = &fact.classified.fact;
-    let workspace_id = scope_workspace_id(scope);
-    let user_id = scope_user_id(scope);
+    let storage_partition_id = scope_storage_partition_id(scope);
+    let contact_id = scope_user_id(scope);
     let scope_tier = scope.tier_str();
     NodeWriteIntent {
         uid: fact_uid,
         label: NodeLabel::Fact,
-        workspace_id: workspace_id.clone(),
-        user_id: user_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
+        contact_id: contact_id.clone(),
         scope: scope_tier.to_string(),
         name: extracted.subject.clone(),
         properties: json!({
             "uid": fact_uid.to_string(),
             "extracted_uid": extracted.uid.to_string(),
-            "workspace_id": workspace_id,
-            "user_id": user_id,
+            "storage_partition_id": storage_partition_id,
+            "user_id": contact_id,
             "scope": scope_tier,
             "name": extracted.subject,
             "subject": extracted.subject,
@@ -725,7 +725,7 @@ fn node_intent(
     }
 }
 
-fn scope_workspace_id(scope: &ScopeContext) -> Option<String> {
+fn scope_storage_partition_id(scope: &ScopeContext) -> Option<String> {
     Some(scope.tenant_id().to_string())
 }
 
@@ -840,8 +840,8 @@ fn entity_fact_edge_intent(
         start_uid: entity_uid,
         end_uid: fact_uid,
         properties: entity_edge_properties(turn, role, alias_mention),
-        workspace_id: scope_workspace_id(scope),
-        user_id: scope_user_id(scope),
+        storage_partition_id: scope_storage_partition_id(scope),
+        contact_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
         actor_id: turn.contact_id.to_string(),
         actor_kind: "contact".to_string(),
@@ -863,8 +863,8 @@ fn fact_entity_edge_intent(
         start_uid: fact_uid,
         end_uid: entity_uid,
         properties: entity_edge_properties(turn, role, alias_mention),
-        workspace_id: scope_workspace_id(scope),
-        user_id: scope_user_id(scope),
+        storage_partition_id: scope_storage_partition_id(scope),
+        contact_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
         actor_id: turn.contact_id.to_string(),
         actor_kind: "contact".to_string(),
@@ -926,13 +926,16 @@ fn entity_edge_properties(
     serde_json::Value::Object(properties)
 }
 
-async fn workspace_degraded(pool: &PgPool, turn: &SessionTurn) -> Result<bool, HandlerError> {
+async fn storage_partition_degraded(
+    pool: &PgPool,
+    turn: &SessionTurn,
+) -> Result<bool, HandlerError> {
     let scope = turn_tenant_scope(turn).map_err(HandlerError::from)?;
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .map_err(HandlerError::from)?;
     let degraded = sqlx::query_scalar::<_, bool>(
-        "SELECT slow_path_degraded FROM moa.workspace_state WHERE workspace_id = $1",
+        "SELECT slow_path_degraded FROM moa.storage_partition_state WHERE storage_partition_id = $1",
     )
     .bind(scope.tenant_id().to_string())
     .fetch_optional(conn.as_mut())
@@ -958,7 +961,7 @@ async fn dedup_fact_uid(
         r#"
         SELECT fact_uid
         FROM moa.ingest_dedup
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND session_id = $2
           AND turn_seq = $3
           AND fact_hash = $4
@@ -994,9 +997,9 @@ async fn insert_dedup(
     sqlx::query(
         r#"
         INSERT INTO moa.ingest_dedup
-            (workspace_id, user_id, session_id, turn_seq, fact_hash, fact_uid)
+            (storage_partition_id, user_id, session_id, turn_seq, fact_hash, fact_uid)
         VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (workspace_id, session_id, turn_seq, fact_hash) DO NOTHING
+        ON CONFLICT (storage_partition_id, session_id, turn_seq, fact_hash) DO NOTHING
         "#,
     )
     .bind(scope.tenant_id().to_string())
@@ -1027,7 +1030,7 @@ async fn write_dlq(
     sqlx::query(
         r#"
         INSERT INTO moa.ingest_dlq
-            (workspace_id, user_id, session_id, turn_seq, payload, error, next_retry_at)
+            (storage_partition_id, user_id, session_id, turn_seq, payload, error, next_retry_at)
         VALUES ($1, $2, $3, $4, $5, $6, now() + INTERVAL '5 minutes')
         "#,
     )

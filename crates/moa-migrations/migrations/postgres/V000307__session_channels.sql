@@ -26,12 +26,12 @@ ALTER TABLE sessions
     DROP COLUMN IF EXISTS platform;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_channel
-    ON sessions(workspace_id, channel, updated_at DESC);
+    ON sessions(storage_partition_id, channel, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS contact_channel_accounts (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     contact_point_id UUID REFERENCES contact_points(id) ON DELETE SET NULL,
     channel TEXT NOT NULL CHECK (channel IN ('chat', 'slack', 'email', 'sms')),
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS contact_channel_accounts (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_channel_accounts_lookup_active
     ON contact_channel_accounts(
         tenant_id,
-        workspace_id,
+        storage_partition_id,
         channel,
         COALESCE(external_tenant_key, ''),
         external_user_key
@@ -61,7 +61,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_channel_accounts_lookup_active
     WHERE merged_into_id IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_contact_channel_accounts_contact
-    ON contact_channel_accounts(tenant_id, workspace_id, contact_id, channel, last_seen_at DESC);
+    ON contact_channel_accounts(tenant_id, storage_partition_id, contact_id, channel, last_seen_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_contact_channel_accounts_point
     ON contact_channel_accounts(contact_point_id)
@@ -70,7 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_contact_channel_accounts_point
 CREATE TABLE IF NOT EXISTS session_channel_bindings (
     id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     channel_account_id UUID REFERENCES contact_channel_accounts(id) ON DELETE SET NULL,
@@ -94,7 +94,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_session_channel_bindings_one_active
 CREATE UNIQUE INDEX IF NOT EXISTS idx_session_channel_bindings_external_active
     ON session_channel_bindings(
         tenant_id,
-        workspace_id,
+        storage_partition_id,
         channel,
         COALESCE(external_tenant_key, ''),
         COALESCE(external_conversation_key, ''),
@@ -103,7 +103,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_session_channel_bindings_external_active
     WHERE ended_at IS NULL AND external_conversation_key IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_session_channel_bindings_contact
-    ON session_channel_bindings(tenant_id, workspace_id, contact_id, channel, last_used_at DESC);
+    ON session_channel_bindings(tenant_id, storage_partition_id, contact_id, channel, last_used_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_session_channel_bindings_account
     ON session_channel_bindings(channel_account_id, ended_at)

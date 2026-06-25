@@ -45,10 +45,9 @@ cloud mode, querying Restate status.
 
 ## Contact Session Flow
 
-Enterprise integrations authenticate as tenant admin/operator callers, or as
-workspace control-plane callers that are explicitly administering a tenant, to
-issue MOA contact JWTs for agent-facing contacts. Contacts are end users inside
-one tenant; users are admin/operator principals. Initial contact tokens are low
+Enterprise integrations authenticate as tenant admin/operator callers to issue
+MOA contact JWTs for agent-facing contacts. Contacts are end users inside one
+tenant; users are admin/operator principals. Initial contact tokens are low
 assurance: they can create a contact-bound session, but their scopes and
 structured permissions bound them to the configured tenant, agent/session
 allowlists, and low-assurance memory operations. A dedicated contact message
@@ -75,8 +74,8 @@ inherit tenant memory or any other contact's memory by default.
 ## Action Reviews
 
 Tenant action reviews are persisted records with enough information for an
-admin surface to render. Workspace-level action policies are inherited defaults,
-and tenant-level policy rows override them for the tenant:
+admin surface to render. Tenant-level action policies determine whether actions
+are allowed, denied, or queued for review:
 
 - review ID and tenant
 - durable `ActionEnvelope`

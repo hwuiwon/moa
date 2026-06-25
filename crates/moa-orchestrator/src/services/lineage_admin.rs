@@ -9,7 +9,7 @@ use moa_core::wire::{
     LineageExportRequest, LineageExportResponse, LineageQueryRequest, LineageQueryResponse,
     LineageVerifyRequest, LineageVerifyResponse,
 };
-use moa_core::{TenantId, WorkspaceId};
+use moa_core::{StoragePartitionId, TenantId};
 use moa_lineage_audit::SigningKey;
 use moa_lineage_audit::admin as lineage_audit_admin;
 use moa_lineage_sink::admin as lineage_sink_admin;
@@ -22,7 +22,7 @@ use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 
-const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_WORKSPACE_SECRET_HEX";
+const PII_VAULT_SECRET_HEX_ENV: &str = "MOA_PII_VAULT_SECRET_HEX";
 const PRIVACY_EXPORT_SIGNING_KEY_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_HEX";
 const PRIVACY_EXPORT_SIGNING_KEY_ID_ENV: &str = "MOA_PRIVACY_EXPORT_SIGNING_KEY_ID";
 const LINEAGE_AUDIT_SIGNING_KEY_ENV: &str = "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX";
@@ -161,16 +161,16 @@ async fn authorize_tenant(
         .map_err(translate_authz_error)
 }
 
-fn storage_workspace_id(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
+fn storage_partition_id_for_tenant(tenant_id: TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }
 
 async fn explain_inner(
     pool: PgPool,
     request: LineageExplainRequest,
 ) -> Result<LineageExplainResponse, HandlerError> {
-    let workspace_id = storage_workspace_id(request.tenant_id);
-    let records = lineage_sink_admin::explain_records(&pool, &workspace_id, request.id)
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
+    let records = lineage_sink_admin::explain_records(&pool, &storage_partition_id, request.id)
         .await
         .map_err(handler_error)?;
     Ok(LineageExplainResponse {
@@ -191,7 +191,7 @@ async fn query_inner(
         .into());
     }
     let prepared = prepare_lineage_sql(&request.sql)?;
-    let workspace_id = storage_workspace_id(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let mut tx = pool.begin().await.map_err(handler_error)?;
     sqlx::query("SET TRANSACTION READ ONLY")
         .execute(&mut *tx)
@@ -204,7 +204,7 @@ async fn query_inner(
     let rows = lineage_sink_admin::execute_prepared_lineage_query(
         &mut tx,
         &prepared,
-        &workspace_id,
+        &storage_partition_id,
         &request.since,
     )
     .await
@@ -218,16 +218,19 @@ async fn export_inner(
     request: LineageExportRequest,
 ) -> Result<LineageExportResponse, HandlerError> {
     let signing = configured_lineage_dsar_signing_key()?;
-    let workspace_id = storage_workspace_id(request.tenant_id);
-    let records =
-        lineage_sink_admin::load_dsar_export_records(&pool, &workspace_id, &request.subject)
-            .await
-            .map_err(handler_error)?;
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
+    let records = lineage_sink_admin::load_dsar_export_records(
+        &pool,
+        &storage_partition_id,
+        &request.subject,
+    )
+    .await
+    .map_err(handler_error)?;
     let export_dir = create_temp_dir("moa-lineage-export").await?;
     let bundle_path = export_dir.join("lineage-dsar.zip");
     let bundle = lineage_audit_admin::export_dsar_bundle(
         signing,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         &request.subject,
         records,
         &bundle_path,
@@ -249,21 +252,24 @@ async fn verify_inner(
     pool: PgPool,
     request: LineageVerifyRequest,
 ) -> Result<LineageVerifyResponse, HandlerError> {
-    let workspace_id = storage_workspace_id(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     if request.window == "hot" || request.window == "db" {
         let rows = lineage_audit_admin::load_compliance_rows_for_interval(
             &pool,
-            workspace_id.as_str(),
+            storage_partition_id.as_str(),
             &request.since,
         )
         .await
         .map_err(handler_error)?;
         let report =
             lineage_audit_admin::verify_compliance_rows(rows, None).map_err(handler_error)?;
-        let dead_letters =
-            lineage_audit_admin::count_lineage_dead_letter_rows(&pool, workspace_id.as_str(), None)
-                .await
-                .map_err(handler_error)?;
+        let dead_letters = lineage_audit_admin::count_lineage_dead_letter_rows(
+            &pool,
+            storage_partition_id.as_str(),
+            None,
+        )
+        .await
+        .map_err(handler_error)?;
         return Ok(LineageVerifyResponse {
             tenant_id: request.tenant_id,
             records: usize_to_u64(report.records),
@@ -274,12 +280,13 @@ async fn verify_inner(
     }
 
     let signing = configured_audit_root_signing_key()?;
-    let root = lineage_audit_admin::load_audit_root(&pool, workspace_id.as_str(), &request.window)
-        .await
-        .map_err(handler_error)?;
+    let root =
+        lineage_audit_admin::load_audit_root(&pool, storage_partition_id.as_str(), &request.window)
+            .await
+            .map_err(handler_error)?;
     let rows = lineage_audit_admin::load_compliance_rows_for_window(
         &pool,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         root.window_start,
         root.window_end,
     )
@@ -287,7 +294,7 @@ async fn verify_inner(
     .map_err(handler_error)?;
     let dead_letters = lineage_audit_admin::count_lineage_dead_letter_rows(
         &pool,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         Some((root.window_start, root.window_end)),
     )
     .await
@@ -307,7 +314,7 @@ async fn erase_inner(
     pool: PgPool,
     request: LineageEraseRequest,
 ) -> Result<LineageEraseResponse, HandlerError> {
-    let workspace_id = storage_workspace_id(request.tenant_id);
+    let storage_partition_id = storage_partition_id_for_tenant(request.tenant_id);
     let subject = hex::decode(request.subject.trim()).map_err(|error| {
         TerminalError::new_with_code(
             400,
@@ -317,7 +324,7 @@ async fn erase_inner(
     let secret = pii_vault_secret_from_env()?.unwrap_or_default();
     let subjects = lineage_audit_admin::erase_subject_pseudonym(
         &pool,
-        workspace_id.as_str(),
+        storage_partition_id.as_str(),
         &subject,
         secret,
         "lineage-erase",
@@ -355,7 +362,7 @@ pub fn prepare_lineage_sql(sql: &str) -> Result<String, HandlerError> {
         .into());
     };
     let replacement = "FROM (SELECT * FROM analytics.turn_lineage \
-        WHERE workspace_id = $1 AND ts > now() - ($2::text)::interval) lineage";
+        WHERE storage_partition_id = $1 AND ts > now() - ($2::text)::interval) lineage";
     let mut prepared = String::with_capacity(trimmed.len() + replacement.len());
     prepared.push_str(&trimmed[..idx]);
     prepared.push_str(replacement);

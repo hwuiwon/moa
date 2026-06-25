@@ -14,7 +14,7 @@ use moa_core::wire::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
-use moa_core::{ContactId, SessionId, UserId, WorkspaceId};
+use moa_core::{ContactId, SessionId, StoragePartitionId, UserId};
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
     StageTimings, TurnId, VecHit,
@@ -485,7 +485,7 @@ fn record_debug_retrieval_lineage(
     hits: &[RetrievalHit],
 ) -> Result<TurnId, HandlerError> {
     let turn_id = TurnId::new_v7();
-    let workspace_id = WorkspaceId::new(scope.tenant_id().to_string());
+    let storage_partition_id = StoragePartitionId::new(scope.tenant_id().to_string());
     let user_id = scope
         .contact_id()
         .map(|contact_id| UserId::new(contact_id.to_string()))
@@ -494,7 +494,7 @@ fn record_debug_retrieval_lineage(
     let record = RetrievalLineage {
         turn_id,
         session_id: SessionId::new(),
-        workspace_id,
+        storage_partition_id,
         user_id,
         scope: scope.clone(),
         ts: Utc::now(),

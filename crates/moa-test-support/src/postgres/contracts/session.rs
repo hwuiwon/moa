@@ -3,13 +3,13 @@
 use chrono::{Duration, Utc};
 use moa_core::{
     Event, EventFilter, EventRange, EventType, ModelId, SessionActorRef, SessionFilter,
-    SessionMeta, SessionStatus, SessionStore, TenantId, WorkspaceId,
+    SessionMeta, SessionStatus, SessionStore, TenantId,
 };
 use uuid::Uuid;
 
-fn test_session_meta(workspace: &str) -> SessionMeta {
+fn test_session_meta(tenant_label: &str) -> SessionMeta {
     SessionMeta {
-        tenant_id: tenant_id_for_label(workspace),
+        tenant_id: tenant_id_for_label(tenant_label),
         created_by: Some(SessionActorRef::Identity {
             id: Uuid::from_u128(1),
         }),
@@ -20,15 +20,11 @@ fn test_session_meta(workspace: &str) -> SessionMeta {
 
 fn tenant_id_for_label(label: &str) -> TenantId {
     let value = match label {
-        "ws1" => 1,
-        "ws2" => 2,
+        "tenant1" => 1,
+        "tenant2" => 2,
         _ => 3,
     };
     TenantId::from(Uuid::from_u128(value))
-}
-
-fn tenant_workspace_key(label: &str) -> WorkspaceId {
-    WorkspaceId::new(tenant_id_for_label(label).to_string())
 }
 
 /// Verifies session creation, event append, and aggregate counters.
@@ -37,7 +33,7 @@ where
     S: SessionStore + ?Sized,
 {
     let session_id = store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
         .expect("create session");
 
@@ -91,7 +87,7 @@ where
     S: SessionStore + ?Sized,
 {
     let session_id = store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
         .expect("create session");
 
@@ -156,7 +152,7 @@ where
     S: SessionStore + ?Sized,
 {
     let session_id = store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
         .expect("create session");
 
@@ -203,7 +199,7 @@ where
     S: SessionStore + ?Sized,
 {
     let session_id = store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
         .expect("create session");
 
@@ -217,48 +213,48 @@ where
     assert!(session.completed_at.is_some());
 }
 
-/// Verifies workspace-filtered session listing.
+/// Verifies tenant-filtered session listing.
 pub async fn test_list_sessions_with_filter<S>(store: &S)
 where
     S: SessionStore + ?Sized,
 {
     store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
-        .expect("create ws1");
+        .expect("create tenant1");
     store
-        .create_session(test_session_meta("ws2"))
+        .create_session(test_session_meta("tenant2"))
         .await
-        .expect("create ws2");
+        .expect("create tenant2");
 
     let sessions = store
         .list_sessions(SessionFilter {
-            tenant_id: Some(tenant_id_for_label("ws1")),
+            tenant_id: Some(tenant_id_for_label("tenant1")),
             ..Default::default()
         })
         .await
         .expect("list sessions");
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].tenant_id, tenant_id_for_label("ws1"));
+    assert_eq!(sessions[0].tenant_id, tenant_id_for_label("tenant1"));
 }
 
-/// Verifies workspace spend aggregation since a specific timestamp.
-pub async fn test_workspace_cost_since<S>(store: &S)
+/// Verifies tenant spend aggregation since a specific timestamp.
+pub async fn test_tenant_cost_since<S>(store: &S)
 where
     S: SessionStore + ?Sized,
 {
     let first_session_id = store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
         .expect("create first session");
     let second_session_id = store
-        .create_session(test_session_meta("ws1"))
+        .create_session(test_session_meta("tenant1"))
         .await
         .expect("create second session");
-    let other_workspace_session_id = store
-        .create_session(test_session_meta("ws2"))
+    let other_tenant_session_id = store
+        .create_session(test_session_meta("tenant2"))
         .await
-        .expect("create other workspace session");
+        .expect("create other tenant session");
 
     let since = Utc::now() - Duration::minutes(1);
     let future_since = Utc::now() + Duration::minutes(1);
@@ -301,7 +297,7 @@ where
         .expect("emit second response");
     store
         .emit_event(
-            other_workspace_session_id,
+            other_tenant_session_id,
             Event::BrainResponse {
                 text: "other".into(),
                 thought_signature: None,
@@ -316,17 +312,17 @@ where
             },
         )
         .await
-        .expect("emit other workspace response");
+        .expect("emit other tenant response");
 
-    let workspace_total = store
-        .workspace_cost_since(&tenant_workspace_key("ws1"), since)
+    let tenant_total = store
+        .tenant_cost_since(&tenant_id_for_label("tenant1"), since)
         .await
-        .expect("load workspace spend");
-    assert_eq!(workspace_total, 18);
+        .expect("load tenant spend");
+    assert_eq!(tenant_total, 18);
 
     let future_total = store
-        .workspace_cost_since(&tenant_workspace_key("ws1"), future_since)
+        .tenant_cost_since(&tenant_id_for_label("tenant1"), future_since)
         .await
-        .expect("load future workspace spend");
+        .expect("load future tenant spend");
     assert_eq!(future_total, 0);
 }

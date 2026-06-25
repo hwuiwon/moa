@@ -11,11 +11,11 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(workspace_id: impl AsRef<str>) -> ScopeContext {
-    let workspace_id = workspace_id.as_ref();
-    let tenant_id = Uuid::parse_str(workspace_id)
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+    let storage_partition_id = storage_partition_id.as_ref();
+    let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id)));
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
     ScopeContext::tenant(tenant_id)
 }
 
@@ -53,8 +53,8 @@ async fn set_auditor_role(conn: &mut sqlx::PgConnection) {
         .expect("set moa_auditor role");
 }
 
-async fn set_tenant_gucs(conn: &mut sqlx::PgConnection, workspace_id: &str) {
-    let tenant_id = Uuid::parse_str(workspace_id).expect("test workspace id is a UUID");
+async fn set_tenant_gucs(conn: &mut sqlx::PgConnection, storage_partition_id: &str) {
+    let tenant_id = Uuid::parse_str(storage_partition_id).expect("test workspace id is a UUID");
     sqlx::query(
         r#"
         SELECT
@@ -69,10 +69,10 @@ async fn set_tenant_gucs(conn: &mut sqlx::PgConnection, workspace_id: &str) {
     .expect("set tenant GUCs");
 }
 
-fn record(workspace_id: &str, uid: Uuid, index: usize) -> ChangelogRecord {
+fn record(storage_partition_id: &str, uid: Uuid, index: usize) -> ChangelogRecord {
     ChangelogRecord {
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: None,
+        storage_partition_id: Some(storage_partition_id.to_string()),
+        contact_id: None,
         scope: "tenant".to_string(),
         actor_id: None,
         actor_kind: "system".to_string(),
@@ -112,7 +112,7 @@ async fn changelog_write_bumps_workspace_version_and_respects_read_rls() {
     }
 
     let version = sqlx::query_scalar::<_, i64>(
-        "SELECT changelog_version FROM moa.workspace_state WHERE workspace_id = $1",
+        "SELECT changelog_version FROM moa.storage_partition_state WHERE storage_partition_id = $1",
     )
     .bind(&workspace_a)
     .fetch_one(conn.as_mut())
@@ -164,15 +164,15 @@ async fn changelog_rejects_updates_for_app_role() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
-    let workspace_id = Uuid::now_v7().to_string();
-    let ctx = tenant_scope(&workspace_id);
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let ctx = tenant_scope(&storage_partition_id);
     let mut conn = ScopedConn::begin(store.pool(), &ctx)
         .await
         .expect("begin scoped changelog transaction");
     set_app_role(conn.as_mut()).await;
 
     let target_uid = Uuid::now_v7();
-    write_and_bump(conn.as_mut(), record(&workspace_id, target_uid, 0))
+    write_and_bump(conn.as_mut(), record(&storage_partition_id, target_uid, 0))
         .await
         .expect("seed changelog record");
     let visible_before = sqlx::query_scalar::<_, i64>(

@@ -1,9 +1,7 @@
 //! Action-policy rule contract tests.
 
 use chrono::Utc;
-use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, TenantId, UserId, WorkspaceId,
-};
+use moa_core::{ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, TenantId, UserId};
 use moa_security::ActionPolicyRuleStore;
 use uuid::Uuid;
 
@@ -14,8 +12,6 @@ where
 {
     let tenant_id = TenantId::from(Uuid::from_u128(1));
     let other_tenant_id = TenantId::from(Uuid::from_u128(2));
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
-    let other_workspace_id = WorkspaceId::new(other_tenant_id.to_string());
     let user_id = UserId::new("u1");
     let other_user_id = UserId::new("u2");
     let rule = ActionPolicyRule {
@@ -47,22 +43,8 @@ where
         .upsert_action_policy_rule(tenant_override_rule.clone())
         .await
         .expect("upsert tenant-scoped action policy rule");
-    let default_rule = ActionPolicyRule {
-        id: Uuid::now_v7(),
-        tool: "bash".to_string(),
-        pattern: "git fetch".to_string(),
-        effect: ActionPolicyEffect::Deny,
-        scope: ActionRuleScope::WorkspaceDefault,
-        reason: Some("workspace-default deny".to_string()),
-        created_by: user_id.clone(),
-        created_at: Utc::now(),
-    };
-    store
-        .upsert_action_policy_rule(default_rule.clone())
-        .await
-        .expect("upsert workspace-default action policy rule");
     let rules = store
-        .list_action_policy_rules_for_tool(&workspace_id, &user_id, "bash")
+        .list_action_policy_rules_for_tool(&tenant_id, &user_id, "bash")
         .await
         .expect("list action policy rules");
     assert!(
@@ -75,11 +57,8 @@ where
             .any(|candidate| candidate.id == tenant_override_rule.id
                 && candidate.effect == ActionPolicyEffect::Deny)
     );
-    assert!(rules.iter().any(|candidate| candidate.id == default_rule.id
-        && candidate.scope == ActionRuleScope::WorkspaceDefault));
-
     let other_user_rules = store
-        .list_action_policy_rules_for_tool(&workspace_id, &other_user_id, "bash")
+        .list_action_policy_rules_for_tool(&tenant_id, &other_user_id, "bash")
         .await
         .expect("list action policy rules for other user");
     assert!(
@@ -93,28 +72,27 @@ where
             .any(|candidate| candidate.id == tenant_override_rule.id)
     );
 
-    let other_workspace_rules = store
-        .list_action_policy_rules_for_tool(&other_workspace_id, &user_id, "bash")
+    let other_tenant_rules = store
+        .list_action_policy_rules_for_tool(&other_tenant_id, &user_id, "bash")
         .await
         .expect("list action policy rules for other tenant");
     assert!(
-        !other_workspace_rules
+        !other_tenant_rules
             .iter()
             .any(|candidate| candidate.id == rule.id)
     );
     assert!(
-        other_workspace_rules
+        !other_tenant_rules
             .iter()
-            .any(|candidate| candidate.id == default_rule.id
-                && candidate.scope == ActionRuleScope::WorkspaceDefault)
+            .any(|candidate| candidate.id == tenant_override_rule.id)
     );
 
     store
-        .delete_action_policy_rule(&workspace_id, None, &rule.tool, &rule.pattern)
+        .delete_action_policy_rule(&tenant_id, None, &rule.tool, &rule.pattern)
         .await
         .expect("delete action policy rule");
     let rules = store
-        .list_action_policy_rules_for_tool(&workspace_id, &user_id, "bash")
+        .list_action_policy_rules_for_tool(&tenant_id, &user_id, "bash")
         .await
         .expect("list action policy rules after delete");
     assert!(!rules.iter().any(|candidate| candidate.id == rule.id));

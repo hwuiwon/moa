@@ -138,7 +138,7 @@ struct GoldenStack {
     pool: PgPool,
     database_url: String,
     schema_name: String,
-    workspace_uuid: Uuid,
+    tenant_uuid: Uuid,
     user_uuid: Uuid,
     session_id: SessionId,
     scope: ScopeContext,
@@ -155,22 +155,22 @@ impl GoldenStack {
             .await
             .map_err(box_error)?;
         let pool = session_store.pool().clone();
-        let workspace_uuid = Uuid::now_v7();
+        let tenant_uuid = Uuid::now_v7();
         let user_uuid = Uuid::now_v7();
-        let tenant_id = TenantId::from(workspace_uuid);
+        let tenant_id = TenantId::from(tenant_uuid);
         let scope = ScopeContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let graph = Arc::new(
             AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
                 .with_vector_store(vector.clone()),
         );
-        seed_workspace_embedder_state(&pool, &scope, workspace_uuid).await?;
+        seed_tenant_embedder_state(&pool, &scope, tenant_uuid).await?;
 
         Ok(Self {
             pool,
             database_url,
             schema_name,
-            workspace_uuid,
+            tenant_uuid,
             user_uuid,
             session_id: SessionId::new(),
             scope,
@@ -208,7 +208,7 @@ impl GoldenStack {
 
     fn memory_scope(&self) -> MemoryScope {
         MemoryScope::Tenant {
-            tenant_id: TenantId::from(self.workspace_uuid),
+            tenant_id: TenantId::from(self.tenant_uuid),
         }
     }
 
@@ -219,10 +219,10 @@ impl GoldenStack {
     }
 }
 
-async fn seed_workspace_embedder_state(
+async fn seed_tenant_embedder_state(
     pool: &PgPool,
     scope: &ScopeContext,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
 ) -> TestResult {
     let mut conn = ScopedConn::begin(pool, scope).await.map_err(box_error)?;
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -231,17 +231,17 @@ async fn seed_workspace_embedder_state(
         .map_err(box_error)?;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind("golden-mock-embedder")
     .bind(29_i32)
     .bind(VECTOR_DIMENSION as i32)
@@ -280,23 +280,17 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
         assert_eq!(report.skipped, 0, "fixture {}", fixture.uid_seed);
         assert_eq!(report.failed, 0, "fixture {}", fixture.uid_seed);
 
-        let uid = uid_for_turn_seq(&stack.pool, stack.workspace_uuid, turn_seq).await?;
+        let uid = uid_for_turn_seq(&stack.pool, stack.tenant_uuid, turn_seq).await?;
         let alias = fact_alias(&fixture.uid_seed);
         uid_by_alias.insert(alias.clone(), uid);
         summary_by_alias.insert(alias, fixture.summary.clone());
     }
 
-    wait_for_dlq_empty(&stack.pool, stack.workspace_uuid, Duration::from_secs(60)).await?;
+    wait_for_dlq_empty(&stack.pool, stack.tenant_uuid, Duration::from_secs(60)).await?;
+    assert_eq!(fact_node_count(&stack.pool, stack.tenant_uuid).await?, 100);
+    assert_eq!(embedding_count(&stack.pool, stack.tenant_uuid).await?, 100);
     assert_eq!(
-        fact_node_count(&stack.pool, stack.workspace_uuid).await?,
-        100
-    );
-    assert_eq!(
-        embedding_count(&stack.pool, stack.workspace_uuid).await?,
-        100
-    );
-    assert_eq!(
-        fact_create_changelog_count(&stack.pool, stack.workspace_uuid).await?,
+        fact_create_changelog_count(&stack.pool, stack.tenant_uuid).await?,
         100
     );
 
@@ -312,7 +306,7 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
         uid_by_alias.insert(format!("{alias}-pre"), old_uid);
         let new_uid = fast_remember(
             FastRememberRequest {
-                tenant_id: stack.workspace_uuid,
+                tenant_id: stack.tenant_uuid,
                 contact_id: None,
                 scope: "tenant".to_string(),
                 text: superseded_text(old_summary),
@@ -329,12 +323,9 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
         supersede_pairs.push((old_uid, new_uid));
     }
 
+    assert_eq!(invalidated_count(&stack.pool, stack.tenant_uuid).await?, 10);
     assert_eq!(
-        invalidated_count(&stack.pool, stack.workspace_uuid).await?,
-        10
-    );
-    assert_eq!(
-        supersedes_edge_count(&stack.pool, stack.workspace_uuid, &supersede_pairs).await?,
+        supersedes_edge_count(&stack.pool, stack.tenant_uuid, &supersede_pairs).await?,
         10
     );
 
@@ -365,7 +356,7 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
     }
 
     let other_tenant_id = TenantId::new();
-    seed_workspace_embedder_state(
+    seed_tenant_embedder_state(
         &stack.pool,
         &ScopeContext::tenant(other_tenant_id),
         other_tenant_id.0,
@@ -522,7 +513,7 @@ fn load_queries() -> TestResult<GoldenQueries> {
 
 fn session_turn(stack: &GoldenStack, fixture: &GoldenFixture, turn_seq: u64) -> SessionTurn {
     SessionTurn {
-        tenant_id: TenantId::from(stack.workspace_uuid),
+        tenant_id: TenantId::from(stack.tenant_uuid),
         contact_id: ContactId(stack.user_uuid),
         session_id: stack.session_id,
         turn_seq,
@@ -601,68 +592,72 @@ fn fact_index(token: &str) -> Option<usize> {
         .then_some(number - 1)
 }
 
-async fn uid_for_turn_seq(pool: &PgPool, workspace_id: Uuid, turn_seq: u64) -> TestResult<Uuid> {
-    let mut conn = scoped_conn(pool, workspace_id).await?;
+async fn uid_for_turn_seq(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+    turn_seq: u64,
+) -> TestResult<Uuid> {
+    let mut conn = scoped_conn(pool, storage_partition_id).await?;
     let uid = sqlx::query_scalar::<_, Uuid>(
         "SELECT uid FROM moa.node_index \
-         WHERE workspace_id = $1 \
+         WHERE storage_partition_id = $1 \
            AND properties_summary->>'source_turn_seq' = $2 \
            AND valid_to IS NULL",
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(turn_seq.to_string())
     .fetch_one(conn.as_mut())
     .await
     .map_err(|error| {
         box_message(format!(
-            "uid_for_turn_seq failed for workspace {workspace_id} turn_seq {turn_seq}: {error}"
+            "uid_for_turn_seq failed for tenant {storage_partition_id} turn_seq {turn_seq}: {error}"
         ))
     })?;
     conn.commit().await.map_err(box_error)?;
     Ok(uid)
 }
 
-async fn fact_node_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
+async fn fact_node_count(pool: &PgPool, storage_partition_id: Uuid) -> TestResult<i64> {
     scoped_count(
         pool,
-        workspace_id,
-        "SELECT count(*) FROM moa.node_index WHERE workspace_id = $1 AND label = 'Fact'",
+        storage_partition_id,
+        "SELECT count(*) FROM moa.node_index WHERE storage_partition_id = $1 AND label = 'Fact'",
     )
     .await
 }
 
-async fn embedding_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
+async fn embedding_count(pool: &PgPool, storage_partition_id: Uuid) -> TestResult<i64> {
     scoped_count(
         pool,
-        workspace_id,
-        "SELECT count(*) FROM moa.embeddings WHERE workspace_id = $1",
+        storage_partition_id,
+        "SELECT count(*) FROM moa.embeddings WHERE storage_partition_id = $1",
     )
     .await
 }
 
-async fn fact_create_changelog_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
+async fn fact_create_changelog_count(pool: &PgPool, storage_partition_id: Uuid) -> TestResult<i64> {
     scoped_count(
         pool,
-        workspace_id,
+        storage_partition_id,
         "SELECT count(*) FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'create' AND target_kind = 'node' AND target_label = 'Fact'",
+         WHERE storage_partition_id = $1 AND op = 'create' AND target_kind = 'node' AND target_label = 'Fact'",
     )
     .await
 }
 
-async fn invalidated_count(pool: &PgPool, workspace_id: Uuid) -> TestResult<i64> {
+async fn invalidated_count(pool: &PgPool, storage_partition_id: Uuid) -> TestResult<i64> {
     scoped_count(
         pool,
-        workspace_id,
-        "SELECT count(*) FROM moa.node_index WHERE workspace_id = $1 AND valid_to IS NOT NULL",
+        storage_partition_id,
+        "SELECT count(*) FROM moa.node_index WHERE storage_partition_id = $1 AND valid_to IS NOT NULL",
     )
     .await
 }
 
-async fn scoped_count(pool: &PgPool, workspace_id: Uuid, sql: &str) -> TestResult<i64> {
-    let mut conn = scoped_conn(pool, workspace_id).await?;
+async fn scoped_count(pool: &PgPool, storage_partition_id: Uuid, sql: &str) -> TestResult<i64> {
+    let mut conn = scoped_conn(pool, storage_partition_id).await?;
     let count = sqlx::query_scalar::<_, i64>(sql)
-        .bind(workspace_id.to_string())
+        .bind(storage_partition_id.to_string())
         .fetch_one(conn.as_mut())
         .await?;
     conn.commit().await.map_err(box_error)?;
@@ -671,12 +666,12 @@ async fn scoped_count(pool: &PgPool, workspace_id: Uuid, sql: &str) -> TestResul
 
 async fn supersedes_edge_count(
     pool: &PgPool,
-    workspace_id: Uuid,
+    storage_partition_id: Uuid,
     pairs: &[(Uuid, Uuid)],
 ) -> TestResult<i64> {
     let mut count = 0_i64;
     for (old_uid, new_uid) in pairs {
-        let mut conn = scoped_conn(pool, workspace_id).await?;
+        let mut conn = scoped_conn(pool, storage_partition_id).await?;
         let row = cypher::edge::SUPERSEDES_EXISTS
             .execute(&serde_json::json!({
                 "old_uid": old_uid.to_string(),
@@ -692,13 +687,17 @@ async fn supersedes_edge_count(
     Ok(count)
 }
 
-async fn wait_for_dlq_empty(pool: &PgPool, workspace_id: Uuid, timeout: Duration) -> TestResult {
+async fn wait_for_dlq_empty(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+    timeout: Duration,
+) -> TestResult {
     let started = tokio::time::Instant::now();
     loop {
         let count = scoped_count(
             pool,
-            workspace_id,
-            "SELECT count(*) FROM moa.ingest_dlq WHERE workspace_id = $1",
+            storage_partition_id,
+            "SELECT count(*) FROM moa.ingest_dlq WHERE storage_partition_id = $1",
         )
         .await?;
         if count == 0 {
@@ -713,8 +712,11 @@ async fn wait_for_dlq_empty(pool: &PgPool, workspace_id: Uuid, timeout: Duration
     }
 }
 
-async fn scoped_conn<'a>(pool: &'a PgPool, workspace_id: Uuid) -> TestResult<ScopedConn<'a>> {
-    let scope = ScopeContext::tenant(TenantId::from(workspace_id));
+async fn scoped_conn<'a>(
+    pool: &'a PgPool,
+    storage_partition_id: Uuid,
+) -> TestResult<ScopedConn<'a>> {
+    let scope = ScopeContext::tenant(TenantId::from(storage_partition_id));
     let mut conn = ScopedConn::begin(pool, &scope).await.map_err(box_error)?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())

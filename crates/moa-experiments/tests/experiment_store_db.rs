@@ -1,5 +1,5 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
-use moa_core::{ActionRuleScope, ModelId, Result, SessionId, TenantId, UserId, WorkspaceId};
+use moa_core::{ActionRuleScope, ModelId, Result, SessionId, StoragePartitionId, TenantId, UserId};
 use moa_db::ScopedConn;
 use moa_experiments::{
     model::{
@@ -18,12 +18,12 @@ static DB_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn workspace_scoped_run_insert_load_round_trip_db() -> Result<()> {
+async fn tenant_scoped_run_insert_load_round_trip_db() -> Result<()> {
     // Pins: tenant-scoped experiment metadata persists and loads through the scoped store.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("experiment-round-trip");
+    let scope = tenant_scope("experiment-round-trip");
     let artifact_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let new_run = new_experiment(
         "round-trip",
@@ -63,7 +63,7 @@ async fn missing_artifact_revision_rejects_experiment_insert_db() -> Result<()> 
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("experiment-missing-artifact-revision");
+    let scope = tenant_scope("experiment-missing-artifact-revision");
     let missing_revision_uid = Uuid::now_v7();
 
     let error = store
@@ -88,8 +88,8 @@ async fn workspace_a_cannot_load_workspace_b_run_db() -> Result<()> {
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_a = workspace_scope("experiment-a");
-    let workspace_b = workspace_scope("experiment-b");
+    let workspace_a = tenant_scope("experiment-a");
+    let workspace_b = tenant_scope("experiment-b");
 
     let inserted = store
         .insert_run(
@@ -118,8 +118,8 @@ async fn idempotency_key_deduplicates_within_scope_not_across_workspaces_db() ->
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_a = workspace_scope("experiment-idem-a");
-    let workspace_b = workspace_scope("experiment-idem-b");
+    let workspace_a = tenant_scope("experiment-idem-a");
+    let workspace_b = tenant_scope("experiment-idem-b");
 
     let first = store
         .insert_run(
@@ -153,7 +153,7 @@ async fn idempotency_duplicate_does_not_add_artifact_revision_links_db() -> Resu
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("experiment-idem-links");
+    let scope = tenant_scope("experiment-idem-links");
     let first_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let duplicate_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let first = store
@@ -186,13 +186,13 @@ async fn idempotency_duplicate_does_not_add_artifact_revision_links_db() -> Resu
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn score_run_id_from_another_workspace_rejects_insert_db() -> Result<()> {
-    // Pins: experiment runs cannot attach to an existing score-run parent from another workspace.
+async fn score_run_id_from_another_tenant_rejects_insert_db() -> Result<()> {
+    // Pins: experiment runs cannot attach to an existing score-run parent from another tenant.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_a = workspace_scope("experiment-score-run-a");
-    let workspace_b = workspace_scope("experiment-score-run-b");
+    let workspace_a = tenant_scope("experiment-score-run-a");
+    let workspace_b = tenant_scope("experiment-score-run-b");
     let score_run_id = Uuid::now_v7();
     insert_score_run(test_db.store().pool(), &workspace_b, score_run_id).await?;
     let mut new_run = new_experiment("cross-score-run", None, Vec::new());
@@ -201,7 +201,7 @@ async fn score_run_id_from_another_workspace_rejects_insert_db() -> Result<()> {
     let error = store
         .insert_run(&workspace_a, new_run)
         .await
-        .expect_err("cross-workspace score run should reject experiment insert");
+        .expect_err("cross-tenant score run should reject experiment insert");
 
     assert!(
         error.to_string().contains("score_run"),
@@ -219,17 +219,17 @@ async fn score_run_id_from_another_workspace_rejects_insert_db() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn cross_workspace_artifact_revision_rejects_insert_db() -> Result<()> {
+async fn cross_tenant_artifact_revision_rejects_insert_db() -> Result<()> {
     // Pins: experiment artifact links must target revisions visible from the requested scope.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_a = workspace_scope("experiment-artifact-a");
-    let workspace_b = workspace_scope("experiment-artifact-b");
+    let workspace_a = tenant_scope("experiment-artifact-a");
+    let workspace_b = tenant_scope("experiment-artifact-b");
     let workspace_b_revision_uid =
         insert_artifact_revision(test_db.store().pool(), &workspace_b).await?;
     let new_run = new_experiment(
-        "cross-workspace-revision",
+        "cross-tenant-revision",
         None,
         vec![workspace_b_revision_uid],
     );
@@ -238,7 +238,7 @@ async fn cross_workspace_artifact_revision_rejects_insert_db() -> Result<()> {
     let error = store
         .insert_run(&workspace_a, new_run)
         .await
-        .expect_err("cross-workspace artifact revision should reject experiment insert");
+        .expect_err("cross-tenant artifact revision should reject experiment insert");
 
     assert!(
         error.to_string().contains("artifact revision"),
@@ -256,11 +256,12 @@ async fn workflow_run_and_session_links_persist_db() -> Result<()> {
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let experiment_store = ExperimentStore::new(test_db.store().pool().clone());
     let tenant_id = TenantId::from(Uuid::now_v7());
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
     let scope = ActionRuleScope::Tenant { tenant_id };
     let session_id =
-        insert_session_for_experiment_fk(test_db.store().pool(), &workspace_id, &user_id).await?;
+        insert_session_for_experiment_fk(test_db.store().pool(), &storage_partition_id, &user_id)
+            .await?;
     let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
     let inserted = experiment_store
         .insert_run(&scope, new_experiment("links", None, Vec::new()))
@@ -288,7 +289,7 @@ async fn terminal_run_status_cannot_be_overwritten_db() -> Result<()> {
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("run-terminal-guard");
+    let scope = tenant_scope("run-terminal-guard");
     let run = store
         .insert_run(
             &scope,
@@ -335,7 +336,7 @@ async fn trial_insert_load_list_round_trip_db() -> Result<()> {
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("trial-round-trip");
+    let scope = tenant_scope("trial-round-trip");
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let variant_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let run = store
@@ -392,7 +393,7 @@ async fn trial_key_deduplicates_within_run_db() -> Result<()> {
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("trial-idem");
+    let scope = tenant_scope("trial-idem");
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let run = store
         .insert_run(
@@ -429,13 +430,13 @@ async fn trial_key_deduplicates_within_run_db() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn trial_rejects_cross_workspace_score_run_db() -> Result<()> {
-    // Pins: trial-level score runs cannot be attached across workspace scope boundaries.
+async fn trial_rejects_cross_tenant_score_run_db() -> Result<()> {
+    // Pins: trial-level score runs cannot be attached across tenant scope boundaries.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_a = workspace_scope("trial-score-a");
-    let workspace_b = workspace_scope("trial-score-b");
+    let workspace_a = tenant_scope("trial-score-a");
+    let workspace_b = tenant_scope("trial-score-b");
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &workspace_a).await?;
     let run = store
         .insert_run(
@@ -457,7 +458,7 @@ async fn trial_rejects_cross_workspace_score_run_db() -> Result<()> {
     let error = store
         .insert_trial(&workspace_a, trial)
         .await
-        .expect_err("cross-workspace score run should reject trial insert");
+        .expect_err("cross-tenant score run should reject trial insert");
 
     assert!(
         error.to_string().contains("score_run"),
@@ -470,13 +471,13 @@ async fn trial_rejects_cross_workspace_score_run_db() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn trial_rejects_cross_workspace_artifact_revision_db() -> Result<()> {
+async fn trial_rejects_cross_tenant_artifact_revision_db() -> Result<()> {
     // Pins: trial artifact pins must be visible from the requested experiment scope.
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let workspace_a = workspace_scope("trial-artifact-a");
-    let workspace_b = workspace_scope("trial-artifact-b");
+    let workspace_a = tenant_scope("trial-artifact-a");
+    let workspace_b = tenant_scope("trial-artifact-b");
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &workspace_a).await?;
     let run = store
         .insert_run(
@@ -497,7 +498,7 @@ async fn trial_rejects_cross_workspace_artifact_revision_db() -> Result<()> {
     let error = store
         .insert_trial(&workspace_a, trial)
         .await
-        .expect_err("cross-workspace artifact revision should reject trial insert");
+        .expect_err("cross-tenant artifact revision should reject trial insert");
 
     assert!(
         error.to_string().contains("artifact revision"),
@@ -515,11 +516,12 @@ async fn trial_links_trace_status_and_turns_persist_db() -> Result<()> {
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
     let tenant_id = TenantId::from(Uuid::now_v7());
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let user_id = UserId::new(format!("user-{}", Uuid::now_v7()));
     let scope = ActionRuleScope::Tenant { tenant_id };
     let session_id =
-        insert_session_for_experiment_fk(test_db.store().pool(), &workspace_id, &user_id).await?;
+        insert_session_for_experiment_fk(test_db.store().pool(), &storage_partition_id, &user_id)
+            .await?;
     let workflow_run_uid = insert_workflow_run(test_db.store().pool(), &scope, session_id).await?;
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let run = store
@@ -604,7 +606,7 @@ async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_tri
     let _guard = DB_TEST_LOCK.lock().await;
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let store = ExperimentStore::new(test_db.store().pool().clone());
-    let scope = workspace_scope("trial-cancel-active");
+    let scope = tenant_scope("trial-cancel-active");
     let plan_revision_uid = insert_artifact_revision(test_db.store().pool(), &scope).await?;
     let run = store
         .insert_run(
@@ -728,8 +730,8 @@ async fn cancel_active_trials_marks_remaining_work_without_mutating_terminal_tri
 
 #[tokio::test]
 #[ignore = "requires local Postgres configured through MOA_DATABASE_URL"]
-async fn concurrent_trial_creation_uses_unique_workspace_ids_db() -> Result<()> {
-    // Pins: trial creation is parallel-safe when callers use unique workspace IDs.
+async fn concurrent_trial_creation_uses_unique_storage_partitions_db() -> Result<()> {
+    // Pins: trial creation is parallel-safe when callers use unique storage partitions.
     let test_db = moa_test_support::postgres::bootstrap_test_db().await?;
     let pool = test_db.store().pool().clone();
 
@@ -745,7 +747,7 @@ async fn concurrent_trial_creation_uses_unique_workspace_ids_db() -> Result<()> 
     Ok(())
 }
 
-fn workspace_scope(_label: &str) -> ActionRuleScope {
+fn tenant_scope(_label: &str) -> ActionRuleScope {
     ActionRuleScope::Tenant {
         tenant_id: TenantId::from(Uuid::now_v7()),
     }
@@ -821,7 +823,7 @@ fn new_trial(
 
 async fn create_run_and_trial(pool: sqlx::PgPool, label: &'static str) -> Result<(Uuid, Uuid)> {
     let store = ExperimentStore::new(pool.clone());
-    let scope = workspace_scope(label);
+    let scope = tenant_scope(label);
     let plan_revision_uid = insert_artifact_revision(&pool, &scope).await?;
     let run = store
         .insert_run(&scope, new_experiment(label, None, Vec::new()))
@@ -854,19 +856,19 @@ async fn insert_workflow_run(
     scope: &ActionRuleScope,
     session_id: SessionId,
 ) -> Result<Uuid> {
-    let workspace_id = scope_workspace_id(scope);
+    let storage_partition_id = scope_storage_partition_id(scope);
     let run_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_run (
-            run_uid, workspace_id, session_id, workflow_ref, status, input, state
+            run_uid, storage_partition_id, session_id, workflow_ref, status, input, state
         )
         VALUES ($1, $2, $3, $4, 'queued', $5, $6)
         "#,
     )
     .bind(run_uid)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(session_id.0)
     .bind("workflow://experiment-link")
     .bind(json!({ "case": "link" }))
@@ -879,20 +881,20 @@ async fn insert_workflow_run(
 }
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
-    let workspace_id = scope_workspace_id(scope);
+    let storage_partition_id = scope_storage_partition_id(scope);
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &scope_context(scope)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, workspace_id, kind, name, description
+            artifact_uid, storage_partition_id, kind, name, description
         )
         VALUES ($1, $2, 'skill', $3, 'experiment fixture')
         "#,
     )
     .bind(artifact_uid)
-    .bind(&workspace_id)
+    .bind(&storage_partition_id)
     .bind(format!("experiment-fixture-{artifact_uid}"))
     .execute(conn.as_mut())
     .await
@@ -900,7 +902,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, workspace_id, definition, canonical_hash,
+            revision_uid, artifact_uid, storage_partition_id, definition, canonical_hash,
             source_format, source_text, status, validation_report, version, published_at
         )
         VALUES ($1, $2, $3, $4, $5, 'json', $6, 'published', $7, 1, now())
@@ -908,7 +910,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     )
     .bind(revision_uid)
     .bind(artifact_uid)
-    .bind(&workspace_id)
+    .bind(&storage_partition_id)
     .bind(json!({ "kind": "skill", "name": "experiment fixture" }))
     .bind(vec![1_u8; 32])
     .bind(br#"{"kind":"skill","name":"experiment fixture"}"#.to_vec())
@@ -944,7 +946,7 @@ async fn assert_score_run_exists_with_source(
             WHERE run_id = $1
               AND source = $5
               AND scope = $2
-              AND workspace_id IS NOT DISTINCT FROM $3
+              AND storage_partition_id IS NOT DISTINCT FROM $3
               AND user_id IS NOT DISTINCT FROM $4
         )
         "#,
@@ -994,7 +996,7 @@ async fn assert_scoped_experiment_count_for_score_run(
         FROM moa.experiment_run
         WHERE score_run_id = $1
           AND scope = $2
-          AND workspace_id IS NOT DISTINCT FROM $3
+          AND storage_partition_id IS NOT DISTINCT FROM $3
           AND user_id IS NOT DISTINCT FROM $4
         "#,
     )
@@ -1024,7 +1026,7 @@ async fn assert_scoped_trial_count_for_score_run(
         FROM moa.experiment_trial
         WHERE score_run_id = $1
           AND scope = $2
-          AND workspace_id IS NOT DISTINCT FROM $3
+          AND storage_partition_id IS NOT DISTINCT FROM $3
           AND user_id IS NOT DISTINCT FROM $4
         "#,
     )
@@ -1072,7 +1074,7 @@ async fn insert_score_run_with_source(
     sqlx::query(
         r#"
         INSERT INTO analytics.score_run (
-            run_id, workspace_id, user_id, source
+            run_id, storage_partition_id, user_id, source
         )
         VALUES ($1, $2, $3, $4)
         "#,
@@ -1117,7 +1119,7 @@ async fn assert_artifact_revision_links(
 
 async fn insert_session_for_experiment_fk(
     pool: &sqlx::PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     user_id: &UserId,
 ) -> Result<SessionId> {
     let target_table = sqlx::query_scalar::<_, String>(
@@ -1136,13 +1138,13 @@ async fn insert_session_for_experiment_fk(
     sqlx::query(&format!(
         r#"
         INSERT INTO {target_table} (
-            id, workspace_id, user_id, status, platform, model
+            id, storage_partition_id, user_id, status, platform, model
         )
         VALUES ($1, $2, $3, 'created', 'api', $4)
         "#
     ))
     .bind(session_id.0)
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(user_id.to_string())
     .bind("gpt-5.1")
     .execute(pool)
@@ -1153,21 +1155,18 @@ async fn insert_session_for_experiment_fk(
 
 fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option<String>) {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ("global", None, None),
-        ActionRuleScope::Tenant { tenant_id } => ("workspace", Some(tenant_id.to_string()), None),
+        ActionRuleScope::Tenant { tenant_id } => ("tenant", Some(tenant_id.to_string()), None),
     }
 }
 
-fn scope_workspace_id(scope: &ActionRuleScope) -> String {
+fn scope_storage_partition_id(scope: &ActionRuleScope) -> String {
     match scope {
         ActionRuleScope::Tenant { tenant_id } => tenant_id.to_string(),
-        ActionRuleScope::WorkspaceDefault => "workspace-default".to_string(),
     }
 }
 
 fn scope_context(scope: &ActionRuleScope) -> ScopeContext {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
         ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
 }

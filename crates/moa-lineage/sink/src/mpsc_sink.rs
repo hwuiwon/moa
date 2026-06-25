@@ -243,7 +243,7 @@ impl From<&WriterHandle> for WriterStats {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{SessionId, TenantId, UserId, WorkspaceId};
+    use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
     use moa_lineage_core::{
         BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
     };
@@ -277,11 +277,11 @@ mod tests {
 
     fn sample_event() -> LineageEvent {
         let tenant_id = TenantId::from(Uuid::from_u128(1));
-        let workspace_id = WorkspaceId::new(tenant_id.to_string());
+        let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
         LineageEvent::Retrieval(RetrievalLineage {
             turn_id: TurnId::new_v7(),
             session_id: SessionId::new(),
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: UserId::new("test-user"),
             scope: MemoryScope::Tenant { tenant_id },
             ts: Utc::now(),

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContactId, TenantId, UserId, WorkspaceId};
+use moa_core::{ContactId, StoragePartitionId, TenantId, UserId};
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
@@ -109,10 +109,8 @@ pub struct ScopeMatchBreakdown {
     #[serde(alias = "user_total")]
     pub contact_total: usize,
     /// Resolved records expected to be tenant-scoped and stored as tenant-scoped.
-    #[serde(alias = "workspace_matches")]
     pub tenant_matches: usize,
     /// Resolved records expected to be tenant-scoped.
-    #[serde(alias = "workspace_total")]
     pub tenant_total: usize,
 }
 
@@ -357,25 +355,25 @@ async fn resolve_fact_nodes(
         return Ok(containment_matches);
     }
 
-    let broad_candidates = fetch_workspace_fact_candidates(ctx, fact).await?;
+    let broad_candidates = fetch_tenant_fact_candidates(ctx, fact).await?;
     Ok(match_by_structured_fact(&broad_candidates, fact))
 }
 
 async fn fetch_source_candidates(ctx: &IngestCtx, fact: &LedgerFact) -> Result<Vec<NodeIndexRow>> {
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at,
                COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
         WHERE label = 'Fact'
-          AND workspace_id = $1
+          AND storage_partition_id = $1
           AND properties_summary->>'source_session_id' = $2
           AND properties_summary->>'source_turn_seq' = $3
         ORDER BY uid
         "#,
     )
-    .bind(fact.workspace_id.to_string())
+    .bind(fact.storage_partition_id.to_string())
     .bind(fact.source_session_id.to_string())
     .bind(fact.source_turn_seq.to_string())
     .fetch_all(&ctx.pool)
@@ -383,22 +381,22 @@ async fn fetch_source_candidates(ctx: &IngestCtx, fact: &LedgerFact) -> Result<V
     .map_err(EvalError::from)
 }
 
-async fn fetch_workspace_fact_candidates(
+async fn fetch_tenant_fact_candidates(
     ctx: &IngestCtx,
     fact: &LedgerFact,
 ) -> Result<Vec<NodeIndexRow>> {
     sqlx::query_as::<_, NodeIndexRow>(
         r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at,
                COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index
         WHERE label = 'Fact'
-          AND workspace_id = $1
+          AND storage_partition_id = $1
         ORDER BY uid
         "#,
     )
-    .bind(fact.workspace_id.to_string())
+    .bind(fact.storage_partition_id.to_string())
     .fetch_all(&ctx.pool)
     .await
     .map_err(EvalError::from)
@@ -549,7 +547,7 @@ async fn expected_fact_hashes(
     source: &FactSource<'_>,
 ) -> Result<BTreeSet<String>> {
     let turn = SessionTurn {
-        tenant_id: tenant_id_from_workspace_id(&source.session.workspace_id),
+        tenant_id: tenant_id_from_storage_partition_id(&source.session.storage_partition_id),
         contact_id: contact_id_from_user_id(&source.session.user_id),
         session_id: source.session.session_id,
         turn_seq: source.turn.turn_seq,
@@ -865,7 +863,7 @@ pub(crate) fn session_turn(
     facts: &HashMap<&str, &LedgerFact>,
 ) -> Result<SessionTurn> {
     Ok(SessionTurn {
-        tenant_id: tenant_id_from_workspace_id(&source.session.workspace_id),
+        tenant_id: tenant_id_from_storage_partition_id(&source.session.storage_partition_id),
         contact_id: contact_id_from_user_id(&source.session.user_id),
         session_id: source.session.session_id,
         turn_seq: source.turn.turn_seq,
@@ -986,10 +984,10 @@ fn scope_tier_str(scope: ScopeTier) -> &'static str {
     }
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    uuid::Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    uuid::Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn contact_id_from_user_id(user_id: &UserId) -> ContactId {
@@ -1089,7 +1087,7 @@ pub(crate) struct FactSource<'a> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use moa_core::{SessionId, UserId, WorkspaceId};
+    use moa_core::{SessionId, StoragePartitionId, UserId};
     use moa_memory_ingest::ScriptedFactExtractor;
     use moa_memory_types::ScopeTier;
     use serde_json::json;
@@ -1123,7 +1121,7 @@ mod tests {
 
         assert!(
             matches.is_empty(),
-            "workspace-wide candidates are not considered by matcher four; caller must pass source-turn rows"
+            "tenant-wide candidates are not considered by matcher four; caller must pass source-turn rows"
         );
         assert_eq!(
             match_by_provenance_containment(&[other_turn_candidate], &fact).len(),
@@ -1245,7 +1243,7 @@ mod tests {
         };
         let session = SyntheticSession {
             session_id: fact.source_session_id,
-            workspace_id: fact.workspace_id.clone(),
+            storage_partition_id: fact.storage_partition_id.clone(),
             user_id: fact.user_id.clone(),
             turns: vec![turn],
         };
@@ -1269,7 +1267,7 @@ mod tests {
         object: &'static str,
     ) -> LedgerFact {
         LedgerFact {
-            workspace_id: WorkspaceId::new("workspace-test"),
+            storage_partition_id: StoragePartitionId::new("tenant-test"),
             user_id: UserId::new("user-test"),
             scope: ScopeTier::Tenant,
             fact_id: fact_id.to_string(),
@@ -1294,8 +1292,8 @@ mod tests {
         NodeIndexRow {
             uid: uuid::Uuid::from_u128(uid_suffix),
             label: NodeLabel::Fact,
-            workspace_id: Some("workspace-test".to_string()),
-            user_id: None,
+            storage_partition_id: Some("tenant-test".to_string()),
+            contact_id: None,
             scope: "tenant".to_string(),
             name: summary.to_string(),
             pii_class: PiiClass::None,

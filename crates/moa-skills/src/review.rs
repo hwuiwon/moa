@@ -7,7 +7,7 @@ use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
-    LearningCandidateType, LearningEntry, MoaError, WorkspaceId,
+    LearningCandidateType, LearningEntry, MoaError, TenantId,
 };
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
@@ -18,18 +18,16 @@ use std::pin::Pin;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::registry::workspace_artifact_scope;
-
 /// Boxed store operation future used to keep transaction-borrow lifetimes explicit.
 pub type LearningReviewStoreFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, MoaError>> + Send + 'a>>;
 
 /// Store operations required by skill candidate review.
 pub trait LearningReviewStore: Send + Sync {
-    /// Loads one candidate visible in a workspace review scope.
+    /// Loads one candidate visible in a tenant review scope.
     fn get_learning_candidate<'a>(
         &'a self,
-        workspace_id: &'a WorkspaceId,
+        tenant_id: &'a TenantId,
         candidate_id: Uuid,
     ) -> LearningReviewStoreFuture<'a, Option<LearningCandidate>>;
 
@@ -63,8 +61,8 @@ pub trait LearningReviewStore: Send + Sync {
 /// Request metadata supplied by the authenticated review service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillReviewRequest {
-    /// Workspace that owns the candidate.
-    pub workspace_id: WorkspaceId,
+    /// Tenant that owns the candidate.
+    pub tenant_id: TenantId,
     /// Candidate selected for review.
     pub candidate_id: Uuid,
     /// Review action requested by the endpoint.
@@ -87,7 +85,7 @@ pub enum SkillReviewAction {
 /// Skill candidate and draft artifact state prepared for acceptance.
 #[derive(Debug, Clone)]
 pub struct PreparedSkillAcceptance {
-    /// Workspace scope used for artifact publication and regression checks.
+    /// Tenant scope used for artifact publication and regression checks.
     pub scope: ActionRuleScope,
     /// Candidate being accepted.
     pub candidate: LearningCandidate,
@@ -136,13 +134,13 @@ pub enum SkillReviewError {
 /// Convenience result type for skill review operations.
 pub type Result<T> = std::result::Result<T, SkillReviewError>;
 
-/// Loads one candidate after the caller has authorized workspace editor access.
+/// Loads one candidate after the caller has authorized tenant review access.
 pub async fn get_learning_candidate_for_review(
     store: &(impl LearningReviewStore + ?Sized),
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     candidate_id: Uuid,
 ) -> Result<LearningCandidate> {
-    load_candidate(store, workspace_id, candidate_id).await
+    load_candidate(store, tenant_id, candidate_id).await
 }
 
 /// Claims and validates a proposed skill candidate before review-time regression execution.
@@ -151,12 +149,12 @@ pub async fn prepare_skill_acceptance(
     pool: sqlx::PgPool,
     request: &SkillReviewRequest,
 ) -> Result<PreparedSkillAcceptance> {
-    let candidate = load_candidate(store, &request.workspace_id, request.candidate_id).await?;
+    let candidate = load_candidate(store, &request.tenant_id, request.candidate_id).await?;
     ensure_skill_candidate(&candidate)?;
     ensure_proposed_candidate(&candidate)?;
     let draft_revision_uid = payload_uuid(&candidate.payload, "draft_artifact_revision_uid")?;
 
-    let scope = workspace_scope(&request.workspace_id);
+    let scope = tenant_artifact_scope(candidate.tenant_id);
     let artifact_registry = ArtifactRegistry::new(pool.clone());
     let draft = artifact_registry
         .load_revision(&scope, draft_revision_uid)
@@ -164,7 +162,7 @@ pub async fn prepare_skill_acceptance(
         .ok_or_else(|| {
             SkillReviewError::NotFound("draft artifact revision not found".to_string())
         })?;
-    ensure_workspace_skill_draft(&draft, &request.workspace_id)?;
+    ensure_tenant_skill_draft(&draft, candidate.tenant_id)?;
 
     let mut document = draft.document.clone();
     document.reference_resolutions = ArtifactResolver::new(ArtifactRegistry::new(pool.clone()))
@@ -296,7 +294,7 @@ pub async fn reject_learning_candidate(
     store: &(impl LearningReviewStore + ?Sized),
     request: &SkillReviewRequest,
 ) -> Result<SkillReviewOutcome> {
-    let candidate = load_candidate(store, &request.workspace_id, request.candidate_id).await?;
+    let candidate = load_candidate(store, &request.tenant_id, request.candidate_id).await?;
     ensure_proposed_candidate(&candidate)?;
     let artifact_uid = optional_payload_uuid(&candidate.payload, "artifact_uid")?;
     let draft_artifact_revision_uid =
@@ -338,24 +336,21 @@ pub async fn reject_learning_candidate(
 
 async fn load_candidate(
     store: &(impl LearningReviewStore + ?Sized),
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     candidate_id: Uuid,
 ) -> Result<LearningCandidate> {
     store
-        .get_learning_candidate(workspace_id, candidate_id)
+        .get_learning_candidate(tenant_id, candidate_id)
         .await?
         .ok_or_else(|| SkillReviewError::NotFound("learning candidate not found".to_string()))
 }
 
-fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
-    workspace_artifact_scope(workspace_id)
+fn tenant_artifact_scope(tenant_id: TenantId) -> ActionRuleScope {
+    ActionRuleScope::Tenant { tenant_id }
 }
 
 fn artifact_scope_context(scope: &ActionRuleScope) -> Result<ScopeContext> {
     match scope {
-        ActionRuleScope::WorkspaceDefault => Err(bad_request(
-            "skill review cannot promote WorkspaceDefault-scoped artifacts",
-        )),
         ActionRuleScope::Tenant { tenant_id } => Ok(ScopeContext::tenant(*tenant_id)),
     }
 }
@@ -378,10 +373,7 @@ fn ensure_proposed_candidate(candidate: &LearningCandidate) -> Result<()> {
     Ok(())
 }
 
-fn ensure_workspace_skill_draft(
-    revision: &StoredArtifactRevision,
-    workspace_id: &WorkspaceId,
-) -> Result<()> {
+fn ensure_tenant_skill_draft(revision: &StoredArtifactRevision, tenant_id: TenantId) -> Result<()> {
     if revision.kind != ArtifactKind::Skill {
         return Err(bad_request(
             "draft artifact revision must be a skill artifact",
@@ -390,9 +382,13 @@ fn ensure_workspace_skill_draft(
     if revision.status != ArtifactStatus::Draft {
         return Err(bad_request("skill artifact revision must still be a draft"));
     }
-    if revision.workspace_id.as_ref() != Some(workspace_id) || revision.user_id.is_some() {
+    let storage_partition_id = tenant_id.to_string();
+    if revision.storage_partition_id.as_ref().map(|id| id.as_str())
+        != Some(storage_partition_id.as_str())
+        || revision.user_id.is_some()
+    {
         return Err(bad_request(
-            "skill draft artifact revision must belong to the requested workspace scope",
+            "skill draft artifact revision must belong to the requested tenant scope",
         ));
     }
     Ok(())
@@ -617,7 +613,7 @@ fn bad_request(message: impl Into<String>) -> SkillReviewError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moa_core::{LearningRiskClass, TenantId, WorkspaceId};
+    use moa_core::LearningRiskClass;
 
     #[test]
     fn accepted_learning_type_rejects_unknown_operations() {
@@ -625,7 +621,6 @@ mod tests {
         let candidate = LearningCandidate {
             id: Uuid::from_u128(1),
             tenant_id: TenantId::from(Uuid::from_u128(1)),
-            workspace_id: WorkspaceId::new("workspace-a"),
             user_id: None,
             candidate_type: LearningCandidateType::Skill,
             status: LearningCandidateStatus::Proposed,
@@ -648,19 +643,6 @@ mod tests {
         assert!(
             accepted_learning_type(&candidate).is_err(),
             "skill review must not append unsupported learning-log operation types"
-        );
-    }
-
-    #[test]
-    fn review_artifact_scope_rejects_workspace_default() {
-        // Pins: review promotion never maps workspace defaults to a nil tenant.
-        let error = artifact_scope_context(&ActionRuleScope::WorkspaceDefault)
-            .expect_err("workspace default review scope should fail closed");
-
-        assert!(
-            error
-                .to_string()
-                .contains("WorkspaceDefault-scoped artifacts")
         );
     }
 }

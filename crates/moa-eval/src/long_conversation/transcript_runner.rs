@@ -476,7 +476,7 @@ fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
     );
     let lineage_events = input.environment.lineage.events();
     let mut score_records = score_card.to_score_records(
-        input.environment.workspace_id.clone(),
+        input.environment.storage_partition_id.clone(),
         input.environment.user_id.clone(),
         input.environment.session_id,
     );
@@ -718,7 +718,7 @@ async fn create_secondary_session(
 ) -> Result<SessionId> {
     let session_meta = SessionMeta {
         tenant_id: moa_core::TenantId::from(
-            uuid::Uuid::parse_str(environment.workspace_id.as_str())
+            uuid::Uuid::parse_str(environment.storage_partition_id.as_str())
                 .map_err(|error| EvalError::InvalidConfig(error.to_string()))?,
         ),
         created_by: Some(moa_core::SessionActorRef::Identity {
@@ -868,7 +868,7 @@ async fn collect_learning_summary(
             let rates = environment
                 .segment_store
                 .list_task_strategy_success_rates(
-                    environment.workspace_id.as_str(),
+                    environment.storage_partition_id.as_str(),
                     &experience.task_fingerprint.hash,
                 )
                 .await?;
@@ -883,7 +883,7 @@ async fn collect_learning_summary(
     let candidates = environment
         .learning_candidate_store
         .list_learning_candidates(
-            environment.workspace_id.as_str(),
+            environment.storage_partition_id.as_str(),
             Some(LearningCandidateStatus::Proposed),
             256,
         )

@@ -213,9 +213,9 @@ mod tests {
         NodeIndexRow {
             uid: uuid::Uuid::now_v7(),
             label: moa_memory_graph::NodeLabel::Entity,
-            workspace_id: Some("workspace-a".to_string()),
-            user_id: None,
-            scope: "workspace".to_string(),
+            storage_partition_id: Some("storage-partition-a".to_string()),
+            contact_id: None,
+            scope: "tenant".to_string(),
             name: name.to_string(),
             pii_class: moa_memory_graph::PiiClass::None,
             valid_to: None,

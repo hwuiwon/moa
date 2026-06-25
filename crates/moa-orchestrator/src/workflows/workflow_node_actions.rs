@@ -22,10 +22,10 @@ use uuid::Uuid;
 use crate::delegation::{DelegationParent, execute_delegation_tool};
 use crate::objects::session::SessionClient;
 use crate::restate_identity::with_identity_headers;
+use crate::services::action_policy::{ActionPolicyClient, PrepareActionReviewRequest};
 use crate::services::memory::MemoryClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
-use crate::services::workspace_store::{PrepareActionReviewRequest, WorkspaceStoreClient};
 
 const AGENT_NODE_WAIT_ATTEMPTS: usize = 180;
 const SUB_AGENT_WAIT_TIMEOUT_MS: u64 = 30_000;
@@ -123,7 +123,7 @@ pub async fn execute_workflow_node_action(
     ));
     let session = workflow_session_meta(&action_context);
     let prepared_action = ctx
-        .service_client::<WorkspaceStoreClient>()
+        .service_client::<ActionPolicyClient>()
         .prepare_action_review(Json(PrepareActionReviewRequest {
             session: session.clone(),
             invocation: invocation.clone(),

@@ -327,7 +327,7 @@ async fn supersedes_edge_exists(pool: &PgPool, tenant_id: Uuid, old_uid: Uuid, n
 async fn tenant_state_version(pool: &PgPool, tenant_id: Uuid) -> i64 {
     let mut conn = tenant_scoped_conn(pool, tenant_id).await;
     let version = sqlx::query_scalar::<_, i64>(
-        "SELECT changelog_version FROM moa.workspace_state WHERE workspace_id = $1",
+        "SELECT changelog_version FROM moa.storage_partition_state WHERE storage_partition_id = $1",
     )
     .bind(tenant_id.to_string())
     .fetch_one(conn.as_mut())
@@ -339,24 +339,26 @@ async fn tenant_state_version(pool: &PgPool, tenant_id: Uuid) -> i64 {
 
 async fn node_count_for_tenant(pool: &PgPool, tenant_id: Uuid) -> i64 {
     let mut conn = tenant_scoped_conn(pool, tenant_id).await;
-    let count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM moa.node_index WHERE workspace_id = $1")
-            .bind(tenant_id.to_string())
-            .fetch_one(conn.as_mut())
-            .await
-            .expect("count tenant nodes");
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.node_index WHERE storage_partition_id = $1",
+    )
+    .bind(tenant_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count tenant nodes");
     conn.commit().await.expect("commit node count read");
     count
 }
 
 async fn embedding_count_for_tenant(pool: &PgPool, tenant_id: Uuid) -> i64 {
     let mut conn = tenant_scoped_conn(pool, tenant_id).await;
-    let count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM moa.embeddings WHERE workspace_id = $1")
-            .bind(tenant_id.to_string())
-            .fetch_one(conn.as_mut())
-            .await
-            .expect("count tenant embeddings");
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.embeddings WHERE storage_partition_id = $1",
+    )
+    .bind(tenant_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count tenant embeddings");
     conn.commit().await.expect("commit embedding count read");
     count
 }
@@ -365,7 +367,7 @@ async fn raw_text_property_count(pool: &PgPool, tenant_id: Uuid, raw_text: &str)
     let mut conn = tenant_scoped_conn(pool, tenant_id).await;
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM moa.node_index \
-         WHERE workspace_id = $1 AND strpos(properties_summary::text, $2) > 0",
+         WHERE storage_partition_id = $1 AND strpos(properties_summary::text, $2) > 0",
     )
     .bind(tenant_id.to_string())
     .bind(raw_text)
@@ -380,10 +382,10 @@ async fn seed_tenant_embedder_state(pool: &PgPool, tenant_id: Uuid) {
     let mut conn = tenant_scoped_conn(pool, tenant_id).await;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, 'mock-fast-embedder', 7, $2)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,

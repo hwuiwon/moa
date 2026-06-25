@@ -13,24 +13,22 @@ workspace
             -> session
 ```
 
-The workspace is the global control plane and inherited default scope for skills
-and policies. The tenant is the hard runtime isolation boundary for sessions,
-contacts, learning, memory, artifacts, analytics, policies, events, and audit
-evidence.
+The workspace is a single deployment container, not a runtime parameter. The
+tenant is the hard runtime isolation boundary for sessions, contacts, learning,
+memory, artifacts, analytics, policies, events, and audit evidence.
 
 Contacts are end users inside a tenant. Users are admin/operator principals:
-workspace admins, tenant admins, tenant operators, service users, and API-key
-subjects. Users can administer or operate tenants through authorization, but
-they are not contact memory subjects.
+tenant admins, tenant operators, service users, and API-key subjects. Users can
+administer or operate tenants through authorization, but they are not contact
+memory subjects.
 
 Contact memory is contact-local. A contact session reads memory for that tenant
 and contact only; it does not inherit tenant memory or any other contact's
 memory. Learning entries and resolution aggregates are tenant-scoped because a
 tenant's recurring work patterns usually span sessions and contacts.
 
-Workspace-level skills and policies are inherited by tenants. Tenant-level rows
-override the inherited workspace defaults for that tenant. Tenant-learned data
-is tenant-local and is never promoted into workspace defaults automatically.
+Skills and policies are tenant-owned. Tenant-learned data is tenant-local and
+is never promoted into shared defaults automatically.
 
 ## Skills-First Learning
 

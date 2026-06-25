@@ -133,7 +133,7 @@ def object_key(source: Path, now: datetime) -> str:
     """Builds the S3 key for one compressed audit log segment."""
 
     return (
-        "workspace=unknown/"
+        "tenant=unknown/"
         f"year={now.year:04d}/"
         f"month={now.month:02d}/"
         f"{source.name}.gz"

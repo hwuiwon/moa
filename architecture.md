@@ -86,22 +86,22 @@ sequenceDiagram
 
 ```text
 Platform
-  -> Tenant
-       -> Users
-       -> Workspaces
-       -> Sessions
-       -> Task segments
-       -> Learning log
-       -> Tenant knowledge
-       -> Workspace-administered skills
-       -> Lineage, analytics, and audit evidence
+  -> Workspace control plane
+       -> Workspace-default skills and policies
+       -> Tenants
+            -> Users and contacts
+            -> Sessions
+            -> Task segments
+            -> Learning log
+            -> Tenant knowledge and skills
+            -> Lineage, analytics, and audit evidence
 ```
 
 Enterprise behavior is tenant-controlled:
 
 - Learning is append-only and invalidated by `valid_to`, not silently rewritten.
-- Knowledge and learning are tenant-scoped; workspace administration controls
-  which tenant resources are available in each workspace.
+- Knowledge and learning are tenant-scoped; tenant administration controls
+  runtime policy.
 - Compliance audit is an opt-in tier with explicit attestation caveats until
   external cryptographic review is complete.
 
@@ -281,7 +281,8 @@ from Postgres events plus Restate journals.
 
 Default enterprise posture:
 
-- Product-visible state is tenant/workspace scoped in Postgres.
+- Product-visible runtime state is tenant-scoped in Postgres; workspace rows are
+  control-plane defaults or storage-internal compatibility keys.
 - API keys are the default identity mechanism; Auth0/OIDC is opt-in.
 - `moa-edge` is the public trust boundary and injects `X-Moa-*` identity
   headers for the orchestrator.

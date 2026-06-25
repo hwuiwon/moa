@@ -16,10 +16,10 @@ pub struct NodeIndexRow {
     pub uid: Uuid,
     /// AGE vertex label.
     pub label: NodeLabel,
-    /// Workspace owner for workspace and user scoped rows.
-    pub workspace_id: Option<String>,
-    /// User owner for user scoped rows.
-    pub user_id: Option<String>,
+    /// Storage partition owner for tenant and contact scoped rows.
+    pub storage_partition_id: Option<String>,
+    /// Contact owner for contact-scoped rows.
+    pub contact_id: Option<String>,
     /// Generated scope tier stored by Postgres.
     pub scope: String,
     /// Human-readable node name used for seed lookup.
@@ -45,8 +45,8 @@ impl<'r> FromRow<'r, PgRow> for NodeIndexRow {
         Ok(Self {
             uid: row.try_get("uid")?,
             label,
-            workspace_id: row.try_get("workspace_id")?,
-            user_id: row.try_get("user_id")?,
+            storage_partition_id: row.try_get("storage_partition_id")?,
+            contact_id: row.try_get("user_id")?,
             scope: row.try_get("scope")?,
             name: row.try_get("name")?,
             pii_class,
@@ -160,11 +160,11 @@ pub struct NodeWriteIntent {
     pub uid: Uuid,
     /// AGE vertex label.
     pub label: NodeLabel,
-    /// Workspace scope for workspace and user rows.
-    pub workspace_id: Option<String>,
-    /// User scope inside a workspace for user-private rows.
-    pub user_id: Option<String>,
-    /// Expected scope tier: `global`, `workspace`, or `user`.
+    /// Storage partition scope for tenant and contact rows.
+    pub storage_partition_id: Option<String>,
+    /// Contact scope inside a tenant for contact-private rows.
+    pub contact_id: Option<String>,
+    /// Expected scope tier: `global`, `tenant`, or `contact`.
     pub scope: String,
     /// Human-readable node name projected into `moa.node_index`.
     pub name: String,
@@ -257,7 +257,7 @@ pub async fn lookup_seed_by_name(
 
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
-        SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+        SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                valid_to, valid_from, properties_summary, last_accessed_at,
                COALESCE(quality_score, 0.5) AS quality_score
         FROM moa.node_index

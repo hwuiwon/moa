@@ -196,23 +196,21 @@ fn new_trial(
 }
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
-    let ActionRuleScope::Tenant { tenant_id } = scope else {
-        anyhow::bail!("simulation comparison test uses tenant scope");
-    };
-    let workspace_id = tenant_id.to_string();
+    let ActionRuleScope::Tenant { tenant_id } = scope;
+    let storage_partition_id = tenant_id.to_string();
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (
-            artifact_uid, workspace_id, kind, name, description
+            artifact_uid, storage_partition_id, kind, name, description
         )
         VALUES ($1, $2, 'experiment_plan', $3, 'simulation fixture')
         "#,
     )
     .bind(artifact_uid)
-    .bind(&workspace_id)
+    .bind(&storage_partition_id)
     .bind(format!("simulation-fixture-{artifact_uid}"))
     .execute(conn.as_mut())
     .await
@@ -220,7 +218,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     sqlx::query(
         r#"
         INSERT INTO moa.artifact_revision (
-            revision_uid, artifact_uid, workspace_id, definition, canonical_hash,
+            revision_uid, artifact_uid, storage_partition_id, definition, canonical_hash,
             source_format, source_text, status, validation_report, version, published_at
         )
         VALUES ($1, $2, $3, $4, $5, 'json', $6, 'published', $7, 1, now())
@@ -228,7 +226,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     )
     .bind(revision_uid)
     .bind(artifact_uid)
-    .bind(&workspace_id)
+    .bind(&storage_partition_id)
     .bind(json!({ "kind": "experiment_plan", "name": "simulation fixture" }))
     .bind(vec![2_u8; 32])
     .bind(br#"{"kind":"experiment_plan","name":"simulation fixture"}"#.to_vec())

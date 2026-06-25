@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moa_core::{Channel, ContactId, WorkspaceId};
+use moa_core::{Channel, ContactId};
 use moa_messaging::{DeliveryMessage, DeliveryPurpose, DeliverySink, ProviderDeliverySink};
 use serde_json::json;
 use uuid::Uuid;
@@ -116,7 +116,6 @@ async fn delivery_offline_dispatches_sms_through_twilio() {
 fn delivery_message(channel: Channel, to: &str) -> DeliveryMessage {
     DeliveryMessage {
         tenant_id: Uuid::now_v7(),
-        workspace_id: WorkspaceId::new("workspace"),
         contact_id: ContactId::new(),
         purpose: DeliveryPurpose::ContactVerification,
         channel,

@@ -11,7 +11,7 @@ use moa_core::wire::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
     EventRange, EventRecord, EventType, MoaError, ModelId, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, SessionStore, TenantId, WorkspaceId,
+    SessionStatus, SessionStore, TenantId,
 };
 use moa_experiments::model::{
     ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,
@@ -55,7 +55,6 @@ use status::{
 use target_execution::{run_agent_loop_trial, run_workflow_trial};
 use trial_simulator::load_simulator_context;
 
-const K_WORKSPACE_ID: &str = "workspace_id";
 const K_RUN_UID: &str = "run_uid";
 const K_TRIAL_UID: &str = "trial_uid";
 const K_TRIAL_KEY: &str = "trial_key";
@@ -155,10 +154,6 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
             return Err(TerminalError::new_with_code(404, "experiment trial key mismatch").into());
         }
 
-        ctx.set(
-            K_WORKSPACE_ID,
-            Json(workspace_id_for_tenant(request.tenant_id)),
-        );
         ctx.set(K_RUN_UID, Json(request.trial.run_uid));
         ctx.set(K_TRIAL_KEY, Json(request.trial.trial_key.clone()));
         annotate_trial_span(&request.trial, None);
@@ -352,10 +347,6 @@ fn annotate_trial_record_span(trial: &ExperimentTrialRecord) {
 
 fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
     ActionRuleScope::Tenant { tenant_id }
-}
-
-fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn parse_payload<T>(field: &'static str, value: Value) -> Result<T, HandlerError>

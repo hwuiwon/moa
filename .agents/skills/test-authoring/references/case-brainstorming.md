@@ -87,7 +87,7 @@ Always include:
 
 Always include:
 
-- workspace isolation: a write in workspace A is not visible from workspace B
+- tenant isolation: a write in tenant A is not visible from tenant B
 - supersession: a later write replaces an earlier one with a `SUPERSEDES` edge
 - changelog DAG: no cycles in `cause_change_id`
 - RLS enforcement: queries running under `BYPASSRLS` should not be the only ones that pass; the policy itself must be tested

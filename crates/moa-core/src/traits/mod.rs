@@ -19,7 +19,7 @@ use crate::types::{
     OutboundMessage, ProcessorOutput, SandboxFile, SegmentAssessment, SegmentBaseline,
     SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionId, SessionMeta,
     SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
-    ToolOutput, WorkingContext, WorkspaceId,
+    TenantId, ToolOutput, WorkingContext,
 };
 
 pub use auth::*;
@@ -150,12 +150,8 @@ pub trait SessionStore: Send + Sync {
     /// Lists sessions matching the provided filter.
     async fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>>;
 
-    /// Returns aggregate workspace spend in cents since the provided UTC timestamp.
-    async fn workspace_cost_since(
-        &self,
-        workspace_id: &WorkspaceId,
-        since: DateTime<Utc>,
-    ) -> Result<u32>;
+    /// Returns aggregate tenant spend in cents since the provided UTC timestamp.
+    async fn tenant_cost_since(&self, tenant_id: &TenantId, since: DateTime<Utc>) -> Result<u32>;
 
     /// Deletes a session only when it has no append-only events.
     ///
@@ -264,7 +260,7 @@ pub trait LearningCandidateStore: Send + Sync {
     /// Loads one full learning candidate for a tenant-scoped review path.
     async fn get_learning_candidate(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         candidate_id: uuid::Uuid,
     ) -> Result<Option<LearningCandidate>>;
 

@@ -58,7 +58,7 @@ All per-turn runtime state belongs in the dynamic tail:
 ```text
 <system-reminder>
 Current date: 2026-04-16
-Current workspace: moa
+Current project: moa
 Current working directory: /Users/example/Github/moa
 Current git branch: main
 Current user: alice

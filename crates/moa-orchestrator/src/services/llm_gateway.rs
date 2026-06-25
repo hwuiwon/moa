@@ -1,4 +1,4 @@
-//! Durable Restate façade over the workspace LLM providers.
+//! Durable Restate facade over configured LLM providers.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,7 @@ pub trait LLMGateway {
     ) -> Result<Json<CompletionResponse>, HandlerError>;
 }
 
-/// Concrete Restate service implementation backed by workspace providers.
+/// Concrete Restate service implementation backed by configured providers.
 #[derive(Clone)]
 pub struct LLMGatewayImpl {
     providers: Arc<ProviderRegistry>,

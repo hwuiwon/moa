@@ -22,7 +22,7 @@ use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContactId,
     ContextMessage, ContextProcessor, LLMProvider, MessageRole, MoaConfig, ModelCapabilities,
     ModelId, NullLineageHandle, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
-    RewriteSource, StopReason, TenantId, TokenUsage, WorkingContext, WorkspaceId,
+    RewriteSource, StopReason, StoragePartitionId, TenantId, TokenUsage, WorkingContext,
     stable_prefix_fingerprint,
 };
 use moa_db::ScopedConn;
@@ -89,7 +89,7 @@ async fn digest_processor_registers_at_documented_position() {
 async fn identity_stage_emits_stable_system_message_with_workspace_and_runtime_metadata()
 -> Result<()> {
     let mut fixture = WorkingContextFixture::new()
-        .with_workspace_id("ws-001")
+        .with_storage_partition_id("ws-001")
         .with_model_id("claude-sonnet-4-6")
         .with_messages(Vec::new())
         .build();
@@ -247,9 +247,10 @@ async fn tool_definition_stage_caps_tool_count_at_max_and_orders_deterministical
 }
 
 #[tokio::test]
-async fn runtime_stage_includes_cwd_and_now_and_workspace_id_in_runtime_block() -> Result<()> {
+async fn runtime_stage_includes_cwd_and_now_and_storage_partition_id_in_runtime_block() -> Result<()>
+{
     let fixture = WorkingContextFixture::new()
-        .with_workspace_id("ws-001")
+        .with_storage_partition_id("ws-001")
         .with_user_id("user-007")
         .with_clock_at("2026-05-07T12:00:00Z")
         .with_messages(vec![
@@ -279,7 +280,7 @@ async fn runtime_stage_includes_cwd_and_now_and_workspace_id_in_runtime_block() 
         "RuntimeContextProcessor: active user turn should remain last"
     );
     let expected = format!(
-        "<system-reminder>\nCurrent date: 2026-05-07\nCurrent workspace: ws-001\nCurrent working directory: {}\nCurrent tenant: {}\nCurrent contact: {}\n</system-reminder>",
+        "<system-reminder>\nCurrent date: 2026-05-07\nCurrent project: ws-001\nCurrent working directory: {}\nCurrent tenant: {}\nCurrent contact: {}\n</system-reminder>",
         fixture.workspace_root.display(),
         ctx.tenant_id,
         ctx.contact
@@ -343,7 +344,7 @@ async fn query_rewrite_stage_emits_one_leg_per_strategy_for_a_user_query() -> Re
 async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalidated_nodes()
 -> Result<()> {
     let fixture = WorkingContextFixture::new()
-        .with_workspace_id("ws-001")
+        .with_storage_partition_id("ws-001")
         .with_user_message("auth jwt memory")
         .with_memory_hits(&[
             mem_hit("auth jwt memory valid 00", "uses jwt zero"),
@@ -365,14 +366,14 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         .as_ref()
         .expect("memory-stage fixture should have a contact")
         .contact_id;
-    let runtime_workspace_id = WorkspaceId::new(runtime_tenant_id.to_string());
+    let runtime_storage_partition_id = StoragePartitionId::new(runtime_tenant_id.to_string());
     let (store, _database_url, _schema_name) = testing::create_isolated_test_store().await?;
-    delete_memory_rows(store.pool(), &runtime_workspace_id).await?;
+    delete_memory_rows(store.pool(), &runtime_storage_partition_id).await?;
     seed_memory_rows(
         store.pool(),
         runtime_tenant_id,
         runtime_contact_id,
-        &runtime_workspace_id,
+        &runtime_storage_partition_id,
         &fixture.memory_hits,
         fixture.clock_at,
     )
@@ -445,7 +446,7 @@ async fn memory_stage_includes_top_k_hits_with_lineage_uids_and_excludes_invalid
         "GraphMemoryRetriever: vector-only cross-tenant noise leaked without a query embedding"
     );
     delete_other_tenant_vector_noise(store.pool(), vector_noise_uid).await?;
-    delete_memory_rows(store.pool(), &runtime_workspace_id).await?;
+    delete_memory_rows(store.pool(), &runtime_storage_partition_id).await?;
     Ok(())
 }
 
@@ -577,7 +578,7 @@ async fn seed_memory_rows(
     pool: &sqlx::PgPool,
     tenant_id: TenantId,
     contact_id: ContactId,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     hits: &[MemoryHit],
     clock_at: DateTime<Utc>,
 ) -> Result<()> {
@@ -594,14 +595,14 @@ async fn seed_memory_rows(
         sqlx::query(
             r#"
             INSERT INTO moa.node_index
-                (uid, label, workspace_id, user_id, name, pii_class, confidence,
+                (uid, label, storage_partition_id, user_id, name, pii_class, confidence,
                  valid_to, properties_summary, last_accessed_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(hit.uid)
         .bind(NodeLabel::Fact.as_str())
-        .bind(workspace_id.as_str())
+        .bind(storage_partition_id.as_str())
         .bind(contact_id.to_string())
         .bind(&hit.name)
         .bind(PiiClass::None.as_str())
@@ -625,11 +626,11 @@ async fn seed_other_tenant_vector_noise(
 ) -> Result<Uuid> {
     let uid = Uuid::from_u128(0x2_000);
     let other_tenant_id = TenantId::new();
-    let other_workspace_id = other_tenant_id.to_string();
+    let other_storage_partition_id = other_tenant_id.to_string();
     seed_workspace_embedder_state(
         pool,
         &other_tenant_id,
-        &other_workspace_id,
+        &other_storage_partition_id,
         "pipeline-stage-test",
     )
     .await?;
@@ -641,14 +642,14 @@ async fn seed_other_tenant_vector_noise(
     sqlx::query(
         r#"
         INSERT INTO moa.node_index
-            (uid, label, workspace_id, user_id, name, pii_class, confidence,
+            (uid, label, storage_partition_id, user_id, name, pii_class, confidence,
              properties_summary, last_accessed_at)
         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(uid)
     .bind(NodeLabel::Fact.as_str())
-    .bind(&other_workspace_id)
+    .bind(&other_storage_partition_id)
     .bind("unrelated cross-tenant vector noise")
     .bind(PiiClass::None.as_str())
     .bind(0.99_f64)
@@ -662,7 +663,6 @@ async fn seed_other_tenant_vector_noise(
     vector
         .upsert(&[VectorItem {
             uid,
-            workspace_id: Some(other_workspace_id),
             user_id: None,
             label: NodeLabel::Fact.as_str().to_string(),
             pii_class: PiiClass::None.as_str().to_string(),
@@ -680,7 +680,7 @@ async fn seed_other_tenant_vector_noise(
 async fn seed_workspace_embedder_state(
     pool: &sqlx::PgPool,
     tenant_id: &TenantId,
-    workspace_id: &str,
+    storage_partition_id: &str,
     model: &str,
 ) -> Result<()> {
     let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id))
@@ -692,17 +692,17 @@ async fn seed_workspace_embedder_state(
         .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, $2, 1, $3)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(model)
     .bind(VECTOR_DIMENSION as i32)
     .execute(conn.as_mut())
@@ -714,9 +714,12 @@ async fn seed_workspace_embedder_state(
     Ok(())
 }
 
-async fn delete_memory_rows(pool: &sqlx::PgPool, workspace_id: &WorkspaceId) -> Result<()> {
-    sqlx::query("DELETE FROM moa.node_index WHERE workspace_id = $1")
-        .bind(workspace_id.as_str())
+async fn delete_memory_rows(
+    pool: &sqlx::PgPool,
+    storage_partition_id: &StoragePartitionId,
+) -> Result<()> {
+    sqlx::query("DELETE FROM moa.node_index WHERE storage_partition_id = $1")
+        .bind(storage_partition_id.as_str())
         .execute(pool)
         .await
         .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;

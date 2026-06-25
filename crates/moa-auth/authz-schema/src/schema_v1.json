@@ -111,28 +111,6 @@
       }
     },
     {
-      "type": "workspace",
-      "metadata": {
-        "relations": {
-          "admin": {
-            "directly_related_user_types": [
-              {
-                "type": "user"
-              },
-              {
-                "type": "api_key"
-              }
-            ]
-          }
-        }
-      },
-      "relations": {
-        "admin": {
-          "this": {}
-        }
-      }
-    },
-    {
       "type": "tenant",
       "metadata": {
         "relations": {
@@ -158,35 +136,12 @@
                 "type": "agent"
               }
             ]
-          },
-          "workspace": {
-            "directly_related_user_types": [
-              {
-                "type": "workspace"
-              }
-            ]
           }
         }
       },
       "relations": {
         "admin": {
-          "union": {
-            "child": [
-              {
-                "this": {}
-              },
-              {
-                "tupleToUserset": {
-                  "tupleset": {
-                    "relation": "workspace"
-                  },
-                  "computedUserset": {
-                    "relation": "admin"
-                  }
-                }
-              }
-            ]
-          }
+          "this": {}
         },
         "operator": {
           "union": {
@@ -201,9 +156,6 @@
               }
             ]
           }
-        },
-        "workspace": {
-          "this": {}
         }
       }
     },

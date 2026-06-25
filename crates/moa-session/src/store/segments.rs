@@ -9,13 +9,13 @@ impl PostgresSessionStore {
         let sessions = self.table_name("sessions");
         let affected = sqlx::query(&format!(
             "INSERT INTO {task_segments} \
-             (id, session_id, workspace_id, user_id, tenant_id, segment_index, task_summary, \
+             (id, session_id, storage_partition_id, user_id, tenant_id, segment_index, task_summary, \
               started_at, ended_at, outcome, assessment, outcome_confidence, \
               tools_used, skills_activated, turn_count, token_cost, previous_segment_id) \
-             SELECT $1, $2, s.workspace_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
+             SELECT $1, $2, s.storage_partition_id, s.user_id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
              FROM {sessions} s WHERE s.id = $2 \
              ON CONFLICT (id) DO UPDATE SET \
-                 workspace_id = EXCLUDED.workspace_id, \
+                 storage_partition_id = EXCLUDED.storage_partition_id, \
                  user_id = EXCLUDED.user_id, \
                  tenant_id = EXCLUDED.tenant_id, \
                  task_summary = EXCLUDED.task_summary, \

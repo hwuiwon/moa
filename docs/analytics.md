@@ -22,7 +22,7 @@ its own rollups on the write path.
   - `tool_call_analytics`
   - `tool_call_summary`
   - `session_turn_metrics`
-  - `daily_workspace_metrics`
+  - `daily_storage_partition_metrics`
   - `skill_resolution_rates`
   - `segment_baselines`
 
@@ -71,7 +71,7 @@ Live per-call fact view over `ToolCall` plus matching `ToolResult` or
 
 Columns include:
 
-- workspace and session identity
+- tenant and session identity
 - tool name and tool id
 - call and finish timestamps
 - `duration_ms`
@@ -109,9 +109,9 @@ Columns include:
 `pipeline_ms` is present but currently `NULL` because turn-pipeline latency is
 only traced, not yet persisted as an event payload.
 
-### `daily_workspace_metrics`
+### `daily_storage_partition_metrics`
 
-Cached daily workspace rollup keyed by `(workspace_id, day)`.
+Cached daily tenant rollup keyed by the legacy storage column `(storage_partition_id, day)`.
 
 Columns include:
 
@@ -156,12 +156,12 @@ Materialized views are refreshed with:
 
 ```sql
 REFRESH MATERIALIZED VIEW CONCURRENTLY session_turn_metrics;
-REFRESH MATERIALIZED VIEW CONCURRENTLY daily_workspace_metrics;
+REFRESH MATERIALIZED VIEW CONCURRENTLY daily_storage_partition_metrics;
 REFRESH MATERIALIZED VIEW CONCURRENTLY skill_resolution_rates;
 REFRESH MATERIALIZED VIEW CONCURRENTLY segment_baselines;
 ```
 
-The orchestrator runs this refresh loop hourly. Workspace and cache analytics
+The orchestrator runs this refresh loop hourly. Tenant and cache analytics
 API handlers also trigger an on-demand refresh before reading these materialized views.
 
 ## Adding new analytics

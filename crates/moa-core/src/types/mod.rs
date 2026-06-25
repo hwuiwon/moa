@@ -82,7 +82,7 @@ pub use hands::{
     validate_sandbox_file_path,
 };
 pub use identifiers::{
-    BrainId, ModelId, SegmentId, SessionId, TenantId, ToolCallId, UserId, WorkspaceId,
+    BrainId, ModelId, SegmentId, SessionId, StoragePartitionId, TenantId, ToolCallId, UserId,
 };
 pub use learning::LearningEntry;
 pub use memory::SkillMetadata;

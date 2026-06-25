@@ -11,7 +11,7 @@ use crate::PostgresSessionStore;
 const DEFAULT_DATABASE_URL: &str = "postgres://moa_owner:dev@127.0.0.1:10040/moa";
 static TEST_SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// Returns the Postgres URL used by workspace tests.
+/// Returns the Postgres URL used by Postgres-backed tests.
 pub fn test_database_url() -> String {
     std::env::var("MOA_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string())
 }

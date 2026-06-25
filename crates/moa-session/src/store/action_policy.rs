@@ -1,32 +1,28 @@
 //! Action-policy rule operations for the Postgres session store.
 
-use moa_core::{ActionRuleScope, UserId, WorkspaceId};
+use moa_core::{ActionRuleScope, StoragePartitionId, TenantId, UserId};
 
 use super::*;
 
-const WORKSPACE_DEFAULT_POLICY_KEY: &str = "workspace_default";
-
 impl PostgresSessionStore {
-    /// Lists action-policy rules visible to one workspace user and tool.
+    /// Lists action-policy rules visible to one tenant user and tool.
     pub async fn list_action_policy_rules_for_tool(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         user_id: &UserId,
         tool: &str,
     ) -> Result<Vec<ActionPolicyRule>> {
         let action_policy_rules = self.table_name("action_policy_rules");
         let rows = sqlx::query(&format!(
-            "SELECT id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
+            "SELECT id, storage_partition_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at \
              FROM {action_policy_rules} \
-             WHERE ((tenant_id = $1 AND scope = 'tenant') OR (tenant_id IS NULL AND workspace_id = $2 AND scope = 'workspace_default')) \
-               AND (user_id IS NULL OR user_id = $3) \
-               AND tool = $4 \
+             WHERE tenant_id = $1 \
+               AND scope = 'tenant' \
+               AND (user_id IS NULL OR user_id = $2) \
+               AND tool = $3 \
              ORDER BY created_at ASC"
         ))
-        .bind(workspace_id.as_str().parse::<uuid::Uuid>().map_err(|error| {
-            MoaError::StorageError(format!("action policy workspace id must be a tenant UUID: {error}"))
-        })?)
-        .bind(WORKSPACE_DEFAULT_POLICY_KEY)
+        .bind(tenant_id.0)
         .bind(user_id.to_string())
         .bind(tool)
         .fetch_all(&self.pool)
@@ -41,12 +37,12 @@ impl PostgresSessionStore {
         moa_security::validate_action_policy_rule(&rule)?;
 
         let action_policy_rules = self.table_name("action_policy_rules");
-        let workspace_id = stored_workspace_id_for_rule(&rule);
+        let storage_partition_id = stored_storage_partition_id_for_rule(&rule);
         let tenant_id = stored_tenant_id_for_rule(&rule);
         sqlx::query(&format!(
-            "INSERT INTO {action_policy_rules} (id, tenant_id, workspace_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
+            "INSERT INTO {action_policy_rules} (id, tenant_id, storage_partition_id, user_id, tool, pattern, effect, scope, reason, created_by, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
-             ON CONFLICT (workspace_id, tool, pattern, (COALESCE(user_id, ''))) DO UPDATE SET \
+             ON CONFLICT (storage_partition_id, tool, pattern, (COALESCE(user_id, ''))) DO UPDATE SET \
                  tenant_id = EXCLUDED.tenant_id, \
                  effect = EXCLUDED.effect, \
                  scope = EXCLUDED.scope, \
@@ -56,7 +52,7 @@ impl PostgresSessionStore {
         ))
         .bind(rule.id)
         .bind(tenant_id)
-        .bind(workspace_id.to_string())
+        .bind(storage_partition_id.to_string())
         .bind(Option::<String>::None)
         .bind(rule.tool)
         .bind(rule.pattern)
@@ -72,10 +68,10 @@ impl PostgresSessionStore {
         Ok(())
     }
 
-    /// Deletes an action-policy rule by tool and pattern within a workspace.
+    /// Deletes an action-policy rule by tool and pattern within a tenant.
     pub async fn delete_action_policy_rule(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         user_id: Option<&UserId>,
         tool: &str,
         pattern: &str,
@@ -83,12 +79,13 @@ impl PostgresSessionStore {
         let action_policy_rules = self.table_name("action_policy_rules");
         sqlx::query(&format!(
             "DELETE FROM {action_policy_rules} \
-             WHERE workspace_id = $1 \
+             WHERE tenant_id = $1 \
+               AND scope = 'tenant' \
                AND ((user_id IS NULL AND $2::text IS NULL) OR user_id = $2) \
                AND tool = $3 \
                AND pattern = $4"
         ))
-        .bind(workspace_id.to_string())
+        .bind(tenant_id.0)
         .bind(user_id.map(ToString::to_string))
         .bind(tool)
         .bind(pattern)
@@ -100,30 +97,28 @@ impl PostgresSessionStore {
     }
 }
 
-fn stored_workspace_id_for_rule(rule: &ActionPolicyRule) -> WorkspaceId {
+fn stored_storage_partition_id_for_rule(rule: &ActionPolicyRule) -> StoragePartitionId {
     match rule.scope {
-        ActionRuleScope::WorkspaceDefault => WorkspaceId::new(WORKSPACE_DEFAULT_POLICY_KEY),
-        ActionRuleScope::Tenant { tenant_id } => WorkspaceId::new(tenant_id.to_string()),
+        ActionRuleScope::Tenant { tenant_id } => StoragePartitionId::new(tenant_id.to_string()),
     }
 }
 
-fn stored_tenant_id_for_rule(rule: &ActionPolicyRule) -> Option<uuid::Uuid> {
+fn stored_tenant_id_for_rule(rule: &ActionPolicyRule) -> uuid::Uuid {
     match rule.scope {
-        ActionRuleScope::WorkspaceDefault => None,
-        ActionRuleScope::Tenant { tenant_id } => Some(tenant_id.0),
+        ActionRuleScope::Tenant { tenant_id } => tenant_id.0,
     }
 }
 
 #[async_trait]
 impl ActionPolicyRuleStore for PostgresSessionStore {
-    /// Lists action-policy rules visible to one workspace user and tool.
+    /// Lists action-policy rules visible to one tenant user and tool.
     async fn list_action_policy_rules_for_tool(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         user_id: &UserId,
         tool: &str,
     ) -> Result<Vec<ActionPolicyRule>> {
-        self.list_action_policy_rules_for_tool(workspace_id, user_id, tool)
+        self.list_action_policy_rules_for_tool(tenant_id, user_id, tool)
             .await
     }
 
@@ -135,12 +130,12 @@ impl ActionPolicyRuleStore for PostgresSessionStore {
     /// Deletes an action-policy rule by tool and pattern.
     async fn delete_action_policy_rule(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         user_id: Option<&UserId>,
         tool: &str,
         pattern: &str,
     ) -> Result<()> {
-        self.delete_action_policy_rule(workspace_id, user_id, tool, pattern)
+        self.delete_action_policy_rule(tenant_id, user_id, tool, pattern)
             .await
     }
 }

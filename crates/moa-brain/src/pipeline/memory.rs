@@ -11,8 +11,8 @@ use chrono::Utc;
 use moa_core::{
     AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContextMessage, ContextProcessor,
     ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MoaError, NullLineageHandle,
-    ProcessorOutput, QueryRewriteResult, Result, RewriteSource, UserId, WorkingContext,
-    WorkspaceId, traits::EmbeddingProvider,
+    ProcessorOutput, QueryRewriteResult, Result, RewriteSource, StoragePartitionId, UserId,
+    WorkingContext, traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -422,7 +422,7 @@ impl GraphMemoryRetriever {
         let retrieval = RetrievalLineage {
             turn_id: turn_id_from_context(ctx).unwrap_or_else(TurnId::new_v7),
             session_id: ctx.session_id,
-            workspace_id: lineage_workspace_id_from_context(ctx),
+            storage_partition_id: lineage_storage_partition_id_from_context(ctx),
             user_id: lineage_user_id_from_context(ctx),
             scope: lineage_memory_scope_from_context(ctx),
             ts: Utc::now(),
@@ -482,7 +482,7 @@ impl GraphMemoryRetriever {
             target: ScoreTarget::Turn {
                 turn_id: retrieval.turn_id,
             },
-            workspace_id: retrieval.workspace_id.clone(),
+            storage_partition_id: retrieval.storage_partition_id.clone(),
             user_id: Some(retrieval.user_id.clone()),
             name: "retrieval_zero_recall".to_string(),
             value: ScoreValue::Boolean(retrieval.top_k.is_empty()),
@@ -498,13 +498,13 @@ impl GraphMemoryRetriever {
         }
         metrics::counter!(
             "moa_turn_count",
-            "workspace_id" => retrieval.workspace_id.to_string()
+            "tenant_id" => retrieval.storage_partition_id.to_string()
         )
         .increment(1);
         if retrieval.top_k.is_empty() {
             metrics::counter!(
                 "moa_zero_recall_count",
-                "workspace_id" => retrieval.workspace_id.to_string()
+                "tenant_id" => retrieval.storage_partition_id.to_string()
             )
             .increment(1);
         }
@@ -569,8 +569,8 @@ fn lineage_memory_scope_from_context(ctx: &WorkingContext) -> MemoryScope {
     memory_scope_from_context_with_policy(ctx, &policy)
 }
 
-fn lineage_workspace_id_from_context(ctx: &WorkingContext) -> WorkspaceId {
-    WorkspaceId::new(ctx.tenant_id.to_string())
+fn lineage_storage_partition_id_from_context(ctx: &WorkingContext) -> StoragePartitionId {
+    StoragePartitionId::new(ctx.tenant_id.to_string())
 }
 
 fn lineage_user_id_from_context(ctx: &WorkingContext) -> UserId {

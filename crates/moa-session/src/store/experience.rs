@@ -9,7 +9,7 @@ impl PostgresSessionStore {
         let experience_records = self.table_name("experience_records");
         sqlx::query(&format!(
             "INSERT INTO {experience_records} \
-             (id, segment_id, session_id, workspace_id, user_id, tenant_id, task_summary, \
+             (id, segment_id, session_id, storage_partition_id, user_id, tenant_id, task_summary, \
               task_fingerprint, task_fingerprint_payload, task_facets, actions, resources, \
               outcome, confidence, evidence, tools_used, skills_activated, turn_count, token_cost, \
               duration_ms, assessment_policy_version, extraction_policy_version, created_at) \
@@ -35,7 +35,7 @@ impl PostgresSessionStore {
         .bind(experience.id)
         .bind(experience.segment_id.0)
         .bind(experience.session_id.0)
-        .bind(experience.workspace_id.to_string())
+        .bind(storage_partition_id(experience.tenant_id))
         .bind(experience.user_id.to_string())
         .bind(experience.tenant_id.to_string())
         .bind(experience.task_summary.as_deref())
@@ -111,7 +111,7 @@ impl PostgresSessionStore {
         for attribution in attributions {
             sqlx::query(&format!(
                 "INSERT INTO {experience_attributions} \
-                 (id, experience_id, tenant_id, workspace_id, user_id, subject_type, subject_id, \
+                 (id, experience_id, tenant_id, storage_partition_id, user_id, subject_type, subject_id, \
                   effect, confidence, evidence, created_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
                  ON CONFLICT (experience_id, subject_type, subject_id) DO UPDATE SET \
@@ -122,7 +122,7 @@ impl PostgresSessionStore {
             .bind(attribution.id)
             .bind(attribution.experience_id)
             .bind(attribution.tenant_id.to_string())
-            .bind(attribution.workspace_id.to_string())
+            .bind(storage_partition_id(attribution.tenant_id))
             .bind(attribution.user_id.as_ref().map(ToString::to_string))
             .bind(attribution.subject_type.as_str())
             .bind(&attribution.subject_id)
@@ -172,7 +172,7 @@ impl PostgresSessionStore {
         let learning_candidates = self.table_name("learning_candidates");
         sqlx::query(&format!(
             "INSERT INTO {learning_candidates} \
-             (id, tenant_id, workspace_id, user_id, candidate_type, status, target_id, target_label, \
+             (id, tenant_id, storage_partition_id, user_id, candidate_type, status, target_id, target_label, \
               task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, \
               source_experience_ids, confidence, risk_class, promotion_requirements, status_reason, \
               batch_id, created_at, updated_at) \
@@ -191,7 +191,7 @@ impl PostgresSessionStore {
         ))
         .bind(candidate.id)
         .bind(candidate.tenant_id.to_string())
-        .bind(candidate.workspace_id.to_string())
+        .bind(storage_partition_id(candidate.tenant_id))
         .bind(candidate.user_id.as_ref().map(ToString::to_string))
         .bind(candidate.candidate_type.as_str())
         .bind(candidate.status.as_str())
@@ -243,30 +243,30 @@ impl PostgresSessionStore {
         rows.iter().map(learning_candidate_from_row).collect()
     }
 
-    /// Loads one full learning candidate by workspace and candidate ID.
+    /// Loads one full learning candidate by tenant and candidate ID.
     pub async fn get_learning_candidate(
         &self,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         candidate_id: Uuid,
     ) -> Result<Option<LearningCandidate>> {
         let mut conn = self.pool.acquire().await.map_err(map_sqlx_error)?;
-        self.get_learning_candidate_with_conn(&mut conn, workspace_id, candidate_id)
+        self.get_learning_candidate_with_conn(&mut conn, tenant_id, candidate_id)
             .await
     }
 
-    /// Loads one full learning candidate by workspace and candidate ID using an existing connection.
+    /// Loads one full learning candidate by tenant and candidate ID using an existing connection.
     pub async fn get_learning_candidate_with_conn(
         &self,
         conn: &mut PgConnection,
-        workspace_id: &WorkspaceId,
+        tenant_id: &TenantId,
         candidate_id: Uuid,
     ) -> Result<Option<LearningCandidate>> {
         let learning_candidates = self.table_name("learning_candidates");
         let row = sqlx::query(&format!(
             "SELECT {LEARNING_CANDIDATE_COLUMNS} FROM {learning_candidates} \
-             WHERE workspace_id = $1 AND id = $2"
+             WHERE tenant_id = $1 AND id = $2"
         ))
-        .bind(workspace_id.to_string())
+        .bind(tenant_id.to_string())
         .bind(candidate_id)
         .fetch_optional(&mut *conn)
         .await
@@ -399,4 +399,8 @@ impl PostgresSessionStore {
             .map(task_strategy_success_rate_from_row)
             .collect()
     }
+}
+
+fn storage_partition_id(tenant_id: TenantId) -> String {
+    tenant_id.to_string()
 }

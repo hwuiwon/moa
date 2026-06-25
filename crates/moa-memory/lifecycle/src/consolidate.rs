@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use moa_core::{ContactId, MemoryDigestConfig, TenantId, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{
+    ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, traits::EmbeddingProvider,
+};
 use moa_memory_graph::{
     AgeGraphStore, ExistingSupersessionIntent, GraphError, NodeEmbeddingIntent, NodeLabel,
     NodePropertyUpdateIntent, PiiClass,
@@ -17,7 +19,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::digest::rebuild_digests;
+use crate::digest::{DigestStats, rebuild_storage_digests};
 
 const CONSOLIDATION_ACTOR: &str = "consolidation";
 const CONSOLIDATION_ACTOR_KIND: &str = "system";
@@ -69,7 +71,7 @@ impl Default for ConsolidationOptions {
     }
 }
 
-/// Serializable outcome for one workspace consolidation pass.
+/// Serializable outcome for one tenant consolidation pass.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConsolidationOutcome {
     /// Duplicate fact nodes invalidated into a canonical active node.
@@ -142,19 +144,20 @@ pub struct BackfillStats {
     pub aliases_promoted: u64,
 }
 
-/// Runs all v1 consolidation operations for one workspace.
-pub async fn consolidate_workspace(
+/// Runs all v1 consolidation operations for one tenant.
+pub async fn consolidate_tenant(
     pool: &PgPool,
-    workspace_id: WorkspaceId,
+    tenant_id: TenantId,
     opts: ConsolidationOptions,
     now: DateTime<Utc>,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
 ) -> Result<ConsolidationOutcome> {
-    let merge = merge_duplicates(pool, &workspace_id, now).await?;
-    let decay = decay_confidence(pool, &workspace_id, now, &opts).await?;
-    let sweep = sweep_contradictions(pool, &workspace_id, now).await?;
-    let backfill = backfill_entities(pool, &workspace_id, embedder).await?;
-    let digest = rebuild_digests(pool, &workspace_id, now, &opts.digest).await?;
+    let merge = merge_duplicates(pool, &tenant_id, now).await?;
+    let decay = decay_confidence(pool, &tenant_id, now, &opts).await?;
+    let sweep = sweep_contradictions(pool, &tenant_id, now).await?;
+    let backfill = backfill_entities(pool, &tenant_id, embedder).await?;
+    let storage_partition_id = storage_partition_id(&tenant_id);
+    let digest = rebuild_storage_digests(pool, &storage_partition_id, now, &opts.digest).await?;
 
     Ok(ConsolidationOutcome {
         merged: merge.merged,
@@ -172,10 +175,10 @@ pub async fn consolidate_workspace(
 /// Merges active exact-duplicate facts by `(tenant, contact, scope, fact_hash)`.
 pub async fn merge_duplicates(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     now: DateTime<Utc>,
 ) -> Result<MergeStats> {
-    let facts = active_fact_rows(pool, workspace_id).await?;
+    let facts = active_fact_rows(pool, tenant_id).await?;
     let groups = duplicate_groups(&facts);
     let mut merged = 0_u64;
 
@@ -195,7 +198,7 @@ pub async fn merge_duplicates(
         }
     }
 
-    let remaining = duplicate_groups(&active_fact_rows(pool, workspace_id).await?)
+    let remaining = duplicate_groups(&active_fact_rows(pool, tenant_id).await?)
         .into_iter()
         .filter(|group| group.len() > 1)
         .count() as u64;
@@ -208,11 +211,11 @@ pub async fn merge_duplicates(
 /// Applies anchored confidence decay to idle active facts.
 pub async fn decay_confidence(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     now: DateTime<Utc>,
     opts: &ConsolidationOptions,
 ) -> Result<DecayStats> {
-    let facts = active_fact_rows(pool, workspace_id).await?;
+    let facts = active_fact_rows(pool, tenant_id).await?;
     let mut decayed = 0_u64;
     let mut at_floor = 0_u64;
 
@@ -253,10 +256,10 @@ pub async fn decay_confidence(
 /// Supersedes older active contradictory facts using a deterministic newest-wins policy.
 pub async fn sweep_contradictions(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     now: DateTime<Utc>,
 ) -> Result<SweepStats> {
-    let facts = active_fact_rows(pool, workspace_id).await?;
+    let facts = active_fact_rows(pool, tenant_id).await?;
     let mut supersessions = 0_u64;
 
     for group in contradiction_groups(&facts) {
@@ -280,10 +283,10 @@ pub async fn sweep_contradictions(
 /// Backfills missing entity embeddings and promotes edge alias mentions to entity properties.
 pub async fn backfill_entities(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
 ) -> Result<BackfillStats> {
-    let entities = active_entity_rows(pool, workspace_id).await?;
+    let entities = active_entity_rows(pool, tenant_id).await?;
     let mut embeddings = 0_u64;
     let mut aliases = 0_u64;
 
@@ -314,12 +317,14 @@ pub async fn backfill_entities(
         }
     } else {
         tracing::debug!(
-            workspace_id = %workspace_id,
+            tenant_id = %tenant_id,
             "entity embedding backfill skipped because no embedder was provided"
         );
     }
 
-    let mut aliases_by_entity = edge_aliases_for_entities(pool, workspace_id, &entities).await?;
+    let storage_partition_id = storage_partition_id(tenant_id);
+    let mut aliases_by_entity =
+        edge_aliases_for_entities(pool, &storage_partition_id, &entities).await?;
     for entity in &entities {
         let promoted = promote_aliases_for_entity(
             pool,
@@ -334,6 +339,17 @@ pub async fn backfill_entities(
         entity_embeddings_backfilled: embeddings,
         aliases_promoted: aliases,
     })
+}
+
+/// Rebuilds deterministic standing digest rows for one tenant.
+pub async fn rebuild_digests(
+    pool: &PgPool,
+    tenant_id: &TenantId,
+    now: DateTime<Utc>,
+    config: &MemoryDigestConfig,
+) -> Result<DigestStats> {
+    let storage_partition_id = storage_partition_id(tenant_id);
+    rebuild_storage_digests(pool, &storage_partition_id, now, config).await
 }
 
 async fn close_into_existing(
@@ -510,7 +526,7 @@ async fn promote_aliases_for_entity(
 
 async fn edge_aliases_for_entities(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     entities: &[LifecycleNodeRow],
 ) -> Result<BTreeMap<Uuid, BTreeSet<String>>> {
     if entities.is_empty() {
@@ -526,7 +542,7 @@ async fn edge_aliases_for_entities(
             SELECT payload->>'start_uid' AS entity_uid,
                    payload->'after'->>'alias_mention' AS alias
             FROM moa.graph_changelog
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND target_kind = 'edge'
               AND op = 'create'
               AND payload->>'start_uid' = ANY($2)
@@ -535,7 +551,7 @@ async fn edge_aliases_for_entities(
             SELECT payload->>'end_uid' AS entity_uid,
                    payload->'after'->>'alias_mention' AS alias
             FROM moa.graph_changelog
-            WHERE workspace_id = $1
+            WHERE storage_partition_id = $1
               AND target_kind = 'edge'
               AND op = 'create'
               AND payload->>'end_uid' = ANY($2)
@@ -547,7 +563,7 @@ async fn edge_aliases_for_entities(
           AND alias IS NOT NULL
         "#,
     )
-    .bind(workspace_id.to_string())
+    .bind(storage_partition_id.to_string())
     .bind(&entity_uids)
     .fetch_all(pool)
     .await?;
@@ -568,27 +584,20 @@ async fn edge_aliases_for_entities(
     Ok(aliases_by_entity)
 }
 
-async fn active_fact_rows(
-    pool: &PgPool,
-    workspace_id: &WorkspaceId,
-) -> Result<Vec<LifecycleNodeRow>> {
-    active_rows(pool, workspace_id, NodeLabel::Fact, false).await
+async fn active_fact_rows(pool: &PgPool, tenant_id: &TenantId) -> Result<Vec<LifecycleNodeRow>> {
+    active_rows(pool, tenant_id, NodeLabel::Fact, false).await
 }
 
-async fn active_entity_rows(
-    pool: &PgPool,
-    workspace_id: &WorkspaceId,
-) -> Result<Vec<LifecycleNodeRow>> {
-    active_rows(pool, workspace_id, NodeLabel::Entity, true).await
+async fn active_entity_rows(pool: &PgPool, tenant_id: &TenantId) -> Result<Vec<LifecycleNodeRow>> {
+    active_rows(pool, tenant_id, NodeLabel::Entity, true).await
 }
 
 async fn active_rows(
     pool: &PgPool,
-    workspace_id: &WorkspaceId,
+    tenant_id: &TenantId,
     label: NodeLabel,
     include_embedding_state: bool,
 ) -> Result<Vec<LifecycleNodeRow>> {
-    let tenant_id = tenant_uuid_from_workspace_id(workspace_id)?;
     let mut rows = Vec::new();
     let mut cursor_valid_from: Option<DateTime<Utc>> = None;
     let mut cursor_uid: Option<Uuid> = None;
@@ -597,7 +606,6 @@ async fn active_rows(
         let batch = sqlx::query(
             r#"
             SELECT node.uid,
-                   node.workspace_id,
                    node.user_id,
                    node.tenant_id,
                    node.contact_id,
@@ -622,7 +630,7 @@ async fn active_rows(
             LIMIT $5
             "#,
         )
-        .bind(tenant_id)
+        .bind(tenant_id.0)
         .bind(label.as_str())
         .bind(cursor_valid_from)
         .bind(cursor_uid)
@@ -648,12 +656,8 @@ async fn active_rows(
     Ok(rows)
 }
 
-fn tenant_uuid_from_workspace_id(workspace_id: &WorkspaceId) -> Result<Uuid> {
-    Uuid::parse_str(workspace_id.as_str()).map_err(|error| {
-        Error::InvalidRow(format!(
-            "workspace_id `{workspace_id}` cannot be used as tenant_id: {error}"
-        ))
-    })
+fn storage_partition_id(tenant_id: &TenantId) -> StoragePartitionId {
+    StoragePartitionId::new(tenant_id.to_string())
 }
 
 fn lifecycle_row_from_sql(
@@ -663,7 +667,6 @@ fn lifecycle_row_from_sql(
     let pii_class: String = row.try_get("pii_class")?;
     Ok(LifecycleNodeRow {
         uid: row.try_get("uid")?,
-        workspace_id: row.try_get("workspace_id")?,
         user_id: row.try_get("user_id")?,
         tenant_id: row.try_get("tenant_id")?,
         contact_id: row.try_get("contact_id")?,
@@ -722,7 +725,6 @@ fn contradiction_group_key(group: &[LifecycleNodeRow]) -> ContradictionKey {
 #[derive(Debug, Clone, PartialEq)]
 struct LifecycleNodeRow {
     uid: Uuid,
-    workspace_id: Option<String>,
     user_id: Option<String>,
     tenant_id: Uuid,
     contact_id: Option<Uuid>,
@@ -1061,7 +1063,6 @@ mod tests {
         let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         LifecycleNodeRow {
             uid: uuid(spec.uid_suffix),
-            workspace_id: Some(spec.tenant_id.to_string()),
             user_id: spec.contact_id.map(|contact_id| contact_id.to_string()),
             tenant_id: spec.tenant_id,
             contact_id: spec.contact_id,

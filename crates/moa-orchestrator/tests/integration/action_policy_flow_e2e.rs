@@ -7,10 +7,10 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
     ActionPolicyEffect, ActionReviewDecision, ActionReviewStatus, Event, EventRange, EventRecord,
-    SessionId, SessionStatus, TenantId, ToolCallId, WorkspaceId,
+    SessionId, SessionStatus, TenantId, ToolCallId,
 };
-use moa_orchestrator::objects::workspace::{
-    WorkspaceActionPolicy, WorkspaceActionPolicyRuleInput, WorkspaceConfig,
+use moa_orchestrator::objects::tenant::{
+    TenantActionPolicy, TenantActionPolicyRuleInput, TenantConfig,
 };
 use moa_orchestrator::services::action_reviews::{
     ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
@@ -27,9 +27,9 @@ async fn action_policy_flow_covers_auto_review_decision_and_member_authz() -> Re
     let fixture = OrchestratorTestFixture::with_script(action_policy_script()).await?;
     action_policy_auto_mode_executes_shell_without_user_approval(&fixture).await?;
     admin_review_policy_records_pending_review_and_turn_continues(&fixture).await?;
-    workspace_admin_clear_executes_stored_review_action(&fixture).await?;
-    workspace_admin_deny_does_not_execute_stored_review_action(&fixture).await?;
-    workspace_member_cannot_decide_action_review(&fixture).await?;
+    tenant_admin_clear_executes_stored_review_action(&fixture).await?;
+    tenant_admin_deny_does_not_execute_stored_review_action(&fixture).await?;
+    tenant_member_cannot_decide_action_review(&fixture).await?;
     Ok(())
 }
 
@@ -121,17 +121,16 @@ async fn admin_review_policy_records_pending_review_and_turn_continues(
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-pending").await?;
     let meta = test.client().get_session(session_id).await?;
-    let workspace_id = workspace_id_from_meta(&meta);
-    initialize_workspace(test.client(), &workspace_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
     fixture
         .grant_default_tenant_admin(meta.tenant_id)
         .await
         .context("grant admin before adding and listing pending review")?;
-    add_bash_admin_review_rule(test.client(), &workspace_id).await?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
     let events = run_scripted_turn(&test, session_id, "Run the admin-review bash command.").await?;
     let review_id = action_review_id(&events).context("expected ActionReviewRequested event")?;
-    let pending = list_pending_reviews(test.client(), &workspace_id).await?;
+    let pending = list_pending_reviews(test.client(), meta.tenant_id).await?;
     assert_eq!(pending.len(), 1, "expected exactly one pending review");
     assert_eq!(pending[0].id, review_id);
     assert_eq!(pending[0].status, ActionReviewStatus::Pending);
@@ -162,20 +161,19 @@ async fn admin_review_policy_records_pending_review_and_turn_continues(
     Ok(())
 }
 
-async fn workspace_admin_clear_executes_stored_review_action(
+async fn tenant_admin_clear_executes_stored_review_action(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
     // Pins: clearing a tenant action review executes the stored request with a fresh tool id.
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-clear").await?;
     let meta = test.client().get_session(session_id).await?;
-    let workspace_id = workspace_id_from_meta(&meta);
-    initialize_workspace(test.client(), &workspace_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
     fixture
         .grant_default_tenant_admin(meta.tenant_id)
         .await
         .context("grant admin before adding and deciding review")?;
-    add_bash_admin_review_rule(test.client(), &workspace_id).await?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
     let events = run_scripted_turn(&test, session_id, "Run the clear-review bash command.").await?;
     let original_tool_id = original_tool_call_id(&events, "clear-review-bash")
@@ -184,7 +182,7 @@ async fn workspace_admin_clear_executes_stored_review_action(
 
     decide_review(
         test.client(),
-        &workspace_id,
+        meta.tenant_id,
         review_id,
         ActionReviewDecisionKind::Cleared,
         None,
@@ -232,26 +230,25 @@ async fn workspace_admin_clear_executes_stored_review_action(
     Ok(())
 }
 
-async fn workspace_admin_deny_does_not_execute_stored_review_action(
+async fn tenant_admin_deny_does_not_execute_stored_review_action(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
     // Pins: denying a tenant action review records the decision without executing the stored action.
     let test = fixture.isolated().await;
     let session_id = test.create_session("admin-review-deny").await?;
     let meta = test.client().get_session(session_id).await?;
-    let workspace_id = workspace_id_from_meta(&meta);
-    initialize_workspace(test.client(), &workspace_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
     fixture
         .grant_default_tenant_admin(meta.tenant_id)
         .await
         .context("grant admin before adding and denying review")?;
-    add_bash_admin_review_rule(test.client(), &workspace_id).await?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
     let events = run_scripted_turn(&test, session_id, "Run the deny-review bash command.").await?;
     let review_id = action_review_id(&events).context("expected ActionReviewRequested event")?;
     decide_review(
         test.client(),
-        &workspace_id,
+        meta.tenant_id,
         review_id,
         ActionReviewDecisionKind::Denied,
         Some("risk too high"),
@@ -281,20 +278,19 @@ async fn workspace_admin_deny_does_not_execute_stored_review_action(
     Ok(())
 }
 
-async fn workspace_member_cannot_decide_action_review(
+async fn tenant_member_cannot_decide_action_review(
     fixture: &OrchestratorTestFixture,
 ) -> Result<()> {
     // Pins: non-admin tenant operators cannot list or decide action reviews.
     let test = fixture.isolated().await;
     let session_id = test.create_session("member-denied").await?;
     let meta = test.client().get_session(session_id).await?;
-    let workspace_id = workspace_id_from_meta(&meta);
-    initialize_workspace(test.client(), &workspace_id).await?;
+    initialize_tenant(test.client(), meta.tenant_id).await?;
     fixture
         .grant_default_tenant_admin(meta.tenant_id)
         .await
         .context("grant admin before adding review rule")?;
-    add_bash_admin_review_rule(test.client(), &workspace_id).await?;
+    add_bash_admin_review_rule(test.client(), meta.tenant_id).await?;
 
     let events =
         run_scripted_turn(&test, session_id, "Run the member-denied bash command.").await?;
@@ -308,13 +304,13 @@ async fn workspace_member_cannot_decide_action_review(
         .context("grant non-admin member before forbidden review decision")?;
     let member_client = TestApiClient::new(&fixture.ingress_url)?.with_identity(member_identity);
 
-    let list_error = list_pending_reviews(&member_client, &workspace_id)
+    let list_error = list_pending_reviews(&member_client, meta.tenant_id)
         .await
         .expect_err("tenant operator should not list pending action reviews");
     assert_authz_error(&list_error);
     let decide_error = decide_review(
         &member_client,
-        &workspace_id,
+        meta.tenant_id,
         review_id,
         ActionReviewDecisionKind::Cleared,
         None,
@@ -387,28 +383,25 @@ async fn run_scripted_turn(
         .await
 }
 
-async fn initialize_workspace(client: &TestApiClient, workspace_id: &WorkspaceId) -> Result<()> {
+async fn initialize_tenant(client: &TestApiClient, tenant_id: TenantId) -> Result<()> {
     client
         .post_void(
-            &format!("/Workspace/{workspace_id}/init"),
-            &WorkspaceConfig {
-                id: workspace_id.clone(),
-                name: format!("Action policy E2E {workspace_id}"),
+            &format!("/Tenant/{tenant_id}/init"),
+            &TenantConfig {
+                id: tenant_id,
+                name: format!("Action policy E2E {tenant_id}"),
                 consolidation_hour_utc: 2,
-                action_policy: WorkspaceActionPolicy::default(),
+                action_policy: TenantActionPolicy::default(),
             },
         )
         .await
 }
 
-async fn add_bash_admin_review_rule(
-    client: &TestApiClient,
-    workspace_id: &WorkspaceId,
-) -> Result<()> {
+async fn add_bash_admin_review_rule(client: &TestApiClient, tenant_id: TenantId) -> Result<()> {
     client
         .post_void(
-            &format!("/Workspace/{workspace_id}/add_action_policy_rule"),
-            &WorkspaceActionPolicyRuleInput {
+            &format!("/Tenant/{tenant_id}/add_action_policy_rule"),
+            &TenantActionPolicyRuleInput {
                 tool_name: "bash".to_string(),
                 pattern: "*".to_string(),
                 effect: ActionPolicyEffect::AdminReview,
@@ -420,21 +413,19 @@ async fn add_bash_admin_review_rule(
 
 async fn list_pending_reviews(
     client: &TestApiClient,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
 ) -> Result<Vec<ActionReviewSummary>> {
     client
         .post_call(
             "/ActionReviews/list_pending",
-            &ListActionReviewsRequest {
-                tenant_id: tenant_id_from_workspace_id(workspace_id)?,
-            },
+            &ListActionReviewsRequest { tenant_id },
         )
         .await
 }
 
 async fn decide_review(
     client: &TestApiClient,
-    workspace_id: &WorkspaceId,
+    tenant_id: TenantId,
     review_id: Uuid,
     decision: ActionReviewDecisionKind,
     reason: Option<&str>,
@@ -443,19 +434,13 @@ async fn decide_review(
         .post_void(
             "/ActionReviews/decide",
             &DecideActionReviewRequest {
-                tenant_id: tenant_id_from_workspace_id(workspace_id)?,
+                tenant_id,
                 review_id,
                 decision,
                 reason: reason.map(str::to_string),
             },
         )
         .await
-}
-
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> Result<TenantId> {
-    Uuid::parse_str(workspace_id.as_str())
-        .map(TenantId::from)
-        .context("workspace fixture id should be a tenant UUID")
 }
 
 fn action_policy_script() -> serde_json::Value {
@@ -563,10 +548,6 @@ fn test_identity() -> Identity {
         api_key_id: None,
         acting_on_behalf_of: None,
     }
-}
-
-fn workspace_id_from_meta(meta: &moa_core::SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(meta.tenant_id.to_string())
 }
 
 fn action_review_id(events: &[EventRecord]) -> Option<Uuid> {

@@ -283,8 +283,8 @@ pub struct MoaEnvOverlay {
     pub metrics_enabled: Option<bool>,
     /// `MOA_METRICS_LISTEN`.
     pub metrics_listen: Option<String>,
-    /// `MOA_BUDGETS_DAILY_WORKSPACE_CENTS`.
-    pub budgets_daily_workspace_cents: Option<u32>,
+    /// `MOA_BUDGETS_DAILY_TENANT_CENTS`.
+    pub budgets_daily_tenant_cents: Option<u32>,
     /// `MOA_SESSION_LIMITS_MAX_TURNS`.
     pub session_limits_max_turns: Option<u32>,
     /// `MOA_SESSION_LIMITS_SIMPLE_MAX_TURNS`.
@@ -677,8 +677,8 @@ impl MoaEnvOverlay {
         set_copy_if_some(&mut config.metrics.enabled, self.metrics_enabled);
         set_if_some(&mut config.metrics.listen, &self.metrics_listen);
         set_copy_if_some(
-            &mut config.budgets.daily_workspace_cents,
-            self.budgets_daily_workspace_cents,
+            &mut config.budgets.daily_tenant_cents,
+            self.budgets_daily_tenant_cents,
         );
         set_copy_if_some(
             &mut config.session_limits.max_turns,

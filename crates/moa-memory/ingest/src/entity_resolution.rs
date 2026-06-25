@@ -203,8 +203,8 @@ impl EntityResolver {
             .create_node(NodeWriteIntent {
                 uid,
                 label: NodeLabel::Entity,
-                workspace_id: Some(request.scope.tenant_id().to_string()),
-                user_id: request
+                storage_partition_id: Some(request.scope.tenant_id().to_string()),
+                contact_id: request
                     .scope
                     .contact_id()
                     .map(|contact_id| contact_id.to_string()),
@@ -242,7 +242,7 @@ impl EntityResolver {
         scope: &ScopeContext,
         normalized_name: &str,
     ) -> Result<Vec<NodeIndexRow>> {
-        let workspace_id = Some(scope.tenant_id().to_string());
+        let storage_partition_id = Some(scope.tenant_id().to_string());
         let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
         let mut conn = ScopedConn::begin(pool, scope).await?;
         if self.assume_app_role {
@@ -252,21 +252,21 @@ impl EntityResolver {
         }
         let rows = sqlx::query_as::<_, NodeIndexRow>(
             r#"
-            SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+            SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                    valid_to, valid_from, properties_summary, last_accessed_at,
                    COALESCE(quality_score, 0.5) AS quality_score
             FROM moa.node_index
             WHERE valid_to IS NULL
               AND label = $1
               AND scope = $2
-              AND (($3::text IS NULL AND workspace_id IS NULL) OR workspace_id = $3)
+              AND (($3::text IS NULL AND storage_partition_id IS NULL) OR storage_partition_id = $3)
               AND (($4::text IS NULL AND user_id IS NULL) OR user_id = $4)
             ORDER BY valid_from ASC, uid ASC
             "#,
         )
         .bind(NodeLabel::Entity.as_str())
         .bind(scope.tier_str())
-        .bind(workspace_id.as_deref())
+        .bind(storage_partition_id.as_deref())
         .bind(user_id.as_deref())
         .fetch_all(conn.as_mut())
         .await?;
@@ -291,7 +291,6 @@ impl EntityResolver {
         let mut matches = blocker
             .vector
             .knn(&VectorQuery {
-                workspace_id: Some(scope.tenant_id().to_string()),
                 embedding,
                 k: EMBEDDING_BLOCK_K,
                 label_filter: Some(vec![NodeLabel::Entity.as_str().to_string()]),
@@ -313,7 +312,7 @@ impl EntityResolver {
             return Ok(Vec::new());
         }
 
-        let workspace_id = Some(scope.tenant_id().to_string());
+        let storage_partition_id = Some(scope.tenant_id().to_string());
         let user_id = scope.contact_id().map(|contact_id| contact_id.to_string());
         let uids = matches
             .iter()
@@ -327,7 +326,7 @@ impl EntityResolver {
         }
         let rows = sqlx::query_as::<_, NodeIndexRow>(
             r#"
-            SELECT uid, label, workspace_id, user_id, scope, name, pii_class,
+            SELECT uid, label, storage_partition_id, user_id, scope, name, pii_class,
                    valid_to, valid_from, properties_summary, last_accessed_at,
                    COALESCE(quality_score, 0.5) AS quality_score
             FROM moa.node_index
@@ -335,14 +334,14 @@ impl EntityResolver {
               AND label = $1
               AND uid = ANY($2)
               AND scope = $3
-              AND (($4::text IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
+              AND (($4::text IS NULL AND storage_partition_id IS NULL) OR storage_partition_id = $4)
               AND (($5::text IS NULL AND user_id IS NULL) OR user_id = $5)
             "#,
         )
         .bind(NodeLabel::Entity.as_str())
         .bind(&uids)
         .bind(scope.tier_str())
-        .bind(workspace_id.as_deref())
+        .bind(storage_partition_id.as_deref())
         .bind(user_id.as_deref())
         .fetch_all(conn.as_mut())
         .await?;

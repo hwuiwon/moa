@@ -14,8 +14,8 @@ use moa_core::{
     MoaConfig, MoaError, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
     SegmentStore, SessionAnalyticsSummary, SessionChannelBinding, SessionFilter, SessionId,
     SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
-    SkillResolutionRate, TaskSegment, TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId,
-    ToolCallId, ToolCallSummary, WorkspaceId, record_session_event_replay,
+    SkillResolutionRate, StoragePartitionId, TaskSegment, TaskStrategySuccessRate,
+    TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary, record_session_event_replay,
 };
 use moa_observability::{
     record_session_created, record_session_event_append, record_session_event_decoded_bytes,
@@ -61,8 +61,8 @@ pub struct PostgresSessionStore {
 pub struct SessionChannelBindingReplacement<'a> {
     /// Tenant that owns the contact and session.
     pub tenant_id: moa_core::TenantId,
-    /// Workspace that owns the session.
-    pub workspace_id: &'a WorkspaceId,
+    /// Storage partition that owns the session.
+    pub storage_partition_id: &'a StoragePartitionId,
     /// Session whose active channel is changing.
     pub session_id: SessionId,
     /// Contact associated with the route.
@@ -267,7 +267,7 @@ impl PostgresSessionStore {
 
     /// Refreshes materialized analytics views using concurrent refreshes.
     pub async fn refresh_analytics_materialized_views(&self) -> Result<()> {
-        for view_name in ["session_turn_metrics", "daily_workspace_metrics"] {
+        for view_name in ["session_turn_metrics", "daily_storage_partition_metrics"] {
             let qualified = self.table_name(view_name);
             sqlx::query(&format!(
                 "REFRESH MATERIALIZED VIEW CONCURRENTLY {qualified}"

@@ -12,7 +12,7 @@ pub struct GeneralConfig {
     pub reasoning_effort: String,
     /// Whether provider-native web search should be offered to supported models.
     pub web_search_enabled: bool,
-    /// Optional workspace-level instructions injected into the prompt.
+    /// Optional repository-workspace instructions injected into the prompt.
     pub workspace_instructions: Option<String>,
     /// Optional user-level preferences injected into the prompt.
     pub user_instructions: Option<String>,

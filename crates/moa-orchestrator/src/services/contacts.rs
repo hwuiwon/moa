@@ -10,7 +10,7 @@ use moa_contacts::domain::{
 use moa_contacts::repository::{
     ContactVerificationStartCommand, complete_contact_verification, create_contact_token_grant,
     ensure_contact_token_grant_active, issue_contact, load_contact_ref, promoted_from_contact,
-    resolve_contact_session_channel, start_contact_verification, storage_workspace_id_for_tenant,
+    resolve_contact_session_channel, start_contact_verification, storage_partition_id_for_tenant,
 };
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
@@ -319,7 +319,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
-        let storage_workspace_id = storage_workspace_id_for_tenant(tenant_id);
+        let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
         let model = ModelId::new(request.model);
         let channel_request = request.channel;
         let initial_channel_ref = channel_request.channel_ref;
@@ -381,7 +381,7 @@ impl Contacts for ContactsImpl {
         };
         let response_contact = contact.clone();
         let event_channel = meta.channel;
-        let storage_workspace_id_for_create = storage_workspace_id.clone();
+        let storage_partition_id_for_create = storage_partition_id.clone();
         let resolver_pool = pool.clone();
         let (session_id, meta_for_vo) = ctx
             .run(|| async move {
@@ -397,7 +397,7 @@ impl Contacts for ContactsImpl {
                 store
                     .replace_session_channel_binding(SessionChannelBindingReplacement {
                         tenant_id,
-                        workspace_id: &storage_workspace_id_for_create,
+                        storage_partition_id: &storage_partition_id_for_create,
                         session_id,
                         contact_id: contact.contact_id,
                         channel_account_id: channel_account
@@ -465,7 +465,7 @@ impl Contacts for ContactsImpl {
         let tenant_id = claims.tenant_id;
         let pool = OrchestratorCtx::current_graph_pool();
         let store = OrchestratorCtx::current_session_store();
-        let storage_workspace_id = storage_workspace_id_for_tenant(tenant_id);
+        let storage_partition_id = storage_partition_id_for_tenant(tenant_id);
 
         let ChannelChangeResult {
             contact,
@@ -494,7 +494,7 @@ impl Contacts for ContactsImpl {
                 let binding_id = store
                     .replace_session_channel_binding(SessionChannelBindingReplacement {
                         tenant_id,
-                        workspace_id: &storage_workspace_id,
+                        storage_partition_id: &storage_partition_id,
                         session_id,
                         contact_id: contact.contact_id,
                         channel_account_id: resolved

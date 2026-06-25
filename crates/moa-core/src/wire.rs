@@ -1430,21 +1430,6 @@ pub struct SkillSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Request payload for bootstrapping workspace-default skills.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillBootstrapWorkspaceDefaultRequest {
-    /// Authored workspace-default skill packages to import.
-    #[serde(default)]
-    pub packages: Vec<SkillPackageDocument>,
-}
-
-/// Response payload for bootstrapping workspace-default skills.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillBootstrapWorkspaceDefaultResponse {
-    /// Number of workspace-default skill documents imported.
-    pub imported: u64,
-}
-
 /// One source/package file supplied with an artifact import or export.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactFileDocument {
@@ -2224,7 +2209,7 @@ pub struct EvalDatasetSummary {
     pub dataset_id: Uuid,
     /// Dataset name.
     pub name: String,
-    /// Number of items visible in this workspace.
+    /// Number of items visible in this tenant.
     pub items: u64,
     /// Logical source path or URI for the dataset.
     pub source_uri: Option<String>,
@@ -2281,7 +2266,7 @@ pub struct EvalScoresRequest {
     pub run_id: Uuid,
 }
 
-/// Workspace-scoped eval score summary row.
+/// Tenant-scoped eval score summary row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalScoreSummaryRow {
     /// Score name.
@@ -2317,7 +2302,7 @@ pub struct EvalCompareRequest {
     pub new_run: Uuid,
 }
 
-/// Workspace-scoped eval run comparison row.
+/// Tenant-scoped eval run comparison row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalCompareRow {
     /// Score name.
@@ -2648,7 +2633,7 @@ pub struct ExperimentScoresRequest {
     pub run_uid: Uuid,
 }
 
-/// Workspace-scoped experiment score summary row.
+/// Tenant-scoped experiment score summary row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentScoreSummaryRow {
     /// Score name.
@@ -2723,7 +2708,7 @@ pub struct ExperimentCompareRequest {
     pub new_run_uid: Uuid,
 }
 
-/// Workspace-scoped experiment run comparison row.
+/// Tenant-scoped experiment run comparison row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentCompareRow {
     /// Score name.
@@ -2972,7 +2957,7 @@ pub struct AgentRevisionCompareResponse {
     pub tool_dependency_deltas: Vec<AgentToolDependencyDelta>,
 }
 
-/// Request payload for promoting a workspace vector backend.
+/// Request payload for promoting a tenant vector backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorPromoteRequest {
     /// Tenant whose vector backend should be promoted.

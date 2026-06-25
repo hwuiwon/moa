@@ -1,7 +1,7 @@
 {
   "comment": "Fixture: successful session with exactly five tool calls; proves the distillation threshold admits real multi-step runs.",
   "session_id": "018f1a30-0000-7000-8000-000000000015",
-  "workspace_id": "skills-distillation-workspace",
+  "storage_partition_id": "skills-distillation-workspace",
   "user_id": "skills-user",
   "task": "debug oauth refresh regression with bash file search and validation",
   "final_response": "OAuth refresh regression fixed and validated",

@@ -60,8 +60,8 @@ async fn session_resume_after_orchestrator_crash_meets_budgets() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires MOA_DATABASE_URL"]
-async fn concurrent_workspace_writes_to_same_subgraph_meets_budgets() -> TestResult {
-    assert_scenario_meets_expectations("concurrent_workspace_writes_to_same_subgraph").await
+async fn concurrent_tenant_writes_to_same_subgraph_meets_budgets() -> TestResult {
+    assert_scenario_meets_expectations("concurrent_tenant_writes_to_same_subgraph").await
 }
 
 #[tokio::test]
@@ -138,7 +138,7 @@ async fn assert_scenario_meets_expectations(scenario_name: &str) -> TestResult {
         base_config.skill_budget.max_per_skill_chars = 128;
         seed_experience_learning_skills(
             &base_config.database.url,
-            &eval_workspace_id_for_agent(&agent_config.name),
+            &eval_storage_partition_id_for_agent(&agent_config.name),
         )
         .await?;
     }
@@ -343,7 +343,7 @@ async fn run_learning_matrix_case(
     let agent_config = learning_matrix_agent_config(matrix_case);
     seed_learning_matrix_skills(
         &base_config.database.url,
-        &eval_workspace_id_for_agent(&agent_config.name),
+        &eval_storage_partition_id_for_agent(&agent_config.name),
         matrix_case,
     )
     .await?;
@@ -641,22 +641,26 @@ fn assert_learning_matrix_case_value(
     );
 }
 
-async fn seed_experience_learning_skills(database_url: &str, workspace_id: &str) -> TestResult {
+async fn seed_experience_learning_skills(
+    database_url: &str,
+    storage_partition_id: &str,
+) -> TestResult {
+    ensure_skill_seed_schema(database_url).await?;
     let pool = sqlx::PgPool::connect(database_url).await?;
     let names = vec![
         "api-contract-repair".to_string(),
         "generic-debugger".to_string(),
     ];
     sqlx::query(
-        "DELETE FROM moa.artifact WHERE workspace_id = $1 AND kind = 'skill' AND name = ANY($2)",
+        "DELETE FROM moa.artifact WHERE storage_partition_id = $1 AND kind = 'skill' AND name = ANY($2)",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(&names)
     .execute(&pool)
     .await?;
     insert_eval_skill(
         &pool,
-        workspace_id,
+        storage_partition_id,
         "generic-debugger",
         "General troubleshooting workflow for broad software incidents.",
         &["general"],
@@ -665,7 +669,7 @@ async fn seed_experience_learning_skills(database_url: &str, workspace_id: &str)
     .await?;
     insert_eval_skill(
         &pool,
-        workspace_id,
+        storage_partition_id,
         "api-contract-repair",
         "Rust auth API contract repair workflow for cargo test verification.",
         &["api-contract", "rust-auth"],
@@ -677,9 +681,10 @@ async fn seed_experience_learning_skills(database_url: &str, workspace_id: &str)
 
 async fn seed_learning_matrix_skills(
     database_url: &str,
-    workspace_id: &str,
+    storage_partition_id: &str,
     matrix_case: &LearningMatrixCase,
 ) -> TestResult {
+    ensure_skill_seed_schema(database_url).await?;
     let pool = sqlx::PgPool::connect(database_url).await?;
     let category_decoy = format!("{}-general-playbook", matrix_case.category);
     let names = vec![
@@ -688,15 +693,15 @@ async fn seed_learning_matrix_skills(
         category_decoy.clone(),
     ];
     sqlx::query(
-        "DELETE FROM moa.artifact WHERE workspace_id = $1 AND kind = 'skill' AND name = ANY($2)",
+        "DELETE FROM moa.artifact WHERE storage_partition_id = $1 AND kind = 'skill' AND name = ANY($2)",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(&names)
     .execute(&pool)
     .await?;
     insert_eval_skill(
         &pool,
-        workspace_id,
+        storage_partition_id,
         "general-troubleshooting-runbook",
         "Very broad troubleshooting workflow for software work, debugging, validation, config updates, code edits, and documentation cleanup.",
         &["general", "debug", "validator"],
@@ -705,7 +710,7 @@ async fn seed_learning_matrix_skills(
     .await?;
     insert_eval_skill(
         &pool,
-        workspace_id,
+        storage_partition_id,
         &category_decoy,
         &format!(
             "Broad {} playbook for common fixes, implementation, review, docs, tests, deploys, and validator checks.",
@@ -717,7 +722,7 @@ async fn seed_learning_matrix_skills(
     .await?;
     insert_eval_skill(
         &pool,
-        workspace_id,
+        storage_partition_id,
         &matrix_case.expected_skill,
         &matrix_case.skill_description,
         &matrix_case.tags,
@@ -727,9 +732,16 @@ async fn seed_learning_matrix_skills(
     Ok(())
 }
 
+async fn ensure_skill_seed_schema(database_url: &str) -> TestResult {
+    let schema_name = format!("eval_skill_seed_{}", Uuid::now_v7().simple());
+    let _store =
+        moa_session::PostgresSessionStore::new_in_schema(database_url, &schema_name).await?;
+    Ok(())
+}
+
 async fn insert_eval_skill<T: AsRef<str>>(
     pool: &sqlx::PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     name: &str,
     description: &str,
     tags: &[T],
@@ -748,7 +760,7 @@ async fn insert_eval_skill<T: AsRef<str>>(
     registry
         .upsert_by_name(NewSkill::from_package(
             ActionRuleScope::Tenant {
-                tenant_id: tenant_id_from_label(workspace_id),
+                tenant_id: tenant_id_from_label(storage_partition_id),
             },
             SkillPackage::from_skill_markdown(skill_md),
         ))
@@ -775,7 +787,7 @@ fn indent_frontmatter_block(value: &str) -> String {
     value.replace('\n', "\n  ")
 }
 
-fn eval_workspace_id_for_agent(agent_name: &str) -> String {
+fn eval_storage_partition_id_for_agent(agent_name: &str) -> String {
     let mut slug = String::from("eval");
     let trimmed = agent_name.trim();
     if trimmed.is_empty() {

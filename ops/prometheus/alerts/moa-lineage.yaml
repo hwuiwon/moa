@@ -26,21 +26,21 @@ groups:
           and avg_over_time(moa_grounding_verified_rate[1h]) < 0.7
         for: 30m
         annotations:
-          summary: "Verified citation rate dropped for workspace {{ $labels.workspace_id }}"
+          summary: "Verified citation rate dropped for tenant {{ $labels.tenant_id }}"
           description: "Investigate retriever changes, embedder swaps, or model changes."
 
       - alert: MOAZeroRecallSpike
         expr: rate(moa_zero_recall_count[1h]) / rate(moa_turn_count[1h]) > 0.05
         for: 30m
         annotations:
-          summary: "Zero-recall retrievals above 5 percent in workspace {{ $labels.workspace_id }}"
+          summary: "Zero-recall retrievals above 5 percent in tenant {{ $labels.tenant_id }}"
           description: "Retriever returned empty top-K too often. Check vector index, embedder API, and sidecar health."
 
       - alert: MOACitationHallucinationSpike
         expr: 1 - avg_over_time(moa_grounding_verified_rate[1h]) > 0.3
         for: 30m
         annotations:
-          summary: "Citation hallucination rate high in workspace {{ $labels.workspace_id }}"
+          summary: "Citation hallucination rate high in tenant {{ $labels.tenant_id }}"
           description: "More than 30 percent of citations failed verifier checks over the last hour."
 
   - name: moa-generation
@@ -52,5 +52,5 @@ groups:
           > 2 * avg_over_time(moa_cost_micros_per_turn[24h] offset 1d)
         for: 30m
         annotations:
-          summary: "Cost per turn doubled vs yesterday for workspace {{ $labels.workspace_id }}"
+          summary: "Cost per turn doubled vs yesterday for tenant {{ $labels.tenant_id }}"
           description: "Inspect provider selection, prompt size, tool loops, and cache hit rate."

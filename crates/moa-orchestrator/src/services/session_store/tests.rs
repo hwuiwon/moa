@@ -26,8 +26,8 @@ struct AuthzOutboxTuple {
     tenant_id: Option<Uuid>,
 }
 
-fn test_session_meta(workspace_id: &str) -> SessionMeta {
-    let _ = workspace_id;
+fn test_session_meta(storage_partition_id: &str) -> SessionMeta {
+    let _ = storage_partition_id;
     SessionMeta {
         tenant_id: TenantId::new(),
         created_by: Some(SessionActorRef::Identity {

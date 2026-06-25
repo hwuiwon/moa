@@ -2,36 +2,35 @@ DROP TABLE IF EXISTS approval_rules;
 
 CREATE TABLE IF NOT EXISTS action_policy_rules (
     id UUID PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
     tool TEXT NOT NULL,
     pattern TEXT NOT NULL,
     effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny', 'admin_review')),
-    scope TEXT NOT NULL CHECK (scope IN ('global', 'tenant')),
+    scope TEXT NOT NULL CHECK (scope IN ('tenant')),
     reason TEXT,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT action_policy_rules_global_workspace_check
+    CONSTRAINT action_policy_rules_global_partition_check
         CHECK (
-            (scope = 'global' AND workspace_id = 'global')
-            OR (scope = 'tenant' AND workspace_id <> 'global')
+            scope = 'tenant' AND storage_partition_id <> 'global'
         )
 );
 
 CREATE INDEX IF NOT EXISTS idx_action_policy_rules_scope
-    ON action_policy_rules(workspace_id, scope, user_id);
+    ON action_policy_rules(storage_partition_id, scope, user_id);
 CREATE INDEX IF NOT EXISTS idx_action_policy_rules_lookup
-    ON action_policy_rules(workspace_id, tool, user_id, created_at);
+    ON action_policy_rules(storage_partition_id, tool, user_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_action_policy_rules_unique_scope
-    ON action_policy_rules(workspace_id, tool, pattern, COALESCE(user_id, ''));
+    ON action_policy_rules(storage_partition_id, tool, pattern, COALESCE(user_id, ''));
 
 SELECT moa.apply_three_tier_rls('action_policy_rules'::REGCLASS);
 
-CREATE TABLE IF NOT EXISTS workspace_action_reviews (
+CREATE TABLE IF NOT EXISTS tenant_action_reviews (
     id UUID PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
+    storage_partition_id TEXT NOT NULL,
     user_id TEXT,
-    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(workspace_id, user_id)) STORED,
+    scope TEXT GENERATED ALWAYS AS (moa.compute_scope_tier(storage_partition_id, user_id)) STORED,
     session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
     sub_agent_id TEXT,
     tool_call_id UUID NOT NULL,
@@ -56,17 +55,17 @@ CREATE TABLE IF NOT EXISTS workspace_action_reviews (
     execution_requested_at TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_pending
-    ON workspace_action_reviews(workspace_id, created_at DESC)
+CREATE INDEX IF NOT EXISTS idx_tenant_action_reviews_pending
+    ON tenant_action_reviews(storage_partition_id, created_at DESC)
     WHERE status = 'pending';
 
-CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_session
-    ON workspace_action_reviews(session_id, created_at DESC)
+CREATE INDEX IF NOT EXISTS idx_tenant_action_reviews_session
+    ON tenant_action_reviews(session_id, created_at DESC)
     WHERE session_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_workspace_action_reviews_scope
-    ON workspace_action_reviews(workspace_id, scope, user_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_action_reviews_scope
+    ON tenant_action_reviews(storage_partition_id, scope, user_id);
 
-SELECT moa.apply_three_tier_rls('workspace_action_reviews'::REGCLASS);
+SELECT moa.apply_three_tier_rls('tenant_action_reviews'::REGCLASS);
 
 ALTER TABLE moa.artifact_run
     DROP CONSTRAINT IF EXISTS artifact_run_status_check;

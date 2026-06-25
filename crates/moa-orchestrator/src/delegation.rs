@@ -9,7 +9,7 @@ use moa_core::{
     MessageSubAgentInput, RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent,
     SessionId, SessionMeta, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef,
     SubAgentChildRequest, SubAgentId, SubAgentMessage, SubAgentState, SubAgentStatus,
-    SubAgentTerminalResult, ToolOutput, UserId, WaitSubAgentInput, WaitSubAgentOutput, WorkspaceId,
+    SubAgentTerminalResult, ToolOutput, UserId, WaitSubAgentInput, WaitSubAgentOutput,
 };
 use restate_sdk::prelude::*;
 use serde::Serialize;
@@ -256,7 +256,7 @@ async fn reserve_root_child(
         session_id,
         None,
         1,
-        storage_workspace_id(meta),
+        meta.tenant_id,
         storage_user_id(meta),
         meta.model.clone(),
     );
@@ -268,10 +268,6 @@ async fn reserve_root_child(
         task,
         budget_tokens,
     })
-}
-
-fn storage_workspace_id(meta: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(meta.tenant_id.to_string())
 }
 
 fn storage_user_id(meta: &SessionMeta) -> UserId {

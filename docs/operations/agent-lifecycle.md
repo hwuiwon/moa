@@ -39,7 +39,7 @@ behalf of a user. It does not grant resource access by itself.
 agent's `operator`, `tenant`, and `can_act_as` tuples, and revokes active API
 keys owned by the agent with reason `agent_deactivation_cascade`.
 
-Deactivation does not remove direct resource tuples such as
-`agent:<agent> editor workspace:<workspace>`, because listing every resource
-tuple for an agent is an expensive full FGA read. Operators should prefer
-delegation grants and remove direct resource grants manually when used.
+Deactivation does not remove arbitrary direct resource tuples, because listing
+every resource tuple for an agent is an expensive full FGA read. Operators
+should prefer delegation grants and remove direct resource grants manually when
+used.

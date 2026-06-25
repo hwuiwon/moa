@@ -39,22 +39,22 @@ fn approval_token(claims: &ApprovalClaims, key: &SigningKey) -> String {
     format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature))
 }
 
-fn valid_claims(subject: Uuid) -> ApprovalClaims {
-    valid_claims_for(subject, "workspace-a", "export")
+fn valid_claims(subject: Uuid, tenant_id: Uuid) -> ApprovalClaims {
+    valid_claims_for(subject, tenant_id, "export")
 }
 
-fn valid_claims_for(subject: Uuid, workspace: &str, op: &str) -> ApprovalClaims {
-    valid_claims_for_user_id(&subject.to_string(), workspace, op)
+fn valid_claims_for(subject: Uuid, tenant_id: Uuid, op: &str) -> ApprovalClaims {
+    valid_claims_for_user_id(&subject.to_string(), tenant_id, op)
 }
 
-fn valid_claims_for_user_id(subject_user_id: &str, workspace: &str, op: &str) -> ApprovalClaims {
+fn valid_claims_for_user_id(subject_user_id: &str, tenant_id: Uuid, op: &str) -> ApprovalClaims {
     ApprovalClaims {
         sub: "ops-admin".to_string(),
         jti: Uuid::now_v7().to_string(),
         exp: Utc::now().timestamp() + 300,
         op: op.to_string(),
         subject_user_id: subject_user_id.to_string(),
-        workspace_id: Some(workspace.to_string()),
+        tenant_id: TenantId::from(tenant_id),
         role: None,
         roles: vec!["platform_admin".to_string()],
     }
@@ -85,12 +85,13 @@ fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> AgeGrap
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }
 
-fn erase_test_intent(workspace_id: &str, user_id: &str, name: &str) -> NodeWriteIntent {
+fn erase_test_intent(storage_partition_id: &str, user_id: &str, name: &str) -> NodeWriteIntent {
+    let storage_partition_id = Some(storage_partition_id.to_string());
     NodeWriteIntent {
         uid: Uuid::now_v7(),
         label: NodeLabel::Fact,
-        workspace_id: Some(workspace_id.to_string()),
-        user_id: Some(user_id.to_string()),
+        storage_partition_id,
+        contact_id: Some(user_id.to_string()),
         scope: "contact".to_string(),
         name: name.to_string(),
         properties: json!({ "name": name, "user_id": user_id, "source": "privacy_erase_test" }),
@@ -109,13 +110,14 @@ async fn create_erase_test_node(
     pool: &PgPool,
     tenant_id: Uuid,
     contact_id: Uuid,
-    workspace_id: &str,
+    storage_partition_id: &str,
     user_id: &str,
     name: &str,
 ) -> Uuid {
-    seed_workspace_embedder_state(pool, workspace_id, user_id, "test-model").await;
+    seed_workspace_embedder_state(pool, tenant_id, storage_partition_id, user_id, "test-model")
+        .await;
     let graph = erase_test_graph(pool, tenant_id, contact_id);
-    let intent = erase_test_intent(workspace_id, user_id, name);
+    let intent = erase_test_intent(storage_partition_id, user_id, name);
     let uid = intent.uid;
     graph
         .create_node(intent)
@@ -126,26 +128,27 @@ async fn create_erase_test_node(
 
 async fn seed_workspace_embedder_state(
     pool: &PgPool,
-    workspace_id: &str,
+    tenant_id: Uuid,
+    storage_partition_id: &str,
     subject_user_id: &str,
     model: &str,
 ) {
-    let mut conn = begin_app_scoped_tx(pool, workspace_id, subject_user_id)
+    let mut conn = begin_app_scoped_tx(pool, TenantId::from(tenant_id), subject_user_id)
         .await
         .expect("begin workspace embedder seed transaction");
     sqlx::query(
         r#"
-        INSERT INTO moa.workspace_state
-            (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+        INSERT INTO moa.storage_partition_state
+            (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
         VALUES ($1, $2, 1, 1024)
-        ON CONFLICT (workspace_id) DO UPDATE
+        ON CONFLICT (storage_partition_id) DO UPDATE
             SET embedding_model = EXCLUDED.embedding_model,
                 embedding_model_version = EXCLUDED.embedding_model_version,
                 embedding_dimension = EXCLUDED.embedding_dimension,
                 reembed_state = 'steady'
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(model)
     .execute(conn.as_mut())
     .await
@@ -156,19 +159,19 @@ async fn seed_workspace_embedder_state(
 async fn seed_contact(
     pool: &PgPool,
     tenant_id: Uuid,
-    workspace_id: &str,
+    storage_partition_id: &str,
     contact_id: Uuid,
     state: &str,
 ) {
     sqlx::query(
         r#"
-        INSERT INTO contacts (id, tenant_id, workspace_id, contact_id, state)
+        INSERT INTO contacts (id, tenant_id, storage_partition_id, contact_id, state)
         VALUES ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(contact_id)
     .bind(tenant_id)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(contact_id)
     .bind(state)
     .execute(pool)
@@ -179,21 +182,21 @@ async fn seed_contact(
 async fn seed_merged_contact(
     pool: &PgPool,
     tenant_id: Uuid,
-    workspace_id: &str,
+    storage_partition_id: &str,
     merged_contact_id: Uuid,
     canonical_contact_id: Uuid,
 ) {
     sqlx::query(
         r#"
         INSERT INTO contacts (
-            id, tenant_id, workspace_id, contact_id, state, canonical_contact_id, merged_at
+            id, tenant_id, storage_partition_id, contact_id, state, canonical_contact_id, merged_at
         )
         VALUES ($1, $2, $3, $4, 'merged', $5, NOW())
         "#,
     )
     .bind(merged_contact_id)
     .bind(tenant_id)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(merged_contact_id)
     .bind(canonical_contact_id)
     .execute(pool)
@@ -217,19 +220,19 @@ async fn embedding_count(pool: &PgPool, uid: Uuid) -> i64 {
         .expect("count embedding rows")
 }
 
-async fn erase_changelog_count(pool: &PgPool, workspace_id: &str, subject: Uuid) -> i64 {
+async fn erase_changelog_count(pool: &PgPool, storage_partition_id: &str, subject: Uuid) -> i64 {
     sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM moa.graph_changelog \
-         WHERE workspace_id = $1 AND op = 'erase' AND target_uid = $2",
+         WHERE storage_partition_id = $1 AND op = 'erase' AND target_uid = $2",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(subject)
     .fetch_one(pool)
     .await
     .expect("count erase changelog rows")
 }
 
-async fn seed_pii_vault_subject(pool: &PgPool, workspace_id: &str, subject_user_id: &str) {
+async fn seed_pii_vault_subject(pool: &PgPool, storage_partition_id: &str, subject_user_id: &str) {
     let vault = PiiVault::new_dev(pii_vault_secret());
     let subject_pseudonym = vault
         .subject_pseudonym(subject_user_id)
@@ -237,13 +240,13 @@ async fn seed_pii_vault_subject(pool: &PgPool, workspace_id: &str, subject_user_
     sqlx::query(
         r#"
         INSERT INTO pii_vault.subject_keys (
-            subject_pseudonym, workspace_id, hmac_key_handle
+            subject_pseudonym, storage_partition_id, hmac_key_handle
         )
         VALUES ($1, $2, 'test-key')
         "#,
     )
     .bind(subject_pseudonym)
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .execute(pool)
     .await
     .expect("seed PII vault subject");
@@ -251,7 +254,7 @@ async fn seed_pii_vault_subject(pool: &PgPool, workspace_id: &str, subject_user_
 
 async fn erased_pii_vault_subject_count(
     pool: &PgPool,
-    workspace_id: &str,
+    storage_partition_id: &str,
     subject_user_id: &str,
 ) -> i64 {
     let vault = PiiVault::new_dev(pii_vault_secret());
@@ -262,61 +265,74 @@ async fn erased_pii_vault_subject_count(
         r#"
         SELECT count(*)
         FROM pii_vault.subject_keys
-        WHERE workspace_id = $1
+        WHERE storage_partition_id = $1
           AND subject_pseudonym = $2
           AND erased_at IS NOT NULL
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .bind(subject_pseudonym)
     .fetch_one(pool)
     .await
     .expect("count erased PII vault subject")
 }
 
-async fn total_erase_changelog_count(pool: &PgPool, workspace_id: &str) -> i64 {
+async fn total_erase_changelog_count(pool: &PgPool, storage_partition_id: &str) -> i64 {
     sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM moa.graph_changelog WHERE workspace_id = $1 AND op = 'erase'",
+        "SELECT count(*) FROM moa.graph_changelog WHERE storage_partition_id = $1 AND op = 'erase'",
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .fetch_one(pool)
     .await
     .expect("count all erase changelog rows")
 }
 
 #[test]
-fn approval_token_verifies_subject_op_workspace_and_signature() {
-    // Pins: server-side approval verifier binds token proof to op, subject, workspace, and signature.
+fn approval_token_verifies_subject_op_tenant_and_signature() {
+    // Pins: server-side approval verifier binds token proof to op, subject, tenant, and signature.
     let subject = Uuid::now_v7();
+    let tenant_id = Uuid::now_v7();
     let key = signing_key();
     let verifier = ApprovalTokenVerifier {
         verifying_key: key.verifying_key(),
     };
-    let claims = valid_claims(subject);
+    let claims = valid_claims(subject, tenant_id);
     let token = approval_token(&claims, &key);
 
     let verified = verifier
-        .verify(&token, "export", &subject.to_string(), Some("workspace-a"))
+        .verify(
+            &token,
+            "export",
+            &subject.to_string(),
+            TenantId::from(tenant_id),
+        )
         .expect("verify token");
 
     assert_eq!(verified.sub, "ops-admin");
     assert_eq!(verified.subject_user_id, subject.to_string());
+    assert_eq!(verified.tenant_id, TenantId::from(tenant_id));
 }
 
 #[test]
 fn approval_token_requires_platform_admin_role() {
     // Pins: signed privacy approval tokens must carry platform_admin.
     let subject = Uuid::now_v7();
+    let tenant_id = Uuid::now_v7();
     let key = signing_key();
     let verifier = ApprovalTokenVerifier {
         verifying_key: key.verifying_key(),
     };
-    let mut claims = valid_claims(subject);
+    let mut claims = valid_claims(subject, tenant_id);
     claims.roles.clear();
     let token = approval_token(&claims, &key);
 
     let error = verifier
-        .verify(&token, "export", &subject.to_string(), Some("workspace-a"))
+        .verify(
+            &token,
+            "export",
+            &subject.to_string(),
+            TenantId::from(tenant_id),
+        )
         .expect_err("missing platform_admin role should fail");
 
     assert!(format!("{error:?}").contains("platform_admin"));
@@ -337,28 +353,28 @@ async fn privacy_erase_dry_run() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let subject = Uuid::now_v7();
     let uid = create_erase_test_node(
         store.pool(),
         tenant_id,
         subject,
-        &workspace_id,
+        &storage_partition_id,
         &subject.to_string(),
         "dry run fact",
     )
     .await;
-    let before_changelog = total_erase_changelog_count(store.pool(), &workspace_id).await;
+    let before_changelog = total_erase_changelog_count(store.pool(), &storage_partition_id).await;
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "dry run".to_string(),
         dry_run: true,
         contact_erasure_scope: None,
-        claims: valid_claims_for(subject, &workspace_id, "erase"),
+        claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
     };
 
@@ -370,7 +386,7 @@ async fn privacy_erase_dry_run() {
     assert_eq!(response.sample[0]["uid"], uid.to_string());
     assert_eq!(node_count(store.pool(), uid).await, 1);
     assert_eq!(
-        total_erase_changelog_count(store.pool(), &workspace_id).await,
+        total_erase_changelog_count(store.pool(), &storage_partition_id).await,
         before_changelog
     );
 
@@ -387,29 +403,29 @@ async fn privacy_erase_basic() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let subject = Uuid::now_v7();
     let uid = create_erase_test_node(
         store.pool(),
         tenant_id,
         subject,
-        &workspace_id,
+        &storage_partition_id,
         &subject.to_string(),
         "basic erasure fact",
     )
     .await;
-    seed_pii_vault_subject(store.pool(), &workspace_id, &subject.to_string()).await;
+    seed_pii_vault_subject(store.pool(), &storage_partition_id, &subject.to_string()).await;
     assert_eq!(embedding_count(store.pool(), uid).await, 1);
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "GDPR Art.17 request".to_string(),
         dry_run: false,
         contact_erasure_scope: None,
-        claims: valid_claims_for(subject, &workspace_id, "erase"),
+        claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: Some(pii_vault_secret()),
     };
 
@@ -420,15 +436,16 @@ async fn privacy_erase_basic() {
     assert_eq!(node_count(store.pool(), uid).await, 0);
     assert_eq!(embedding_count(store.pool(), uid).await, 0);
     assert_eq!(
-        erased_pii_vault_subject_count(store.pool(), &workspace_id, &subject.to_string()).await,
+        erased_pii_vault_subject_count(store.pool(), &storage_partition_id, &subject.to_string())
+            .await,
         1
     );
     assert_eq!(
-        erase_changelog_count(store.pool(), &workspace_id, uid).await,
+        erase_changelog_count(store.pool(), &storage_partition_id, uid).await,
         1
     );
     assert_eq!(
-        erase_changelog_count(store.pool(), &workspace_id, subject).await,
+        erase_changelog_count(store.pool(), &storage_partition_id, subject).await,
         1
     );
 
@@ -445,13 +462,13 @@ async fn privacy_erase_idempotent() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let subject = Uuid::now_v7();
     create_erase_test_node(
         store.pool(),
         tenant_id,
         subject,
-        &workspace_id,
+        &storage_partition_id,
         &subject.to_string(),
         "idempotent erasure fact",
     )
@@ -459,27 +476,27 @@ async fn privacy_erase_idempotent() {
     let first = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "first erase".to_string(),
         dry_run: false,
         contact_erasure_scope: None,
-        claims: valid_claims_for(subject, &workspace_id, "erase"),
+        claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
     };
     run_privacy_erase(first).await.expect("first erasure");
-    let after_first = total_erase_changelog_count(store.pool(), &workspace_id).await;
+    let after_first = total_erase_changelog_count(store.pool(), &storage_partition_id).await;
     let second = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "second erase".to_string(),
         dry_run: false,
         contact_erasure_scope: None,
-        claims: valid_claims_for(subject, &workspace_id, "erase"),
+        claims: valid_claims_for(subject, tenant_id, "erase"),
         pii_vault_secret: None,
     };
 
@@ -488,7 +505,7 @@ async fn privacy_erase_idempotent() {
     assert_eq!(response.candidate_count, 0);
     assert_eq!(response.erased_count, 0);
     assert_eq!(
-        total_erase_changelog_count(store.pool(), &workspace_id).await,
+        total_erase_changelog_count(store.pool(), &storage_partition_id).await,
         after_first
     );
 
@@ -520,13 +537,13 @@ async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_a),
-        workspace_id: workspace_a.clone(),
+        storage_partition_id: workspace_a.clone(),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         reason: "wrong workspace erase".to_string(),
         dry_run: false,
         contact_erasure_scope: None,
-        claims: valid_claims_for(subject, &workspace_a, "erase"),
+        claims: valid_claims_for(subject, tenant_a, "erase"),
         pii_vault_secret: None,
     };
 
@@ -554,12 +571,12 @@ async fn privacy_erase_contact_requires_explicit_scope() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     seed_contact(
         store.pool(),
         tenant_id,
-        &workspace_id,
+        &storage_partition_id,
         contact_id,
         "unverified",
     )
@@ -568,7 +585,7 @@ async fn privacy_erase_contact_requires_explicit_scope() {
         store.pool(),
         tenant_id,
         contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(contact_id),
         "contact scope fact",
     )
@@ -576,13 +593,13 @@ async fn privacy_erase_contact_requires_explicit_scope() {
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: contact_id,
         subject_user_id: contact_id.to_string(),
         reason: "contact erase".to_string(),
         dry_run: true,
         contact_erasure_scope: None,
-        claims: valid_claims_for(contact_id, &workspace_id, "erase"),
+        claims: valid_claims_for(contact_id, tenant_id, "erase"),
         pii_vault_secret: None,
     };
 
@@ -605,13 +622,13 @@ async fn privacy_erase_unverified_contact_only() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let other_contact_id = Uuid::now_v7();
     seed_contact(
         store.pool(),
         tenant_id,
-        &workspace_id,
+        &storage_partition_id,
         contact_id,
         "unverified",
     )
@@ -619,7 +636,7 @@ async fn privacy_erase_unverified_contact_only() {
     seed_contact(
         store.pool(),
         tenant_id,
-        &workspace_id,
+        &storage_partition_id,
         other_contact_id,
         "unverified",
     )
@@ -628,7 +645,7 @@ async fn privacy_erase_unverified_contact_only() {
         store.pool(),
         tenant_id,
         contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(contact_id),
         "contact-only fact",
     )
@@ -637,7 +654,7 @@ async fn privacy_erase_unverified_contact_only() {
         store.pool(),
         tenant_id,
         other_contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(other_contact_id),
         "other contact fact",
     )
@@ -645,13 +662,13 @@ async fn privacy_erase_unverified_contact_only() {
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: contact_id,
         subject_user_id: contact_id.to_string(),
         reason: "contact erase".to_string(),
         dry_run: false,
         contact_erasure_scope: Some(ContactErasureScope::SpecifiedContact),
-        claims: valid_claims_for(contact_id, &workspace_id, "erase"),
+        claims: valid_claims_for(contact_id, tenant_id, "erase"),
         pii_vault_secret: None,
     };
 
@@ -675,13 +692,13 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let linked_contact_id = Uuid::now_v7();
     seed_contact(
         store.pool(),
         tenant_id,
-        &workspace_id,
+        &storage_partition_id,
         contact_id,
         "verified",
     )
@@ -689,7 +706,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     seed_merged_contact(
         store.pool(),
         tenant_id,
-        &workspace_id,
+        &storage_partition_id,
         linked_contact_id,
         contact_id,
     )
@@ -698,7 +715,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
         store.pool(),
         tenant_id,
         contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(contact_id),
         "verified contact fact",
     )
@@ -707,7 +724,7 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
         store.pool(),
         tenant_id,
         linked_contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(linked_contact_id),
         "linked contact fact",
     )
@@ -716,13 +733,13 @@ async fn privacy_erase_verified_contact_with_linked_unverified_contacts() {
     let ctx = PrivacyEraseContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace_id: workspace_id.clone(),
+        storage_partition_id: storage_partition_id.clone(),
         subject_user: contact_id,
         subject_user_id: subject_user_id.clone(),
         reason: "verified contact erase".to_string(),
         dry_run: false,
         contact_erasure_scope: Some(ContactErasureScope::SpecifiedAndLinkedContacts),
-        claims: valid_claims_for_user_id(&subject_user_id, &workspace_id, "erase"),
+        claims: valid_claims_for_user_id(&subject_user_id, tenant_id, "erase"),
         pii_vault_secret: None,
     };
 
@@ -754,14 +771,14 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (tenant_id, workspace_id) = tenant_workspace();
+    let (tenant_id, storage_partition_id) = tenant_workspace();
     let contact_id = Uuid::now_v7();
     let linked_contact_id = Uuid::now_v7();
     create_erase_test_node(
         store.pool(),
         tenant_id,
         contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(contact_id),
         "export primary fact",
     )
@@ -770,7 +787,7 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
         store.pool(),
         tenant_id,
         linked_contact_id,
-        &workspace_id,
+        &storage_partition_id,
         &contact_user_id(linked_contact_id),
         "export linked fact",
     )
@@ -780,7 +797,7 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
     let ctx = PrivacyExportContext {
         pool: store.pool().clone(),
         tenant_id: TenantId::from(tenant_id),
-        workspace: Some(workspace_id.clone()),
+        storage_partition: Some(storage_partition_id.clone()),
         subject_user: contact_id,
         subject_user_id: subject_user_id.clone(),
         subjects: vec![
@@ -792,7 +809,7 @@ async fn privacy_export_contact_data_sections_label_linked_provenance() {
             },
         ],
         reason: "GDPR Art.15 contact request".to_string(),
-        claims: valid_claims_for_user_id(&subject_user_id, &workspace_id, "export"),
+        claims: valid_claims_for_user_id(&subject_user_id, tenant_id, "export"),
     };
 
     let counts = collect_privacy_export_data_sections(&ctx, export_dir.path())
@@ -829,21 +846,25 @@ async fn privacy_erase_unknown_op_rejected() {
     let (store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated test store");
-    let (_tenant_id, workspace_id) = tenant_workspace();
-    let mut tx = begin_app_scoped_tx(store.pool(), &workspace_id, &Uuid::now_v7().to_string())
-        .await
-        .expect("begin app tx");
+    let (tenant_id, _storage_partition_id) = tenant_workspace();
+    let mut tx = begin_app_scoped_tx(
+        store.pool(),
+        TenantId::from(tenant_id),
+        &Uuid::now_v7().to_string(),
+    )
+    .await
+    .expect("begin app tx");
 
     let error = sqlx::query(
         r#"
         INSERT INTO moa.graph_changelog
-            (workspace_id, actor_id, actor_kind, op, target_kind, target_label,
+            (storage_partition_id, actor_id, actor_kind, op, target_kind, target_label,
              target_uid, payload, pii_class)
         VALUES ($1, 'ops-admin', 'admin', 'deferred_encryption', 'contact', 'Contact',
                 $2, '{}'::jsonb, 'phi')
         "#,
     )
-    .bind(&workspace_id)
+    .bind(tenant_id.to_string())
     .bind(Uuid::now_v7())
     .execute(tx.as_mut())
     .await
@@ -885,12 +906,12 @@ async fn privacy_export_archive_round_trip() {
         .await
         .expect("write changelog");
 
-    let (tenant_id, workspace_id) = tenant_workspace();
-    let claims = valid_claims_for(subject, &workspace_id, "export");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let claims = valid_claims_for(subject, tenant_id, "export");
     let ctx = PrivacyExportContext {
         pool: PgPool::connect_lazy("postgres://unused").expect("lazy pool"),
         tenant_id: TenantId::from(tenant_id),
-        workspace: Some(workspace_id),
+        storage_partition: Some(storage_partition_id),
         subject_user: subject,
         subject_user_id: subject.to_string(),
         subjects: vec![PrivacySubject::primary(subject.to_string(), subject)],

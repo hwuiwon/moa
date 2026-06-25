@@ -3,7 +3,7 @@
 use moa_core::{
     ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewField, ActionReviewFileDiff,
     ActionReviewPreview, ActionRuleScope, MoaError, Result, SessionActorRef, SessionMeta,
-    SubAgentId, ToolCallId, ToolInvocation, ToolPolicyInput, UserId, WorkspaceId,
+    SubAgentId, ToolCallId, ToolInvocation, ToolPolicyInput, UserId,
 };
 use uuid::Uuid;
 
@@ -128,11 +128,10 @@ impl ToolRouter {
             .ok_or_else(|| MoaError::ToolError(format!("unknown tool: {}", invocation.name)))?;
         let policy_input = self.describe_invocation(tool_definition, invocation)?;
         let rules = if let Some(rule_store) = &self.rule_store {
-            let policy_workspace_key = tenant_workspace_key(session);
             let policy_actor = identity_actor_for_policy_lookup(session);
             rule_store
                 .list_action_policy_rules_for_tool(
-                    &policy_workspace_key,
+                    &session.tenant_id,
                     &policy_actor,
                     &invocation.name,
                 )
@@ -150,7 +149,7 @@ impl ToolRouter {
             self.workspace_roots
                 .read()
                 .await
-                .get(&tenant_workspace_key(session))
+                .get(&session.tenant_id)
                 .cloned()
                 .or_else(|| self.sandbox_root.clone())
         } else {
@@ -245,10 +244,6 @@ impl ToolRouter {
             action_class: definition.policy.action_class,
         })
     }
-}
-
-fn tenant_workspace_key(session: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(session.tenant_id.to_string())
 }
 
 fn identity_actor_for_policy_lookup(session: &SessionMeta) -> UserId {

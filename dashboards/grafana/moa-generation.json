@@ -12,7 +12,7 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT date_trunc('hour', ts) AS time, workspace_id::text AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY ((payload #>> '{record,usage,input_tokens}')::double precision + (payload #>> '{record,usage,output_tokens}')::double precision)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, storage_partition_id::text AS metric, percentile_cont(0.95) WITHIN GROUP (ORDER BY ((payload #>> '{record,usage,input_tokens}')::double precision + (payload #>> '{record,usage,output_tokens}')::double precision)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -28,7 +28,7 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT date_trunc('hour', ts) AS time, payload #>> '{record,provider}' AS metric, avg((payload #>> '{record,cost_micros}')::double precision) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, payload #>> '{record,provider}' AS metric, avg((payload #>> '{record,cost_micros}')::double precision) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -44,7 +44,7 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT date_trunc('hour', ts) AS time, COALESCE(payload #>> '{record,finish_reasons,0}', 'unknown') AS metric, count(*) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, COALESCE(payload #>> '{record,finish_reasons,0}', 'unknown') AS metric, count(*) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -60,7 +60,7 @@
       "targets": [
         {
           "format": "time_series",
-          "rawSql": "SELECT date_trunc('hour', ts) AS time, workspace_id::text AS metric, avg((payload #>> '{record,usage,cache_read_tokens}')::double precision / NULLIF((payload #>> '{record,usage,input_tokens}')::double precision, 0)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$workspace_id' = 'all' OR workspace_id::text = '$workspace_id') GROUP BY 1, 2 ORDER BY 1",
+          "rawSql": "SELECT date_trunc('hour', ts) AS time, storage_partition_id::text AS metric, avg((payload #>> '{record,usage,cache_read_tokens}')::double precision / NULLIF((payload #>> '{record,usage,input_tokens}')::double precision, 0)) AS value FROM analytics.turn_lineage WHERE $__timeFilter(ts) AND record_kind = 3 AND ('$tenant_id' = 'all' OR storage_partition_id::text = '$tenant_id') GROUP BY 1, 2 ORDER BY 1",
           "refId": "A"
         }
       ],
@@ -76,12 +76,12 @@
       {
         "current": { "selected": true, "text": "all", "value": "all" },
         "datasource": { "type": "postgres", "uid": "${DS_POSTGRES}" },
-        "definition": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "definition": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT storage_partition_id::text AS tenant_id FROM analytics.turn_lineage ORDER BY 1",
         "includeAll": false,
-        "label": "workspace_id",
+        "label": "tenant_id",
         "multi": false,
-        "name": "workspace_id",
-        "query": "SELECT 'all' AS workspace_id UNION SELECT DISTINCT workspace_id::text FROM analytics.turn_lineage ORDER BY 1",
+        "name": "tenant_id",
+        "query": "SELECT 'all' AS tenant_id UNION SELECT DISTINCT storage_partition_id::text AS tenant_id FROM analytics.turn_lineage ORDER BY 1",
         "refresh": 1,
         "type": "query"
       }

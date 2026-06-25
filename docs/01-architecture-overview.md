@@ -102,22 +102,20 @@ workspace
             -> session
 ```
 
-This is the complete runtime hierarchy. The workspace is the single global
-control plane and the inherited default scope for skills and policies. A tenant
-is the hard runtime isolation boundary: sessions, contacts, memory, learning,
-artifacts, analytics, policies, events, and audit evidence are tenant-owned
-unless a handler is explicitly operating in workspace control-plane mode.
+This is the complete runtime hierarchy. The workspace is a single deployment
+container, not a runtime parameter. A tenant is the hard runtime isolation
+boundary: sessions, contacts, memory, learning, artifacts, analytics, policies,
+events, and audit evidence are tenant-owned.
 
 Contacts are end users inside a tenant. Users are admin/operator principals:
-workspace admins, tenant admins, tenant operators, service users, and API-key
-subjects. Users are authorized to administer or operate tenants, but they are
-not contact memory subjects and are not part of the contact/session lineage.
+tenant admins, tenant operators, service users, and API-key subjects. Users are
+authorized to administer or operate tenants, but they are not contact memory
+subjects and are not part of the contact/session lineage.
 
 Contact memory is contact-local. A contact session retrieves memory for that
 tenant and contact only; it does not inherit tenant memory or any other
 contact's memory. Tenant learning is tenant-local and never globally promoted.
-Workspace-level skills and policies are inherited defaults for tenants, while
-tenant-level rows override those defaults for that tenant.
+Skills and policies are tenant-owned.
 
 ## Core Traits
 
@@ -155,12 +153,12 @@ binding without changing handler contracts.
 
 Default production bindings:
 
-- Virtual objects: `Session`, `SubAgent`, `Workspace`, `CronJob`, `IngestionVO`
+- Virtual objects: `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO`
 - Services: `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
   `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`,
   `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`,
   `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-  `Workflows`, `WorkspaceStore`, `Whoami`
+  `Workflows`, `ActionPolicy`, `Whoami`
 - Workflows: `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`,
   `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution`
 
@@ -237,7 +235,7 @@ policy.
 | Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
-| Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store canonical skill documents and package bytes as workspace defaults or tenant overrides; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
+| Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
@@ -278,12 +276,10 @@ documented in [`docs/operations/ocsf-audit.md`](operations/ocsf-audit.md).
 
 ### Caller Identity Vs Contact
 
-MOA identity is the authenticated control-plane caller: workspace admins,
-tenant admins, tenant operators, API keys, service users, and future SSO/OIDC
-users. These admin/operator principals are authorized through OpenFGA before
-protected reads or writes. Workspace admins operate the global control plane;
-runtime access to tenant-owned data uses tenant relations unless an endpoint is
-explicitly documented as workspace control-plane access.
+MOA identity is the authenticated control-plane caller: tenant admins, tenant
+operators, API keys, service users, and future SSO/OIDC users. These
+admin/operator principals are authorized through OpenFGA before protected reads
+or writes. Runtime access to tenant-owned data uses tenant relations.
 
 Contacts are agent-facing people or anonymous browser/device handles that
 interact with an agent inside one tenant. Contacts are not admin/operator users
@@ -325,8 +321,7 @@ separate surfaces:
   `/v1/evals/*`. The `Eval` service and `EvalRun` workflow are available
   only when the orchestrator is compiled with `internal-eval-runner`; if
   exposed internally, their handlers enforce tenant authorization for
-  tenant-owned replay, dataset, score, or compare reads. Workspace admins use
-  explicit control-plane endpoints for cross-tenant administration.
+  tenant-owned replay, dataset, score, or compare reads.
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets create or reuse `Session`
@@ -356,10 +351,8 @@ separate surfaces:
   session stats require session participation; tenant, cache, experiment, and
   session-search reads require tenant authorization; tenant learning candidate
   reads require tenant admin or tenant operator authorization. Deployment-wide
-  tool stats are workspace control-plane operations limited to service
-  identities or workspace admins. `LineageAdmin` tenant reads require tenant
-  authorization, while export and erase are tenant-bounded unless an explicit
-  workspace admin control-plane operation is used.
+  tool stats are control-plane operations limited to service identities.
+  `LineageAdmin` tenant reads, export, and erase require tenant authorization.
 
 Live behavior experiment-derived improvements have one review boundary: they
 must become `learning_candidates` before any skill or workflow change is
@@ -373,7 +366,7 @@ Skill-derived improvements use the same boundary. `TurnExecution` may dispatch a
 detached `SkillLearning` workflow after experience persistence, but that
 workflow can only create tenant-scoped draft skill artifacts and proposed
 `LearningCandidateType::Skill` rows. Tenant-learned skills remain tenant-local
-and are never promoted into workspace defaults automatically. `LearningReview`
+and are never promoted into shared defaults automatically. `LearningReview`
 is the only runtime path that publishes those drafts inside the tenant, records
 `skill_created`/`skill_improved`, and marks the candidate promoted.
 

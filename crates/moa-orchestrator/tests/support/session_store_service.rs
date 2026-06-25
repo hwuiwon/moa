@@ -11,7 +11,7 @@ use moa_core::wire::{
 };
 use moa_core::{
     ContactId, ContactRef, ContactVerificationState, Event, EventFilter, EventRange, ModelId,
-    SessionId, SessionMeta, SessionStatus, TenantId, UserMessage, WorkspaceId,
+    SessionId, SessionMeta, SessionStatus, StoragePartitionId, TenantId, UserMessage,
 };
 use moa_orchestrator::services::session_store::{RestateSessionStore, SessionStoreImpl};
 use moa_session::{PostgresSessionStore, testing};
@@ -92,8 +92,8 @@ impl TestSessionStoreApp {
 }
 
 /// Returns a session metadata payload suitable for `create_session`.
-pub fn test_session_meta(workspace_id: &str) -> SessionMeta {
-    let _ = workspace_id;
+pub fn test_session_meta(storage_partition_id: &str) -> SessionMeta {
+    let _ = storage_partition_id;
     let tenant_id = TenantId::new();
     SessionMeta {
         tenant_id,
@@ -118,9 +118,9 @@ fn test_contact_ref(tenant_id: TenantId) -> ContactRef {
     }
 }
 
-/// Returns the workspace-compatible API id for a tenant-owned session fixture.
-pub fn workspace_id_from_meta(meta: &SessionMeta) -> WorkspaceId {
-    WorkspaceId::new(meta.tenant_id.to_string())
+/// Returns the storage partition id for a tenant-owned session fixture.
+pub fn storage_partition_id_from_meta(meta: &SessionMeta) -> StoragePartitionId {
+    StoragePartitionId::new(meta.tenant_id.to_string())
 }
 
 /// Returns a user-message event suitable for append-event tests.

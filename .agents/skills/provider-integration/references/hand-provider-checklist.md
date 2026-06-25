@@ -67,7 +67,7 @@ For MCP integrations:
 
 ## Common Mistakes
 
-- Hardcoding workspace paths inside the sandbox provider; use `WorkspaceId`-derived paths instead.
+- Hardcoding shared paths inside the sandbox provider; derive paths from the tenant or explicit storage partition instead.
 - Forgetting the destroy step on session failure; sandboxes leak.
 - Treating MCP tool names as opaque; they need namespacing to prevent collisions.
 - Implementing approval inside the hand provider; approval belongs to the orchestrator. The hand provider just dispatches.

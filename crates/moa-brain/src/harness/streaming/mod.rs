@@ -8,8 +8,7 @@ use std::time::Instant;
 use moa_core::{
     CompletionContent, Event, EventRange, EventRecord, LLMProvider, LineageHandle, MoaError,
     ModelTask, Result, RuntimeEvent, SessionId, SessionMeta, SessionSignal, SessionStore,
-    StopReason, TraceContext, WorkingContext, WorkspaceId, genai_operation_name,
-    genai_provider_name,
+    StopReason, TraceContext, WorkingContext, genai_operation_name, genai_provider_name,
 };
 use moa_hands::ToolRouter;
 use moa_lineage_core::TurnId;
@@ -26,7 +25,7 @@ use crate::pipeline::ContextPipeline;
 use crate::turn::{StreamSignalDisposition, stream_completion_response};
 
 use super::StreamedTurnResult;
-use super::budget::enforce_workspace_budget;
+use super::budget::enforce_tenant_budget;
 use super::context_build::{
     BuildTurnContextOptions, append_event, build_cache_report, build_turn_context,
     calculate_response_cost_cents, complete_cache_report, last_user_message_text,
@@ -90,9 +89,7 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 moa.pipeline.total_tokens = tracing::field::Empty,
             );
             let workspace_root = match &tool_router {
-                Some(router) => router
-                    .workspace_root(&WorkspaceId::new(session.tenant_id.to_string()))
-                    .await,
+                Some(router) => router.workspace_root(&session.tenant_id).await,
                 None => None,
             };
             let (mut ctx, active_canary) = build_turn_context(BuildTurnContextOptions {
@@ -118,11 +115,11 @@ pub(super) async fn run_streamed_turn_with_tools_mode(
                 let _ = runtime_tx.send(event);
             };
 
-            enforce_workspace_budget(
+            enforce_tenant_budget(
                 &session_store,
                 &session_id,
-                &WorkspaceId::new(session.tenant_id.to_string()),
-                pipeline.daily_workspace_budget_cents(),
+                &session.tenant_id,
+                pipeline.daily_tenant_budget_cents(),
                 runtime_tx,
                 event_tx,
             )

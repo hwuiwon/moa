@@ -6,10 +6,9 @@ use moa_artifacts::registry::{
     ArtifactFile, ArtifactRegistry, ArtifactScopeParts, NewPublishedArtifactRevision,
     StoredArtifactRevision, insert_published_revision,
 };
-use moa_core::{ActionRuleScope, MoaError, Result, SkillMetadata, TenantId, UserId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, Result, SkillMetadata, TenantId, UserId};
 use moa_db::ScopedConn;
 use moa_memory_types::{MemoryScope, ScopeContext};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -27,8 +26,8 @@ use crate::package::{
 pub struct Skill {
     /// Compatibility identifier for this skill revision; equals artifact `revision_uid`.
     pub skill_uid: Uuid,
-    /// Workspace owning workspace and user scoped skills.
-    pub workspace_id: Option<WorkspaceId>,
+    /// Tenant owning tenant-scoped skills.
+    pub tenant_id: Option<TenantId>,
     /// User owning user scoped skills.
     pub user_id: Option<UserId>,
     /// Generated SQL scope tier.
@@ -149,12 +148,9 @@ impl SkillRegistry {
         Ok(packages.into_iter().map(|package| package.skill).collect())
     }
 
-    /// Returns workspace skill metadata for learning and regression helpers.
-    pub async fn list_for_pipeline(
-        &self,
-        workspace_id: &WorkspaceId,
-    ) -> Result<Vec<SkillMetadata>> {
-        let scope = workspace_artifact_scope(workspace_id);
+    /// Returns tenant skill metadata for learning and regression helpers.
+    pub async fn list_for_pipeline(&self, tenant_id: TenantId) -> Result<Vec<SkillMetadata>> {
+        let scope = tenant_artifact_scope(tenant_id);
         let mut metadata = self
             .load_for_scope(&scope)
             .await?
@@ -170,10 +166,10 @@ impl SkillRegistry {
         Ok(metadata)
     }
 
-    /// Loads the full rendered `SKILL.md` markdown for a named workspace skill.
-    pub async fn load_full(&self, workspace_id: &WorkspaceId, skill_name: &str) -> Result<String> {
-        let scope = workspace_artifact_scope(workspace_id);
-        let render_scope = workspace_memory_scope(workspace_id);
+    /// Loads the full rendered `SKILL.md` markdown for a named tenant skill.
+    pub async fn load_full(&self, tenant_id: TenantId, skill_name: &str) -> Result<String> {
+        let scope = tenant_artifact_scope(tenant_id);
+        let render_scope = tenant_memory_scope(tenant_id);
         let package = self
             .load_package_by_name(&scope, skill_name)
             .await?
@@ -317,35 +313,18 @@ async fn publish_skill_revision(pool: &PgPool, skill: &ValidatedNewSkill) -> Res
     Ok(revision_uid)
 }
 
-pub(crate) fn workspace_artifact_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
-    ActionRuleScope::Tenant {
-        tenant_id: tenant_id_from_workspace(workspace_id),
-    }
+pub(crate) fn tenant_artifact_scope(tenant_id: TenantId) -> ActionRuleScope {
+    ActionRuleScope::Tenant { tenant_id }
 }
 
-fn workspace_memory_scope(workspace_id: &WorkspaceId) -> MemoryScope {
-    MemoryScope::Tenant {
-        tenant_id: tenant_id_from_workspace(workspace_id),
-    }
+fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {
+    MemoryScope::Tenant { tenant_id }
 }
 
 fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
     match scope {
-        ActionRuleScope::WorkspaceDefault => ScopeContext::tenant(TenantId::from(Uuid::nil())),
         ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
     }
-}
-
-fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> TenantId {
-    if let Ok(uuid) = Uuid::parse_str(workspace_id.as_str()) {
-        return TenantId::from(uuid);
-    }
-    let digest = Sha256::digest(workspace_id.as_str().as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    TenantId::from(Uuid::from_bytes(bytes))
 }
 
 async fn insert_skill_artifact(
@@ -414,7 +393,19 @@ fn skill_from_package_revision(
 ) -> Result<Skill> {
     Ok(Skill {
         skill_uid: revision.revision_uid,
-        workspace_id: revision.workspace_id.clone(),
+        tenant_id: revision
+            .storage_partition_id
+            .as_ref()
+            .map(|storage_partition_id| {
+                Uuid::parse_str(storage_partition_id.as_str())
+                    .map(TenantId::from)
+                    .map_err(|error| {
+                        MoaError::StorageError(format!(
+                            "stored skill storage partition is not a tenant id: {error}"
+                        ))
+                    })
+            })
+            .transpose()?,
         user_id: revision.user_id.clone(),
         scope: revision.scope.clone(),
         name: package.name.clone(),

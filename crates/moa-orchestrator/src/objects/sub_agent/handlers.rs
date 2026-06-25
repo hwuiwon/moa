@@ -384,10 +384,9 @@ async fn prepare_turn_inner(
     let parent_session = state
         .parent_session
         .ok_or_else(|| TerminalError::new("sub-agent parent session missing"))?;
-    let workspace_id = state
-        .workspace_id
-        .clone()
-        .ok_or_else(|| TerminalError::new("sub-agent workspace_id missing"))?;
+    let tenant_id = state
+        .tenant_id
+        .ok_or_else(|| TerminalError::new("sub-agent tenant_id missing"))?;
     let user_id = state
         .user_id
         .clone()
@@ -412,10 +411,9 @@ async fn prepare_turn_inner(
         "_moa.session_id".to_string(),
         json!(parent_session.to_string()),
     );
-    request.metadata.insert(
-        "_moa.tenant_id".to_string(),
-        json!(workspace_id.to_string()),
-    );
+    request
+        .metadata
+        .insert("_moa.tenant_id".to_string(), json!(tenant_id.to_string()));
     request
         .metadata
         .insert("_moa.contact_id".to_string(), json!(user_id.to_string()));
@@ -491,10 +489,9 @@ async fn reserve_child_inner(
     let parent_session = state.parent_session.ok_or_else(|| {
         TerminalError::new("sub-agent parent session missing while reserving child")
     })?;
-    let workspace_id = state
-        .workspace_id
-        .clone()
-        .ok_or_else(|| TerminalError::new("sub-agent workspace_id missing"))?;
+    let tenant_id = state
+        .tenant_id
+        .ok_or_else(|| TerminalError::new("sub-agent tenant_id missing"))?;
     let user_id = state
         .user_id
         .clone()
@@ -529,7 +526,7 @@ async fn reserve_child_inner(
         parent_session,
         Some(parent_key),
         state.depth + 1,
-        workspace_id,
+        tenant_id,
         user_id,
         model,
     );

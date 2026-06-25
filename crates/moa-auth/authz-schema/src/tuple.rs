@@ -11,8 +11,6 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ObjectType {
-    /// The global workspace control plane.
-    Workspace,
     /// A tenant runtime boundary.
     Tenant,
     /// A tenant-local end-user contact.
@@ -60,8 +58,6 @@ pub enum Relation {
     Participant,
     /// Delegation relationship for agent impersonation.
     CanActAs,
-    /// Parent workspace relationship.
-    Workspace,
     /// Parent tenant relationship.
     Tenant,
     /// Contact object relationship.
@@ -109,7 +105,7 @@ impl TupleKey {
         format!("{}:{}", self.user_type, self.user_id)
     }
 
-    /// Render the wire-format object string, such as `workspace:<uuid>`.
+    /// Render the wire-format object string, such as `tenant:<uuid>`.
     pub fn object_wire(&self) -> String {
         format!("{}:{}", self.object_type, self.object_id)
     }
@@ -148,7 +144,7 @@ pub struct TupleKeyWire {
     pub user: String,
     /// Relation name.
     pub relation: String,
-    /// Wire-format object, such as `workspace:<uuid>`.
+    /// Wire-format object, such as `tenant:<uuid>`.
     pub object: String,
 }
 
@@ -173,7 +169,6 @@ mod tests {
         // previous hand-written tables, since these strings cross the OpenFGA
         // wire boundary and are baked into outbox idempotency keys.
         let object_types = [
-            (ObjectType::Workspace, "workspace"),
             (ObjectType::Tenant, "tenant"),
             (ObjectType::Contact, "contact"),
             (ObjectType::Session, "session"),
@@ -200,7 +195,6 @@ mod tests {
             (Relation::Owner, "owner"),
             (Relation::Participant, "participant"),
             (Relation::CanActAs, "can_act_as"),
-            (Relation::Workspace, "workspace"),
             (Relation::Tenant, "tenant"),
             (Relation::Contact, "contact"),
         ];
@@ -287,15 +281,7 @@ mod tests {
         types.sort_unstable();
         assert_eq!(
             types,
-            [
-                "agent",
-                "api_key",
-                "contact",
-                "session",
-                "tenant",
-                "user",
-                "workspace",
-            ]
+            ["agent", "api_key", "contact", "session", "tenant", "user",]
         );
 
         let agent = definitions
@@ -307,18 +293,6 @@ mod tests {
             .expect("agent relations must be an object");
         assert!(agent_relations.contains_key("can_act_as"));
 
-        let workspace = definitions
-            .iter()
-            .find(|definition| definition["type"] == "workspace")
-            .expect("schema_v1.json must define workspace");
-        let workspace_relations = workspace["relations"]
-            .as_object()
-            .expect("workspace relations must be an object");
-        assert!(
-            workspace_relations.contains_key("admin"),
-            "workspace must define relation admin"
-        );
-
         let tenant = definitions
             .iter()
             .find(|definition| definition["type"] == "tenant")
@@ -326,7 +300,7 @@ mod tests {
         let tenant_relations = tenant["relations"]
             .as_object()
             .expect("tenant relations must be an object");
-        for relation in ["workspace", "admin", "operator"] {
+        for relation in ["admin", "operator"] {
             assert!(
                 tenant_relations.contains_key(relation),
                 "tenant must define relation {relation}"

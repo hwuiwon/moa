@@ -1,0 +1,17 @@
+[suite]
+name = "concurrent_tenant_writes_to_same_subgraph"
+description = "Two recorded sessions alternate turns while updating the same auth-flow subgraph."
+default_timeout_seconds = 90
+tags = ["long_conversation", "recorded", "concurrent", "memory"]
+
+[[cases]]
+kind = "long"
+name = "concurrent_tenant_writes_to_same_subgraph"
+goal_card = "scenarios/long_conversation/concurrent_tenant_writes_to_same_subgraph/goal_card.md"
+transcript = "scenarios/long_conversation/concurrent_tenant_writes_to_same_subgraph/transcript.jsonl"
+expectations = "scenarios/long_conversation/concurrent_tenant_writes_to_same_subgraph/expectations.toml"
+mode = "recorded"
+
+[cases.secondary_session]
+transcript = "scenarios/long_conversation/concurrent_tenant_writes_to_same_subgraph/secondary_transcript.jsonl"
+interleaving = "round_robin"

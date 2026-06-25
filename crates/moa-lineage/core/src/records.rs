@@ -1,7 +1,7 @@
 //! Serializable lineage records emitted by retrieval, context, and generation.
 
 use chrono::{DateTime, Utc};
-use moa_core::{ContextSourceRef, SessionId, UserId, WorkspaceId};
+use moa_core::{ContextSourceRef, SessionId, StoragePartitionId, UserId};
 use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -61,8 +61,8 @@ pub struct RetrievalLineage {
     pub turn_id: TurnId,
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier.
+    pub storage_partition_id: StoragePartitionId,
     /// User identifier.
     pub user_id: UserId,
     /// Memory scope used for retrieval.
@@ -243,8 +243,8 @@ pub struct ContextLineage {
     pub turn_id: TurnId,
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier.
+    pub storage_partition_id: StoragePartitionId,
     /// User identifier.
     pub user_id: UserId,
     /// Event timestamp.
@@ -297,8 +297,8 @@ pub struct GenerationLineage {
     pub turn_id: TurnId,
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier.
+    pub storage_partition_id: StoragePartitionId,
     /// User identifier.
     pub user_id: UserId,
     /// Event timestamp.
@@ -368,8 +368,8 @@ pub struct CitationLineage {
     pub turn_id: TurnId,
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier.
+    pub storage_partition_id: StoragePartitionId,
     /// User identifier.
     pub user_id: UserId,
     /// Event timestamp.
@@ -435,8 +435,8 @@ pub struct ScoreRecord {
     pub ts: DateTime<Utc>,
     /// Entity this score evaluates.
     pub target: ScoreTarget,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier.
+    pub storage_partition_id: StoragePartitionId,
     /// Optional user identifier.
     pub user_id: Option<UserId>,
     /// Score name, such as `grounding` or `retrieval_zero_recall`.
@@ -511,8 +511,8 @@ pub struct DecisionRecord {
     pub turn_id: TurnId,
     /// Session identifier.
     pub session_id: SessionId,
-    /// Workspace identifier.
-    pub workspace_id: WorkspaceId,
+    /// Storage partition identifier.
+    pub storage_partition_id: StoragePartitionId,
     /// User identifier.
     pub user_id: UserId,
     /// Event timestamp.
@@ -636,19 +636,19 @@ impl LineageEvent {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use moa_core::{SessionId, TenantId, UserId, WorkspaceId};
+    use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
     use moa_memory_types::MemoryScope;
 
     use super::*;
 
     #[test]
     fn lineage_event_serializes_with_kind_and_record() {
-        let workspace_id = WorkspaceId::new("workspace");
+        let storage_partition_id = StoragePartitionId::new("tenant");
         let tenant_id = TenantId::from(Uuid::from_u128(0x1000));
         let event = LineageEvent::Retrieval(RetrievalLineage {
             turn_id: TurnId::new_v7(),
             session_id: SessionId::new(),
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: UserId::new("user"),
             scope: MemoryScope::Tenant { tenant_id },
             ts: Utc::now(),
@@ -677,7 +677,7 @@ mod tests {
             score_id: Uuid::now_v7(),
             ts: Utc::now(),
             target: ScoreTarget::Turn { turn_id },
-            workspace_id: WorkspaceId::new("workspace"),
+            storage_partition_id: StoragePartitionId::new("tenant"),
             user_id: Some(UserId::new("user")),
             name: "citation_verified".to_string(),
             value: ScoreValue::Boolean(true),

@@ -98,7 +98,7 @@ Before editing a subsystem, read the matching design doc:
 
 ## Type and API Conventions
 
-- Use `uuid::Uuid` wrapped in MOA newtypes (`SessionId`, `UserId`, `WorkspaceId`).
+- Use `uuid::Uuid` wrapped in MOA newtypes (`SessionId`, `UserId`, `TenantId`).
 - Use `chrono::DateTime<Utc>` for timestamps.
 - Use `PathBuf` for filesystem paths and `String` for logical wiki paths.
 - Use `serde_json::Value` for dynamic JSON payloads.

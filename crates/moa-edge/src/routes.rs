@@ -55,31 +55,28 @@ pub fn router(state: AppState) -> Router {
             post(handle_auth0_connection_webhook),
         )
         .route(
-            "/v1/workspaces/{workspace_id}/contacts/verification/start",
+            "/v1/contacts/verification/start",
             post(handle_public_contact_verification_start),
         )
         .route(
-            "/v1/workspaces/{workspace_id}/contacts/verification/complete",
+            "/v1/contacts/verification/complete",
             post(handle_public_contact_verification_complete),
         )
         .route(
-            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/contacts/verification/start",
+            "/v1/agent-sessions/{session_id}/contacts/verification/start",
             post(handle_public_session_contact_verification_start),
         )
         .route(
-            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/contacts/verification/complete",
+            "/v1/agent-sessions/{session_id}/contacts/verification/complete",
             post(handle_public_session_contact_verification_complete),
         )
+        .route("/v1/agent-sessions", post(handle_public_agent_session_init))
         .route(
-            "/v1/workspaces/{workspace_id}/agent-sessions",
-            post(handle_public_agent_session_init),
-        )
-        .route(
-            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/promote",
+            "/v1/agent-sessions/{session_id}/promote",
             post(handle_public_agent_session_promote),
         )
         .route(
-            "/v1/workspaces/{workspace_id}/agent-sessions/{session_id}/channel",
+            "/v1/agent-sessions/{session_id}/channel",
             patch(handle_public_agent_session_channel_change),
         )
         .route(
@@ -123,14 +120,15 @@ async fn handle_proxy(
         .map(|path| path.as_str())
         .unwrap_or(uri.path())
         .to_string();
-    let (method, path, body) = match translate_public_route(&method, &uri, &body) {
-        RouteTranslation::Forward { method, path, body } => (method, path, body),
-        RouteTranslation::NoChange => (method, original_path, body.to_vec()),
-        RouteTranslation::BadRequest(message) => {
-            span.record("http.status_code", 400_i64);
-            return (StatusCode::BAD_REQUEST, message).into_response();
-        }
-    };
+    let (method, path, body) =
+        match translate_public_route(&method, &uri, &body, identity.tenant_id) {
+            RouteTranslation::Forward { method, path, body } => (method, path, body),
+            RouteTranslation::NoChange => (method, original_path, body.to_vec()),
+            RouteTranslation::BadRequest(message) => {
+                span.record("http.status_code", 400_i64);
+                return (StatusCode::BAD_REQUEST, message).into_response();
+            }
+        };
     let response = match state
         .proxy
         .forward(&identity, method, &path, body, &headers)
@@ -251,39 +249,23 @@ async fn handle_github_secret_scan() -> axum::response::Response {
 
 async fn handle_public_contact_verification_start(
     State(state): State<AppState>,
-    Path(workspace_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    forward_public_contact_route(
-        state,
-        headers,
-        body,
-        "/Contacts/start_verification",
-        [("workspace_id", serde_json::json!(workspace_id))],
-    )
-    .await
+    forward_public_contact_route(state, headers, body, "/Contacts/start_verification", []).await
 }
 
 async fn handle_public_contact_verification_complete(
     State(state): State<AppState>,
-    Path(workspace_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    forward_public_contact_route(
-        state,
-        headers,
-        body,
-        "/Contacts/complete_verification",
-        [("workspace_id", serde_json::json!(workspace_id))],
-    )
-    .await
+    forward_public_contact_route(state, headers, body, "/Contacts/complete_verification", []).await
 }
 
 async fn handle_public_session_contact_verification_start(
     State(state): State<AppState>,
-    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    Path(session_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -292,17 +274,14 @@ async fn handle_public_session_contact_verification_start(
         headers,
         body,
         "/Contacts/start_verification",
-        [
-            ("workspace_id", serde_json::json!(workspace_id)),
-            ("session_id", serde_json::json!(session_id)),
-        ],
+        [("session_id", serde_json::json!(session_id))],
     )
     .await
 }
 
 async fn handle_public_session_contact_verification_complete(
     State(state): State<AppState>,
-    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    Path(session_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -311,33 +290,22 @@ async fn handle_public_session_contact_verification_complete(
         headers,
         body,
         "/Contacts/complete_verification",
-        [
-            ("workspace_id", serde_json::json!(workspace_id)),
-            ("session_id", serde_json::json!(session_id)),
-        ],
+        [("session_id", serde_json::json!(session_id))],
     )
     .await
 }
 
 async fn handle_public_agent_session_init(
     State(state): State<AppState>,
-    Path(workspace_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    forward_public_contact_route(
-        state,
-        headers,
-        body,
-        "/Contacts/init_session",
-        [("workspace_id", serde_json::json!(workspace_id))],
-    )
-    .await
+    forward_public_contact_route(state, headers, body, "/Contacts/init_session", []).await
 }
 
 async fn handle_public_agent_session_promote(
     State(state): State<AppState>,
-    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    Path(session_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -346,17 +314,14 @@ async fn handle_public_agent_session_promote(
         headers,
         body,
         "/Contacts/promote_session",
-        [
-            ("workspace_id", serde_json::json!(workspace_id)),
-            ("session_id", serde_json::json!(session_id)),
-        ],
+        [("session_id", serde_json::json!(session_id))],
     )
     .await
 }
 
 async fn handle_public_agent_session_channel_change(
     State(state): State<AppState>,
-    Path((workspace_id, session_id)): Path<(String, Uuid)>,
+    Path(session_id): Path<Uuid>,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -365,10 +330,7 @@ async fn handle_public_agent_session_channel_change(
         headers,
         body,
         "/Contacts/change_session_channel",
-        [
-            ("workspace_id", serde_json::json!(workspace_id)),
-            ("session_id", serde_json::json!(session_id)),
-        ],
+        [("session_id", serde_json::json!(session_id))],
     )
     .await
 }
@@ -954,7 +916,12 @@ enum RouteTranslation {
     BadRequest(&'static str),
 }
 
-fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTranslation {
+fn translate_public_route(
+    method: &Method,
+    uri: &Uri,
+    body: &Bytes,
+    tenant_id: TenantId,
+) -> RouteTranslation {
     if *method == Method::GET && uri.path() == "/v1/whoami" {
         return RouteTranslation::Forward {
             method: Method::POST,
@@ -988,49 +955,20 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             [("id", serde_json::json!(challenge_id))],
         );
     }
-    if *method == Method::GET
-        && let Some(rest) = uri
-            .path()
-            .strip_prefix("/v1/workspaces/")
-            .and_then(|rest| rest.strip_suffix("/action-reviews"))
-    {
-        let workspace_id = rest.trim_matches('/');
-        if workspace_id.is_empty() || workspace_id.contains('/') {
-            return RouteTranslation::BadRequest("bad workspace id");
-        }
-        let body = match serde_json::to_vec(&serde_json::json!({ "workspace_id": workspace_id })) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::error!(error = %error, "serialize action review list body failed");
-                return RouteTranslation::BadRequest("bad action review list body");
-            }
-        };
-        return RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/ActionReviews/list_pending".to_string(),
-            body,
-        };
+    if *method == Method::GET && uri.path() == "/v1/action-reviews" {
+        return translate_empty_json_body_with_fields(
+            "/ActionReviews/list_pending",
+            "bad action review list body",
+            [tenant_id_field(tenant_id)],
+        );
     }
     if *method == Method::POST
         && let Some(rest) = uri
             .path()
-            .strip_prefix("/v1/workspaces/")
+            .strip_prefix("/v1/action-reviews/")
             .and_then(|rest| rest.strip_suffix("/decision"))
     {
-        let mut segments = rest.split('/');
-        let Some(workspace_id) = segments.next() else {
-            return RouteTranslation::BadRequest("bad workspace id");
-        };
-        if segments.next() != Some("action-reviews") {
-            return RouteTranslation::NoChange;
-        }
-        let Some(review_id_text) = segments.next() else {
-            return RouteTranslation::BadRequest("bad action review id");
-        };
-        if segments.next().is_some() || workspace_id.is_empty() {
-            return RouteTranslation::BadRequest("bad action review path");
-        }
-        let review_id = match Uuid::parse_str(review_id_text) {
+        let review_id = match Uuid::parse_str(rest) {
             Ok(value) => value,
             Err(_) => return RouteTranslation::BadRequest("bad action review id"),
         };
@@ -1041,31 +979,22 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
             "action review decision body must be object",
             "serialize action review decision body failed",
             [
-                ("workspace_id", serde_json::json!(workspace_id)),
+                tenant_id_field(tenant_id),
                 ("review_id", serde_json::json!(review_id)),
             ],
         );
     }
-    if *method == Method::POST
-        && let Some(rest) = uri
-            .path()
-            .strip_prefix("/v1/workspaces/")
-            .and_then(|rest| rest.strip_suffix("/contacts/tokens"))
-    {
-        let workspace_id = rest.trim_matches('/');
-        if workspace_id.is_empty() || workspace_id.contains('/') {
-            return RouteTranslation::BadRequest("bad workspace id");
-        }
+    if *method == Method::POST && uri.path() == "/v1/contacts/tokens" {
         return translate_json_object_with_fields(
             body,
             "/Contacts/issue_token",
             "bad contact token body",
             "contact token body must be object",
             "serialize contact token body failed",
-            [("workspace_id", serde_json::json!(workspace_id))],
+            [tenant_id_field(tenant_id)],
         );
     }
-    if let Some(translation) = translate_workspace_agent_route(method, uri, body) {
+    if let Some(translation) = translate_tenant_agent_route(method, uri, body, tenant_id) {
         return translation;
     }
     if *method == Method::POST
@@ -1087,165 +1016,156 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
     if *method == Method::POST {
         match uri.path() {
             "/v1/analytics/session-stats" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/session_stats".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_fields(
+                    body,
+                    "/Analytics/session_stats",
+                    "bad session stats body",
+                    "session stats body must be object",
+                    "serialize session stats body failed",
+                    [],
+                );
             }
-            "/v1/analytics/workspace-stats" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/workspace_stats".to_string(),
-                    body: body.to_vec(),
-                };
+            "/v1/analytics/tenant-stats" => {
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Analytics/tenant_stats",
+                    tenant_id,
+                );
             }
             "/v1/analytics/tool-stats" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/tool_stats".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Analytics/tool_stats",
+                    tenant_id,
+                );
             }
             "/v1/analytics/cache-stats" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/cache_stats".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Analytics/cache_stats",
+                    tenant_id,
+                );
             }
             "/v1/analytics/experiment-stats" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/experiment_stats".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Analytics/experiment_stats",
+                    tenant_id,
+                );
             }
             "/v1/analytics/learning-candidates" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/learning_candidates".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Analytics/learning_candidates",
+                    tenant_id,
+                );
             }
             "/v1/analytics/session-search" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Analytics/session_search".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Analytics/session_search",
+                    tenant_id,
+                );
             }
             "/v1/experiments/generate-plan" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/generate_plan".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/generate_plan",
+                    tenant_id,
+                );
             }
             "/v1/experiments/run-plan" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/run".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Experiments/run", tenant_id);
             }
             "/v1/experiments/status" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/status".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/status",
+                    tenant_id,
+                );
             }
             "/v1/experiments/list" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/list".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Experiments/list", tenant_id);
             }
             "/v1/experiments/trials" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/trials".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/trials",
+                    tenant_id,
+                );
             }
             "/v1/experiments/trial-status" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/trial_status".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/trial_status",
+                    tenant_id,
+                );
             }
             "/v1/experiments/cancel" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/cancel".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/cancel",
+                    tenant_id,
+                );
             }
             "/v1/experiments/propose-improvements" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/propose_improvements".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/propose_improvements",
+                    tenant_id,
+                );
             }
             "/v1/experiments/scores" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/scores".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/scores",
+                    tenant_id,
+                );
             }
             "/v1/experiments/compare" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/compare".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/compare",
+                    tenant_id,
+                );
             }
             "/v1/experiments/agent-revision-simulations" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/run_agent_revision_simulation".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/run_agent_revision_simulation",
+                    tenant_id,
+                );
             }
             "/v1/experiments/agent-revision-simulations/compare" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Experiments/compare_agent_revision_simulation".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Experiments/compare_agent_revision_simulation",
+                    tenant_id,
+                );
             }
             "/v1/sessions/create-agent" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/SessionStore/create_agent_session".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_create_agent_session_route(body, tenant_id);
             }
-            "/v1/admin-maintenance/promote-workspace" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/AdminMaintenance/promote_workspace".to_string(),
-                    body: body.to_vec(),
-                };
+            "/v1/admin-maintenance/vector/promote" => {
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/AdminMaintenance/promote_tenant_vector",
+                    tenant_id,
+                );
             }
-            "/v1/admin-maintenance/rollback-promotion" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/AdminMaintenance/rollback_promotion".to_string(),
-                    body: body.to_vec(),
-                };
+            "/v1/admin-maintenance/vector/rollback-promotion" => {
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/AdminMaintenance/rollback_promotion",
+                    tenant_id,
+                );
             }
-            "/v1/admin-maintenance/finalize-promotion" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/AdminMaintenance/finalize_promotion".to_string(),
-                    body: body.to_vec(),
-                };
+            "/v1/admin-maintenance/vector/finalize-promotion" => {
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/AdminMaintenance/finalize_promotion",
+                    tenant_id,
+                );
             }
             "/v1/admin-maintenance/checkpoints/create" => {
                 return RouteTranslation::Forward {
@@ -1276,200 +1196,155 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
                 };
             }
             "/v1/memory/search" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Memory/search".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Memory/search", tenant_id);
             }
             "/v1/memory/show" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Memory/show".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Memory/show", tenant_id);
             }
             "/v1/memory/ingest-documents" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Memory/ingest_documents".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Memory/ingest_documents",
+                    tenant_id,
+                );
             }
             "/v1/memory/retrieve-debug" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Memory/retrieve_debug".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Memory/retrieve_debug",
+                    tenant_id,
+                );
             }
             "/v1/lineage/explain" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LineageAdmin/explain".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/LineageAdmin/explain",
+                    tenant_id,
+                );
             }
             "/v1/lineage/query" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LineageAdmin/query".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/LineageAdmin/query",
+                    tenant_id,
+                );
             }
             "/v1/lineage/export" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LineageAdmin/export".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/LineageAdmin/export",
+                    tenant_id,
+                );
             }
             "/v1/lineage/verify" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LineageAdmin/verify".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/LineageAdmin/verify",
+                    tenant_id,
+                );
             }
             "/v1/lineage/erase" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LineageAdmin/erase".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/LineageAdmin/erase",
+                    tenant_id,
+                );
             }
             "/v1/privacy/export" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Privacy/export".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Privacy/export", tenant_id);
             }
             "/v1/privacy/erase" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Privacy/erase".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Privacy/erase", tenant_id);
             }
             "/v1/skills/export" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Skills/export".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Skills/export", tenant_id);
             }
             "/v1/skills/import" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Skills/import".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_scope(body, "/Skills/import", tenant_id);
             }
             "/v1/skills/list" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Skills/list".to_string(),
-                    body: body.to_vec(),
-                };
-            }
-            "/v1/skills/bootstrap-workspace-default" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Skills/bootstrap_workspace_default".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Skills/list", tenant_id);
             }
             "/v1/artifacts/import" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Artifacts/import".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_scope(
+                    body,
+                    "/Artifacts/import",
+                    tenant_id,
+                );
             }
             "/v1/artifacts/export" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Artifacts/export".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Artifacts/export", tenant_id);
             }
             "/v1/artifacts/list" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Artifacts/list".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Artifacts/list", tenant_id);
             }
             "/v1/artifacts/validate" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Artifacts/validate".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Artifacts/validate",
+                    tenant_id,
+                );
             }
             "/v1/artifacts/publish" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Artifacts/publish".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_scope(
+                    body,
+                    "/Artifacts/publish",
+                    tenant_id,
+                );
             }
             "/v1/learning-candidates/get" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LearningReview/get".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/LearningReview/get",
+                    tenant_id,
+                );
             }
             "/v1/learning-candidates/accept-skill" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LearningReview/accept_skill".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_fields(
+                    body,
+                    "/LearningReview/accept_skill",
+                    "bad tenant route body",
+                    "tenant route body must be object",
+                    "serialize tenant route body failed",
+                    [
+                        tenant_id_field(tenant_id),
+                        ("action", serde_json::json!("accept")),
+                        ("reviewer_subject", serde_json::json!("edge")),
+                    ],
+                );
             }
             "/v1/learning-candidates/reject" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/LearningReview/reject".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_fields(
+                    body,
+                    "/LearningReview/reject",
+                    "bad tenant route body",
+                    "tenant route body must be object",
+                    "serialize tenant route body failed",
+                    [
+                        tenant_id_field(tenant_id),
+                        ("action", serde_json::json!("reject")),
+                        ("reviewer_subject", serde_json::json!("edge")),
+                    ],
+                );
             }
             "/v1/workflows/run" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Workflows/run".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Workflows/run", tenant_id);
             }
             "/v1/workflows/status" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Workflows/status".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Workflows/status", tenant_id);
             }
             "/v1/workflows/cancel" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Workflows/cancel".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Workflows/cancel", tenant_id);
             }
             "/v1/workflows/decide-review" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Workflows/decide_review".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(
+                    body,
+                    "/Workflows/decide_review",
+                    tenant_id,
+                );
             }
             "/v1/workflows/signal" => {
-                return RouteTranslation::Forward {
-                    method: Method::POST,
-                    path: "/Workflows/signal".to_string(),
-                    body: body.to_vec(),
-                };
+                return translate_json_object_with_tenant_id(body, "/Workflows/signal", tenant_id);
             }
             _ => {}
         }
@@ -1518,17 +1393,14 @@ fn translate_public_route(method: &Method, uri: &Uri, body: &Bytes) -> RouteTran
     RouteTranslation::NoChange
 }
 
-fn translate_workspace_agent_route(
+fn translate_tenant_agent_route(
     method: &Method,
     uri: &Uri,
     body: &Bytes,
+    tenant_id: TenantId,
 ) -> Option<RouteTranslation> {
-    let rest = uri.path().strip_prefix("/v1/workspaces/")?;
+    let rest = uri.path().strip_prefix("/v1/")?;
     let mut segments = rest.split('/');
-    let workspace_id = segments.next()?;
-    if workspace_id.is_empty() {
-        return Some(RouteTranslation::BadRequest("bad workspace id"));
-    }
 
     match (
         segments.next(),
@@ -1540,14 +1412,14 @@ fn translate_workspace_agent_route(
             Some(translate_empty_json_body_with_fields(
                 "/AgentDefinitions/list_definitions",
                 "bad agent definitions list body",
-                [("workspace_id", serde_json::json!(workspace_id))],
+                [tenant_id_field(tenant_id)],
             ))
         }
         (Some("agent-installations"), None, None, None) if *method == Method::GET => {
             Some(translate_empty_json_body_with_fields(
                 "/AgentDefinitions/list_installations",
                 "bad agent installations list body",
-                [("workspace_id", serde_json::json!(workspace_id))],
+                [tenant_id_field(tenant_id)],
             ))
         }
         (Some("agent-installations"), None, None, None) if *method == Method::POST => {
@@ -1557,7 +1429,7 @@ fn translate_workspace_agent_route(
                 "bad agent install body",
                 "agent install body must be object",
                 "serialize agent install body failed",
-                [("workspace_id", serde_json::json!(workspace_id))],
+                [tenant_id_field(tenant_id)],
             ))
         }
         (Some("agent-installations"), Some(installation_uid), Some("deployments"), None)
@@ -1571,7 +1443,7 @@ fn translate_workspace_agent_route(
                 "/AgentDefinitions/list_deployments",
                 "bad agent deployments list body",
                 [
-                    ("workspace_id", serde_json::json!(workspace_id)),
+                    tenant_id_field(tenant_id),
                     ("installation_uid", serde_json::json!(installation_uid)),
                 ],
             ))
@@ -1590,7 +1462,7 @@ fn translate_workspace_agent_route(
                 "agent deploy body must be object",
                 "serialize agent deploy body failed",
                 [
-                    ("workspace_id", serde_json::json!(workspace_id)),
+                    tenant_id_field(tenant_id),
                     ("installation_uid", serde_json::json!(installation_uid)),
                 ],
             ))
@@ -1602,7 +1474,7 @@ fn translate_workspace_agent_route(
                 "bad agent simulation body",
                 "agent simulation body must be object",
                 "serialize agent simulation body failed",
-                [("workspace_id", serde_json::json!(workspace_id))],
+                [tenant_id_field(tenant_id)],
             ))
         }
         (Some("agent-simulations"), Some(run_uid), Some("compare"), None)
@@ -1619,12 +1491,79 @@ fn translate_workspace_agent_route(
                 "agent simulation compare body must be object",
                 "serialize agent simulation compare body failed",
                 [
-                    ("workspace_id", serde_json::json!(workspace_id)),
+                    tenant_id_field(tenant_id),
                     ("run_uid", serde_json::json!(run_uid)),
                 ],
             ))
         }
         _ => None,
+    }
+}
+
+fn tenant_id_field(tenant_id: TenantId) -> (&'static str, serde_json::Value) {
+    ("tenant_id", serde_json::json!(tenant_id))
+}
+
+fn tenant_scope_value(tenant_id: TenantId) -> serde_json::Value {
+    serde_json::json!({ "tenant": { "tenant_id": tenant_id } })
+}
+
+fn translate_json_object_with_tenant_id(
+    body: &Bytes,
+    target: &str,
+    tenant_id: TenantId,
+) -> RouteTranslation {
+    translate_json_object_with_fields(
+        body,
+        target,
+        "bad tenant route body",
+        "tenant route body must be object",
+        "serialize tenant route body failed",
+        [tenant_id_field(tenant_id)],
+    )
+}
+
+fn translate_json_object_with_tenant_scope(
+    body: &Bytes,
+    target: &str,
+    tenant_id: TenantId,
+) -> RouteTranslation {
+    translate_json_object_with_fields(
+        body,
+        target,
+        "bad tenant route body",
+        "tenant route body must be object",
+        "serialize tenant route body failed",
+        [("scope", tenant_scope_value(tenant_id))],
+    )
+}
+
+fn translate_create_agent_session_route(body: &Bytes, tenant_id: TenantId) -> RouteTranslation {
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad agent session body"),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return RouteTranslation::BadRequest("agent session body must be object");
+    };
+    let Some(meta) = object
+        .get_mut("meta")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return RouteTranslation::BadRequest("agent session meta must be object");
+    };
+    meta.insert("tenant_id".to_string(), serde_json::json!(tenant_id));
+    let bytes = match serde_json::to_vec(&value) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "serialize agent session body failed");
+            return RouteTranslation::BadRequest("bad agent session body");
+        }
+    };
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: "/SessionStore/create_agent_session".to_string(),
+        body: bytes,
     }
 }
 
@@ -1728,6 +1667,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_TENANT_ID: &str = "22222222-2222-2222-2222-222222222222";
+
     struct StrictAuth;
 
     #[async_trait]
@@ -1762,6 +1703,22 @@ mod tests {
         fn requires_credentials(&self) -> bool {
             false
         }
+    }
+
+    fn test_tenant_id() -> TenantId {
+        TenantId::from(Uuid::parse_str(TEST_TENANT_ID).expect("test tenant id should parse"))
+    }
+
+    fn test_tenant_json() -> serde_json::Value {
+        serde_json::json!(TEST_TENANT_ID)
+    }
+
+    fn test_tenant_scope_json() -> serde_json::Value {
+        serde_json::json!({ "tenant": { "tenant_id": TEST_TENANT_ID } })
+    }
+
+    fn translate(method: &Method, uri: &Uri, body: &Bytes) -> RouteTranslation {
+        translate_public_route(method, uri, body, test_tenant_id())
     }
 
     #[test]
@@ -1878,7 +1835,7 @@ mod tests {
             .parse::<Uri>()
             .expect("route path should parse");
 
-        let translation = translate_public_route(&Method::GET, &uri, &Bytes::new());
+        let translation = translate(&Method::GET, &uri, &Bytes::new());
 
         match translation {
             RouteTranslation::Forward { method, path, body } => {
@@ -1931,13 +1888,13 @@ mod tests {
 
     #[test]
     fn contact_token_route_translates_to_contacts_service() {
-        // Pins: contact token issuance stays on the authenticated proxy and injects the path workspace id.
-        let uri = "/v1/workspaces/workspace-a/contacts/tokens"
+        // Pins: contact token issuance derives the tenant from authenticated identity, not a workspace path.
+        let uri = "/v1/contacts/tokens"
             .parse::<Uri>()
             .expect("route path should parse");
         let body = Bytes::from_static(br#"{"display_name":"Ada"}"#);
 
-        let translation = translate_public_route(&Method::POST, &uri, &body);
+        let translation = translate(&Method::POST, &uri, &body);
 
         match translation {
             RouteTranslation::Forward { method, path, body } => {
@@ -1949,7 +1906,7 @@ mod tests {
                     value,
                     serde_json::json!({
                         "display_name": "Ada",
-                        "workspace_id": "workspace-a"
+                        "tenant_id": test_tenant_json()
                     })
                 );
             }
@@ -1965,10 +1922,10 @@ mod tests {
     #[test]
     fn action_review_public_routes_translate_to_restate_handlers() {
         // Pins: tenant-admin action-review routes forward to the internal ActionReviews service.
-        let list_uri = "/v1/workspaces/workspace-a/action-reviews"
+        let list_uri = "/v1/action-reviews"
             .parse::<Uri>()
             .expect("route path should parse");
-        let list_translation = translate_public_route(&Method::GET, &list_uri, &Bytes::new());
+        let list_translation = translate(&Method::GET, &list_uri, &Bytes::new());
         match list_translation {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
@@ -1977,7 +1934,7 @@ mod tests {
                     serde_json::from_slice(&body).expect("list body should be valid JSON");
                 assert_eq!(
                     forwarded,
-                    serde_json::json!({ "workspace_id": "workspace-a" })
+                    serde_json::json!({ "tenant_id": test_tenant_json() })
                 );
             }
             RouteTranslation::NoChange => {
@@ -1988,13 +1945,11 @@ mod tests {
             }
         }
 
-        let decision_uri =
-            "/v1/workspaces/workspace-a/action-reviews/11111111-1111-1111-1111-111111111111/decision"
+        let decision_uri = "/v1/action-reviews/11111111-1111-1111-1111-111111111111/decision"
             .parse::<Uri>()
             .expect("route path should parse");
         let decision_body = Bytes::from_static(br#"{"decision":"cleared","reason":null}"#);
-        let decision_translation =
-            translate_public_route(&Method::POST, &decision_uri, &decision_body);
+        let decision_translation = translate(&Method::POST, &decision_uri, &decision_body);
         match decision_translation {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
@@ -2004,7 +1959,7 @@ mod tests {
                 assert_eq!(
                     forwarded,
                     serde_json::json!({
-                        "workspace_id": "workspace-a",
+                        "tenant_id": test_tenant_json(),
                         "review_id": "11111111-1111-1111-1111-111111111111",
                         "decision": "cleared",
                         "reason": null
@@ -2026,7 +1981,7 @@ mod tests {
         let list_uri = "/v1/authz-challenges"
             .parse::<Uri>()
             .expect("route path should parse");
-        let list_translation = translate_public_route(&Method::GET, &list_uri, &Bytes::new());
+        let list_translation = translate(&Method::GET, &list_uri, &Bytes::new());
         match list_translation {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
@@ -2048,8 +2003,7 @@ mod tests {
             .parse::<Uri>()
             .expect("route path should parse");
         let decision_body = Bytes::from_static(br#"{"outcome":"approved","reason":null}"#);
-        let decision_translation =
-            translate_public_route(&Method::POST, &decision_uri, &decision_body);
+        let decision_translation = translate(&Method::POST, &decision_uri, &decision_body);
         match decision_translation {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
@@ -2081,45 +2035,67 @@ mod tests {
             (
                 "/v1/analytics/session-stats",
                 "/Analytics/session_stats",
-                r#"{"session_id":"11111111-1111-1111-1111-111111111111"}"#,
+                serde_json::json!({
+                    "session_id": "11111111-1111-1111-1111-111111111111"
+                }),
             ),
             (
-                "/v1/analytics/workspace-stats",
-                "/Analytics/workspace_stats",
-                r#"{"workspace_id":"workspace-a","days":14}"#,
+                "/v1/analytics/tenant-stats",
+                "/Analytics/tenant_stats",
+                serde_json::json!({ "tenant_id": test_tenant_json(), "days": 14 }),
             ),
             (
                 "/v1/analytics/tool-stats",
                 "/Analytics/tool_stats",
-                r#"{"workspace_id":"workspace-a"}"#,
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
             (
                 "/v1/analytics/cache-stats",
                 "/Analytics/cache_stats",
-                r#"{"workspace_id":"workspace-a","days":7}"#,
+                serde_json::json!({ "tenant_id": test_tenant_json(), "days": 14 }),
             ),
             (
                 "/v1/analytics/experiment-stats",
                 "/Analytics/experiment_stats",
-                r#"{"workspace_id":"workspace-a","from_time":null,"to_time":null,"limit":20}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "from_time": null,
+                    "to_time": null,
+                    "limit": 20
+                }),
             ),
             (
                 "/v1/analytics/learning-candidates",
                 "/Analytics/learning_candidates",
-                r#"{"workspace_id":"workspace-a","status":"proposed","limit":20}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "status": "proposed",
+                    "limit": 20
+                }),
             ),
             (
                 "/v1/analytics/session-search",
                 "/Analytics/session_search",
-                r#"{"workspace_id":"workspace-a","query":"refresh token","from_time":null,"to_time":null,"event_types":["user_message"],"limit":10}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "query": "refresh token",
+                    "from_time": null,
+                    "to_time": null,
+                    "event_types": ["user_message"],
+                    "limit": 10
+                }),
             ),
         ];
 
-        for (public_path, internal_path, json_body) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from(json_body.as_bytes().to_vec());
+            let mut input_body = expected_body.clone();
+            if let Some(object) = input_body.as_object_mut() {
+                object.remove("tenant_id");
+            }
+            let body = Bytes::from(input_body.to_string());
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2129,11 +2105,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        json_body.as_bytes(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2162,9 +2136,9 @@ mod tests {
 
         for public_path in paths {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+            let body = Bytes::from_static(br#"{}"#);
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::NoChange => {}
@@ -2214,9 +2188,9 @@ mod tests {
 
         for (public_path, internal_path) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+            let body = Bytes::from_static(br#"{}"#);
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2226,11 +2200,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        body.as_ref(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded.get("tenant_id"), Some(&test_tenant_json()));
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2251,54 +2223,50 @@ mod tests {
         let cases = vec![
             (
                 Method::GET,
-                "/v1/workspaces/workspace-a/agent-definitions".to_string(),
+                "/v1/agent-definitions".to_string(),
                 Bytes::new(),
                 "/AgentDefinitions/list_definitions",
-                serde_json::json!({ "workspace_id": "workspace-a" }),
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
             (
                 Method::GET,
-                "/v1/workspaces/workspace-a/agent-installations".to_string(),
+                "/v1/agent-installations".to_string(),
                 Bytes::new(),
                 "/AgentDefinitions/list_installations",
-                serde_json::json!({ "workspace_id": "workspace-a" }),
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
             (
                 Method::POST,
-                "/v1/workspaces/workspace-a/agent-installations".to_string(),
+                "/v1/agent-installations".to_string(),
                 Bytes::from(format!(
                     r#"{{"revision_uid":"{revision_uid}","metadata":{{"tier":"gold"}}}}"#
                 )),
                 "/AgentDefinitions/install",
                 serde_json::json!({
-                    "workspace_id": "workspace-a",
+                    "tenant_id": test_tenant_json(),
                     "revision_uid": revision_uid,
                     "metadata": { "tier": "gold" }
                 }),
             ),
             (
                 Method::GET,
-                format!(
-                    "/v1/workspaces/workspace-a/agent-installations/{installation_uid}/deployments"
-                ),
+                format!("/v1/agent-installations/{installation_uid}/deployments"),
                 Bytes::new(),
                 "/AgentDefinitions/list_deployments",
                 serde_json::json!({
-                    "workspace_id": "workspace-a",
+                    "tenant_id": test_tenant_json(),
                     "installation_uid": installation_uid
                 }),
             ),
             (
                 Method::POST,
-                format!(
-                    "/v1/workspaces/workspace-a/agent-installations/{installation_uid}/deployments"
-                ),
+                format!("/v1/agent-installations/{installation_uid}/deployments"),
                 Bytes::from(format!(
                     r#"{{"revision_uid":"{revision_uid}","reason":"candidate passed"}}"#
                 )),
                 "/AgentDefinitions/deploy",
                 serde_json::json!({
-                    "workspace_id": "workspace-a",
+                    "tenant_id": test_tenant_json(),
                     "installation_uid": installation_uid,
                     "revision_uid": revision_uid,
                     "reason": "candidate passed"
@@ -2306,13 +2274,13 @@ mod tests {
             ),
             (
                 Method::POST,
-                "/v1/workspaces/workspace-a/agent-simulations".to_string(),
+                "/v1/agent-simulations".to_string(),
                 Bytes::from(format!(
                     r#"{{"name":"compare support","plan_revision_uid":"{revision_uid}","base":{{"variant_key":"base","revision_uid":"{revision_uid}"}}}}"#
                 )),
                 "/Experiments/run_agent_revision_simulation",
                 serde_json::json!({
-                    "workspace_id": "workspace-a",
+                    "tenant_id": test_tenant_json(),
                     "name": "compare support",
                     "plan_revision_uid": revision_uid,
                     "base": {
@@ -2323,13 +2291,13 @@ mod tests {
             ),
             (
                 Method::POST,
-                format!("/v1/workspaces/workspace-a/agent-simulations/{run_uid}/compare"),
+                format!("/v1/agent-simulations/{run_uid}/compare"),
                 Bytes::from_static(
                     br#"{"base_variant_key":"base","candidate_variant_keys":["candidate"]}"#,
                 ),
                 "/Experiments/compare_agent_revision_simulation",
                 serde_json::json!({
-                    "workspace_id": "workspace-a",
+                    "tenant_id": test_tenant_json(),
                     "run_uid": run_uid,
                     "base_variant_key": "base",
                     "candidate_variant_keys": ["candidate"]
@@ -2340,7 +2308,7 @@ mod tests {
         for (method, public_path, body, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
 
-            let translation = translate_public_route(&method, &uri, &body);
+            let translation = translate(&method, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2374,9 +2342,9 @@ mod tests {
         let uri = "/v1/sessions/create-agent"
             .parse::<Uri>()
             .expect("route path should parse");
-        let body = Bytes::from_static(br#"{"meta":{"workspace_id":"workspace-a"},"agent":{}}"#);
+        let body = Bytes::from_static(br#"{"meta":{},"agent":{}}"#);
 
-        let translation = translate_public_route(&Method::POST, &uri, &body);
+        let translation = translate(&Method::POST, &uri, &body);
 
         match translation {
             RouteTranslation::Forward {
@@ -2386,7 +2354,17 @@ mod tests {
             } => {
                 assert_eq!(method, Method::POST);
                 assert_eq!(path, "/SessionStore/create_agent_session");
-                assert_eq!(forwarded_body, body.as_ref());
+                let forwarded: serde_json::Value =
+                    serde_json::from_slice(&forwarded_body).expect("forwarded body should be JSON");
+                assert_eq!(
+                    forwarded,
+                    serde_json::json!({
+                        "meta": {
+                            "tenant_id": test_tenant_json()
+                        },
+                        "agent": {}
+                    })
+                );
             }
             RouteTranslation::NoChange => panic!("agent session route should translate"),
             RouteTranslation::BadRequest(message) => {
@@ -2404,7 +2382,7 @@ mod tests {
             .expect("route path should parse");
         let body = Bytes::from_static(br#"{"event_range":{"from_seq":4,"limit":20}}"#);
 
-        let translation = translate_public_route(&Method::POST, &uri, &body);
+        let translation = translate(&Method::POST, &uri, &body);
 
         match translation {
             RouteTranslation::Forward {
@@ -2434,7 +2412,7 @@ mod tests {
             .expect("route path should parse");
         let body = Bytes::from_static(br#"{}"#);
 
-        let translation = translate_public_route(&Method::POST, &uri, &body);
+        let translation = translate(&Method::POST, &uri, &body);
 
         match translation {
             RouteTranslation::BadRequest(message) => assert_eq!(message, "bad session id"),
@@ -2446,76 +2424,68 @@ mod tests {
     }
 
     #[test]
-    fn stale_experiment_alias_routes_do_not_translate() {
-        // Pins: removed experiment aliases cannot bypass the product-shaped public API.
-        let stale_paths = [
-            "/v1/experiments/run",
-            "/v1/experiments/generate_plan",
-            "/v1/experiments/trial_status",
-        ];
-
-        for public_path in stale_paths {
-            let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
-
-            match translate_public_route(&Method::POST, &uri, &body) {
-                RouteTranslation::NoChange => {}
-                RouteTranslation::Forward { method, path, .. } => {
-                    panic!("{public_path} must not translate, got {method} {path}")
-                }
-                RouteTranslation::BadRequest(message) => {
-                    panic!("{public_path} should fall through unchanged, got: {message}")
-                }
-            }
-        }
-    }
-
-    #[test]
     fn admin_maintenance_public_routes_translate_to_restate_handlers() {
         // Pins: hosted admin-maintenance routes forward to the internal AdminMaintenance service paths.
         let cases = [
             (
-                "/v1/admin-maintenance/promote-workspace",
-                "/AdminMaintenance/promote_workspace",
-                r#"{"workspace_id":"workspace-a","target_backend":"turbopuffer","validate_percent":5,"dual_read_hours":24}"#,
+                "/v1/admin-maintenance/vector/promote",
+                "/AdminMaintenance/promote_tenant_vector",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "target_backend": "turbopuffer",
+                    "validate_percent": 5,
+                    "dual_read_hours": 24
+                }),
             ),
             (
-                "/v1/admin-maintenance/rollback-promotion",
+                "/v1/admin-maintenance/vector/rollback-promotion",
                 "/AdminMaintenance/rollback_promotion",
-                r#"{"workspace_id":"workspace-a","action":"rollback"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "action": "rollback"
+                }),
             ),
             (
-                "/v1/admin-maintenance/finalize-promotion",
+                "/v1/admin-maintenance/vector/finalize-promotion",
                 "/AdminMaintenance/finalize_promotion",
-                r#"{"workspace_id":"workspace-a","action":"finalize"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "action": "finalize"
+                }),
             ),
             (
                 "/v1/admin-maintenance/checkpoints/create",
                 "/AdminMaintenance/checkpoint_create",
-                r#"{"label":"before-deploy","session_id":null}"#,
+                serde_json::json!({ "label": "before-deploy", "session_id": null }),
             ),
             (
                 "/v1/admin-maintenance/checkpoints/list",
                 "/AdminMaintenance/checkpoint_list",
-                r#"{}"#,
+                serde_json::json!({}),
             ),
             (
                 "/v1/admin-maintenance/checkpoints/rollback",
                 "/AdminMaintenance/checkpoint_rollback",
-                r#"{"id":"br-checkpoint"}"#,
+                serde_json::json!({ "id": "br-checkpoint" }),
             ),
             (
                 "/v1/admin-maintenance/checkpoints/cleanup",
                 "/AdminMaintenance/checkpoint_cleanup",
-                r#"{}"#,
+                serde_json::json!({}),
             ),
         ];
 
-        for (public_path, internal_path, json_body) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from(json_body.as_bytes().to_vec());
+            let mut input_body = expected_body.clone();
+            if public_path.contains("/vector/")
+                && let Some(object) = input_body.as_object_mut()
+            {
+                object.remove("tenant_id");
+            }
+            let body = Bytes::from(input_body.to_string());
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2525,11 +2495,16 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        json_body.as_bytes(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    if public_path.contains("/vector/") {
+                        assert_eq!(forwarded, expected_body, "{public_path} body changed");
+                    } else {
+                        assert_eq!(
+                            forwarded, input_body,
+                            "{public_path} body should pass through"
+                        );
+                    }
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2548,30 +2523,48 @@ mod tests {
             (
                 "/v1/memory/search",
                 "/Memory/search",
-                r#"{"workspace_id":"workspace-a","query":"auth","limit":10}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "query": "auth",
+                    "limit": 10
+                }),
             ),
             (
                 "/v1/memory/show",
                 "/Memory/show",
-                r#"{"workspace_id":"workspace-a","uid":"22222222-2222-2222-2222-222222222222"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "uid": "22222222-2222-2222-2222-222222222222"
+                }),
             ),
             (
                 "/v1/memory/ingest-documents",
                 "/Memory/ingest_documents",
-                r#"{"workspace_id":"workspace-a","documents":[{"source_name":"Auth","content":"Fact: auth uses JWT"}]}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "documents": [{"source_name": "Auth", "content": "Fact: auth uses JWT"}]
+                }),
             ),
             (
                 "/v1/memory/retrieve-debug",
                 "/Memory/retrieve_debug",
-                r#"{"workspace_id":"workspace-a","query":"auth","limit":5,"no_flush_wait":true}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "query": "auth",
+                    "limit": 5,
+                    "no_flush_wait": true
+                }),
             ),
         ];
 
-        for (public_path, internal_path, json_body) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from(json_body.as_bytes().to_vec());
+            let mut input_body = expected_body.clone();
+            let object = input_body.as_object_mut().expect("expected body is object");
+            object.remove("tenant_id");
+            let body = Bytes::from(input_body.to_string());
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2581,11 +2574,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        json_body.as_bytes(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2604,45 +2595,75 @@ mod tests {
             (
                 "/v1/lineage/explain",
                 "/LineageAdmin/explain",
-                r#"{"workspace_id":"workspace-a","id":"11111111-1111-1111-1111-111111111111"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "id": "11111111-1111-1111-1111-111111111111"
+                }),
             ),
             (
                 "/v1/lineage/query",
                 "/LineageAdmin/query",
-                r#"{"workspace_id":"workspace-a","sql":"SELECT count(*) FROM lineage","since":"24 hours"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "sql": "SELECT count(*) FROM lineage",
+                    "since": "24 hours"
+                }),
             ),
             (
                 "/v1/lineage/export",
                 "/LineageAdmin/export",
-                r#"{"workspace_id":"workspace-a","subject":"subject-a"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "subject": "subject-a"
+                }),
             ),
             (
                 "/v1/lineage/verify",
                 "/LineageAdmin/verify",
-                r#"{"workspace_id":"workspace-a","window":"hot","since":"24 hours"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "window": "hot",
+                    "since": "24 hours"
+                }),
             ),
             (
                 "/v1/lineage/erase",
                 "/LineageAdmin/erase",
-                r#"{"workspace_id":"workspace-a","subject":"00ff"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "subject": "00ff"
+                }),
             ),
             (
                 "/v1/privacy/export",
                 "/Privacy/export",
-                r#"{"workspace_id":"workspace-a","subject_user_id":"22222222-2222-2222-2222-222222222222","reason":"GDPR","approval_token":"token"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "subject_user_id": "22222222-2222-2222-2222-222222222222",
+                    "reason": "GDPR",
+                    "approval_token": "token"
+                }),
             ),
             (
                 "/v1/privacy/erase",
                 "/Privacy/erase",
-                r#"{"workspace_id":"workspace-a","subject_user_id":"22222222-2222-2222-2222-222222222222","reason":"GDPR","approval_token":"token"}"#,
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "subject_user_id": "22222222-2222-2222-2222-222222222222",
+                    "reason": "GDPR",
+                    "approval_token": "token"
+                }),
             ),
         ];
 
-        for (public_path, internal_path, json_body) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from(json_body.as_bytes().to_vec());
+            let mut input_body = expected_body.clone();
+            let object = input_body.as_object_mut().expect("expected body is object");
+            object.remove("tenant_id");
+            let body = Bytes::from(input_body.to_string());
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2652,11 +2673,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        json_body.as_bytes(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2675,30 +2694,34 @@ mod tests {
             (
                 "/v1/skills/export",
                 "/Skills/export",
-                r#"{"workspace_id":"workspace-a"}"#,
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
             (
                 "/v1/skills/import",
                 "/Skills/import",
-                r#"{"workspace_id":"workspace-a","scope":{"kind":"workspace","workspace_id":"workspace-a"},"documents":[]}"#,
+                serde_json::json!({
+                    "scope": test_tenant_scope_json(),
+                    "packages": []
+                }),
             ),
             (
                 "/v1/skills/list",
                 "/Skills/list",
-                r#"{"workspace_id":"workspace-a"}"#,
-            ),
-            (
-                "/v1/skills/bootstrap-workspace-default",
-                "/Skills/bootstrap_workspace_default",
-                r#"{"documents":[]}"#,
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
             ),
         ];
 
-        for (public_path, internal_path, json_body) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from(json_body.as_bytes().to_vec());
+            let mut input_body = expected_body.clone();
+            let object = input_body.as_object_mut().expect("expected body is object");
+            object.remove("tenant_id");
+            if public_path == "/v1/skills/import" {
+                object.remove("scope");
+            }
+            let body = Bytes::from(input_body.to_string());
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2708,11 +2731,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        json_body.as_bytes(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2728,18 +2749,53 @@ mod tests {
     fn artifact_public_routes_translate_to_restate_handlers() {
         // Pins: hosted artifact edge routes forward to the internal Artifacts service paths.
         let cases = [
-            ("/v1/artifacts/import", "/Artifacts/import"),
-            ("/v1/artifacts/export", "/Artifacts/export"),
-            ("/v1/artifacts/list", "/Artifacts/list"),
-            ("/v1/artifacts/validate", "/Artifacts/validate"),
-            ("/v1/artifacts/publish", "/Artifacts/publish"),
+            (
+                "/v1/artifacts/import",
+                "/Artifacts/import",
+                serde_json::json!({
+                    "scope": test_tenant_scope_json(),
+                    "source_format": "json",
+                    "source_text": "{}"
+                }),
+            ),
+            (
+                "/v1/artifacts/export",
+                "/Artifacts/export",
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
+            ),
+            (
+                "/v1/artifacts/list",
+                "/Artifacts/list",
+                serde_json::json!({ "tenant_id": test_tenant_json() }),
+            ),
+            (
+                "/v1/artifacts/validate",
+                "/Artifacts/validate",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "source_format": "json",
+                    "source_text": "{}"
+                }),
+            ),
+            (
+                "/v1/artifacts/publish",
+                "/Artifacts/publish",
+                serde_json::json!({
+                    "scope": test_tenant_scope_json(),
+                    "revision_uid": "11111111-1111-1111-1111-111111111111"
+                }),
+            ),
         ];
 
-        for (public_path, internal_path) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+            let mut input_body = expected_body.clone();
+            let object = input_body.as_object_mut().expect("expected body is object");
+            object.remove("tenant_id");
+            object.remove("scope");
+            let body = Bytes::from(input_body.to_string());
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2749,11 +2805,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        body.as_ref(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2769,21 +2823,42 @@ mod tests {
     fn learning_candidate_public_routes_translate_to_restate_handlers() {
         // Pins: hosted learning-review edge routes forward to the internal LearningReview service paths.
         let cases = [
-            ("/v1/learning-candidates/get", "/LearningReview/get"),
+            (
+                "/v1/learning-candidates/get",
+                "/LearningReview/get",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "candidate_id": "11111111-1111-1111-1111-111111111111"
+                }),
+            ),
             (
                 "/v1/learning-candidates/accept-skill",
                 "/LearningReview/accept_skill",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "candidate_id": "11111111-1111-1111-1111-111111111111",
+                    "action": "accept",
+                    "reviewer_subject": "edge"
+                }),
             ),
-            ("/v1/learning-candidates/reject", "/LearningReview/reject"),
+            (
+                "/v1/learning-candidates/reject",
+                "/LearningReview/reject",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "candidate_id": "11111111-1111-1111-1111-111111111111",
+                    "action": "reject",
+                    "reviewer_subject": "edge"
+                }),
+            ),
         ];
 
-        for (public_path, internal_path) in cases {
+        for (public_path, internal_path, expected_body) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(
-                br#"{"workspace_id":"workspace-a","candidate_id":"11111111-1111-1111-1111-111111111111"}"#,
-            );
+            let body =
+                Bytes::from_static(br#"{"candidate_id":"11111111-1111-1111-1111-111111111111"}"#);
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2793,11 +2868,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        body.as_ref(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2822,9 +2895,9 @@ mod tests {
 
         for (public_path, internal_path) in cases {
             let uri = public_path.parse::<Uri>().expect("route path should parse");
-            let body = Bytes::from_static(br#"{"workspace_id":"workspace-a"}"#);
+            let body = Bytes::from_static(br#"{}"#);
 
-            let translation = translate_public_route(&Method::POST, &uri, &body);
+            let translation = translate(&Method::POST, &uri, &body);
 
             match translation {
                 RouteTranslation::Forward {
@@ -2834,11 +2907,9 @@ mod tests {
                 } => {
                     assert_eq!(method, Method::POST, "{public_path} must remain POST");
                     assert_eq!(path, internal_path, "{public_path} target changed");
-                    assert_eq!(
-                        forwarded_body,
-                        body.as_ref(),
-                        "{public_path} body should pass through unchanged"
-                    );
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded.get("tenant_id"), Some(&test_tenant_json()));
                 }
                 RouteTranslation::NoChange => {
                     panic!("{public_path} should translate to {internal_path}")
@@ -2857,7 +2928,7 @@ mod tests {
         let create_uri = "/v1/agents"
             .parse::<Uri>()
             .expect("agent register path should parse");
-        match translate_public_route(&Method::POST, &create_uri, &body) {
+        match translate(&Method::POST, &create_uri, &body) {
             RouteTranslation::Forward {
                 method,
                 path,
@@ -2876,7 +2947,7 @@ mod tests {
         let list_uri = "/v1/agents"
             .parse::<Uri>()
             .expect("agent list path should parse");
-        match translate_public_route(&Method::GET, &list_uri, &Bytes::new()) {
+        match translate(&Method::GET, &list_uri, &Bytes::new()) {
             RouteTranslation::Forward { method, path, body } => {
                 assert_eq!(method, Method::POST);
                 assert_eq!(path, "/Agents/list");
@@ -2899,7 +2970,7 @@ mod tests {
         ];
         for (method, public_path, internal_path) in uuid_cases {
             let uri = public_path.parse::<Uri>().expect("agent path should parse");
-            match translate_public_route(&method, &uri, &Bytes::new()) {
+            match translate(&method, &uri, &Bytes::new()) {
                 RouteTranslation::Forward { method, path, body } => {
                     assert_eq!(method, Method::POST);
                     assert_eq!(path, internal_path);
@@ -2931,7 +3002,7 @@ mod tests {
         ];
         for (public_path, internal_path) in act_as_cases {
             let uri = public_path.parse::<Uri>().expect("agent path should parse");
-            match translate_public_route(&Method::POST, &uri, &act_as_body) {
+            match translate(&Method::POST, &uri, &act_as_body) {
                 RouteTranslation::Forward { method, path, body } => {
                     assert_eq!(method, Method::POST);
                     assert_eq!(path, internal_path);

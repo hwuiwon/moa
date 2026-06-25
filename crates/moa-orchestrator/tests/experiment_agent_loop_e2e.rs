@@ -18,7 +18,7 @@ use moa_core::wire::{
     ExperimentRunStatusResponse, SkillImportRequest, SkillImportResponse, SkillPackageDocument,
     SkillPackageDocumentFile,
 };
-use moa_core::{ActionRuleScope, Event, EventRange, EventRecord, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, Event, EventRange, EventRecord, StoragePartitionId, TenantId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::json;
 use tempfile::TempDir;
@@ -93,15 +93,15 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir, &fixture_path)?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        import_support_skill(&client, ingress, &identity, &workspace_id).await?;
+        import_support_skill(&client, ingress, &identity, &storage_partition_id).await?;
 
-        let run = run_agent_loop_experiment(&client, ingress, &identity, &workspace_id).await?;
+        let run = run_agent_loop_experiment(&client, ingress, &identity, &storage_partition_id).await?;
         assert_eq!(run.status, "accepted");
         assert_ne!(run.score_run_id, Uuid::nil());
         assert!(
@@ -110,7 +110,7 @@ async fn agent_loop_experiment_creates_session_and_persists_scripted_response() 
         );
 
         let status =
-            wait_for_experiment_status(&client, ingress, &identity, &workspace_id, run.run_uid)
+            wait_for_experiment_status(&client, ingress, &identity, &storage_partition_id, run.run_uid)
                 .await?;
         assert_eq!(status.score_run_id, Some(run.score_run_id));
         assert!(
@@ -144,12 +144,13 @@ async fn import_support_skill(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) -> Result<()> {
     let request = SkillImportRequest {
         scope: ActionRuleScope::Tenant {
             tenant_id: TenantId::from(
-                Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+                Uuid::parse_str(storage_partition_id.as_str())
+                    .context("storage partition id is tenant uuid")?,
             ),
         },
         packages: vec![support_skill_package()],
@@ -167,10 +168,10 @@ async fn run_agent_loop_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) -> Result<ExperimentRunResponse> {
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         name: "spilled-order-support-agent-loop".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
@@ -207,11 +208,11 @@ async fn wait_for_experiment_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_uid: Uuid,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id)?,
         run_uid,
     };
     let mut last_status = None;
@@ -386,10 +387,10 @@ fn write_scripted_fixture(path: &Path, final_text: &str) -> Result<()> {
     fs::write(path, body).context("write scripted fixture")
 }
 
-fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .context("workspace fixture id should be a tenant UUID")
+        .context("storage partition fixture id should be a tenant UUID")
 }
 
 fn support_skill_package() -> SkillPackageDocument {

@@ -38,16 +38,16 @@ async fn turbopuffer_offline_round_trip() {
         .mount(&server)
         .await;
 
+    let storage_partition_id = Uuid::now_v7().to_string();
     let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
-        .expect("store");
-    let workspace_id = Uuid::now_v7().to_string();
+        .expect("store")
+        .with_storage_partition_id(storage_partition_id.clone());
     store
-        .upsert(&[test_item(uid, &workspace_id)])
+        .upsert(&[test_item(uid, &storage_partition_id)])
         .await
         .expect("upsert");
     let matches = store
         .knn(&VectorQuery {
-            workspace_id: Some(workspace_id.clone()),
             embedding: basis_vector(0),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -58,7 +58,7 @@ async fn turbopuffer_offline_round_trip() {
         .await
         .expect("query");
     store
-        .delete_in_workspace(&workspace_id, &[uid])
+        .delete_in_storage_partition(&storage_partition_id, &[uid])
         .await
         .expect("delete");
 
@@ -77,10 +77,10 @@ async fn turbopuffer_as_of_query_returns_unsupported_without_http_request() {
     // Pins: Turbopuffer historical queries return the typed unsupported feature error locally.
     let server = MockServer::start().await;
     let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
-        .expect("store");
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
     let error = store
         .knn(&VectorQuery {
-            workspace_id: Some(Uuid::now_v7().to_string()),
             embedding: basis_vector(0),
             k: 10,
             label_filter: Some(vec!["Fact".to_string()]),
@@ -109,10 +109,10 @@ async fn turbopuffer_as_of_query_returns_unsupported_without_http_request() {
     assert_eq!(requests.len(), 0);
 }
 
-fn test_item(uid: Uuid, workspace_id: &str) -> VectorItem {
+fn test_item(uid: Uuid, storage_partition_id: &str) -> VectorItem {
+    let _ = storage_partition_id;
     VectorItem {
         uid,
-        workspace_id: Some(workspace_id.to_string()),
         user_id: None,
         label: "Fact".to_string(),
         pii_class: "none".to_string(),

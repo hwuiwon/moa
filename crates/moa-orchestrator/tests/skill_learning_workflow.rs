@@ -17,8 +17,8 @@ use moa_core::{
     CompletionResponse, CompletionStream, Event, LLMProvider, MoaConfig, MoaError,
     ModelCapabilities, ModelId, ModelTier, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
     SegmentEvidencePolarity, SegmentId, SegmentOutcome, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, SessionStore as _, StopReason, TaskSegment, TenantId, TokenPricing, TokenUsage,
-    ToolCallFormat, ToolCallId, ToolOutput, WorkspaceId,
+    SessionStatus, SessionStore as _, StopReason, StoragePartitionId, TaskSegment, TenantId,
+    TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
 };
 use moa_orchestrator::workflows::skill_learning::{
     RunSkillLearningRequest, record_skill_learning_failure, run_skill_learning_for_experience,
@@ -81,7 +81,7 @@ mod skill_learning {
             "Create draft skill proposals from assessed experiences",
             "Follow the bounded experience evidence, generate the draft, and wait for review.",
         );
-        let (config, request, workspace_id) =
+        let (config, request, storage_partition_id) =
             seed_experience_fixture(&test_db, "workflow-proposed").await;
 
         let report = run_skill_learning_for_experience(
@@ -100,7 +100,10 @@ mod skill_learning {
             .expect("draft artifact revision id");
         let candidate = test_db
             .store()
-            .get_learning_candidate(&workspace_id, candidate_id)
+            .get_learning_candidate(
+                &tenant_id_from_storage_partition(&storage_partition_id),
+                candidate_id,
+            )
             .await
             .expect("load proposed candidate")
             .expect("candidate exists");
@@ -112,7 +115,7 @@ mod skill_learning {
             request.experience_id.to_string()
         );
 
-        let scope = workspace_scope(&workspace_id);
+        let scope = tenant_scope(&storage_partition_id);
         let revision = ArtifactRegistry::new(test_db.store().pool().clone())
             .load_revision(&scope, draft_uid)
             .await
@@ -136,7 +139,7 @@ mod skill_learning {
         let test_db = bootstrap_test_db()
             .await
             .expect("bootstrap skill-learning warning db");
-        let (_config, request, _workspace_id) =
+        let (_config, request, _storage_partition_id) =
             seed_experience_fixture(&test_db, "workflow-warning").await;
         let error = "scripted proposal generation failed";
 
@@ -193,9 +196,9 @@ mod skill_learning {
 async fn seed_experience_fixture(
     test_db: &moa_test_support::postgres::TestDb,
     _label: &str,
-) -> (MoaConfig, RunSkillLearningRequest, WorkspaceId) {
+) -> (MoaConfig, RunSkillLearningRequest, StoragePartitionId) {
     let tenant_id = TenantId::new();
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     let creator_id = Uuid::now_v7();
     let session = SessionMeta {
         id: SessionId::new(),
@@ -338,7 +341,7 @@ async fn seed_experience_fixture(
     let segment = TaskSegment {
         id: segment_id,
         session_id: session.id,
-        tenant_id: workspace_id.to_string(),
+        tenant_id: storage_partition_id.to_string(),
         segment_index: 0,
         task_summary: Some("Implement a reusable Rust workflow".to_string()),
         started_at: events[0].timestamp,
@@ -387,7 +390,7 @@ async fn seed_experience_fixture(
             session_id: session.id,
             experience_id: experience.id,
         },
-        workspace_id,
+        storage_partition_id,
     )
 }
 
@@ -422,12 +425,17 @@ fn skill_markdown(name: &str, description: &str, body: &str) -> String {
     )
 }
 
-fn workspace_scope(workspace_id: &WorkspaceId) -> ActionRuleScope {
+fn tenant_scope(storage_partition_id: &StoragePartitionId) -> ActionRuleScope {
     ActionRuleScope::Tenant {
-        tenant_id: TenantId::from(
-            Uuid::parse_str(workspace_id.as_str()).expect("test workspace id is tenant UUID"),
-        ),
+        tenant_id: tenant_id_from_storage_partition(storage_partition_id),
     }
+}
+
+fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -> TenantId {
+    TenantId::from(
+        Uuid::parse_str(storage_partition_id.as_str())
+            .expect("test storage partition id is tenant UUID"),
+    )
 }
 
 fn unique_name(prefix: &str) -> String {

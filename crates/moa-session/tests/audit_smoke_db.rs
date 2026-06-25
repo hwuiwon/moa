@@ -137,7 +137,7 @@ async fn audit_writes_log_line() -> Result<(), Box<dyn Error>> {
     let phi_like_placeholder = "audit smoke placeholder 123-45-6789";
     sqlx::query(
         "INSERT INTO moa.node_index \
-         (uid, label, workspace_id, user_id, name, pii_class, properties_summary) \
+         (uid, label, storage_partition_id, user_id, name, pii_class, properties_summary) \
          VALUES ($1, 'Fact', 'audit-smoke', NULL, $2, 'phi', $3)",
     )
     .bind(uid)

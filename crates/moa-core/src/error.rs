@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::types::{SessionId, ToolOutput, WorkspaceId};
+use crate::types::{SessionId, ToolOutput};
 
 /// Convenience result type for MOA libraries.
 pub type Result<T> = std::result::Result<T, MoaError>;
@@ -16,10 +16,6 @@ pub enum MoaError {
     /// The requested session does not exist.
     #[error("session not found: {0}")]
     SessionNotFound(SessionId),
-
-    /// The requested workspace does not exist.
-    #[error("workspace not found: {0}")]
-    WorkspaceNotFound(WorkspaceId),
 
     /// A provider returned an error.
     #[error("provider error: {0}")]
@@ -85,8 +81,8 @@ pub enum MoaError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
-    /// The workspace has exhausted its configured daily spend budget.
-    #[error("daily workspace budget exhausted: {0}")]
+    /// The tenant has exhausted its configured daily spend budget.
+    #[error("daily tenant budget exhausted: {0}")]
     BudgetExhausted(String),
 
     /// Operation was cancelled by the user.
@@ -198,7 +194,7 @@ impl MoaError {
             // in the "kill the app" sense nor recoverable within the
             // same session — treat them as fatal so the supervisor
             // doesn't leave a broken session in `Paused`.
-            Self::SessionNotFound(_) | Self::WorkspaceNotFound(_) | Self::BlobNotFound(_) => true,
+            Self::SessionNotFound(_) | Self::BlobNotFound(_) => true,
             Self::Cancelled => true,
         }
     }
@@ -265,9 +261,6 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
         },
         MoaError::SessionNotFound(session_id) => ToolFailureClass::Fatal {
             reason: format!("session not found: {session_id}"),
-        },
-        MoaError::WorkspaceNotFound(workspace_id) => ToolFailureClass::Fatal {
-            reason: format!("workspace not found: {workspace_id}"),
         },
         MoaError::ProviderQuirk(message) => ToolFailureClass::Retryable {
             reason: format!("tool provider returned a transient shape mismatch: {message}"),

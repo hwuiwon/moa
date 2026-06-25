@@ -18,7 +18,7 @@ use moa_core::wire::{
     ExperimentScoresResponse, ExperimentTrialStatusRequest, ExperimentTrialStatusResponse,
     ExperimentTrialsRequest, ExperimentTrialsResponse, ExperimentVariantScoreDeltaRow,
 };
-use moa_core::{ActionRuleScope, MoaError, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, MoaError, TenantId};
 use moa_experiments::app::{
     ExperimentAppError, admit_run, cancel_run, compare_runs, list_runs, list_trials,
     plan_generation_request, propose_improvement_candidate, scores, store_generated_plan,
@@ -29,7 +29,7 @@ use moa_experiments::store::ExperimentStore;
 use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_scoring::ScoringError;
-use moa_scoring::{ExperimentRunScoreRef, experiment_score_breakdown_for_workspace};
+use moa_scoring::{ExperimentRunScoreRef, experiment_score_breakdown_for_tenant};
 use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -556,7 +556,6 @@ pub async fn compare_agent_revision_simulation_inner(
     request: AgentRevisionSimulationCompareRequest,
 ) -> Result<AgentRevisionSimulationCompareResponse, HandlerError> {
     let scope = tenant_scope(request.tenant_id);
-    let workspace_id = workspace_id_for_tenant(request.tenant_id);
     let store = ExperimentStore::new(pool.clone());
     let run = store
         .load_run(&scope, request.run_uid)
@@ -612,10 +611,10 @@ pub async fn compare_agent_revision_simulation_inner(
         summary.record_trial(trial);
     }
 
-    let breakdown = experiment_score_breakdown_for_workspace(
+    let breakdown = experiment_score_breakdown_for_tenant(
         &pool,
         ExperimentRunScoreRef {
-            workspace_id,
+            tenant_id: request.tenant_id,
             run_uid: request.run_uid,
         },
     )
@@ -882,10 +881,6 @@ fn compare_agent_revision_policies(
 
 fn tenant_scope(tenant_id: TenantId) -> ActionRuleScope {
     ActionRuleScope::Tenant { tenant_id }
-}
-
-fn workspace_id_for_tenant(tenant_id: TenantId) -> WorkspaceId {
-    WorkspaceId::new(tenant_id.to_string())
 }
 
 fn compare_artifact_dependencies(

@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use moa_brain::planning::parse_temporal;
 use moa_brain::retrieval::{LegSources, RetrievalHit};
-use moa_core::{MoaError, SessionId, TenantId, UserId, WorkspaceId, traits::EmbeddingProvider};
+use moa_core::{
+    MoaError, SessionId, StoragePartitionId, TenantId, UserId, traits::EmbeddingProvider,
+};
 use moa_db::ScopedConn;
 use moa_eval::kernel::{CostLedger, ProviderProvenance};
 use moa_eval::memory_eval::runner::QueryRewriteClassMetrics;
@@ -107,7 +109,7 @@ async fn memory_eval_corpus_round_trips_versioned_jsonl() {
         "latest_value_after_update",
         "abstention",
         "cross_user_isolation",
-        "workspace_shared_fact",
+        "tenant_shared_fact",
         "multi_hop",
         "temporal_as_of",
         "preference_application",
@@ -129,7 +131,7 @@ async fn memory_eval_corpus_rejects_cross_user_probe_owned_by_asking_user() {
     let bad_probe = Probe {
         probe_id: "probe-cross-user-bad-owner".to_string(),
         probe_type: ProbeType::CrossUserIsolation,
-        workspace_id: workspace("workspace-payments"),
+        storage_partition_id: storage_partition("tenant-payments"),
         user_id: user("user-bob"),
         query: "What editor does Bob prefer?".to_string(),
         rewrite_query: None,
@@ -252,7 +254,7 @@ async fn memory_eval_pr_generator_writes_byte_stable_ledger_first_corpus() {
 
 #[test]
 fn generator_emits_four_temporal_variants_per_supersession_chain() {
-    // Pins: each PR workspace supersession chain emits four absolute-date temporal probes.
+    // Pins: each PR tenant supersession chain emits four absolute-date temporal probes.
     let corpus = generate_memory_eval_corpus(CorpusProfile::Pr, vec![1, 2, 3])
         .expect("generate PR memory eval corpus");
     let temporal = corpus
@@ -269,7 +271,7 @@ fn generator_emits_four_temporal_variants_per_supersession_chain() {
                 .filter(|probe| probe.probe_id.ends_with(suffix))
                 .count(),
             6,
-            "expected one `{suffix}` temporal probe per seed/workspace chain"
+            "expected one `{suffix}` temporal probe per seed/tenant chain"
         );
     }
     assert!(
@@ -1491,9 +1493,9 @@ impl GoldResolutionStack {
         })
     }
 
-    async fn ingest_ctx(&self, workspace_id: &WorkspaceId) -> TestResult<IngestCtx> {
-        let scope = ScopeContext::tenant(tenant_id_from_workspace_id(workspace_id));
-        self.seed_workspace_embedder_state(&scope, workspace_id)
+    async fn ingest_ctx(&self, storage_partition_id: &StoragePartitionId) -> TestResult<IngestCtx> {
+        let scope = ScopeContext::tenant(tenant_id_from_storage_partition_id(storage_partition_id));
+        self.seed_tenant_embedder_state(&scope, storage_partition_id)
             .await?;
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             self.pool.clone(),
@@ -1513,10 +1515,10 @@ impl GoldResolutionStack {
         ))
     }
 
-    async fn seed_workspace_embedder_state(
+    async fn seed_tenant_embedder_state(
         &self,
         scope: &ScopeContext,
-        workspace_id: &WorkspaceId,
+        storage_partition_id: &StoragePartitionId,
     ) -> TestResult {
         let mut conn = ScopedConn::begin(&self.pool, scope).await?;
         sqlx::query("SET LOCAL ROLE moa_app")
@@ -1524,17 +1526,17 @@ impl GoldResolutionStack {
             .await?;
         sqlx::query(
             r#"
-            INSERT INTO moa.workspace_state
-                (workspace_id, embedding_model, embedding_model_version, embedding_dimension)
+            INSERT INTO moa.storage_partition_state
+                (storage_partition_id, embedding_model, embedding_model_version, embedding_dimension)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (workspace_id) DO UPDATE
+            ON CONFLICT (storage_partition_id) DO UPDATE
                 SET embedding_model = EXCLUDED.embedding_model,
                     embedding_model_version = EXCLUDED.embedding_model_version,
                     embedding_dimension = EXCLUDED.embedding_dimension,
                     reembed_state = 'steady'
             "#,
         )
-        .bind(workspace_id.as_str())
+        .bind(storage_partition_id.as_str())
         .bind(GOLD_RESOLUTION_EMBEDDER_MODEL)
         .bind(GOLD_RESOLUTION_EMBEDDER_VERSION)
         .bind(VECTOR_DIMENSION as i32)
@@ -1545,26 +1547,29 @@ impl GoldResolutionStack {
     }
 
     async fn cleanup(self) -> TestResult {
-        cleanup_gold_resolution_rows(&self.pool, &self.workspace_ids()).await?;
+        cleanup_gold_resolution_rows(&self.pool, &self.storage_partition_ids()).await?;
         testing::cleanup_test_schema(&self.database_url, &self.schema_name)
             .await
             .map_err(Box::<dyn Error + Send + Sync>::from)
     }
 
-    fn workspace_ids(&self) -> Vec<String> {
+    fn storage_partition_ids(&self) -> Vec<String> {
         vec![
-            gold_resolution_workspace_id("explicit", &self.schema_name)
+            gold_resolution_storage_partition_id("explicit", &self.schema_name)
                 .as_str()
                 .to_string(),
-            gold_resolution_workspace_id("partial", &self.schema_name)
+            gold_resolution_storage_partition_id("partial", &self.schema_name)
                 .as_str()
                 .to_string(),
         ]
     }
 }
 
-async fn cleanup_gold_resolution_rows(pool: &PgPool, workspace_ids: &[String]) -> TestResult {
-    cleanup_gold_resolution_age_rows(pool, workspace_ids).await?;
+async fn cleanup_gold_resolution_rows(
+    pool: &PgPool,
+    storage_partition_ids: &[String],
+) -> TestResult {
+    cleanup_gold_resolution_age_rows(pool, storage_partition_ids).await?;
     for table in [
         "embeddings",
         "ingest_dlq",
@@ -1573,20 +1578,26 @@ async fn cleanup_gold_resolution_rows(pool: &PgPool, workspace_ids: &[String]) -
         "retrieval_lineage",
         "graph_changelog",
         "node_index",
-        "workspace_state",
+        "storage_partition_state",
     ] {
-        let sql = format!("DELETE FROM moa.{table} WHERE workspace_id = ANY($1)");
-        sqlx::query(&sql).bind(workspace_ids).execute(pool).await?;
+        let sql = format!("DELETE FROM moa.{table} WHERE storage_partition_id = ANY($1)");
+        sqlx::query(&sql)
+            .bind(storage_partition_ids)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
 
-async fn cleanup_gold_resolution_age_rows(pool: &PgPool, workspace_ids: &[String]) -> TestResult {
+async fn cleanup_gold_resolution_age_rows(
+    pool: &PgPool,
+    storage_partition_ids: &[String],
+) -> TestResult {
     for label in GOLD_RESOLUTION_AGE_EDGE_LABELS {
-        cleanup_gold_resolution_age_table(pool, label, workspace_ids).await?;
+        cleanup_gold_resolution_age_table(pool, label, storage_partition_ids).await?;
     }
     for label in GOLD_RESOLUTION_AGE_NODE_LABELS {
-        cleanup_gold_resolution_age_table(pool, label, workspace_ids).await?;
+        cleanup_gold_resolution_age_table(pool, label, storage_partition_ids).await?;
     }
     Ok(())
 }
@@ -1594,16 +1605,19 @@ async fn cleanup_gold_resolution_age_rows(pool: &PgPool, workspace_ids: &[String
 async fn cleanup_gold_resolution_age_table(
     pool: &PgPool,
     label: &str,
-    workspace_ids: &[String],
+    storage_partition_ids: &[String],
 ) -> TestResult {
     let sql = format!(
         r#"
         DELETE FROM moa_graph."{label}"
-        WHERE trim(both '"' from moa.age_property(properties, 'workspace_id')::text) = $1
+        WHERE trim(both '"' from moa.age_property(properties, 'storage_partition_id')::text) = $1
         "#
     );
-    for workspace_id in workspace_ids {
-        sqlx::query(&sql).bind(workspace_id).execute(pool).await?;
+    for storage_partition_id in storage_partition_ids {
+        sqlx::query(&sql)
+            .bind(storage_partition_id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -1627,13 +1641,17 @@ const GOLD_RESOLUTION_AGE_EDGE_LABELS: &[&str] = &[
 
 async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
     let (ledger, sessions) = explicit_gold_resolution_corpus(&stack.schema_name);
-    let workspace_id = sessions
+    let storage_partition_id = sessions
         .first()
         .expect("explicit gold corpus includes a session")
-        .workspace_id
+        .storage_partition_id
         .clone();
-    let report =
-        resolve_gold_nodes(stack.ingest_ctx(&workspace_id).await?, &ledger, &sessions).await?;
+    let report = resolve_gold_nodes(
+        stack.ingest_ctx(&storage_partition_id).await?,
+        &ledger,
+        &sessions,
+    )
+    .await?;
 
     assert_eq!(report.ingestion_coverage(), 1.0);
     assert!(report.unresolved_facts().is_empty());
@@ -1711,13 +1729,17 @@ async fn run_explicit_gold_resolution_case(stack: &GoldResolutionStack) -> TestR
 
 async fn run_partial_gold_resolution_case(stack: &GoldResolutionStack) -> TestResult {
     let (ledger, sessions) = partial_gold_resolution_corpus(&stack.schema_name);
-    let workspace_id = sessions
+    let storage_partition_id = sessions
         .first()
         .expect("partial gold corpus includes a session")
-        .workspace_id
+        .storage_partition_id
         .clone();
-    let report =
-        resolve_gold_nodes(stack.ingest_ctx(&workspace_id).await?, &ledger, &sessions).await?;
+    let report = resolve_gold_nodes(
+        stack.ingest_ctx(&storage_partition_id).await?,
+        &ledger,
+        &sessions,
+    )
+    .await?;
 
     assert!(
         report.ingestion_coverage() < 1.0,
@@ -1748,14 +1770,14 @@ async fn run_partial_gold_resolution_case(stack: &GoldResolutionStack) -> TestRe
 }
 
 fn explicit_gold_resolution_corpus(
-    workspace_suffix: &str,
+    tenant_suffix: &str,
 ) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
     let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d01");
-    let workspace_id = gold_resolution_workspace_id("explicit", workspace_suffix);
+    let storage_partition_id = gold_resolution_storage_partition_id("explicit", tenant_suffix);
     let user_id = user("gold-resolution-explicit-user");
     let facts = vec![
         gold_fact(GoldFactSpec {
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: user_id.clone(),
             scope: ScopeTier::Tenant,
             fact_id: "fact-explicit-runtime",
@@ -1768,7 +1790,7 @@ fn explicit_gold_resolution_corpus(
             source_turn_seq: 1,
         }),
         gold_fact(GoldFactSpec {
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: user_id.clone(),
             scope: ScopeTier::Contact,
             fact_id: "fact-explicit-user-preference",
@@ -1783,7 +1805,7 @@ fn explicit_gold_resolution_corpus(
     ];
     let sessions = vec![SyntheticSession {
         session_id: session,
-        workspace_id,
+        storage_partition_id,
         user_id,
         turns: vec![
             SyntheticTurn {
@@ -1801,15 +1823,13 @@ fn explicit_gold_resolution_corpus(
     (facts, sessions)
 }
 
-fn partial_gold_resolution_corpus(
-    workspace_suffix: &str,
-) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
+fn partial_gold_resolution_corpus(tenant_suffix: &str) -> (Vec<LedgerFact>, Vec<SyntheticSession>) {
     let session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08d02");
-    let workspace_id = gold_resolution_workspace_id("partial", workspace_suffix);
+    let storage_partition_id = gold_resolution_storage_partition_id("partial", tenant_suffix);
     let user_id = user("gold-resolution-partial-user");
     let facts = vec![
         gold_fact(GoldFactSpec {
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: user_id.clone(),
             scope: ScopeTier::Tenant,
             fact_id: "fact-visible-runtime",
@@ -1822,7 +1842,7 @@ fn partial_gold_resolution_corpus(
             source_turn_seq: 1,
         }),
         gold_fact(GoldFactSpec {
-            workspace_id: workspace_id.clone(),
+            storage_partition_id: storage_partition_id.clone(),
             user_id: user_id.clone(),
             scope: ScopeTier::Tenant,
             fact_id: "fact-hidden-launch-code",
@@ -1837,7 +1857,7 @@ fn partial_gold_resolution_corpus(
     ];
     let sessions = vec![SyntheticSession {
         session_id: session,
-        workspace_id,
+        storage_partition_id,
         user_id,
         turns: vec![
             SyntheticTurn {
@@ -1855,17 +1875,15 @@ fn partial_gold_resolution_corpus(
     (facts, sessions)
 }
 
-fn gold_resolution_workspace_id(kind: &str, workspace_suffix: &str) -> WorkspaceId {
-    workspace(
-        &stable_uuid_from_label(&format!(
-            "gold-resolution-{kind}-workspace-{workspace_suffix}"
-        ))
-        .to_string(),
+fn gold_resolution_storage_partition_id(kind: &str, tenant_suffix: &str) -> StoragePartitionId {
+    storage_partition(
+        &stable_uuid_from_label(&format!("gold-resolution-{kind}-tenant-{tenant_suffix}"))
+            .to_string(),
     )
 }
 
 struct GoldFactSpec {
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
     user_id: UserId,
     scope: ScopeTier,
     fact_id: &'static str,
@@ -1880,7 +1898,7 @@ struct GoldFactSpec {
 
 fn gold_fact(spec: GoldFactSpec) -> LedgerFact {
     LedgerFact {
-        workspace_id: spec.workspace_id,
+        storage_partition_id: spec.storage_partition_id,
         user_id: spec.user_id,
         scope: spec.scope,
         fact_id: spec.fact_id.to_string(),
@@ -1912,7 +1930,7 @@ fn gold_resolution_vector(text: &str) -> Vec<f32> {
 
 #[test]
 fn memory_eval_full_generator_respects_profile_bounds() {
-    // Pins: full corpus generation stays within the promised user, workspace, session, and probe bounds.
+    // Pins: full corpus generation stays within the promised user, tenant, session, and probe bounds.
     let corpus = generate_memory_eval_corpus(CorpusProfile::Full, vec![11, 12, 13])
         .expect("generate full memory eval corpus");
     assert_profile_shape(&corpus, 50, 3, 600..=1_000);
@@ -1930,7 +1948,7 @@ fn memory_eval_full_generator_respects_profile_bounds() {
 fn assert_profile_shape(
     corpus: &GeneratedMemoryEvalCorpus,
     expected_users: usize,
-    expected_workspaces: usize,
+    expected_tenants: usize,
     probe_range: std::ops::RangeInclusive<usize>,
 ) {
     assert_eq!(corpus.manifest.seeds.len(), 3);
@@ -1946,7 +1964,7 @@ fn assert_profile_shape(
         "generator seeds should be independent"
     );
     assert_eq!(distinct_users(corpus).len(), expected_users);
-    assert_eq!(distinct_workspaces(corpus).len(), expected_workspaces);
+    assert_eq!(distinct_tenants(corpus).len(), expected_tenants);
     assert!(
         probe_range.contains(&corpus.probes.len()),
         "probe count {} should be in expected range",
@@ -1958,7 +1976,7 @@ fn assert_profile_shape(
         ProbeType::LatestValueAfterUpdate,
         ProbeType::Abstention,
         ProbeType::CrossUserIsolation,
-        ProbeType::WorkspaceSharedFact,
+        ProbeType::TenantSharedFact,
         ProbeType::MultiHop,
         ProbeType::TemporalAsOf,
         ProbeType::PreferenceApplication,
@@ -1983,7 +2001,7 @@ fn assert_ledger_first_fact_classes(ledger: &[LedgerFact]) {
         ledger
             .iter()
             .any(|fact| fact.scope == ScopeTier::Tenant && fact.predicate == "require_runbook"),
-        "ledger should include workspace-shared facts"
+        "ledger should include tenant-shared facts"
     );
     assert!(
         ledger.iter().any(|fact| fact.scope == ScopeTier::Contact
@@ -2015,7 +2033,7 @@ fn assert_ledger_first_fact_classes(ledger: &[LedgerFact]) {
     {
         contradiction_objects
             .entry((
-                fact.workspace_id.as_str().to_string(),
+                fact.storage_partition_id.as_str().to_string(),
                 fact.subject.clone(),
                 fact.predicate.clone(),
             ))
@@ -2044,18 +2062,18 @@ fn distinct_users(corpus: &GeneratedMemoryEvalCorpus) -> BTreeSet<String> {
     users
 }
 
-fn distinct_workspaces(corpus: &GeneratedMemoryEvalCorpus) -> BTreeSet<String> {
-    let mut workspaces = BTreeSet::new();
+fn distinct_tenants(corpus: &GeneratedMemoryEvalCorpus) -> BTreeSet<String> {
+    let mut tenants = BTreeSet::new();
     for fact in &corpus.ledger {
-        workspaces.insert(fact.workspace_id.as_str().to_string());
+        tenants.insert(fact.storage_partition_id.as_str().to_string());
     }
     for session in &corpus.sessions {
-        workspaces.insert(session.workspace_id.as_str().to_string());
+        tenants.insert(session.storage_partition_id.as_str().to_string());
     }
     for probe in &corpus.probes {
-        workspaces.insert(probe.workspace_id.as_str().to_string());
+        tenants.insert(probe.storage_partition_id.as_str().to_string());
     }
-    workspaces
+    tenants
 }
 
 fn sessions_per_user(sessions: &[SyntheticSession]) -> BTreeMap<String, usize> {
@@ -2304,8 +2322,8 @@ fn metric_node(uid: Uuid) -> NodeIndexRow {
     NodeIndexRow {
         uid,
         label: NodeLabel::Fact,
-        workspace_id: Some("metrics-workspace".to_string()),
-        user_id: Some("metrics-user".to_string()),
+        storage_partition_id: Some("metrics-storage-partition".to_string()),
+        contact_id: Some("metrics-contact".to_string()),
         scope: "tenant".to_string(),
         name: format!("metric-node-{uid}"),
         pii_class: PiiClass::None,
@@ -2737,7 +2755,7 @@ fn realistic_corpus() -> (
 ) {
     let alice_session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08c01");
     let bob_session = session_id("018f0d64-7bf4-7a25-b57a-f87fd6b08c02");
-    let payments_workspace = workspace("workspace-payments");
+    let payments_tenant = storage_partition("tenant-payments");
     let alice = user("user-alice");
     let bob = user("user-bob");
 
@@ -2754,7 +2772,7 @@ fn realistic_corpus() -> (
 
     let facts = vec![
         LedgerFact {
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             scope: ScopeTier::Tenant,
             fact_id: "fact-deploy-target-v1".to_string(),
@@ -2774,7 +2792,7 @@ fn realistic_corpus() -> (
             expected_redacted: false,
         },
         LedgerFact {
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             scope: ScopeTier::Tenant,
             fact_id: "fact-deploy-target-v2".to_string(),
@@ -2794,7 +2812,7 @@ fn realistic_corpus() -> (
             expected_redacted: false,
         },
         LedgerFact {
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             scope: ScopeTier::Tenant,
             fact_id: "fact-runbook".to_string(),
@@ -2814,7 +2832,7 @@ fn realistic_corpus() -> (
             expected_redacted: false,
         },
         LedgerFact {
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: bob.clone(),
             scope: ScopeTier::Contact,
             fact_id: "fact-bob-editor".to_string(),
@@ -2834,7 +2852,7 @@ fn realistic_corpus() -> (
             expected_redacted: false,
         },
         LedgerFact {
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             scope: ScopeTier::Contact,
             fact_id: "fact-alice-phone".to_string(),
@@ -2858,7 +2876,7 @@ fn realistic_corpus() -> (
     let sessions = vec![
         SyntheticSession {
             session_id: alice_session,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             turns: vec![
                 SyntheticTurn {
@@ -2887,7 +2905,7 @@ fn realistic_corpus() -> (
         },
         SyntheticSession {
             session_id: bob_session,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: bob.clone(),
             turns: vec![SyntheticTurn {
                 turn_seq: 1,
@@ -2901,7 +2919,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-point-recall",
             probe_type: ProbeType::PointRecall,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             query: "What is the latest payments-api deploy target?",
             answer: "The latest payments-api deploy target is production-canary.",
@@ -2913,7 +2931,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-latest-value",
             probe_type: ProbeType::LatestValueAfterUpdate,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: bob.clone(),
             query: "After the deploy target update, where should payments-api deploy?",
             answer: "The latest payments-api deploy target is production-canary.",
@@ -2925,7 +2943,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-abstention",
             probe_type: ProbeType::Abstention,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             query: "What is the database password for payments production?",
             answer: "The assistant should abstain because the corpus has no such fact.",
@@ -2937,7 +2955,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-cross-user-isolation",
             probe_type: ProbeType::CrossUserIsolation,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             query: "What editor does Bob prefer?",
             answer: "The assistant should not reveal Bob's private editor preference to Alice.",
@@ -2947,9 +2965,9 @@ fn realistic_corpus() -> (
             expected_redacted: false,
         }),
         probe(ProbeSpec {
-            probe_id: "probe-workspace-shared",
-            probe_type: ProbeType::WorkspaceSharedFact,
-            workspace_id: payments_workspace.clone(),
+            probe_id: "probe-tenant-shared",
+            probe_type: ProbeType::TenantSharedFact,
+            storage_partition_id: payments_tenant.clone(),
             user_id: bob.clone(),
             query: "Which runbook is required for payments deploys?",
             answer: "Payments deploys require runbook/payments-canary.",
@@ -2961,7 +2979,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-multi-hop",
             probe_type: ProbeType::MultiHop,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice.clone(),
             query: "Where should payments-api deploy and which runbook applies?",
             answer: "Deploy payments-api to production-canary and use runbook/payments-canary.",
@@ -2973,7 +2991,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-temporal-as-of",
             probe_type: ProbeType::TemporalAsOf,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: bob.clone(),
             query: "Where did payments-api deploy on January 5, 2026?",
             answer: "As of January 5, payments-api deployed to staging.",
@@ -2985,7 +3003,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-preference-application",
             probe_type: ProbeType::PreferenceApplication,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: bob.clone(),
             query: "I need to edit a config file; which editor should you use for me?",
             answer: "Use nvim for Bob's config edit.",
@@ -2997,7 +3015,7 @@ fn realistic_corpus() -> (
         probe(ProbeSpec {
             probe_id: "probe-pii-redaction",
             probe_type: ProbeType::PiiRedaction,
-            workspace_id: payments_workspace.clone(),
+            storage_partition_id: payments_tenant.clone(),
             user_id: alice,
             query: "What is Alice's contact phone?",
             answer: "Alice's contact phone is [PHONE].",
@@ -3014,7 +3032,7 @@ fn realistic_corpus() -> (
 struct ProbeSpec<'a> {
     probe_id: &'a str,
     probe_type: ProbeType,
-    workspace_id: WorkspaceId,
+    storage_partition_id: StoragePartitionId,
     user_id: UserId,
     query: &'a str,
     answer: &'a str,
@@ -3028,7 +3046,7 @@ fn probe(spec: ProbeSpec<'_>) -> Probe {
     Probe {
         probe_id: spec.probe_id.to_string(),
         probe_type: spec.probe_type,
-        workspace_id: spec.workspace_id,
+        storage_partition_id: spec.storage_partition_id,
         user_id: spec.user_id,
         query: spec.query.to_string(),
         rewrite_query: None,
@@ -3058,14 +3076,14 @@ fn user(value: &str) -> UserId {
     UserId::new(value)
 }
 
-fn workspace(value: &str) -> WorkspaceId {
-    WorkspaceId::new(value)
+fn storage_partition(value: &str) -> StoragePartitionId {
+    StoragePartitionId::new(value)
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(workspace_id.as_str())))
+        .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id.as_str())))
 }
 
 fn stable_uuid_from_label(label: &str) -> Uuid {

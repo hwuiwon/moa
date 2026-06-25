@@ -8,7 +8,7 @@ impl PostgresSessionStore {
         let learning_log = self.table_name("learning_log");
         sqlx::query(&format!(
             "INSERT INTO {learning_log} \
-             (id, tenant_id, workspace_id, learning_type, target_id, target_label, payload, confidence, \
+             (id, tenant_id, storage_partition_id, learning_type, target_id, target_label, payload, confidence, \
               source_refs, actor, valid_from, valid_to, batch_id, version) \
              VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
@@ -40,7 +40,7 @@ impl PostgresSessionStore {
         let learning_log = self.table_name("learning_log");
         sqlx::query(&format!(
             "INSERT INTO {learning_log} \
-             (id, tenant_id, workspace_id, learning_type, target_id, target_label, payload, confidence, \
+             (id, tenant_id, storage_partition_id, learning_type, target_id, target_label, payload, confidence, \
               source_refs, actor, valid_from, valid_to, batch_id, version) \
              VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))

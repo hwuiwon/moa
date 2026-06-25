@@ -31,8 +31,10 @@ PORT_FORWARD_PID=$!
 sleep 5
 
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+TENANT_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 SESSION_META="$(cat <<EOF
-{"id":"$(uuidgen | tr '[:upper:]' '[:lower:]')","workspace_id":"observability-smoke","user_id":"smoke-user","title":"Observability smoke","status":"created","platform":"desktop","platform_channel":null,"model":"${MODEL}","created_at":"${NOW}","updated_at":"${NOW}","completed_at":null,"parent_session_id":null,"total_input_tokens":0,"total_input_tokens_uncached":0,"total_input_tokens_cache_write":0,"total_input_tokens_cache_read":0,"total_output_tokens":0,"total_cost_cents":0,"event_count":0,"last_checkpoint_seq":null}
+{"id":"${SESSION_ID}","tenant_id":"${TENANT_ID}","title":"Observability smoke","status":"created","channel":"chat","model":"${MODEL}","created_at":"${NOW}","updated_at":"${NOW}","completed_at":null,"parent_session_id":null,"total_input_tokens":0,"total_input_tokens_uncached":0,"total_input_tokens_cache_write":0,"total_input_tokens_cache_read":0,"total_output_tokens":0,"total_cost_cents":0,"event_count":0,"last_checkpoint_seq":null}
 EOF
 )"
 

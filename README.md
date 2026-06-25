@@ -12,7 +12,7 @@ Status: early active development. The architecture is stable enough to document,
 
 ## What Matters
 
-- **Enterprise tenancy:** teams own users, workspaces, sessions, memory, skills, learning entries, lineage, and audit evidence.
+- **Enterprise tenancy:** tenants own contacts, sessions, memory, skills, learning entries, lineage, policies, and audit evidence.
 - **Durable orchestration:** Restate virtual objects own sessions and sub-agents; workflows own one-shot jobs such as memory consolidation.
 - **Postgres everywhere:** sessions, events, analytics, task segments, memory indexes, embeddings, and the learning log live in Postgres/Neon.
 - **Task-aware sessions:** every session can contain multiple task segments, each with tool and skill usage, cost, and a resolution score.
@@ -146,11 +146,11 @@ cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --healt
 ```
 
 The binary serves these Restate surfaces: virtual objects `Session`, `SubAgent`,
-`Workspace`, `CronJob`, and `IngestionVO`; services `Agents`,
+`Tenant`, `CronJob`, and `IngestionVO`; services `Agents`,
 `AdminMaintenance`, `Analytics`, `Approvals`, `ApiKeys`, `Audit`, `Authz`,
 `Eval`, `GraphMemoryMaint`, `Health`, `LineageAdmin`, `LLMGateway`, `Memory`,
 `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-`WorkspaceStore`, and `Whoami`; and
+`ActionPolicy`, and `Whoami`; and
 workflows `Consolidate`, `EvalRun`, and `TurnExecution`. Deployment
 registration is handled outside the binary.
 

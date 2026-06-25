@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use moa_core::{
     LearningCandidate, LearningCandidateStatus, LearningCandidateType, LearningRiskClass,
-    SessionId, SessionMeta, SkillMetadata, TaskFacetSet, TaskFingerprint, TenantId, WorkspaceId,
+    SessionId, SessionMeta, SkillMetadata, TaskFacetSet, TaskFingerprint, TenantId,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -68,7 +68,6 @@ pub(crate) fn skill_draft_candidate(
     LearningCandidate {
         id: input.candidate_id,
         tenant_id: session.tenant_id,
-        workspace_id: WorkspaceId::new(session.tenant_id.to_string()),
         user_id: None,
         candidate_type: LearningCandidateType::Skill,
         status: LearningCandidateStatus::Proposed,

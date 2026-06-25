@@ -9,7 +9,7 @@ The root workspace currently contains:
 | Crate | Purpose |
 |---|---|
 | `moa-core` | Shared traits, DTOs, config, events, telemetry, analytics helpers |
-| `moa-artifacts` | Canonical skill, connector, action, and workflow artifact documents, validation, references, workspace-default and tenant-override scopes, and Postgres registry |
+| `moa-artifacts` | Canonical skill, connector, action, and workflow artifact documents, validation, references, tenant scopes, and Postgres registry |
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
 | `moa-workflows` | Artifact-backed workflow run lifecycle and future workflow node interpreter/improvement logic |
 | `moa-session` | Tenant-owned Postgres session store, event log, task segments, learning log, analytics |
@@ -34,7 +34,7 @@ The root workspace currently contains:
 | `moa-orchestrator` | One production binary with Restate services, virtual objects, workflows, and in-process application/repository boundaries |
 | `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
 | `moa-security` | Action policies, MCP credential proxy, prompt-injection controls |
-| `moa-skills` | Skill parser, DB-backed workspace-default and tenant-override package registry, tenant-local draft proposal generation, and regression suite source generation |
+| `moa-skills` | Skill parser, DB-backed tenant package registry, tenant-local draft proposal generation, and regression suite source generation |
 | `moa-eval` | Evaluation harness used by CI and optional orchestrator-owned internal eval execution |
 | `moa-loadtest` | Direct HTTP load-test harness for hosted orchestrator APIs |
 | `workspace-hack` | Generated `cargo-hakari` feature unification crate |
@@ -130,12 +130,12 @@ and deployment setup. Key groups:
 
 Implemented architectural pillars:
 
-- Restate cloud orchestration with session, sub-agent, workspace control-plane, service, and workflow handlers.
+- Restate cloud orchestration with session, sub-agent, tenant, service, and workflow handlers.
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and tenant-level skill resolution-rate ranking.
-- Draft-only tenant skill distillation/improvement proposals with explicit review acceptance before learning-log emission; tenant learning is never promoted into workspace defaults automatically.
+- Draft-only tenant skill distillation/improvement proposals with explicit review acceptance before learning-log emission; tenant learning remains tenant-local.
 - Lineage, eval score storage, cold export support, and opt-in compliance audit tables.
 - Hosted API automation surfaces.
 

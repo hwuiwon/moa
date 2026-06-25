@@ -12,7 +12,7 @@ use moa_core::wire::{
     ExperimentRunRequest, ExperimentRunResponse, ExperimentRunStatusRequest,
     ExperimentRunStatusResponse, WorkflowRunStatus, WorkflowStatusRequest,
 };
-use moa_core::{ActionRuleScope, TenantId, WorkspaceId};
+use moa_core::{ActionRuleScope, StoragePartitionId, TenantId};
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -71,18 +71,28 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
     let tenant_id = TenantId::new();
     let mut identity = test_user_identity();
     identity.tenant_id = tenant_id;
-    let workspace_id = WorkspaceId::new(tenant_id.to_string());
+    let storage_partition_id = StoragePartitionId::new(tenant_id.to_string());
     grant_tenant_admin(&identity, tenant_id).await?;
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 
     let result = async {
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
-        let published =
-            import_and_publish_damaged_food_workflow(&client, ingress, &identity, &workspace_id)
-                .await?;
+        let published = import_and_publish_damaged_food_workflow(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+        )
+        .await?;
 
-        let run =
-            run_workflow_experiment(&client, ingress, &identity, &workspace_id, &published).await?;
+        let run = run_workflow_experiment(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+            &published,
+        )
+        .await?;
         assert_eq!(run.status, "accepted");
         assert_ne!(run.score_run_id, Uuid::nil());
         assert!(
@@ -94,15 +104,21 @@ async fn workflow_experiment_links_queued_artifact_workflow_run() -> Result<()> 
             &client,
             ingress,
             &identity,
-            &workspace_id,
+            &storage_partition_id,
             run.run_uid,
         )
         .await?;
         let workflow_run_uid = experiment_status
             .workflow_run_uid
             .context("experiment status should expose linked workflow_run_uid")?;
-        let workflow_status =
-            workflow_status(&client, ingress, &identity, &workspace_id, workflow_run_uid).await?;
+        let workflow_status = workflow_status(
+            &client,
+            ingress,
+            &identity,
+            &storage_partition_id,
+            workflow_run_uid,
+        )
+        .await?;
 
         assert_eq!(experiment_status.target_kind.as_deref(), Some("workflow"));
         assert_eq!(experiment_status.score_run_id, Some(run.score_run_id));
@@ -143,11 +159,12 @@ async fn import_and_publish_damaged_food_workflow(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
 ) -> Result<ArtifactPublishResponse> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: TenantId::from(
-            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            Uuid::parse_str(storage_partition_id.as_str())
+                .context("workspace id is tenant uuid")?,
         ),
     };
     let import_request = ArtifactImportRequest {
@@ -195,12 +212,12 @@ async fn run_workflow_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     published: &ArtifactPublishResponse,
 ) -> Result<ExperimentRunResponse> {
     let order_id = format!("ORD-{}", Uuid::now_v7());
     let request = ExperimentRunRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_workspace(storage_partition_id)?,
         name: "damaged-food-workflow-experiment".to_string(),
         plan_revision_uid: None,
         target: Some(json!({
@@ -241,11 +258,11 @@ async fn wait_for_linked_workflow_experiment(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_uid: Uuid,
 ) -> Result<ExperimentRunStatusResponse> {
     let request = ExperimentRunStatusRequest {
-        tenant_id: tenant_id_from_workspace(workspace_id)?,
+        tenant_id: tenant_id_from_workspace(storage_partition_id)?,
         run_uid,
     };
     let mut last_status = None;
@@ -275,12 +292,13 @@ async fn workflow_status(
     client: &reqwest::Client,
     ingress: &str,
     identity: &Identity,
-    workspace_id: &WorkspaceId,
+    storage_partition_id: &StoragePartitionId,
     run_id: Uuid,
 ) -> Result<WorkflowRunStatus> {
     let request = WorkflowStatusRequest {
         tenant_id: TenantId::from(
-            Uuid::parse_str(workspace_id.as_str()).context("workspace id is tenant uuid")?,
+            Uuid::parse_str(storage_partition_id.as_str())
+                .context("workspace id is tenant uuid")?,
         ),
         run_id,
     };
@@ -405,8 +423,8 @@ fn assert_validation_report_has_no_errors(report: &Value) -> Result<()> {
     bail!("published workflow had validation errors: {errors:?}")
 }
 
-fn tenant_id_from_workspace(workspace_id: &WorkspaceId) -> Result<TenantId> {
-    Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_workspace(storage_partition_id: &StoragePartitionId) -> Result<TenantId> {
+    Uuid::parse_str(storage_partition_id.as_str())
         .map(TenantId::from)
-        .context("workspace fixture id should be a tenant UUID")
+        .context("storage partition fixture id should be a tenant UUID")
 }

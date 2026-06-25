@@ -91,7 +91,7 @@ Current defenses:
 
 - The context pipeline preserves instruction precedence.
 - Tool output is wrapped so lower-authority text cannot override system,
-  workspace-default, tenant, contact/session, or skill instructions.
+  tenant, contact/session, or skill instructions.
 - A per-turn canary is injected into tool-enabled requests.
 - Tool calls are blocked if they leak the active canary or any
   `moa_canary_*` marker.
@@ -126,14 +126,12 @@ Action-policy decisions are scoped to parsed tool intent, not raw command
 strings. Shell matching splits command chains so a rule for one command does not
 cover `&&`, `||`, `;`, or pipe-connected follow-up commands.
 
-Default tool policy is auto-mode `allow`. Workspace-level policy rows are
-inherited defaults for tenants, and tenant-level policy rows override those
-defaults. Rules and config can return `allow`, `deny`, or `admin_review`.
+Default tool policy is auto-mode `allow`. Tenant-level policy rows and config
+can return `allow`, `deny`, or `admin_review`.
 `admin_review` persists a tenant action-review row plus event, returns a
 pending-review tool result to the model, and does not block the root or
 sub-agent workflow. Tenant admins clear or deny the stored action later through
-the action-review service; workspace admins manage inherited defaults through
-explicit control-plane operations.
+the action-review service.
 
 ## Security Audit
 

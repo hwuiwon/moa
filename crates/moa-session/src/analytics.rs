@@ -57,7 +57,7 @@ pub async fn list_tool_call_summaries(
                      PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms, \
                      AVG(CASE WHEN success THEN 1.0 ELSE 0.0 END)::DOUBLE PRECISION AS success_rate \
                  FROM {tool_call_analytics} \
-                 WHERE finished_at IS NOT NULL AND workspace_id = $1 \
+                 WHERE finished_at IS NOT NULL AND storage_partition_id = $1 \
                  GROUP BY tool_name \
                  ORDER BY call_count DESC, p95_ms DESC, tool_name ASC"
             )
@@ -112,7 +112,7 @@ pub async fn list_session_turn_metrics(
     rows.iter().map(session_turn_metric_from_row).collect()
 }
 
-/// Loads a recent tenant rollup from `daily_workspace_metrics`.
+/// Loads a recent tenant rollup from `daily_storage_partition_metrics`.
 pub async fn get_tenant_stats(
     pool: &PgPool,
     schema_name: Option<&str>,
@@ -142,7 +142,8 @@ async fn get_tenant_stats_with_conn(
     tenant_id: &TenantId,
     days: u32,
 ) -> Result<TenantAnalyticsSummary> {
-    let daily_workspace_metrics = qualified_relation(schema_name, "daily_workspace_metrics");
+    let daily_storage_partition_metrics =
+        qualified_relation(schema_name, "daily_storage_partition_metrics");
     let start_day = analytics_window_start(days);
     let row = sqlx::query(&format!(
         "SELECT \
@@ -157,8 +158,8 @@ async fn get_tenant_stats_with_conn(
                  ELSE COALESCE(SUM(total_cache_read_tokens), 0)::DOUBLE PRECISION \
                      / COALESCE(SUM(total_input_tokens), 0)::DOUBLE PRECISION \
              END AS cache_hit_rate \
-         FROM {daily_workspace_metrics} \
-         WHERE workspace_id = $1 AND day >= $2"
+         FROM {daily_storage_partition_metrics} \
+         WHERE storage_partition_id = $1 AND day >= $2"
     ))
     .bind(tenant_id.to_string())
     .bind(start_day)
@@ -228,7 +229,7 @@ pub async fn list_learning_candidate_summaries(
 ) -> Result<Vec<LearningCandidateSummary>> {
     let learning_candidates = qualified_relation(schema_name, "learning_candidates");
     let mut query = QueryBuilder::<Postgres>::new(format!(
-        "SELECT id, tenant_id, workspace_id, contact_id, candidate_type, status, \
+        "SELECT id, tenant_id, storage_partition_id, contact_id, candidate_type, status, \
          target_id, target_label, task_fingerprint, payload, \
          confidence::DOUBLE PRECISION AS confidence, risk_class, created_at, updated_at \
          FROM {learning_candidates} WHERE tenant_id = "
@@ -257,14 +258,15 @@ async fn list_cache_daily_metrics_with_conn(
     tenant_id: &TenantId,
     days: u32,
 ) -> Result<Vec<CacheDailyMetric>> {
-    let daily_workspace_metrics = qualified_relation(schema_name, "daily_workspace_metrics");
+    let daily_storage_partition_metrics =
+        qualified_relation(schema_name, "daily_storage_partition_metrics");
     let start_day = analytics_window_start(days);
     let rows = sqlx::query(&format!(
         "SELECT \
-             workspace_id, day, session_count, turn_count, total_input_tokens, \
+             storage_partition_id, day, session_count, turn_count, total_input_tokens, \
              total_cache_read_tokens, total_output_tokens, total_cost_cents, avg_cache_hit_rate \
-         FROM {daily_workspace_metrics} \
-         WHERE workspace_id = $1 AND day >= $2 \
+         FROM {daily_storage_partition_metrics} \
+         WHERE storage_partition_id = $1 AND day >= $2 \
          ORDER BY day ASC"
     ))
     .bind(tenant_id.to_string())
@@ -416,7 +418,7 @@ fn session_turn_metric_from_row(row: &PgRow) -> Result<SessionTurnMetric> {
 fn cache_daily_metric_from_row(row: &PgRow) -> Result<CacheDailyMetric> {
     Ok(CacheDailyMetric {
         tenant_id: TenantId(
-            row.try_get::<String, _>("workspace_id")
+            row.try_get::<String, _>("storage_partition_id")
                 .map_err(map_sqlx_error)?
                 .parse()
                 .map_err(|error| {

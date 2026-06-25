@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub(super) struct RetrievalQuery {
-    pub(super) workspace_index: usize,
+    pub(super) tenant_index: usize,
     pub(super) text: String,
     pub(super) embedding: Vec<f32>,
     pub(super) is_repeated: bool,
@@ -12,7 +12,7 @@ pub(super) struct RetrievalQuery {
 
 #[derive(Debug, Clone)]
 pub(super) struct QueryTemplate {
-    pub(super) workspace_index: usize,
+    pub(super) tenant_index: usize,
     pub(super) text: String,
     pub(super) is_repeated: bool,
 }
@@ -130,14 +130,14 @@ pub(super) struct QueryOutcome {
 pub(super) async fn warm_cache(stack: &Stack, cfg: &PerfGateConfig) -> Result<()> {
     let mut queries = hydrate_queries(
         stack.embedder.as_ref(),
-        build_repeated_pool(QUERY_SEED, cfg.workspaces, cfg.facts_per_workspace),
+        build_repeated_pool(QUERY_SEED, cfg.tenants, cfg.facts_per_tenant),
     )
     .await?;
     for query in queries.drain(..) {
         let retriever = stack
             .retrievers
-            .get(query.workspace_index)
-            .context("warm query referenced missing workspace retriever")?;
+            .get(query.tenant_index)
+            .context("warm query referenced missing tenant retriever")?;
         let _ = retriever.retrieve(&query).await?;
     }
     Ok(())
@@ -147,7 +147,7 @@ pub(super) async fn drive_load(stack: Stack, cfg: &PerfGateConfig) -> Result<Loa
     let total = cfg.qps as usize * cfg.duration.as_secs() as usize;
     let queries = hydrate_queries(
         stack.embedder.as_ref(),
-        build_query_mix(QUERY_SEED, total, cfg.workspaces, cfg.facts_per_workspace),
+        build_query_mix(QUERY_SEED, total, cfg.tenants, cfg.facts_per_tenant),
     )
     .await?;
     let tick_micros = (1_000_000_u64 / u64::from(cfg.qps)).max(1);
@@ -167,8 +167,8 @@ pub(super) async fn drive_load(stack: Stack, cfg: &PerfGateConfig) -> Result<Loa
         let permit = semaphore.clone().acquire_owned().await?;
         let retriever = stack
             .retrievers
-            .get(query.workspace_index)
-            .context("load query referenced missing workspace retriever")?
+            .get(query.tenant_index)
+            .context("load query referenced missing tenant retriever")?
             .clone();
         joins.push(tokio::spawn(async move {
             let t0 = Instant::now();
@@ -213,7 +213,7 @@ pub(super) async fn hydrate_queries(
                 .context("missing query embedding")?
                 .clone();
             Ok(RetrievalQuery {
-                workspace_index: template.workspace_index,
+                tenant_index: template.tenant_index,
                 text: template.text,
                 embedding,
                 is_repeated: template.is_repeated,
@@ -225,11 +225,11 @@ pub(super) async fn hydrate_queries(
 pub(super) fn build_query_mix(
     seed: u64,
     total: usize,
-    workspaces: usize,
-    facts_per_workspace: usize,
+    tenants: usize,
+    facts_per_tenant: usize,
 ) -> Vec<QueryTemplate> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let repeated_pool = build_repeated_pool(seed, workspaces, facts_per_workspace);
+    let repeated_pool = build_repeated_pool(seed, tenants, facts_per_tenant);
     let mut out = Vec::with_capacity(total);
     for _ in 0..(total * 70 / 100) {
         if let Some(query) = repeated_pool.choose(&mut rng) {
@@ -242,7 +242,7 @@ pub(super) fn build_query_mix(
         }
     }
     for _ in 0..(total.saturating_sub(out.len())) {
-        out.push(novel_query(&mut rng, workspaces, facts_per_workspace));
+        out.push(novel_query(&mut rng, tenants, facts_per_tenant));
     }
     out.shuffle(&mut rng);
     out
@@ -250,17 +250,17 @@ pub(super) fn build_query_mix(
 
 pub(super) fn build_repeated_pool(
     seed: u64,
-    workspaces: usize,
-    facts_per_workspace: usize,
+    tenants: usize,
+    facts_per_tenant: usize,
 ) -> Vec<QueryTemplate> {
     let mut rng = StdRng::seed_from_u64(seed ^ 0x0A11_CE55);
     (0..50)
         .map(|index| {
-            let workspace_index = index % workspaces;
-            let fact_index = (index * 37 + rng.r#gen::<usize>()) % facts_per_workspace;
+            let tenant_index = index % tenants;
+            let fact_index = (index * 37 + rng.r#gen::<usize>()) % facts_per_tenant;
             QueryTemplate {
-                workspace_index,
-                text: canonical_query(workspace_index, fact_index),
+                tenant_index,
+                text: canonical_query(tenant_index, fact_index),
                 is_repeated: true,
             }
         })
@@ -273,7 +273,7 @@ pub(super) fn paraphrase(base: &QueryTemplate, rng: &mut StdRng) -> QueryTemplat
         .copied()
         .unwrap_or("lookup");
     QueryTemplate {
-        workspace_index: base.workspace_index,
+        tenant_index: base.tenant_index,
         text: format!("{prefix} {}", base.text),
         is_repeated: false,
     }
@@ -281,21 +281,21 @@ pub(super) fn paraphrase(base: &QueryTemplate, rng: &mut StdRng) -> QueryTemplat
 
 pub(super) fn novel_query(
     rng: &mut StdRng,
-    workspaces: usize,
-    facts_per_workspace: usize,
+    tenants: usize,
+    facts_per_tenant: usize,
 ) -> QueryTemplate {
-    let workspace_index = rng.gen_range(0..workspaces);
-    let fact_index = rng.gen_range(0..facts_per_workspace);
+    let tenant_index = rng.gen_range(0..tenants);
+    let fact_index = rng.gen_range(0..facts_per_tenant);
     QueryTemplate {
-        workspace_index,
-        text: canonical_query(workspace_index, fact_index),
+        tenant_index,
+        text: canonical_query(tenant_index, fact_index),
         is_repeated: false,
     }
 }
 
-pub(super) fn canonical_query(workspace_index: usize, fact_index: usize) -> String {
+pub(super) fn canonical_query(tenant_index: usize, fact_index: usize) -> String {
     format!(
-        "workspace {workspace_index} fact {fact_index} topic {} retrieval memory",
+        "tenant {tenant_index} fact {fact_index} topic {} retrieval memory",
         fact_index % 17
     )
 }

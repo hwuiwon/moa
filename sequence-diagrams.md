@@ -42,7 +42,7 @@ sequenceDiagram
     participant Hand
 
     User->>Platform: "deploy to staging"
-    Platform->>Messaging: InboundMessage {user, workspace, text}
+    Platform->>Messaging: InboundMessage {tenant, contact/user, text}
     Messaging->>Orch: start_session / signal(QueueMessage)
     Orch->>Log: create_session + emit UserMessage
     Orch->>Brain: spawn / wake
@@ -153,7 +153,7 @@ sequenceDiagram
     rect rgb(230, 245, 255)
         Note over Pipe: STABLE PREFIX (cached across turns)
         Pipe->>Pipe: 1. IdentityProcessor — static system prompt
-        Pipe->>Pipe: 2. InstructionProcessor — workspace + user prefs
+        Pipe->>Pipe: 2. InstructionProcessor — tenant/contact prefs
         Pipe->>Tools: 3. ToolDefinitionProcessor — get loadout (cap 30)
         Tools-->>Pipe: tool schemas (deterministic key order)
         Pipe->>Skills: 4. SkillInjector — metadata only (~100 tok/skill)

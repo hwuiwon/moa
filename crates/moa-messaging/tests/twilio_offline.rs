@@ -114,7 +114,7 @@ async fn twilio_offline_from_vault_uses_api_key_and_messaging_service() {
         twilio_base_url: server.uri(),
         ..MessagingConfig::default()
     };
-    let client = TwilioSmsClient::from_vault(vault, "workspace-1", &config)
+    let client = TwilioSmsClient::from_vault(vault, "tenant-1", &config)
         .await
         .expect("Twilio client should build from vault credentials");
     let message = TwilioSmsMessage::new(TEST_TO_NUMBER, "moa-alert");
@@ -391,7 +391,7 @@ struct MockVault {
 impl MockVault {
     fn with(mut self, service: &str, value: &str) -> Self {
         self.credentials.insert(
-            (service.to_string(), "workspace-1".to_string()),
+            (service.to_string(), "tenant-1".to_string()),
             Credential::Bearer(value.to_string()),
         );
         self

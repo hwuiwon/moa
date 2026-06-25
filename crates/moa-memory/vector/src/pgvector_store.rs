@@ -1,7 +1,5 @@
 //! pgvector-backed graph-memory vector store.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
@@ -50,10 +48,10 @@ impl PgvectorStore {
         }
     }
 
-    /// Creates a pgvector store that reads through the workspace control-plane scope.
+    /// Creates a pgvector store that reads through the tenant control-plane scope.
     ///
     /// This is intended for administrative operations, such as backend promotion,
-    /// that must validate both tenant and contact-owned vectors in one workspace.
+    /// that must validate both tenant and contact-owned vectors in one tenant.
     pub fn new_for_control_plane(pool: PgPool, scope: ScopeContext) -> Self {
         Self {
             pool,
@@ -79,6 +77,10 @@ impl PgvectorStore {
     /// Returns the request scope used for RLS GUCs.
     pub fn scope(&self) -> &ScopeContext {
         &self.scope
+    }
+
+    fn storage_partition_id(&self) -> String {
+        self.scope.tenant_id().to_string()
     }
 
     async fn begin(&self) -> Result<ScopedConn<'_>> {
@@ -108,24 +110,22 @@ impl VectorStore for PgvectorStore {
 
     async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
         let mut conn = self.begin().await?;
-        guard_workspace_embedder_for_write(conn.as_mut(), items).await?;
-        upsert_items(conn.as_mut(), items).await?;
+        let storage_partition_id = self.storage_partition_id();
+        guard_storage_partition_embedder_for_write(conn.as_mut(), &storage_partition_id, items)
+            .await?;
+        upsert_items(conn.as_mut(), &storage_partition_id, items).await?;
         conn.commit().await?;
         Ok(())
     }
 
     async fn upsert_in_tx(&self, conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
-        guard_workspace_embedder_for_write(conn, items).await?;
-        upsert_items(conn, items).await
+        let storage_partition_id = self.storage_partition_id();
+        guard_storage_partition_embedder_for_write(conn, &storage_partition_id, items).await?;
+        upsert_items(conn, &storage_partition_id, items).await
     }
 
     async fn knn(&self, query: &VectorQuery) -> Result<Vec<VectorMatch>> {
-        let Some(workspace_id) = query.workspace_id.as_deref() else {
-            return Err(Error::WorkspaceRequired {
-                backend: self.backend(),
-                operation: "knn",
-            });
-        };
+        let storage_partition_id = self.storage_partition_id();
         let limit = i64::try_from(query.k).map_err(|_| Error::QueryLimitTooLarge(query.k))?;
         let max_pii_rank = pii_rank(&query.max_pii_class)?;
         if limit <= 0 {
@@ -141,7 +141,7 @@ impl VectorStore for PgvectorStore {
                 .execute(conn.as_mut())
                 .await?;
         }
-        guard_workspace_embedder(conn.as_mut(), query).await?;
+        guard_storage_partition_embedder(conn.as_mut(), &storage_partition_id).await?;
         validate_dimension(&query.embedding)?;
         let halfvec = HalfVector::from_f32_slice(&query.embedding);
         let mut builder =
@@ -164,8 +164,8 @@ impl VectorStore for PgvectorStore {
         } else {
             builder.push("node.valid_to IS NULL AND embedding.valid_to IS NULL");
         }
-        builder.push(" AND embedding.workspace_id = ");
-        builder.push_bind(workspace_id);
+        builder.push(" AND embedding.storage_partition_id = ");
+        builder.push_bind(&storage_partition_id);
         builder.push(
             r#"
                  AND CASE embedding.pii_class
@@ -212,52 +212,39 @@ impl VectorStore for PgvectorStore {
         }
 
         let mut conn = self.begin().await?;
-        delete_items(conn.as_mut(), uids).await?;
+        let storage_partition_id = self.storage_partition_id();
+        delete_items(conn.as_mut(), &storage_partition_id, uids).await?;
         conn.commit().await?;
         Ok(())
     }
 
     async fn delete_in_tx(&self, conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
-        delete_items(conn, uids).await
+        let storage_partition_id = self.storage_partition_id();
+        delete_items(conn, &storage_partition_id, uids).await
     }
 }
 
-struct WorkspaceEmbedderState {
+struct StoragePartitionEmbedderState {
     embedding_model: String,
     embedding_dimension: usize,
     reembed_state: String,
 }
 
-async fn guard_workspace_embedder_for_write(
+async fn guard_storage_partition_embedder_for_write(
     conn: &mut PgConnection,
+    storage_partition_id: &str,
     items: &[VectorItem],
 ) -> Result<()> {
-    let mut workspace_ids = Vec::new();
-    for workspace_id in items.iter().filter_map(|item| item.workspace_id.as_deref()) {
-        if !workspace_ids.iter().any(|seen| seen == workspace_id) {
-            workspace_ids.push(workspace_id.to_string());
-        }
+    if items.is_empty() {
+        return Ok(());
     }
 
-    let mut states = HashMap::with_capacity(workspace_ids.len());
-    for workspace_id in workspace_ids {
-        let state = load_workspace_embedder_state(conn, &workspace_id).await?;
-        guard_workspace_dimension(&workspace_id, &state)?;
-        states.insert(workspace_id, state);
-    }
-
+    let state = load_storage_partition_embedder_state(conn, storage_partition_id).await?;
+    guard_storage_partition_dimension(storage_partition_id, &state)?;
     for item in items {
-        let Some(workspace_id) = item.workspace_id.as_deref() else {
-            continue;
-        };
-        let Some(state) = states.get(workspace_id) else {
-            return Err(Error::WorkspaceEmbedderStateMissing {
-                workspace_id: workspace_id.to_string(),
-            });
-        };
         if state.embedding_model != item.embedding_model {
             return Err(Error::EmbedderModelMismatch {
-                workspace_id: workspace_id.to_string(),
+                storage_partition_id: storage_partition_id.to_string(),
                 configured_model: state.embedding_model.clone(),
                 requested_model: item.embedding_model.clone(),
             });
@@ -266,51 +253,54 @@ async fn guard_workspace_embedder_for_write(
     Ok(())
 }
 
-async fn guard_workspace_embedder(conn: &mut PgConnection, query: &VectorQuery) -> Result<()> {
-    let Some(workspace_id) = query.workspace_id.as_deref() else {
-        return Ok(());
-    };
-    let state = load_workspace_embedder_state(conn, workspace_id).await?;
+async fn guard_storage_partition_embedder(
+    conn: &mut PgConnection,
+    storage_partition_id: &str,
+) -> Result<()> {
+    let state = load_storage_partition_embedder_state(conn, storage_partition_id).await?;
     if state.reembed_state == "in_progress" {
         return Err(Error::ReembedInProgress {
-            workspace_id: workspace_id.to_string(),
+            storage_partition_id: storage_partition_id.to_string(),
         });
     }
 
-    guard_workspace_dimension(workspace_id, &state)
+    guard_storage_partition_dimension(storage_partition_id, &state)
 }
 
-async fn load_workspace_embedder_state(
+async fn load_storage_partition_embedder_state(
     conn: &mut PgConnection,
-    workspace_id: &str,
-) -> Result<WorkspaceEmbedderState> {
+    storage_partition_id: &str,
+) -> Result<StoragePartitionEmbedderState> {
     let row = sqlx::query(
         r#"
         SELECT embedding_model, embedding_dimension, reembed_state
-          FROM moa.workspace_state
-         WHERE workspace_id = $1
+          FROM moa.storage_partition_state
+         WHERE storage_partition_id = $1
         "#,
     )
-    .bind(workspace_id)
+    .bind(storage_partition_id)
     .fetch_optional(&mut *conn)
     .await?;
 
-    let row = row.ok_or_else(|| Error::WorkspaceEmbedderStateMissing {
-        workspace_id: workspace_id.to_string(),
+    let row = row.ok_or_else(|| Error::StoragePartitionEmbedderStateMissing {
+        storage_partition_id: storage_partition_id.to_string(),
     })?;
     let configured_dimension: i32 = row.try_get("embedding_dimension")?;
     let embedding_dimension = usize::try_from(configured_dimension).unwrap_or_default();
-    Ok(WorkspaceEmbedderState {
+    Ok(StoragePartitionEmbedderState {
         embedding_model: row.try_get("embedding_model")?,
         embedding_dimension,
         reembed_state: row.try_get("reembed_state")?,
     })
 }
 
-fn guard_workspace_dimension(workspace_id: &str, state: &WorkspaceEmbedderState) -> Result<()> {
+fn guard_storage_partition_dimension(
+    storage_partition_id: &str,
+    state: &StoragePartitionEmbedderState,
+) -> Result<()> {
     if state.embedding_dimension != VECTOR_DIMENSION {
         return Err(Error::EmbedderMismatch {
-            workspace_id: workspace_id.to_string(),
+            storage_partition_id: storage_partition_id.to_string(),
             configured_model: state.embedding_model.clone(),
             configured_dimension: state.embedding_dimension,
             required_dimension: VECTOR_DIMENSION,
@@ -319,7 +309,11 @@ fn guard_workspace_dimension(workspace_id: &str, state: &WorkspaceEmbedderState)
     Ok(())
 }
 
-async fn upsert_items(conn: &mut PgConnection, items: &[VectorItem]) -> Result<()> {
+async fn upsert_items(
+    conn: &mut PgConnection,
+    storage_partition_id: &str,
+    items: &[VectorItem],
+) -> Result<()> {
     for item in items {
         validate_dimension(&item.embedding)?;
         pii_rank(&item.pii_class)?;
@@ -327,10 +321,10 @@ async fn upsert_items(conn: &mut PgConnection, items: &[VectorItem]) -> Result<(
         sqlx::query(
             r#"
             INSERT INTO moa.embeddings
-                (uid, workspace_id, user_id, label, pii_class, embedding,
+                (uid, storage_partition_id, user_id, label, pii_class, embedding,
                  embedding_model, embedding_model_version, valid_to)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (workspace_id, uid) DO UPDATE
+            ON CONFLICT (storage_partition_id, uid) DO UPDATE
                 SET user_id = EXCLUDED.user_id,
                     label = EXCLUDED.label,
                     pii_class = EXCLUDED.pii_class,
@@ -341,7 +335,7 @@ async fn upsert_items(conn: &mut PgConnection, items: &[VectorItem]) -> Result<(
             "#,
         )
         .bind(item.uid)
-        .bind(item.workspace_id.as_deref())
+        .bind(storage_partition_id)
         .bind(item.user_id.as_deref())
         .bind(&item.label)
         .bind(&item.pii_class)
@@ -355,12 +349,17 @@ async fn upsert_items(conn: &mut PgConnection, items: &[VectorItem]) -> Result<(
     Ok(())
 }
 
-async fn delete_items(conn: &mut PgConnection, uids: &[Uuid]) -> Result<()> {
+async fn delete_items(
+    conn: &mut PgConnection,
+    storage_partition_id: &str,
+    uids: &[Uuid],
+) -> Result<()> {
     if uids.is_empty() {
         return Ok(());
     }
 
-    sqlx::query("DELETE FROM moa.embeddings WHERE uid = ANY($1)")
+    sqlx::query("DELETE FROM moa.embeddings WHERE storage_partition_id = $1 AND uid = ANY($2)")
+        .bind(storage_partition_id)
         .bind(uids)
         .execute(conn)
         .await?;

@@ -2,7 +2,7 @@
 
 /// Canonical column list for selecting session rows.
 pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
-    "id, tenant_id, workspace_id, title, status, channel, active_channel_binding_id, model, ",
+    "id, tenant_id, storage_partition_id, title, status, channel, active_channel_binding_id, model, ",
     "created_at, updated_at, completed_at, parent_session_id, contact_id, contact_tenant_id, ",
     "contact_state, contact_canonical_id, contact_linked_ids, contact_scopes, ",
     "created_by_actor_type, created_by_actor_id, contact_promoted_from_id, total_input_tokens, ",
@@ -12,7 +12,7 @@ pub(crate) const SESSION_SELECT_COLUMNS: &str = concat!(
 
 /// Canonical column list for inserting session rows.
 pub(crate) const SESSION_INSERT_COLUMNS: &str = concat!(
-    "id, tenant_id, workspace_id, user_id, title, status, channel, active_channel_binding_id, model, ",
+    "id, tenant_id, storage_partition_id, user_id, title, status, channel, active_channel_binding_id, model, ",
     "created_at, updated_at, completed_at, parent_session_id, contact_id, contact_tenant_id, ",
     "contact_state, contact_canonical_id, contact_linked_ids, contact_scopes, ",
     "created_by_actor_type, created_by_actor_id, contact_promoted_from_id, total_input_tokens_uncached, ",
@@ -26,7 +26,7 @@ pub(crate) const EVENT_COLUMNS: &str =
 
 /// Canonical column list for selecting session summaries.
 pub(crate) const SESSION_SUMMARY_COLUMNS: &str = concat!(
-    "id, tenant_id, workspace_id, title, status, channel, model, updated_at, ",
+    "id, tenant_id, storage_partition_id, title, status, channel, model, updated_at, ",
     "contact_id, contact_tenant_id, contact_state, contact_canonical_id, contact_linked_ids, ",
     "contact_scopes, created_by_actor_type, created_by_actor_id"
 );
@@ -47,7 +47,7 @@ pub(crate) const LEARNING_ENTRY_COLUMNS: &str = concat!(
 
 /// Canonical column list for selecting experience records.
 pub(crate) const EXPERIENCE_RECORD_COLUMNS: &str = concat!(
-    "id, segment_id, session_id, tenant_id, workspace_id, user_id, task_summary, ",
+    "id, segment_id, session_id, tenant_id, storage_partition_id, user_id, task_summary, ",
     "task_fingerprint, task_fingerprint_payload, task_facets, actions, resources, outcome, ",
     "confidence::DOUBLE PRECISION AS confidence, evidence, tools_used, skills_activated, ",
     "turn_count, token_cost, duration_ms, assessment_policy_version, extraction_policy_version, ",
@@ -56,13 +56,13 @@ pub(crate) const EXPERIENCE_RECORD_COLUMNS: &str = concat!(
 
 /// Canonical column list for selecting experience attributions.
 pub(crate) const EXPERIENCE_ATTRIBUTION_COLUMNS: &str = concat!(
-    "id, experience_id, tenant_id, workspace_id, user_id, subject_type, subject_id, effect, ",
+    "id, experience_id, tenant_id, storage_partition_id, user_id, subject_type, subject_id, effect, ",
     "confidence::DOUBLE PRECISION AS confidence, evidence, created_at"
 );
 
 /// Canonical column list for selecting learning candidates.
 pub(crate) const LEARNING_CANDIDATE_COLUMNS: &str = concat!(
-    "id, tenant_id, workspace_id, user_id, candidate_type, status, target_id, target_label, ",
+    "id, tenant_id, storage_partition_id, user_id, candidate_type, status, target_id, target_label, ",
     "task_fingerprint, task_fingerprint_payload, task_facets, payload, evaluation_payload, ",
     "source_experience_ids, confidence::DOUBLE PRECISION AS confidence, risk_class, ",
     "promotion_requirements, status_reason, batch_id, created_at, updated_at"

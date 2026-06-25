@@ -24,7 +24,7 @@ pub struct PipelineStageReport {
 /// Ordered context compilation pipeline.
 pub struct ContextPipeline {
     stages: Vec<Box<dyn ContextProcessor>>,
-    daily_workspace_budget_cents: u32,
+    daily_tenant_budget_cents: u32,
     snapshot_config: ContextSnapshotConfig,
 }
 
@@ -37,19 +37,19 @@ impl ContextPipeline {
     /// Creates a pipeline from an ordered list of processors and runtime limits.
     pub fn with_runtime_limits(
         stages: Vec<Box<dyn ContextProcessor>>,
-        daily_workspace_budget_cents: u32,
+        daily_tenant_budget_cents: u32,
         snapshot_config: ContextSnapshotConfig,
     ) -> Self {
         Self {
             stages,
-            daily_workspace_budget_cents,
+            daily_tenant_budget_cents,
             snapshot_config,
         }
     }
 
-    /// Returns the configured daily workspace budget limit in cents.
-    pub fn daily_workspace_budget_cents(&self) -> u32 {
-        self.daily_workspace_budget_cents
+    /// Returns the configured daily tenant budget limit in cents.
+    pub fn daily_tenant_budget_cents(&self) -> u32 {
+        self.daily_tenant_budget_cents
     }
 
     /// Returns the number of configured pipeline stages.

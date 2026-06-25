@@ -23,15 +23,15 @@ struct Args {
     /// Perf gate profile to run.
     #[arg(long, value_enum, default_value_t = Profile::Retrieval)]
     profile: Profile,
-    /// Number of tenant workspaces to seed and query.
+    /// Number of tenants to seed and query.
     #[arg(long, default_value_t = 10)]
-    workspaces: usize,
+    tenants: usize,
     /// Number of concurrent virtual users for mock profiles.
     #[arg(long)]
     vus: Option<usize>,
-    /// Number of facts to seed per workspace.
+    /// Number of facts to seed per tenant.
     #[arg(long, default_value_t = 1000)]
-    facts_per_workspace: usize,
+    facts_per_tenant: usize,
     /// Target query rate.
     #[arg(long, default_value_t = 100)]
     qps: u32,
@@ -67,8 +67,8 @@ struct Args {
 impl Args {
     fn retrieval_config(&self) -> PerfGateConfig {
         PerfGateConfig {
-            workspaces: self.workspaces,
-            facts_per_workspace: self.facts_per_workspace,
+            tenants: self.tenants,
+            facts_per_tenant: self.facts_per_tenant,
             qps: self.qps,
             duration: self.duration,
             p95_budget_ms: self.max_p95_ms.unwrap_or(self.p95_budget_ms),

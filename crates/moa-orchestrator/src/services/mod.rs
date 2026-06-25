@@ -1,5 +1,6 @@
 //! Restate service modules hosted by the orchestrator binary.
 
+pub mod action_policy;
 pub mod action_reviews;
 pub mod admin_maintenance;
 pub mod agent_definitions;
@@ -32,4 +33,3 @@ pub mod tenants;
 pub mod tool_executor;
 pub mod whoami;
 pub mod workflows;
-pub mod workspace_store;

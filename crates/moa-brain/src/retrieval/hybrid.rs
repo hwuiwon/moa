@@ -193,7 +193,7 @@ impl HybridRetriever {
             .with_lineage_enabled(config.memory.retrieval.lineage_enabled)
     }
 
-    /// Adds an optional Turbopuffer target backend for promoted workspaces.
+    /// Adds an optional Turbopuffer target backend for promoted storage partitions.
     #[must_use]
     pub fn with_turbopuffer(mut self, turbopuffer: Option<Arc<TurbopufferStore>>) -> Self {
         self.turbopuffer = turbopuffer;
@@ -361,7 +361,8 @@ impl HybridRetriever {
         }
         if state.vector_backend == "turbopuffer" {
             if let Some(turbopuffer) = &self.turbopuffer {
-                return match run_vector_leg(turbopuffer.as_ref(), req).await {
+                let scoped_turbopuffer = turbopuffer.scoped_to_tenant(tenant_id);
+                return match run_vector_leg(&scoped_turbopuffer, req).await {
                     Ok(hits) => Ok(hits),
                     Err(error) if is_turbopuffer_as_of_unsupported(&error) => {
                         tracing::debug!(
@@ -387,8 +388,9 @@ impl HybridRetriever {
             return run_vector_leg(self.vector.as_ref(), req).await;
         };
 
+        let scoped_turbopuffer = turbopuffer.scoped_to_tenant(req.scope.tenant_id());
         let pg_future = run_vector_leg(self.vector.as_ref(), req);
-        let tp_future = run_vector_leg(turbopuffer.as_ref(), req);
+        let tp_future = run_vector_leg(&scoped_turbopuffer, req);
         let (pg_result, tp_result) = tokio::join!(pg_future, tp_future);
 
         if let (Ok(pg_hits), Ok(tp_hits)) = (&pg_result, &tp_result) {
@@ -420,7 +422,7 @@ impl HybridRetriever {
         let row = sqlx::query_as::<_, (String, String, Option<DateTime<Utc>>)>(
             r#"
                 SELECT vector_backend, vector_backend_state, dual_read_until
-                FROM moa.workspace_state
+                FROM moa.storage_partition_state
                 WHERE tenant_id = $1
                 "#,
         )
@@ -808,7 +810,7 @@ mod tests {
         config.weights.recency = 0.0;
         config.weights.access = 0.0;
         config.weights.subject_match = 0.0;
-        config.weights.scope_workspace = 0.0;
+        config.weights.scope_tenant = 0.0;
         let mut hits = vec![graph_lexical_hit, lexical_hit];
 
         rank_hydrated_hits(
@@ -864,7 +866,7 @@ mod tests {
         config.weights.recency = 0.0;
         config.weights.access = 0.0;
         config.weights.subject_match = 0.0;
-        config.weights.scope_workspace = 0.0;
+        config.weights.scope_tenant = 0.0;
         let mut hits = vec![vector_hit, graph_hit];
 
         rank_hydrated_hits(
@@ -989,8 +991,8 @@ mod tests {
             node: NodeIndexRow {
                 uid,
                 label: NodeLabel::Fact,
-                workspace_id: Some("workspace".to_string()),
-                user_id: None,
+                storage_partition_id: Some("tenant".to_string()),
+                contact_id: None,
                 scope: scope.to_string(),
                 name: format!("{scope} fact"),
                 pii_class: PiiClass::None,
@@ -1007,9 +1009,9 @@ mod tests {
         NodeIndexRow {
             uid,
             label: NodeLabel::Fact,
-            workspace_id: Some("workspace".to_string()),
-            user_id: None,
-            scope: "workspace".to_string(),
+            storage_partition_id: Some("tenant".to_string()),
+            contact_id: None,
+            scope: "tenant".to_string(),
             name: name.to_string(),
             pii_class: PiiClass::None,
             valid_to: None,

@@ -12,7 +12,7 @@ use moa_core::wire::{
 use moa_core::{BranchManager, TenantId};
 use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
-    PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, WorkspacePromotion,
+    PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
     finalize_promotion, rollback_promotion,
 };
 use moa_observability::restate_observability::annotate_restate_handler_span;
@@ -26,8 +26,8 @@ use crate::handlers::authz_shim::{require_fga_client, require_identity, translat
 #[restate_sdk::service]
 #[name = "AdminMaintenance"]
 pub trait AdminMaintenance {
-    /// Promotes one workspace to a new vector backend.
-    async fn promote_workspace(
+    /// Promotes one tenant's vector namespace to a new backend.
+    async fn promote_tenant_vector(
         request: Json<VectorPromoteRequest>,
     ) -> Result<Json<VectorPromotionResponse>, HandlerError>;
 
@@ -68,12 +68,12 @@ pub struct AdminMaintenanceImpl;
 
 impl AdminMaintenance for AdminMaintenanceImpl {
     #[tracing::instrument(skip(self, ctx, request))]
-    async fn promote_workspace(
+    async fn promote_tenant_vector(
         &self,
         ctx: Context<'_>,
         request: Json<VectorPromoteRequest>,
     ) -> Result<Json<VectorPromotionResponse>, HandlerError> {
-        annotate_restate_handler_span("AdminMaintenance", "promote_workspace");
+        annotate_restate_handler_span("AdminMaintenance", "promote_tenant_vector");
         let request = request.into_inner();
         authorize_tenant_admin_for_tenant(&ctx, request.tenant_id).await?;
         let runtime = OrchestratorCtx::current();
@@ -82,30 +82,35 @@ impl AdminMaintenance for AdminMaintenanceImpl {
 
         Ok(ctx
             .run(|| async move {
-                let workspace_id = request.tenant_id.to_string();
+                let storage_partition_id = request.tenant_id.to_string();
                 let scope = ScopeContext::tenant(request.tenant_id);
                 let pgvector = Arc::new(PgvectorStore::new_for_control_plane(pool.clone(), scope));
-                let turbopuffer =
-                    Arc::new(TurbopufferStore::from_config(&config).map_err(|error| {
-                        TerminalError::new(format!("loading Turbopuffer client: {error}"))
-                    })?);
-                let promotion = WorkspacePromotion::new(pool, pgvector, turbopuffer);
+                let turbopuffer = Arc::new(
+                    TurbopufferStore::from_config(&config)
+                        .map_err(|error| {
+                            TerminalError::new(format!("loading Turbopuffer client: {error}"))
+                        })?
+                        .with_storage_partition_id(storage_partition_id.clone()),
+                );
+                let promotion = VectorPartitionPromotion::new(pool, pgvector, turbopuffer);
                 let report = promotion
                     .promote(PromotionOptions {
-                        workspace_id,
+                        storage_partition_id,
                         target_backend: request.target_backend,
                         validate_percent: request.validate_percent,
                         dual_read_hours: request.dual_read_hours,
                     })
                     .await
-                    .map_err(|error| TerminalError::new(format!("promote workspace: {error}")))?;
+                    .map_err(|error| {
+                        TerminalError::new(format!("promote tenant vector: {error}"))
+                    })?;
                 Ok::<_, HandlerError>(Json(promotion_response_from_report(
                     request.tenant_id,
                     report,
                     Some(request.dual_read_hours),
                 )))
             })
-            .name("admin_promote_workspace")
+            .name("admin_promote_tenant_vector")
             .await?)
     }
 

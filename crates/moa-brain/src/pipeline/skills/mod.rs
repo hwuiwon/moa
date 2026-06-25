@@ -34,7 +34,7 @@ pub const SELECTED_SKILL_NAMES_METADATA_KEY: &str = "selected_skill_names";
 /// Context metadata key containing the selected skill sandbox file count.
 pub const SELECTED_SKILL_FILE_COUNT_METADATA_KEY: &str = "selected_skill_sandbox_file_count";
 
-/// Injects workspace skill metadata into dynamic turn context.
+/// Injects tenant skill metadata into dynamic turn context.
 pub struct SkillInjector {
     source: SkillSource,
     session_store: Option<Arc<dyn SessionStore>>,

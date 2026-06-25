@@ -16,8 +16,8 @@ use moa_brain::retrieval::{
     RetrievalHit,
 };
 use moa_core::{
-    ContactId, MemoryDigestConfig, TenantId, UserId, WorkspaceId, config::MemoryExtractionConfig,
-    traits::EmbeddingProvider,
+    ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, UserId,
+    config::MemoryExtractionConfig, traits::EmbeddingProvider,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeIndexRow, PiiClass};
 use moa_memory_ingest::{
@@ -1167,7 +1167,7 @@ fn deterministic_rewrite_query(probe: &Probe) -> String {
     match query_class_for_probe(probe).as_str() {
         "vague_followup" => format!("Latest active memory for: {}", probe.query),
         "vector_first" => format!(
-            "Semantic memory search for user/workspace context: {}",
+            "Semantic memory search for user/tenant context: {}",
             probe.query
         ),
         "multi_hop" => format!("Graph relationship retrieval query: {}", probe.query),
@@ -1280,52 +1280,52 @@ fn is_zero_f64(value: &f64) -> bool {
 }
 
 pub(crate) async fn cleanup_eval_graph_rows(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
-    let workspace_ids = eval_workspace_ids(ledger);
-    if workspace_ids.is_empty() {
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
+    if storage_partition_ids.is_empty() {
         return Ok(());
     }
-    cleanup_eval_age_rows(pool, &workspace_ids).await?;
-    sqlx::query("DELETE FROM moa.embeddings WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    cleanup_eval_age_rows(pool, &storage_partition_ids).await?;
+    sqlx::query("DELETE FROM moa.embeddings WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.ingest_dlq WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.ingest_dlq WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.ingest_dedup WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.ingest_dedup WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.memory_digests WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.memory_digests WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.retrieval_lineage WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.retrieval_lineage WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.graph_changelog WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.graph_changelog WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.node_index WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.node_index WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM moa.workspace_state WHERE workspace_id = ANY($1)")
-        .bind(&workspace_ids)
+    sqlx::query("DELETE FROM moa.storage_partition_state WHERE storage_partition_id = ANY($1)")
+        .bind(&storage_partition_ids)
         .execute(pool)
         .await?;
     Ok(())
 }
 
-async fn cleanup_eval_age_rows(pool: &PgPool, workspace_ids: &[String]) -> Result<()> {
+async fn cleanup_eval_age_rows(pool: &PgPool, storage_partition_ids: &[String]) -> Result<()> {
     for label in AGE_EDGE_LABELS {
-        cleanup_eval_age_table(pool, label, workspace_ids).await?;
+        cleanup_eval_age_table(pool, label, storage_partition_ids).await?;
     }
     for label in AGE_NODE_LABELS {
-        cleanup_eval_age_table(pool, label, workspace_ids).await?;
+        cleanup_eval_age_table(pool, label, storage_partition_ids).await?;
     }
     Ok(())
 }
@@ -1333,16 +1333,19 @@ async fn cleanup_eval_age_rows(pool: &PgPool, workspace_ids: &[String]) -> Resul
 async fn cleanup_eval_age_table(
     pool: &PgPool,
     label: &str,
-    workspace_ids: &[String],
+    storage_partition_ids: &[String],
 ) -> Result<()> {
     let sql = format!(
         r#"
         DELETE FROM moa_graph."{label}"
-        WHERE trim(both '"' from moa.age_property(properties, 'workspace_id')::text) = $1
+        WHERE trim(both '"' from moa.age_property(properties, 'storage_partition_id')::text) = $1
         "#
     );
-    for workspace_id in workspace_ids {
-        sqlx::query(&sql).bind(workspace_id).execute(pool).await?;
+    for storage_partition_id in storage_partition_ids {
+        sqlx::query(&sql)
+            .bind(storage_partition_id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -1364,10 +1367,10 @@ const AGE_EDGE_LABELS: &[&str] = &[
     "APPLIES_TO",
 ];
 
-fn eval_workspace_ids(ledger: &[LedgerFact]) -> Vec<String> {
+fn eval_storage_partition_ids(ledger: &[LedgerFact]) -> Vec<String> {
     ledger
         .iter()
-        .map(|fact| fact.workspace_id.to_string())
+        .map(|fact| fact.storage_partition_id.to_string())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -1407,14 +1410,14 @@ async fn apply_eval_validity_windows(
 }
 
 async fn stabilize_eval_access_times(pool: &PgPool, ledger: &[LedgerFact]) -> Result<()> {
-    let workspace_ids = eval_workspace_ids(ledger);
-    if workspace_ids.is_empty() {
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
+    if storage_partition_ids.is_empty() {
         return Ok(());
     }
     sqlx::query(
-        "UPDATE moa.node_index SET last_accessed_at = valid_from WHERE workspace_id = ANY($1)",
+        "UPDATE moa.node_index SET last_accessed_at = valid_from WHERE storage_partition_id = ANY($1)",
     )
-    .bind(&workspace_ids)
+    .bind(&storage_partition_ids)
     .execute(pool)
     .await?;
     Ok(())
@@ -1468,7 +1471,7 @@ async fn retrieve_probe(
     } = options;
     let started = Instant::now();
     let scope = MemoryScope::Contact {
-        tenant_id: tenant_id_from_workspace_id(&probe.workspace_id),
+        tenant_id: tenant_id_from_storage_partition_id(&probe.storage_partition_id),
         contact_id: contact_id_from_user_id(&probe.user_id),
     };
     let scope_context = ScopeContext::new(scope.clone());
@@ -1817,15 +1820,15 @@ async fn equivalent_fact_ids_by_uid(
     ledger: &[LedgerFact],
     fact_ids_by_uid: &HashMap<Uuid, String>,
 ) -> Result<HashMap<Uuid, Vec<String>>> {
-    let workspace_ids = eval_workspace_ids(ledger);
-    if workspace_ids.is_empty() {
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
+    if storage_partition_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let rows = sqlx::query(
         r#"
         SELECT target_uid, (payload->>'replacement_uid')::uuid AS replacement_uid
         FROM moa.graph_changelog
-        WHERE workspace_id = ANY($1)
+        WHERE storage_partition_id = ANY($1)
           AND op = 'supersede'
           AND target_kind = 'node'
           AND target_label = 'Fact'
@@ -1833,7 +1836,7 @@ async fn equivalent_fact_ids_by_uid(
         ORDER BY change_id ASC
         "#,
     )
-    .bind(&workspace_ids)
+    .bind(&storage_partition_ids)
     .fetch_all(pool)
     .await?;
     let mut replacement_by_old = HashMap::<Uuid, Uuid>::new();
@@ -1879,12 +1882,13 @@ async fn run_eval_consolidation(
     reference_time: DateTime<Utc>,
     digest_config: MemoryDigestConfig,
 ) -> Result<ConsolidationOutcome> {
-    let workspace_ids = eval_workspace_ids(ledger);
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
     let mut outcome = ConsolidationOutcome::default();
-    for workspace_id in &workspace_ids {
-        let workspace_outcome = moa_memory_lifecycle::consolidate_workspace(
+    for storage_partition_id in &storage_partition_ids {
+        let tenant_id = tenant_id_from_storage_partition(storage_partition_id);
+        let workspace_outcome = moa_memory_lifecycle::consolidate_tenant(
             pool,
-            WorkspaceId::new(workspace_id.clone()),
+            tenant_id,
             ConsolidationOptions {
                 digest: digest_config.clone(),
                 ..ConsolidationOptions::default()
@@ -1895,7 +1899,7 @@ async fn run_eval_consolidation(
         .await
         .map_err(|error| {
             EvalError::InvalidConfig(format!(
-                "memory consolidation failed for workspace {workspace_id}: {error}"
+                "memory consolidation failed for storage partition {storage_partition_id}: {error}"
             ))
         })?;
         add_consolidation_outcome(&mut outcome, workspace_outcome);
@@ -1904,10 +1908,11 @@ async fn run_eval_consolidation(
     verify_restatement_pairs_collapsed(pool, ledger, gold_resolution, fact_ids_by_uid).await?;
 
     let mut second = ConsolidationOutcome::default();
-    for workspace_id in &workspace_ids {
-        let second_outcome = moa_memory_lifecycle::consolidate_workspace(
+    for storage_partition_id in &storage_partition_ids {
+        let tenant_id = tenant_id_from_storage_partition(storage_partition_id);
+        let second_outcome = moa_memory_lifecycle::consolidate_tenant(
             pool,
-            WorkspaceId::new(workspace_id.clone()),
+            tenant_id,
             ConsolidationOptions {
                 digest: digest_config.clone(),
                 ..ConsolidationOptions::default()
@@ -1918,7 +1923,7 @@ async fn run_eval_consolidation(
         .await
         .map_err(|error| {
             EvalError::InvalidConfig(format!(
-                "second memory consolidation failed for workspace {workspace_id}: {error}"
+                "second memory consolidation failed for storage partition {storage_partition_id}: {error}"
             ))
         })?;
         add_consolidation_outcome(&mut second, second_outcome);
@@ -1951,17 +1956,18 @@ async fn run_eval_digest_rebuild(
 ) -> Result<ConsolidationOutcome> {
     let mut outcome = ConsolidationOutcome::default();
     let config = digest_config_for_eval(true);
-    for workspace_id in eval_workspace_ids(ledger) {
+    for storage_partition_id in eval_storage_partition_ids(ledger) {
+        let tenant_id = tenant_id_from_storage_partition(&storage_partition_id);
         let stats = moa_memory_lifecycle::rebuild_digests(
             pool,
-            &WorkspaceId::new(workspace_id.clone()),
+            &tenant_id,
             reference_time,
             &config,
         )
         .await
         .map_err(|error| {
             EvalError::InvalidConfig(format!(
-                "memory digest rebuild failed for workspace {workspace_id}: {error}"
+                "memory digest rebuild failed for storage partition {storage_partition_id}: {error}"
             ))
         })?;
         outcome.digests_rebuilt += stats.digests_rebuilt;
@@ -2038,14 +2044,14 @@ async fn extraction_precision_counts(
     ledger: &[LedgerFact],
     fact_ids_by_uid: &HashMap<Uuid, String>,
 ) -> Result<ExtractionPrecisionCounts> {
-    let workspace_ids = eval_workspace_ids(ledger);
-    let total_fact_nodes = if workspace_ids.is_empty() {
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
+    let total_fact_nodes = if storage_partition_ids.is_empty() {
         0_i64
     } else {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM moa.node_index WHERE label = 'Fact' AND workspace_id = ANY($1)",
+            "SELECT COUNT(*) FROM moa.node_index WHERE label = 'Fact' AND storage_partition_id = ANY($1)",
         )
-        .bind(&workspace_ids)
+        .bind(&storage_partition_ids)
         .fetch_one(pool)
         .await?
     };
@@ -2063,8 +2069,8 @@ async fn entity_fragmentation_counts(
     pool: &PgPool,
     ledger: &[LedgerFact],
 ) -> Result<super::EntityFragmentationCounts> {
-    let workspace_ids = eval_workspace_ids(ledger);
-    let active_entity_nodes = if workspace_ids.is_empty() {
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
+    let active_entity_nodes = if storage_partition_ids.is_empty() {
         0_i64
     } else {
         sqlx::query_scalar::<_, i64>(
@@ -2073,10 +2079,10 @@ async fn entity_fragmentation_counts(
             FROM moa.node_index
             WHERE label = 'Entity'
               AND valid_to IS NULL
-              AND workspace_id = ANY($1)
+              AND storage_partition_id = ANY($1)
             "#,
         )
-        .bind(&workspace_ids)
+        .bind(&storage_partition_ids)
         .fetch_one(pool)
         .await?
     };
@@ -2090,7 +2096,7 @@ async fn entity_fragmentation_counts(
                 };
                 (
                     scope_tier_name(fact.scope).to_string(),
-                    fact.workspace_id.to_string(),
+                    fact.storage_partition_id.to_string(),
                     user_id,
                     normalize_entity_name(mention),
                 )
@@ -2116,10 +2122,14 @@ fn scope_tier_name(scope: ScopeTier) -> &'static str {
     }
 }
 
-fn tenant_id_from_workspace_id(workspace_id: &WorkspaceId) -> TenantId {
-    uuid::Uuid::parse_str(workspace_id.as_str())
+fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
+    tenant_id_from_storage_partition(storage_partition_id.as_str())
+}
+
+fn tenant_id_from_storage_partition(storage_partition: &str) -> TenantId {
+    uuid::Uuid::parse_str(storage_partition)
         .map(TenantId::from)
-        .unwrap_or_else(|_| tenant_id_from_label(workspace_id.as_str()))
+        .unwrap_or_else(|_| tenant_id_from_label(storage_partition))
 }
 
 fn tenant_id_from_label(label: &str) -> TenantId {
@@ -2162,52 +2172,59 @@ async fn digest_context_by_user(
     pool: &PgPool,
     ledger: &[LedgerFact],
 ) -> Result<HashMap<(String, String), String>> {
-    let workspace_ids = eval_workspace_ids(ledger);
-    if workspace_ids.is_empty() {
+    let storage_partition_ids = eval_storage_partition_ids(ledger);
+    if storage_partition_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let rows = sqlx::query(
         r#"
-        SELECT workspace_id, user_id, scope, content
+        SELECT storage_partition_id, user_id, scope, content
         FROM moa.memory_digests
-        WHERE workspace_id = ANY($1)
-        ORDER BY workspace_id ASC, CASE scope WHEN 'user' THEN 0 ELSE 1 END, user_id ASC NULLS FIRST
+        WHERE storage_partition_id = ANY($1)
+        ORDER BY storage_partition_id ASC, CASE scope WHEN 'user' THEN 0 ELSE 1 END, user_id ASC NULLS FIRST
         "#,
     )
-    .bind(&workspace_ids)
+    .bind(&storage_partition_ids)
     .fetch_all(pool)
     .await?;
-    let mut workspace_content = HashMap::<String, String>::new();
+    let mut tenant_content = HashMap::<String, String>::new();
     let mut user_content = HashMap::<(String, String), String>::new();
     for row in rows {
-        let workspace_id: String = row.try_get("workspace_id")?;
+        let storage_partition_id: String = row.try_get("storage_partition_id")?;
         let user_id: Option<String> = row.try_get("user_id")?;
         let scope: String = row.try_get("scope")?;
         let content: String = row.try_get("content")?;
         if scope == "tenant" {
-            workspace_content.insert(workspace_id, content);
+            tenant_content.insert(storage_partition_id, content);
         } else if scope == "contact"
             && let Some(user_id) = user_id
         {
-            user_content.insert((workspace_id, user_id), content);
+            user_content.insert((storage_partition_id, user_id), content);
         }
     }
 
     let users = ledger
         .iter()
-        .map(|fact| (fact.workspace_id.to_string(), fact.user_id.to_string()))
+        .map(|fact| {
+            (
+                fact.storage_partition_id.to_string(),
+                fact.user_id.to_string(),
+            )
+        })
         .collect::<std::collections::BTreeSet<_>>();
     let mut contexts = HashMap::new();
-    for (workspace_id, user_id) in users {
+    for (storage_partition_id, user_id) in users {
         let mut content = String::new();
-        if let Some(user_digest) = user_content.get(&(workspace_id.clone(), user_id.clone())) {
+        if let Some(user_digest) =
+            user_content.get(&(storage_partition_id.clone(), user_id.clone()))
+        {
             content.push_str(user_digest);
             content.push('\n');
         }
-        if let Some(workspace_digest) = workspace_content.get(&workspace_id) {
-            content.push_str(workspace_digest);
+        if let Some(tenant_digest) = tenant_content.get(&storage_partition_id) {
+            content.push_str(tenant_digest);
         }
-        contexts.insert((workspace_id, user_id), content);
+        contexts.insert((storage_partition_id, user_id), content);
     }
     Ok(contexts)
 }
@@ -2223,7 +2240,10 @@ fn preference_context_hit(
     }
 
     let mut context = digest_context
-        .get(&(probe.workspace_id.to_string(), probe.user_id.to_string()))
+        .get(&(
+            probe.storage_partition_id.to_string(),
+            probe.user_id.to_string(),
+        ))
         .cloned()
         .unwrap_or_default();
     for candidate in final_candidates
@@ -2352,7 +2372,7 @@ async fn extracted_embedding_texts(
     for session in sessions {
         for turn in &session.turns {
             let session_turn = SessionTurn {
-                tenant_id: tenant_id_from_workspace_id(&session.workspace_id),
+                tenant_id: tenant_id_from_storage_partition_id(&session.storage_partition_id),
                 contact_id: contact_id_from_user_id(&session.user_id),
                 session_id: session.session_id,
                 turn_seq: turn.turn_seq,
@@ -2644,13 +2664,13 @@ mod tests {
         let explicit = Probe {
             probe_id: "explicit".to_string(),
             probe_type: ProbeType::PointRecall,
-            workspace_id: WorkspaceId::new("workspace"),
+            storage_partition_id: StoragePartitionId::new("workspace"),
             user_id: moa_core::UserId::new("user"),
             query: "Which runbook is required for deploy?".to_string(),
             rewrite_query: None,
             expected_rewrite: None,
             query_class: None,
-            answer: "Use the workspace deploy runbook.".to_string(),
+            answer: "Use the tenant deploy runbook.".to_string(),
             expected_fact_ids: Vec::new(),
             blocked_fact_ids: Vec::new(),
             as_of: None,
@@ -2694,7 +2714,7 @@ mod tests {
         let probe = Probe {
             probe_id: "probe-pii".to_string(),
             probe_type: ProbeType::PiiRedaction,
-            workspace_id: WorkspaceId::new("workspace"),
+            storage_partition_id: StoragePartitionId::new("workspace"),
             user_id: moa_core::UserId::new("user"),
             query: "What is Alice's phone?".to_string(),
             rewrite_query: None,
