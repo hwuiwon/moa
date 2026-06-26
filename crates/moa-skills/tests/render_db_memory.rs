@@ -18,7 +18,7 @@ async fn render_with_graph_lessons() -> Result<()> {
     let _guard = GRAPH_TEST_LOCK.lock().await;
     let (store, database_url, schema_name) =
         moa_session::testing::create_isolated_test_store().await?;
-    let workspace_name = format!("skills-render-{}", Uuid::now_v7());
+    let workspace_name = Uuid::now_v7().to_string();
     let artifact_scope = tenant_scope(&workspace_name);
     let scope = memory_scope(&workspace_name);
     let registry = SkillRegistry::new(store.pool().clone());

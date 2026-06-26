@@ -587,7 +587,7 @@ fn memory_scope_from_context_with_policy(
     policy: &AgentKnowledgePolicy,
 ) -> MemoryScope {
     match policy.mode {
-        AgentKnowledgeScopeMode::Tenant | AgentKnowledgeScopeMode::Disabled => ctx
+        AgentKnowledgeScopeMode::Enabled | AgentKnowledgeScopeMode::Disabled => ctx
             .contact
             .as_ref()
             .map(|contact| MemoryScope::Contact {

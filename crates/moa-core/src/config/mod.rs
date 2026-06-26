@@ -8,6 +8,7 @@ mod compliance;
 mod context;
 mod database;
 mod env_overlay;
+mod knowledge;
 mod learning;
 mod lineage;
 mod loader;
@@ -37,6 +38,12 @@ pub use context::{
 };
 pub use database::{DatabaseConfig, DatabaseNeonConfig};
 pub use env_overlay::MoaEnvOverlay;
+pub use knowledge::{
+    KnowledgeChunkingConfig, KnowledgeConfig, KnowledgeObservabilityConfig,
+    KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
+    KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig,
+    NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
+};
 pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
 pub use memory::{
@@ -88,6 +95,8 @@ pub struct MoaConfig {
     pub local: LocalConfig,
     /// Memory bootstrap and maintenance settings.
     pub memory: MemoryConfig,
+    /// Tenant knowledge-base ingestion settings.
+    pub knowledge: KnowledgeConfig,
     /// Cloud runtime settings.
     pub cloud: CloudConfig,
     /// Messaging adapter settings.

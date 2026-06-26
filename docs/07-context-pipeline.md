@@ -26,7 +26,7 @@ The code reports fixed stage numbers through each `ContextProcessor`. With query
 | 4 | `QueryRewriter` | Dynamic metadata | retrieval query preparation and task transition signal |
 | 5 | `SkillInjector` | Dynamic tail | budgeted visible skill manifest ranked within pinned agent skill policy |
 | 6 | `DigestProcessor` | Dynamic tail | standing contact digest for contact sessions |
-| 7 | `MemoryRetriever` | Dynamic tail | tenant-isolated indexes and contact memory filtered by pinned agent knowledge policy |
+| 7 | `MemoryRetriever` | Dynamic tail | tenant knowledge plus admitted contact memory filtered by pinned agent knowledge policy |
 | 8 | `HistoryCompiler` | Dynamic/history tail | replayed events, checkpoints, recent turns, errors |
 | 9 | `RuntimeContextProcessor` | Dynamic tail | current date, tenant, working directory, branch, contact or admin/operator actor |
 | 10 | `Compactor` | Dynamic maintenance | checkpoint/compaction when thresholds are exceeded |
@@ -122,7 +122,8 @@ shown for one turn.
 ## Memory Retrieval
 
 `MemoryRetriever` loads ranked graph hits through the graph, sidecar, and vector
-memory crates. See
+memory crates, and assembles tenant knowledge chunks with admitted contact
+memory when graph memory is enabled. See
 `docs/15-architecture-policy.md` for the
 current privacy boundary and `crates/moa-memory/README.md` for crate-level
 details.
@@ -133,12 +134,28 @@ internally, while semantic retrieval keeps the natural-language query intact.
 Retrieval can be keyword, semantic, or hybrid depending on the memory store
 configuration.
 
-For contact sessions, retrieval reads only the current tenant/contact memory.
-It does not inherit tenant memory or any other contact's memory. Tenant
-admin/operator memory inspection uses explicit tenant admin paths rather than
-the default contact-session retrieval path.
+For contact sessions, retrieval reads tenant knowledge plus the current
+tenant/contact memory. It does not inherit tenant admin/operator memory or any
+other contact's memory. Sessions without an admitted contact retrieve tenant
+knowledge only. Tenant admin/operator memory inspection uses explicit tenant
+admin paths rather than the default contact-session retrieval path.
 
-Memory is inserted as a reminder near the active turn so runtime facts and retrieved context do not disturb the stable prefix.
+The assembled context keeps source tiers visible:
+
+```text
+<knowledge_context>
+  <tenant_knowledge>...</tenant_knowledge>
+  <user_memory>...</user_memory>
+</knowledge_context>
+```
+
+Tenant knowledge entries carry source URI/title, document version, chunk
+identity, and citation metadata from `moa-knowledge` and `moa-memory-graph`.
+Contact memory entries carry minimal provenance and privacy-filtered summaries.
+The query trace records the scopes searched, retrieval legs run, candidate
+counts, selected chunks/facts, source tiers, filters, citations, and stage
+latencies. Memory is inserted as a reminder near the active turn so runtime
+facts and retrieved context do not disturb the stable prefix.
 
 ## History Compilation
 
@@ -173,3 +190,7 @@ Each processor returns `ProcessorOutput` with:
 The pipeline records structured tracing spans with tenant, contact, session,
 admin/operator actor, model, stage number, stage name, token counts, and
 stable-prefix metrics derived from prompt ordering.
+
+Knowledge retrieval spans and metrics include source tier, retrieval leg,
+candidate count, selected count, and redaction outcome. They must not include
+provider credentials, account tokens, full raw documents, or contact points.

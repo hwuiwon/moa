@@ -78,6 +78,12 @@ pub enum NodeLabel {
     Fact,
     /// Source vertex label.
     Source,
+    /// Tenant knowledge document vertex label.
+    Document,
+    /// Tenant knowledge chunk vertex label.
+    Chunk,
+    /// Tenant knowledge contact-group vertex label.
+    ContactGroup,
 }
 
 impl NodeLabel {
@@ -91,6 +97,9 @@ impl NodeLabel {
             Self::Lesson => "Lesson",
             Self::Fact => "Fact",
             Self::Source => "Source",
+            Self::Document => "Document",
+            Self::Chunk => "Chunk",
+            Self::ContactGroup => "ContactGroup",
         }
     }
 }
@@ -107,6 +116,9 @@ impl FromStr for NodeLabel {
             "Lesson" => Ok(Self::Lesson),
             "Fact" => Ok(Self::Fact),
             "Source" => Ok(Self::Source),
+            "Document" => Ok(Self::Document),
+            "Chunk" => Ok(Self::Chunk),
+            "ContactGroup" => Ok(Self::ContactGroup),
             other => Err(GraphError::UnknownNodeLabel(other.to_string())),
         }
     }

@@ -24,6 +24,7 @@ Product data in Postgres / Neon
   task_segments, experience_records, experience_attributions,
   learning_candidates, segment and strategy materialized views
   graph nodes, graph edges, sidecar indexes, pgvector embeddings
+  knowledge connections, sync runs, document versions, chunks
   learning_log
   analytics.turn_lineage, analytics.score_run, analytics.scores,
   moa.experiment_run, compliance audit tables
@@ -37,7 +38,7 @@ Learning loop
   learning log -> skill ranking, memory consolidation, rollback audit
 ```
 
-Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes.
+Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes. Tenant knowledge-base ingestion is a separate product surface owned by `moa-knowledge`; it writes tenant knowledge into the same graph/vector substrate without turning connector sync into session memory ingestion.
 
 ## Agent Building Blocks
 
@@ -88,6 +89,14 @@ future reviewed artifact policy allows that routing.
 
 Current artifact tables are `moa.artifact`, `moa.artifact_revision`, `moa.artifact_file`, `moa.artifact_run`, and `moa.artifact_node_run`. `moa.artifact` / `moa.artifact_revision` are the source of truth for skill packages. Automatic skill learning follows `skill proposal -> draft skill artifact + learning_candidate -> LearningReview accept -> published artifact`; generation never rewrites published skill revisions directly.
 
+Tenant knowledge-base rows are `moa.knowledge_connections`,
+`moa.knowledge_sync_runs`, `moa.knowledge_ingestion_steps`,
+`moa.knowledge_objects`, `moa.knowledge_document_versions`,
+`moa.knowledge_blocks`, and `moa.knowledge_chunks`. These rows describe linked
+external accounts, sync-run inspection state, parser output, block/chunk
+identity, and graph write status. They are not session events and are not
+written through `Memory.ingest_documents`.
+
 MOA's runtime boundary is the tenant. Runtime operators can run local mode for
 development and incident response, but the product model assumes organizations
 need governed execution, audit trails, tenant-owned learning, and clear rollback
@@ -112,10 +121,12 @@ tenant admins, tenant operators, service users, and API-key subjects. Users are
 authorized to administer or operate tenants, but they are not contact memory
 subjects and are not part of the contact/session lineage.
 
-Contact memory is contact-local. A contact session retrieves memory for that
-tenant and contact only; it does not inherit tenant memory or any other
-contact's memory. Tenant learning is tenant-local and never globally promoted.
-Skills and policies are tenant-owned.
+Contact memory is contact-local. A contact session never inherits another
+contact's memory or tenant admin/operator memory. When graph memory is enabled,
+the default answer-time retrieval path combines tenant knowledge-base chunks
+with admitted memory for the current contact, then keeps those source tiers
+separate in prompt context and query trace records. Tenant learning is
+tenant-local and never globally promoted. Skills and policies are tenant-owned.
 
 ## Core Traits
 
@@ -135,6 +146,8 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |
+| `LinkedIntegrationProvider` | Tenant knowledge linked-account flow, provider sync trigger, changed-record listing, and webhook verification | Nango and Merge adapters in `moa-knowledge` |
+| `DocumentParser` | Structure-aware parsing into normalized document elements for tenant knowledge ingestion | Native parser backed by `liteparse` for local file parsing, plus LlamaParse, Unstructured, and Reducto adapters in `moa-knowledge` |
 | `CredentialVault` | Secret storage and retrieval | environment-backed MCP vault |
 | `LineageHandle` | Transport-neutral lineage capture | null handle, async sink, OTel bridge |
 
@@ -156,7 +169,7 @@ Default production bindings:
 - Virtual objects: `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO`
 - Services: `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
   `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`,
-  `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`,
+  `Knowledge`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`,
   `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
   `Workflows`, `ActionPolicy`, `Whoami`
 - Workflows: `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`,
@@ -233,6 +246,7 @@ policy.
 | Task segmentation | Postgres | `task_segments`, segment baselines, skill resolution rates |
 | Experience learning | Postgres | `experience_records`, `experience_attributions`, `learning_candidates`, task-conditioned strategy rates |
 | Live behavior experiments | Postgres | `moa.experiment_run`, `moa.experiment_run_artifact_revision`, and linked `analytics.score_run` rows |
+| Tenant knowledge base | Postgres | `moa-knowledge` owns linked connections, sync runs, ingestion steps, document versions, blocks, chunks, and provider event state; `moa-memory-*` owns the resulting graph/vector storage |
 | Graph memory | Postgres | Nodes, edges, sidecar indexes, changelog, and RLS-protected scope state |
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
 | Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
@@ -423,6 +437,7 @@ and replay resistance on the verify path.
 | `moa-core` | Shared types, traits, config, events, analytics helpers |
 | `moa-brain` | Context pipeline, query rewrite, segment helpers, segment assessment |
 | `moa-session` | Postgres session store, event log, task segments, learning log |
+| `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, block/chunk derivation, sync-run inspection, and high-level graph ingestion assembly |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory SQL sidecars, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph ingestion and fast memory write APIs |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification and privacy helpers |

@@ -154,7 +154,9 @@ fn edge_weight(edge: EdgeLabel, as_of: Option<DateTime<Utc>>) -> f64 {
         | EdgeLabel::DependsOn
         | EdgeLabel::OwnedBy
         | EdgeLabel::DerivedFrom
+        | EdgeLabel::Contains
         | EdgeLabel::MentionedIn
+        | EdgeLabel::MemberOf
         | EdgeLabel::Caused
         | EdgeLabel::LearnedFrom
         | EdgeLabel::AppliesTo => 1.0,

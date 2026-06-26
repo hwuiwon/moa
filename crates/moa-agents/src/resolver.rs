@@ -377,7 +377,13 @@ fn model_policy_from_definition(definition: &ModelPolicy) -> AgentModelPolicy {
 fn knowledge_policy_from_definition(definition: &AgentDefinition) -> AgentKnowledgePolicy {
     AgentKnowledgePolicy {
         mode: match definition.knowledge_policy.mode {
-            KnowledgeScopeMode::Tenant => AgentKnowledgeScopeMode::Tenant,
+            KnowledgeScopeMode::Enabled => AgentKnowledgeScopeMode::Enabled,
+            KnowledgeScopeMode::Tenant => {
+                tracing::warn!(
+                    "agent knowledge_policy.mode value `tenant` is deprecated; treating it as `enabled`"
+                );
+                AgentKnowledgeScopeMode::Enabled
+            }
             KnowledgeScopeMode::Disabled => AgentKnowledgeScopeMode::Disabled,
         },
         filters: definition.knowledge_policy.filters.clone(),
@@ -660,8 +666,9 @@ fn map_sqlx_error(error: sqlx::Error) -> MoaError {
 
 #[cfg(test)]
 mod tests {
-    use moa_artifacts::agent::{AgentPurpose, ToolPolicy};
+    use moa_artifacts::agent::{AgentPurpose, KnowledgePolicy, ToolPolicy};
     use moa_core::GuardrailMode;
+    use serde_json::Value;
 
     use super::*;
 
@@ -723,6 +730,27 @@ mod tests {
             locked[0].schema_hash,
             stable_tool_hash("file_read", "builtin")
         );
+    }
+
+    #[test]
+    fn legacy_tenant_knowledge_scope_maps_to_enabled_knowledge_scope() {
+        // Pins: serialized legacy `tenant` agent policy cannot become a narrower runtime policy.
+        let mut definition = AgentDefinition {
+            knowledge_policy: KnowledgePolicy {
+                mode: KnowledgeScopeMode::Tenant,
+                filters: Value::Object(Default::default()),
+                retrieval_budget: Some(4),
+                pii_floor: Some("internal".to_string()),
+            },
+            ..agent_definition()
+        };
+
+        let legacy_policy = knowledge_policy_from_definition(&definition);
+        definition.knowledge_policy.mode = KnowledgeScopeMode::Enabled;
+        let enabled_policy = knowledge_policy_from_definition(&definition);
+
+        assert_eq!(legacy_policy.mode, AgentKnowledgeScopeMode::Enabled);
+        assert_eq!(legacy_policy, enabled_policy);
     }
 
     fn agent_definition() -> AgentDefinition {

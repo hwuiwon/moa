@@ -595,6 +595,9 @@ fn node_create_template(label: NodeLabel) -> &'static Cypher {
         NodeLabel::Lesson => &cypher::node::CREATE_LESSON,
         NodeLabel::Fact => &cypher::node::CREATE_FACT,
         NodeLabel::Source => &cypher::node::CREATE_SOURCE,
+        NodeLabel::Document => &cypher::node::CREATE_DOCUMENT,
+        NodeLabel::Chunk => &cypher::node::CREATE_CHUNK,
+        NodeLabel::ContactGroup => &cypher::node::CREATE_CONTACT_GROUP,
     }
 }
 
@@ -606,7 +609,9 @@ fn edge_create_template(label: EdgeLabel) -> &'static Cypher {
         EdgeLabel::Supersedes => &cypher::edge::CREATE_SUPERSEDES,
         EdgeLabel::Contradicts => &cypher::edge::CREATE_CONTRADICTS,
         EdgeLabel::DerivedFrom => &cypher::edge::CREATE_DERIVED_FROM,
+        EdgeLabel::Contains => &cypher::edge::CREATE_CONTAINS,
         EdgeLabel::MentionedIn => &cypher::edge::CREATE_MENTIONED_IN,
+        EdgeLabel::MemberOf => &cypher::edge::CREATE_MEMBER_OF,
         EdgeLabel::Caused => &cypher::edge::CREATE_CAUSED,
         EdgeLabel::LearnedFrom => &cypher::edge::CREATE_LEARNED_FROM,
         EdgeLabel::AppliesTo => &cypher::edge::CREATE_APPLIES_TO,
@@ -907,6 +912,9 @@ fn age_vertex_table(label: NodeLabel) -> &'static str {
         NodeLabel::Lesson => r#"moa_graph."Lesson""#,
         NodeLabel::Fact => r#"moa_graph."Fact""#,
         NodeLabel::Source => r#"moa_graph."Source""#,
+        NodeLabel::Document => r#"moa_graph."Document""#,
+        NodeLabel::Chunk => r#"moa_graph."Chunk""#,
+        NodeLabel::ContactGroup => r#"moa_graph."ContactGroup""#,
     }
 }
 
@@ -918,7 +926,9 @@ fn age_edge_table(label: EdgeLabel) -> &'static str {
         EdgeLabel::Supersedes => r#"moa_graph."SUPERSEDES""#,
         EdgeLabel::Contradicts => r#"moa_graph."CONTRADICTS""#,
         EdgeLabel::DerivedFrom => r#"moa_graph."DERIVED_FROM""#,
+        EdgeLabel::Contains => r#"moa_graph."CONTAINS""#,
         EdgeLabel::MentionedIn => r#"moa_graph."MENTIONED_IN""#,
+        EdgeLabel::MemberOf => r#"moa_graph."MEMBER_OF""#,
         EdgeLabel::Caused => r#"moa_graph."CAUSED""#,
         EdgeLabel::LearnedFrom => r#"moa_graph."LEARNED_FROM""#,
         EdgeLabel::AppliesTo => r#"moa_graph."APPLIES_TO""#,
