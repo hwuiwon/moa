@@ -1,5 +1,7 @@
 //! Safe source-object inspection and query-trace projection logic for Knowledge.
 
+use std::time::Duration;
+
 use chrono::Utc;
 use moa_core::wire::knowledge::{
     KnowledgeObjectChunkInspectView, KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse,
@@ -9,6 +11,7 @@ use moa_core::wire::knowledge::{
 use moa_core::{MoaError, StoragePartitionId};
 use moa_knowledge::normalize::redact_provider_metadata;
 use moa_lineage_core::{LineageEvent, RecordKind, RetrievalLineage};
+use moa_observability::{record_knowledge_retrieval_duration, record_knowledge_retrieval_hits};
 use serde_json::{Value, json};
 use sqlx::Row;
 
@@ -146,11 +149,31 @@ impl KnowledgeService {
     }
 
     /// Returns a renderer-safe retrieval trace from durable lineage rows.
+    #[tracing::instrument(
+        name = "knowledge_retrieval_trace",
+        skip(self, request),
+        fields(
+            tenant_id = %request.tenant_id,
+            connection_id = "none",
+            sync_run_id = "none",
+            provider = "retrieval",
+            parser = "none",
+            trace_id = %request.trace_uid,
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+            stage_count = tracing::field::Empty,
+            hit_count = tracing::field::Empty
+        )
+    )]
     pub async fn query_trace(
         &self,
         request: KnowledgeQueryTraceRequest,
     ) -> Result<KnowledgeQueryTraceResponse, KnowledgeServiceError> {
         let Some(pool) = self.postgres_pool() else {
+            tracing::Span::current().record("status", "no_pool");
+            tracing::Span::current().record("error_code", "none");
+            tracing::Span::current().record("stage_count", 0_u64);
+            tracing::Span::current().record("hit_count", 0_u64);
             return Ok(empty_query_trace_response(request.trace_uid));
         };
         let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
@@ -169,15 +192,23 @@ impl KnowledgeService {
         .bind(RecordKind::Retrieval.as_i16())
         .fetch_all(&pool)
         .await
-        .map_err(|error| KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string())))?;
+        .map_err(|error| {
+            tracing::Span::current().record("status", "failed");
+            tracing::Span::current().record("error_code", "query_trace_storage_failed");
+            KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
+        })?;
 
         let mut traces = Vec::with_capacity(rows.len());
         for row in rows {
             let payload: Value = row.try_get("payload").map_err(|error| {
+                tracing::Span::current().record("status", "failed");
+                tracing::Span::current().record("error_code", "query_trace_decode_failed");
                 KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
             })?;
             if let LineageEvent::Retrieval(record) = serde_json::from_value::<LineageEvent>(payload)
                 .map_err(|error| {
+                    tracing::Span::current().record("status", "failed");
+                    tracing::Span::current().record("error_code", "query_trace_payload_invalid");
                     KnowledgeServiceError::InvalidRequest(format!(
                         "invalid retrieval lineage payload: {error}"
                     ))
@@ -186,7 +217,13 @@ impl KnowledgeService {
                 traces.push(record);
             }
         }
-        Ok(render_query_trace_response(request.trace_uid, traces))
+        let response = render_query_trace_response(request.trace_uid, traces);
+        tracing::Span::current().record("status", "success");
+        tracing::Span::current().record("error_code", "none");
+        tracing::Span::current().record("stage_count", response.stages.len() as u64);
+        tracing::Span::current().record("hit_count", response.hits.len() as u64);
+        record_query_trace_metrics(&response);
+        Ok(response)
     }
 }
 
@@ -239,6 +276,29 @@ fn render_query_trace_response(
         stages,
         hits,
         created_at: first.ts,
+    }
+}
+
+fn record_query_trace_metrics(response: &KnowledgeQueryTraceResponse) {
+    for stage in &response.stages {
+        record_knowledge_retrieval_duration(
+            &stage.stage,
+            "success",
+            Duration::from_millis(stage.latency_ms),
+        );
+    }
+    for hit in &response.hits {
+        let legs = hit
+            .citation
+            .get("legs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for leg in legs {
+            if let Some(leg) = leg.as_str() {
+                record_knowledge_retrieval_hits(&hit.source_tier, leg, 1);
+            }
+        }
     }
 }
 
@@ -321,9 +381,14 @@ fn lexical_candidate_count(record: &RetrievalLineage) -> usize {
 }
 
 fn trace_hit_citation(hit: &moa_lineage_core::RetrievalSelectedHit) -> Value {
-    let mut citation = hit.citation.clone();
-    if let Some(object) = citation.as_object_mut() {
+    let mut citation = match redact_provider_metadata(hit.citation.clone()) {
+        Value::Object(map) => Value::Object(map),
+        _ => json!({}),
+    };
+    if let Value::Object(object) = &mut citation {
         object.insert("graph_node_uid".to_string(), json!(hit.graph_node_uid));
+        object.insert("chunk_uid".to_string(), json!(hit.chunk_uid));
+        object.insert("fact_uid".to_string(), json!(hit.fact_uid));
         object.insert("legs".to_string(), json!(hit.legs));
         if let Some(source_uri) = &hit.source_uri {
             object.insert("source_uri".to_string(), json!(source_uri));

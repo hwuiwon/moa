@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use moa_core::{
-    TenantId,
+    SessionId, StoragePartitionId, TenantId, UserId,
     wire::knowledge::{
         KnowledgeExchangeTokenRequest, KnowledgeObjectInspectRequest, KnowledgeObjectListRequest,
         KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest, KnowledgeSyncRequest,
@@ -29,6 +29,11 @@ use moa_knowledge::{
     providers::LinkedIntegrationProvider,
     repository::KnowledgeRepository,
 };
+use moa_lineage_core::{
+    BackendIntrospection, FusedHit, GraphPath, LineageEvent, RecordKind, RerankHit,
+    RetrievalLineage, RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
+};
+use moa_memory_types::MemoryScope;
 use moa_orchestrator::services::knowledge::{
     KnowledgeCredentialStore, KnowledgeService, ParserWebhookVerifier, StaticKnowledgeProviders,
 };
@@ -67,7 +72,7 @@ async fn manual_sync_triggers_provider_and_does_not_ingest_inline() {
         .await
         .expect("manual sync should trigger provider sync");
 
-    assert_eq!(response.status, "running");
+    assert_eq!(response.status, "provider_syncing");
     assert_eq!(provider.trigger_sync_count(), 1);
     assert_eq!(provider.list_changed_records_count(), 0);
     assert_eq!(repository.op_count("create_sync_run"), 1);
@@ -376,6 +381,169 @@ async fn query_trace_is_present_and_does_not_hydrate_cross_contact_memory() {
     assert!(response.hits.is_empty());
     assert!(response.stages.is_empty());
     assert!(response.searched_scopes.is_empty());
+    assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
+}
+
+#[tokio::test]
+async fn query_trace_renders_populated_retrieval_lineage_db() {
+    // Pins: query_trace renders persisted retrieval lineage without hydrating unrelated contact memory.
+    let db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated query trace DB");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let trace_uid = Uuid::now_v7();
+    let turn_id = TurnId(trace_uid);
+    let session_id = SessionId::new();
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+    let graph_node_uid = Uuid::now_v7();
+    let chunk_uid = Uuid::now_v7();
+    let event = LineageEvent::Retrieval(RetrievalLineage {
+        turn_id,
+        session_id,
+        storage_partition_id: storage_partition_id.clone(),
+        user_id: UserId::new("query-trace-user"),
+        scope: MemoryScope::Tenant { tenant_id },
+        ts: Utc::now(),
+        query_original: "How do I rotate payroll keys?".to_string(),
+        query_expansions: vec!["rotate payroll keys".to_string()],
+        vector_hits: vec![VecHit {
+            chunk_id: chunk_uid,
+            score: 0.91,
+            source: "pgvector".to_string(),
+            embedder: "test-embedder".to_string(),
+            embed_dim: 4,
+        }],
+        graph_paths: vec![GraphPath {
+            start: graph_node_uid,
+            end: chunk_uid,
+            edges: vec![Uuid::now_v7()],
+            labels: vec!["HAS_CHUNK".to_string()],
+            length: 1,
+            score: 0.82,
+        }],
+        fusion_scores: vec![FusedHit {
+            chunk_id: chunk_uid,
+            fused_score: 0.94,
+            vector_contribution: 0.5,
+            graph_contribution: 0.3,
+            lexical_contribution: 0.1,
+            fusion_method: "rrf".to_string(),
+        }],
+        rerank_scores: vec![RerankHit {
+            chunk_id: chunk_uid,
+            original_index: 0,
+            relevance_score: 0.97,
+            rerank_model: "noop-reranker".to_string(),
+        }],
+        top_k: vec![chunk_uid],
+        searched_scopes: vec!["tenant_knowledge".to_string(), "user_memory".to_string()],
+        selected_hits: vec![RetrievalSelectedHit {
+            graph_node_uid,
+            chunk_uid: Some(chunk_uid),
+            fact_uid: None,
+            source_tier: "tenant_knowledge".to_string(),
+            label: "Chunk".to_string(),
+            title: "Payroll Rotation".to_string(),
+            snippet: "Rotate payroll keys through the admin console.".to_string(),
+            score: 0.97,
+            legs: vec!["vector".to_string(), "graph".to_string()],
+            prompt_included: true,
+            source_uri: Some("https://kb.example/payroll-rotation".to_string()),
+            source_title: Some("Payroll Rotation".to_string()),
+            citation: json!({ "chunk_hash": "chunk-hash" }),
+        }],
+        filters: json!({ "pii_floor": "internal" }),
+        timings: StageTimings {
+            embed_ms: 3,
+            vector_search_ms: 5,
+            graph_search_ms: 7,
+            lexical_search_ms: 2,
+            fusion_ms: 1,
+            rerank_ms: 4,
+            total_ms: 25,
+        },
+        introspection: BackendIntrospection::default(),
+        stage: RetrievalStage::Single,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.turn_lineage (
+            turn_id,
+            session_id,
+            user_id,
+            storage_partition_id,
+            ts,
+            tier,
+            record_kind,
+            payload,
+            integrity_hash,
+            prev_hash
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)
+        "#,
+    )
+    .bind(turn_id.0)
+    .bind(session_id.0)
+    .bind("query-trace-user")
+    .bind(storage_partition_id.as_str())
+    .bind(Utc::now())
+    .bind(1_i16)
+    .bind(RecordKind::Retrieval.as_i16())
+    .bind(serde_json::to_value(event).expect("retrieval lineage should serialize"))
+    .bind(vec![0_u8; 32])
+    .execute(&pool)
+    .await
+    .expect("insert retrieval lineage row");
+    let service = KnowledgeService::from_postgres_pool(
+        pool,
+        Arc::new(StaticKnowledgeProviders::new()),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        80,
+    );
+
+    let response = service
+        .query_trace(KnowledgeQueryTraceRequest {
+            tenant_id,
+            trace_uid,
+        })
+        .await
+        .expect("query trace should render persisted lineage");
+    let response_json =
+        serde_json::to_string(&response).expect("query trace response should serialize");
+    let stage_names = response
+        .stages
+        .iter()
+        .map(|stage| stage.stage.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(response.trace_uid, trace_uid);
+    assert_eq!(response.original_query, "How do I rotate payroll keys?");
+    assert_eq!(
+        response.retrieval_query.as_deref(),
+        Some("rotate payroll keys")
+    );
+    assert_eq!(
+        response.searched_scopes,
+        vec!["tenant_knowledge".to_string(), "user_memory".to_string()]
+    );
+    assert_eq!(
+        stage_names,
+        vec![
+            "embed", "vector", "graph", "lexical", "fusion", "reranker", "context"
+        ]
+    );
+    assert_eq!(response.hits.len(), 1);
+    assert_eq!(response.hits[0].uid, chunk_uid);
+    assert_eq!(response.hits[0].source_tier, "tenant_knowledge");
+    assert_eq!(
+        response.hits[0].citation["legs"],
+        json!(["vector", "graph"])
+    );
+    assert_eq!(
+        response.hits[0].citation["source_uri"],
+        json!("https://kb.example/payroll-rotation")
+    );
     assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
 }
 
@@ -929,8 +1097,14 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         self.with_state(|state| {
             if let Some(run) = state.sync_runs.get_mut(&sync_run_uid) {
                 run.records_seen += counters.records_seen;
+                run.records_changed += counters.records_changed;
+                run.records_deleted += counters.records_deleted;
                 run.records_ingested += counters.records_ingested;
                 run.records_failed += counters.records_failed;
+                run.objects_parsed += counters.objects_parsed;
+                run.chunks_embedded += counters.chunks_embedded;
+                run.graph_nodes_upserted += counters.graph_nodes_upserted;
+                run.graph_edges_upserted += counters.graph_edges_upserted;
             }
         })
     }

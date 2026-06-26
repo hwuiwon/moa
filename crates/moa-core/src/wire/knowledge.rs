@@ -102,11 +102,38 @@ pub struct KnowledgeSyncStatusResponse {
     /// Current sync-run status.
     pub status: String,
     /// Number of source records observed.
+    #[serde(default)]
     pub records_seen: u64,
+    /// Number of source records whose content changed.
+    #[serde(default)]
+    pub records_changed: u64,
+    /// Number of source records deleted by the provider.
+    #[serde(default)]
+    pub records_deleted: u64,
     /// Number of source records ingested.
+    #[serde(default)]
     pub records_ingested: u64,
     /// Number of source records that failed.
+    #[serde(default)]
     pub records_failed: u64,
+    /// Number of parser jobs or local parse operations completed.
+    #[serde(default)]
+    pub objects_parsed: u64,
+    /// Number of chunks embedded.
+    #[serde(default)]
+    pub chunks_embedded: u64,
+    /// Number of graph nodes upserted.
+    #[serde(default)]
+    pub graph_nodes_upserted: u64,
+    /// Number of graph edges upserted.
+    #[serde(default)]
+    pub graph_edges_upserted: u64,
+    /// Latest safe failure code, when the run failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Retry classification inferred from the current status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_classification: Option<String>,
     /// Ordered sync-run step summaries.
     #[serde(default)]
     pub steps: Vec<KnowledgeSyncStepView>,

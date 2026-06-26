@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{IngestionStepStatus, KnowledgeIngestionStep},
-    error::Result,
+    error::{Error, Result},
 };
 
 /// Safe step outcome recorded by ingestion observers.
@@ -48,6 +48,99 @@ impl StepOutcome {
             retry_count: 0,
             error_code: Some(error_code.into()),
         }
+    }
+}
+
+/// Stable failure classification for support-visible retry decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureClassification {
+    /// Actionable safe error code.
+    pub error_code: &'static str,
+    /// Whether the failure can be retried without operator or source-data changes.
+    pub retryable: bool,
+}
+
+impl FailureClassification {
+    /// Returns the retry classification label used in sync status and summaries.
+    #[must_use]
+    pub const fn retry_label(self) -> &'static str {
+        if self.retryable {
+            "retryable"
+        } else {
+            "terminal"
+        }
+    }
+}
+
+/// Classifies a tenant knowledge failure into a safe error code and retry decision.
+#[must_use]
+pub fn classify_failure(stage: &str, error: &Error) -> FailureClassification {
+    let prefix = failure_prefix(stage);
+    match error {
+        Error::UnsupportedFormat(_) => FailureClassification {
+            error_code: "parser_unsupported_format",
+            retryable: false,
+        },
+        Error::HttpStatus { status, .. } if retryable_http_status(*status) => {
+            FailureClassification {
+                error_code: retryable_http_code(prefix),
+                retryable: true,
+            }
+        }
+        Error::HttpStatus { .. } => FailureClassification {
+            error_code: terminal_http_code(prefix),
+            retryable: false,
+        },
+        Error::Transport(_) => FailureClassification {
+            error_code: retryable_transport_code(prefix),
+            retryable: true,
+        },
+        Error::Provider { message, .. } if message.contains("materializable text") => {
+            FailureClassification {
+                error_code: "provider_record_missing_text",
+                retryable: false,
+            }
+        }
+        Error::Provider { .. } => FailureClassification {
+            error_code: "provider_error_retryable",
+            retryable: true,
+        },
+        Error::Parser { .. } => FailureClassification {
+            error_code: "parser_error_retryable",
+            retryable: true,
+        },
+        Error::Decode(_) => FailureClassification {
+            error_code: terminal_decode_code(prefix),
+            retryable: false,
+        },
+        Error::Config(_) => FailureClassification {
+            error_code: terminal_config_code(prefix),
+            retryable: false,
+        },
+        Error::Repository(_) if prefix == "graph" => FailureClassification {
+            error_code: "graph_write_failed_retryable",
+            retryable: true,
+        },
+        Error::Repository(_) if prefix == "embedder" => FailureClassification {
+            error_code: "embedder_failed_retryable",
+            retryable: true,
+        },
+        Error::Repository(_) => FailureClassification {
+            error_code: "repository_failed_retryable",
+            retryable: true,
+        },
+    }
+}
+
+/// Builds a failed outcome with a stable safe summary.
+#[must_use]
+pub fn failed_outcome(classification: FailureClassification) -> StepOutcome {
+    StepOutcome {
+        status: IngestionStepStatus::Failed,
+        counters: json!({}),
+        summary: Some(format!("{} failure", classification.retry_label())),
+        retry_count: 0,
+        error_code: Some(classification.error_code.to_string()),
     }
 }
 
@@ -98,16 +191,20 @@ impl IngestionObserver for MetricsIngestionObserver {
             IngestionStepStatus::Failed => "failed",
             IngestionStepStatus::Skipped => "skipped",
         };
-        metrics::counter!(
-            "moa_knowledge_ingestion_steps_total",
+        tracing::Span::current().record("status", status);
+        tracing::Span::current().record(
+            "error_code",
+            outcome.error_code.as_deref().unwrap_or("none"),
+        );
+        metrics::histogram!(
+            "moa_knowledge_ingestion_step_duration_seconds",
             "provider" => labels.provider.to_string(),
             "parser" => labels.parser.to_string(),
             "stage" => labels.stage,
-            "status" => status,
-            "retryable" => labels.retryable.to_string(),
-            "error_code" => labels.error_code.to_string(),
+            "status" => status
         )
-        .increment(1);
+        .record(outcome.duration_seconds());
+        emit_counter_metrics(labels, status, &outcome.counters);
         tracing::info!(
             provider = labels.provider,
             parser = labels.parser,
@@ -119,6 +216,12 @@ impl IngestionObserver for MetricsIngestionObserver {
             "knowledge ingestion step recorded"
         );
         Ok(())
+    }
+}
+
+impl StepOutcome {
+    fn duration_seconds(&self) -> f64 {
+        0.0
     }
 }
 
@@ -157,6 +260,9 @@ fn sanitize_counters(counters: Value) -> Value {
                         "records_listed"
                             | "records_changed"
                             | "records_deleted"
+                            | "records_ingested"
+                            | "records_failed"
+                            | "objects_parsed"
                             | "bytes_fetched"
                             | "parser_pages"
                             | "parser_items"
@@ -166,6 +272,7 @@ fn sanitize_counters(counters: Value) -> Value {
                             | "chunks_total"
                             | "chunks_new"
                             | "chunks_deleted"
+                            | "chunks_embedded"
                             | "embeddings_created"
                             | "embeddings_reused"
                             | "graph_nodes_upserted"
@@ -178,5 +285,160 @@ fn sanitize_counters(counters: Value) -> Value {
                 .collect(),
         ),
         _ => json!({}),
+    }
+}
+
+fn emit_counter_metrics(labels: StepLabels<'_>, status: &str, counters: &Value) {
+    let records_listed = safe_counter(counters, "records_listed");
+    if records_listed > 0 {
+        metrics::counter!(
+            "moa_knowledge_records_total",
+            "provider" => labels.provider.to_string(),
+            "action" => "listed"
+        )
+        .increment(records_listed);
+    }
+    for (key, action) in [
+        ("records_changed", "changed"),
+        ("records_deleted", "deleted"),
+        ("records_ingested", "ingested"),
+    ] {
+        let count = safe_counter(counters, key);
+        if count > 0 {
+            metrics::counter!(
+                "moa_knowledge_records_total",
+                "provider" => labels.provider.to_string(),
+                "action" => action
+            )
+            .increment(count);
+        }
+    }
+    let records_failed =
+        safe_counter(counters, "records_failed").max(u64::from(status == "failed"));
+    if records_failed > 0 {
+        metrics::counter!(
+            "moa_knowledge_records_total",
+            "provider" => labels.provider.to_string(),
+            "action" => "failed"
+        )
+        .increment(records_failed);
+    }
+    if labels.stage == "parse_completed" || labels.stage == "parse_submitted" {
+        metrics::counter!(
+            "moa_knowledge_parse_jobs_total",
+            "parser" => labels.parser.to_string(),
+            "status" => status.to_string()
+        )
+        .increment(1);
+    }
+    for (key, action) in [
+        ("chunks_total", "total"),
+        ("chunks_new", "created"),
+        ("chunks_deleted", "deleted"),
+        ("chunks_embedded", "embedded"),
+    ] {
+        let count = safe_counter(counters, key);
+        if count > 0 {
+            metrics::counter!(
+                "moa_knowledge_chunks_total",
+                "action" => action
+            )
+            .increment(count);
+        }
+    }
+    for (key, metric_status) in [
+        ("embeddings_created", "created"),
+        ("embeddings_reused", "reused"),
+    ] {
+        let count = safe_counter(counters, key);
+        if count > 0 {
+            metrics::counter!(
+                "moa_knowledge_embeddings_total",
+                "status" => metric_status
+            )
+            .increment(count);
+        }
+    }
+    for (key, kind) in [
+        ("graph_nodes_upserted", "node"),
+        ("graph_edges_upserted", "edge"),
+    ] {
+        let count = safe_counter(counters, key);
+        if count > 0 {
+            metrics::counter!(
+                "moa_knowledge_graph_writes_total",
+                "kind" => kind,
+                "status" => status.to_string()
+            )
+            .increment(count);
+        }
+    }
+}
+
+fn safe_counter(counters: &Value, key: &str) -> u64 {
+    counters.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn failure_prefix(stage: &str) -> &'static str {
+    match stage {
+        "provider_triggered" | "provider_records_listed" | "content_fetched" => "provider",
+        "parse_submitted" | "parse_completed" => "parser",
+        "embedded" => "embedder",
+        "graph_upserted" | "vector_indexed" => "graph",
+        _ => "knowledge",
+    }
+}
+
+fn retryable_http_status(status: u16) -> bool {
+    matches!(status, 408 | 409 | 425 | 429 | 500..=599)
+}
+
+fn retryable_http_code(prefix: &str) -> &'static str {
+    match prefix {
+        "provider" => "provider_http_retryable",
+        "parser" => "parser_http_retryable",
+        "embedder" => "embedder_http_retryable",
+        "graph" => "graph_http_retryable",
+        _ => "knowledge_http_retryable",
+    }
+}
+
+fn terminal_http_code(prefix: &str) -> &'static str {
+    match prefix {
+        "provider" => "provider_http_terminal",
+        "parser" => "parser_http_terminal",
+        "embedder" => "embedder_http_terminal",
+        "graph" => "graph_http_terminal",
+        _ => "knowledge_http_terminal",
+    }
+}
+
+fn retryable_transport_code(prefix: &str) -> &'static str {
+    match prefix {
+        "provider" => "provider_transport_retryable",
+        "parser" => "parser_transport_retryable",
+        "embedder" => "embedder_transport_retryable",
+        "graph" => "graph_transport_retryable",
+        _ => "knowledge_transport_retryable",
+    }
+}
+
+fn terminal_decode_code(prefix: &str) -> &'static str {
+    match prefix {
+        "provider" => "provider_decode_terminal",
+        "parser" => "parser_decode_terminal",
+        "embedder" => "embedder_decode_terminal",
+        "graph" => "graph_decode_terminal",
+        _ => "knowledge_decode_terminal",
+    }
+}
+
+fn terminal_config_code(prefix: &str) -> &'static str {
+    match prefix {
+        "provider" => "provider_config_terminal",
+        "parser" => "parser_config_terminal",
+        "embedder" => "embedder_config_terminal",
+        "graph" => "graph_config_terminal",
+        _ => "knowledge_config_terminal",
     }
 }

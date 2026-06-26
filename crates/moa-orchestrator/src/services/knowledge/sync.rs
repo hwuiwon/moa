@@ -11,13 +11,29 @@ use moa_knowledge::domain::{
     IngestionStepStatus, KnowledgeIngestionStep, KnowledgeSyncRun, SyncRunStatus,
     TriggerSyncRequest,
 };
+use moa_knowledge::observability::{build_step_row, classify_failure, failed_outcome};
+use moa_observability::record_knowledge_sync_run;
 use serde_json::json;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::{KnowledgeService, KnowledgeServiceError};
 
 impl KnowledgeService {
     /// Starts a provider sync and returns after enqueueing provider-side work.
+    #[tracing::instrument(
+        name = "knowledge_sync_run",
+        skip(self, request),
+        fields(
+            tenant_id = %request.tenant_id,
+            connection_id = %request.connection_uid,
+            sync_run_id = tracing::field::Empty,
+            provider = tracing::field::Empty,
+            parser = %request.parser.as_deref().unwrap_or("default"),
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty
+        )
+    )]
     pub async fn sync_connection(
         &self,
         request: KnowledgeSyncRequest,
@@ -37,43 +53,108 @@ impl KnowledgeService {
             tenant_id: request.tenant_id,
             connection_uid: request.connection_uid,
             parser: request.parser,
-            status: SyncRunStatus::Pending,
+            status: SyncRunStatus::Queued,
             records_seen: 0,
+            records_changed: 0,
+            records_deleted: 0,
             records_ingested: 0,
             records_failed: 0,
+            objects_parsed: 0,
+            chunks_embedded: 0,
+            graph_nodes_upserted: 0,
+            graph_edges_upserted: 0,
+            error_code: None,
             started_at: now,
             finished_at: None,
         };
         repository.create_sync_run(run.clone()).await?;
+        let provider_label = connection.provider.clone();
+        let current_span = tracing::Span::current();
+        current_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
+        current_span.record("provider", provider_label.as_str());
+        current_span.record("status", run.status.as_str());
+        current_span.record("error_code", "none");
+        record_knowledge_sync_run(&provider_label, run.status.as_str());
 
-        let triggered = self
-            .provider(&connection.provider)?
+        let provider = self.provider(&connection.provider)?;
+        let provider_span = tracing::info_span!(
+            "knowledge_provider_request",
+            tenant_id = %request.tenant_id,
+            connection_id = %request.connection_uid,
+            sync_run_id = %run.sync_run_uid,
+            provider = %provider_label,
+            parser = %run.parser.as_deref().unwrap_or("default"),
+            operation = "trigger_sync",
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty
+        );
+        let triggered = match provider
             .trigger_sync(TriggerSyncRequest {
                 connection,
                 model: None,
             })
-            .await?;
-        run.status = SyncRunStatus::Running;
+            .instrument(provider_span.clone())
+            .await
+        {
+            Ok(triggered) => {
+                provider_span.record("status", "accepted");
+                provider_span.record("error_code", "none");
+                triggered
+            }
+            Err(error) => {
+                let classification = classify_failure("provider_triggered", &error);
+                provider_span.record("status", "failed");
+                provider_span.record("error_code", classification.error_code);
+                run.status = if classification.retryable {
+                    SyncRunStatus::FailedRetryable
+                } else {
+                    SyncRunStatus::FailedTerminal
+                };
+                run.records_failed = run.records_failed.saturating_add(1);
+                run.error_code = Some(classification.error_code.to_string());
+                run.finished_at = Some(Utc::now());
+                repository.update_sync_run(run.clone()).await?;
+                current_span.record("status", run.status.as_str());
+                current_span.record("error_code", classification.error_code);
+                repository
+                    .record_ingestion_step(build_step_row(
+                        run.sync_run_uid,
+                        None,
+                        "provider_triggered",
+                        failed_outcome(classification),
+                    ))
+                    .await?;
+                record_knowledge_sync_run(&provider_label, run.status.as_str());
+                return Err(error.into());
+            }
+        };
+        run.status = SyncRunStatus::ProviderSyncing;
         repository.update_sync_run(run.clone()).await?;
+        current_span.record("status", run.status.as_str());
+        current_span.record("error_code", "none");
+        record_knowledge_sync_run(&provider_label, run.status.as_str());
         repository
             .record_ingestion_step(KnowledgeIngestionStep {
                 step_uid: Uuid::now_v7(),
                 sync_run_uid: run.sync_run_uid,
                 object_uid: None,
-                step: "provider_sync_triggered".to_string(),
+                step: "provider_triggered".to_string(),
                 status: IngestionStepStatus::Completed,
                 started_at: now,
                 ended_at: Some(Utc::now()),
                 duration_ms: None,
-                counters: json!({
-                    "provider_status": triggered.status,
-                    "provider_sync_id": triggered.provider_sync_id,
-                }),
+                counters: json!({}),
                 summary: Some("Provider sync accepted".to_string()),
                 retry_count: 0,
                 error_code: None,
             })
             .await?;
+        tracing::info!(
+            sync_run_id = %run.sync_run_uid,
+            provider = %provider_label,
+            provider_status = %triggered.status,
+            "knowledge provider sync accepted"
+        );
 
         Ok(KnowledgeSyncResponse {
             sync_run_uid: run.sync_run_uid,
@@ -106,8 +187,16 @@ impl KnowledgeService {
             sync_run_uid: run.sync_run_uid,
             status: run.status.as_str().to_string(),
             records_seen: run.records_seen,
+            records_changed: run.records_changed,
+            records_deleted: run.records_deleted,
             records_ingested: run.records_ingested,
             records_failed: run.records_failed,
+            objects_parsed: run.objects_parsed,
+            chunks_embedded: run.chunks_embedded,
+            graph_nodes_upserted: run.graph_nodes_upserted,
+            graph_edges_upserted: run.graph_edges_upserted,
+            error_code: run.error_code.clone(),
+            retry_classification: retry_classification(run.status).map(ToString::to_string),
             steps,
             started_at: run.started_at,
             finished_at: run.finished_at,
@@ -170,13 +259,36 @@ impl KnowledgeService {
 }
 
 pub(crate) fn step_view(step: KnowledgeIngestionStep) -> KnowledgeSyncStepView {
+    let metadata = step_metadata(&step);
     KnowledgeSyncStepView {
         step_uid: step.step_uid,
         step: step.step,
         status: step.status.as_str().to_string(),
         object_uid: step.object_uid,
         preview: step.summary,
-        metadata: step.counters,
+        metadata,
         created_at: step.started_at,
     }
+}
+
+fn retry_classification(status: SyncRunStatus) -> Option<&'static str> {
+    match status {
+        SyncRunStatus::FailedRetryable => Some("retryable"),
+        SyncRunStatus::FailedTerminal => Some("terminal"),
+        _ => None,
+    }
+}
+
+fn step_metadata(step: &KnowledgeIngestionStep) -> serde_json::Value {
+    let mut metadata = match &step.counters {
+        serde_json::Value::Object(map) => serde_json::Value::Object(map.clone()),
+        _ => json!({}),
+    };
+    if let serde_json::Value::Object(map) = &mut metadata {
+        map.insert("retry_count".to_string(), json!(step.retry_count));
+        if let Some(error_code) = &step.error_code {
+            map.insert("error_code".to_string(), json!(error_code));
+        }
+    }
+    metadata
 }

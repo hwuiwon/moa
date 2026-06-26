@@ -10,8 +10,10 @@ use moa_knowledge::domain::{
     IngestionStepStatus, KnowledgeIngestionStep, KnowledgeProviderEventRecord, KnowledgeSyncRun,
     SyncRunStatus,
 };
+use moa_observability::record_knowledge_sync_run;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use super::{KnowledgeService, KnowledgeServiceError};
@@ -25,7 +27,42 @@ impl KnowledgeService {
         let verifier = self.webhook_verifier(&request.provider)?;
         let headers = header_map(&request.headers)?;
         let body = webhook_body(&request)?;
-        let verified = verifier.verify_webhook(headers, body.into()).await?;
+        let verify_span = tracing::info_span!(
+            "knowledge_provider_request",
+            tenant_id = tracing::field::Empty,
+            connection_id = tracing::field::Empty,
+            sync_run_id = tracing::field::Empty,
+            provider = %request.provider,
+            parser = "webhook",
+            operation = "verify_webhook",
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty
+        );
+        let verified = match verifier
+            .verify_webhook(headers, body.into())
+            .instrument(verify_span.clone())
+            .await
+        {
+            Ok(verified) => {
+                verify_span.record("status", "accepted");
+                verify_span.record("error_code", "none");
+                tracing::info!(
+                    provider = %request.provider,
+                    "knowledge provider webhook accepted"
+                );
+                verified
+            }
+            Err(error) => {
+                verify_span.record("status", "failed");
+                verify_span.record("error_code", "webhook_verification_failed");
+                tracing::warn!(
+                    provider = %request.provider,
+                    error_code = "webhook_verification_failed",
+                    "knowledge provider webhook rejected"
+                );
+                return Err(error.into());
+            }
+        };
         let tenant_id = tenant_id_from_metadata(&verified.metadata)
             .or_else(|| tenant_id_from_metadata(&request.payload))
             .ok_or_else(|| {
@@ -37,6 +74,10 @@ impl KnowledgeService {
             uuid_from_metadata(&verified.metadata, &["connection_uid", "connection_id"]).or_else(
                 || uuid_from_metadata(&request.payload, &["connection_uid", "connection_id"]),
             );
+        verify_span.record("tenant_id", tracing::field::display(tenant_id));
+        if let Some(connection_uid) = connection_uid {
+            verify_span.record("connection_id", tracing::field::display(connection_uid));
+        }
         let repository = self.repository(tenant_id);
         let recorded = repository
             .record_provider_event(KnowledgeProviderEventRecord {
@@ -63,14 +104,23 @@ impl KnowledgeService {
                 tenant_id,
                 connection_uid,
                 parser: None,
-                status: SyncRunStatus::Pending,
+                status: SyncRunStatus::Queued,
                 records_seen: 0,
+                records_changed: 0,
+                records_deleted: 0,
                 records_ingested: 0,
                 records_failed: 0,
+                objects_parsed: 0,
+                chunks_embedded: 0,
+                graph_nodes_upserted: 0,
+                graph_edges_upserted: 0,
+                error_code: None,
                 started_at: Utc::now(),
                 finished_at: None,
             };
             repository.create_sync_run(run.clone()).await?;
+            verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
+            record_knowledge_sync_run(&recorded.provider, run.status.as_str());
             repository
                 .record_ingestion_step(KnowledgeIngestionStep {
                     step_uid: Uuid::now_v7(),
@@ -81,10 +131,7 @@ impl KnowledgeService {
                     started_at: run.started_at,
                     ended_at: None,
                     duration_ms: None,
-                    counters: json!({
-                        "provider_event_id": recorded.provider_event_id,
-                        "provider": recorded.provider,
-                    }),
+                    counters: json!({}),
                     summary: Some("Provider completed sync; ingestion accepted".to_string()),
                     retry_count: 0,
                     error_code: None,

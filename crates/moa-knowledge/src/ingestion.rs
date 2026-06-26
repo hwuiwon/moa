@@ -10,18 +10,22 @@ use moa_memory_graph::{
 };
 use moa_memory_types::MemoryScope;
 use serde_json::{Value, json};
+use tracing::{Instrument, Span};
 use uuid::Uuid;
 
 use crate::{
     chunking::{ChunkingConfig, blocks_to_chunks, content_hash, elements_to_blocks},
     domain::{
         DocumentVersion, IngestionStepStatus, KnowledgeChunk, KnowledgeObject,
-        KnowledgeSyncCounters, ParsedDocument, ProviderRecord, RecordPage,
+        KnowledgeSyncCounters, ParsedDocument, ProviderRecord, RecordPage, SyncRunStatus,
     },
     error::{Error, Result},
     graph_delta::{GraphEdgeUpsert, KnowledgeGraphDelta, document_chunk_delta, stable_uid},
     normalize::{normalize_text, redact_provider_metadata},
-    observability::{IngestionObserver, StepLabels, StepOutcome, build_step_row},
+    observability::{
+        FailureClassification, IngestionObserver, StepLabels, StepOutcome, build_step_row,
+        classify_failure, failed_outcome,
+    },
     parser::DocumentParser,
     repository::KnowledgeRepository,
 };
@@ -238,6 +242,20 @@ where
     }
 
     /// Ingests one provider record page, including change-token checks and deletions.
+    #[tracing::instrument(
+        name = "knowledge_sync_run",
+        skip(self, page),
+        fields(
+            tenant_id = %tenant_id,
+            connection_id = %connection_uid,
+            sync_run_id = %sync_run_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+            records_listed = page.records.len()
+        )
+    )]
     pub async fn ingest_record_page(
         &self,
         sync_run_uid: Uuid,
@@ -297,6 +315,20 @@ where
     }
 
     /// Parses, normalizes, chunks, persists, and writes graph/vector state for one object.
+    #[tracing::instrument(
+        name = "knowledge_object_ingest",
+        skip(self, input),
+        fields(
+            sync_run_id = %sync_run_uid,
+            tenant_id = %object.tenant_id,
+            connection_id = %object.connection_uid,
+            object_id = %object.object_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty
+        )
+    )]
     pub async fn ingest_parsed_object(
         &self,
         sync_run_uid: Uuid,
@@ -311,7 +343,40 @@ where
             StepOutcome::completed(),
         )
         .await?;
-        let parsed = self.parser.parse(input).await?;
+        let parse_span = tracing::info_span!(
+            "knowledge_parse_job",
+            tenant_id = %object.tenant_id,
+            connection_id = %object.connection_uid,
+            sync_run_id = %sync_run_uid,
+            object_id = %object.object_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty
+        );
+        let parsed = match self
+            .parser
+            .parse(input)
+            .instrument(parse_span.clone())
+            .await
+        {
+            Ok(parsed) => {
+                record_span_outcome(&parse_span, "completed", None);
+                parsed
+            }
+            Err(error) => {
+                let classification = self
+                    .record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "parse_completed",
+                        &error,
+                    )
+                    .await?;
+                record_span_outcome(&parse_span, "failed", Some(classification.error_code));
+                return Err(error);
+            }
+        };
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -378,7 +443,19 @@ where
             )
             .await?;
 
-        let input = self.parse_input_from_record(object.clone(), &record)?;
+        let input = match self.parse_input_from_record(object.clone(), &record) {
+            Ok(input) => input,
+            Err(error) => {
+                self.record_failure_step(
+                    sync_run_uid,
+                    Some(object.object_uid),
+                    "content_fetched",
+                    &error,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         let bytes_fetched = input.bytes.as_ref().map_or_else(
             || input.text.as_ref().map_or(0, |text| text.len()),
             Vec::len,
@@ -403,7 +480,40 @@ where
             StepOutcome::completed(),
         )
         .await?;
-        let parsed = self.parser.parse(input).await?;
+        let parse_span = tracing::info_span!(
+            "knowledge_parse_job",
+            tenant_id = %object.tenant_id,
+            connection_id = %object.connection_uid,
+            sync_run_id = %sync_run_uid,
+            object_id = %object.object_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty
+        );
+        let parsed = match self
+            .parser
+            .parse(input)
+            .instrument(parse_span.clone())
+            .await
+        {
+            Ok(parsed) => {
+                record_span_outcome(&parse_span, "completed", None);
+                parsed
+            }
+            Err(error) => {
+                let classification = self
+                    .record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "parse_completed",
+                        &error,
+                    )
+                    .await?;
+                record_span_outcome(&parse_span, "failed", Some(classification.error_code));
+                return Err(error);
+            }
+        };
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -574,11 +684,20 @@ where
         let embeddings = if embedding_inputs.is_empty() {
             HashMap::new()
         } else {
-            let vectors = self
-                .embedder
-                .embed(&embedding_inputs)
-                .await
-                .map_err(|error| Error::Repository(format!("embedding failed: {error}")))?;
+            let vectors = match self.embedder.embed(&embedding_inputs).await {
+                Ok(vectors) => vectors,
+                Err(error) => {
+                    let error = Error::Repository(format!("embedding failed: {error}"));
+                    self.record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "embedded",
+                        &error,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
             embedding_uids
                 .into_iter()
                 .zip(vectors)
@@ -593,6 +712,7 @@ where
                 counters: json!({
                     "embeddings_created": embeddings.len(),
                     "embeddings_reused": chunks.len().saturating_sub(embeddings.len()),
+                    "chunks_embedded": embeddings.len(),
                 }),
                 summary: None,
                 retry_count: 0,
@@ -601,7 +721,21 @@ where
         )
         .await?;
 
-        let graph_report = self
+        let graph_span = tracing::info_span!(
+            "knowledge_graph_write",
+            tenant_id = %object.tenant_id,
+            connection_id = %object.connection_uid,
+            sync_run_id = %sync_run_uid,
+            object_id = %object.object_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            kind = "upsert",
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+            graph_node_count = delta.nodes.len(),
+            graph_edge_count = delta.edges.len()
+        );
+        let graph_report = match self
             .graph
             .upsert_delta(
                 &delta,
@@ -609,7 +743,26 @@ where
                 self.embedder.model_name(),
                 self.embedder.model_version(),
             )
-            .await?;
+            .instrument(graph_span.clone())
+            .await
+        {
+            Ok(report) => {
+                record_span_outcome(&graph_span, "completed", None);
+                report
+            }
+            Err(error) => {
+                let classification = self
+                    .record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "graph_upserted",
+                        &error,
+                    )
+                    .await?;
+                record_span_outcome(&graph_span, "failed", Some(classification.error_code));
+                return Err(error);
+            }
+        };
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -632,7 +785,47 @@ where
             .filter_map(|chunk| old_by_hash.get(&chunk.chunk_hash))
             .map(|chunk| stable_uid(&format!("chunk:{}", chunk.chunk_hash)))
             .collect::<Vec<_>>();
-        let invalidation_report = self.graph.invalidate_chunks(&orphan_uids).await?;
+        let invalidation_span = tracing::info_span!(
+            "knowledge_graph_write",
+            tenant_id = %object.tenant_id,
+            connection_id = %object.connection_uid,
+            sync_run_id = %sync_run_uid,
+            object_id = %object.object_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            kind = "invalidate",
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+            graph_node_count = orphan_uids.len(),
+            graph_edge_count = 0
+        );
+        let invalidation_report = match self
+            .graph
+            .invalidate_chunks(&orphan_uids)
+            .instrument(invalidation_span.clone())
+            .await
+        {
+            Ok(report) => {
+                record_span_outcome(&invalidation_span, "completed", None);
+                report
+            }
+            Err(error) => {
+                let classification = self
+                    .record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "vector_indexed",
+                        &error,
+                    )
+                    .await?;
+                record_span_outcome(
+                    &invalidation_span,
+                    "failed",
+                    Some(classification.error_code),
+                );
+                return Err(error);
+            }
+        };
         let tombstones = orphan_chunks
             .iter()
             .map(|chunk| chunk.chunk_uid)
@@ -659,7 +852,17 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "contact_groups_derived",
-            StepOutcome::completed(),
+            StepOutcome {
+                status: IngestionStepStatus::Completed,
+                counters: json!({
+                    "records_ingested": 1,
+                    "objects_parsed": 1,
+                    "chunks_embedded": embeddings.len(),
+                }),
+                summary: None,
+                retry_count: 0,
+                error_code: None,
+            },
         )
         .await?;
 
@@ -720,7 +923,47 @@ where
             .iter()
             .map(|chunk| stable_uid(&format!("chunk:{}", chunk.chunk_hash)))
             .collect::<Vec<_>>();
-        let invalidation_report = self.graph.invalidate_chunks(&graph_uids).await?;
+        let invalidation_span = tracing::info_span!(
+            "knowledge_graph_write",
+            tenant_id = %object.tenant_id,
+            connection_id = %object.connection_uid,
+            sync_run_id = %sync_run_uid,
+            object_id = %object.object_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            kind = "invalidate",
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+            graph_node_count = graph_uids.len(),
+            graph_edge_count = 0
+        );
+        let invalidation_report = match self
+            .graph
+            .invalidate_chunks(&graph_uids)
+            .instrument(invalidation_span.clone())
+            .await
+        {
+            Ok(report) => {
+                record_span_outcome(&invalidation_span, "completed", None);
+                report
+            }
+            Err(error) => {
+                let classification = self
+                    .record_failure_step(
+                        sync_run_uid,
+                        Some(object.object_uid),
+                        "vector_indexed",
+                        &error,
+                    )
+                    .await?;
+                record_span_outcome(
+                    &invalidation_span,
+                    "failed",
+                    Some(classification.error_code),
+                );
+                return Err(error);
+            }
+        };
         let chunk_uids = chunks
             .iter()
             .map(|chunk| chunk.chunk_uid)
@@ -836,15 +1079,74 @@ where
             provider: &self.provider,
             parser: &self.parser_label,
             stage,
-            retryable: false,
+            retryable: outcome
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.starts_with("retryable")),
             error_code: outcome.error_code.as_deref().unwrap_or("none"),
         };
+        let status = outcome.status.as_str();
+        tracing::Span::current().record("status", status);
+        tracing::Span::current().record(
+            "error_code",
+            outcome.error_code.as_deref().unwrap_or("none"),
+        );
         self.observer
             .record_step(sync_run_uid, object_uid, labels, outcome.clone())
             .await?;
         self.repository
             .record_ingestion_step(build_step_row(sync_run_uid, object_uid, stage, outcome))
             .await
+    }
+
+    async fn record_failure_step(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+        stage: &'static str,
+        error: &Error,
+    ) -> Result<FailureClassification> {
+        let classification = classify_failure(stage, error);
+        self.record_step(
+            sync_run_uid,
+            object_uid,
+            stage,
+            failed_outcome(classification),
+        )
+        .await?;
+        self.repository
+            .add_sync_counters(
+                sync_run_uid,
+                KnowledgeSyncCounters {
+                    records_failed: 1,
+                    ..KnowledgeSyncCounters::default()
+                },
+            )
+            .await?;
+        if let Some(mut run) = self.repository.get_sync_run(sync_run_uid).await? {
+            run.status = if classification.retryable {
+                SyncRunStatus::FailedRetryable
+            } else {
+                SyncRunStatus::FailedTerminal
+            };
+            run.error_code = Some(classification.error_code.to_string());
+            run.finished_at = Some(Utc::now());
+            self.repository.update_sync_run(run).await?;
+        }
+        let object_id = object_uid
+            .map(|uid| uid.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        tracing::warn!(
+            sync_run_id = %sync_run_uid,
+            object_id = %object_id,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            stage,
+            retryable = classification.retryable,
+            error_code = classification.error_code,
+            "knowledge ingestion failure recorded"
+        );
+        Ok(classification)
     }
 }
 
@@ -935,4 +1237,9 @@ fn compact_properties(properties: Value) -> Value {
 
 fn map_graph_error(error: moa_memory_graph::GraphError) -> Error {
     Error::Repository(error.to_string())
+}
+
+fn record_span_outcome(span: &Span, status: &'static str, error_code: Option<&str>) {
+    span.record("status", status);
+    span.record("error_code", error_code.unwrap_or("none"));
 }

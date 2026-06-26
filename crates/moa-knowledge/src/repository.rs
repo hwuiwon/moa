@@ -326,10 +326,19 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             r#"
             INSERT INTO moa.knowledge_sync_runs (
                 sync_run_uid, tenant_id, storage_partition_id, connection_id, status,
-                parser_provider, records_seen, records_changed, records_ingested,
-                records_failed, started_at, finished_at
+                parser_provider, records_seen, records_changed, records_deleted,
+                records_ingested, records_failed, objects_parsed, chunks_embedded,
+                graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11)
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15,
+                CASE
+                    WHEN $16::TEXT IS NULL THEN NULL
+                    ELSE jsonb_build_object('code', $16::TEXT)
+                END,
+                $17, $18
+            )
             "#,
         )
         .bind(run.sync_run_uid)
@@ -339,8 +348,15 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(run.status.as_str())
         .bind(run.parser)
         .bind(i64::try_from(run.records_seen).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_changed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_deleted).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_ingested).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_failed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.objects_parsed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.chunks_embedded).map_err(map_int_error)?)
+        .bind(i64::try_from(run.graph_nodes_upserted).map_err(map_int_error)?)
+        .bind(i64::try_from(run.graph_edges_upserted).map_err(map_int_error)?)
+        .bind(run.error_code)
         .bind(run.started_at)
         .bind(run.finished_at)
         .execute(conn.as_mut())
@@ -354,7 +370,10 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         let row = sqlx::query(
             r#"
             SELECT sync_run_uid, tenant_id, connection_id, parser_provider, status,
-                   records_seen, records_ingested, records_failed, started_at, finished_at
+                   records_seen, records_changed, records_deleted, records_ingested,
+                   records_failed, objects_parsed, chunks_embedded, graph_nodes_upserted,
+                   graph_edges_upserted, error->>'code' AS error_code,
+                   started_at, finished_at
             FROM moa.knowledge_sync_runs
             WHERE sync_run_uid = $1
             "#,
@@ -375,9 +394,19 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             SET status = $2,
                 parser_provider = $3,
                 records_seen = $4,
-                records_ingested = $5,
-                records_failed = $6,
-                finished_at = $7,
+                records_changed = $5,
+                records_deleted = $6,
+                records_ingested = $7,
+                records_failed = $8,
+                objects_parsed = $9,
+                chunks_embedded = $10,
+                graph_nodes_upserted = $11,
+                graph_edges_upserted = $12,
+                error = CASE
+                    WHEN $13::TEXT IS NULL THEN NULL
+                    ELSE jsonb_build_object('code', $13::TEXT)
+                END,
+                finished_at = $14,
                 updated_at = now()
             WHERE sync_run_uid = $1
             "#,
@@ -386,8 +415,15 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(run.status.as_str())
         .bind(run.parser)
         .bind(i64::try_from(run.records_seen).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_changed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_deleted).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_ingested).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_failed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.objects_parsed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.chunks_embedded).map_err(map_int_error)?)
+        .bind(i64::try_from(run.graph_nodes_upserted).map_err(map_int_error)?)
+        .bind(i64::try_from(run.graph_edges_upserted).map_err(map_int_error)?)
+        .bind(run.error_code)
         .bind(run.finished_at)
         .execute(conn.as_mut())
         .await
@@ -1264,8 +1300,18 @@ fn connection_projection_from_row(
 
 fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeSyncRun> {
     let records_seen: i64 = row.try_get("records_seen").map_err(map_sqlx_error)?;
+    let records_changed: i64 = row.try_get("records_changed").map_err(map_sqlx_error)?;
+    let records_deleted: i64 = row.try_get("records_deleted").map_err(map_sqlx_error)?;
     let records_ingested: i64 = row.try_get("records_ingested").map_err(map_sqlx_error)?;
     let records_failed: i64 = row.try_get("records_failed").map_err(map_sqlx_error)?;
+    let objects_parsed: i64 = row.try_get("objects_parsed").map_err(map_sqlx_error)?;
+    let chunks_embedded: i64 = row.try_get("chunks_embedded").map_err(map_sqlx_error)?;
+    let graph_nodes_upserted: i64 = row
+        .try_get("graph_nodes_upserted")
+        .map_err(map_sqlx_error)?;
+    let graph_edges_upserted: i64 = row
+        .try_get("graph_edges_upserted")
+        .map_err(map_sqlx_error)?;
     Ok(KnowledgeSyncRun {
         sync_run_uid: row.try_get("sync_run_uid").map_err(map_sqlx_error)?,
         tenant_id: TenantId::from(
@@ -1276,8 +1322,15 @@ fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeSyncRun> {
         parser: row.try_get("parser_provider").map_err(map_sqlx_error)?,
         status: sync_run_status(row.try_get("status").map_err(map_sqlx_error)?)?,
         records_seen: u64::try_from(records_seen).map_err(map_int_error)?,
+        records_changed: u64::try_from(records_changed).map_err(map_int_error)?,
+        records_deleted: u64::try_from(records_deleted).map_err(map_int_error)?,
         records_ingested: u64::try_from(records_ingested).map_err(map_int_error)?,
         records_failed: u64::try_from(records_failed).map_err(map_int_error)?,
+        objects_parsed: u64::try_from(objects_parsed).map_err(map_int_error)?,
+        chunks_embedded: u64::try_from(chunks_embedded).map_err(map_int_error)?,
+        graph_nodes_upserted: u64::try_from(graph_nodes_upserted).map_err(map_int_error)?,
+        graph_edges_upserted: u64::try_from(graph_edges_upserted).map_err(map_int_error)?,
+        error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
         started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
         finished_at: row.try_get("finished_at").map_err(map_sqlx_error)?,
     })
@@ -1425,6 +1478,14 @@ fn connection_status(value: String) -> Result<ConnectionStatus> {
 
 fn sync_run_status(value: String) -> Result<crate::domain::SyncRunStatus> {
     match value.as_str() {
+        "queued" => Ok(crate::domain::SyncRunStatus::Queued),
+        "provider_syncing" => Ok(crate::domain::SyncRunStatus::ProviderSyncing),
+        "provider_synced" => Ok(crate::domain::SyncRunStatus::ProviderSynced),
+        "parse_pending" => Ok(crate::domain::SyncRunStatus::ParsePending),
+        "ingesting" => Ok(crate::domain::SyncRunStatus::Ingesting),
+        "failed_retryable" => Ok(crate::domain::SyncRunStatus::FailedRetryable),
+        "failed_terminal" => Ok(crate::domain::SyncRunStatus::FailedTerminal),
+        "canceled" => Ok(crate::domain::SyncRunStatus::Canceled),
         "pending" => Ok(crate::domain::SyncRunStatus::Pending),
         "running" => Ok(crate::domain::SyncRunStatus::Running),
         "completed" => Ok(crate::domain::SyncRunStatus::Completed),

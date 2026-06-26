@@ -127,10 +127,31 @@ pub struct KnowledgeSyncRun {
     pub status: SyncRunStatus,
     /// Number of source records observed.
     pub records_seen: u64,
+    /// Number of records whose content changed.
+    #[serde(default)]
+    pub records_changed: u64,
+    /// Number of provider-deleted records.
+    #[serde(default)]
+    pub records_deleted: u64,
     /// Number of records ingested.
     pub records_ingested: u64,
     /// Number of records failed.
     pub records_failed: u64,
+    /// Number of parser jobs or local parse operations completed.
+    #[serde(default)]
+    pub objects_parsed: u64,
+    /// Number of chunks embedded.
+    #[serde(default)]
+    pub chunks_embedded: u64,
+    /// Number of graph nodes upserted.
+    #[serde(default)]
+    pub graph_nodes_upserted: u64,
+    /// Number of graph edges upserted.
+    #[serde(default)]
+    pub graph_edges_upserted: u64,
+    /// Latest safe failure code for the run, when failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     /// Run start time.
     pub started_at: DateTime<Utc>,
     /// Run finish time.
@@ -166,14 +187,30 @@ pub struct KnowledgeSyncCounters {
 #[serde(rename_all = "snake_case")]
 pub enum SyncRunStatus {
     /// Accepted but not yet doing provider work.
-    Pending,
-    /// Provider and ingestion work is running.
-    Running,
+    Queued,
+    /// Provider-side sync was requested and has not completed.
+    ProviderSyncing,
+    /// Provider-side sync completed and local ingestion is not yet running.
+    ProviderSynced,
+    /// Parser job is queued or waiting on an external parser callback.
+    ParsePending,
+    /// Local parsing, embedding, graph, or vector work is running.
+    Ingesting,
     /// Run completed successfully.
     Completed,
-    /// Run completed with some failed records.
+    /// Run failed but the classified failure is safe to retry.
+    FailedRetryable,
+    /// Run failed and should not retry without operator or data changes.
+    FailedTerminal,
+    /// Run was canceled before completion.
+    Canceled,
+    /// Legacy pending label retained for older local rows.
+    Pending,
+    /// Legacy running label retained for older local rows.
+    Running,
+    /// Legacy partial-failure label retained for older local rows.
     PartialFailure,
-    /// Run failed.
+    /// Legacy failed label retained for older local rows.
     Failed,
 }
 
@@ -182,11 +219,19 @@ impl SyncRunStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Queued => "queued",
+            Self::ProviderSyncing => "provider_syncing",
+            Self::ProviderSynced => "provider_synced",
+            Self::ParsePending => "parse_pending",
+            Self::Ingesting => "ingesting",
             Self::Pending => "pending",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::PartialFailure => "partial_failure",
             Self::Failed => "failed",
+            Self::FailedRetryable => "failed_retryable",
+            Self::FailedTerminal => "failed_terminal",
+            Self::Canceled => "canceled",
         }
     }
 }

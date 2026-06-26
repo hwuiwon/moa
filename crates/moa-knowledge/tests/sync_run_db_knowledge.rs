@@ -44,10 +44,17 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         tenant_id,
         connection_uid,
         parser: Some("native".to_string()),
-        status: SyncRunStatus::Running,
+        status: SyncRunStatus::Ingesting,
         records_seen: 1,
+        records_changed: 0,
+        records_deleted: 0,
         records_ingested: 0,
         records_failed: 0,
+        objects_parsed: 0,
+        chunks_embedded: 0,
+        graph_nodes_upserted: 0,
+        graph_edges_upserted: 0,
+        error_code: None,
         started_at: Utc::now(),
         finished_at: None,
     }
@@ -138,7 +145,7 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
         .await
         .expect("read tenant A sync run")
         .expect("tenant A run should exist");
-    assert_eq!(created.status, SyncRunStatus::Running);
+    assert_eq!(created.status, SyncRunStatus::Ingesting);
     assert_eq!(created.records_seen, 1);
     assert_eq!(created.records_ingested, 0);
     assert_eq!(created.records_failed, 0);

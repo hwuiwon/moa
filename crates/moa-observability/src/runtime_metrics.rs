@@ -515,6 +515,122 @@ pub fn record_memory_operation(
     .record(result_count as f64);
 }
 
+/// Records one tenant knowledge sync-run lifecycle observation.
+pub fn record_knowledge_sync_run(provider: &str, status: &str) {
+    counter!(
+        "moa_knowledge_sync_runs_total",
+        "provider" => knowledge_metric_label(provider),
+        "status" => knowledge_metric_label(status)
+    )
+    .increment(1);
+}
+
+/// Records provider record actions observed during tenant knowledge sync.
+pub fn record_knowledge_records(provider: &str, action: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_knowledge_records_total",
+        "provider" => knowledge_metric_label(provider),
+        "action" => knowledge_metric_label(action)
+    )
+    .increment(count);
+}
+
+/// Records tenant knowledge ingestion stage duration.
+pub fn record_knowledge_ingestion_step_duration(
+    provider: &str,
+    parser: &str,
+    stage: &str,
+    status: &str,
+    duration: Duration,
+) {
+    histogram!(
+        "moa_knowledge_ingestion_step_duration_seconds",
+        "provider" => knowledge_metric_label(provider),
+        "parser" => knowledge_metric_label(parser),
+        "stage" => knowledge_metric_label(stage),
+        "status" => knowledge_metric_label(status)
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records parser job outcomes for tenant knowledge ingestion.
+pub fn record_knowledge_parse_job(parser: &str, status: &str) {
+    counter!(
+        "moa_knowledge_parse_jobs_total",
+        "parser" => knowledge_metric_label(parser),
+        "status" => knowledge_metric_label(status)
+    )
+    .increment(1);
+}
+
+/// Records tenant knowledge chunk actions.
+pub fn record_knowledge_chunks(action: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_knowledge_chunks_total",
+        "action" => knowledge_metric_label(action)
+    )
+    .increment(count);
+}
+
+/// Records tenant knowledge embedding outcomes.
+pub fn record_knowledge_embeddings(status: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_knowledge_embeddings_total",
+        "status" => knowledge_metric_label(status)
+    )
+    .increment(count);
+}
+
+/// Records tenant knowledge graph write outcomes.
+pub fn record_knowledge_graph_write(kind: &str, status: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_knowledge_graph_writes_total",
+        "kind" => knowledge_metric_label(kind),
+        "status" => knowledge_metric_label(status)
+    )
+    .increment(count);
+}
+
+/// Records tenant knowledge retrieval stage duration.
+pub fn record_knowledge_retrieval_duration(stage: &str, status: &str, duration: Duration) {
+    histogram!(
+        "moa_knowledge_retrieval_duration_seconds",
+        "stage" => knowledge_metric_label(stage),
+        "status" => knowledge_metric_label(status)
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records tenant knowledge retrieval hit contribution by source tier and leg.
+pub fn record_knowledge_retrieval_hits(source_tier: &str, leg: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+
+    counter!(
+        "moa_knowledge_retrieval_hits_total",
+        "source_tier" => knowledge_metric_label(source_tier),
+        "leg" => knowledge_metric_label(leg)
+    )
+    .increment(count);
+}
+
 /// Records live broadcast events dropped because a receiver lagged.
 pub fn record_broadcast_lag(channel: &str, policy: &str, dropped_events: u64) {
     if dropped_events == 0 {
@@ -699,6 +815,41 @@ fn format_metrics_endpoint_url(addr: SocketAddr) -> String {
         ip => ip.to_string(),
     };
     format!("http://{host}:{}/metrics", addr.port())
+}
+
+fn knowledge_metric_label(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .take(48)
+        .map(|ch| match ch {
+            'a'..='z' | '0'..='9' | '_' => ch,
+            'A'..='Z' => ch.to_ascii_lowercase(),
+            '-' | '.' | '/' | ' ' => '_',
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if normalized.is_empty() {
+        "unknown".to_string()
+    } else {
+        normalized
+    }
+}
+
+#[cfg(test)]
+fn knowledge_metric_names() -> &'static [&'static str] {
+    &[
+        "moa_knowledge_sync_runs_total",
+        "moa_knowledge_records_total",
+        "moa_knowledge_ingestion_step_duration_seconds",
+        "moa_knowledge_parse_jobs_total",
+        "moa_knowledge_chunks_total",
+        "moa_knowledge_embeddings_total",
+        "moa_knowledge_graph_writes_total",
+        "moa_knowledge_retrieval_duration_seconds",
+        "moa_knowledge_retrieval_hits_total",
+    ]
 }
 
 fn register_metric_descriptions() {
@@ -906,6 +1057,42 @@ fn register_metric_descriptions() {
     describe_histogram!(
         "moa_memory_operation_results",
         "Memory service result counts, labeled by operation and status."
+    );
+    describe_counter!(
+        "moa_knowledge_sync_runs_total",
+        "Tenant knowledge sync-run lifecycle outcomes, labeled by provider and status."
+    );
+    describe_counter!(
+        "moa_knowledge_records_total",
+        "Tenant knowledge provider records observed, labeled by provider and action."
+    );
+    describe_histogram!(
+        "moa_knowledge_ingestion_step_duration_seconds",
+        "Tenant knowledge ingestion step duration in seconds, labeled by provider, parser, stage, and status."
+    );
+    describe_counter!(
+        "moa_knowledge_parse_jobs_total",
+        "Tenant knowledge parse job outcomes, labeled by parser and status."
+    );
+    describe_counter!(
+        "moa_knowledge_chunks_total",
+        "Tenant knowledge chunk actions, labeled by action."
+    );
+    describe_counter!(
+        "moa_knowledge_embeddings_total",
+        "Tenant knowledge embedding outcomes, labeled by status."
+    );
+    describe_counter!(
+        "moa_knowledge_graph_writes_total",
+        "Tenant knowledge graph write outcomes, labeled by write kind and status."
+    );
+    describe_histogram!(
+        "moa_knowledge_retrieval_duration_seconds",
+        "Tenant knowledge retrieval stage duration in seconds, labeled by stage and status."
+    );
+    describe_counter!(
+        "moa_knowledge_retrieval_hits_total",
+        "Tenant knowledge retrieval hits, labeled by source tier and retrieval leg."
     );
     describe_counter!(
         "moa_experiment_runs_total",
@@ -1148,6 +1335,62 @@ mod tests {
             assert!(
                 !experiment_metrics_source.contains(forbidden),
                 "experiment metric helpers must not use high-cardinality label `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn knowledge_metrics_have_descriptions_and_low_cardinality_labels() {
+        // Pins: tenant knowledge metrics use the Task 13 names without tenant, source, object, contact, or error-message labels.
+        let source = include_str!("runtime_metrics.rs");
+        for metric in knowledge_metric_names() {
+            let described = source.contains(&format!("describe_counter!(\n        \"{metric}\""))
+                || source.contains(&format!("describe_histogram!(\n        \"{metric}\""));
+            assert!(
+                described,
+                "runtime metric {metric} should have a description"
+            );
+        }
+
+        let knowledge_metrics_source = source
+            .split("pub fn record_knowledge_sync_run")
+            .nth(1)
+            .expect("knowledge metric helper section should exist")
+            .split("/// Records live broadcast events dropped")
+            .next()
+            .expect("knowledge metric helper section should end before broadcast metrics");
+        for required_label in [
+            "\"provider\"",
+            "\"status\"",
+            "\"action\"",
+            "\"parser\"",
+            "\"stage\"",
+            "\"kind\"",
+            "\"source_tier\"",
+            "\"leg\"",
+        ] {
+            assert!(
+                knowledge_metrics_source.contains(required_label),
+                "knowledge metric helper section should include label {required_label}"
+            );
+        }
+        for forbidden in [
+            "tenant_id",
+            "source_uri",
+            "object_id",
+            "object_uid",
+            "contact_id",
+            "contact_uid",
+            "error_message",
+            "error_code",
+            "provider_event_id",
+            "parser_job_id",
+            "access_token",
+            "api_key",
+        ] {
+            assert!(
+                !knowledge_metrics_source.contains(forbidden),
+                "knowledge metric helpers must not use high-cardinality label `{forbidden}`"
             );
         }
     }
