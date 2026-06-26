@@ -87,6 +87,7 @@ moa-eval-core = { workspace = true, optional = true }
 moa-eval = { workspace = true, optional = true }
 moa-experiments = { workspace = true, optional = true }
 moa-hands = { workspace = true }
+moa-knowledge = { workspace = true }
 moa-lineage-audit = { workspace = true }
 moa-lineage-citation = { workspace = true }
 moa-lineage-core = { workspace = true }

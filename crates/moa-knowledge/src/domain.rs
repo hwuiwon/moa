@@ -425,6 +425,9 @@ pub struct KnowledgeChunk {
     pub chunk_uid: Uuid,
     /// Owning document version.
     pub version_uid: Uuid,
+    /// Graph node UID written for this chunk, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_node_uid: Option<Uuid>,
     /// Deterministic chunk content hash.
     pub chunk_hash: String,
     /// Ordered source block hashes.
@@ -441,6 +444,73 @@ pub struct KnowledgeChunk {
     /// Safe metadata.
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// Linked connection plus latest sync-run status for service projections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeConnectionProjection {
+    /// Linked connection.
+    pub connection: KnowledgeConnection,
+    /// Most recent sync-run status, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_status: Option<SyncRunStatus>,
+}
+
+/// Source object plus parser and graph counters for service projections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeObjectProjection {
+    /// Source object.
+    pub object: KnowledgeObject,
+    /// Latest parser that produced content for the object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser: Option<String>,
+    /// Current parser status for the object.
+    pub parser_status: String,
+    /// Current chunk count.
+    pub chunk_count: u64,
+    /// Current graph node count.
+    pub graph_node_count: u64,
+}
+
+/// Object inspection projection assembled from object, version, chunks, and steps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeObjectInspection {
+    /// Source object.
+    pub object: KnowledgeObject,
+    /// Latest parsed document version, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<DocumentVersion>,
+    /// Current chunks for the latest version.
+    #[serde(default)]
+    pub chunks: Vec<KnowledgeChunk>,
+    /// Ordered object ingestion timeline.
+    #[serde(default)]
+    pub steps: Vec<KnowledgeIngestionStep>,
+}
+
+/// Stored provider webhook event used for idempotent delivery handling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeProviderEventRecord {
+    /// Tenant-owned provider-event row identifier.
+    pub provider_event_uid: Uuid,
+    /// Owning tenant.
+    pub tenant_id: TenantId,
+    /// Optional linked connection associated with the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_uid: Option<Uuid>,
+    /// Linked-account provider that emitted the event.
+    pub provider: String,
+    /// Provider event identifier used for idempotency.
+    pub provider_event_id: String,
+    /// Provider event type.
+    pub event_type: String,
+    /// Local event status.
+    pub status: String,
+    /// Redacted provider payload.
+    #[serde(default)]
+    pub payload: Value,
+    /// Whether this delivery duplicated an already recorded event.
+    pub duplicate: bool,
 }
 
 /// Request to create a provider link token.

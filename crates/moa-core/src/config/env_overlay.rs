@@ -196,10 +196,14 @@ pub struct MoaEnvOverlay {
     pub nango_api_base_url: Option<String>,
     /// `MOA_NANGO_API_KEY`.
     pub nango_api_key: Option<String>,
+    /// `MOA_NANGO_WEBHOOK_SIGNING_KEY`.
+    pub nango_webhook_signing_key: Option<String>,
     /// `MOA_MERGE_API_BASE_URL`.
     pub merge_api_base_url: Option<String>,
     /// `MOA_MERGE_API_KEY`.
     pub merge_api_key: Option<String>,
+    /// `MOA_MERGE_WEBHOOK_SIGNATURE_KEY`.
+    pub merge_webhook_signature_key: Option<String>,
     /// `MOA_LLAMAPARSE_API_URL`.
     pub llamaparse_api_url: Option<String>,
     /// `MOA_LLAMAPARSE_API_KEY`.
@@ -1041,11 +1045,19 @@ impl MoaEnvOverlay {
             &self.nango_api_base_url,
         );
         set_option_if_some(&mut config.knowledge.nango.api_key, &self.nango_api_key);
+        set_option_if_some(
+            &mut config.knowledge.nango.webhook_signing_key,
+            &self.nango_webhook_signing_key,
+        );
         set_if_some(
             &mut config.knowledge.merge.api_base_url,
             &self.merge_api_base_url,
         );
         set_option_if_some(&mut config.knowledge.merge.api_key, &self.merge_api_key);
+        set_option_if_some(
+            &mut config.knowledge.merge.webhook_signature_key,
+            &self.merge_webhook_signature_key,
+        );
         set_if_some(
             &mut config.knowledge.llamaparse.api_base_url,
             &self.llamaparse_api_url,
@@ -1719,8 +1731,10 @@ mod tests {
             ("MOA_KNOWLEDGE_EXTERNAL_PARSER_DEFAULT", "llamaparse"),
             ("MOA_NANGO_API_BASE_URL", "https://nango.example"),
             ("MOA_NANGO_API_KEY", "nango-secret"),
+            ("MOA_NANGO_WEBHOOK_SIGNING_KEY", "nango-webhook-secret"),
             ("MOA_MERGE_API_BASE_URL", "https://merge.example"),
             ("MOA_MERGE_API_KEY", "merge-secret"),
+            ("MOA_MERGE_WEBHOOK_SIGNATURE_KEY", "merge-webhook-secret"),
             ("MOA_LLAMAPARSE_API_URL", "https://llamaparse.example"),
             ("MOA_LLAMAPARSE_API_KEY", "llamaparse-secret"),
             ("MOA_LLAMAPARSE_TIER", "premium"),
@@ -1751,10 +1765,18 @@ mod tests {
             config.knowledge.nango.api_key.as_deref(),
             Some("nango-secret")
         );
+        assert_eq!(
+            config.knowledge.nango.webhook_signing_key.as_deref(),
+            Some("nango-webhook-secret")
+        );
         assert_eq!(config.knowledge.merge.api_base_url, "https://merge.example");
         assert_eq!(
             config.knowledge.merge.api_key.as_deref(),
             Some("merge-secret")
+        );
+        assert_eq!(
+            config.knowledge.merge.webhook_signature_key.as_deref(),
+            Some("merge-webhook-secret")
         );
         assert_eq!(
             config.knowledge.llamaparse.api_base_url,

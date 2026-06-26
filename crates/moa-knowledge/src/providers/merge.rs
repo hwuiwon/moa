@@ -1,9 +1,12 @@
 //! Merge linked-account provider adapter.
 
+use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
+use hmac::{Hmac, Mac};
 use reqwest::{Client, header::HeaderMap};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::Sha256;
 
 use crate::{
     domain::{
@@ -22,6 +25,7 @@ pub struct MergeProvider {
     client: Client,
     base_url: String,
     api_key: String,
+    webhook_signature_key: Option<String>,
 }
 
 impl MergeProvider {
@@ -31,6 +35,7 @@ impl MergeProvider {
             client: http::build_http_client()?,
             base_url: trim_base_url(base_url.into()),
             api_key: api_key.into(),
+            webhook_signature_key: None,
         })
     }
 
@@ -45,11 +50,34 @@ impl MergeProvider {
             client,
             base_url: trim_base_url(base_url.into()),
             api_key: api_key.into(),
+            webhook_signature_key: None,
         }
+    }
+
+    /// Configures the webhook signature key used to verify Merge webhook payloads.
+    #[must_use]
+    pub fn with_webhook_signature_key(mut self, signature_key: impl Into<String>) -> Self {
+        self.webhook_signature_key = Some(signature_key.into());
+        self
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    fn verify_signature(&self, headers: &HeaderMap, body: &[u8]) -> Result<()> {
+        let signature_key = self.webhook_signature_key.as_deref().ok_or_else(|| {
+            Error::Config("Merge webhook signature key is not configured".to_string())
+        })?;
+        let signature = header_value(headers, "x-merge-webhook-signature")?;
+        let signature = decode_signature(signature)?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(signature_key.as_bytes()).map_err(|error| {
+                Error::provider("merge", format!("webhook signature key failed: {error}"))
+            })?;
+        mac.update(body);
+        mac.verify_slice(&signature)
+            .map_err(|_| Error::provider("merge", "webhook signature verification failed"))
     }
 }
 
@@ -166,7 +194,8 @@ impl LinkedIntegrationProvider for MergeProvider {
         })
     }
 
-    async fn verify_webhook(&self, _headers: HeaderMap, body: Bytes) -> Result<WebhookEvent> {
+    async fn verify_webhook(&self, headers: HeaderMap, body: Bytes) -> Result<WebhookEvent> {
+        self.verify_signature(&headers, &body)?;
         let value: Value = serde_json::from_slice(&body).map_err(|error| {
             Error::provider("merge", format!("webhook JSON decode failed: {error}"))
         })?;
@@ -208,6 +237,29 @@ fn value_to_provider_record(value: &Value) -> ProviderRecord {
 
 fn trim_base_url(value: String) -> String {
     value.trim_end_matches('/').to_string()
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
+    headers
+        .get(name)
+        .ok_or_else(|| Error::provider("merge", format!("webhook missing `{name}` header")))?
+        .to_str()
+        .map_err(|error| {
+            Error::provider("merge", format!("webhook header `{name}` failed: {error}"))
+        })
+}
+
+fn decode_signature(value: &str) -> Result<Vec<u8>> {
+    general_purpose::URL_SAFE
+        .decode(value.trim())
+        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(value.trim()))
+        .or_else(|_| general_purpose::STANDARD.decode(value.trim()))
+        .map_err(|error| {
+            Error::provider(
+                "merge",
+                format!("webhook signature was not base64: {error}"),
+            )
+        })
 }
 
 fn stable_id(value: &str) -> String {

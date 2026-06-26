@@ -143,6 +143,9 @@ pub struct NangoKnowledgeProviderConfig {
     /// Optional Nango API key loaded from `MOA_NANGO_API_KEY`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Optional Nango webhook signing key loaded from `MOA_NANGO_WEBHOOK_SIGNING_KEY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_signing_key: Option<String>,
 }
 
 impl Default for NangoKnowledgeProviderConfig {
@@ -150,6 +153,7 @@ impl Default for NangoKnowledgeProviderConfig {
         Self {
             api_base_url: "https://api.nango.dev".to_string(),
             api_key: None,
+            webhook_signing_key: None,
         }
     }
 }
@@ -163,6 +167,9 @@ pub struct MergeKnowledgeProviderConfig {
     /// Optional Merge API key loaded from `MOA_MERGE_API_KEY`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Optional Merge webhook signature key loaded from `MOA_MERGE_WEBHOOK_SIGNATURE_KEY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_signature_key: Option<String>,
 }
 
 impl Default for MergeKnowledgeProviderConfig {
@@ -170,6 +177,7 @@ impl Default for MergeKnowledgeProviderConfig {
         Self {
             api_base_url: "https://api.merge.dev".to_string(),
             api_key: None,
+            webhook_signature_key: None,
         }
     }
 }

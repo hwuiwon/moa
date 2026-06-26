@@ -11,8 +11,9 @@ use crate::{
     domain::{
         ConnectionStatus, ContactGroup, ContactGroupMembership, DocumentVersion,
         IngestionStepStatus, KnowledgeBlock, KnowledgeChunk, KnowledgeConnection,
-        KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun,
-        ObjectStatus,
+        KnowledgeConnectionProjection, KnowledgeIngestionStep, KnowledgeObject,
+        KnowledgeObjectInspection, KnowledgeObjectProjection, KnowledgeProviderEventRecord,
+        KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -27,8 +28,18 @@ pub trait KnowledgeRepository: Send + Sync {
     /// Gets a linked connection by identifier.
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>>;
 
+    /// Lists linked-connection projections for a tenant.
+    async fn list_connections(
+        &self,
+        tenant_id: TenantId,
+        provider: Option<&str>,
+    ) -> Result<Vec<KnowledgeConnectionProjection>>;
+
     /// Saves a sync run.
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
+
+    /// Gets one sync run by identifier.
+    async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>>;
 
     /// Updates a sync run.
     async fn update_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
@@ -43,11 +54,27 @@ pub trait KnowledgeRepository: Send + Sync {
     /// Records one ingestion step.
     async fn record_ingestion_step(&self, step: KnowledgeIngestionStep) -> Result<()>;
 
+    /// Loads a redacted ingestion timeline for one sync run.
+    async fn sync_run_steps(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+    ) -> Result<Vec<KnowledgeIngestionStep>>;
+
     /// Saves or updates a knowledge object.
     async fn upsert_object(&self, object: KnowledgeObject) -> Result<()>;
 
     /// Gets a knowledge object by identifier.
     async fn get_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObject>>;
+
+    /// Lists source object projections for a tenant.
+    async fn list_objects(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Option<Uuid>,
+        object_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<KnowledgeObjectProjection>>;
 
     /// Gets a knowledge object by provider external identifier.
     async fn get_object_by_source(
@@ -61,6 +88,9 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Gets the chunks attached to one document version.
     async fn chunks_for_version(&self, version_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
+
+    /// Loads an object inspection projection with bounded service-side rendering inputs.
+    async fn inspect_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>>;
 
     /// Saves an immutable document version.
     async fn insert_document_version(&self, version: DocumentVersion) -> Result<()>;
@@ -93,6 +123,12 @@ pub trait KnowledgeRepository: Send + Sync {
         group_uid: Uuid,
         memberships: Vec<ContactGroupMembership>,
     ) -> Result<()>;
+
+    /// Records a provider webhook event idempotently.
+    async fn record_provider_event(
+        &self,
+        event: KnowledgeProviderEventRecord,
+    ) -> Result<KnowledgeProviderEventRecord>;
 }
 
 /// Postgres-backed tenant knowledge repository.
@@ -241,6 +277,40 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         row.as_ref().map(connection_from_row).transpose()
     }
 
+    async fn list_connections(
+        &self,
+        tenant_id: TenantId,
+        provider: Option<&str>,
+    ) -> Result<Vec<KnowledgeConnectionProjection>> {
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT c.connection_uid, c.tenant_id, c.provider, c.connector,
+                   c.provider_connection_id, c.credential_ref, c.status, c.metadata,
+                   c.created_at, c.updated_at, c.last_synced_at,
+                   latest.status AS last_sync_status
+            FROM moa.knowledge_connections c
+            LEFT JOIN LATERAL (
+                SELECT status
+                FROM moa.knowledge_sync_runs
+                WHERE connection_id = c.connection_uid
+                ORDER BY started_at DESC, sync_run_uid DESC
+                LIMIT 1
+            ) latest ON TRUE
+            WHERE c.tenant_id = $1
+              AND ($2::TEXT IS NULL OR c.provider = $2)
+            ORDER BY c.updated_at DESC, c.connection_uid DESC
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(provider)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter().map(connection_projection_from_row).collect()
+    }
+
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
         let mut conn = self.begin().await?;
         sqlx::query(
@@ -268,6 +338,24 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>> {
+        let mut conn = self.begin().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT sync_run_uid, tenant_id, connection_id, parser_provider, status,
+                   records_seen, records_ingested, records_failed, started_at, finished_at
+            FROM moa.knowledge_sync_runs
+            WHERE sync_run_uid = $1
+            "#,
+        )
+        .bind(sync_run_uid)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        row.as_ref().map(sync_run_from_row).transpose()
     }
 
     async fn update_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
@@ -369,6 +457,31 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         conn.commit().await.map_err(map_moa_error)
     }
 
+    async fn sync_run_steps(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+    ) -> Result<Vec<KnowledgeIngestionStep>> {
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT step_uid, sync_run_id, object_id, stage, status, started_at, ended_at,
+                   duration_ms, attempt, counters, safe_summary, error_code, error_message
+            FROM moa.knowledge_ingestion_steps
+            WHERE sync_run_id = $1
+              AND ($2::UUID IS NULL OR object_id = $2)
+            ORDER BY started_at ASC, stage ASC, attempt ASC
+            "#,
+        )
+        .bind(sync_run_uid)
+        .bind(object_uid)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter().map(step_from_row).collect()
+    }
+
     async fn upsert_object(&self, object: KnowledgeObject) -> Result<()> {
         let mut conn = self.begin().await?;
         sqlx::query(
@@ -431,6 +544,54 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         row.as_ref().map(object_from_row).transpose()
     }
 
+    async fn list_objects(
+        &self,
+        tenant_id: TenantId,
+        connection_uid: Option<Uuid>,
+        object_type: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<KnowledgeObjectProjection>> {
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT o.object_uid, o.tenant_id, o.connection_id, o.object_type,
+                   o.external_object_id, o.parent_external_object_id, o.source_uri,
+                   o.title, o.change_token, o.metadata, o.status, o.last_modified_at,
+                   o.deleted_at, latest.parser_provider,
+                   CASE WHEN latest.document_version_uid IS NULL THEN 'pending' ELSE 'parsed' END AS parser_status,
+                   COALESCE(chunk_counts.chunk_count, 0) AS chunk_count,
+                   COALESCE(chunk_counts.graph_node_count, 0) AS graph_node_count
+            FROM moa.knowledge_objects o
+            LEFT JOIN LATERAL (
+                SELECT document_version_uid, parser_provider
+                FROM moa.knowledge_document_versions
+                WHERE object_id = o.object_uid
+                ORDER BY created_at DESC, document_version_uid DESC
+                LIMIT 1
+            ) latest ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT count(*) AS chunk_count, count(graph_node_uid) AS graph_node_count
+                FROM moa.knowledge_chunks
+                WHERE document_version_id = latest.document_version_uid
+            ) chunk_counts ON TRUE
+            WHERE o.tenant_id = $1
+              AND ($2::UUID IS NULL OR o.connection_id = $2)
+              AND ($3::TEXT IS NULL OR o.object_type = $3)
+            ORDER BY o.updated_at DESC, o.object_uid DESC
+            LIMIT $4
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(connection_uid)
+        .bind(object_type)
+        .bind(i64::from(limit))
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter().map(object_projection_from_row).collect()
+    }
+
     async fn get_object_by_source(
         &self,
         connection_uid: Uuid,
@@ -479,8 +640,8 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         let mut conn = self.begin().await?;
         let rows = sqlx::query(
             r#"
-            SELECT chunk_uid, document_version_id, chunk_hash, block_hashes, heading_path,
-                   text, ordinal, token_count, metadata
+            SELECT chunk_uid, document_version_id, graph_node_uid, chunk_hash, block_hashes,
+                   heading_path, text, ordinal, token_count, metadata
             FROM moa.knowledge_chunks
             WHERE document_version_id = $1
             ORDER BY ordinal ASC
@@ -492,6 +653,24 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .map_err(map_sqlx_error)?;
         conn.commit().await.map_err(map_moa_error)?;
         rows.iter().map(chunk_from_row).collect()
+    }
+
+    async fn inspect_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>> {
+        let Some(object) = self.get_object(object_uid).await? else {
+            return Ok(None);
+        };
+        let version = self.latest_document_version(object_uid).await?;
+        let chunks = match &version {
+            Some(version) => self.chunks_for_version(version.version_uid).await?,
+            None => Vec::new(),
+        };
+        let steps = self.object_timeline(object_uid).await?;
+        Ok(Some(KnowledgeObjectInspection {
+            object,
+            version,
+            chunks,
+            steps,
+        }))
     }
 
     async fn insert_document_version(&self, version: DocumentVersion) -> Result<()> {
@@ -568,16 +747,18 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
                 r#"
                 INSERT INTO moa.knowledge_chunks (
                     chunk_uid, tenant_id, storage_partition_id, document_version_id,
-                    chunk_hash, block_hashes, heading_path, text, ordinal, token_count, metadata
+                    graph_node_uid, chunk_hash, block_hashes, heading_path, text, ordinal,
+                    token_count, metadata
                 )
                 SELECT $1, tenant_id, storage_partition_id, document_version_uid,
-                       $3, $4, $5, $6, $7, $8, $9
+                       $3, $4, $5, $6, $7, $8, $9, $10
                 FROM moa.knowledge_document_versions
                 WHERE document_version_uid = $2
                 "#,
             )
             .bind(chunk.chunk_uid)
             .bind(version_uid)
+            .bind(chunk.graph_node_uid)
             .bind(chunk.chunk_hash)
             .bind(chunk.block_hashes)
             .bind(chunk.heading_path)
@@ -749,6 +930,57 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         }
         conn.commit().await.map_err(map_moa_error)
     }
+
+    async fn record_provider_event(
+        &self,
+        event: KnowledgeProviderEventRecord,
+    ) -> Result<KnowledgeProviderEventRecord> {
+        let mut conn = self.begin().await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO moa.knowledge_provider_events (
+                provider_event_uid, tenant_id, storage_partition_id, connection_id,
+                provider, provider_event_id, event_type, status, payload
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (tenant_id, provider, provider_event_id) DO NOTHING
+            RETURNING provider_event_uid, tenant_id, connection_id, provider, provider_event_id,
+                      event_type, status, payload, FALSE AS duplicate
+            "#,
+        )
+        .bind(event.provider_event_uid)
+        .bind(event.tenant_id.0)
+        .bind(storage_partition_id(event.tenant_id))
+        .bind(event.connection_uid)
+        .bind(&event.provider)
+        .bind(&event.provider_event_id)
+        .bind(&event.event_type)
+        .bind(&event.status)
+        .bind(redact_provider_metadata(event.payload.clone()))
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let row = match inserted {
+            Some(row) => row,
+            None => sqlx::query(
+                r#"
+                    SELECT provider_event_uid, tenant_id, connection_id, provider,
+                           provider_event_id, event_type, status, payload, TRUE AS duplicate
+                    FROM moa.knowledge_provider_events
+                    WHERE tenant_id = $1 AND provider = $2 AND provider_event_id = $3
+                    "#,
+            )
+            .bind(event.tenant_id.0)
+            .bind(&event.provider)
+            .bind(&event.provider_event_id)
+            .fetch_one(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?,
+        };
+        conn.commit().await.map_err(map_moa_error)?;
+        provider_event_from_row(&row)
+    }
 }
 
 /// No-op repository useful before the SQL schema is available.
@@ -765,8 +997,20 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
         Ok(None)
     }
 
+    async fn list_connections(
+        &self,
+        _tenant_id: TenantId,
+        _provider: Option<&str>,
+    ) -> Result<Vec<KnowledgeConnectionProjection>> {
+        Ok(Vec::new())
+    }
+
     async fn create_sync_run(&self, _run: KnowledgeSyncRun) -> Result<()> {
         Ok(())
+    }
+
+    async fn get_sync_run(&self, _sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>> {
+        Ok(None)
     }
 
     async fn update_sync_run(&self, _run: KnowledgeSyncRun) -> Result<()> {
@@ -785,12 +1029,30 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
         Ok(())
     }
 
+    async fn sync_run_steps(
+        &self,
+        _sync_run_uid: Uuid,
+        _object_uid: Option<Uuid>,
+    ) -> Result<Vec<KnowledgeIngestionStep>> {
+        Ok(Vec::new())
+    }
+
     async fn upsert_object(&self, _object: KnowledgeObject) -> Result<()> {
         Ok(())
     }
 
     async fn get_object(&self, _object_uid: Uuid) -> Result<Option<KnowledgeObject>> {
         Ok(None)
+    }
+
+    async fn list_objects(
+        &self,
+        _tenant_id: TenantId,
+        _connection_uid: Option<Uuid>,
+        _object_type: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<KnowledgeObjectProjection>> {
+        Ok(Vec::new())
     }
 
     async fn get_object_by_source(
@@ -807,6 +1069,10 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
 
     async fn chunks_for_version(&self, _version_uid: Uuid) -> Result<Vec<KnowledgeChunk>> {
         Ok(Vec::new())
+    }
+
+    async fn inspect_object(&self, _object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>> {
+        Ok(None)
     }
 
     async fn insert_document_version(&self, _version: DocumentVersion) -> Result<()> {
@@ -848,6 +1114,13 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
     ) -> Result<()> {
         Ok(())
     }
+
+    async fn record_provider_event(
+        &self,
+        event: KnowledgeProviderEventRecord,
+    ) -> Result<KnowledgeProviderEventRecord> {
+        Ok(event)
+    }
 }
 
 fn storage_partition_id(tenant_id: TenantId) -> String {
@@ -875,6 +1148,41 @@ fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeConnectio
     })
 }
 
+fn connection_projection_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<KnowledgeConnectionProjection> {
+    let last_sync_status = row
+        .try_get::<Option<String>, _>("last_sync_status")
+        .map_err(map_sqlx_error)?
+        .map(sync_run_status)
+        .transpose()?;
+    Ok(KnowledgeConnectionProjection {
+        connection: connection_from_row(row)?,
+        last_sync_status,
+    })
+}
+
+fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeSyncRun> {
+    let records_seen: i64 = row.try_get("records_seen").map_err(map_sqlx_error)?;
+    let records_ingested: i64 = row.try_get("records_ingested").map_err(map_sqlx_error)?;
+    let records_failed: i64 = row.try_get("records_failed").map_err(map_sqlx_error)?;
+    Ok(KnowledgeSyncRun {
+        sync_run_uid: row.try_get("sync_run_uid").map_err(map_sqlx_error)?,
+        tenant_id: TenantId::from(
+            row.try_get::<Uuid, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
+        connection_uid: row.try_get("connection_id").map_err(map_sqlx_error)?,
+        parser: row.try_get("parser_provider").map_err(map_sqlx_error)?,
+        status: sync_run_status(row.try_get("status").map_err(map_sqlx_error)?)?,
+        records_seen: u64::try_from(records_seen).map_err(map_int_error)?,
+        records_ingested: u64::try_from(records_ingested).map_err(map_int_error)?,
+        records_failed: u64::try_from(records_failed).map_err(map_int_error)?,
+        started_at: row.try_get("started_at").map_err(map_sqlx_error)?,
+        finished_at: row.try_get("finished_at").map_err(map_sqlx_error)?,
+    })
+}
+
 fn object_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeObject> {
     Ok(KnowledgeObject {
         object_uid: row.try_get("object_uid").map_err(map_sqlx_error)?,
@@ -898,6 +1206,18 @@ fn object_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeObject> {
     })
 }
 
+fn object_projection_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeObjectProjection> {
+    let chunk_count: i64 = row.try_get("chunk_count").map_err(map_sqlx_error)?;
+    let graph_node_count: i64 = row.try_get("graph_node_count").map_err(map_sqlx_error)?;
+    Ok(KnowledgeObjectProjection {
+        object: object_from_row(row)?,
+        parser: row.try_get("parser_provider").map_err(map_sqlx_error)?,
+        parser_status: row.try_get("parser_status").map_err(map_sqlx_error)?,
+        chunk_count: u64::try_from(chunk_count).map_err(map_int_error)?,
+        graph_node_count: u64::try_from(graph_node_count).map_err(map_int_error)?,
+    })
+}
+
 fn document_version_from_row(row: &sqlx::postgres::PgRow) -> Result<DocumentVersion> {
     Ok(DocumentVersion {
         version_uid: row
@@ -918,6 +1238,7 @@ fn chunk_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeChunk> {
     Ok(KnowledgeChunk {
         chunk_uid: row.try_get("chunk_uid").map_err(map_sqlx_error)?,
         version_uid: row.try_get("document_version_id").map_err(map_sqlx_error)?,
+        graph_node_uid: row.try_get("graph_node_uid").map_err(map_sqlx_error)?,
         chunk_hash: row.try_get("chunk_hash").map_err(map_sqlx_error)?,
         block_hashes: row.try_get("block_hashes").map_err(map_sqlx_error)?,
         text: row.try_get("text").map_err(map_sqlx_error)?,
@@ -925,6 +1246,23 @@ fn chunk_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeChunk> {
         ordinal: u32::try_from(ordinal).map_err(map_int_error)?,
         token_count: usize::try_from(token_count).map_err(map_int_error)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
+    })
+}
+
+fn provider_event_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeProviderEventRecord> {
+    Ok(KnowledgeProviderEventRecord {
+        provider_event_uid: row.try_get("provider_event_uid").map_err(map_sqlx_error)?,
+        tenant_id: TenantId::from(
+            row.try_get::<Uuid, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
+        connection_uid: row.try_get("connection_id").map_err(map_sqlx_error)?,
+        provider: row.try_get("provider").map_err(map_sqlx_error)?,
+        provider_event_id: row.try_get("provider_event_id").map_err(map_sqlx_error)?,
+        event_type: row.try_get("event_type").map_err(map_sqlx_error)?,
+        status: row.try_get("status").map_err(map_sqlx_error)?,
+        payload: row.try_get("payload").map_err(map_sqlx_error)?,
+        duplicate: row.try_get("duplicate").map_err(map_sqlx_error)?,
     })
 }
 
@@ -955,6 +1293,19 @@ fn connection_status(value: String) -> Result<ConnectionStatus> {
         "error" => Ok(ConnectionStatus::Error),
         _ => Err(Error::Repository(format!(
             "unknown knowledge connection status `{value}`"
+        ))),
+    }
+}
+
+fn sync_run_status(value: String) -> Result<crate::domain::SyncRunStatus> {
+    match value.as_str() {
+        "pending" => Ok(crate::domain::SyncRunStatus::Pending),
+        "running" => Ok(crate::domain::SyncRunStatus::Running),
+        "completed" => Ok(crate::domain::SyncRunStatus::Completed),
+        "partial_failure" => Ok(crate::domain::SyncRunStatus::PartialFailure),
+        "failed" => Ok(crate::domain::SyncRunStatus::Failed),
+        _ => Err(Error::Repository(format!(
+            "unknown knowledge sync-run status `{value}`"
         ))),
     }
 }

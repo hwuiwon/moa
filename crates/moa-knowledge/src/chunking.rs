@@ -144,6 +144,7 @@ fn build_chunk(version_uid: Uuid, ordinal: u32, blocks: &[ChunkPart]) -> Knowled
     KnowledgeChunk {
         chunk_uid: deterministic_uid(&format!("{}:{}:{}", version_uid, ordinal, chunk_seed)),
         version_uid,
+        graph_node_uid: None,
         chunk_hash: content_hash(&chunk_seed),
         block_hashes,
         token_count: estimate_tokens(&text),

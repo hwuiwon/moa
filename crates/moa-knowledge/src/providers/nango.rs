@@ -1,9 +1,11 @@
 //! Nango linked-account provider adapter.
 
 use bytes::Bytes;
+use hmac::{Hmac, Mac};
 use reqwest::{Client, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Sha256;
 
 use crate::{
     domain::{
@@ -22,6 +24,7 @@ pub struct NangoProvider {
     client: Client,
     base_url: String,
     api_key: String,
+    webhook_signing_key: Option<String>,
 }
 
 impl NangoProvider {
@@ -31,6 +34,7 @@ impl NangoProvider {
             client: http::build_http_client()?,
             base_url: trim_base_url(base_url.into()),
             api_key: api_key.into(),
+            webhook_signing_key: None,
         })
     }
 
@@ -45,11 +49,35 @@ impl NangoProvider {
             client,
             base_url: trim_base_url(base_url.into()),
             api_key: api_key.into(),
+            webhook_signing_key: None,
         }
+    }
+
+    /// Configures the webhook signing key used to verify Nango webhook payloads.
+    #[must_use]
+    pub fn with_webhook_signing_key(mut self, signing_key: impl Into<String>) -> Self {
+        self.webhook_signing_key = Some(signing_key.into());
+        self
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    }
+
+    fn verify_signature(&self, headers: &HeaderMap, body: &[u8]) -> Result<()> {
+        let signing_key = self.webhook_signing_key.as_deref().ok_or_else(|| {
+            Error::Config("Nango webhook signing key is not configured".to_string())
+        })?;
+        let signature = header_value(headers, "x-nango-hmac-sha256")?;
+        let signature = hex::decode(signature.trim()).map_err(|error| {
+            Error::provider("nango", format!("webhook signature was not hex: {error}"))
+        })?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(signing_key.as_bytes()).map_err(|error| {
+            Error::provider("nango", format!("webhook signing key failed: {error}"))
+        })?;
+        mac.update(body);
+        mac.verify_slice(&signature)
+            .map_err(|_| Error::provider("nango", "webhook signature verification failed"))
     }
 }
 
@@ -179,7 +207,8 @@ impl LinkedIntegrationProvider for NangoProvider {
         Ok(page.into_record_page())
     }
 
-    async fn verify_webhook(&self, _headers: HeaderMap, body: Bytes) -> Result<WebhookEvent> {
+    async fn verify_webhook(&self, headers: HeaderMap, body: Bytes) -> Result<WebhookEvent> {
+        self.verify_signature(&headers, &body)?;
         let value: Value = serde_json::from_slice(&body).map_err(|error| {
             Error::provider("nango", format!("webhook JSON decode failed: {error}"))
         })?;
@@ -252,6 +281,16 @@ impl NangoRecord {
 
 fn trim_base_url(value: String) -> String {
     value.trim_end_matches('/').to_string()
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
+    headers
+        .get(name)
+        .ok_or_else(|| Error::provider("nango", format!("webhook missing `{name}` header")))?
+        .to_str()
+        .map_err(|error| {
+            Error::provider("nango", format!("webhook header `{name}` failed: {error}"))
+        })
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {

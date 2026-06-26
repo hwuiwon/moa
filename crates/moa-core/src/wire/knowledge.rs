@@ -124,6 +124,9 @@ pub struct KnowledgeSyncEventsRequest {
     pub tenant_id: TenantId,
     /// Tenant-owned sync-run identifier.
     pub sync_run_uid: Uuid,
+    /// Optional object filter for per-object ingestion timelines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_uid: Option<Uuid>,
     /// Optional pagination cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -178,9 +181,30 @@ pub struct KnowledgeConnectionSummary {
     pub provider_account_id: String,
     /// Current connection status.
     pub status: String,
+    /// Most recent sync-run status, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync_status: Option<String>,
     /// Timestamp of the last successful sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_synced_at: Option<DateTime<Utc>>,
+}
+
+/// Request payload for listing tenant knowledge connections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeConnectionListRequest {
+    /// Tenant that owns the linked connections.
+    pub tenant_id: TenantId,
+    /// Optional linked-account provider filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+/// Response payload containing tenant knowledge connection summaries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeConnectionListResponse {
+    /// Linked connection summaries ordered by recent update time.
+    #[serde(default)]
+    pub connections: Vec<KnowledgeConnectionSummary>,
 }
 
 /// Request payload for listing tenant knowledge source objects.
@@ -236,12 +260,57 @@ pub struct KnowledgeObjectInspectResponse {
     /// Renderer-safe object preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// Latest document version identifier, when parsed content exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_uid: Option<Uuid>,
+    /// Parser that produced the latest document version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser: Option<String>,
+    /// Safe parser metadata for the latest document version.
+    #[serde(default)]
+    pub parser_metadata: Value,
+    /// Unique heading paths observed in current chunks.
+    #[serde(default)]
+    pub heading_paths: Vec<Vec<String>>,
+    /// Current chunk summaries for inspection and citation rendering.
+    #[serde(default)]
+    pub chunks: Vec<KnowledgeObjectChunkInspectView>,
+    /// Graph node UIDs written for current chunks.
+    #[serde(default)]
+    pub graph_node_uids: Vec<Uuid>,
+    /// Safe citation metadata assembled from chunk metadata.
+    #[serde(default)]
+    pub citation_metadata: Value,
     /// Redacted source metadata.
     #[serde(default)]
     pub metadata: Value,
     /// Sync and ingestion steps for this object.
     #[serde(default)]
     pub steps: Vec<KnowledgeSyncStepView>,
+}
+
+/// Renderer-safe summary of one tenant knowledge chunk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeObjectChunkInspectView {
+    /// Tenant-owned chunk identifier.
+    pub chunk_uid: Uuid,
+    /// Chunk ordinal within the document version.
+    pub ordinal: u32,
+    /// Stable chunk content hash.
+    pub chunk_hash: String,
+    /// Heading path active for the chunk.
+    #[serde(default)]
+    pub heading_path: Vec<String>,
+    /// Approximate token count.
+    pub token_count: usize,
+    /// Bounded safe text preview for this chunk.
+    pub preview: String,
+    /// Graph node UID written for this chunk, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_node_uid: Option<Uuid>,
+    /// Safe chunk metadata.
+    #[serde(default)]
+    pub metadata: Value,
 }
 
 /// Provider webhook payload accepted by the knowledge service.
@@ -256,6 +325,30 @@ pub struct KnowledgeProviderWebhookRequest {
     /// Redacted provider payload.
     #[serde(default)]
     pub payload: Value,
+    /// Provider HTTP headers forwarded for signature verification.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// Base64-encoded raw webhook body. When absent, `payload` is serialized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_base64: Option<String>,
+}
+
+/// Response payload for a processed provider webhook.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeProviderWebhookResponse {
+    /// Provider that emitted the verified event.
+    pub provider: String,
+    /// Provider event id used for idempotency.
+    pub event_id: String,
+    /// Stored event status.
+    pub status: String,
+    /// Whether this delivery was a duplicate of a previously recorded event.
+    pub duplicate: bool,
+    /// Local sync run touched by this event, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_run_uid: Option<Uuid>,
+    /// Whether ingestion was enqueued for this delivery.
+    pub ingestion_enqueued: bool,
 }
 
 /// Request payload for reading a tenant knowledge query trace.
