@@ -9,31 +9,43 @@ use async_trait::async_trait;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use moa_core::{
-    SessionId, StoragePartitionId, TenantId, UserId,
+    ContactId, SessionId, StoragePartitionId, TenantId, UserId,
+    traits::EmbeddingProvider,
     wire::knowledge::{
         KnowledgeExchangeTokenRequest, KnowledgeObjectInspectRequest, KnowledgeObjectListRequest,
-        KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest, KnowledgeSyncRequest,
+        KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest,
+        KnowledgeSyncRequest, KnowledgeSyncStatusRequest,
     },
 };
 use moa_knowledge::{
     Error as KnowledgeError,
+    chunking::ChunkingConfig,
+    contact_groups::derive_contact_groups_from_object_with_resolved_members,
     domain::{
         ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
-        CreateLinkTokenRequest, DocumentVersion, ExchangePublicTokenRequest, KnowledgeBlock,
-        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
+        CreateLinkTokenRequest, DocumentElement, DocumentElementKind, DocumentVersion,
+        ElementLayout, ExchangePublicTokenRequest, KnowledgeBlock, KnowledgeChunk,
+        KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
         KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkToken,
-        LinkedAccount, ListChangedRecordsRequest, ObjectStatus, RecordPage, TriggerSyncRequest,
-        TriggeredSync, WebhookEvent,
+        LinkedAccount, ListChangedRecordsRequest, ObjectStatus, ParseInput, ParsedDocument,
+        ProviderRecord, RecordPage, SyncRunStatus, TriggerSyncRequest, TriggeredSync, WebhookEvent,
     },
+    ingestion::{
+        KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
+    },
+    observability::MetricsIngestionObserver,
+    parser::DocumentParser,
     providers::LinkedIntegrationProvider,
-    repository::KnowledgeRepository,
+    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, GraphPath, LineageEvent, RecordKind, RerankHit,
     RetrievalLineage, RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
-use moa_memory_types::MemoryScope;
+use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
+use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
     KnowledgeCredentialStore, KnowledgeService, ParserWebhookVerifier, StaticKnowledgeProviders,
 };
@@ -547,6 +559,557 @@ async fn query_trace_renders_populated_retrieval_lineage_db() {
     assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
 }
 
+#[tokio::test]
+async fn mock_connector_end_to_end() {
+    // Pins: fake Merge and Nango connector syncs can be manually driven through tenant KB ingestion and inspected without external credentials.
+    let db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated mock connector DB");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let contact_id = ContactId::new();
+    let merge_provider = Arc::new(Task14LinkedIntegrationProvider::new(
+        "merge",
+        "crm",
+        task14_merge_records(),
+    ));
+    let nango_provider = Arc::new(Task14LinkedIntegrationProvider::new(
+        "nango",
+        "docs",
+        task14_nango_records(),
+    ));
+    let providers = StaticKnowledgeProviders::new()
+        .with_provider("merge", merge_provider.clone())
+        .with_provider("nango", nango_provider.clone());
+    let service = KnowledgeService::from_postgres_pool(
+        pool.clone(),
+        Arc::new(providers),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        96,
+    );
+
+    let merge_connection = service
+        .exchange_public_token(KnowledgeExchangeTokenRequest {
+            tenant_id,
+            provider: "merge".to_string(),
+            exchange_token: "merge-public-token".to_string(),
+        })
+        .await
+        .expect("merge link should store one fake connection");
+    let nango_connection = service
+        .exchange_public_token(KnowledgeExchangeTokenRequest {
+            tenant_id,
+            provider: "nango".to_string(),
+            exchange_token: "nango-public-token".to_string(),
+        })
+        .await
+        .expect("nango link should store one fake connection");
+    assert_ne!(
+        merge_connection.connection_uid,
+        nango_connection.connection_uid
+    );
+
+    let merge_sync = service
+        .sync_connection(KnowledgeSyncRequest {
+            tenant_id,
+            connection_uid: merge_connection.connection_uid,
+            parser: Some("task14".to_string()),
+            max_records: Some(10),
+        })
+        .await
+        .expect("merge manual sync should trigger provider sync");
+    let nango_sync = service
+        .sync_connection(KnowledgeSyncRequest {
+            tenant_id,
+            connection_uid: nango_connection.connection_uid,
+            parser: Some("task14".to_string()),
+            max_records: Some(10),
+        })
+        .await
+        .expect("nango manual sync should trigger provider sync");
+    assert_eq!(merge_sync.status, "provider_syncing");
+    assert_eq!(nango_sync.status, "provider_syncing");
+    assert_eq!(merge_provider.trigger_sync_count(), 1);
+    assert_eq!(nango_provider.trigger_sync_count(), 1);
+
+    let scope = ScopeContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope.clone(),
+    ));
+    let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+    let graph_store = Arc::new(
+        AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone()).with_vector_store(vector),
+    );
+    let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
+        graph_store.clone(),
+        MemoryScope::Tenant { tenant_id },
+        "task14-mock-connector",
+    ));
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        Arc::new(Task14Parser),
+        Arc::new(Task14Embedder),
+        graph_writer,
+        Arc::new(MetricsIngestionObserver),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 128,
+                max_tokens: 256,
+                min_tokens: 1,
+            },
+            provider: "mock_connector".to_string(),
+            parser_label: "task14".to_string(),
+        },
+    );
+
+    let merge_connection_row = repository
+        .get_connection(merge_connection.connection_uid)
+        .await
+        .expect("read merge connection")
+        .expect("merge connection should exist");
+    let nango_connection_row = repository
+        .get_connection(nango_connection.connection_uid)
+        .await
+        .expect("read nango connection")
+        .expect("nango connection should exist");
+    let merge_page = merge_provider
+        .list_changed_records(ListChangedRecordsRequest {
+            connection: merge_connection_row,
+            cursor: None,
+            modified_after: None,
+            limit: Some(10),
+        })
+        .await
+        .expect("merge fake provider should return changed records");
+    let nango_page = nango_provider
+        .list_changed_records(ListChangedRecordsRequest {
+            connection: nango_connection_row,
+            cursor: None,
+            modified_after: None,
+            limit: Some(10),
+        })
+        .await
+        .expect("nango fake provider should return changed records");
+    assert_eq!(merge_provider.list_changed_records_count(), 1);
+    assert_eq!(nango_provider.list_changed_records_count(), 1);
+    assert_eq!(merge_page.records.len(), 3);
+    assert_eq!(nango_page.records.len(), 3);
+
+    pipeline
+        .ingest_record_page(
+            merge_sync.sync_run_uid,
+            merge_connection.connection_uid,
+            tenant_id,
+            merge_page,
+        )
+        .await
+        .expect("merge fake records should ingest");
+    pipeline
+        .ingest_record_page(
+            nango_sync.sync_run_uid,
+            nango_connection.connection_uid,
+            tenant_id,
+            nango_page,
+        )
+        .await
+        .expect("nango fake records should ingest");
+    complete_sync_run(&repository, merge_sync.sync_run_uid)
+        .await
+        .expect("complete merge sync run");
+    complete_sync_run(&repository, nango_sync.sync_run_uid)
+        .await
+        .expect("complete nango sync run");
+
+    let account_object = repository
+        .get_object_by_source(merge_connection.connection_uid, "merge-crm-account")
+        .await
+        .expect("read account object")
+        .expect("account object should be ingested");
+    let group_delta =
+        derive_contact_groups_from_object_with_resolved_members(&account_object, &[contact_id]);
+    assert_eq!(group_delta.groups.len(), 1);
+    assert_eq!(group_delta.memberships.len(), 1);
+    let group = group_delta
+        .groups
+        .first()
+        .expect("group should be derived")
+        .clone();
+    repository
+        .upsert_contact_group(group.clone())
+        .await
+        .expect("persist derived contact group");
+    repository
+        .replace_contact_group_memberships(group.group_uid, group_delta.memberships)
+        .await
+        .expect("persist derived group membership");
+    let group_node_uid = create_contact_group_graph_node(&graph_store, tenant_id, &group)
+        .await
+        .expect("materialize contact group graph node");
+    assert_ne!(group_node_uid, Uuid::nil());
+
+    let merge_status = service
+        .sync_status(KnowledgeSyncStatusRequest {
+            tenant_id,
+            sync_run_uid: merge_sync.sync_run_uid,
+        })
+        .await
+        .expect("merge status should render");
+    let nango_status = service
+        .sync_status(KnowledgeSyncStatusRequest {
+            tenant_id,
+            sync_run_uid: nango_sync.sync_run_uid,
+        })
+        .await
+        .expect("nango status should render");
+    assert_sync_status_counters(&merge_status, 3, 16, 13);
+    assert_sync_status_counters(&nango_status, 3, 15, 12);
+    assert_eq!(
+        merge_status
+            .steps
+            .iter()
+            .take(2)
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provider_triggered", "provider_records_listed"]
+    );
+    assert_eq!(
+        nango_status
+            .steps
+            .iter()
+            .take(2)
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>(),
+        vec!["provider_triggered", "provider_records_listed"]
+    );
+
+    let objects = service
+        .list_objects(KnowledgeObjectListRequest {
+            tenant_id,
+            connection_uid: None,
+            object_type: None,
+            cursor: None,
+            limit: Some(10),
+        })
+        .await
+        .expect("object summaries should render");
+    assert_eq!(objects.objects.len(), 6);
+    let mut object_source_ids = objects
+        .objects
+        .iter()
+        .map(|object| {
+            assert_eq!(object["parser_status"], json!("parsed"));
+            assert_eq!(object["chunk_count"], json!(1));
+            assert_eq!(object["graph_node_count"], json!(1));
+            object["source_id"]
+                .as_str()
+                .expect("object summary should include source_id")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    object_source_ids.sort();
+    assert_eq!(
+        object_source_ids,
+        vec![
+            "merge-crm-account",
+            "merge-crm-contact",
+            "merge-md-handbook",
+            "nango-llamaparse-policy",
+            "nango-reducto-layout",
+            "nango-unstructured-guide",
+        ]
+    );
+
+    let llama_object = repository
+        .get_object_by_source(nango_connection.connection_uid, "nango-llamaparse-policy")
+        .await
+        .expect("read llama object")
+        .expect("llama object should exist");
+    let llama_inspect = service
+        .inspect_object(KnowledgeObjectInspectRequest {
+            tenant_id,
+            object_uid: llama_object.object_uid,
+        })
+        .await
+        .expect("llamaparse object should inspect");
+    assert_eq!(llama_inspect.parser.as_deref(), Some("llamaparse"));
+    assert_eq!(
+        llama_inspect.parser_metadata["job_status"],
+        json!("completed")
+    );
+    assert_eq!(llama_inspect.chunks.len(), 1);
+    assert!(
+        llama_inspect.chunks[0]
+            .preview
+            .contains("Finance control is")
+    );
+    assert_eq!(
+        llama_inspect
+            .steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>(),
+        object_ingestion_steps()
+    );
+
+    let reducto_object = repository
+        .get_object_by_source(nango_connection.connection_uid, "nango-reducto-layout")
+        .await
+        .expect("read reducto object")
+        .expect("reducto object should exist");
+    let reducto_inspect = service
+        .inspect_object(KnowledgeObjectInspectRequest {
+            tenant_id,
+            object_uid: reducto_object.object_uid,
+        })
+        .await
+        .expect("reducto object should inspect");
+    assert_eq!(reducto_inspect.parser.as_deref(), Some("reducto"));
+    assert_eq!(
+        reducto_inspect.parser_metadata["blocks"][0]["bbox"],
+        json!([0.1, 0.2, 0.7, 0.4])
+    );
+
+    let trace_uid = Uuid::now_v7();
+    let trace_chunk = llama_inspect
+        .chunks
+        .first()
+        .expect("llamaparse object should expose one chunk");
+    let trace_graph_uid = trace_chunk
+        .graph_node_uid
+        .expect("llamaparse chunk should have a graph node");
+    let contact_fact_uid = Uuid::now_v7();
+    let retrieval_event = LineageEvent::Retrieval(RetrievalLineage {
+        turn_id: TurnId(trace_uid),
+        session_id: SessionId::new(),
+        storage_partition_id: StoragePartitionId::for_tenant(tenant_id),
+        user_id: UserId::new(contact_id.to_string()),
+        scope: MemoryScope::Contact {
+            tenant_id,
+            contact_id,
+        },
+        ts: Utc::now(),
+        query_original: "Where is the finance payroll control?".to_string(),
+        query_expansions: vec!["finance payroll control".to_string()],
+        vector_hits: vec![VecHit {
+            chunk_id: trace_graph_uid,
+            score: 0.91,
+            source: "pgvector".to_string(),
+            embedder: "cohere-embed-v4".to_string(),
+            embed_dim: VECTOR_DIMENSION as u16,
+        }],
+        graph_paths: vec![GraphPath {
+            start: trace_graph_uid,
+            end: trace_graph_uid,
+            edges: Vec::new(),
+            labels: vec!["HAS_CHUNK".to_string()],
+            length: 0,
+            score: 0.88,
+        }],
+        fusion_scores: vec![
+            FusedHit {
+                chunk_id: trace_graph_uid,
+                fused_score: 0.94,
+                vector_contribution: 1.0,
+                graph_contribution: 1.0,
+                lexical_contribution: 1.0,
+                fusion_method: "rrf".to_string(),
+            },
+            FusedHit {
+                chunk_id: contact_fact_uid,
+                fused_score: 0.72,
+                vector_contribution: 0.0,
+                graph_contribution: 0.0,
+                lexical_contribution: 1.0,
+                fusion_method: "rrf".to_string(),
+            },
+        ],
+        rerank_scores: vec![
+            RerankHit {
+                chunk_id: trace_graph_uid,
+                original_index: 0,
+                relevance_score: 0.97,
+                rerank_model: "noop".to_string(),
+            },
+            RerankHit {
+                chunk_id: contact_fact_uid,
+                original_index: 1,
+                relevance_score: 0.76,
+                rerank_model: "noop".to_string(),
+            },
+        ],
+        top_k: vec![trace_graph_uid, contact_fact_uid],
+        searched_scopes: vec![
+            format!("tenant:{tenant_id}:tenant_knowledge"),
+            format!("contact:{tenant_id}:{contact_id}:user_memory"),
+        ],
+        selected_hits: vec![
+            RetrievalSelectedHit {
+                graph_node_uid: trace_graph_uid,
+                chunk_uid: Some(trace_chunk.chunk_uid),
+                fact_uid: None,
+                source_tier: "tenant_knowledge".to_string(),
+                label: "Chunk".to_string(),
+                title: "Finance Controls".to_string(),
+                snippet: trace_chunk.preview.clone(),
+                score: 0.97,
+                legs: vec![
+                    "vector".to_string(),
+                    "graph".to_string(),
+                    "lexical".to_string(),
+                ],
+                prompt_included: true,
+                source_uri: Some("https://nango.example.test/docs/finance-controls".to_string()),
+                source_title: Some("Finance Controls".to_string()),
+                citation: json!({
+                    "chunk_hash": trace_chunk.chunk_hash.clone(),
+                    "heading_path": trace_chunk.heading_path.clone(),
+                    "object_type": "document",
+                }),
+            },
+            RetrievalSelectedHit {
+                graph_node_uid: contact_fact_uid,
+                chunk_uid: None,
+                fact_uid: Some(contact_fact_uid),
+                source_tier: "user_memory".to_string(),
+                label: "Fact".to_string(),
+                title: "Contact preference".to_string(),
+                snippet: "Contact prefers payroll reminders before approval.".to_string(),
+                score: 0.76,
+                legs: vec!["lexical".to_string()],
+                prompt_included: true,
+                source_uri: None,
+                source_title: None,
+                citation: json!({}),
+            },
+        ],
+        filters: json!({
+            "source_tiers": ["tenant_knowledge", "user_memory"],
+            "tenant_knowledge_labels": ["Chunk", "ContactGroup"],
+        }),
+        timings: StageTimings {
+            embed_ms: 2,
+            vector_search_ms: 4,
+            graph_search_ms: 6,
+            lexical_search_ms: 3,
+            fusion_ms: 1,
+            rerank_ms: 2,
+            total_ms: 21,
+        },
+        introspection: BackendIntrospection::default(),
+        stage: RetrievalStage::Single,
+    });
+    insert_retrieval_lineage_row(&pool, retrieval_event, trace_uid, tenant_id)
+        .await
+        .expect("persist task14 retrieval lineage");
+    let query_trace = service
+        .query_trace(KnowledgeQueryTraceRequest {
+            tenant_id,
+            trace_uid,
+        })
+        .await
+        .expect("query trace should render task14 retrieval lineage");
+    assert_eq!(
+        query_trace.original_query,
+        "Where is the finance payroll control?"
+    );
+    assert_eq!(
+        query_trace.retrieval_query.as_deref(),
+        Some("finance payroll control")
+    );
+    assert_eq!(
+        query_trace.searched_scopes,
+        vec![
+            format!("tenant:{tenant_id}:tenant_knowledge"),
+            format!("contact:{tenant_id}:{contact_id}:user_memory"),
+        ]
+    );
+    assert_eq!(
+        query_trace
+            .stages
+            .iter()
+            .map(|stage| (
+                stage.stage.as_str(),
+                stage.candidate_count,
+                stage.latency_ms
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("embed", 0, 2),
+            ("vector", 1, 4),
+            ("graph", 1, 6),
+            ("lexical", 2, 3),
+            ("fusion", 2, 1),
+            ("reranker", 2, 2),
+            ("context", 2, 21),
+        ]
+    );
+    assert_eq!(query_trace.hits.len(), 2);
+    assert_eq!(query_trace.hits[0].source_tier, "tenant_knowledge");
+    assert_eq!(
+        query_trace.hits[0].citation["chunk_hash"],
+        json!(trace_chunk.chunk_hash.clone())
+    );
+    assert_eq!(
+        query_trace.hits[0].citation["legs"],
+        json!(["vector", "graph", "lexical"])
+    );
+    assert_eq!(
+        query_trace.hits[0].citation["source_uri"],
+        json!("https://nango.example.test/docs/finance-controls")
+    );
+    assert_eq!(query_trace.hits[1].source_tier, "user_memory");
+
+    let merge_events = service
+        .sync_events(KnowledgeSyncEventsRequest {
+            tenant_id,
+            sync_run_uid: merge_sync.sync_run_uid,
+            object_uid: Some(account_object.object_uid),
+            cursor: None,
+            limit: Some(20),
+        })
+        .await
+        .expect("object sync events should render");
+    assert_eq!(
+        merge_events
+            .events
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>(),
+        object_ingestion_steps()
+    );
+
+    let label_counts = graph_label_counts(&pool, tenant_id).await;
+    assert_eq!(label_counts.get("Source"), Some(&6));
+    assert_eq!(label_counts.get("Document"), Some(&6));
+    assert_eq!(label_counts.get("Chunk"), Some(&6));
+    assert_eq!(label_counts.get("Fact"), Some(&6));
+    assert_eq!(label_counts.get("Entity"), Some(&7));
+    assert_eq!(label_counts.get("ContactGroup"), Some(&1));
+    assert_eq!(chunk_vector_row_count(&pool, tenant_id).await, 6);
+
+    let target = repository
+        .contact_group_targets(tenant_id, &group.group_key)
+        .await
+        .expect("load derived target group")
+        .expect("target group should exist");
+    assert_eq!(target.group.group_key, "merge:account:acct-task14");
+    assert_eq!(
+        target
+            .members
+            .iter()
+            .map(|member| member.contact_id)
+            .collect::<Vec<_>>(),
+        vec![contact_id]
+    );
+    assert_eq!(target.active_graph_memberships.len(), 1);
+    assert_eq!(target.active_graph_memberships[0].edge_label, "MEMBER_OF");
+    assert_eq!(
+        target.active_graph_memberships[0].evidence,
+        vec![account_object.object_uid]
+    );
+}
+
 #[test]
 fn knowledge_handlers_are_authorized_or_have_webhook_safety_comment() {
     // Pins: tenant-data Knowledge handlers keep authz at the Restate boundary.
@@ -740,6 +1303,621 @@ fn handler_body<'a>(source: &'a str, method: &str) -> &'a str {
         .or_else(|| rest.find("\n/// Application logic"))
         .expect("handler body should be followed by another handler or application logic");
     &rest[..end]
+}
+
+async fn complete_sync_run(
+    repository: &PostgresKnowledgeRepository,
+    sync_run_uid: Uuid,
+) -> moa_knowledge::Result<()> {
+    let Some(mut run) = repository.get_sync_run(sync_run_uid).await? else {
+        return Err(KnowledgeError::Repository(format!(
+            "missing sync run {sync_run_uid}"
+        )));
+    };
+    run.status = SyncRunStatus::Completed;
+    run.finished_at = Some(Utc::now());
+    repository.update_sync_run(run).await
+}
+
+async fn insert_retrieval_lineage_row(
+    pool: &sqlx::PgPool,
+    event: LineageEvent,
+    trace_uid: Uuid,
+    tenant_id: TenantId,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.turn_lineage (
+            turn_id,
+            session_id,
+            user_id,
+            storage_partition_id,
+            ts,
+            tier,
+            record_kind,
+            payload,
+            integrity_hash,
+            prev_hash
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)
+        "#,
+    )
+    .bind(trace_uid)
+    .bind(SessionId::new().0)
+    .bind("task14-contact")
+    .bind(StoragePartitionId::for_tenant(tenant_id).to_string())
+    .bind(Utc::now())
+    .bind(1_i16)
+    .bind(RecordKind::Retrieval.as_i16())
+    .bind(serde_json::to_value(event).expect("retrieval lineage should serialize"))
+    .bind(vec![0_u8; 32])
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+fn assert_sync_status_counters(
+    status: &moa_core::wire::knowledge::KnowledgeSyncStatusResponse,
+    expected_records: u64,
+    expected_graph_nodes: u64,
+    expected_graph_edges: u64,
+) {
+    assert_eq!(status.status, "completed");
+    assert_eq!(status.records_seen, expected_records);
+    assert_eq!(status.records_changed, expected_records);
+    assert_eq!(status.records_deleted, 0);
+    assert_eq!(status.records_ingested, expected_records);
+    assert_eq!(status.records_failed, 0);
+    assert_eq!(status.objects_parsed, expected_records);
+    assert_eq!(status.chunks_embedded, expected_records);
+    assert_eq!(status.graph_nodes_upserted, expected_graph_nodes);
+    assert_eq!(status.graph_edges_upserted, expected_graph_edges);
+}
+
+fn object_ingestion_steps() -> Vec<&'static str> {
+    vec![
+        "object_change_checked",
+        "content_fetched",
+        "parse_submitted",
+        "parse_completed",
+        "normalized",
+        "blocks_diffed",
+        "chunks_diffed",
+        "embedded",
+        "graph_upserted",
+        "vector_indexed",
+        "contact_groups_derived",
+    ]
+}
+
+async fn create_contact_group_graph_node(
+    graph: &AgeGraphStore,
+    tenant_id: TenantId,
+    group: &ContactGroup,
+) -> moa_memory_graph::Result<Uuid> {
+    graph
+        .create_node(NodeWriteIntent {
+            uid: group.group_uid,
+            label: NodeLabel::ContactGroup,
+            storage_partition_id: Some(tenant_id.to_string()),
+            contact_id: None,
+            scope: "tenant".to_string(),
+            name: group.display_name.clone(),
+            properties: json!({
+                "group_key": group.group_key,
+                "display_name": group.display_name,
+            }),
+            pii_class: PiiClass::None,
+            confidence: Some(0.95),
+            valid_from: Utc::now(),
+            embedding: None,
+            embedding_model: None,
+            embedding_model_version: None,
+            actor_id: Uuid::now_v7().to_string(),
+            actor_kind: "system".to_string(),
+        })
+        .await
+}
+
+async fn graph_label_counts(pool: &sqlx::PgPool, tenant_id: TenantId) -> HashMap<String, i64> {
+    sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT label::TEXT, count(*)
+        FROM moa.node_index
+        WHERE storage_partition_id = $1
+          AND valid_to IS NULL
+        GROUP BY label
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_all(pool)
+    .await
+    .expect("read graph label counts")
+    .into_iter()
+    .collect()
+}
+
+async fn chunk_vector_row_count(pool: &sqlx::PgPool, tenant_id: TenantId) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.embeddings
+        WHERE storage_partition_id = $1
+          AND label = 'Chunk'
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .fetch_one(pool)
+    .await
+    .expect("read chunk vector row count")
+}
+
+#[derive(Debug, Clone)]
+struct Task14LinkedIntegrationProvider {
+    provider: &'static str,
+    connector: &'static str,
+    records: Arc<Vec<ProviderRecord>>,
+    calls: Arc<Mutex<FakeProviderCalls>>,
+}
+
+impl Task14LinkedIntegrationProvider {
+    fn new(provider: &'static str, connector: &'static str, records: Vec<ProviderRecord>) -> Self {
+        Self {
+            provider,
+            connector,
+            records: Arc::new(records),
+            calls: Arc::new(Mutex::new(FakeProviderCalls::default())),
+        }
+    }
+
+    fn trigger_sync_count(&self) -> usize {
+        self.calls().trigger_sync
+    }
+
+    fn list_changed_records_count(&self) -> usize {
+        self.calls().list_changed_records
+    }
+
+    fn calls(&self) -> FakeProviderCalls {
+        self.calls
+            .lock()
+            .expect("task14 fake provider call log should not be poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
+    async fn create_link_token(
+        &self,
+        _req: CreateLinkTokenRequest,
+    ) -> moa_knowledge::Result<LinkToken> {
+        Ok(LinkToken {
+            provider: self.provider.to_string(),
+            token: format!("{}-task14-link-token", self.provider),
+            link_url: Some(format!("https://{}.example.test/link", self.provider)),
+            expires_at: None,
+        })
+    }
+
+    async fn exchange_public_token(
+        &self,
+        _req: ExchangePublicTokenRequest,
+    ) -> moa_knowledge::Result<LinkedAccount> {
+        self.calls
+            .lock()
+            .expect("task14 fake provider call log should not be poisoned")
+            .exchange_public_token += 1;
+        Ok(LinkedAccount {
+            provider: self.provider.to_string(),
+            connector: self.connector.to_string(),
+            provider_account_id: format!("{}-task14-account", self.provider),
+            credential_ref: format!("{}-raw-token-should-enter-vault", self.provider),
+            metadata: json!({
+                "provider": self.provider,
+                "access_token": format!("{}-secret", self.provider),
+            }),
+        })
+    }
+
+    async fn trigger_sync(&self, req: TriggerSyncRequest) -> moa_knowledge::Result<TriggeredSync> {
+        self.calls
+            .lock()
+            .expect("task14 fake provider call log should not be poisoned")
+            .trigger_sync += 1;
+        Ok(TriggeredSync {
+            provider: self.provider.to_string(),
+            provider_sync_id: Some(format!(
+                "{}-sync-{}",
+                self.provider, req.connection.connection_uid
+            )),
+            status: "accepted".to_string(),
+            metadata: json!({ "provider_trigger": "accepted" }),
+        })
+    }
+
+    async fn list_changed_records(
+        &self,
+        req: ListChangedRecordsRequest,
+    ) -> moa_knowledge::Result<RecordPage> {
+        self.calls
+            .lock()
+            .expect("task14 fake provider call log should not be poisoned")
+            .list_changed_records += 1;
+        let limit = req.limit.unwrap_or(u32::MAX) as usize;
+        Ok(RecordPage {
+            records: self.records.iter().take(limit).cloned().collect(),
+            next_cursor: None,
+        })
+    }
+
+    async fn verify_webhook(
+        &self,
+        _headers: HeaderMap,
+        _body: Bytes,
+    ) -> moa_knowledge::Result<WebhookEvent> {
+        self.calls
+            .lock()
+            .expect("task14 fake provider call log should not be poisoned")
+            .verify_webhook += 1;
+        Ok(WebhookEvent {
+            provider: self.provider.to_string(),
+            event_id: format!("{}-task14-webhook", self.provider),
+            event_type: "sync.completed".to_string(),
+            metadata: json!({ "provider": self.provider }),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct Task14Parser;
+
+#[async_trait]
+impl DocumentParser for Task14Parser {
+    async fn parse(&self, input: ParseInput) -> moa_knowledge::Result<ParsedDocument> {
+        match input.object.source_id.as_str() {
+            "merge-md-handbook" => Ok(parsed_doc(
+                "native",
+                None,
+                "Benefits Handbook",
+                json!({ "job_status": "completed", "format": "markdown" }),
+                vec![
+                    element(
+                        "md-heading-1",
+                        DocumentElementKind::Heading,
+                        "PTO Policy",
+                        vec!["Benefits Handbook", "PTO Policy"],
+                        0,
+                        None,
+                        json!({ "markdown_heading_level": 1 }),
+                    ),
+                    element(
+                        "md-paragraph-1",
+                        DocumentElementKind::Paragraph,
+                        "PTO policy is standardized for all employees.",
+                        vec!["Benefits Handbook", "PTO Policy"],
+                        1,
+                        None,
+                        json!({ "markdown": true }),
+                    ),
+                    element(
+                        "md-list-1",
+                        DocumentElementKind::ListItem,
+                        "Carryover is capped at five days.",
+                        vec!["Benefits Handbook", "PTO Policy"],
+                        2,
+                        None,
+                        json!({ "list_marker": "-" }),
+                    ),
+                ],
+            )),
+            "nango-llamaparse-policy" => Ok(parsed_doc(
+                "llamaparse",
+                Some("lp-task14-job"),
+                "Finance Controls",
+                json!({
+                    "job_status": "completed",
+                    "markdown": true,
+                    "items": 2,
+                    "job_metadata": { "pages": 1 }
+                }),
+                vec![
+                    element(
+                        "lp-heading-1",
+                        DocumentElementKind::Heading,
+                        "Finance Controls",
+                        vec!["Finance Controls"],
+                        0,
+                        None,
+                        json!({ "llamaparse_item_type": "heading" }),
+                    ),
+                    element(
+                        "lp-item-1",
+                        DocumentElementKind::ListItem,
+                        "Finance control is dual approval before payroll export.",
+                        vec!["Finance Controls"],
+                        1,
+                        None,
+                        json!({ "llamaparse_item_id": "item-1" }),
+                    ),
+                ],
+            )),
+            "nango-unstructured-guide" => Ok(parsed_doc(
+                "unstructured",
+                Some("unstructured-task14-job"),
+                "Support Guide",
+                json!({ "job_status": "completed", "element_count": 2 }),
+                vec![
+                    element(
+                        "un-title-1",
+                        DocumentElementKind::Heading,
+                        "Support Guide",
+                        vec!["Support Guide"],
+                        0,
+                        None,
+                        json!({ "unstructured_type": "Title" }),
+                    ),
+                    element(
+                        "un-narrative-1",
+                        DocumentElementKind::Paragraph,
+                        "Support guide is escalated when billing evidence is missing.",
+                        vec!["Support Guide"],
+                        1,
+                        Some(ElementLayout {
+                            x: 12.0,
+                            y: 24.0,
+                            width: 300.0,
+                            height: 90.0,
+                            page_width: Some(612.0),
+                            page_height: Some(792.0),
+                            confidence: Some(0.99),
+                        }),
+                        json!({ "filename": "support-guide.pdf" }),
+                    ),
+                ],
+            )),
+            "nango-reducto-layout" => Ok(parsed_doc(
+                "reducto",
+                Some("reducto-task14-job"),
+                "Warehouse Layout",
+                json!({
+                    "job_status": "completed",
+                    "usage": { "pages": 1 },
+                    "studio_link": "https://reducto.example.test/studio/task14",
+                    "blocks": [
+                        {
+                            "type": "paragraph",
+                            "bbox": [0.1, 0.2, 0.7, 0.4]
+                        }
+                    ]
+                }),
+                vec![element(
+                    "reducto-chunk-1",
+                    DocumentElementKind::ParserChunk,
+                    "Warehouse layout is receiving on the east dock.",
+                    vec!["Warehouse Layout"],
+                    0,
+                    Some(ElementLayout {
+                        x: 0.1,
+                        y: 0.2,
+                        width: 0.6,
+                        height: 0.2,
+                        page_width: Some(1.0),
+                        page_height: Some(1.0),
+                        confidence: Some(0.98),
+                    }),
+                    json!({
+                        "blocks": [
+                            {
+                                "type": "paragraph",
+                                "bbox": [0.1, 0.2, 0.7, 0.4]
+                            }
+                        ]
+                    }),
+                )],
+            )),
+            "merge-crm-contact" => Ok(parsed_doc(
+                "native",
+                None,
+                "CRM Contact",
+                json!({ "job_status": "completed", "format": "crm_contact" }),
+                vec![element(
+                    "crm-contact-field-1",
+                    DocumentElementKind::Field,
+                    "CRM contact is linked to the existing MOA contact.",
+                    vec!["CRM Contact"],
+                    0,
+                    None,
+                    json!({ "crm_model": "contact", "moa_contact_linked": true }),
+                )],
+            )),
+            "merge-crm-account" => Ok(parsed_doc(
+                "native",
+                None,
+                "Acme Account",
+                json!({ "job_status": "completed", "format": "crm_account" }),
+                vec![element(
+                    "crm-account-field-1",
+                    DocumentElementKind::Field,
+                    "Acme account is the enterprise renewal group.",
+                    vec!["Acme Account"],
+                    0,
+                    None,
+                    json!({ "crm_model": "account" }),
+                )],
+            )),
+            source_id => Err(KnowledgeError::parser(
+                "task14",
+                format!("unexpected task14 source id {source_id}"),
+            )),
+        }
+    }
+}
+
+fn parsed_doc(
+    parser: &str,
+    parser_job_id: Option<&str>,
+    fallback_title: &str,
+    metadata: Value,
+    elements: Vec<DocumentElement>,
+) -> ParsedDocument {
+    let text = elements
+        .iter()
+        .map(|element| element.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ParsedDocument {
+        parser: parser.to_string(),
+        parser_job_id: parser_job_id.map(ToOwned::to_owned),
+        text: if text.is_empty() {
+            fallback_title.to_string()
+        } else {
+            text
+        },
+        elements,
+        metadata,
+    }
+}
+
+fn element(
+    element_id: &str,
+    kind: DocumentElementKind,
+    text: &str,
+    heading_path: Vec<&str>,
+    ordinal: u32,
+    layout: Option<ElementLayout>,
+    metadata: Value,
+) -> DocumentElement {
+    DocumentElement {
+        element_id: element_id.to_string(),
+        kind,
+        text: text.to_string(),
+        heading_path: heading_path.into_iter().map(ToOwned::to_owned).collect(),
+        ordinal,
+        page_number: Some(1),
+        layout,
+        metadata,
+    }
+}
+
+#[derive(Debug, Default)]
+struct Task14Embedder;
+
+#[async_trait]
+impl EmbeddingProvider for Task14Embedder {
+    fn model_id(&self) -> &str {
+        "cohere-embed-v4"
+    }
+
+    fn dimensions(&self) -> usize {
+        VECTOR_DIMENSION
+    }
+
+    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        Ok(inputs.iter().map(|input| task14_vector(input)).collect())
+    }
+}
+
+fn task14_vector(input: &str) -> Vec<f32> {
+    let mut vector = vec![0.0; VECTOR_DIMENSION];
+    for (index, byte) in input.bytes().enumerate() {
+        vector[index % VECTOR_DIMENSION] += f32::from(byte) / 255.0;
+    }
+    vector[0] += 1.0;
+    vector
+}
+
+fn task14_merge_records() -> Vec<ProviderRecord> {
+    vec![
+        provider_record(
+            "merge-md-handbook",
+            "article",
+            "Benefits Handbook",
+            "https://merge.example.test/kb/benefits",
+            "# PTO Policy\n\nPTO policy is standardized for all employees.\n\n- Carryover is capped at five days.",
+            json!({ "mime_type": "text/markdown", "merge": { "category": "knowledge" } }),
+        ),
+        provider_record(
+            "merge-crm-contact",
+            "crm_contact",
+            "CRM Contact",
+            "https://merge.example.test/crm/contact/member-a",
+            "CRM contact is linked to the existing MOA contact.",
+            json!({
+                "mime_type": "application/json",
+                "merge": {
+                    "contact": { "id": "contact-task14", "name": "Member A" },
+                    "account": { "id": "acct-task14", "name": "Acme" }
+                }
+            }),
+        ),
+        provider_record(
+            "merge-crm-account",
+            "crm_account",
+            "Acme Account",
+            "https://merge.example.test/crm/account/acct-task14",
+            "Acme account is the enterprise renewal group.",
+            json!({
+                "mime_type": "application/json",
+                "merge": {
+                    "account": { "id": "acct-task14", "name": "Acme" },
+                    "members": [
+                        { "email": "member-a@example.invalid" }
+                    ]
+                }
+            }),
+        ),
+    ]
+}
+
+fn task14_nango_records() -> Vec<ProviderRecord> {
+    vec![
+        provider_record(
+            "nango-llamaparse-policy",
+            "document",
+            "Finance Controls",
+            "https://nango.example.test/docs/finance-controls",
+            "Finance control is dual approval before payroll export.",
+            json!({ "mime_type": "application/pdf", "parser": "llamaparse" }),
+        ),
+        provider_record(
+            "nango-unstructured-guide",
+            "document",
+            "Support Guide",
+            "https://nango.example.test/docs/support-guide",
+            "Support guide is escalated when billing evidence is missing.",
+            json!({ "mime_type": "application/pdf", "parser": "unstructured" }),
+        ),
+        provider_record(
+            "nango-reducto-layout",
+            "document",
+            "Warehouse Layout",
+            "https://nango.example.test/docs/warehouse-layout",
+            "Warehouse layout is receiving on the east dock.",
+            json!({ "mime_type": "application/pdf", "parser": "reducto" }),
+        ),
+    ]
+}
+
+fn provider_record(
+    source_id: &str,
+    object_type: &str,
+    title: &str,
+    source_uri: &str,
+    text: &str,
+    metadata: Value,
+) -> ProviderRecord {
+    ProviderRecord {
+        source_id: source_id.to_string(),
+        object_type: object_type.to_string(),
+        title: Some(title.to_string()),
+        source_uri: Some(source_uri.to_string()),
+        change_token: Some(format!("{source_id}-v1")),
+        deleted: false,
+        source_updated_at: Some(Utc::now()),
+        metadata,
+        payload: json!({ "text": text }),
+    }
 }
 
 #[derive(Debug, Clone, Default)]

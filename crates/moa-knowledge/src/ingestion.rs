@@ -1,6 +1,9 @@
 //! Tenant knowledge ingestion pipeline from provider records to graph/vector writes.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -90,8 +93,12 @@ where
     ) -> Result<GraphWriteReport> {
         let mut report = GraphWriteReport::default();
         let mut key_to_uid = HashMap::new();
+        let mut seen_node_uids = HashSet::new();
         for node in &delta.nodes {
             key_to_uid.insert(node.key.clone(), node.uid);
+            if !seen_node_uids.insert(node.uid) {
+                continue;
+            }
             if self
                 .graph
                 .get_node(node.uid)
@@ -130,7 +137,11 @@ where
             report.nodes_upserted = report.nodes_upserted.saturating_add(1);
         }
 
+        let mut seen_edge_uids = HashSet::new();
         for edge in &delta.edges {
+            if !seen_edge_uids.insert(edge.uid) {
+                continue;
+            }
             let Some(start_uid) = key_to_uid.get(&edge.from_key).copied() else {
                 continue;
             };
@@ -672,7 +683,7 @@ where
         let mut embedding_inputs = Vec::new();
         let mut embedding_uids = Vec::new();
         for chunk in &chunks {
-            let graph_uid = chunk_graph_uid(&delta, chunk)?;
+            let graph_uid = chunk_graph_uid(&delta, object.tenant_id, chunk)?;
             self.repository
                 .set_chunk_graph_uid(chunk.chunk_uid, graph_uid)
                 .await?;
@@ -783,7 +794,7 @@ where
         let orphan_uids = orphan_chunks
             .iter()
             .filter_map(|chunk| old_by_hash.get(&chunk.chunk_hash))
-            .map(|chunk| stable_uid(&format!("chunk:{}", chunk.chunk_hash)))
+            .map(|chunk| stable_uid(&format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash)))
             .collect::<Vec<_>>();
         let invalidation_span = tracing::info_span!(
             "knowledge_graph_write",
@@ -921,7 +932,7 @@ where
         };
         let graph_uids = chunks
             .iter()
-            .map(|chunk| stable_uid(&format!("chunk:{}", chunk.chunk_hash)))
+            .map(|chunk| stable_uid(&format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash)))
             .collect::<Vec<_>>();
         let invalidation_span = tracing::info_span!(
             "knowledge_graph_write",
@@ -1162,8 +1173,12 @@ struct PersistedIngestion {
     embeddings_created: u64,
 }
 
-fn chunk_graph_uid(delta: &KnowledgeGraphDelta, chunk: &KnowledgeChunk) -> Result<Uuid> {
-    let key = format!("chunk:{}", chunk.chunk_hash);
+fn chunk_graph_uid(
+    delta: &KnowledgeGraphDelta,
+    tenant_id: moa_core::TenantId,
+    chunk: &KnowledgeChunk,
+) -> Result<Uuid> {
+    let key = format!("chunk:{}:{}", tenant_id, chunk.chunk_hash);
     delta
         .nodes
         .iter()

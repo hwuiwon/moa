@@ -1,15 +1,21 @@
 //! Integration coverage for tenant knowledge plus contact-memory retrieval.
 
+use std::sync::{Arc, Mutex as StdMutex};
+
+use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
-    ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing, ToolCallFormat,
+    LineageHandle, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
+    ToolCallFormat, traits::EmbeddingProvider,
 };
+use moa_lineage_core::{LineageEvent, RetrievalLineage};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_types::ScopeContext;
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -30,16 +36,19 @@ async fn mock_tenant_and_contact_retrieval() {
     let tenant_scope = ScopeContext::tenant(tenant_id);
     let contact_scope = ScopeContext::contact(tenant_id, contact_id);
     let other_contact_scope = ScopeContext::contact(tenant_id, other_contact_id);
-    let tenant_graph = AgeGraphStore::scoped_for_app_role(pool.clone(), tenant_scope.clone());
-    let contact_graph = AgeGraphStore::scoped_for_app_role(pool.clone(), contact_scope);
-    let other_contact_graph = AgeGraphStore::scoped_for_app_role(pool.clone(), other_contact_scope);
+    seed_storage_partition_embedder_state(&pool, tenant_id)
+        .await
+        .expect("seed tenant vector embedder state");
+    let tenant_graph = graph_store(pool.clone(), tenant_scope.clone());
+    let contact_graph = graph_store(pool.clone(), contact_scope);
+    let other_contact_graph = graph_store(pool.clone(), other_contact_scope);
 
     let chunk_graph_uid = tenant_graph
         .create_node(node_intent(
             tenant_id,
             None,
             NodeLabel::Chunk,
-            "tenant pto runbook answer",
+            "pto runbook answer",
             json!({ "summary": "tenant node summary should be replaced by hydrated chunk text" }),
         ))
         .await
@@ -73,8 +82,10 @@ async fn mock_tenant_and_contact_retrieval() {
     ctx.append_message(ContextMessage::user(
         "Find the pto runbook answer and contact deployment preference answer",
     ));
-    let retriever = GraphMemoryRetriever::new(pool.clone(), None)
+    let contact_lineage = Arc::new(CapturedLineage::default());
+    let retriever = GraphMemoryRetriever::new(pool.clone(), Some(Arc::new(TestEmbedder)))
         .with_assume_app_role(true)
+        .with_lineage(contact_lineage.clone())
         .with_result_limit(6);
 
     let output = retriever
@@ -128,6 +139,123 @@ async fn mock_tenant_and_contact_retrieval() {
             .content
             .contains("other contact private memory")
     );
+    assert_eq!(memory_message.source_refs.len(), 2);
+    assert!(
+        memory_message.source_refs.iter().any(|source| source
+            .label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("tenant_knowledge:Chunk:"))),
+        "{:?}",
+        memory_message.source_refs
+    );
+    assert!(
+        memory_message.source_refs.iter().any(|source| source
+            .label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("user_memory:Fact:"))),
+        "{:?}",
+        memory_message.source_refs
+    );
+
+    let contact_traces = contact_lineage.retrieval_events();
+    assert_eq!(contact_traces.len(), 1);
+    let contact_trace = &contact_traces[0];
+    assert_eq!(
+        contact_trace.query_original,
+        "Find the pto runbook answer and contact deployment preference answer"
+    );
+    assert_eq!(
+        contact_trace.searched_scopes,
+        vec![
+            format!("tenant:{tenant_id}:tenant_knowledge"),
+            format!("contact:{tenant_id}:{contact_id}:user_memory"),
+        ]
+    );
+    assert_eq!(contact_trace.selected_hits.len(), 2);
+    let tenant_hit = contact_trace
+        .selected_hits
+        .iter()
+        .find(|hit| hit.source_tier == "tenant_knowledge")
+        .expect("tenant KB hit should be selected");
+    assert_eq!(tenant_hit.graph_node_uid, chunk_graph_uid);
+    assert_eq!(
+        tenant_hit.source_uri.as_deref(),
+        Some("https://example.test/pto-runbook")
+    );
+    assert_eq!(tenant_hit.citation["object_type"], json!("document"));
+    assert!(tenant_hit.prompt_included);
+    let contact_hit = contact_trace
+        .selected_hits
+        .iter()
+        .find(|hit| hit.source_tier == "user_memory")
+        .expect("current contact memory should be selected");
+    assert_eq!(contact_hit.fact_uid, Some(contact_fact_uid));
+    assert_eq!(
+        contact_trace
+            .fusion_scores
+            .iter()
+            .filter(|hit| hit.vector_contribution > 0.0)
+            .count(),
+        2
+    );
+    assert_eq!(
+        contact_trace
+            .fusion_scores
+            .iter()
+            .filter(|hit| hit.lexical_contribution > 0.0)
+            .count(),
+        2
+    );
+    assert_eq!(contact_trace.timings.total_ms > 0, true);
+
+    let tenant_session = tenant_only_session(tenant_id);
+    let mut tenant_ctx = moa_core::WorkingContext::new(&tenant_session, capabilities());
+    tenant_ctx.append_message(ContextMessage::user("Find the pto runbook answer"));
+    let tenant_lineage = Arc::new(CapturedLineage::default());
+    let tenant_retriever = GraphMemoryRetriever::new(pool.clone(), Some(Arc::new(TestEmbedder)))
+        .with_assume_app_role(true)
+        .with_lineage(tenant_lineage.clone())
+        .with_result_limit(6);
+    let tenant_output = tenant_retriever
+        .process(&mut tenant_ctx)
+        .await
+        .expect("tenant-only graph retrieval should assemble context");
+    assert_eq!(
+        tenant_output.items_included,
+        vec![format!("graph:Chunk:{chunk_graph_uid}")]
+    );
+    let tenant_memory_message = tenant_ctx
+        .messages
+        .first()
+        .expect("tenant-only memory reminder should be inserted");
+    let tenant_only_section = section_between(
+        &tenant_memory_message.content,
+        "<tenant_knowledge>",
+        "</tenant_knowledge>",
+    );
+    let tenant_only_user_section = section_between(
+        &tenant_memory_message.content,
+        "<user_memory>",
+        "</user_memory>",
+    );
+    assert!(tenant_only_section.contains("Hydrated tenant PTO policy chunk text"));
+    assert!(!tenant_only_user_section.contains("current contact prefers"));
+    assert!(
+        !tenant_memory_message
+            .content
+            .contains("other contact private memory")
+    );
+    let tenant_traces = tenant_lineage.retrieval_events();
+    assert_eq!(tenant_traces.len(), 1);
+    assert_eq!(
+        tenant_traces[0].searched_scopes,
+        vec![format!("tenant:{tenant_id}:tenant_knowledge")]
+    );
+    assert_eq!(tenant_traces[0].selected_hits.len(), 1);
+    assert_eq!(
+        tenant_traces[0].selected_hits[0].source_tier,
+        "tenant_knowledge"
+    );
 
     let _ = tenant_graph
         .hard_purge(chunk_graph_uid, "redacted:tenant-contact-knowledge-test")
@@ -145,6 +273,39 @@ async fn mock_tenant_and_contact_retrieval() {
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await
         .expect("drop isolated schema");
+}
+
+fn graph_store(pool: PgPool, scope: ScopeContext) -> AgeGraphStore {
+    let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+    AgeGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
+}
+
+async fn seed_storage_partition_embedder_state(
+    pool: &PgPool,
+    tenant_id: TenantId,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO moa.storage_partition_state (
+            storage_partition_id,
+            embedding_model,
+            embedding_model_version,
+            embedding_dimension,
+            reembed_state
+        )
+        VALUES ($1, 'cohere-embed-v4', 1, $2, 'steady')
+        ON CONFLICT (storage_partition_id) DO UPDATE
+        SET embedding_model = EXCLUDED.embedding_model,
+            embedding_model_version = EXCLUDED.embedding_model_version,
+            embedding_dimension = EXCLUDED.embedding_dimension,
+            reembed_state = EXCLUDED.reembed_state
+        "#,
+    )
+    .bind(tenant_id.to_string())
+    .bind(VECTOR_DIMENSION as i32)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 fn node_intent(
@@ -169,11 +330,68 @@ fn node_intent(
         pii_class: PiiClass::None,
         confidence: Some(0.95),
         valid_from: Utc::now(),
-        embedding: None,
-        embedding_model: None,
-        embedding_model_version: None,
+        embedding: Some(test_embedding(name)),
+        embedding_model: Some("cohere-embed-v4".to_string()),
+        embedding_model_version: Some(1),
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
+    }
+}
+
+#[derive(Debug, Default)]
+struct TestEmbedder;
+
+#[async_trait]
+impl EmbeddingProvider for TestEmbedder {
+    fn model_id(&self) -> &str {
+        "cohere-embed-v4"
+    }
+
+    fn dimensions(&self) -> usize {
+        VECTOR_DIMENSION
+    }
+
+    async fn embed(&self, inputs: &[String]) -> moa_core::Result<Vec<Vec<f32>>> {
+        Ok(inputs.iter().map(|input| test_embedding(input)).collect())
+    }
+}
+
+fn test_embedding(input: &str) -> Vec<f32> {
+    let mut vector = vec![0.0; VECTOR_DIMENSION];
+    for (index, byte) in input.bytes().enumerate() {
+        vector[index % VECTOR_DIMENSION] += f32::from(byte) / 255.0;
+    }
+    vector[0] += 1.0;
+    vector
+}
+
+#[derive(Debug, Default)]
+struct CapturedLineage {
+    events: StdMutex<Vec<Value>>,
+}
+
+impl CapturedLineage {
+    fn retrieval_events(&self) -> Vec<RetrievalLineage> {
+        self.events
+            .lock()
+            .expect("captured lineage mutex should not be poisoned")
+            .iter()
+            .filter_map(
+                |event| match serde_json::from_value::<LineageEvent>(event.clone()) {
+                    Ok(LineageEvent::Retrieval(retrieval)) => Some(retrieval),
+                    Ok(_) | Err(_) => None,
+                },
+            )
+            .collect()
+    }
+}
+
+impl LineageHandle for CapturedLineage {
+    fn record(&self, evt_json: Value) {
+        self.events
+            .lock()
+            .expect("captured lineage mutex should not be poisoned")
+            .push(evt_json);
     }
 }
 
@@ -273,6 +491,17 @@ fn contact_session(tenant_id: TenantId, contact_id: ContactId) -> SessionMeta {
             session_ids: Vec::new(),
             verified_contact_point_ids: Vec::new(),
         }),
+        ..SessionMeta::default()
+    }
+}
+
+fn tenant_only_session(tenant_id: TenantId) -> SessionMeta {
+    SessionMeta {
+        id: SessionId::new(),
+        tenant_id,
+        channel: Channel::Chat,
+        model: ModelId::new("mock"),
+        contact: None,
         ..SessionMeta::default()
     }
 }

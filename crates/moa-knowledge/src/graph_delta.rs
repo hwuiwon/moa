@@ -99,7 +99,7 @@ pub fn document_chunk_delta(
         tombstone_chunk_hashes: Vec::new(),
     };
     for chunk in chunks {
-        let chunk_key = format!("chunk:{}", chunk.chunk_hash);
+        let chunk_key = format!("chunk:{}:{}", object.tenant_id, chunk.chunk_hash);
         delta.nodes.push(GraphNodeUpsert {
             label: "Chunk".to_string(),
             key: chunk_key.clone(),
@@ -120,7 +120,7 @@ pub fn document_chunk_delta(
             properties: serde_json::json!({}),
         });
         for entity in deterministic_entities(object, chunk) {
-            let entity_key = format!("entity:{}", stable_slug(&entity));
+            let entity_key = format!("entity:{}:{}", object.tenant_id, stable_slug(&entity));
             delta.nodes.push(GraphNodeUpsert {
                 label: "Entity".to_string(),
                 key: entity_key.clone(),
@@ -140,7 +140,12 @@ pub fn document_chunk_delta(
             });
         }
         if let Some(fact) = deterministic_fact(chunk) {
-            let fact_key = format!("fact:{}:{}", chunk.chunk_hash, stable_slug(&fact));
+            let fact_key = format!(
+                "fact:{}:{}:{}",
+                object.tenant_id,
+                chunk.chunk_hash,
+                stable_slug(&fact)
+            );
             delta.nodes.push(GraphNodeUpsert {
                 label: "Fact".to_string(),
                 key: fact_key.clone(),
