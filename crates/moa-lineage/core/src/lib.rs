@@ -15,8 +15,8 @@ pub use records::{
     ContextChunk, ContextLineage, DecisionKind, DecisionRecord, FusedHit, GenerationLineage,
     GenerationTokenUsage, GraphPath, LineageEvent, PgvectorIntrospection, PiiRedactionDecision,
     PrivacyEraseDecision, PrivacyExportDecision, RecordKind, RerankHit, RetrievalLineage,
-    RetrievalStage, ScopeEnforcementDecision, ScoreRecord, ScoreSource, ScoreTarget, ScoreValue,
-    StageTimings, ToolCallSummary, TruncationEvent, TurbopufferIntrospection, VecHit,
-    VerifierResult,
+    RetrievalSelectedHit, RetrievalStage, ScopeEnforcementDecision, ScoreRecord, ScoreSource,
+    ScoreTarget, ScoreValue, StageTimings, ToolCallSummary, TruncationEvent,
+    TurbopufferIntrospection, VecHit, VerifierResult,
 };
 pub use sink::{LineageSink, NullSink};

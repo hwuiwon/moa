@@ -1,13 +1,16 @@
 //! Offline LlamaParse parser coverage.
 
+use hmac::{Hmac, Mac};
 use moa_core::TenantId;
 use moa_knowledge::{
     Error,
     chunking::{ChunkingConfig, blocks_to_chunks, elements_to_blocks},
     domain::{KnowledgeObject, ObjectStatus, ParseInput},
-    parser::{DocumentParser, llamaparse::LlamaParseParser},
+    parser::{DocumentParser, llamaparse::LlamaParseParser, verify_parser_webhook},
 };
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::json;
+use sha2::Sha256;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -38,6 +41,13 @@ fn input() -> ParseInput {
         text: None,
         options: json!({}),
     }
+}
+
+fn webhook_signature(body: &[u8], signing_key: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key.as_bytes())
+        .expect("test signing key should initialize HMAC");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 #[tokio::test]
@@ -105,6 +115,121 @@ async fn parse_request_preserves_items_page_metadata_timing_and_identity() {
     );
     assert_eq!(blocks, repeated_blocks);
     assert_eq!(chunks, repeated_chunks);
+}
+
+#[test]
+fn webhook_payload_maps_job_object_and_rejects_bad_signature() {
+    // Pins: LlamaParse webhook verification maps job/object metadata and rejects invalid HMAC.
+    let signing_key = "llamaparse-webhook-secret";
+    let object_uid = Uuid::from_u128(21).to_string();
+    let body = serde_json::to_vec(&json!({
+        "event_id": "evt-llama-1",
+        "event_type": "parse.success",
+        "job_id": "job-123",
+        "status": "success",
+        "metadata": {
+            "object_uid": object_uid,
+            "source_id": "llamaparse-source",
+            "raw_text": "must not be retained"
+        }
+    }))
+    .expect("serialize LlamaParse webhook fixture");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-llamaparse-webhook-signature",
+        HeaderValue::from_str(&webhook_signature(&body, signing_key))
+            .expect("valid LlamaParse signature header"),
+    );
+
+    let event = verify_parser_webhook("llamaparse", &headers, &body, signing_key)
+        .expect("valid LlamaParse webhook signature");
+    assert_eq!(event.provider, "llamaparse");
+    assert_eq!(event.event_id, "evt-llama-1");
+    assert_eq!(event.event_type, "parse.success");
+    assert_eq!(event.metadata["parser_job_id"], "job-123");
+    assert_eq!(event.metadata["object_uid"], object_uid);
+    assert_eq!(event.metadata["source_id"], "llamaparse-source");
+    assert!(event.metadata["metadata"].get("raw_text").is_none());
+
+    headers.insert(
+        "x-llamaparse-webhook-signature",
+        HeaderValue::from_static("00000000000000000000000000000000"),
+    );
+    let error = verify_parser_webhook("llamaparse", &headers, &body, signing_key)
+        .expect_err("bad LlamaParse webhook signature should fail");
+    assert!(matches!(
+        error,
+        Error::Parser { parser, message }
+            if parser == "llamaparse" && message.contains("signature verification failed")
+    ));
+}
+
+#[tokio::test]
+async fn partial_success_preserves_parser_status_and_errors() {
+    // Pins: LlamaParse partial-success payloads keep provider status and safe error metadata.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/parsing/job"))
+        .and(body_string_contains("\"tier\":\"premium\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "job_id": "job-partial",
+            "status": "partial_success",
+            "errors": [{"code": "page_timeout", "page": 2}],
+            "markdown": "Recovered text",
+            "items": [
+                {"id": "p1", "type": "paragraph", "text": "Recovered text", "page_number": 1}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let parser = LlamaParseParser::with_client(
+        reqwest::Client::new(),
+        server.uri(),
+        "test-key",
+        "premium",
+        "2026-06",
+        Vec::new(),
+    );
+    let parsed = parser
+        .parse(input())
+        .await
+        .expect("parse partial-success LlamaParse fixture");
+
+    assert_eq!(parsed.parser_job_id.as_deref(), Some("job-partial"));
+    assert_eq!(parsed.metadata["parser_status"], "partial_success");
+    assert_eq!(parsed.metadata["parser_errors"][0]["code"], "page_timeout");
+    assert_eq!(parsed.elements.len(), 1);
+    assert_eq!(parsed.elements[0].text, "Recovered text");
+}
+
+#[tokio::test]
+async fn parse_error_maps_to_typed_http_status() {
+    // Pins: LlamaParse parser failures surface as typed HTTP status errors.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/parsing/job"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "detail": "parse failed"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let parser = LlamaParseParser::with_client(
+        reqwest::Client::new(),
+        server.uri(),
+        "test-key",
+        "premium",
+        "2026-06",
+        Vec::new(),
+    );
+    let error = parser
+        .parse(input())
+        .await
+        .expect_err("LlamaParse HTTP error should fail");
+    assert!(matches!(error, Error::HttpStatus { status: 422, .. }));
 }
 
 #[tokio::test]

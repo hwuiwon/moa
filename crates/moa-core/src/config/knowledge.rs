@@ -191,6 +191,15 @@ pub struct LlamaParseKnowledgeParserConfig {
     /// Optional LlamaParse API key loaded from `MOA_LLAMAPARSE_API_KEY`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Optional LlamaParse webhook signing key loaded from `MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_signing_key: Option<String>,
+    /// Optional custom header name required on LlamaParse webhooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_header_name: Option<String>,
+    /// Optional custom header value required on LlamaParse webhooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_header_value: Option<String>,
     /// LlamaParse plan or routing tier.
     pub tier: String,
     /// Parse response expansions requested from LlamaParse.
@@ -202,6 +211,9 @@ impl Default for LlamaParseKnowledgeParserConfig {
         Self {
             api_base_url: "https://api.cloud.llamaindex.ai".to_string(),
             api_key: None,
+            webhook_signing_key: None,
+            webhook_header_name: None,
+            webhook_header_value: None,
             tier: "balanced".to_string(),
             expand: vec![
                 "markdown".to_string(),
@@ -248,6 +260,15 @@ pub struct ReductoKnowledgeParserConfig {
     /// Optional Reducto API key loaded from `MOA_REDUCTO_API_KEY`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Optional Reducto webhook signing key loaded from `MOA_REDUCTO_WEBHOOK_SIGNING_KEY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_signing_key: Option<String>,
+    /// Optional custom header name required on Reducto webhooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_header_name: Option<String>,
+    /// Optional custom header value required on Reducto webhooks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_header_value: Option<String>,
     /// Reducto parse mode.
     pub parse_mode: String,
     /// Whether Reducto asynchronous parsing is enabled.
@@ -263,6 +284,9 @@ impl Default for ReductoKnowledgeParserConfig {
         Self {
             api_base_url: "https://platform.reducto.ai".to_string(),
             api_key: None,
+            webhook_signing_key: None,
+            webhook_header_name: None,
+            webhook_header_value: None,
             parse_mode: "standard".to_string(),
             async_enabled: true,
             chunk_mode: "variable".to_string(),

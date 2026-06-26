@@ -22,10 +22,10 @@ impl KnowledgeService {
         &self,
         request: KnowledgeProviderWebhookRequest,
     ) -> Result<KnowledgeProviderWebhookResponse, KnowledgeServiceError> {
-        let provider = self.provider(&request.provider)?;
+        let verifier = self.webhook_verifier(&request.provider)?;
         let headers = header_map(&request.headers)?;
         let body = webhook_body(&request)?;
-        let verified = provider.verify_webhook(headers, body.into()).await?;
+        let verified = verifier.verify_webhook(headers, body.into()).await?;
         let tenant_id = tenant_id_from_metadata(&verified.metadata)
             .or_else(|| tenant_id_from_metadata(&request.payload))
             .ok_or_else(|| {

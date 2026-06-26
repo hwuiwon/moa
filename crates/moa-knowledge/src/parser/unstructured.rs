@@ -178,7 +178,12 @@ pub fn map_unstructured_elements(value: Value) -> ParsedDocument {
         parser_job_id: None,
         text,
         elements,
-        metadata: json!({ "provider": "unstructured" }),
+        metadata: json!({
+            "provider": "unstructured",
+            "parser_status": value.get("status").cloned().unwrap_or(Value::Null),
+            "parser_errors": value.get("errors").cloned().unwrap_or(Value::Null),
+            "parser_warnings": value.get("warnings").cloned().unwrap_or(Value::Null)
+        }),
     }
 }
 

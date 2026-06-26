@@ -1,7 +1,9 @@
 //! Repository traits for tenant knowledge persistence.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
-use moa_core::{StoragePartitionId, TenantId};
+use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_types::ScopeContext;
 use sqlx::{PgPool, Row};
@@ -9,11 +11,11 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        ConnectionStatus, ContactGroup, ContactGroupMembership, DocumentVersion,
-        IngestionStepStatus, KnowledgeBlock, KnowledgeChunk, KnowledgeConnection,
-        KnowledgeConnectionProjection, KnowledgeIngestionStep, KnowledgeObject,
-        KnowledgeObjectInspection, KnowledgeObjectProjection, KnowledgeProviderEventRecord,
-        KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
+        ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
+        ContactGroupTargetMember, DocumentVersion, IngestionStepStatus, KnowledgeBlock,
+        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
+        KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
+        KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
@@ -123,6 +125,13 @@ pub trait KnowledgeRepository: Send + Sync {
         group_uid: Uuid,
         memberships: Vec<ContactGroupMembership>,
     ) -> Result<()>;
+
+    /// Resolves one derived contact group and its active targeting members.
+    async fn contact_group_targets(
+        &self,
+        tenant_id: TenantId,
+        group_key: &str,
+    ) -> Result<Option<ContactGroupTarget>>;
 
     /// Records a provider webhook event idempotently.
     async fn record_provider_event(
@@ -895,14 +904,43 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         memberships: Vec<ContactGroupMembership>,
     ) -> Result<()> {
         let mut conn = self.begin().await?;
-        sqlx::query(
-            "UPDATE moa.knowledge_contact_group_memberships SET active = FALSE, updated_at = now() WHERE group_id = $1",
-        )
-        .bind(group_uid)
-        .execute(conn.as_mut())
-        .await
-        .map_err(map_sqlx_error)?;
-        for membership in memberships {
+        let mut memberships_by_contact = BTreeMap::new();
+        for mut membership in memberships {
+            membership.evidence.sort_unstable();
+            membership.evidence.dedup();
+            memberships_by_contact.insert(membership.contact_id.0, membership);
+        }
+        let active_contact_ids = memberships_by_contact.keys().copied().collect::<Vec<_>>();
+        if active_contact_ids.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE moa.knowledge_contact_group_memberships
+                SET active = FALSE, updated_at = now()
+                WHERE group_id = $1
+                  AND active = TRUE
+                "#,
+            )
+            .bind(group_uid)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE moa.knowledge_contact_group_memberships
+                SET active = FALSE, updated_at = now()
+                WHERE group_id = $1
+                  AND active = TRUE
+                  AND NOT (contact_id = ANY($2::UUID[]))
+                "#,
+            )
+            .bind(group_uid)
+            .bind(&active_contact_ids)
+            .execute(conn.as_mut())
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        for membership in memberships_by_contact.into_values() {
             sqlx::query(
                 r#"
                 INSERT INTO moa.knowledge_contact_group_memberships (
@@ -914,10 +952,13 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
                 WHERE group_uid = $1
                 ON CONFLICT (tenant_id, group_id, contact_id) WHERE active = TRUE
                 DO UPDATE SET
-                    active = TRUE,
                     evidence_ids = EXCLUDED.evidence_ids,
                     metadata = EXCLUDED.metadata,
                     updated_at = now()
+                WHERE moa.knowledge_contact_group_memberships.evidence_ids
+                        IS DISTINCT FROM EXCLUDED.evidence_ids
+                   OR moa.knowledge_contact_group_memberships.metadata
+                        IS DISTINCT FROM EXCLUDED.metadata
                 "#,
             )
             .bind(group_uid)
@@ -929,6 +970,57 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .map_err(map_sqlx_error)?;
         }
         conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn contact_group_targets(
+        &self,
+        tenant_id: TenantId,
+        group_key: &str,
+    ) -> Result<Option<ContactGroupTarget>> {
+        let mut conn = self.begin().await?;
+        let group = sqlx::query(
+            r#"
+            SELECT group_uid, tenant_id, normalized_name, display_name, metadata
+            FROM moa.knowledge_contact_groups
+            WHERE tenant_id = $1
+              AND group_kind = 'derived'
+              AND normalized_name = $2
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(group_key)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let Some(group_row) = group else {
+            conn.commit().await.map_err(map_moa_error)?;
+            return Ok(None);
+        };
+        let group = contact_group_from_row(&group_row)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT contact_id, evidence_ids, metadata
+            FROM moa.knowledge_contact_group_memberships
+            WHERE tenant_id = $1
+              AND group_id = $2
+              AND active = TRUE
+            ORDER BY contact_id ASC
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(group.group_uid)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        let members = rows
+            .iter()
+            .map(contact_group_target_member_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(ContactGroupTarget::from_active_members(
+            group, members,
+        )))
     }
 
     async fn record_provider_event(
@@ -1115,6 +1207,14 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
         Ok(())
     }
 
+    async fn contact_group_targets(
+        &self,
+        _tenant_id: TenantId,
+        _group_key: &str,
+    ) -> Result<Option<ContactGroupTarget>> {
+        Ok(None)
+    }
+
     async fn record_provider_event(
         &self,
         event: KnowledgeProviderEventRecord,
@@ -1245,6 +1345,32 @@ fn chunk_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeChunk> {
         heading_path: row.try_get("heading_path").map_err(map_sqlx_error)?,
         ordinal: u32::try_from(ordinal).map_err(map_int_error)?,
         token_count: usize::try_from(token_count).map_err(map_int_error)?,
+        metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
+    })
+}
+
+fn contact_group_from_row(row: &sqlx::postgres::PgRow) -> Result<ContactGroup> {
+    Ok(ContactGroup {
+        group_uid: row.try_get("group_uid").map_err(map_sqlx_error)?,
+        tenant_id: TenantId::from(
+            row.try_get::<Uuid, _>("tenant_id")
+                .map_err(map_sqlx_error)?,
+        ),
+        group_key: row.try_get("normalized_name").map_err(map_sqlx_error)?,
+        display_name: row.try_get("display_name").map_err(map_sqlx_error)?,
+        metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
+    })
+}
+
+fn contact_group_target_member_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ContactGroupTargetMember> {
+    Ok(ContactGroupTargetMember {
+        contact_id: ContactId(
+            row.try_get::<Uuid, _>("contact_id")
+                .map_err(map_sqlx_error)?,
+        ),
+        evidence: row.try_get("evidence_ids").map_err(map_sqlx_error)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
     })
 }

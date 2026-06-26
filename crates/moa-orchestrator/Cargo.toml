@@ -74,6 +74,7 @@ croner = "2.2"
 ed25519-dalek.workspace = true
 flate2 = "1"
 hex.workspace = true
+hmac.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true

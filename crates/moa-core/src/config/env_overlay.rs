@@ -208,6 +208,12 @@ pub struct MoaEnvOverlay {
     pub llamaparse_api_url: Option<String>,
     /// `MOA_LLAMAPARSE_API_KEY`.
     pub llamaparse_api_key: Option<String>,
+    /// `MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY`.
+    pub llamaparse_webhook_signing_key: Option<String>,
+    /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME`.
+    pub llamaparse_webhook_header_name: Option<String>,
+    /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE`.
+    pub llamaparse_webhook_header_value: Option<String>,
     /// `MOA_LLAMAPARSE_TIER`.
     pub llamaparse_tier: Option<String>,
     /// `MOA_UNSTRUCTURED_API_URL`.
@@ -222,6 +228,12 @@ pub struct MoaEnvOverlay {
     pub reducto_api_url: Option<String>,
     /// `MOA_REDUCTO_API_KEY`.
     pub reducto_api_key: Option<String>,
+    /// `MOA_REDUCTO_WEBHOOK_SIGNING_KEY`.
+    pub reducto_webhook_signing_key: Option<String>,
+    /// `MOA_REDUCTO_WEBHOOK_HEADER_NAME`.
+    pub reducto_webhook_header_name: Option<String>,
+    /// `MOA_REDUCTO_WEBHOOK_HEADER_VALUE`.
+    pub reducto_webhook_header_value: Option<String>,
     /// `MOA_REDUCTO_PARSE_MODE`.
     pub reducto_parse_mode: Option<String>,
     /// `MOA_REDUCTO_ASYNC_ENABLED`.
@@ -1066,6 +1078,18 @@ impl MoaEnvOverlay {
             &mut config.knowledge.llamaparse.api_key,
             &self.llamaparse_api_key,
         );
+        set_option_if_some(
+            &mut config.knowledge.llamaparse.webhook_signing_key,
+            &self.llamaparse_webhook_signing_key,
+        );
+        set_option_if_some(
+            &mut config.knowledge.llamaparse.webhook_header_name,
+            &self.llamaparse_webhook_header_name,
+        );
+        set_option_if_some(
+            &mut config.knowledge.llamaparse.webhook_header_value,
+            &self.llamaparse_webhook_header_value,
+        );
         set_if_some(&mut config.knowledge.llamaparse.tier, &self.llamaparse_tier);
         set_if_some(
             &mut config.knowledge.unstructured.api_base_url,
@@ -1088,6 +1112,18 @@ impl MoaEnvOverlay {
             &self.reducto_api_url,
         );
         set_option_if_some(&mut config.knowledge.reducto.api_key, &self.reducto_api_key);
+        set_option_if_some(
+            &mut config.knowledge.reducto.webhook_signing_key,
+            &self.reducto_webhook_signing_key,
+        );
+        set_option_if_some(
+            &mut config.knowledge.reducto.webhook_header_name,
+            &self.reducto_webhook_header_name,
+        );
+        set_option_if_some(
+            &mut config.knowledge.reducto.webhook_header_value,
+            &self.reducto_webhook_header_value,
+        );
         set_if_some(
             &mut config.knowledge.reducto.parse_mode,
             &self.reducto_parse_mode,
@@ -1737,6 +1773,12 @@ mod tests {
             ("MOA_MERGE_WEBHOOK_SIGNATURE_KEY", "merge-webhook-secret"),
             ("MOA_LLAMAPARSE_API_URL", "https://llamaparse.example"),
             ("MOA_LLAMAPARSE_API_KEY", "llamaparse-secret"),
+            (
+                "MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY",
+                "llamaparse-webhook-secret",
+            ),
+            ("MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME", "x-llama-secret"),
+            ("MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE", "llama-header-secret"),
             ("MOA_LLAMAPARSE_TIER", "premium"),
             ("MOA_UNSTRUCTURED_API_URL", "https://unstructured.example"),
             ("MOA_UNSTRUCTURED_API_KEY", "unstructured-secret"),
@@ -1744,6 +1786,9 @@ mod tests {
             ("MOA_UNSTRUCTURED_CHUNKING_STRATEGY", "basic"),
             ("MOA_REDUCTO_API_URL", "https://reducto.example"),
             ("MOA_REDUCTO_API_KEY", "reducto-secret"),
+            ("MOA_REDUCTO_WEBHOOK_SIGNING_KEY", "reducto-webhook-secret"),
+            ("MOA_REDUCTO_WEBHOOK_HEADER_NAME", "x-reducto-secret"),
+            ("MOA_REDUCTO_WEBHOOK_HEADER_VALUE", "reducto-header-secret"),
             ("MOA_REDUCTO_PARSE_MODE", "ocr"),
             ("MOA_REDUCTO_ASYNC_ENABLED", "false"),
             ("MOA_REDUCTO_CHUNK_MODE", "page"),
@@ -1786,6 +1831,18 @@ mod tests {
             config.knowledge.llamaparse.api_key.as_deref(),
             Some("llamaparse-secret")
         );
+        assert_eq!(
+            config.knowledge.llamaparse.webhook_signing_key.as_deref(),
+            Some("llamaparse-webhook-secret")
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.webhook_header_name.as_deref(),
+            Some("x-llama-secret")
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.webhook_header_value.as_deref(),
+            Some("llama-header-secret")
+        );
         assert_eq!(config.knowledge.llamaparse.tier, "premium");
         assert_eq!(
             config.knowledge.unstructured.api_base_url,
@@ -1804,6 +1861,18 @@ mod tests {
         assert_eq!(
             config.knowledge.reducto.api_key.as_deref(),
             Some("reducto-secret")
+        );
+        assert_eq!(
+            config.knowledge.reducto.webhook_signing_key.as_deref(),
+            Some("reducto-webhook-secret")
+        );
+        assert_eq!(
+            config.knowledge.reducto.webhook_header_name.as_deref(),
+            Some("x-reducto-secret")
+        );
+        assert_eq!(
+            config.knowledge.reducto.webhook_header_value.as_deref(),
+            Some("reducto-header-secret")
         );
         assert_eq!(config.knowledge.reducto.parse_mode, "ocr");
         assert!(!config.knowledge.reducto.async_enabled);

@@ -4,6 +4,9 @@ mod inspect;
 mod link;
 mod sync;
 mod webhook;
+mod webhook_verifier;
+
+pub use webhook_verifier::{KnowledgeWebhookVerifier, ParserWebhookVerifier};
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -37,6 +40,8 @@ use crate::{
     ctx::RequestHeaders,
     handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error},
 };
+
+use self::webhook_verifier::LinkedProviderWebhookVerifier;
 
 /// Restate service surface for tenant knowledge-base operations.
 #[restate_sdk::service]
@@ -368,8 +373,22 @@ impl KnowledgeService {
         self.providers.provider(provider)
     }
 
+    fn webhook_verifier(
+        &self,
+        provider: &str,
+    ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
+        self.providers.webhook_verifier(provider)
+    }
+
     fn repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeRepository> {
         self.repository.repository(tenant_id)
+    }
+
+    fn postgres_pool(&self) -> Option<sqlx::PgPool> {
+        match &self.repository {
+            KnowledgeRepositorySource::Fixed(_) => None,
+            KnowledgeRepositorySource::Postgres { pool } => Some(pool.clone()),
+        }
     }
 }
 
@@ -398,12 +417,23 @@ pub trait KnowledgeProviderResolver: Send + Sync {
         &self,
         provider: &str,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError>;
+
+    /// Returns the webhook verifier for a selected provider identifier.
+    fn webhook_verifier(
+        &self,
+        provider: &str,
+    ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
+        Ok(Arc::new(LinkedProviderWebhookVerifier::new(
+            self.provider(provider)?,
+        )))
+    }
 }
 
 /// Static provider resolver used by offline service tests.
 #[derive(Clone, Default)]
 pub struct StaticKnowledgeProviders {
     providers: HashMap<String, Arc<dyn LinkedIntegrationProvider>>,
+    webhook_verifiers: HashMap<String, Arc<dyn KnowledgeWebhookVerifier>>,
 }
 
 impl StaticKnowledgeProviders {
@@ -412,6 +442,7 @@ impl StaticKnowledgeProviders {
     pub fn new() -> Self {
         Self {
             providers: HashMap::new(),
+            webhook_verifiers: HashMap::new(),
         }
     }
 
@@ -425,6 +456,17 @@ impl StaticKnowledgeProviders {
         self.providers.insert(provider.into(), implementation);
         self
     }
+
+    /// Adds a webhook verifier under a stable provider identifier.
+    #[must_use]
+    pub fn with_webhook_verifier(
+        mut self,
+        provider: impl Into<String>,
+        verifier: Arc<dyn KnowledgeWebhookVerifier>,
+    ) -> Self {
+        self.webhook_verifiers.insert(provider.into(), verifier);
+        self
+    }
 }
 
 impl KnowledgeProviderResolver for StaticKnowledgeProviders {
@@ -436,6 +478,18 @@ impl KnowledgeProviderResolver for StaticKnowledgeProviders {
             .get(provider)
             .cloned()
             .ok_or_else(|| KnowledgeServiceError::UnknownProvider(provider.to_string()))
+    }
+
+    fn webhook_verifier(
+        &self,
+        provider: &str,
+    ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
+        if let Some(verifier) = self.webhook_verifiers.get(provider) {
+            return Ok(verifier.clone());
+        }
+        Ok(Arc::new(LinkedProviderWebhookVerifier::new(
+            self.provider(provider)?,
+        )))
     }
 }
 
@@ -484,9 +538,9 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
         &self,
         provider: &str,
     ) -> Result<Arc<dyn LinkedIntegrationProvider>, KnowledgeServiceError> {
-        let api_key = self.config.selected_provider_api_key(provider)?;
         match provider {
             "nango" => {
+                let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     NangoProvider::new(self.config.nango.api_base_url.clone(), api_key)?;
                 if let Some(signing_key) = self.config.nango.webhook_signing_key.clone() {
@@ -495,6 +549,7 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 Ok(Arc::new(implementation))
             }
             "merge" => {
+                let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     MergeProvider::new(self.config.merge.api_base_url.clone(), api_key)?;
                 if let Some(signature_key) = self.config.merge.webhook_signature_key.clone() {
@@ -504,6 +559,67 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
             }
             other => Err(KnowledgeServiceError::UnknownProvider(other.to_string())),
         }
+    }
+
+    fn webhook_verifier(
+        &self,
+        provider: &str,
+    ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
+        match provider {
+            "nango" | "merge" => Ok(Arc::new(LinkedProviderWebhookVerifier::new(
+                self.provider(provider)?,
+            ))),
+            "llamaparse" => self.parser_webhook_verifier("llamaparse"),
+            "reducto" => self.parser_webhook_verifier("reducto"),
+            other => Err(KnowledgeServiceError::UnknownProvider(other.to_string())),
+        }
+    }
+}
+
+impl ConfigKnowledgeProviders {
+    fn parser_webhook_verifier(
+        &self,
+        provider: &'static str,
+    ) -> Result<Arc<dyn KnowledgeWebhookVerifier>, KnowledgeServiceError> {
+        if !self
+            .config
+            .parsers
+            .enabled
+            .iter()
+            .any(|candidate| candidate == provider)
+        {
+            return Err(KnowledgeServiceError::UnknownProvider(provider.to_string()));
+        }
+        let (signing_key, header_name, header_value) = match provider {
+            "llamaparse" => (
+                self.config.llamaparse.webhook_signing_key.clone(),
+                self.config.llamaparse.webhook_header_name.clone(),
+                self.config.llamaparse.webhook_header_value.clone(),
+            ),
+            "reducto" => (
+                self.config.reducto.webhook_signing_key.clone(),
+                self.config.reducto.webhook_header_name.clone(),
+                self.config.reducto.webhook_header_value.clone(),
+            ),
+            other => return Err(KnowledgeServiceError::UnknownProvider(other.to_string())),
+        };
+        let mut verifier = ParserWebhookVerifier::new(provider);
+        if let Some(signing_key) = signing_key {
+            verifier = verifier.with_signing_key(signing_key);
+        }
+        match (header_name, header_value) {
+            (Some(name), Some(value)) => {
+                verifier = verifier.with_custom_header(name, value);
+            }
+            (None, None) => {}
+            _ => {
+                return Err(MoaError::ConfigError(format!(
+                    "knowledge parser `{provider}` webhook custom header requires both name and value"
+                ))
+                .into());
+            }
+        }
+        Ok(Arc::new(verifier))
     }
 }
 

@@ -611,6 +611,8 @@ mod tests {
                     vector: false,
                     lexical: false,
                 },
+                source_tier: crate::retrieval::SourceTier::UserMemory,
+                knowledge_chunk: None,
                 node: NodeIndexRow {
                     uid,
                     label: NodeLabel::Fact,

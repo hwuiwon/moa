@@ -7,7 +7,7 @@ use moa_knowledge::{
     domain::{KnowledgeObject, ObjectStatus, ParseInput},
     parser::{DocumentParser, unstructured::UnstructuredParser},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -48,6 +48,16 @@ async fn partition_elements_preserve_parent_filetype_source_coordinates_and_iden
         .and(path("/general/v0/general"))
         .and(body_string_contains("\"strategy\":\"hi_res\""))
         .and(body_string_contains("\"chunking_strategy\":\"by_title\""))
+        .and(|request: &wiremock::Request| {
+            request
+                .body_json::<Value>()
+                .ok()
+                .and_then(|body| {
+                    body.pointer("/chunking_options/max_characters")
+                        .and_then(Value::as_u64)
+                })
+                == Some(4000)
+        })
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {
                 "element_id": "title-1",
@@ -120,6 +130,77 @@ async fn partition_elements_preserve_parent_filetype_source_coordinates_and_iden
             },
         )
     );
+}
+
+#[tokio::test]
+async fn object_response_preserves_parser_status_and_warnings() {
+    // Pins: Unstructured object responses keep parser status/warnings while mapping elements.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/general/v0/general"))
+        .and(body_string_contains("\"strategy\":\"hi_res\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "completed_with_warnings",
+            "warnings": [{"code": "low_confidence"}],
+            "elements": [
+                {
+                    "element_id": "body-1",
+                    "type": "NarrativeText",
+                    "text": "Recovered body",
+                    "metadata": {"page_number": 1}
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let parser = UnstructuredParser::with_client(
+        reqwest::Client::new(),
+        server.uri(),
+        "test-key",
+        "hi_res",
+        "by_title",
+    );
+    let parsed = parser
+        .parse(input())
+        .await
+        .expect("parse Unstructured status fixture");
+
+    assert_eq!(parsed.metadata["parser_status"], "completed_with_warnings");
+    assert_eq!(
+        parsed.metadata["parser_warnings"][0]["code"],
+        "low_confidence"
+    );
+    assert_eq!(parsed.elements.len(), 1);
+    assert_eq!(parsed.elements[0].text, "Recovered body");
+}
+
+#[tokio::test]
+async fn parser_error_maps_to_typed_http_status() {
+    // Pins: Unstructured parser failures surface as typed HTTP status errors.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/general/v0/general"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "partition failed"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let parser = UnstructuredParser::with_client(
+        reqwest::Client::new(),
+        server.uri(),
+        "test-key",
+        "hi_res",
+        "by_title",
+    );
+    let error = parser
+        .parse(input())
+        .await
+        .expect_err("Unstructured HTTP error should fail");
+    assert!(matches!(error, Error::HttpStatus { status: 500, .. }));
 }
 
 #[tokio::test]

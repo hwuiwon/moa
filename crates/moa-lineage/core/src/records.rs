@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use moa_core::{ContextSourceRef, SessionId, StoragePartitionId, UserId};
 use moa_memory_types::MemoryScope;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -83,6 +84,15 @@ pub struct RetrievalLineage {
     pub rerank_scores: Vec<RerankHit>,
     /// Final chunk or node IDs that survived into context.
     pub top_k: Vec<Uuid>,
+    /// Scopes searched by the retrieval plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub searched_scopes: Vec<String>,
+    /// Selected evidence records with source tier and citation details.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_hits: Vec<RetrievalSelectedHit>,
+    /// Redacted filters applied during retrieval.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub filters: Value,
     /// Per-stage timings.
     pub timings: StageTimings,
     /// Backend-specific introspection.
@@ -163,6 +173,43 @@ pub struct RerankHit {
     pub relevance_score: f32,
     /// Reranker model.
     pub rerank_model: String,
+}
+
+/// One selected retrieval hit with source-tier and citation metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetrievalSelectedHit {
+    /// Stable graph node UID used for context source references.
+    pub graph_node_uid: Uuid,
+    /// Optional tenant knowledge chunk UID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_uid: Option<Uuid>,
+    /// Optional fact UID for user/contact memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact_uid: Option<Uuid>,
+    /// Stable source tier such as `tenant_knowledge` or `user_memory`.
+    pub source_tier: String,
+    /// Graph label or object type.
+    pub label: String,
+    /// Renderer-safe title.
+    pub title: String,
+    /// Renderer-safe snippet used in prompt context.
+    pub snippet: String,
+    /// Retrieval score after ranking.
+    pub score: f64,
+    /// Retrieval legs that contributed to this hit.
+    #[serde(default)]
+    pub legs: Vec<String>,
+    /// Whether the hit was included in prompt context.
+    pub prompt_included: bool,
+    /// Source URI when tenant knowledge has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    /// Source title when tenant knowledge has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    /// Redacted citation metadata.
+    #[serde(default)]
+    pub citation: Value,
 }
 
 /// Millisecond timings for retrieval stages.

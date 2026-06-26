@@ -32,5 +32,6 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+moa-contacts = { workspace = true }
 moa-test-support = { workspace = true }
 wiremock.workspace = true

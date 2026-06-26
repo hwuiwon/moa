@@ -1,13 +1,17 @@
 //! Offline Reducto parser coverage.
 
+use base64::{Engine as _, engine::general_purpose};
+use hmac::{Hmac, Mac};
 use moa_core::TenantId;
 use moa_knowledge::{
     Error,
     chunking::{ChunkingConfig, blocks_to_chunks, elements_to_blocks},
     domain::{KnowledgeObject, ObjectStatus, ParseInput},
-    parser::{DocumentParser, reducto::ReductoParser},
+    parser::{DocumentParser, reducto::ReductoParser, verify_parser_webhook},
 };
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::json;
+use sha2::Sha256;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -41,6 +45,20 @@ fn input(result_url: Option<String>) -> ParseInput {
             "presigned_url": result_url
         }),
     }
+}
+
+fn svix_signature(body: &[u8], signing_key: &str, message_id: &str, timestamp: &str) -> String {
+    let payload = format!(
+        "{message_id}.{timestamp}.{}",
+        std::str::from_utf8(body).expect("webhook fixture body should be UTF-8")
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key.as_bytes())
+        .expect("test signing key should initialize HMAC");
+    mac.update(payload.as_bytes());
+    format!(
+        "v1,{}",
+        general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    )
 }
 
 #[tokio::test]
@@ -149,6 +167,167 @@ async fn url_result_chunks_and_blocks_preserve_metadata_and_identity() {
             },
         )
     );
+}
+
+#[test]
+fn svix_webhook_payload_maps_job_object_and_rejects_bad_signature() {
+    // Pins: Reducto Svix webhook verification maps job/object metadata and rejects invalid signatures.
+    let signing_key = "reducto-svix-secret";
+    let message_id = "msg_reducto_1";
+    let timestamp = "1782499200";
+    let object_uid = Uuid::from_u128(41).to_string();
+    let body = serde_json::to_vec(&json!({
+        "event": "parse.completed",
+        "data": {
+            "id": "job-red",
+            "status": "completed",
+            "metadata": {
+                "object_uid": object_uid,
+                "source_id": "reducto-source",
+                "document_text": "must not be retained"
+            }
+        }
+    }))
+    .expect("serialize Reducto webhook fixture");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "svix-id",
+        HeaderValue::from_str(message_id).expect("valid Svix id header"),
+    );
+    headers.insert(
+        "svix-timestamp",
+        HeaderValue::from_str(timestamp).expect("valid Svix timestamp header"),
+    );
+    headers.insert(
+        "svix-signature",
+        HeaderValue::from_str(&svix_signature(&body, signing_key, message_id, timestamp))
+            .expect("valid Svix signature header"),
+    );
+
+    let event = verify_parser_webhook("reducto", &headers, &body, signing_key)
+        .expect("valid Reducto Svix webhook signature");
+    assert_eq!(event.provider, "reducto");
+    assert_eq!(event.event_id, "job-red");
+    assert_eq!(event.event_type, "parse.completed");
+    assert_eq!(event.metadata["parser_job_id"], "job-red");
+    assert_eq!(event.metadata["object_uid"], object_uid);
+    assert_eq!(event.metadata["source_id"], "reducto-source");
+    assert!(
+        event.metadata["data_metadata"]
+            .get("document_text")
+            .is_none()
+    );
+
+    headers.insert("svix-signature", HeaderValue::from_static("v1,AAAA"));
+    let error = verify_parser_webhook("reducto", &headers, &body, signing_key)
+        .expect_err("bad Reducto Svix signature should fail");
+    assert!(matches!(
+        error,
+        Error::Parser { parser, message }
+            if parser == "reducto" && message.contains("signature verification failed")
+    ));
+}
+
+#[tokio::test]
+async fn async_job_retrieval_preserves_parser_status_and_metadata() {
+    // Pins: Reducto async parse jobs retrieve job results and keep parser status metadata.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/parse_async"))
+        .and(body_string_contains("\"mode\":\"standard\""))
+        .and(body_string_contains("\"chunk_mode\":\"variable\""))
+        .and(body_string_contains("\"force_url_result\":false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "job_id": "job-async",
+            "status": "queued"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/job/job-async"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "job_id": "job-async",
+            "status": "completed",
+            "parse_mode": "standard",
+            "processing_duration": 321,
+            "studio_link": "https://studio.reducto.test/job-async",
+            "usage": {"pages": 1, "credits": 1},
+            "chunks": [{
+                "id": "chunk-async",
+                "content": "Async chunk",
+                "blocks": [{
+                    "id": "body-async",
+                    "block_type": "paragraph",
+                    "text": "Async body"
+                }]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let parser = ReductoParser::with_client(
+        reqwest::Client::new(),
+        server.uri(),
+        "test-key",
+        "standard",
+        true,
+        "variable",
+        false,
+    );
+    let parsed = parser
+        .parse(input(None))
+        .await
+        .expect("parse Reducto async fixture");
+
+    assert_eq!(parsed.parser_job_id.as_deref(), Some("job-async"));
+    assert_eq!(parsed.metadata["parser_status"], "completed");
+    assert_eq!(parsed.metadata["processing_duration"], 321);
+    assert_eq!(
+        parsed.metadata["studio_link"],
+        "https://studio.reducto.test/job-async"
+    );
+    assert_eq!(parsed.metadata["usage_pages"], 1);
+    assert_eq!(parsed.elements.len(), 2);
+    assert_eq!(parsed.elements[1].text, "Async body");
+}
+
+#[tokio::test]
+async fn parser_error_maps_to_typed_http_status() {
+    // Pins: Reducto parser failures surface as typed HTTP status errors.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/parse_async"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "job_id": "job-error"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/job/job-error"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "job failed"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let parser = ReductoParser::with_client(
+        reqwest::Client::new(),
+        server.uri(),
+        "test-key",
+        "standard",
+        true,
+        "variable",
+        false,
+    );
+    let error = parser
+        .parse(input(None))
+        .await
+        .expect_err("Reducto HTTP error should fail");
+    assert!(matches!(error, Error::HttpStatus { status: 500, .. }));
 }
 
 #[tokio::test]

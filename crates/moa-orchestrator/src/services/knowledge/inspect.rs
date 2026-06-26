@@ -3,11 +3,14 @@
 use chrono::Utc;
 use moa_core::wire::knowledge::{
     KnowledgeObjectChunkInspectView, KnowledgeObjectInspectRequest, KnowledgeObjectInspectResponse,
-    KnowledgeObjectListRequest, KnowledgeObjectListResponse, KnowledgeQueryTraceRequest,
-    KnowledgeQueryTraceResponse,
+    KnowledgeObjectListRequest, KnowledgeObjectListResponse, KnowledgeQueryTraceHit,
+    KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse, KnowledgeQueryTraceStage,
 };
+use moa_core::{MoaError, StoragePartitionId};
 use moa_knowledge::normalize::redact_provider_metadata;
+use moa_lineage_core::{LineageEvent, RecordKind, RetrievalLineage};
 use serde_json::{Value, json};
+use sqlx::Row;
 
 use super::{KnowledgeService, KnowledgeServiceError, sync::step_view};
 
@@ -142,20 +145,201 @@ impl KnowledgeService {
         })
     }
 
-    /// Returns a renderer-safe empty query trace until full lineage hydration lands.
+    /// Returns a renderer-safe retrieval trace from durable lineage rows.
     pub async fn query_trace(
         &self,
         request: KnowledgeQueryTraceRequest,
     ) -> Result<KnowledgeQueryTraceResponse, KnowledgeServiceError> {
-        Ok(KnowledgeQueryTraceResponse {
-            trace_uid: request.trace_uid,
-            original_query: String::new(),
-            retrieval_query: None,
-            searched_scopes: Vec::new(),
-            stages: Vec::new(),
-            hits: Vec::new(),
-            created_at: Utc::now(),
-        })
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(empty_query_trace_response(request.trace_uid));
+        };
+        let storage_partition_id = StoragePartitionId::for_tenant(request.tenant_id).to_string();
+        let rows = sqlx::query(
+            r#"
+            SELECT ts, payload
+            FROM analytics.turn_lineage
+            WHERE storage_partition_id = $1
+              AND turn_id = $2
+              AND record_kind = $3
+            ORDER BY ts ASC, record_kind ASC
+            "#,
+        )
+        .bind(storage_partition_id)
+        .bind(request.trace_uid)
+        .bind(RecordKind::Retrieval.as_i16())
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string())))?;
+
+        let mut traces = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload: Value = row.try_get("payload").map_err(|error| {
+                KnowledgeServiceError::Moa(MoaError::StorageError(error.to_string()))
+            })?;
+            if let LineageEvent::Retrieval(record) = serde_json::from_value::<LineageEvent>(payload)
+                .map_err(|error| {
+                    KnowledgeServiceError::InvalidRequest(format!(
+                        "invalid retrieval lineage payload: {error}"
+                    ))
+                })?
+            {
+                traces.push(record);
+            }
+        }
+        Ok(render_query_trace_response(request.trace_uid, traces))
+    }
+}
+
+fn empty_query_trace_response(trace_uid: uuid::Uuid) -> KnowledgeQueryTraceResponse {
+    KnowledgeQueryTraceResponse {
+        trace_uid,
+        original_query: String::new(),
+        retrieval_query: None,
+        searched_scopes: Vec::new(),
+        stages: Vec::new(),
+        hits: Vec::new(),
+        created_at: Utc::now(),
+    }
+}
+
+fn render_query_trace_response(
+    trace_uid: uuid::Uuid,
+    traces: Vec<RetrievalLineage>,
+) -> KnowledgeQueryTraceResponse {
+    let Some(first) = traces.first() else {
+        return empty_query_trace_response(trace_uid);
+    };
+    let mut searched_scopes = Vec::new();
+    let mut stages = Vec::new();
+    let mut hits = Vec::new();
+    for record in &traces {
+        extend_unique(&mut searched_scopes, record.searched_scopes.iter().cloned());
+        stages.extend(trace_stages(record));
+        hits.extend(
+            record
+                .selected_hits
+                .iter()
+                .map(|hit| KnowledgeQueryTraceHit {
+                    uid: hit.chunk_uid.unwrap_or(hit.graph_node_uid),
+                    source_tier: hit.source_tier.clone(),
+                    label: hit.label.clone(),
+                    title: hit.title.clone(),
+                    snippet: hit.snippet.clone(),
+                    score: hit.score,
+                    citation: trace_hit_citation(hit),
+                }),
+        );
+    }
+
+    KnowledgeQueryTraceResponse {
+        trace_uid,
+        original_query: first.query_original.clone(),
+        retrieval_query: first.query_expansions.first().cloned(),
+        searched_scopes,
+        stages,
+        hits,
+        created_at: first.ts,
+    }
+}
+
+fn trace_stages(record: &RetrievalLineage) -> Vec<KnowledgeQueryTraceStage> {
+    let mut stages = Vec::new();
+    push_trace_stage(&mut stages, "embed", 0, record.timings.embed_ms, json!({}));
+    push_trace_stage(
+        &mut stages,
+        "vector",
+        record.vector_hits.len(),
+        record.timings.vector_search_ms,
+        json!({}),
+    );
+    push_trace_stage(
+        &mut stages,
+        "graph",
+        record.graph_paths.len(),
+        record.timings.graph_search_ms,
+        json!({}),
+    );
+    push_trace_stage(
+        &mut stages,
+        "lexical",
+        lexical_candidate_count(record),
+        record.timings.lexical_search_ms,
+        json!({}),
+    );
+    push_trace_stage(
+        &mut stages,
+        "fusion",
+        record.fusion_scores.len(),
+        record.timings.fusion_ms,
+        json!({ "filters": record.filters }),
+    );
+    push_trace_stage(
+        &mut stages,
+        "reranker",
+        record.rerank_scores.len(),
+        record.timings.rerank_ms,
+        json!({}),
+    );
+    push_trace_stage(
+        &mut stages,
+        "context",
+        record
+            .selected_hits
+            .iter()
+            .filter(|hit| hit.prompt_included)
+            .count(),
+        record.timings.total_ms,
+        json!({ "top_k": record.top_k }),
+    );
+    stages
+}
+
+fn push_trace_stage(
+    stages: &mut Vec<KnowledgeQueryTraceStage>,
+    stage: &str,
+    candidate_count: usize,
+    latency_ms: u32,
+    metadata: Value,
+) {
+    if candidate_count == 0 && latency_ms == 0 && metadata == json!({}) {
+        return;
+    }
+    stages.push(KnowledgeQueryTraceStage {
+        stage: stage.to_string(),
+        candidate_count: candidate_count.min(u32::MAX as usize) as u32,
+        latency_ms: u64::from(latency_ms),
+        metadata,
+    });
+}
+
+fn lexical_candidate_count(record: &RetrievalLineage) -> usize {
+    record
+        .fusion_scores
+        .iter()
+        .filter(|score| score.lexical_contribution > 0.0)
+        .count()
+}
+
+fn trace_hit_citation(hit: &moa_lineage_core::RetrievalSelectedHit) -> Value {
+    let mut citation = hit.citation.clone();
+    if let Some(object) = citation.as_object_mut() {
+        object.insert("graph_node_uid".to_string(), json!(hit.graph_node_uid));
+        object.insert("legs".to_string(), json!(hit.legs));
+        if let Some(source_uri) = &hit.source_uri {
+            object.insert("source_uri".to_string(), json!(source_uri));
+        }
+        if let Some(source_title) = &hit.source_title {
+            object.insert("source_title".to_string(), json!(source_title));
+        }
+    }
+    citation
+}
+
+fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
     }
 }
 

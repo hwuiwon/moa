@@ -124,11 +124,12 @@ impl LinkedIntegrationProvider for MergeProvider {
             id: Option<String>,
             integration: Option<Value>,
         }
+        let mut url = parse_url(&self.url("/api/integrations/account-token"))?;
+        append_path_segment(&mut url, &req.public_token)?;
         let response = self
             .client
-            .post(self.url("/api/integrations/account-token"))
+            .get(url)
             .bearer_auth(&self.api_key)
-            .json(&json!({ "public_token": req.public_token }))
             .send()
             .await
             .map_err(|error| Error::provider("merge", format!("token exchange failed: {error}")))?;
@@ -166,9 +167,13 @@ impl LinkedIntegrationProvider for MergeProvider {
     }
 
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage> {
-        let mut url = parse_url(&self.url("/api/knowledge/records"))?;
+        let mut url = parse_url(&self.url("/api/knowledgebase/v1/articles"))?;
         if let Some(cursor) = &req.cursor {
             url.query_pairs_mut().append_pair("cursor", cursor);
+        }
+        if let Some(modified_after) = req.modified_after {
+            url.query_pairs_mut()
+                .append_pair("modified_after", &modified_after.to_rfc3339());
         }
         if let Some(limit) = req.limit {
             url.query_pairs_mut()
@@ -218,13 +223,14 @@ fn value_to_provider_record(value: &Value) -> ProviderRecord {
         object_type: string_field(&payload, &["model", "object_type", "type"])
             .unwrap_or_else(|| "record".to_string()),
         title: string_field(&payload, &["name", "title", "subject"]),
-        source_uri: string_field(&payload, &["url", "remote_url", "web_url"]),
+        source_uri: string_field(&payload, &["article_url", "url", "remote_url", "web_url"]),
         change_token: string_field(
             &payload,
             &["modified_at", "updated_at", "remote_updated_at"],
         ),
         deleted: payload
-            .get("is_deleted")
+            .get("remote_was_deleted")
+            .or_else(|| payload.get("is_deleted"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
         source_updated_at: string_field(&payload, &["modified_at", "updated_at"])
@@ -279,4 +285,11 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
 fn parse_url(value: &str) -> Result<reqwest::Url> {
     reqwest::Url::parse(value)
         .map_err(|error| Error::provider("merge", format!("invalid URL `{value}`: {error}")))
+}
+
+fn append_path_segment(url: &mut reqwest::Url, segment: &str) -> Result<()> {
+    url.path_segments_mut()
+        .map_err(|_| Error::provider("merge", "URL cannot accept path segments"))?
+        .push(segment);
+    Ok(())
 }

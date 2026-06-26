@@ -218,6 +218,8 @@ pub fn map_llamaparse_result(job_id: String, value: Value) -> ParsedDocument {
         text: normalize_text(&markdown),
         elements,
         metadata: json!({
+            "parser_status": value.get("status").or_else(|| value.pointer("/job_metadata/status")).cloned().unwrap_or(Value::Null),
+            "parser_errors": value.get("errors").or_else(|| value.pointer("/metadata/errors")).cloned().unwrap_or(Value::Null),
             "metadata": value.get("metadata").cloned().unwrap_or(Value::Null),
             "job_metadata": value.get("job_metadata").cloned().unwrap_or(Value::Null),
             "page_metadata": value.get("page_metadata").or_else(|| value.get("pages")).cloned().unwrap_or(Value::Null),

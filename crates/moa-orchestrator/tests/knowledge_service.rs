@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use moa_core::{
     TenantId,
     wire::knowledge::{
@@ -17,9 +18,9 @@ use moa_core::{
 use moa_knowledge::{
     Error as KnowledgeError,
     domain::{
-        ConnectionStatus, ContactGroup, ContactGroupMembership, CreateLinkTokenRequest,
-        DocumentVersion, ExchangePublicTokenRequest, KnowledgeBlock, KnowledgeChunk,
-        KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
+        ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
+        CreateLinkTokenRequest, DocumentVersion, ExchangePublicTokenRequest, KnowledgeBlock,
+        KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
         KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkToken,
         LinkedAccount, ListChangedRecordsRequest, ObjectStatus, RecordPage, TriggerSyncRequest,
@@ -29,10 +30,11 @@ use moa_knowledge::{
     repository::KnowledgeRepository,
 };
 use moa_orchestrator::services::knowledge::{
-    KnowledgeCredentialStore, KnowledgeService, StaticKnowledgeProviders,
+    KnowledgeCredentialStore, KnowledgeService, ParserWebhookVerifier, StaticKnowledgeProviders,
 };
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
+use sha2::Sha256;
 use tokio_util::bytes::Bytes;
 use uuid::Uuid;
 
@@ -110,6 +112,131 @@ async fn duplicate_provider_webhook_records_once_and_enqueues_once() {
     assert!(!second.ingestion_enqueued);
     assert!(second.sync_run_uid.is_none());
     assert_eq!(provider.verify_webhook_count(), 2);
+    assert_eq!(repository.provider_event_count(), 1);
+    assert_eq!(repository.sync_run_count(), 1);
+    assert_eq!(repository.step_count(), 1);
+}
+
+#[tokio::test]
+async fn parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
+    // Pins: parser webhook HMAC verification is fakeable and persists only safe event metadata.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let verifier = Arc::new(
+        ParserWebhookVerifier::new("llamaparse").with_signing_key("llamaparse-webhook-secret"),
+    );
+    let service = KnowledgeService::new(
+        repository.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("llamaparse", verifier)),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        80,
+    );
+    let payload = parser_webhook_payload(tenant_id, connection_uid, "lp-job-1");
+    let bad_request = parser_webhook_request(
+        "llamaparse",
+        payload.clone(),
+        vec![(
+            "x-llamaparse-webhook-signature".to_string(),
+            "sha256=bad-signature".to_string(),
+        )],
+    );
+    let good_request = parser_webhook_request(
+        "llamaparse",
+        payload,
+        vec![(
+            "x-llamaparse-webhook-signature".to_string(),
+            format!(
+                "sha256={}",
+                webhook_signature_hex("llamaparse-webhook-secret", &bad_request.payload)
+            ),
+        )],
+    );
+
+    let bad_error = service
+        .provider_webhook(bad_request)
+        .await
+        .expect_err("bad parser webhook signature should be rejected");
+    let response = service
+        .provider_webhook(good_request)
+        .await
+        .expect("valid parser webhook signature should be accepted");
+    let stored = repository
+        .provider_event(tenant_id, "llamaparse", "lp-job-1")
+        .expect("verified parser event should be stored");
+    let stored_json =
+        serde_json::to_string(&stored.payload).expect("stored payload should serialize");
+
+    assert!(bad_error.to_string().contains("signature"));
+    assert_eq!(response.provider, "llamaparse");
+    assert_eq!(response.event_id, "lp-job-1");
+    assert!(response.ingestion_enqueued);
+    assert_eq!(
+        stored.connection_uid,
+        Some(connection_uid),
+        "verified metadata should preserve connection_uid"
+    );
+    assert_eq!(
+        stored.payload.get("tenant_id").and_then(Value::as_str),
+        Some(tenant_id.to_string().as_str())
+    );
+    assert!(!stored_json.contains(SECRET_TOKEN));
+    assert!(!stored_json.contains(RAW_DOCUMENT_TAIL));
+    assert!(!stored_json.contains("raw_document_text"));
+    assert_eq!(repository.provider_event_count(), 1);
+}
+
+#[tokio::test]
+async fn parser_webhook_rejects_bad_custom_header_and_accepts_good_header() {
+    // Pins: parser webhook custom-header verification is fakeable without provider API calls.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let verifier = Arc::new(
+        ParserWebhookVerifier::new("reducto")
+            .with_custom_header("x-reducto-webhook-secret", "expected-header-secret"),
+    );
+    let service = KnowledgeService::new(
+        repository.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("reducto", verifier)),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        80,
+    );
+    let payload = parser_webhook_payload(tenant_id, connection_uid, "reducto-job-1");
+    let bad_request = parser_webhook_request(
+        "reducto",
+        payload.clone(),
+        vec![(
+            "x-reducto-webhook-secret".to_string(),
+            "wrong-header-secret".to_string(),
+        )],
+    );
+    let good_request = parser_webhook_request(
+        "reducto",
+        payload,
+        vec![(
+            "x-reducto-webhook-secret".to_string(),
+            "expected-header-secret".to_string(),
+        )],
+    );
+
+    let bad_error = service
+        .provider_webhook(bad_request)
+        .await
+        .expect_err("bad parser webhook custom header should be rejected");
+    let response = service
+        .provider_webhook(good_request)
+        .await
+        .expect("valid parser webhook custom header should be accepted");
+    let stored = repository
+        .provider_event(tenant_id, "reducto", "reducto-job-1")
+        .expect("verified parser event should be stored");
+
+    assert!(bad_error.to_string().contains("header"));
+    assert_eq!(response.provider, "reducto");
+    assert_eq!(response.event_id, "reducto-job-1");
+    assert_eq!(stored.connection_uid, Some(connection_uid));
+    assert!(response.ingestion_enqueued);
     assert_eq!(repository.provider_event_count(), 1);
     assert_eq!(repository.sync_run_count(), 1);
     assert_eq!(repository.step_count(), 1);
@@ -384,6 +511,53 @@ fn webhook_request(
     }
 }
 
+fn parser_webhook_payload(tenant_id: TenantId, connection_uid: Uuid, event_id: &str) -> Value {
+    json!({
+        "tenant_id": tenant_id.to_string(),
+        "connection_uid": connection_uid.to_string(),
+        "event_id": event_id,
+        "event_type": "sync.completed",
+        "metadata": {
+            "safe": "parser",
+            "access_token": SECRET_TOKEN,
+            "raw_document_text": format!("parser document body {RAW_DOCUMENT_TAIL}")
+        }
+    })
+}
+
+fn parser_webhook_request(
+    provider: &str,
+    payload: Value,
+    headers: Vec<(String, String)>,
+) -> KnowledgeProviderWebhookRequest {
+    let event_id = payload
+        .get("event_id")
+        .and_then(Value::as_str)
+        .expect("parser webhook fixture should include event_id")
+        .to_string();
+    let event_type = payload
+        .get("event_type")
+        .and_then(Value::as_str)
+        .expect("parser webhook fixture should include event_type")
+        .to_string();
+    KnowledgeProviderWebhookRequest {
+        provider: provider.to_string(),
+        event_id,
+        event_type,
+        payload,
+        headers,
+        body_base64: None,
+    }
+}
+
+fn webhook_signature_hex(signing_key: &str, payload: &Value) -> String {
+    let body = serde_json::to_vec(payload).expect("parser webhook fixture should serialize");
+    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key.as_bytes())
+        .expect("parser webhook signing key should be valid");
+    mac.update(&body);
+    hex::encode(mac.finalize().into_bytes())
+}
+
 fn handler_body<'a>(source: &'a str, method: &str) -> &'a str {
     let needle = format!("async fn {method}");
     let method_start = source
@@ -620,6 +794,24 @@ impl InMemoryKnowledgeRepository {
             .expect("repository state should not be poisoned")
             .provider_events
             .len()
+    }
+
+    fn provider_event(
+        &self,
+        tenant_id: TenantId,
+        provider: &str,
+        provider_event_id: &str,
+    ) -> Option<KnowledgeProviderEventRecord> {
+        self.state
+            .lock()
+            .expect("repository state should not be poisoned")
+            .provider_events
+            .get(&(
+                tenant_id,
+                provider.to_string(),
+                provider_event_id.to_string(),
+            ))
+            .cloned()
     }
 
     fn record_op(&self, op: &'static str) -> moa_knowledge::Result<()> {
@@ -963,6 +1155,15 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         _memberships: Vec<ContactGroupMembership>,
     ) -> moa_knowledge::Result<()> {
         self.record_op("replace_contact_group_memberships")
+    }
+
+    async fn contact_group_targets(
+        &self,
+        _tenant_id: TenantId,
+        _group_key: &str,
+    ) -> moa_knowledge::Result<Option<ContactGroupTarget>> {
+        self.record_op("contact_group_targets")?;
+        Ok(None)
     }
 
     async fn record_provider_event(

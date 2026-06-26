@@ -249,6 +249,8 @@ pub fn map_reducto_result(value: Value) -> ParsedDocument {
         elements,
         metadata: json!({
             "job_id": job_id,
+            "parser_status": value.get("status").or_else(|| value.pointer("/result/status")).cloned().unwrap_or(Value::Null),
+            "parser_errors": value.get("errors").or_else(|| value.pointer("/result/errors")).cloned().unwrap_or(Value::Null),
             "processing_duration": value.get("duration").or_else(|| value.get("processing_duration")).cloned().unwrap_or(Value::Null),
             "usage": value.get("usage").cloned().unwrap_or(Value::Null),
             "usage_pages": value.pointer("/usage/pages").or_else(|| value.get("usage_pages")).cloned().unwrap_or(Value::Null),
