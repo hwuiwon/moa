@@ -1486,11 +1486,7 @@ fn sync_run_status(value: String) -> Result<crate::domain::SyncRunStatus> {
         "failed_retryable" => Ok(crate::domain::SyncRunStatus::FailedRetryable),
         "failed_terminal" => Ok(crate::domain::SyncRunStatus::FailedTerminal),
         "canceled" => Ok(crate::domain::SyncRunStatus::Canceled),
-        "pending" => Ok(crate::domain::SyncRunStatus::Pending),
-        "running" => Ok(crate::domain::SyncRunStatus::Running),
         "completed" => Ok(crate::domain::SyncRunStatus::Completed),
-        "partial_failure" => Ok(crate::domain::SyncRunStatus::PartialFailure),
-        "failed" => Ok(crate::domain::SyncRunStatus::Failed),
         _ => Err(Error::Repository(format!(
             "unknown knowledge sync-run status `{value}`"
         ))),

@@ -59,7 +59,17 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_sync_runs (
     finished_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (status IN ('pending', 'running', 'completed', 'partial_failure', 'failed')),
+    CHECK (status IN (
+        'queued',
+        'provider_syncing',
+        'provider_synced',
+        'parse_pending',
+        'ingesting',
+        'completed',
+        'failed_retryable',
+        'failed_terminal',
+        'canceled'
+    )),
     CHECK (parser_job_count >= 0),
     CHECK (records_seen >= 0),
     CHECK (records_changed >= 0),

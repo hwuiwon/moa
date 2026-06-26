@@ -22,7 +22,7 @@ async fn configured_test_db() -> Option<TestDb> {
 #[tokio::test]
 #[ignore = "requires MOA_DATABASE_URL and a reachable Postgres instance"]
 async fn duplicate_merge_keeps_contact_collisions_separate_db_memory() {
-    // Pins: exact duplicate consolidation keys by tenant/contact, not legacy user_id.
+    // Pins: exact duplicate consolidation keys by tenant/contact ownership.
     let Some(test_db) = configured_test_db().await else {
         return;
     };
@@ -61,8 +61,6 @@ async fn duplicate_merge_keeps_contact_collisions_separate_db_memory() {
         base + Duration::seconds(2),
     )
     .await;
-
-    force_legacy_user_collision(test_db.store().pool(), &[a1, a2, b1]).await;
 
     let stats = merge_duplicates(
         test_db.store().pool(),
@@ -120,16 +118,6 @@ async fn create_contact_fact(
         .await
         .expect("seed contact fact");
     uid
-}
-
-async fn force_legacy_user_collision(pool: &PgPool, uids: &[Uuid]) {
-    let result =
-        sqlx::query("UPDATE moa.node_index SET user_id = 'legacy-contact' WHERE uid = ANY($1)")
-            .bind(uids)
-            .execute(pool)
-            .await
-            .expect("force legacy user_id collision");
-    assert_eq!(result.rows_affected(), uids.len() as u64);
 }
 
 async fn assert_active(pool: &PgPool, uid: Uuid, expected: bool) {

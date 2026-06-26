@@ -133,9 +133,7 @@ impl DsarExporter {
             "timestamp": exported_at,
         });
         let signed_root = blake3::hash(&canonical_json_bytes(&manifest_claims)?);
-        let signature = self
-            .signing
-            .sign_root(signed_root.as_bytes(), storage_partition_id)?;
+        let signature = self.signing.sign_message(signed_root.as_bytes());
         let manifest = serde_json::json!({
             "version": "1",
             "storage_partition_id": storage_partition_id,
@@ -179,10 +177,8 @@ impl DsarExporter {
             "windows": windows,
         });
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-        let signature = self.signing.sign_root(
-            &blake3::hash(&manifest_bytes).as_bytes()[..],
-            storage_partition_id,
-        )?;
+        let manifest_root = blake3::hash(&manifest_bytes);
+        let signature = self.signing.sign_message(manifest_root.as_bytes());
         let records_bytes = serde_json::to_vec_pretty(&records)?;
         let signature_bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "signing_key_label": self.signing.label(),

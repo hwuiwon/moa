@@ -122,9 +122,6 @@ pub enum KnowledgeScopeMode {
     /// Retrieve tenant knowledge and admitted contact memory.
     #[default]
     Enabled,
-    /// Legacy serialized value for the enabled graph-memory policy.
-    #[serde(rename = "tenant")]
-    Tenant,
     /// Disable graph memory retrieval for this agent.
     Disabled,
 }

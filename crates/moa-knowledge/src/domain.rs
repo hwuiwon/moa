@@ -204,14 +204,6 @@ pub enum SyncRunStatus {
     FailedTerminal,
     /// Run was canceled before completion.
     Canceled,
-    /// Legacy pending label retained for older local rows.
-    Pending,
-    /// Legacy running label retained for older local rows.
-    Running,
-    /// Legacy partial-failure label retained for older local rows.
-    PartialFailure,
-    /// Legacy failed label retained for older local rows.
-    Failed,
 }
 
 impl SyncRunStatus {
@@ -224,11 +216,7 @@ impl SyncRunStatus {
             Self::ProviderSynced => "provider_synced",
             Self::ParsePending => "parse_pending",
             Self::Ingesting => "ingesting",
-            Self::Pending => "pending",
-            Self::Running => "running",
             Self::Completed => "completed",
-            Self::PartialFailure => "partial_failure",
-            Self::Failed => "failed",
             Self::FailedRetryable => "failed_retryable",
             Self::FailedTerminal => "failed_terminal",
             Self::Canceled => "canceled",
