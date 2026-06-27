@@ -7,7 +7,7 @@ use moa_artifacts::document::{ArtifactDefinition, ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, ArtifactRunStatus};
 use moa_artifacts::simulation::ExperimentTargetKind;
 use moa_core::traits::{Identity, IdentityType};
-use moa_core::wire::turn::{QueueMessageRequest, SessionSnapshot};
+use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
     EventRange, EventRecord, EventType, MoaError, ModelId, SessionActorRef, SessionId, SessionMeta,
@@ -61,8 +61,7 @@ const K_TRIAL_KEY: &str = "trial_key";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
 const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
-const TARGET_WAIT_ATTEMPTS: u32 = 90;
-const TARGET_WAIT_INTERVAL: Duration = Duration::from_secs(1);
+const TARGET_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const SESSION_AUTHZ_PROPAGATION_DELAY: Duration = Duration::from_millis(750);
 
 /// Workflow input for one behavior-lab simulator trial.
@@ -78,6 +77,9 @@ pub struct ExperimentTrialRunWorkflowRequest {
     pub variant: Value,
     /// Identity snapshot used for normal downstream authz checks.
     pub identity: Identity,
+    /// Parent workflow awakeable resolved when this trial workflow completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_awakeable_id: Option<String>,
 }
 
 /// Request payload for reading one trial workflow status.
@@ -159,7 +161,10 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
         annotate_trial_span(&request.trial, None);
 
         match run_trial(&ctx, request.clone()).await {
-            Ok(response) => Ok(Json(response)),
+            Ok(response) => {
+                resolve_completion_awakeable(&ctx, &request);
+                Ok(Json(response))
+            }
             Err(error) => {
                 let message = handler_error_message(&error);
                 ctx.set(K_STATUS, Json(ExperimentTrialStatus::Failed));
@@ -181,6 +186,7 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
                         "failed to persist experiment trial workflow failure"
                     );
                 }
+                resolve_completion_awakeable(&ctx, &request);
                 Err(error)
             }
         }
@@ -200,6 +206,15 @@ impl ExperimentTrialRun for ExperimentTrialRunImpl {
             .run(|| async move { trial_status_response(pool, request).await.map(Json::from) })
             .name("experiment_trial_status")
             .await?)
+    }
+}
+
+fn resolve_completion_awakeable(
+    ctx: &WorkflowContext<'_>,
+    request: &ExperimentTrialRunWorkflowRequest,
+) {
+    if let Some(awakeable_id) = request.completion_awakeable_id.as_deref() {
+        ctx.resolve_awakeable(awakeable_id, request.trial.trial_key.clone());
     }
 }
 

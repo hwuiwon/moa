@@ -34,6 +34,7 @@ members = [
     "crates/moa-knowledge",
     "crates/moa-providers",
     "crates/moa-orchestrator",
+    "crates/moa-runtime-store",
     "crates/moa-messaging",
     "crates/moa-security",
     "crates/moa-skills",
@@ -79,6 +80,7 @@ default-members = [
     "crates/moa-knowledge",
     "crates/moa-providers",
     "crates/moa-orchestrator",
+    "crates/moa-runtime-store",
     "crates/moa-messaging",
     "crates/moa-security",
     "crates/moa-skills",
@@ -130,6 +132,7 @@ moa-ocsf = { path = "crates/moa-ocsf" }
 moa-observability = { path = "crates/moa-observability" }
 moa-orchestrator = { path = "crates/moa-orchestrator" }
 moa-providers = { path = "crates/moa-providers" }
+moa-runtime-store = { path = "crates/moa-runtime-store" }
 moa-security = { path = "crates/moa-security" }
 moa-session = { path = "crates/moa-session" }
 moa-skills = { path = "crates/moa-skills" }
@@ -185,6 +188,10 @@ reqwest = { version = "0.13", default-features = false, features = [
     "multipart",
     "rustls",
     "stream",
+] }
+redis = { version = "0.32", default-features = false, features = [
+    "script",
+    "tokio-comp",
 ] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

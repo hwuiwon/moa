@@ -148,6 +148,7 @@ async fn experiment_trial_run_drives_multiturn_scripted_agent_loop() -> Result<(
             target: agent_loop_target(),
             variant: baseline_variant(),
             identity: identity.clone(),
+            completion_awakeable_id: None,
         };
 
         let first = run_trial_workflow(

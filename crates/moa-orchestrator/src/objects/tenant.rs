@@ -5,17 +5,11 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use moa_authz::require_authz_with_delegation;
-use moa_authz_schema::{ObjectType, Relation};
-use moa_core::{
-    ActionPolicyEffect, ActionPolicyRule, ActionRuleScope, MoaError, StoragePartitionId, TenantId,
-    UserId,
-};
+use moa_core::{StoragePartitionId, TenantId};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
-use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use crate::vo::{VoReader, VoState, set_or_clear_opt, set_or_clear_scalar};
 use crate::workflows::consolidate::{
     ConsolidateClient, ConsolidateReport, ConsolidateRequest, consolidate_workflow_id,
@@ -23,18 +17,9 @@ use crate::workflows::consolidate::{
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 const K_CONFIG: &str = "config";
-const K_ACTION_POLICY: &str = "action_policy";
 const K_LAST_CONSOLIDATION: &str = "last_consolidation";
 const K_NEXT_CONSOLIDATION: &str = "next_consolidation";
 const K_CONSOLIDATION_IN_PROGRESS: &str = "consolidation_in_progress";
-
-/// Tenant-scoped action policy snapshot mirrored into Restate object state.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TenantActionPolicy {
-    /// Persisted action-policy rules visible to the tenant.
-    #[serde(default)]
-    pub rules: Vec<ActionPolicyRule>,
-}
 
 /// Input payload used to initialize a tenant object.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -45,9 +30,6 @@ pub struct TenantConfig {
     pub name: String,
     /// Hour of day in UTC at which the next consolidation should be scheduled.
     pub consolidation_hour_utc: u8,
-    /// Action-policy rules mirrored into Restate state for status and bootstrap flows.
-    #[serde(default)]
-    pub action_policy: TenantActionPolicy,
 }
 
 /// Read-only tenant orchestration status projection.
@@ -63,26 +45,11 @@ pub struct TenantStatus {
     pub pages_count: u64,
 }
 
-/// Request payload for storing a tenant action-policy rule.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TenantActionPolicyRuleInput {
-    /// Tool name the rule applies to.
-    pub tool_name: String,
-    /// Persisted normalized pattern.
-    pub pattern: String,
-    /// Effect applied when the rule matches.
-    pub effect: ActionPolicyEffect,
-    /// Optional reason stored with the rule.
-    pub reason: Option<String>,
-}
-
 /// Serializable projection of the Tenant VO's durable keys.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TenantVoState {
     /// Tenant configuration payload.
     pub config: Option<TenantConfig>,
-    /// Action policy snapshot.
-    pub action_policy: TenantActionPolicy,
     /// Most recent completion timestamp.
     pub last_consolidation: Option<DateTime<Utc>>,
     /// Next scheduled consolidation timestamp.
@@ -116,7 +83,6 @@ impl VoState for TenantVoState {
     async fn load_from<R: VoReader>(reader: &R) -> Result<Self, HandlerError> {
         Ok(Self {
             config: reader.get_json(K_CONFIG).await?,
-            action_policy: reader.get_json(K_ACTION_POLICY).await?.unwrap_or_default(),
             last_consolidation: reader.get_json(K_LAST_CONSOLIDATION).await?,
             next_consolidation: reader.get_json(K_NEXT_CONSOLIDATION).await?,
             consolidation_in_progress: reader
@@ -128,11 +94,6 @@ impl VoState for TenantVoState {
 
     fn persist_into(&self, ctx: &ObjectContext<'_>) {
         set_or_clear_opt(ctx, K_CONFIG, self.config.as_ref());
-        set_or_clear_opt(
-            ctx,
-            K_ACTION_POLICY,
-            (!self.action_policy.rules.is_empty()).then_some(&self.action_policy),
-        );
         set_or_clear_opt(ctx, K_LAST_CONSOLIDATION, self.last_consolidation.as_ref());
         set_or_clear_opt(ctx, K_NEXT_CONSOLIDATION, self.next_consolidation.as_ref());
         set_or_clear_scalar(
@@ -175,15 +136,6 @@ pub trait TenantObject {
     /// Initializes the tenant object with its persisted config and schedules the first run.
     async fn init(config: Json<TenantConfig>) -> Result<(), HandlerError>;
 
-    /// Returns the current tenant action-policy rules mirrored into Restate state.
-    #[shared]
-    async fn get_action_policy() -> Result<Json<TenantActionPolicy>, HandlerError>;
-
-    /// Persists one action-policy rule and updates the VO snapshot.
-    async fn add_action_policy_rule(
-        pattern: Json<TenantActionPolicyRuleInput>,
-    ) -> Result<(), HandlerError>;
-
     /// Schedules the next daily consolidation workflow.
     async fn schedule_consolidation() -> Result<(), HandlerError>;
 
@@ -214,69 +166,13 @@ impl TenantObject for TenantImpl {
         let config = config.into_inner();
         validate_tenant_key(ctx.key(), config.id)?;
         validate_consolidation_hour(config.consolidation_hour_utc)?;
-        moa_security::validate_action_policy_rules(&config.action_policy.rules)
-            .map_err(to_handler_error)?;
 
         let mut state = TenantVoState::load_from(&ctx).await?;
         state.config = Some(config.clone());
-        state.action_policy = config.action_policy.clone();
         state.persist_into(&ctx);
 
-        persist_policy_rules(&state.action_policy.rules).await?;
         schedule_consolidation_inner(&ctx, &mut state).await?;
         state.persist_into(&ctx);
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self, ctx))]
-    async fn get_action_policy(
-        &self,
-        ctx: SharedObjectContext<'_>,
-    ) -> Result<Json<TenantActionPolicy>, HandlerError> {
-        annotate_restate_handler_span("Tenant", "get_action_policy");
-        Ok(Json::from(
-            TenantVoState::load_from(&ctx).await?.action_policy,
-        ))
-    }
-
-    #[tracing::instrument(skip(self, ctx, pattern))]
-    async fn add_action_policy_rule(
-        &self,
-        ctx: ObjectContext<'_>,
-        pattern: Json<TenantActionPolicyRuleInput>,
-    ) -> Result<(), HandlerError> {
-        annotate_restate_handler_span("Tenant", "add_action_policy_rule");
-        let pattern = pattern.into_inner();
-        let tenant_id = tenant_id_from_key(ctx.key())?;
-        let identity = require_tenant_admin(&ctx, tenant_id).await?;
-        let created_at = durable_utc_now(&ctx).await?;
-        let mut state = TenantVoState::load_from(&ctx).await?;
-        let _ = state.ensure_initialized()?;
-
-        let rule = ActionPolicyRule {
-            id: Uuid::now_v7(),
-            tool: pattern.tool_name.clone(),
-            pattern: pattern.pattern.clone(),
-            effect: pattern.effect,
-            scope: ActionRuleScope::Tenant { tenant_id },
-            reason: pattern.reason,
-            created_by: UserId::new(identity.id.to_string()),
-            created_at,
-        };
-        moa_security::validate_action_policy_rule(&rule).map_err(to_handler_error)?;
-
-        if let Some(existing) = state
-            .action_policy
-            .rules
-            .iter_mut()
-            .find(|existing| existing.tool == rule.tool && existing.pattern == rule.pattern)
-        {
-            *existing = rule.clone();
-        } else {
-            state.action_policy.rules.push(rule.clone());
-        }
-        state.persist_into(&ctx);
-        persist_policy_rules(&[rule]).await?;
         Ok(())
     }
 
@@ -349,24 +245,6 @@ impl TenantObject for TenantImpl {
     }
 }
 
-async fn require_tenant_admin(
-    ctx: &ObjectContext<'_>,
-    tenant_id: TenantId,
-) -> Result<moa_core::traits::Identity, HandlerError> {
-    let identity = require_identity(ctx)?;
-    let fga = require_fga_client()?;
-    require_authz_with_delegation(
-        &fga,
-        &identity,
-        ObjectType::Tenant,
-        tenant_id,
-        Relation::Admin,
-    )
-    .await
-    .map_err(translate_authz_error)?;
-    Ok(identity)
-}
-
 async fn count_graph_nodes(tenant_id: TenantId) -> Result<u64, HandlerError> {
     let ctx = OrchestratorCtx::current();
     let pool = ctx.graph_pool();
@@ -423,23 +301,6 @@ async fn durable_utc_now(ctx: &ObjectContext<'_>) -> Result<DateTime<Utc>, Handl
         .into_inner())
 }
 
-async fn persist_policy_rules(rules: &[ActionPolicyRule]) -> Result<(), HandlerError> {
-    if rules.is_empty() {
-        return Ok(());
-    }
-
-    let store = OrchestratorCtx::current().action_policy_store();
-    let result: Result<(), MoaError> = async {
-        for rule in rules.iter().cloned() {
-            store.upsert_action_policy_rule(rule).await?;
-        }
-        Ok(())
-    }
-    .await;
-
-    result.map_err(to_handler_error)
-}
-
 fn duration_from_chrono(duration: chrono::Duration) -> Duration {
     duration
         .to_std()
@@ -476,14 +337,6 @@ fn validate_consolidation_hour(hour: u8) -> Result<(), HandlerError> {
         "consolidation hour must be within 0..=23, got {hour}"
     ))
     .into())
-}
-
-fn to_handler_error(error: MoaError) -> HandlerError {
-    if error.is_fatal() {
-        return TerminalError::new(error.to_string()).into();
-    }
-
-    HandlerError::from(error)
 }
 
 #[cfg(test)]
@@ -531,12 +384,38 @@ mod tests {
                 id: TenantId::from(Uuid::from_u128(1)),
                 name: "tenant".to_string(),
                 consolidation_hour_utc: 3,
-                action_policy: TenantActionPolicy::default(),
             }),
             consolidation_in_progress: true,
             ..TenantVoState::default()
         };
 
         assert!(state.record_consolidation_completed(fixed_time()));
+    }
+
+    #[test]
+    fn tenant_state_projection_contains_only_consolidation_state() {
+        // Pins: tenant virtual-object state must not grow a policy-rule mirror again.
+        let state = TenantVoState {
+            config: Some(TenantConfig {
+                id: TenantId::from(Uuid::from_u128(1)),
+                name: "tenant".to_string(),
+                consolidation_hour_utc: 3,
+            }),
+            last_consolidation: Some(fixed_time()),
+            next_consolidation: Some(fixed_time() + chrono::Duration::days(1)),
+            consolidation_in_progress: true,
+        };
+
+        let value = serde_json::to_value(&state).expect("serialize tenant state");
+        let object = value
+            .as_object()
+            .expect("tenant state serializes as object");
+
+        assert_eq!(object.len(), 4);
+        assert!(object.contains_key("config"));
+        assert!(object.contains_key("last_consolidation"));
+        assert!(object.contains_key("next_consolidation"));
+        assert!(object.contains_key("consolidation_in_progress"));
+        assert!(!object.contains_key("action_policy"));
     }
 }

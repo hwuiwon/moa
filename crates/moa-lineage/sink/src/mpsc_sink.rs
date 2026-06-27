@@ -9,7 +9,7 @@ use moa_core::{LineageHandle, NullLineageHandle};
 use moa_lineage_core::{LineageEvent, LineageSink};
 use tokio::sync::mpsc;
 
-use crate::writer::{WriterHandle, spawn_writer};
+use crate::writer::{DurableJournal, WriterCommand, WriterHandle, spawn_writer_for_sink};
 use crate::{Result, WriterStats};
 
 /// Configuration for the production mpsc lineage sink.
@@ -23,6 +23,8 @@ pub struct MpscSinkConfig {
     pub batch_max_age: Duration,
     /// fjall journal directory.
     pub journal_path: PathBuf,
+    /// Allows non-audit telemetry events to drop under channel pressure.
+    pub lossy_telemetry: bool,
 }
 
 impl Default for MpscSinkConfig {
@@ -32,6 +34,7 @@ impl Default for MpscSinkConfig {
             batch_size: 512,
             batch_max_age: Duration::from_secs(2),
             journal_path: "/var/lib/moa/lineage-journal".into(),
+            lossy_telemetry: false,
         }
     }
 }
@@ -43,6 +46,7 @@ impl From<&moa_core::LineageConfig> for MpscSinkConfig {
             batch_size: config.batch_size,
             batch_max_age: Duration::from_secs(config.batch_max_age_secs),
             journal_path: expand_home(&config.journal_path),
+            lossy_telemetry: false,
         }
     }
 }
@@ -97,6 +101,13 @@ impl MpscSinkBuilder {
         self
     }
 
+    /// Enables lossy channel behavior for non-audit telemetry events.
+    #[must_use]
+    pub fn lossy_telemetry(mut self, lossy_telemetry: bool) -> Self {
+        self.config.lossy_telemetry = lossy_telemetry;
+        self
+    }
+
     /// Spawns a sink and writer against the provided SQL pool.
     pub async fn spawn(self, pool: sqlx::PgPool) -> Result<(MpscSink, WriterHandle)> {
         MpscSink::spawn(self.config, pool).await
@@ -106,32 +117,138 @@ impl MpscSinkBuilder {
 /// Production hot-path lineage sink.
 #[derive(Clone)]
 pub struct MpscSink {
-    tx: mpsc::Sender<LineageEvent>,
+    tx: mpsc::Sender<WriterCommand>,
+    journal: DurableJournal,
     dropped: Arc<AtomicU64>,
+    lossy_telemetry: bool,
 }
 
 impl MpscSink {
     /// Spawns the writer task and returns the hot-path sink plus worker handle.
     pub async fn spawn(config: MpscSinkConfig, pool: sqlx::PgPool) -> Result<(Self, WriterHandle)> {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
+        let journal = DurableJournal::open(&config.journal_path)?;
         let dropped = Arc::new(AtomicU64::new(0));
-        let writer_handle = spawn_writer(rx, config, pool).await?;
-        Ok((Self { tx, dropped }, writer_handle))
+        let writer_handle =
+            spawn_writer_for_sink(rx, config.clone(), pool, journal.clone()).await?;
+        Ok((
+            Self {
+                tx,
+                journal,
+                dropped,
+                lossy_telemetry: config.lossy_telemetry,
+            },
+            writer_handle,
+        ))
+    }
+
+    fn record_durable(&self, evt: LineageEvent) {
+        let event_class = lineage_event_class(&evt);
+        let seq = match self.journal.append_accepted_event(evt) {
+            Ok(seq) => seq,
+            Err(error) => {
+                metrics::counter!(
+                    "moa_lineage_failed_total",
+                    "mode" => "durable",
+                    "event_class" => event_class,
+                    "reason" => "journal_append"
+                )
+                .increment(1);
+                tracing::error!(%error, event_class, "lineage event failed before durable journal append");
+                return;
+            }
+        };
+
+        match self.tx.try_send(WriterCommand::Journaled(seq)) {
+            Ok(()) => {
+                metrics::counter!(
+                    "moa_lineage_enqueued_total",
+                    "mode" => "durable",
+                    "event_class" => event_class
+                )
+                .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!(
+                    "moa_lineage_backpressure_total",
+                    "mode" => "durable",
+                    "event_class" => event_class
+                )
+                .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!(
+                    "moa_lineage_failed_total",
+                    "mode" => "durable",
+                    "event_class" => event_class,
+                    "reason" => "channel_closed"
+                )
+                .increment(1);
+                tracing::error!(
+                    seq,
+                    event_class,
+                    "lineage event journaled but writer channel is closed"
+                );
+            }
+        }
+    }
+
+    fn record_lossy_telemetry(&self, evt: LineageEvent) {
+        match self.tx.try_send(WriterCommand::Event(Box::new(evt))) {
+            Ok(()) => {
+                metrics::counter!(
+                    "moa_lineage_enqueued_total",
+                    "mode" => "lossy_telemetry",
+                    "event_class" => "telemetry"
+                )
+                .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                metrics::counter!(
+                    "moa_lineage_dropped_total",
+                    "mode" => "lossy_telemetry",
+                    "event_class" => "telemetry"
+                )
+                .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!(
+                    "moa_lineage_failed_total",
+                    "mode" => "lossy_telemetry",
+                    "event_class" => "telemetry",
+                    "reason" => "channel_closed"
+                )
+                .increment(1);
+                tracing::error!("lossy telemetry lineage writer channel is closed");
+            }
+        }
     }
 }
 
 impl LineageSink for MpscSink {
     fn record(&self, evt: LineageEvent) {
-        if self.tx.try_send(evt).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-            metrics::counter!("moa_lineage_dropped_total").increment(1);
+        if self.lossy_telemetry && is_telemetry_event(&evt) {
+            self.record_lossy_telemetry(evt);
         } else {
-            metrics::counter!("moa_lineage_recorded_total").increment(1);
+            self.record_durable(evt);
         }
     }
 
     fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+fn is_telemetry_event(evt: &LineageEvent) -> bool {
+    !matches!(evt, LineageEvent::Decision(_))
+}
+
+fn lineage_event_class(evt: &LineageEvent) -> &'static str {
+    if is_telemetry_event(evt) {
+        "telemetry"
+    } else {
+        "audit"
     }
 }
 
@@ -245,7 +362,8 @@ mod tests {
     use chrono::Utc;
     use moa_core::{SessionId, StoragePartitionId, TenantId, UserId};
     use moa_lineage_core::{
-        BackendIntrospection, LineageEvent, RetrievalLineage, RetrievalStage, StageTimings, TurnId,
+        BackendIntrospection, DecisionKind, DecisionRecord, LineageEvent, PiiRedactionDecision,
+        RetrievalLineage, RetrievalStage, StageTimings, TurnId,
     };
     use moa_memory_types::MemoryScope;
     use uuid::Uuid;
@@ -253,11 +371,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mpsc_sink_drops_when_channel_is_full() {
+    fn lossy_telemetry_drops_when_channel_is_full() {
+        // Pins: only explicit lossy telemetry mode uses the lineage dropped counter.
         let (tx, _rx) = mpsc::channel(1);
+        let journal = test_journal();
         let sink = MpscSink {
             tx,
+            journal,
             dropped: Arc::new(AtomicU64::new(0)),
+            lossy_telemetry: true,
         };
 
         LineageSink::record(&sink, sample_event());
@@ -267,12 +389,68 @@ mod tests {
     }
 
     #[test]
+    fn audit_event_full_channel_is_journaled_not_dropped() {
+        // Pins: audit-grade lineage reaches fjall before it is accepted, even
+        // when the notification channel is already full.
+        let (tx, _rx) = mpsc::channel(1);
+        let journal = test_journal();
+        let sink = MpscSink {
+            tx,
+            journal: journal.clone(),
+            dropped: Arc::new(AtomicU64::new(0)),
+            lossy_telemetry: true,
+        };
+
+        LineageSink::record(&sink, sample_event());
+        LineageSink::record(&sink, sample_decision_event());
+        LineageSink::record(&sink, sample_event());
+
+        assert_eq!(LineageSink::dropped_count(&sink), 1);
+        assert_eq!(
+            journal
+                .approximate_len()
+                .expect("journal depth should be readable"),
+            1
+        );
+    }
+
+    #[test]
+    fn default_sink_journals_telemetry_instead_of_dropping() {
+        // Pins: lossy telemetry has to be explicit; the default sink journals
+        // telemetry events under channel pressure.
+        let (tx, _rx) = mpsc::channel(1);
+        let journal = test_journal();
+        let sink = MpscSink {
+            tx,
+            journal: journal.clone(),
+            dropped: Arc::new(AtomicU64::new(0)),
+            lossy_telemetry: false,
+        };
+
+        LineageSink::record(&sink, sample_event());
+        LineageSink::record(&sink, sample_event());
+
+        assert_eq!(LineageSink::dropped_count(&sink), 0);
+        assert_eq!(
+            journal
+                .approximate_len()
+                .expect("journal depth should be readable"),
+            2
+        );
+    }
+
+    #[test]
     fn null_sink_never_records_drops() {
         let sink = NullSink::new();
 
         LineageSink::record(&sink, sample_event());
 
         assert_eq!(LineageSink::dropped_count(&sink), 0);
+    }
+
+    fn test_journal() -> DurableJournal {
+        let path = std::env::temp_dir().join(format!("moa-lineage-sink-{}", Uuid::now_v7()));
+        DurableJournal::open(&path).expect("test journal should open")
     }
 
     fn sample_event() -> LineageEvent {
@@ -298,6 +476,26 @@ mod tests {
             timings: StageTimings::default(),
             introspection: BackendIntrospection::default(),
             stage: RetrievalStage::Single,
+        })
+    }
+
+    fn sample_decision_event() -> LineageEvent {
+        let tenant_id = TenantId::from(Uuid::from_u128(1));
+        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
+        LineageEvent::Decision(DecisionRecord {
+            turn_id: TurnId::new_v7(),
+            session_id: SessionId::new(),
+            storage_partition_id,
+            user_id: UserId::new("test-user"),
+            ts: Utc::now(),
+            kind: DecisionKind::PiiRedaction(PiiRedactionDecision {
+                subject_pseudonym: Some("subject-1".to_string()),
+                fields: vec!["email".to_string()],
+                detector: "test-detector".to_string(),
+                redacted: true,
+            }),
+            policy_version: "test-policy-v1".to_string(),
+            integrity_hash: vec![7; 32],
         })
     }
 }

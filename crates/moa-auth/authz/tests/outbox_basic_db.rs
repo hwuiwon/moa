@@ -146,6 +146,7 @@ async fn outbox_basic_failed_row_moves_to_dead_letter_at_max_attempts() {
             max_attempts: 1,
             backoff_base: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(1),
+            lease_duration: PollerConfig::default().lease_duration,
         },
     );
 

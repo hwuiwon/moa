@@ -2,15 +2,20 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
+use moa_authz::require_authz_with_delegation;
+use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
-    ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, AgentPolicySnapshot,
-    MoaError, SessionMeta, SubAgentId, ToolCallId, ToolInvocation,
+    ActionEnvelope, ActionPolicyEffect, ActionPolicyRule, ActionReviewPreview, ActionRuleScope,
+    AgentPolicySnapshot, MoaError, SessionMeta, SubAgentId, TenantId, ToolCallId, ToolInvocation,
+    UserId,
 };
 use moa_hands::{ActionOrigin, ToolRouter};
-use moa_security::stricter_effect;
+use moa_security::{ActionPolicyRuleStore, stricter_effect};
 use restate_sdk::prelude::*;
 use uuid::Uuid;
 
+use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
 use moa_observability::restate_observability::annotate_restate_handler_span;
 
 /// Request payload for `ActionPolicy/prepare_action_review`.
@@ -41,6 +46,21 @@ pub struct PrepareActionReviewRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Request payload for `ActionPolicy/upsert_rule`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UpsertActionPolicyRuleRequest {
+    /// Tenant that owns the rule.
+    pub tenant_id: TenantId,
+    /// Tool name the rule applies to.
+    pub tool_name: String,
+    /// Persisted normalized pattern.
+    pub pattern: String,
+    /// Effect applied when the rule matches.
+    pub effect: ActionPolicyEffect,
+    /// Optional reason stored with the rule.
+    pub reason: Option<String>,
+}
+
 /// Prepared policy decision and review payload for one tool call.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PreparedActionReview {
@@ -67,19 +87,23 @@ pub trait ActionPolicy {
     async fn prepare_action_review(
         request: Json<PrepareActionReviewRequest>,
     ) -> Result<Json<PreparedActionReview>, HandlerError>;
+
+    /// Creates or updates a tenant action-policy rule in the authoritative store.
+    async fn upsert_rule(request: Json<UpsertActionPolicyRuleRequest>) -> Result<(), HandlerError>;
 }
 
 /// Concrete Restate service implementation backed by the shared tool router.
 #[derive(Clone)]
 pub struct ActionPolicyImpl {
     router: Arc<ToolRouter>,
+    rule_store: Arc<dyn ActionPolicyRuleStore>,
 }
 
 impl ActionPolicyImpl {
     /// Creates a new action-policy facade backed by the shared router.
     #[must_use]
-    pub fn new(router: Arc<ToolRouter>) -> Self {
-        Self { router }
+    pub fn new(router: Arc<ToolRouter>, rule_store: Arc<dyn ActionPolicyRuleStore>) -> Self {
+        Self { router, rule_store }
     }
 }
 
@@ -140,6 +164,58 @@ impl ActionPolicy for ActionPolicyImpl {
             .name("prepare_action_review")
             .await?)
     }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn upsert_rule(
+        &self,
+        ctx: Context<'_>,
+        request: Json<UpsertActionPolicyRuleRequest>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("ActionPolicy", "upsert_rule");
+        let identity = require_identity(&ctx)?;
+        let request = request.into_inner();
+        require_tenant_admin(&identity, request.tenant_id).await?;
+        let created_by = UserId::new(identity.id.to_string());
+        let rule_store = self.rule_store.clone();
+
+        Ok(ctx
+            .run(|| async move {
+                let rule = ActionPolicyRule {
+                    id: Uuid::now_v7(),
+                    tool: request.tool_name,
+                    pattern: request.pattern,
+                    effect: request.effect,
+                    scope: ActionRuleScope::Tenant {
+                        tenant_id: request.tenant_id,
+                    },
+                    reason: request.reason,
+                    created_by,
+                    created_at: Utc::now(),
+                };
+                rule_store
+                    .upsert_action_policy_rule(rule)
+                    .await
+                    .map_err(to_handler_error)
+            })
+            .name("action_policy_upsert_rule")
+            .await?)
+    }
+}
+
+async fn require_tenant_admin(
+    identity: &moa_core::traits::Identity,
+    tenant_id: TenantId,
+) -> Result<(), HandlerError> {
+    let fga = require_fga_client()?;
+    require_authz_with_delegation(
+        &fga,
+        identity,
+        ObjectType::Tenant,
+        tenant_id,
+        Relation::Admin,
+    )
+    .await
+    .map_err(translate_authz_error)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,13 +332,10 @@ mod tests {
     #[test]
     fn agent_action_review_policy_upgrades_matching_action_to_review() {
         // Pins: agent action policy can require review for matching artifact-backed actions.
-        let session = session_with_snapshot(AgentPolicySnapshot {
-            action_policy: AgentActionPolicy {
-                allowed: Vec::new(),
-                require_admin_review: vec!["action://refund".to_string()],
-            },
-            ..AgentPolicySnapshot::default()
-        });
+        let session = session_with_snapshot(snapshot_with_action_rules(
+            Vec::new(),
+            vec!["action://refund".to_string()],
+        ));
 
         let decision = agent_action_policy_effect(
             &session,
@@ -296,13 +369,10 @@ mod tests {
     #[test]
     fn agent_action_allowlist_only_gates_action_origins() {
         // Pins: action allowlists apply to artifact-backed action origins, not raw tools.
-        let session = session_with_snapshot(AgentPolicySnapshot {
-            action_policy: AgentActionPolicy {
-                allowed: vec!["action://refund".to_string()],
-                require_admin_review: Vec::new(),
-            },
-            ..AgentPolicySnapshot::default()
-        });
+        let session = session_with_snapshot(snapshot_with_action_rules(
+            vec!["action://refund".to_string()],
+            Vec::new(),
+        ));
 
         let raw_tool =
             agent_action_policy_effect(&session, &invocation("bash"), None, None).expect("raw");
@@ -327,6 +397,19 @@ mod tests {
             id: None,
             name: name.to_string(),
             input: json!({}),
+        }
+    }
+
+    fn snapshot_with_action_rules(
+        allowed: Vec<String>,
+        require_admin_review: Vec<String>,
+    ) -> AgentPolicySnapshot {
+        AgentPolicySnapshot {
+            action_policy: AgentActionPolicy {
+                allowed,
+                require_admin_review,
+            },
+            ..AgentPolicySnapshot::default()
         }
     }
 

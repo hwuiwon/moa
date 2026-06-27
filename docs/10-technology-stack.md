@@ -13,6 +13,7 @@ The root workspace currently contains:
 | `moa-brain` | Context pipeline, query rewriting, task segmentation helpers, segment assessment |
 | `moa-workflows` | Artifact-backed workflow run lifecycle and future workflow node interpreter/improvement logic |
 | `moa-session` | Tenant-owned Postgres session store, event log, task segments, learning log, analytics |
+| `moa-runtime-store` | Runtime cache implementations for process-local memory and optional Redis-backed coordination |
 | `moa-migrations` | Central refinery migrations, schema-isolated test replay helpers, and database DDL guardrails |
 | `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, normalization, block/chunk derivation, sync-run inspection, and graph ingestion assembly |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
@@ -55,6 +56,7 @@ The root workspace currently contains:
 | Database | `sqlx` with Postgres for runtime queries; `refinery` for all Postgres schema migrations |
 | Orchestration | `restate-sdk` |
 | Scheduling | Restate `CronJob` virtual object |
+| Runtime cache | in-process memory by default; optional Redis client behind the `redis` feature |
 | Security | `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
@@ -93,6 +95,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Messaging platforms | Slack adapter |
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
 | Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
+| Redis | Optional shared runtime cache for pacing and transient adapter references across replicas |
 
 ## Build Targets
 
@@ -118,6 +121,7 @@ and deployment setup. Key groups:
 |---|---|
 | `MOA_MODELS_*` and `MOA_PROVIDERS_*` | model routing and provider API key env names |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
+| `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
 | `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, chunking limits, query trace enablement, and ingestion-step observability |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
@@ -126,6 +130,7 @@ and deployment setup. Key groups:
 | `MOA_CLOUD_*` | cloud mode and hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
+| `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
 | `MOA_PRIVACY_*`, `MOA_LINEAGE_AUDIT_*`, and `MOA_PII_VAULT_SECRET_HEX` | privacy approval verification, DSAR/export signing, lineage audit signing, and PII-vault pseudonymization |
 | `MOA_MESSAGING_*` | messaging adapter settings |
 | `MOA_PERMISSIONS_*` | default action-policy posture for tool execution |
@@ -138,6 +143,8 @@ Implemented architectural pillars:
 - Restate cloud orchestration with session, sub-agent, tenant, service, and workflow handlers.
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
+- Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness.
+- Optional Redis-backed runtime cache with in-memory fallback for local and non-authoritative transient behavior.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and tenant-level skill resolution-rate ranking.
 - Draft-only tenant skill distillation/improvement proposals with explicit review acceptance before learning-log emission; tenant learning remains tenant-local.
@@ -162,6 +169,13 @@ MOA_RESTATE_INGRESS_URL=http://...
 OPENAI_API_KEY=... # or another configured provider key
 ```
 
+Configure Redis when runtime cache state should coordinate across replicas:
+
+```bash
+MOA_RUNTIME_CACHE_BACKEND=redis
+MOA_RUNTIME_CACHE_REDIS_URL=redis://...
+```
+
 Optional hand and messaging settings depend on the chosen deployment:
 
 ```bash
@@ -177,3 +191,12 @@ TWILIO_FROM_NUMBER=...
 ```
 
 The orchestrator exposes the Restate handler endpoint and a health/readiness endpoint. Readiness checks Postgres and can optionally require registered Restate services.
+
+Provider registration is deployment-static. `ProviderRegistry` is built at
+startup from `MoaConfig` and provider API-key env names; changing provider
+availability requires a rollout unless a future shared provider store is added.
+
+Kubernetes routing is non-sticky. Correctness-sensitive state must be stored in
+Postgres, Restate, or Redis-backed `RuntimeCacheStore`. The memory runtime cache
+backend is per process and suitable only for local development or best-effort
+transient behavior.

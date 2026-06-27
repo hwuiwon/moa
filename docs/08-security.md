@@ -65,6 +65,12 @@ Local encrypted vault storage is no longer part of the active runtime. New
 credential sources should implement `CredentialVault` or a typed provider vault
 trait and stay behind the host-side credential boundary.
 
+MCP credential proxy grants are private, process-local, and single-use: the
+runtime creates an opaque grant, consumes it while enriching one MCP request,
+and rejects reuse. Until MOA has a shared durable grant store, code must not
+expose MCP credential grants across requests or depend on another Kubernetes
+replica being able to resolve them.
+
 ## Sandbox Tiers
 
 | Tier | Isolation | Default use |

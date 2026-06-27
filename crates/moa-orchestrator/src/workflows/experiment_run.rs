@@ -58,9 +58,9 @@ const K_SCORE_RUN_ID: &str = "score_run_id";
 const K_STATUS: &str = "status";
 const K_SESSION_ID: &str = "session_id";
 const K_WORKFLOW_RUN_UID: &str = "workflow_run_uid";
-const PLAN_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const PLAN_STATUS_POLL_MAX_INTERVAL: Duration = Duration::from_secs(8);
 const PLAN_STATUS_MAX_IDLE_POLLS: u32 = 10_800;
+const PLAN_COMPLETION_TIMEOUT: Duration =
+    Duration::from_secs(8 * PLAN_STATUS_MAX_IDLE_POLLS as u64);
 
 /// Workflow input for one live behavior experiment run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -522,44 +522,6 @@ mod tests {
             plan_expansion::aggregate_status_for_trials(&[], ExperimentRunStatus::Cancelled),
             ExperimentRunStatus::Cancelled
         );
-    }
-
-    #[test]
-    fn plan_status_poll_interval_backs_off_when_idle() {
-        // Pins: the parent plan loop backs off bounded idle scans.
-        assert_eq!(
-            plan_expansion::plan_status_poll_interval(0),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            plan_expansion::plan_status_poll_interval(1),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            plan_expansion::plan_status_poll_interval(2),
-            Duration::from_secs(4)
-        );
-        assert_eq!(
-            plan_expansion::plan_status_poll_interval(9),
-            Duration::from_secs(8)
-        );
-    }
-
-    #[test]
-    fn plan_idle_poll_counter_resets_on_progress_and_has_a_limit() {
-        // Pins: unchanged plan state cannot keep a parent workflow polling forever.
-        assert_eq!(plan_expansion::next_plan_idle_polls(9, true), 0);
-        assert_eq!(plan_expansion::next_plan_idle_polls(9, false), 10);
-        assert_eq!(
-            plan_expansion::next_plan_idle_polls(u32::MAX, false),
-            u32::MAX
-        );
-        assert!(!plan_expansion::plan_idle_limit_exceeded(
-            PLAN_STATUS_MAX_IDLE_POLLS - 1
-        ));
-        assert!(plan_expansion::plan_idle_limit_exceeded(
-            PLAN_STATUS_MAX_IDLE_POLLS
-        ));
     }
 
     fn trial_record(trial_key: &str, status: ExperimentTrialStatus) -> ExperimentTrialRecord {

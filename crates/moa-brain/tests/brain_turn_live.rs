@@ -9,7 +9,8 @@ use moa_brain::{
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions, run_brain_turn,
 };
 use moa_core::{
-    Event, EventRange, LLMProvider, MoaConfig, Result, SessionMeta, SessionStore, TenantId,
+    Event, EventRange, LLMProvider, MoaConfig, Result, SessionActorRef, SessionMeta, SessionStore,
+    TenantId,
 };
 use moa_providers::{build_provider_from_config, resolve_provider_selection};
 use moa_session::testing;
@@ -32,6 +33,9 @@ async fn live_brain_turn_completes() -> Result<()> {
         .create_session(SessionMeta {
             tenant_id: TenantId::new(),
             model: config.models.main.clone().into(),
+            created_by: Some(SessionActorRef::Identity {
+                id: uuid::Uuid::now_v7(),
+            }),
             ..SessionMeta::default()
         })
         .await?;

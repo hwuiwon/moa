@@ -48,7 +48,8 @@ materialize selected skill packages under `.moa/skills/<skill>/...`.
 The default provider name is `local`. Workspace roots, active hand handles,
 MCP clients, action-policy rule stores, session store hooks, and optional
 memory executor hooks live behind async locks so the router can be shared
-across handlers.
+across handlers. These maps are process-local caches or transport internals;
+they must not be the source of cross-request correctness in Kubernetes.
 
 `ActionEnvelope` is the durable policy-facing record for one tool invocation.
 It includes the review id, tenant, user, session or sub-agent origin, tool
@@ -94,17 +95,23 @@ stability.
 
 ## Lifecycle
 
-Active hands are keyed by session and provider. A first tool call provisions
-the hand. Later tool calls reuse the handle if it is healthy. On terminal
-session status, cancellation, failure, or panic cleanup, the orchestrator calls
-`destroy_session_hands(session_id)`.
+Active hands are keyed by session and provider. The authoritative binding lives
+in Postgres `moa.hand_leases`; `ToolRouter` process maps are reconnect caches
+only. A first tool call claims a durable lease before provisioning the hand.
+Later tool calls on any Kubernetes replica load the lease, reconnect or resume
+the provider handle when healthy, or mark it stale and reprovision with a new
+generation. On terminal session status, cancellation, failure, or panic
+cleanup, the orchestrator calls `destroy_session_hands(session_id)`, which
+lists durable leases rather than only handles cached in the current process.
 
-Before the LLM call for a turn, the context pipeline selects relevant skills and
-passes the selected package files to the router on a runtime-only side channel.
-The router materializes those files lazily into the hand provider that actually
-executes the first hand tool. The model only sees the manifest paths; full
-`SKILL.md` and supporting scripts remain filesystem resources that are read or
-executed on demand.
+Before the LLM call for a turn, the context pipeline selects relevant skills.
+The selected trusted sandbox file references are copied into `ToolCallRequest`
+so the `ToolExecutor` can materialize files even when the turn workflow and tool
+executor land on different pods. The router still caches installed-file markers
+to avoid duplicate installs inside one hand, but that cache is not the source of
+install intent. The model only sees the manifest paths; full `SKILL.md` and
+supporting scripts remain filesystem resources that are read or executed on
+demand.
 
 Provider implementations must make cleanup best-effort and observable. Failed
 cleanup should warn through `tracing`, not panic or hide the terminal session
@@ -134,7 +141,10 @@ Tool calls must also declare their idempotency behavior:
 MCP is the primary protocol for external integrations. Supported transports are
 stdio, SSE, and streamable HTTP. Startup discovers tool definitions through
 MCP, then the router exposes the selected tools exactly like built-ins and hand
-tools.
+tools. Stdio MCP launches a child process in the current pod and is allowed
+only for local development; cloud startup rejects stdio MCP servers. Kubernetes
+deployments must use HTTP/SSE MCP transports so any replica can handle a
+request without depending on a pod-local process.
 
 Credential handling is host-side:
 
@@ -146,7 +156,10 @@ Credential handling is host-side:
 
 HTTP/SSE MCP servers get the strongest credential isolation because the proxy
 can inject headers per request. Stdio MCP servers may still need startup
-environment variables, so treat them as a weaker isolation boundary.
+environment variables, so treat them as a weaker local-development-only
+isolation boundary. The stdio pending-call map is only JSON-RPC response
+demultiplexing state inside one transport and never session or request
+correctness state.
 
 ## Security Rules
 

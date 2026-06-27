@@ -16,13 +16,6 @@ pub(super) fn translate(
     body: &Bytes,
     tenant_id: TenantId,
 ) -> Option<RouteTranslation> {
-    if *method == Method::GET && uri.path() == "/v1/whoami" {
-        return Some(RouteTranslation::Forward {
-            method: Method::POST,
-            path: "/Whoami/whoami".to_string(),
-            body: Vec::new(),
-        });
-    }
     if *method == Method::GET && uri.path() == "/v1/authz-challenges" {
         return Some(RouteTranslation::Forward {
             method: Method::POST,
@@ -105,31 +98,6 @@ mod tests {
 
     use crate::routes::RouteTranslation;
     use crate::routes::test_support::{test_tenant_json, translate};
-
-    #[test]
-    fn whoami_public_route_translates_to_restate_handler() {
-        // Pins: hosted identity inspection stays available through the public edge API.
-        let uri = "/v1/whoami"
-            .parse::<Uri>()
-            .expect("route path should parse");
-
-        let translation = translate(&Method::GET, &uri, &Bytes::new());
-
-        match translation {
-            RouteTranslation::Forward { method, path, body } => {
-                assert_eq!(method, Method::POST);
-                assert_eq!(path, "/Whoami/whoami");
-                assert!(
-                    body.is_empty(),
-                    "whoami should not synthesize a request body"
-                );
-            }
-            RouteTranslation::NoChange => panic!("whoami should translate to Whoami service"),
-            RouteTranslation::BadRequest(message) => {
-                panic!("whoami should not fail translation: {message}")
-            }
-        }
-    }
 
     #[test]
     fn contact_token_route_translates_to_contacts_service() {

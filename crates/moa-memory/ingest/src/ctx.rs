@@ -1,6 +1,10 @@
 //! Runtime context installed by hosts that execute graph-memory ingestion.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::{Arc, OnceLock},
+};
 
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
@@ -17,6 +21,69 @@ use crate::{
 };
 
 static INGEST_RUNTIME: OnceLock<IngestRuntime> = OnceLock::new();
+
+/// Error returned when installing the process-local ingestion runtime fails.
+#[derive(Debug, thiserror::Error)]
+pub enum IngestRuntimeInstallError {
+    /// A different runtime has already been installed in this process.
+    #[error(
+        "ingestion runtime already installed with incompatible dependencies: installed={installed}, requested={requested}"
+    )]
+    IncompatibleRuntime {
+        /// Summary of the installed runtime configuration.
+        installed: String,
+        /// Summary of the requested runtime configuration.
+        requested: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IngestRuntimeFingerprint {
+    pool_options_hash: u64,
+    pii_service_url: Option<String>,
+    cohere_api_key_env: String,
+    extractor_name: &'static str,
+    entity_resolver_name: &'static str,
+    entity_blocking_enabled: bool,
+    contradiction_detector_name: &'static str,
+    memory_config_hash: u64,
+}
+
+impl IngestRuntimeFingerprint {
+    fn new(
+        pool: &PgPool,
+        config: &MoaConfig,
+        extractor_name: &'static str,
+        entity_resolver_name: &'static str,
+        entity_blocking_enabled: bool,
+        contradiction_detector_name: &'static str,
+    ) -> Self {
+        Self {
+            pool_options_hash: hash_debug(pool.connect_options().as_ref()),
+            pii_service_url: config.memory.pii_service_url.clone(),
+            cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
+            extractor_name,
+            entity_resolver_name,
+            entity_blocking_enabled,
+            contradiction_detector_name,
+            memory_config_hash: hash_debug(&config.memory),
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "pool={}, pii={}, cohere_env={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}",
+            self.pool_options_hash,
+            self.pii_service_url.as_deref().unwrap_or("<none>"),
+            self.cohere_api_key_env,
+            self.extractor_name,
+            self.entity_resolver_name,
+            self.entity_blocking_enabled,
+            self.contradiction_detector_name,
+            self.memory_config_hash
+        )
+    }
+}
 
 /// Scope-specific dependencies used by ingestion helpers.
 #[derive(Clone)]
@@ -124,8 +191,11 @@ pub struct IngestRuntime {
     extractor: Arc<dyn FactExtractor>,
     extractor_name: &'static str,
     entity_resolver: Arc<EntityResolver>,
+    entity_resolver_name: &'static str,
     entity_blocking_enabled: bool,
     contradiction_detector: Arc<dyn ContradictionDetector>,
+    contradiction_detector_name: &'static str,
+    fingerprint: IngestRuntimeFingerprint,
 }
 
 impl IngestRuntime {
@@ -136,15 +206,30 @@ impl IngestRuntime {
         let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
             &default_config,
         ));
+        let extractor_name = "heuristic";
+        let entity_resolver_name = "deterministic";
+        let entity_blocking_enabled = false;
+        let contradiction_detector_name = "rrf_plus_judge";
+        let fingerprint = IngestRuntimeFingerprint::new(
+            &pool,
+            &default_config,
+            extractor_name,
+            entity_resolver_name,
+            entity_blocking_enabled,
+            contradiction_detector_name,
+        );
         Self {
             pool,
             pii_service_url: None,
             cohere_api_key_env: default_config.memory.vector.embedder.cohere.api_key_env,
             extractor: Arc::new(HeuristicFactExtractor),
-            extractor_name: "heuristic",
+            extractor_name,
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
-            entity_blocking_enabled: false,
+            entity_resolver_name,
+            entity_blocking_enabled,
             contradiction_detector,
+            contradiction_detector_name,
+            fingerprint,
         }
     }
 
@@ -152,8 +237,17 @@ impl IngestRuntime {
     #[must_use]
     pub fn from_config(pool: PgPool, config: &MoaConfig) -> Self {
         let (extractor, extractor_name) = extractor_from_config(config);
-        let entity_resolver = entity_resolver_from_config(config);
+        let (entity_resolver, entity_resolver_name) = entity_resolver_from_config(config);
         let entity_blocking_enabled = entity_blocking_enabled_from_config(config);
+        let contradiction_detector_name = "rrf_plus_judge";
+        let fingerprint = IngestRuntimeFingerprint::new(
+            &pool,
+            config,
+            extractor_name,
+            entity_resolver_name,
+            entity_blocking_enabled,
+            contradiction_detector_name,
+        );
         Self {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
@@ -161,10 +255,13 @@ impl IngestRuntime {
             extractor,
             extractor_name,
             entity_resolver,
+            entity_resolver_name,
             entity_blocking_enabled,
             contradiction_detector: Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(
                 config,
             )),
+            contradiction_detector_name,
+            fingerprint,
         }
     }
 
@@ -173,6 +270,7 @@ impl IngestRuntime {
     pub fn with_extractor(mut self, extractor: Arc<dyn FactExtractor>) -> Self {
         self.extractor = extractor;
         self.extractor_name = "custom";
+        self.fingerprint.extractor_name = "custom";
         self
     }
 
@@ -180,6 +278,8 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_resolver(mut self, entity_resolver: Arc<EntityResolver>) -> Self {
         self.entity_resolver = entity_resolver;
+        self.entity_resolver_name = "custom";
+        self.fingerprint.entity_resolver_name = "custom";
         self
     }
 
@@ -187,6 +287,7 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_entity_embedding_blocking(mut self, enabled: bool) -> Self {
         self.entity_blocking_enabled = enabled;
+        self.fingerprint.entity_blocking_enabled = enabled;
         self
     }
 
@@ -200,6 +301,8 @@ impl IngestRuntime {
     #[must_use]
     pub fn with_contradiction_detector(mut self, detector: Arc<dyn ContradictionDetector>) -> Self {
         self.contradiction_detector = detector;
+        self.contradiction_detector_name = "custom";
+        self.fingerprint.contradiction_detector_name = "custom";
         self
     }
 
@@ -257,9 +360,17 @@ impl IngestRuntime {
     pub fn contradiction_detector(&self) -> Arc<dyn ContradictionDetector> {
         self.contradiction_detector.clone()
     }
+
+    fn is_compatible_with(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint
+    }
+
+    fn summary(&self) -> String {
+        self.fingerprint.summary()
+    }
 }
 
-fn entity_resolver_from_config(config: &MoaConfig) -> Arc<EntityResolver> {
+fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'static str) {
     let extraction = &config.memory.extraction;
     if extraction.enabled
         && std::env::var(&extraction.api_key_env).is_ok()
@@ -273,10 +384,16 @@ fn entity_resolver_from_config(config: &MoaConfig) -> Arc<EntityResolver> {
             model = %extraction.model,
             "memory entity merge verifier installed: llm"
         );
-        return Arc::new(EntityResolver::for_app_role(Arc::new(verifier)));
+        return (
+            Arc::new(EntityResolver::for_app_role(Arc::new(verifier))),
+            "llm",
+        );
     }
     tracing::info!("memory entity merge verifier installed: deterministic");
-    Arc::new(EntityResolver::deterministic_for_app_role())
+    (
+        Arc::new(EntityResolver::deterministic_for_app_role()),
+        "deterministic",
+    )
 }
 
 fn entity_blocking_enabled_from_config(config: &MoaConfig) -> bool {
@@ -328,12 +445,38 @@ fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'stati
 }
 
 /// Installs the process-local ingestion runtime.
-pub fn install_runtime(runtime: IngestRuntime) -> std::result::Result<(), IngestRuntime> {
-    INGEST_RUNTIME.set(runtime)
+pub fn install_runtime(
+    runtime: IngestRuntime,
+) -> std::result::Result<(), IngestRuntimeInstallError> {
+    match INGEST_RUNTIME.get() {
+        Some(installed) if installed.is_compatible_with(&runtime) => Ok(()),
+        Some(installed) => Err(IngestRuntimeInstallError::IncompatibleRuntime {
+            installed: installed.summary(),
+            requested: runtime.summary(),
+        }),
+        None => match INGEST_RUNTIME.set(runtime) {
+            Ok(()) => Ok(()),
+            Err(runtime) => {
+                let installed = INGEST_RUNTIME
+                    .get()
+                    .expect("ingestion runtime should be present after OnceLock set race");
+                if installed.is_compatible_with(&runtime) {
+                    Ok(())
+                } else {
+                    Err(IngestRuntimeInstallError::IncompatibleRuntime {
+                        installed: installed.summary(),
+                        requested: runtime.summary(),
+                    })
+                }
+            }
+        },
+    }
 }
 
 /// Installs the process-local ingestion runtime from a Postgres pool.
-pub fn install_runtime_with_pool(pool: PgPool) -> std::result::Result<(), IngestRuntime> {
+pub fn install_runtime_with_pool(
+    pool: PgPool,
+) -> std::result::Result<(), IngestRuntimeInstallError> {
     install_runtime(IngestRuntime::new(pool))
 }
 
@@ -341,7 +484,7 @@ pub fn install_runtime_with_pool(pool: PgPool) -> std::result::Result<(), Ingest
 pub fn install_runtime_with_config(
     pool: PgPool,
     config: &MoaConfig,
-) -> std::result::Result<(), IngestRuntime> {
+) -> std::result::Result<(), IngestRuntimeInstallError> {
     install_runtime(IngestRuntime::from_config(pool, config))
 }
 
@@ -353,6 +496,12 @@ pub fn current_runtime() -> Result<IngestRuntime> {
         .ok_or(IngestError::RuntimeNotInstalled)
 }
 
+fn hash_debug(value: &impl std::fmt::Debug) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{value:?}").hash(&mut hasher);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -361,7 +510,7 @@ mod tests {
     use moa_core::MoaConfig;
     use sqlx::postgres::PgPoolOptions;
 
-    use super::IngestRuntime;
+    use super::{IngestRuntime, install_runtime};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -409,5 +558,33 @@ mod tests {
         unsafe {
             std::env::remove_var("MOA_TEST_EXTRACTION_KEY");
         }
+    }
+
+    #[tokio::test]
+    async fn incompatible_runtime_install_fails_clearly() {
+        // Pins: orchestrator startup fails instead of silently keeping a stale ingest runtime.
+        let _guard = ENV_LOCK.lock().expect("env test lock");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/moa_test")
+            .expect("lazy test pool should not connect");
+        let mut config = MoaConfig::default();
+        config.memory.pii_service_url = Some("http://pii-a.test".to_string());
+        let installed = IngestRuntime::from_config(pool.clone(), &config);
+
+        install_runtime(installed.clone()).expect("first runtime install should succeed");
+        install_runtime(installed).expect("compatible runtime reinstall should be idempotent");
+
+        config.memory.pii_service_url = Some("http://pii-b.test".to_string());
+        let requested = IngestRuntime::from_config(pool, &config);
+        let error = install_runtime(requested)
+            .expect_err("incompatible runtime install should fail clearly");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ingestion runtime already installed with incompatible dependencies")
+        );
+        assert!(error.to_string().contains("pii=http://pii-a.test"));
+        assert!(error.to_string().contains("pii=http://pii-b.test"));
     }
 }

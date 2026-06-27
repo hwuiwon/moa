@@ -70,6 +70,9 @@ impl ToolExecutorImpl {
             name: request.tool_name.clone(),
             input: request.input.clone(),
         };
+        self.router
+            .set_trusted_sandbox_files(session, request.trusted_sandbox_files.clone())
+            .await;
         let (_hand_id, output) = self
             .router
             .execute_authorized_with_recovery(session, &invocation)
@@ -624,17 +627,84 @@ fn to_handler_error(error: MoaError) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
         AgentContext, AgentPolicySnapshot, AgentToolPolicy, AgentToolPolicyMode, Event,
-        EventRecord, EventType, SessionMeta, TenantId, ToolCallId, ToolCallRequest, UserId,
+        EventRecord, EventType, HandHandle, HandProvider, HandSpec, HandStatus, IdempotencyClass,
+        RiskLevel, SandboxFile, SandboxTier, SessionMeta, TenantId, ToolCallId, ToolCallRequest,
+        ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec, UserId,
     };
+    use moa_hands::{ToolRegistry, ToolRouter};
     use uuid::Uuid;
 
     use super::{
-        agent_tool_policy_denied_output, blocked_canary_output, has_prior_tool_call_event,
-        synthetic_session_id,
+        ToolExecutorImpl, agent_tool_policy_denied_output, blocked_canary_output,
+        has_prior_tool_call_event, synthetic_session_id,
     };
+
+    #[derive(Default)]
+    struct InstallingProvider {
+        installed_files: Mutex<Vec<SandboxFile>>,
+    }
+
+    impl InstallingProvider {
+        fn installed_files(&self) -> Vec<SandboxFile> {
+            self.installed_files
+                .lock()
+                .expect("lock installed files")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl HandProvider for InstallingProvider {
+        fn provider_name(&self) -> &str {
+            "install-provider"
+        }
+
+        async fn provision(&self, _spec: HandSpec) -> moa_core::Result<HandHandle> {
+            Ok(HandHandle::docker("install-provider-1"))
+        }
+
+        async fn execute(
+            &self,
+            _handle: &HandHandle,
+            _tool: &str,
+            _input: &str,
+        ) -> moa_core::Result<ToolOutput> {
+            Ok(ToolOutput::text("ok", Duration::from_millis(1)))
+        }
+
+        async fn install_files(
+            &self,
+            _handle: &HandHandle,
+            files: &[SandboxFile],
+        ) -> moa_core::Result<()> {
+            *self.installed_files.lock().expect("lock installed files") = files.to_vec();
+            Ok(())
+        }
+
+        async fn status(&self, _handle: &HandHandle) -> moa_core::Result<HandStatus> {
+            Ok(HandStatus::Running)
+        }
+
+        async fn pause(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+            Ok(())
+        }
+
+        async fn destroy(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+            Ok(())
+        }
+    }
 
     fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
         EventRecord {
@@ -745,6 +815,64 @@ mod tests {
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
             idempotency_key: None,
+            trusted_sandbox_files: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_installs_files_from_durable_request_manifest() {
+        // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
+        let provider = Arc::new(InstallingProvider::default());
+        let mut registry = ToolRegistry::default_local();
+        registry.register_hand(
+            "bash",
+            "test shell command",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string" }
+                },
+                "required": ["cmd"]
+            }),
+            ToolPolicySpec {
+                risk_level: RiskLevel::High,
+                default_effect: moa_core::ActionPolicyEffect::Allow,
+                action_class: moa_core::ActionClass::CommandExecution,
+                input_shape: ToolInputShape::Json,
+                diff_strategy: ToolDiffStrategy::None,
+            },
+            IdempotencyClass::Idempotent,
+        );
+        registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
+        registry.retain_only(["bash"]);
+        let provider_trait: Arc<dyn HandProvider> = provider.clone();
+        let mut providers = HashMap::new();
+        providers.insert(provider_trait.provider_name().to_string(), provider_trait);
+        let executor = ToolExecutorImpl::new(Arc::new(ToolRouter::new(registry, providers)));
+        let files = vec![SandboxFile {
+            path: ".moa/skills/test/SKILL.md".to_string(),
+            content: b"use this skill".to_vec(),
+            executable: false,
+        }];
+        let request = ToolCallRequest {
+            tool_call_id: ToolCallId::new(),
+            provider_tool_use_id: Some("provider-tool-use".to_string()),
+            tool_name: "bash".to_string(),
+            input: serde_json::json!({"cmd": "cat .moa/skills/test/SKILL.md"}),
+            active_canary: None,
+            session_id: None,
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            user_id: UserId::new("user-1"),
+            idempotency_key: None,
+            trusted_sandbox_files: files.clone(),
+        };
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("tool execution should use request manifest");
+
+        assert!(!output.is_error);
+        assert_eq!(provider.installed_files(), files);
     }
 }

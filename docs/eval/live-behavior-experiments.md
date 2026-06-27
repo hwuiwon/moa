@@ -7,9 +7,9 @@ _Boundary between regression evals, production-path experiments, and analytics._
 Use a regression eval when the question is "did this behavior regress under a
 controlled scenario?" Regression evals live in `moa-eval`. They use datasets,
 transcripts, scripted providers, replay, and budget gates so CI and nightly
-jobs can compare runs deterministically. The `Eval` service and `EvalRun`
-workflow are internal-only surfaces compiled behind
-`internal-eval-runner`; default public edge builds do not translate
+jobs can compare runs deterministically. The `Eval` service is an
+internal-only surface compiled behind `internal-eval-runner`; hosted run status
+is persisted in Postgres. Default public edge builds do not translate
 `/v1/evals/*`.
 
 Use a live behavior experiment when the question is "what happens when this
@@ -159,15 +159,14 @@ lane.
 | Internal-gated `Eval` dataset registration | `Tenant:Editor` |
 | `Experiments/generate_plan`, `run`, `cancel`, `propose_improvements` | `Tenant:Editor` |
 | `Experiments/status`, `list`, `trials`, `trial_status`, `scores`, `compare` | `Tenant:Member` |
-| `Analytics/session_stats` | `Session:Participant` |
-| `Analytics/tenant_stats`, `cache_stats`, `experiment_stats`, `session_search` | `Tenant:Member` |
-| `Analytics/tool_stats` | `Tenant:Member` |
-| `Analytics/learning_candidates` | `Tenant:Editor` |
-| `LineageAdmin/explain`, `query`, `verify` | `Tenant:Member` |
-| `LineageAdmin/export`, `erase` | `Tenant:Admin` |
+| direct edge `analytics/session-stats` | `Session:Participant` |
+| direct edge `analytics/tenant-stats`, `cache-stats`, `experiment-stats`, `session-search` | `Tenant:Member` |
+| direct edge `analytics/tool-stats` | `Tenant:Member` |
+| direct edge `analytics/learning-candidates` | `Tenant:Editor` |
+| direct edge `lineage/explain`, `query`, `verify` | `Tenant:Member` |
 
 Future MCP support is a thin adapter over product/default typed services such
-as `Experiments`, `Analytics`, `LineageAdmin`, and `Workflows`. If it exposes
+as `Experiments`, direct edge analytics/lineage reads, and `Workflows`. If it exposes
 internal eval at all, that surface must remain qualified as
 `internal-eval-runner` gated. MCP must forward through the same DTOs and
 authorization boundaries instead of owning eval, experiment, analytics,

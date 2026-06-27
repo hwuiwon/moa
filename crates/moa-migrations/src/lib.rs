@@ -31,6 +31,11 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000309__tenant_runtime_boundaries.sql",
     "V000310__graph_changelog_append_only.sql",
     "V000311__tenant_knowledge_base.sql",
+    "V000312__knowledge_connection_source_selection.sql",
+    "V000313__hand_leases.sql",
+    "V000314__eval_run_status.sql",
+    "V000315__authz_outbox_claims.sql",
+    "V000317__knowledge_sync_active_claims.sql",
 ];
 
 // Schema-isolated session tests do not own artifact/experiment tables. Keep
@@ -153,12 +158,22 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
             "../migrations/postgres/V000312__knowledge_connection_source_selection.sql"
         ),
     },
+    SchemaMigration {
+        name: "V000317__knowledge_sync_active_claims.sql",
+        sql: include_str!("../migrations/postgres/V000317__knowledge_sync_active_claims.sql"),
+    },
 ];
 
-const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
-    name: "V000101__auth_baseline.sql",
-    sql: include_str!("../migrations/postgres/V000101__auth_baseline.sql"),
-}];
+const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
+    SchemaMigration {
+        name: "V000101__auth_baseline.sql",
+        sql: include_str!("../migrations/postgres/V000101__auth_baseline.sql"),
+    },
+    SchemaMigration {
+        name: "V000315__authz_outbox_claims.sql",
+        sql: include_str!("../migrations/postgres/V000315__authz_outbox_claims.sql"),
+    },
+];
 
 const ORCHESTRATOR_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {
     name: "V000201__orchestrator_baseline.sql",

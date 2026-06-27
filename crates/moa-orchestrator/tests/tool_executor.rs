@@ -98,6 +98,7 @@ fn tool_request(
         tenant_id: TenantId::from(Uuid::from_u128(1)),
         user_id: UserId::new("user-1"),
         idempotency_key: idempotency_key.map(ToOwned::to_owned),
+        trusted_sandbox_files: Vec::new(),
     }
 }
 

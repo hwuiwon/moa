@@ -26,6 +26,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
+sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

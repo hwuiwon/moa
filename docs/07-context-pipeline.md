@@ -45,6 +45,12 @@ The brain does not emit provider cache breakpoints, TTLs, or cached-content name
 
 The stage is fail-open. On timeout, parsing error, circuit-breaker open, or skipped input, it stores an original-query `QueryRewriteResult` and lets the turn continue. A turn execution reuses the same rewrite metadata across repeated compile steps for one user message, so tool-result follow-up requests do not call the rewriter again.
 
+The query-rewrite circuit breaker is shared across rewriter instances inside
+one process. It is a per-pod best-effort cost/latency guard, not a global
+provider-protection mechanism. If a deployment needs cluster-wide rewrite
+throttling, that state must move behind `RuntimeCacheStore` with Redis selected
+or another shared coordination store.
+
 The rewriter produces:
 
 - `retrieval_query`

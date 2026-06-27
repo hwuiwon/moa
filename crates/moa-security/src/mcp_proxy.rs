@@ -78,12 +78,15 @@ impl MCPCredentialProxy {
         Ok(McpSessionToken(token))
     }
 
-    /// Revokes a previously issued proxy token.
+    /// Revokes a previously issued proxy token before it is used.
     pub async fn revoke_session_token(&self, token: &McpSessionToken) {
         self.session_tokens.write().await.remove(token.as_str());
     }
 
     /// Resolves and injects credential headers for one opaque proxy token.
+    ///
+    /// The proxy grant is consumed before the vault lookup so grants cannot be
+    /// reused across requests while MOA only has a process-local grant store.
     pub async fn enrich_headers(
         &self,
         token: &McpSessionToken,
@@ -97,10 +100,9 @@ impl MCPCredentialProxy {
     async fn lookup_grant(&self, token: &McpSessionToken) -> Result<ProxyGrant> {
         self.prune_expired_tokens().await;
         self.session_tokens
-            .read()
+            .write()
             .await
-            .get(token.as_str())
-            .cloned()
+            .remove(token.as_str())
             .ok_or_else(|| {
                 MoaError::PermissionDenied(format!(
                     "unknown or expired MCP proxy token: {}",
@@ -275,6 +277,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_creates_tokens_and_injects_headers() {
+        // Pins: MCP proxy tokens are opaque credentials for one call only.
         let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
             values: HashMap::from([(
                 ("github".to_string(), "github".to_string()),
@@ -302,6 +305,36 @@ mod tests {
             Some(&"Bearer secret-token".to_string())
         );
         assert!(!token.as_str().contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn proxy_grants_are_single_use() {
+        // Pins: a process-local MCP credential grant cannot be exposed across requests.
+        let vault: Arc<dyn CredentialVault> = Arc::new(MockVault {
+            values: HashMap::from([(
+                ("github".to_string(), "github".to_string()),
+                Credential::Bearer("secret-token".to_string()),
+            )]),
+        });
+        let proxy = MCPCredentialProxy::new(vault);
+        let token = proxy
+            .create_session_token(&SessionId::new(), "github", "github")
+            .await
+            .expect("test setup should create an MCP proxy token");
+
+        proxy
+            .enrich_headers(&token, None)
+            .await
+            .expect("first proxy enrichment should consume the grant");
+
+        let error = proxy
+            .enrich_headers(&token, None)
+            .await
+            .expect_err("second proxy enrichment should reject the consumed grant");
+
+        assert!(
+            matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+        );
     }
 
     #[tokio::test]

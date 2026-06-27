@@ -29,6 +29,7 @@ use moa_knowledge::{
 };
 use moa_test_support::postgres;
 use serde_json::{Value, json};
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
 #[derive(Debug, Default)]
@@ -67,6 +68,22 @@ impl DocumentParser for ParagraphParser {
             elements,
             metadata: json!({ "parser": "test_parser" }),
         })
+    }
+}
+
+#[derive(Debug)]
+struct BarrierParser {
+    barrier: Arc<Barrier>,
+}
+
+#[async_trait]
+impl DocumentParser for BarrierParser {
+    async fn parse(
+        &self,
+        input: moa_knowledge::domain::ParseInput,
+    ) -> moa_knowledge::Result<ParsedDocument> {
+        self.barrier.wait().await;
+        ParagraphParser.parse(input).await
     }
 }
 
@@ -550,6 +567,114 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
 }
 
 #[tokio::test]
+async fn ingestion_pipeline_duplicate_workers_coalesce_object_version_before_graph_writes_db_knowledge()
+ {
+    // Pins: duplicate object delivery from two workers stores one document version and performs one graph/vector write.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository_a = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope.clone(),
+    ));
+    let repository_b = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(BarrierParser {
+        barrier: Arc::new(Barrier::new(2)),
+    });
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let observer = Arc::new(MetricsIngestionObserver);
+    let pipeline_a = KnowledgeIngestionPipeline::new(
+        repository_a.clone(),
+        parser.clone(),
+        embedder.clone(),
+        graph.clone(),
+        observer.clone(),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+    let pipeline_b = KnowledgeIngestionPipeline::new(
+        repository_b.clone(),
+        parser,
+        embedder.clone(),
+        graph.clone(),
+        observer,
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+
+    repository_a
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_duplicate_workers".to_string(),
+            credential_ref: "vault://knowledge/duplicate-workers".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let sync_run_uid = create_run(&repository_a, tenant_id, connection_uid).await;
+    let page = RecordPage {
+        records: vec![record(
+            "duplicate-token",
+            false,
+            "Alpha is ready.\n\nBudget is 10.",
+        )],
+        next_cursor: None,
+    };
+
+    let (result_a, result_b) = tokio::join!(
+        pipeline_a.ingest_record_page(sync_run_uid, connection_uid, tenant_id, page.clone()),
+        pipeline_b.ingest_record_page(sync_run_uid, connection_uid, tenant_id, page)
+    );
+    let result_a = result_a.expect("first worker should finish");
+    let result_b = result_b.expect("second worker should finish");
+    assert_eq!(result_a.records_ingested + result_b.records_ingested, 1);
+    assert_eq!(result_a.records_skipped + result_b.records_skipped, 1);
+
+    let object_uid = object_uid(connection_uid);
+    assert_eq!(version_count(&pool, object_uid).await, 1);
+    assert_eq!(chunk_count(&pool, object_uid).await, 2);
+    assert_eq!(embedder.embedded_count(), 2);
+    assert_eq!(graph.vector_count(), 2);
+    assert_eq!(
+        completed_ingestion_step_count(&pool, sync_run_uid, object_uid).await,
+        1
+    );
+    let counters = sync_counters(&pool, sync_run_uid).await;
+    assert_eq!(counters.records_ingested, 1);
+    assert_eq!(counters.chunks_embedded, 2);
+}
+
+#[tokio::test]
 async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh() {
     // Pins: full selected-source refreshes tombstone previously active objects absent from the provider listing.
     let db = postgres::bootstrap_test_db()
@@ -954,7 +1079,7 @@ async fn create_run(
             connection_uid,
             parser: Some("test_parser".to_string()),
             max_records: None,
-            status: SyncRunStatus::Ingesting,
+            status: SyncRunStatus::Completed,
             records_seen: 0,
             records_changed: 0,
             records_deleted: 0,
@@ -966,7 +1091,7 @@ async fn create_run(
             graph_edges_upserted: 0,
             error_code: None,
             started_at: Utc::now(),
-            finished_at: None,
+            finished_at: Some(Utc::now()),
         })
         .await
         .expect("create sync run");
@@ -1091,6 +1216,28 @@ async fn chunk_count(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {
     .fetch_one(pool)
     .await
     .expect("count chunks")
+}
+
+async fn completed_ingestion_step_count(
+    pool: &sqlx::PgPool,
+    sync_run_uid: Uuid,
+    object_uid: Uuid,
+) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.knowledge_ingestion_steps
+        WHERE sync_run_id = $1
+          AND object_id = $2
+          AND stage = 'contact_groups_derived'
+          AND status = 'completed'
+        "#,
+    )
+    .bind(sync_run_uid)
+    .bind(object_uid)
+    .fetch_one(pool)
+    .await
+    .expect("count completed object ingestion steps")
 }
 
 async fn chunks_with_graph_uid(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {

@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use moa_core::TenantId;
-use moa_orchestrator::objects::tenant::{TenantActionPolicy, TenantConfig, TenantStatus};
+use moa_orchestrator::objects::tenant::{TenantConfig, TenantStatus};
 use moa_orchestrator::workflows::consolidate::{ConsolidateReport, ConsolidateRequest};
 use moa_test_support::postgres::test_database_url;
 use tempfile::TempDir;
@@ -70,7 +70,6 @@ async fn tenant_consolidation_round_trip_through_restate() -> Result<()> {
         id: tenant_id,
         name: "Tenant Consolidate E2E".to_string(),
         consolidation_hour_utc: 2,
-        action_policy: TenantActionPolicy::default(),
     };
     let mut orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
 

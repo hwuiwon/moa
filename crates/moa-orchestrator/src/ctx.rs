@@ -9,8 +9,9 @@ use moa_core::{
     Channel, LineageHandle, MoaConfig,
     traits::{
         ChannelAdapter, EmbeddingProvider, ExperienceStore, Identity, IdentityType,
-        LearningCandidateStore, SegmentStore, SessionAnalyticsStore, SessionChannelStore,
-        SessionEventLookupStore, SessionLearningLogStore, SessionRepository, SessionStore,
+        LearningCandidateStore, RuntimeCacheStore, SegmentStore, SessionAnalyticsStore,
+        SessionChannelStore, SessionEventLookupStore, SessionLearningLogStore, SessionRepository,
+        SessionStore,
     },
 };
 use moa_hands::ToolRouter;
@@ -316,6 +317,8 @@ pub struct OrchestratorDeps {
     pub persistence: PersistenceDeps,
     /// AuthN/AuthZ dependencies shared by handler boundaries.
     pub auth: AuthDeps,
+    /// Runtime cache used for ephemeral coordination state.
+    pub runtime_cache: Arc<dyn RuntimeCacheStore>,
     /// LLM and embedding provider dependencies.
     pub providers: ProviderDeps,
     /// Tool-routing dependencies exposed to turn and tool handlers.
@@ -337,6 +340,7 @@ pub struct OrchestratorCtx {
     config: Arc<MoaConfig>,
     persistence: PersistenceDeps,
     auth: AuthDeps,
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
     providers: ProviderDeps,
     tools: ToolDeps,
     memory: MemoryDeps,
@@ -352,6 +356,7 @@ impl OrchestratorCtx {
             config,
             persistence: deps.persistence,
             auth: deps.auth,
+            runtime_cache: deps.runtime_cache,
             providers: deps.providers,
             tools: deps.tools,
             memory: deps.memory,
@@ -424,6 +429,12 @@ impl OrchestratorCtx {
         Self::current().channel_adapter(channel)
     }
 
+    /// Returns the current runtime cache.
+    #[must_use]
+    pub fn current_runtime_cache() -> Arc<dyn RuntimeCacheStore> {
+        Self::current().runtime_cache()
+    }
+
     /// Returns the current runtime configuration.
     #[must_use]
     pub fn config(&self) -> Arc<MoaConfig> {
@@ -440,6 +451,12 @@ impl OrchestratorCtx {
     #[must_use]
     pub fn auth_deps(&self) -> AuthDeps {
         self.auth.clone()
+    }
+
+    /// Returns the runtime cache used for ephemeral coordination state.
+    #[must_use]
+    pub fn runtime_cache(&self) -> Arc<dyn RuntimeCacheStore> {
+        self.runtime_cache.clone()
     }
 
     /// Returns the provider dependency group.

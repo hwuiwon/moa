@@ -1,4 +1,5 @@
 //! HTTP routes exposed by the MOA edge service.
+#![allow(clippy::result_large_err)]
 
 use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
@@ -6,15 +7,19 @@ use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{any, get, patch, post};
 use base64::{Engine as _, engine::general_purpose};
 use futures_util::stream;
+use moa_authz::{AuthzCheckError, FgaClient, FgaConfig, require_authz_with_delegation};
+use moa_authz_schema::{ObjectType, Relation};
+use moa_core::config::AuthzEngine;
 use moa_core::traits::{AuthProvider, Credential, Identity};
 use moa_core::wire::turn::SessionProgress;
 use moa_core::{
     ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
-    Event, EventRange, EventRecord, SequenceNum, SessionId, TenantId,
+    Event, EventRange, EventRecord, MoaConfig, MoaError, SequenceNum, SessionId, TenantId,
 };
 #[cfg(feature = "auth0")]
 use serde::Deserialize;
@@ -34,11 +39,14 @@ const KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES: usize = 256 * 1024;
 mod agents;
 mod analytics;
 mod artifacts;
+mod audit;
 mod auth;
 mod knowledge;
+mod lineage;
 mod memory;
 mod session;
 mod tools;
+mod whoami;
 mod workflows;
 
 /// Shared edge application state.
@@ -75,8 +83,45 @@ pub struct KnowledgeWebhookEdgeConfig {
 
 /// Build the edge router.
 pub fn router(state: AppState) -> Router {
+    moa_authz::configure_security_audit((*state.pool).clone(), false);
+
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/whoami", get(whoami::handle))
+        .route(
+            "/v1/analytics/session-stats",
+            post(analytics::handle_session_stats),
+        )
+        .route(
+            "/v1/analytics/tenant-stats",
+            post(analytics::handle_tenant_stats),
+        )
+        .route(
+            "/v1/analytics/tool-stats",
+            post(analytics::handle_tool_stats),
+        )
+        .route(
+            "/v1/analytics/cache-stats",
+            post(analytics::handle_cache_stats),
+        )
+        .route(
+            "/v1/analytics/experiment-stats",
+            post(analytics::handle_experiment_stats),
+        )
+        .route(
+            "/v1/analytics/learning-candidates",
+            post(analytics::handle_learning_candidates),
+        )
+        .route(
+            "/v1/analytics/session-search",
+            post(analytics::handle_session_search),
+        )
+        .route("/v1/audit/verify", post(audit::handle_verify))
+        .route("/v1/lineage/explain", post(lineage::handle_explain))
+        .route("/v1/lineage/query", post(lineage::handle_query))
+        .route("/v1/lineage/verify", post(lineage::handle_verify))
+        .route("/v1/lineage/export", post(lineage::handle_export_deferred))
+        .route("/v1/lineage/erase", post(lineage::handle_erase_deferred))
         .route(
             "/v1/security/secret-scanning/github",
             post(handle_github_secret_scan),
@@ -138,6 +183,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+// SAFETY: Edge health returns static process status and reads no caller-owned data.
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
@@ -197,11 +243,11 @@ async fn handle_proxy(
     response_to_axum(response).await
 }
 
-async fn authenticate_edge_request(
+pub(super) async fn authenticate_edge_request(
     state: &AppState,
     headers: &HeaderMap,
     span: &tracing::Span,
-) -> Result<Identity, axum::response::Response> {
+) -> Result<Identity, Response> {
     let credential = match credential_for_request(state.auth.as_ref(), headers) {
         Some(credential) => credential,
         None => {
@@ -279,6 +325,137 @@ async fn authenticate_edge_request(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "audit unavailable").into_response());
     }
     Ok(identity)
+}
+
+pub(super) async fn authenticate_direct_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &'static str,
+) -> Result<Identity, Response> {
+    let span = tracing::Span::current();
+    span.record("http.route", route);
+    authenticate_edge_request(state, headers, &span).await
+}
+
+pub(super) fn parse_json_body_with_tenant<T>(
+    body: &Bytes,
+    tenant_id: TenantId,
+) -> Result<T, Response>
+where
+    T: DeserializeOwned,
+{
+    let mut value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad request body").into_response())?;
+    let Some(object) = value.as_object_mut() else {
+        return Err((StatusCode::BAD_REQUEST, "request body must be object").into_response());
+    };
+    object.insert("tenant_id".to_string(), serde_json::json!(tenant_id));
+    serde_json::from_value(value)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad request body").into_response())
+}
+
+pub(super) fn parse_json_body<T>(body: &Bytes) -> Result<T, Response>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad request body").into_response())
+}
+
+pub(super) async fn require_direct_authz(
+    state: &AppState,
+    identity: &Identity,
+    object_type: ObjectType,
+    object_id: impl std::fmt::Display,
+    relation: Relation,
+) -> Result<(), Response> {
+    let fga = fga_client_from_env()?;
+    require_authz_with_delegation(&fga, identity, object_type, object_id, relation)
+        .await
+        .map_err(|error| authz_error_response(state, error))
+}
+
+pub(super) fn load_moa_config() -> Result<MoaConfig, Response> {
+    MoaConfig::load_from_env().map_err(|error| {
+        tracing::error!(error = %error, "load edge route config failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "configuration unavailable",
+        )
+            .into_response()
+    })
+}
+
+pub(super) fn route_error(error: impl std::fmt::Display) -> Response {
+    tracing::error!(error = %error, "direct edge read failed");
+    (StatusCode::INTERNAL_SERVER_ERROR, "read failed").into_response()
+}
+
+pub(super) fn moa_error_response(error: MoaError) -> Response {
+    match error {
+        MoaError::SessionNotFound(_) => (StatusCode::NOT_FOUND, error.to_string()).into_response(),
+        other => route_error(other),
+    }
+}
+
+fn fga_client_from_env() -> Result<FgaClient, Response> {
+    let config = load_moa_config()?;
+    if config.authz.engine != AuthzEngine::Openfga {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization engine unavailable",
+        )
+            .into_response());
+    }
+    let openfga = config.authz.openfga.ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization engine unavailable",
+        )
+            .into_response()
+    })?;
+    FgaClient::new(FgaConfig {
+        url: openfga.url,
+        preshared_key: openfga.preshared_key,
+        store_id: openfga.store_id,
+        model_id: openfga.model_id,
+        timeout_ms: openfga.timeout_ms,
+    })
+    .map_err(|error| {
+        tracing::error!(error = %error, "build edge FGA client failed");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "authorization engine unavailable",
+        )
+            .into_response()
+    })
+}
+
+fn authz_error_response(_state: &AppState, error: AuthzCheckError) -> Response {
+    match error {
+        AuthzCheckError::Forbidden {
+            subject,
+            object_type,
+            object_id,
+            relation,
+        } => {
+            tracing::info!(
+                deny.subject = %subject,
+                deny.object = format!("{object_type}:{object_id}"),
+                deny.relation = %relation,
+                "edge authz denied"
+            );
+            (StatusCode::FORBIDDEN, "forbidden").into_response()
+        }
+        AuthzCheckError::Engine(error) => {
+            tracing::error!(error = %error, "edge authz engine error; failing closed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization engine unavailable",
+            )
+                .into_response()
+        }
+    }
 }
 
 fn credential_for_request(auth: &dyn AuthProvider, headers: &HeaderMap) -> Option<Credential> {

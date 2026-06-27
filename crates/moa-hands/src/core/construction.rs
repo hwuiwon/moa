@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use moa_core::{
-    HandProvider, LineageHandle, MoaConfig, MoaError, NullLineageHandle, Result, SandboxTier,
-    SessionStore, ToolBudgetConfig, ToolOutputConfig,
+    HandProvider, LineageHandle, McpTransportConfig, MoaConfig, MoaError, NullLineageHandle,
+    Result, SandboxTier, SessionStore, ToolBudgetConfig, ToolOutputConfig,
 };
 use moa_security::{
     ActionPolicies, ActionPolicyRuleStore, EnvironmentCredentialVault, MCPCredentialProxy,
@@ -33,6 +33,7 @@ impl ToolRouter {
             mcp_servers: HashMap::new(),
             mcp_proxy: None,
             active_hands: tokio::sync::RwLock::new(HashMap::new()),
+            hand_leases: None,
             trusted_sandbox_files: tokio::sync::RwLock::new(HashMap::new()),
             installed_files: tokio::sync::RwLock::new(HashMap::new()),
             workspace_roots: tokio::sync::RwLock::new(HashMap::new()),
@@ -69,6 +70,8 @@ impl ToolRouter {
 
     /// Creates a local router from the loaded MOA config.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
+        validate_mcp_transports_for_deployment(config)?;
+
         let sandbox_root = expand_local_path(&config.local.sandbox_dir)?;
         let local_provider = Arc::new(
             LocalHandProvider::new_with_docker_detection(
@@ -145,6 +148,16 @@ impl ToolRouter {
     #[must_use]
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = Some(session_store);
+        self
+    }
+
+    /// Attaches a durable hand lease store for cross-replica sandbox recovery.
+    #[must_use]
+    pub fn with_hand_lease_store(
+        mut self,
+        hand_leases: Arc<dyn super::leases::HandLeaseStore>,
+    ) -> Self {
+        self.hand_leases = Some(hand_leases);
         self
     }
 
@@ -264,6 +277,25 @@ impl ToolRouter {
     }
 }
 
+fn validate_mcp_transports_for_deployment(config: &MoaConfig) -> Result<()> {
+    if !config.cloud.enabled {
+        return Ok(());
+    }
+
+    if let Some(server) = config
+        .mcp_servers
+        .iter()
+        .find(|server| server.transport == McpTransportConfig::Stdio)
+    {
+        return Err(MoaError::ConfigError(format!(
+            "MCP server {} uses stdio transport, which is only supported for local development; use http or sse in cloud deployments",
+            server.name
+        )));
+    }
+
+    Ok(())
+}
+
 fn default_cloud_provider(config: &MoaConfig) -> Result<Option<(String, SandboxTier)>> {
     if !config.cloud.enabled {
         return Ok(None);
@@ -305,5 +337,68 @@ fn default_cloud_provider(config: &MoaConfig) -> Result<Option<(String, SandboxT
         other => Err(MoaError::ConfigError(format!(
             "unsupported cloud hand provider configured: {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moa_core::{CloudHandsConfig, McpServerConfig, McpTransportConfig};
+
+    use super::*;
+
+    fn config_with_mcp_transport(transport: McpTransportConfig) -> MoaConfig {
+        MoaConfig {
+            mcp_servers: vec![McpServerConfig {
+                name: "github".to_string(),
+                transport,
+                url: Some("http://127.0.0.1:1/mcp".to_string()),
+                command: Some("mock-mcp".to_string()),
+                ..McpServerConfig::default()
+            }],
+            ..MoaConfig::default()
+        }
+    }
+
+    #[test]
+    fn local_development_allows_stdio_mcp_transport() {
+        // Pins: local development may still launch stdio MCP child processes.
+        let config = config_with_mcp_transport(McpTransportConfig::Stdio);
+
+        validate_mcp_transports_for_deployment(&config)
+            .expect("stdio MCP should remain available outside cloud mode");
+    }
+
+    #[test]
+    fn cloud_deployment_rejects_stdio_mcp_transport() {
+        // Pins: Kubernetes startup must not depend on a pod-local MCP child process.
+        let mut config = config_with_mcp_transport(McpTransportConfig::Stdio);
+        config.cloud.enabled = true;
+        config.cloud.hands = Some(CloudHandsConfig {
+            default_provider: Some(DEFAULT_PROVIDER_NAME.to_string()),
+            ..CloudHandsConfig::default()
+        });
+
+        let error = validate_mcp_transports_for_deployment(&config)
+            .expect_err("cloud stdio MCP should fail before client startup");
+
+        assert!(
+            matches!(error, MoaError::ConfigError(message) if message.contains("stdio transport") && message.contains("local development"))
+        );
+    }
+
+    #[test]
+    fn cloud_deployment_allows_remote_mcp_transports() {
+        // Pins: remote MCP transports do not require same-pod child processes.
+        for transport in [McpTransportConfig::Http, McpTransportConfig::Sse] {
+            let mut config = config_with_mcp_transport(transport);
+            config.cloud.enabled = true;
+            config.cloud.hands = Some(CloudHandsConfig {
+                default_provider: Some(DEFAULT_PROVIDER_NAME.to_string()),
+                ..CloudHandsConfig::default()
+            });
+
+            validate_mcp_transports_for_deployment(&config)
+                .expect("remote MCP transport should be accepted in cloud mode");
+        }
     }
 }

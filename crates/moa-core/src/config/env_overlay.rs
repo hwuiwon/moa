@@ -8,7 +8,7 @@ use crate::error::{MoaError, Result};
 
 use super::{
     AsyncAuthzKind, AuthProviderKind, AuthzEngine, MemoryRerankerMode, MoaConfig, OtlpProtocol,
-    TokenVaultKind,
+    RuntimeCacheBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -272,8 +272,14 @@ pub struct MoaEnvOverlay {
     pub permissions_always_deny: Option<Vec<String>>,
     /// `MOA_SESSION_BLOB_THRESHOLD_BYTES`.
     pub session_blob_threshold_bytes: Option<usize>,
+    /// `MOA_SESSION_BLOB_BACKEND`.
+    pub session_blob_backend: Option<SessionBlobBackend>,
     /// `MOA_SESSION_BLOB_DIR`.
     pub session_blob_dir: Option<String>,
+    /// `MOA_RUNTIME_CACHE_BACKEND`.
+    pub runtime_cache_backend: Option<RuntimeCacheBackend>,
+    /// `MOA_RUNTIME_CACHE_REDIS_URL`.
+    pub runtime_cache_redis_url: Option<String>,
     /// `MOA_COMPACTION_ENABLED`.
     pub compaction_enabled: Option<bool>,
     /// `MOA_COMPACTION_EVENT_THRESHOLD`.
@@ -466,6 +472,7 @@ impl MoaEnvOverlay {
             ("MOA_RESTATE_LLM_GATEWAY_URL", &self.restate_llm_gateway_url),
             ("MOA_ORCHESTRATOR_ENDPOINT", &self.orchestrator_endpoint),
             ("MOA_ORCHESTRATOR_HEALTH_URL", &self.orchestrator_health_url),
+            ("MOA_RUNTIME_CACHE_REDIS_URL", &self.runtime_cache_redis_url),
             (
                 "MOA_OBSERVABILITY_OTLP_ENDPOINT",
                 &self.observability_otlp_endpoint,
@@ -495,6 +502,7 @@ impl MoaEnvOverlay {
         self.apply_messaging_overlay(config);
         self.apply_permissions_overlay(config);
         self.apply_session_overlay(config);
+        self.apply_runtime_cache_overlay(config);
         self.apply_compaction_overlay(config);
         self.apply_orchestrator_overlay(config);
         self.apply_observability_overlay(config);
@@ -1006,6 +1014,51 @@ mod tests {
         assert!(!config.knowledge.reducto.async_enabled);
         assert_eq!(config.knowledge.reducto.chunk_mode, "page");
         assert!(config.knowledge.observability.query_trace_enabled);
+    }
+
+    #[test]
+    fn runtime_cache_overlay_applies_backend_and_redis_url() {
+        // Pins: runtime cache selection uses flat MOA env names through envy.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_RUNTIME_CACHE_BACKEND", "redis"),
+            (
+                "MOA_RUNTIME_CACHE_REDIS_URL",
+                "redis://cache.example:6379/0",
+            ),
+        ]))
+        .expect("runtime cache overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("runtime cache overlay should apply");
+
+        assert_eq!(config.runtime_cache.backend, RuntimeCacheBackend::Redis);
+        assert_eq!(
+            config.runtime_cache.redis_url.as_deref(),
+            Some("redis://cache.example:6379/0")
+        );
+    }
+
+    #[test]
+    fn session_blob_overlay_applies_backend_and_local_path() {
+        // Pins: claim-check blob storage is selected through explicit flat MOA env names.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_SESSION_BLOB_BACKEND", "local"),
+            ("MOA_SESSION_BLOB_DIR", "/var/lib/moa/blobs"),
+        ]))
+        .expect("session blob overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("session blob overlay should apply");
+
+        assert_eq!(config.session.blob_backend, SessionBlobBackend::Local);
+        assert_eq!(
+            config.session.blob_dir.as_deref(),
+            Some("/var/lib/moa/blobs")
+        );
     }
 
     #[test]

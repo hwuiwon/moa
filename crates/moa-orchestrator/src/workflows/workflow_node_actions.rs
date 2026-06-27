@@ -5,7 +5,7 @@ use std::time::Duration;
 use moa_artifacts::reference::ArtifactRef;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::memory::{MemoryIngestDocument, MemoryIngestRequest, MemorySearchRequest};
-use moa_core::wire::turn::{QueueMessageRequest, TurnOutcomeKind};
+use moa_core::wire::turn::{QueueMessageRequest, TurnOutcome, TurnOutcomeKind};
 use moa_core::{
     ActionPolicyEffect, ContactId, DelegationTool, SessionActorRef, SessionId, SessionMeta,
     SessionStatus, SpawnSubAgentInput, TenantId, ToolCallId, ToolCallRequest, ToolInvocation,
@@ -18,14 +18,16 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::delegation::{DelegationParent, execute_delegation_tool};
-use crate::objects::session::SessionClient;
+use crate::objects::session::{
+    AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput, SessionClient,
+};
 use crate::restate_identity::with_identity_headers;
 use crate::services::action_policy::{ActionPolicyClient, PrepareActionReviewRequest};
 use crate::services::memory::MemoryClient;
 use crate::services::session_store::RestateSessionStoreClient;
 use crate::services::tool_executor::ToolExecutorClient;
 
-const AGENT_NODE_WAIT_ATTEMPTS: usize = 180;
+const AGENT_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 const SUB_AGENT_WAIT_TIMEOUT_MS: u64 = 30_000;
 
 /// Runtime context needed to execute one workflow side-effect node.
@@ -156,6 +158,7 @@ pub async fn execute_workflow_node_action(
         tenant_id: action_context.tenant_id,
         user_id: workflow_user_id(&action_context.identity),
         idempotency_key,
+        trusted_sandbox_files: Vec::new(),
     };
 
     if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
@@ -240,40 +243,67 @@ async fn execute_agent_node(
         });
     };
 
-    for _attempt in 0..AGENT_NODE_WAIT_ATTEMPTS {
-        if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
-            return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
-        }
-        let snapshot = with_identity_headers(
-            ctx.object_client::<SessionClient>(session_id.to_string())
-                .snapshot(),
-            &action_context.identity,
-        )
+    let outcome = wait_for_agent_node_turn(ctx, session_id, turn_id.clone()).await?;
+    if let Some(reason) = workflow_cancel_requested(ctx, &action_context).await? {
+        return Ok(WorkflowNodeActionOutcome::Cancelled { reason });
+    }
+    if outcome.kind == TurnOutcomeKind::Completed {
+        Ok(WorkflowNodeActionOutcome::Completed {
+            output: json!({
+                "turn_id": outcome.turn_id,
+                "message": outcome.message,
+                "max_turns": max_turns,
+            }),
+        })
+    } else {
+        Ok(WorkflowNodeActionOutcome::Failed {
+            error: outcome.message,
+        })
+    }
+}
+
+async fn wait_for_agent_node_turn(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    turn_id: String,
+) -> Result<TurnOutcome, HandlerError> {
+    let (awakeable_id, completion) = ctx.awakeable::<String>();
+    let attached = ctx
+        .object_client::<SessionClient>(session_id.to_string())
+        .attach_turn_waiter(Json::from(AttachSessionTurnWaiterInput {
+            turn_id: turn_id.clone(),
+            awakeable_id: awakeable_id.clone(),
+        }))
         .call()
         .await?
         .into_inner();
-        if let Some(outcome) = snapshot.last_outcome
-            && outcome.turn_id == turn_id
-        {
-            return if outcome.kind == TurnOutcomeKind::Completed {
-                Ok(WorkflowNodeActionOutcome::Completed {
-                    output: json!({
-                        "turn_id": outcome.turn_id,
-                        "message": outcome.message,
-                        "max_turns": max_turns,
-                    }),
-                })
-            } else {
-                Ok(WorkflowNodeActionOutcome::Failed {
-                    error: outcome.message,
-                })
-            };
-        }
-        ctx.sleep(Duration::from_secs(1)).await?;
+    if let Some(outcome) = attached.outcome {
+        return Ok(outcome);
     }
 
-    Ok(WorkflowNodeActionOutcome::Failed {
-        error: format!("workflow agent node timed out waiting for turn {turn_id}"),
+    restate_sdk::select! {
+        outcome = completion => parse_turn_outcome(&outcome?),
+        _ = ctx.sleep(AGENT_NODE_WAIT_TIMEOUT) => {
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
+                    turn_id: turn_id.clone(),
+                    awakeable_id,
+                }))
+                .call()
+                .await?;
+            Err(TerminalError::new(format!(
+                "workflow agent node timed out waiting for turn {turn_id}"
+            )).into())
+        }
+    }
+}
+
+fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
+    serde_json::from_str(raw).map_err(|error| {
+        TerminalError::new(format!(
+            "failed to deserialize workflow agent turn outcome: {error}"
+        ))
+        .into()
     })
 }
 
@@ -802,11 +832,27 @@ fn stable_uuid(domain: &[u8], run_uid: Uuid, node_id: &str) -> Uuid {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::time::{Duration, Instant};
+
     use moa_artifacts::reference::ArtifactRef;
     use moa_workflows::interpreter::WorkflowNodeRequest;
     use serde_json::json;
 
+    use crate::objects::session::AttachSessionTurnWaiterOutput;
+
     use super::*;
+
+    async fn await_agent_turn_after_session_waiter(
+        attached: AttachSessionTurnWaiterOutput,
+        completion: impl Future<Output = Result<String, TerminalError>>,
+    ) -> Result<TurnOutcome, HandlerError> {
+        if let Some(outcome) = attached.outcome {
+            return Ok(outcome);
+        }
+        let raw = completion.await?;
+        parse_turn_outcome(&raw)
+    }
 
     #[test]
     fn tool_node_uses_single_tool_ref_and_node_input() {
@@ -866,6 +912,36 @@ mod tests {
             Some("Review the ticket")
         );
         assert_eq!(prompt_from_input(&json!({ "instruction": " " })), None);
+    }
+
+    #[tokio::test]
+    async fn agent_node_turn_completion_awakeable_resolves_before_legacy_poll_interval_offline() {
+        // Pins: workflow agent nodes wait on the session turn signal, not a 1s snapshot poll.
+        let outcome = TurnOutcome {
+            turn_id: "turn-workflow-node".to_string(),
+            kind: TurnOutcomeKind::Completed,
+            message: "agent node completed".to_string(),
+        };
+        let raw = serde_json::to_string(&outcome).expect("turn outcome serializes");
+        let started = Instant::now();
+
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                await_agent_turn_after_session_waiter(
+                    AttachSessionTurnWaiterOutput { outcome: None },
+                    async { Ok::<_, TerminalError>(raw) },
+                ),
+            )
+            .await
+            .expect("completion signal should resolve well below the old 1s polling interval")
+            .expect("turn outcome signal should parse"),
+            outcome
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "agent turn completion path waited like the old polling loop"
+        );
     }
 
     #[test]

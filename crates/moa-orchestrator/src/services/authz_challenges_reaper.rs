@@ -89,10 +89,17 @@ impl AuthzChallengeReaper {
         let unresolved =
             authz_challenge_store::unresolved_terminal_builtin_challenges(&self.pool).await?;
 
+        let mut resolved_count = 0usize;
         for challenge in &unresolved {
             let decision = decision_from_unresolved_challenge(challenge)?;
             let payload = serde_json::to_value(&decision)?;
             if let Err(error) = resolver.resolve(&challenge.awakeable_id, &payload).await {
+                authz_challenge_store::release_builtin_challenge_resolution_claim(
+                    &self.pool,
+                    challenge.id,
+                    challenge.resolve_claim_token,
+                )
+                .await?;
                 tracing::warn!(
                     authz_challenge_id = %challenge.id,
                     awakeable_id = %challenge.awakeable_id,
@@ -101,11 +108,23 @@ impl AuthzChallengeReaper {
                 );
                 continue;
             }
-            authz_challenge_store::mark_builtin_challenge_resolved(&self.pool, challenge.id)
-                .await?;
+            let marked = authz_challenge_store::mark_claimed_builtin_challenge_resolved(
+                &self.pool,
+                challenge.id,
+                challenge.resolve_claim_token,
+            )
+            .await?;
+            if marked {
+                resolved_count += 1;
+            } else {
+                tracing::debug!(
+                    authz_challenge_id = %challenge.id,
+                    "authz challenge resolution claim was already completed elsewhere"
+                );
+            }
         }
 
-        Ok(unresolved.len())
+        Ok(resolved_count)
     }
 }
 
@@ -203,12 +222,14 @@ mod tests {
             awakeable_id: "awakeable-denied".to_string(),
             status: "denied".to_string(),
             deny_reason: Some("policy denied".to_string()),
+            resolve_claim_token: Uuid::now_v7(),
         };
         let timeout = authz_challenge_store::UnresolvedBuiltinChallenge {
             id: Uuid::now_v7(),
             awakeable_id: "awakeable-timeout".to_string(),
             status: "timeout".to_string(),
             deny_reason: None,
+            resolve_claim_token: Uuid::now_v7(),
         };
 
         assert_eq!(

@@ -16,6 +16,7 @@ mod memory;
 mod messaging;
 mod orchestrator;
 mod providers;
+mod runtime_cache;
 mod sandbox;
 mod security;
 mod session;
@@ -55,12 +56,13 @@ pub use memory::{
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
 pub use providers::{GeneralConfig, ModelsConfig, ProviderCredentialConfig, ProvidersConfig};
+pub use runtime_cache::{RuntimeCacheBackend, RuntimeCacheConfig};
 pub use sandbox::{
     CloudConfig, CloudHandsConfig, LocalConfig, McpCredentialConfig, McpServerConfig,
     McpTransportConfig,
 };
 pub use security::PermissionsConfig;
-pub use session::SessionConfig;
+pub use session::{SessionBlobBackend, SessionConfig};
 pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
 pub use token_vault::{TokenVaultConfig, TokenVaultKind};
 
@@ -106,6 +108,8 @@ pub struct MoaConfig {
     pub permissions: PermissionsConfig,
     /// Session storage settings.
     pub session: SessionConfig,
+    /// Ephemeral runtime cache settings.
+    pub runtime_cache: RuntimeCacheConfig,
     /// Session-history compaction settings.
     pub compaction: CompactionConfig,
     /// Restate-backed orchestrator endpoint settings.

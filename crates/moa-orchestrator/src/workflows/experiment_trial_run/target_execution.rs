@@ -6,6 +6,7 @@ use super::status::{
 };
 use super::trial_simulator::{SimulatorContext, simulator_done, simulator_next_user_message};
 use super::*;
+use crate::objects::session::{AttachSessionTurnWaiterInput, RemoveSessionTurnWaiterInput};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TargetObservation {
@@ -97,7 +98,7 @@ pub(super) async fn run_agent_loop_trial(
             .await;
         }
 
-        with_identity_headers(
+        let response = with_identity_headers(
             ctx.object_client::<SessionClient>(session_id.to_string())
                 .queue_message(Json::from(QueueMessageRequest {
                     user_message: simulator_message.clone(),
@@ -109,11 +110,18 @@ pub(super) async fn run_agent_loop_trial(
             &request.identity,
         )
         .call()
-        .await?;
+        .await?
+        .into_inner();
+        let Some(turn_id) = response.started_turn_id else {
+            return Err(TerminalError::new(
+                "target session queued simulator message behind an active turn",
+            )
+            .into());
+        };
         increment_trial_turn(ctx, request.tenant_id, trial.trial_uid).await?;
         transcript.push(ContextMessage::user(simulator_message));
 
-        let status = wait_for_target_after_turn(ctx, session_id, &request.identity).await?;
+        let status = wait_for_target_after_turn(ctx, session_id, turn_id).await?;
         record_target_usage_after(ctx, session_id, &mut target_usage_sequence).await?;
         if let Some(stop) = stop_for_session_status(&status) {
             return stop_trial(
@@ -319,30 +327,40 @@ async fn load_session_events(
 async fn wait_for_target_after_turn(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
-    identity: &Identity,
+    turn_id: String,
 ) -> Result<SessionStatus, HandlerError> {
-    for _ in 0..TARGET_WAIT_ATTEMPTS {
-        let status = ctx
-            .object_client::<SessionClient>(session_id.to_string())
-            .status()
-            .call()
-            .await?
-            .into_inner();
-        let snapshot = with_identity_headers(
-            ctx.object_client::<SessionClient>(session_id.to_string())
-                .snapshot(),
-            identity,
-        )
+    let (awakeable_id, completion) = ctx.awakeable::<String>();
+    let attached = ctx
+        .object_client::<SessionClient>(session_id.to_string())
+        .attach_turn_waiter(Json::from(AttachSessionTurnWaiterInput {
+            turn_id: turn_id.clone(),
+            awakeable_id: awakeable_id.clone(),
+        }))
         .call()
         .await?
         .into_inner();
-        if target_is_waiting_or_idle(&status, &snapshot) {
-            return Ok(status);
-        }
-        ctx.sleep(TARGET_WAIT_INTERVAL).await?;
+    if let Some(outcome) = attached.outcome {
+        return Ok(status_for_turn_outcome(&outcome));
     }
 
-    Err(TerminalError::new("timed out waiting for target session turn").into())
+    restate_sdk::select! {
+        outcome = completion => {
+            let outcome = parse_turn_outcome(&outcome?)?;
+            Ok(status_for_turn_outcome(&outcome))
+        },
+        _ = ctx.sleep(TARGET_WAIT_TIMEOUT) => {
+            ctx.object_client::<SessionClient>(session_id.to_string())
+                .remove_turn_waiter(Json::from(RemoveSessionTurnWaiterInput {
+                    turn_id: turn_id.clone(),
+                    awakeable_id,
+                }))
+                .call()
+                .await?;
+            Err(TerminalError::new(format!(
+                "timed out waiting for target session turn {turn_id}"
+            )).into())
+        }
+    }
 }
 
 async fn record_target_usage_after(
@@ -414,14 +432,21 @@ fn transcript_from_events(events: &[EventRecord]) -> Vec<ContextMessage> {
         .collect()
 }
 
-fn target_is_waiting_or_idle(status: &SessionStatus, snapshot: &SessionSnapshot) -> bool {
-    matches!(
-        status,
-        SessionStatus::Paused
-            | SessionStatus::Completed
-            | SessionStatus::Cancelled
-            | SessionStatus::Failed
-    ) && snapshot.active_turn_id.is_none()
+fn parse_turn_outcome(raw: &str) -> Result<TurnOutcome, HandlerError> {
+    serde_json::from_str(raw).map_err(|error| {
+        TerminalError::new(format!(
+            "failed to deserialize target turn outcome: {error}"
+        ))
+        .into()
+    })
+}
+
+fn status_for_turn_outcome(outcome: &TurnOutcome) -> SessionStatus {
+    match outcome.kind {
+        TurnOutcomeKind::Completed => SessionStatus::Paused,
+        TurnOutcomeKind::Cancelled => SessionStatus::Cancelled,
+        TurnOutcomeKind::Failed => SessionStatus::Failed,
+    }
 }
 
 async fn start_and_attach_workflow_run(
@@ -609,6 +634,29 @@ mod tests {
                 ExperimentTrialStopReason::Cancelled,
             ))
         );
+    }
+
+    #[test]
+    fn target_turn_completion_signal_maps_to_session_status_offline() {
+        // Pins: target waits consume a turn outcome signal instead of polling session status.
+        let completed = TurnOutcome {
+            turn_id: "turn-1".to_string(),
+            kind: TurnOutcomeKind::Completed,
+            message: "done".to_string(),
+        };
+        let failed = TurnOutcome {
+            turn_id: "turn-2".to_string(),
+            kind: TurnOutcomeKind::Failed,
+            message: "failed".to_string(),
+        };
+        let raw = serde_json::to_string(&completed).expect("turn outcome serializes");
+
+        assert_eq!(
+            parse_turn_outcome(&raw).expect("turn outcome parses"),
+            completed
+        );
+        assert_eq!(status_for_turn_outcome(&completed), SessionStatus::Paused);
+        assert_eq!(status_for_turn_outcome(&failed), SessionStatus::Failed);
     }
 
     fn event_record(session_id: SessionId, sequence_num: u64, event: Event) -> EventRecord {

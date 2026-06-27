@@ -8,7 +8,7 @@ use moa_knowledge::{
         ConnectionStatus, IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
     },
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{KnowledgeRepository, PostgresKnowledgeRepository, SyncRunClaim},
 };
 use moa_test_support::postgres;
 use serde_json::json;
@@ -107,6 +107,62 @@ fn step(
         retry_count: 0,
         error_code: None,
     }
+}
+
+#[tokio::test]
+async fn active_sync_run_claim_allows_one_runner_per_connection_db_knowledge() {
+    // Pins: two repository instances racing to start one connection sync produce one active run.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo_a = repository(&db, tenant_id);
+    let repo_b = repository(&db, tenant_id);
+
+    let connection = connection(tenant_id, "active-claim");
+    repo_a
+        .upsert_connection(connection.clone())
+        .await
+        .expect("insert connection");
+
+    let run_a = sync_run(tenant_id, connection.connection_uid);
+    let mut run_b = sync_run(tenant_id, connection.connection_uid);
+    run_b.sync_run_uid = Uuid::now_v7();
+    run_b.started_at = run_a.started_at + Duration::milliseconds(1);
+
+    let (claim_a, claim_b) = tokio::join!(
+        repo_a.claim_sync_run(run_a.clone()),
+        repo_b.claim_sync_run(run_b.clone())
+    );
+    let claim_a = claim_a.expect("first claim should complete");
+    let claim_b = claim_b.expect("second claim should complete");
+    let claimed = [&claim_a, &claim_b]
+        .iter()
+        .filter(|claim| matches!(claim, SyncRunClaim::Claimed(_)))
+        .count();
+    let already_running = [&claim_a, &claim_b]
+        .iter()
+        .filter(|claim| matches!(claim, SyncRunClaim::AlreadyRunning(_)))
+        .count();
+    assert_eq!(claimed, 1);
+    assert_eq!(already_running, 1);
+
+    let claimed_uid = match (&claim_a, &claim_b) {
+        (SyncRunClaim::Claimed(run), SyncRunClaim::AlreadyRunning(existing))
+        | (SyncRunClaim::AlreadyRunning(existing), SyncRunClaim::Claimed(run)) => {
+            assert_eq!(run.sync_run_uid, existing.sync_run_uid);
+            run.sync_run_uid
+        }
+        _ => panic!("expected one claimed run and one already-running result"),
+    };
+    assert_eq!(
+        active_sync_run_count(db.store().pool(), tenant_id, connection.connection_uid).await,
+        1
+    );
+    assert!(
+        [run_a.sync_run_uid, run_b.sync_run_uid].contains(&claimed_uid),
+        "claim should return one of the racing run IDs"
+    );
 }
 
 #[tokio::test]
@@ -362,6 +418,27 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
             .expect("tenant A lookup for tenant B steps")
             .is_empty()
     );
+}
+
+async fn active_sync_run_count(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.knowledge_sync_runs
+        WHERE tenant_id = $1
+          AND connection_id = $2
+          AND status IN ('queued', 'provider_syncing', 'provider_synced', 'parse_pending', 'ingesting')
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(connection_uid)
+    .fetch_one(pool)
+    .await
+    .expect("count active sync runs")
 }
 
 #[derive(Debug, PartialEq, Eq)]

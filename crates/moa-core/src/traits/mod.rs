@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod embedding;
+pub mod runtime_cache;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,6 +32,7 @@ use crate::wire::analytics::LearningCandidateSummary;
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;
+pub use runtime_cache::RuntimeCacheStore;
 
 /// Durable append-only session store.
 #[async_trait]

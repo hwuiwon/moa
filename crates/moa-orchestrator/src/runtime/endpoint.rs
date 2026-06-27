@@ -12,8 +12,6 @@ use std::sync::Arc;
 use crate::services::eval::{Eval, EvalImpl};
 #[cfg(feature = "experiments")]
 use crate::services::experiments::{Experiments, ExperimentsImpl};
-#[cfg(feature = "internal-eval-runner")]
-use crate::workflows::eval_run::{EvalRun, EvalRunImpl};
 #[cfg(feature = "experiments")]
 use crate::workflows::experiment_run::{ExperimentRun, ExperimentRunImpl};
 #[cfg(feature = "experiments")]
@@ -33,18 +31,14 @@ use crate::{
         admin_maintenance::{AdminMaintenance, AdminMaintenanceImpl},
         agent_definitions::{AgentDefinitions, AgentDefinitionsImpl},
         agents::{Agents, AgentsImpl},
-        analytics::{Analytics, AnalyticsImpl},
         api_keys::{ApiKeys, ApiKeysImpl},
         artifacts::{Artifacts, ArtifactsImpl},
-        audit::{Audit, AuditImpl},
         authz_admin::{Authz, AuthzImpl},
         authz_challenges::{AuthzChallenges, AuthzChallengesImpl},
         contacts::{Contacts, ContactsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
-        health::{Health, HealthImpl},
         knowledge::{Knowledge, KnowledgeImpl},
         learning_review::{LearningReview, LearningReviewImpl},
-        lineage_admin::{LineageAdmin, LineageAdminImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl},
         memory::{Memory, MemoryImpl},
         neon_maint::{NeonMaint, NeonMaintImpl},
@@ -53,7 +47,6 @@ use crate::{
         skills::{Skills, SkillsImpl},
         tenants::{Tenants, TenantsImpl},
         tool_executor::{ToolExecutor, ToolExecutorImpl},
-        whoami::{Whoami, WhoamiImpl},
         workflows::{Workflows, WorkflowsImpl},
     },
     workflows::{
@@ -99,17 +92,14 @@ struct EndpointBindingContext<'a> {
 }
 
 const CORE_HEAD_BINDINGS: &[RestateBinding] = &[
-    RestateBinding::enabled("Health", bind_health),
     RestateBinding::enabled("SessionStore", bind_session_store),
     RestateBinding::enabled("LLMGateway", bind_llm_gateway),
     RestateBinding::enabled("AgentDefinitions", bind_agent_definitions),
     RestateBinding::enabled("Agents", bind_agents),
     RestateBinding::enabled("AdminMaintenance", bind_admin_maintenance),
-    RestateBinding::enabled("Analytics", bind_analytics),
     RestateBinding::enabled("Artifacts", bind_artifacts),
     RestateBinding::enabled("ActionReviews", bind_action_reviews),
     RestateBinding::enabled("ApiKeys", bind_api_keys),
-    RestateBinding::enabled("Audit", bind_audit),
     RestateBinding::enabled("Authz", bind_authz),
     RestateBinding::enabled("AuthzChallenges", bind_authz_challenges),
     RestateBinding::enabled("Contacts", bind_contacts),
@@ -122,7 +112,6 @@ const CORE_BODY_BINDINGS: &[RestateBinding] = &[
     RestateBinding::enabled("GraphMemoryMaint", bind_graph_memory_maint),
     RestateBinding::enabled("Knowledge", bind_knowledge),
     RestateBinding::enabled("LearningReview", bind_learning_review),
-    RestateBinding::enabled("LineageAdmin", bind_lineage_admin),
     RestateBinding::enabled("Memory", bind_memory),
     RestateBinding::enabled("NeonMaint", bind_neon_maint),
     RestateBinding::enabled("Privacy", bind_privacy),
@@ -132,7 +121,6 @@ const CORE_BODY_BINDINGS: &[RestateBinding] = &[
     RestateBinding::enabled("SubAgent", bind_sub_agent),
     RestateBinding::enabled("Tenants", bind_tenants),
     RestateBinding::enabled("Tenant", bind_tenant),
-    RestateBinding::enabled("Whoami", bind_whoami),
     RestateBinding::enabled("Workflows", bind_workflows),
     RestateBinding::enabled(
         "ArtifactWorkflowExecution",
@@ -169,12 +157,6 @@ const INTERNAL_EVAL_SERVICE_BINDINGS: &[RestateBinding] =
     &[RestateBinding::enabled("Eval", bind_eval)];
 #[cfg(not(feature = "internal-eval-runner"))]
 const INTERNAL_EVAL_SERVICE_BINDINGS: &[RestateBinding] = &[RestateBinding::name_only("Eval")];
-
-#[cfg(feature = "internal-eval-runner")]
-const INTERNAL_EVAL_WORKFLOW_BINDINGS: &[RestateBinding] =
-    &[RestateBinding::enabled("EvalRun", bind_eval_run)];
-#[cfg(not(feature = "internal-eval-runner"))]
-const INTERNAL_EVAL_WORKFLOW_BINDINGS: &[RestateBinding] = &[RestateBinding::name_only("EvalRun")];
 
 #[cfg(feature = "skill-learning")]
 const SKILL_LEARNING_WORKFLOW_BINDINGS: &[RestateBinding] = &[RestateBinding::enabled(
@@ -287,9 +269,6 @@ fn restate_bindings_for_features(
         bindings.extend(EXPERIMENT_SERVICE_BINDINGS);
     }
     bindings.extend(CORE_BODY_BINDINGS);
-    if internal_eval_enabled {
-        bindings.extend(INTERNAL_EVAL_WORKFLOW_BINDINGS);
-    }
     if skill_learning_enabled {
         bindings.extend(SKILL_LEARNING_WORKFLOW_BINDINGS);
     }
@@ -298,10 +277,6 @@ fn restate_bindings_for_features(
     }
     bindings.extend(CORE_TAIL_BINDINGS);
     bindings
-}
-
-fn bind_health(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(HealthImpl.serve())
 }
 
 fn bind_session_store(
@@ -336,10 +311,6 @@ fn bind_admin_maintenance(
     builder.bind(AdminMaintenanceImpl.serve())
 }
 
-fn bind_analytics(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(AnalyticsImpl.serve())
-}
-
 fn bind_artifacts(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
     builder.bind(ArtifactsImpl.serve())
 }
@@ -353,10 +324,6 @@ fn bind_action_reviews(
 
 fn bind_api_keys(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
     builder.bind(ApiKeysImpl.serve())
-}
-
-fn bind_audit(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(AuditImpl.serve())
 }
 
 fn bind_authz(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
@@ -399,7 +366,9 @@ fn bind_action_policy(
     builder: EndpointBuilder,
     context: &EndpointBindingContext<'_>,
 ) -> EndpointBuilder {
-    builder.bind(ActionPolicyImpl::new(context.tool_router.clone()).serve())
+    builder.bind(
+        ActionPolicyImpl::new(context.tool_router.clone(), context.session_store.clone()).serve(),
+    )
 }
 
 fn bind_graph_memory_maint(
@@ -418,10 +387,6 @@ fn bind_learning_review(
     _: &EndpointBindingContext<'_>,
 ) -> EndpointBuilder {
     builder.bind(LearningReviewImpl.serve())
-}
-
-fn bind_lineage_admin(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(LineageAdminImpl.serve())
 }
 
 fn bind_memory(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
@@ -460,10 +425,6 @@ fn bind_tenant(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> Endp
     builder.bind(TenantImpl.serve())
 }
 
-fn bind_whoami(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(WhoamiImpl.serve())
-}
-
 fn bind_workflows(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
     builder.bind(WorkflowsImpl.serve())
 }
@@ -484,11 +445,6 @@ fn bind_knowledge_sync_ingestion(
 
 fn bind_consolidate(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
     builder.bind(ConsolidateImpl.serve())
-}
-
-#[cfg(feature = "internal-eval-runner")]
-fn bind_eval_run(builder: EndpointBuilder, _: &EndpointBindingContext<'_>) -> EndpointBuilder {
-    builder.bind(EvalRunImpl.serve())
 }
 
 #[cfg(feature = "skill-learning")]
@@ -648,11 +604,6 @@ mod tests {
             "internal eval gate should add Eval exactly once"
         );
         assert_eq!(
-            names.iter().filter(|name| **name == "EvalRun").count(),
-            1,
-            "internal eval gate should add EvalRun exactly once"
-        );
-        assert_eq!(
             names.contains(&"Experiments"),
             cfg!(feature = "experiments"),
             "internal eval mode should preserve the experiments feature state"
@@ -717,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_eval_registration_requires_eval_and_eval_run_when_enabled() {
+    fn internal_eval_registration_requires_eval_when_enabled() {
         let default_names = expected_service_names_for_internal_eval(false);
         let internal_names = expected_service_names_for_internal_eval(true);
         let default_deployment = vec![deployment_with_services(&default_names)];
@@ -725,11 +676,11 @@ mod tests {
 
         assert!(
             !services_registered_with_expected(&default_deployment, &internal_names),
-            "internal eval readiness must reject a deployment missing Eval and EvalRun"
+            "internal eval readiness must reject a deployment missing Eval"
         );
         assert!(
             services_registered_with_expected(&internal_deployment, &internal_names),
-            "internal eval readiness should accept Eval and EvalRun when explicitly enabled"
+            "internal eval readiness should accept Eval when explicitly enabled"
         );
     }
 

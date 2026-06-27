@@ -12,6 +12,7 @@ use moa_knowledge::domain::{
     TriggerSyncRequest,
 };
 use moa_knowledge::observability::{build_step_row, classify_failure, failed_outcome};
+use moa_knowledge::repository::SyncRunClaim;
 use moa_observability::record_knowledge_sync_run;
 use serde_json::json;
 use tracing::Instrument;
@@ -46,26 +47,6 @@ impl KnowledgeService {
         if connection.tenant_id != request.tenant_id {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
-        if let Some(existing) = repository
-            .latest_sync_run_for_connection(
-                request.connection_uid,
-                &[
-                    SyncRunStatus::Queued,
-                    SyncRunStatus::ProviderSyncing,
-                    SyncRunStatus::ProviderSynced,
-                    SyncRunStatus::ParsePending,
-                    SyncRunStatus::Ingesting,
-                ],
-            )
-            .await?
-        {
-            return Ok(KnowledgeSyncResponse {
-                sync_run_uid: existing.sync_run_uid,
-                status: existing.status.as_str().to_string(),
-                started_at: existing.started_at,
-            });
-        }
-
         let now = Utc::now();
         let mut run = KnowledgeSyncRun {
             sync_run_uid: Uuid::now_v7(),
@@ -87,7 +68,18 @@ impl KnowledgeService {
             started_at: now,
             finished_at: None,
         };
-        repository.create_sync_run(run.clone()).await?;
+        match repository.claim_sync_run(run.clone()).await? {
+            SyncRunClaim::Claimed(claimed) => {
+                run = claimed;
+            }
+            SyncRunClaim::AlreadyRunning(existing) => {
+                return Ok(KnowledgeSyncResponse {
+                    sync_run_uid: existing.sync_run_uid,
+                    status: existing.status.as_str().to_string(),
+                    started_at: existing.started_at,
+                });
+            }
+        }
         let provider_label = connection.provider.clone();
         let current_span = tracing::Span::current();
         current_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));

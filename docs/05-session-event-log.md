@@ -17,6 +17,8 @@ Postgres stores:
 - learning log entries
 - live behavior experiment run metadata
 - graph changelog outbox rows and per-tenant changelog versions
+- large event payload claim-check blobs
+- durable hand leases for sandbox reuse and cleanup
 - analytics views and materialized views
 
 ## Core Tables
@@ -139,6 +141,11 @@ history. Compiled context messages can carry the source event id, event sequence
 number, and tool id; context lineage copies those references so citations can be
 joined back to the durable event rows without parsing rendered prompt text.
 
+Large event payloads use claim-check storage before the event is committed.
+The default cloud backend is Postgres (`session_blobs`) so a replay on another
+pod can resolve the blob reference. The local filesystem backend is explicit
+and, in cloud mode, requires a persistent mounted path.
+
 Contact-bound sessions persist contact metadata on the `sessions` row. The
 session id is the observability anchor for turns and tool calls; the contact id
 is derived from the session metadata when needed. A contact may exist without a
@@ -237,9 +244,9 @@ The `Experiments` service exposes `generate_plan`, `run`, `status`, `list`,
 `compare`. `generate_plan`, `run`, `cancel`, and `propose_improvements` require
 tenant admin or tenant operator authorization. `status`, `list`, `trials`,
 `trial_status`, `scores`, and `compare` require tenant authorization for the
-target tenant and resource. `Analytics/experiment_stats` also requires tenant
-authorization. These service checks sit above the tenant RLS scope on
-`moa.experiment_run`, `moa.experiment_trial`,
+target tenant and resource. The direct edge `analytics/experiment-stats` route
+also requires tenant authorization. These checks sit above the tenant RLS scope
+on `moa.experiment_run`, `moa.experiment_trial`,
 `moa.experiment_run_artifact_revision`, and `analytics.score_run`.
 
 ## Graph Changelog
@@ -257,11 +264,20 @@ Replay is history-first:
 3. Reconstruct visible messages, tool state, action reviews, and checkpoints.
 4. Attach to live runtime streams when available.
 
-The orchestrator publishes live runtime events during turn execution. Cloud runtime state is queryable through Restate and recoverable from the durable event log.
+The orchestrator publishes live runtime events during turn execution. Visible
+history is recoverable from the durable event log; hot turn/sub-agent progress
+is queryable through Restate where a durable execution primitive owns it.
 
 Replay uses persisted session contact metadata; clients cannot provide a new
 contact per message to change historical attribution. Tool-call records only
 need the session id because the session store can recover the contact binding.
+
+Sandbox bindings are not recovered from session events. The authoritative
+runtime binding for a session/provider is `moa.hand_leases`, which stores the
+tenant, provider, tier, serialized handle, generation, status, and expiry.
+`ToolRouter` process maps are reconnect caches only; cleanup reads durable
+leases so terminal session teardown works even when the current pod never
+provisioned the original hand.
 
 ## Compaction
 
@@ -287,3 +303,9 @@ Session rollups come from generated columns and triggers. Views and materialized
 - `daily_tenant_metrics`
 - `skill_resolution_rates`
 - `segment_baselines`
+
+Read-only analytics routes are served directly by `moa-edge` after authz and
+read Postgres/domain stores without a Restate service hop. The same applies to
+whoami, audit signature verification, and lineage explain/query/verify reads.
+Lineage export and erase are not direct read handlers until a durable workflow
+owns their side effects.

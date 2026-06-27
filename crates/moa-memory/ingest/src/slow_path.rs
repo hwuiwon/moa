@@ -25,7 +25,8 @@ use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;
 use serde_json::json;
-use sqlx::PgPool;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Postgres, Transaction};
 
 const DONE_KEY_PREFIX: &str = "done";
 const CHUNK_TARGET_TOKENS: usize = 700;
@@ -175,11 +176,13 @@ impl IngestionVO for IngestionVOImpl {
     }
 }
 
-/// Runs the slow-path ingestion steps directly in the current process.
+/// Runs the slow-path ingestion steps directly in the current process for local/test hosts.
 ///
 /// Hosts that call this helper must first install an ingestion runtime with
 /// [`crate::install_runtime_with_pool`]. Restate handlers should continue to use
-/// [`IngestionVO::ingest_turn`] so the step journal remains durable.
+/// [`IngestionVO::ingest_turn`] so the step journal remains durable. The helper
+/// takes a transaction-scoped Postgres advisory fence before graph/vector writes
+/// so duplicate direct callers for the same turn serialize across pods.
 pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, HandlerError> {
     let runtime = current_runtime().map_err(HandlerError::from)?;
     ingest_turn_direct_with_pool_and_pii(
@@ -197,11 +200,13 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
     .await
 }
 
-/// Runs the slow-path ingestion steps directly against an explicit Postgres pool.
+/// Runs the slow-path ingestion steps directly against an explicit Postgres pool for local/tests.
 ///
 /// This is intended for embedded hosts that own more than one pool in the same
 /// process, such as integration tests. Restate handlers should continue to use
-/// [`IngestionVO::ingest_turn`] so the step journal remains durable.
+/// [`IngestionVO::ingest_turn`] so the step journal remains durable. The helper
+/// takes a transaction-scoped Postgres advisory fence before graph/vector writes
+/// so duplicate direct callers for the same turn serialize across pods.
 pub async fn ingest_turn_direct_with_pool(
     pool: PgPool,
     turn: SessionTurn,
@@ -247,12 +252,15 @@ async fn ingest_turn_direct_with_pool_and_pii(
         entity_blocking_embedder,
         contradiction_detector,
     } = deps;
+    let direct_claim = claim_direct_ingest_turn(&pool, &turn).await?;
     let degraded = storage_partition_degraded(&pool, &turn).await?;
     if degraded && !should_ingest_degraded(&turn) {
-        return Ok(IngestApplyReport {
+        let report = IngestApplyReport {
             skipped: 1,
             ..IngestApplyReport::default()
-        });
+        };
+        direct_claim.release().await?;
+        return Ok(report);
     }
 
     let chunks =
@@ -270,30 +278,37 @@ async fn ingest_turn_direct_with_pool_and_pii(
         &embedded,
     )
     .await?;
-    apply_decisions(
+    let report = apply_decisions(
         &pool,
         entity_resolver.as_ref(),
         entity_blocking_embedder,
         &turn,
         &decisions,
     )
-    .await
+    .await?;
+    direct_claim.release().await?;
+    Ok(report)
 }
 
-/// Runs the slow-path ingestion steps with explicit deterministic dependencies.
+/// Runs the slow-path ingestion steps with explicit deterministic dependencies for local/tests.
 ///
 /// This helper is intended for integration tests that need to exercise the M10 pipeline without
-/// depending on process-global environment variables or billed provider calls.
+/// depending on process-global environment variables or billed provider calls. It takes a
+/// transaction-scoped Postgres advisory fence before graph/vector writes so duplicate direct
+/// callers for the same turn serialize across pods.
 pub async fn ingest_turn_direct_with_ctx(
     ctx: IngestCtx,
     turn: SessionTurn,
 ) -> Result<IngestApplyReport, HandlerError> {
+    let direct_claim = claim_direct_ingest_turn(&ctx.pool, &turn).await?;
     let degraded = storage_partition_degraded(&ctx.pool, &turn).await?;
     if degraded && !should_ingest_degraded(&turn) {
-        return Ok(IngestApplyReport {
+        let report = IngestApplyReport {
             skipped: 1,
             ..IngestApplyReport::default()
-        });
+        };
+        direct_claim.release().await?;
+        return Ok(report);
     }
 
     let chunks =
@@ -309,14 +324,16 @@ pub async fn ingest_turn_direct_with_ctx(
         detect_contradictions_with(ctx.contradict.as_ref(), ctx.pool.clone(), &turn, &embedded)
             .await?;
     let entity_blocking_embedder = ctx.entity_blocking_enabled.then(|| ctx.embedder.clone());
-    apply_decisions(
+    let report = apply_decisions(
         &ctx.pool,
         ctx.entity_resolver.as_ref(),
         entity_blocking_embedder,
         &turn,
         &decisions,
     )
-    .await
+    .await?;
+    direct_claim.release().await?;
+    Ok(report)
 }
 
 /// Builds the object key used to serialize ingestion per workspace/session.
@@ -518,6 +535,42 @@ async fn detect_contradictions_with(
     }
 
     Ok(decisions)
+}
+
+struct DirectIngestClaim {
+    tx: Transaction<'static, Postgres>,
+}
+
+impl DirectIngestClaim {
+    async fn release(self) -> Result<(), HandlerError> {
+        self.tx.commit().await.map_err(HandlerError::from)
+    }
+}
+
+async fn claim_direct_ingest_turn(
+    pool: &PgPool,
+    turn: &SessionTurn,
+) -> Result<DirectIngestClaim, HandlerError> {
+    let lock_key = direct_ingest_claim_key(turn);
+    let mut tx = pool.begin().await.map_err(HandlerError::from)?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(HandlerError::from)?;
+    Ok(DirectIngestClaim { tx })
+}
+
+fn direct_ingest_claim_key(turn: &SessionTurn) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"moa:memory:direct_ingest:v1");
+    hasher.update(turn.tenant_id.0.as_bytes());
+    hasher.update(turn.session_id.0.as_bytes());
+    hasher.update(turn.turn_seq.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut key_bytes = [0_u8; 8];
+    key_bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(key_bytes)
 }
 
 fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecision {
@@ -1107,8 +1160,8 @@ mod tests {
     use moa_memory_pii::{PiiCategory, PiiResult, PiiSpan, classify_heuristic};
 
     use super::{
-        entity_fact_edge_intent, fact_entity_edge_intent, fact_object_edge_label, redact_fact,
-        turn_tenant_scope, turn_transcript,
+        direct_ingest_claim_key, entity_fact_edge_intent, fact_entity_edge_intent,
+        fact_object_edge_label, redact_fact, turn_tenant_scope, turn_transcript,
     };
     use crate::{ExtractedFact, ExtractedFactScopeHint, fact_hash};
 
@@ -1257,6 +1310,30 @@ mod tests {
                 .get("alias_mention")
                 .and_then(|value| value.as_str()),
             Some("Lib Foo")
+        );
+    }
+
+    #[test]
+    fn duplicate_direct_ingest_attempts_share_claim_key() {
+        // Pins: direct slow-path callers contend on one Postgres claim before graph/vector writes.
+        let turn = test_turn();
+        let duplicate = turn.clone();
+        let mut next_turn = turn.clone();
+        next_turn.turn_seq += 1;
+        let mut other_session = turn.clone();
+        other_session.session_id = SessionId(uuid::Uuid::now_v7());
+
+        assert_eq!(
+            direct_ingest_claim_key(&turn),
+            direct_ingest_claim_key(&duplicate)
+        );
+        assert_ne!(
+            direct_ingest_claim_key(&turn),
+            direct_ingest_claim_key(&next_turn)
+        );
+        assert_ne!(
+            direct_ingest_claim_key(&turn),
+            direct_ingest_claim_key(&other_session)
         );
     }
 

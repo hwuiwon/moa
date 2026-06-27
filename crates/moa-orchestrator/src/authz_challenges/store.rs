@@ -17,6 +17,8 @@ pub(crate) struct UnresolvedBuiltinChallenge {
     pub(crate) status: String,
     /// Persisted denial reason, when denied.
     pub(crate) deny_reason: Option<String>,
+    /// Resolution lease token held by the reaper that loaded this row.
+    pub(crate) resolve_claim_token: Uuid,
 }
 
 /// Locked builtin challenge row used while deciding or retrying delivery.
@@ -126,6 +128,7 @@ pub(crate) async fn unresolved_terminal_builtin_challenges(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<UnresolvedBuiltinChallenge>, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let claim_token = Uuid::new_v4();
     sqlx::query(
         r#"
         UPDATE builtin_pending_approvals
@@ -139,17 +142,31 @@ pub(crate) async fn unresolved_terminal_builtin_challenges(
     .execute(&mut *tx)
     .await?;
 
-    let unresolved: Vec<(Uuid, String, String, Option<String>)> = sqlx::query_as(
+    let unresolved: Vec<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(
         r#"
-        SELECT id, awakeable_id, status, deny_reason
-        FROM builtin_pending_approvals
-        WHERE status IN ('approved', 'denied', 'timeout')
-          AND resolved_at IS NULL
-        ORDER BY decided_at ASC NULLS LAST, expires_at ASC
-        LIMIT 100
-        FOR UPDATE SKIP LOCKED
+        WITH candidate AS (
+            SELECT id
+            FROM builtin_pending_approvals
+            WHERE status IN ('approved', 'denied', 'timeout')
+              AND resolved_at IS NULL
+              AND (
+                resolve_claim_expires_at IS NULL
+                OR resolve_claim_expires_at <= NOW()
+              )
+            ORDER BY decided_at ASC NULLS LAST, expires_at ASC
+            LIMIT 100
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE builtin_pending_approvals AS approval
+        SET resolve_claim_token = $1,
+            resolve_claim_expires_at = NOW() + INTERVAL '2 minutes'
+        FROM candidate
+        WHERE approval.id = candidate.id
+        RETURNING approval.id, approval.awakeable_id, approval.status,
+                  approval.deny_reason, approval.resolve_claim_token
         "#,
     )
+    .bind(claim_token)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -157,11 +174,14 @@ pub(crate) async fn unresolved_terminal_builtin_challenges(
     Ok(unresolved
         .into_iter()
         .map(
-            |(id, awakeable_id, status, deny_reason)| UnresolvedBuiltinChallenge {
-                id,
-                awakeable_id,
-                status,
-                deny_reason,
+            |(id, awakeable_id, status, deny_reason, resolve_claim_token)| {
+                UnresolvedBuiltinChallenge {
+                    id,
+                    awakeable_id,
+                    status,
+                    deny_reason,
+                    resolve_claim_token,
+                }
             },
         )
         .collect())
@@ -183,4 +203,145 @@ pub(crate) async fn mark_builtin_challenge_resolved(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Mark one claimed terminal challenge as delivered to Restate.
+pub(crate) async fn mark_claimed_builtin_challenge_resolved(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    resolve_claim_token: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE builtin_pending_approvals
+        SET resolved_at = COALESCE(resolved_at, NOW()),
+            resolve_claim_token = NULL,
+            resolve_claim_expires_at = NULL
+        WHERE id = $1
+          AND resolve_claim_token = $2
+        "#,
+    )
+    .bind(id)
+    .bind(resolve_claim_token)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Release a terminal challenge resolution claim after a transient delivery failure.
+pub(crate) async fn release_builtin_challenge_resolution_claim(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    resolve_claim_token: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE builtin_pending_approvals
+        SET resolve_claim_token = NULL,
+            resolve_claim_expires_at = NULL
+        WHERE id = $1
+          AND resolve_claim_token = $2
+        "#,
+    )
+    .bind(id)
+    .bind(resolve_claim_token)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{PgPool, postgres::PgPoolOptions};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn unresolved_terminal_challenges_are_claimed_once() {
+        // Pins: competing reapers cannot both claim the same terminal awakeable delivery.
+        let pool = test_pool().await;
+        let challenge_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO builtin_pending_approvals
+                (id, session_id, deciding_user_id, tenant_id, awakeable_id,
+                 action_summary, action_details, status, expires_at, decided_at)
+            VALUES
+                ($1, $2, $3, $4, 'awakeable-once', 'approve deploy', '{}'::jsonb,
+                 'approved', NOW() - INTERVAL '1 minute', NOW() - INTERVAL '1 minute')
+            "#,
+        )
+        .bind(challenge_id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("terminal challenge should insert");
+
+        let (first, second) = tokio::join!(
+            unresolved_terminal_builtin_challenges(&pool),
+            unresolved_terminal_builtin_challenges(&pool)
+        );
+        let first = first.expect("first claim should succeed");
+        let second = second.expect("second claim should succeed");
+        let total_claimed = first.len() + second.len();
+
+        assert_eq!(
+            total_claimed, 1,
+            "terminal challenge should have one claimant"
+        );
+        let challenge = first
+            .first()
+            .or_else(|| second.first())
+            .expect("one reaper should claim the challenge");
+        assert_eq!(challenge.id, challenge_id);
+        assert!(
+            !mark_claimed_builtin_challenge_resolved(&pool, challenge_id, Uuid::new_v4())
+                .await
+                .expect("wrong-token mark should query"),
+            "wrong resolution claim token must not complete the row"
+        );
+        assert!(
+            mark_claimed_builtin_challenge_resolved(
+                &pool,
+                challenge_id,
+                challenge.resolve_claim_token
+            )
+            .await
+            .expect("right-token mark should query"),
+            "owning resolution claim token should complete the row"
+        );
+    }
+
+    async fn test_pool() -> PgPool {
+        let database_url = std::env::var("MOA_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
+        let schema_name = format!("authz_challenge_store_test_{}", Uuid::new_v4().simple());
+        let search_path = format!("{}, public", quote_identifier(&schema_name));
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .after_connect(move |conn, _meta| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT pg_catalog.set_config('search_path', $1, false)")
+                        .bind(search_path)
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
+            .await
+            .expect("test Postgres should be reachable");
+        moa_migrations::run_auth_schema(&pool, &schema_name)
+            .await
+            .expect("auth schema should apply");
+        pool
+    }
+
+    fn quote_identifier(identifier: &str) -> String {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
 }

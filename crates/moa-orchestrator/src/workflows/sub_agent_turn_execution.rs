@@ -442,6 +442,7 @@ async fn handle_tool_call(
             tool_call,
             allowed_tools,
             active_canary: tool_context.active_canary,
+            trusted_sandbox_files: &[],
             origin: GovernedInvocationOrigin::SubAgent {
                 sub_agent_id,
                 turn_id: tool_context.turn_id,

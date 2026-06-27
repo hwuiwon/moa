@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    ActionClass, ActionPolicyEffect, ClaimCheck, RiskLevel, SessionId, TenantId, ToolCallId, UserId,
+    ActionClass, ActionPolicyEffect, ClaimCheck, RiskLevel, SandboxFile, SessionId, TenantId,
+    ToolCallId, UserId,
 };
 
 fn default_tool_max_output_tokens() -> u32 {
@@ -376,6 +377,9 @@ pub struct ToolCallRequest {
     /// Explicit idempotency key required by `IdempotentWithKey` tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Trusted sandbox files selected during context compilation and required before execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_sandbox_files: Vec<SandboxFile>,
 }
 
 /// Shared metadata that describes one callable tool.

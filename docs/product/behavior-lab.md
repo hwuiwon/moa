@@ -5,8 +5,8 @@ _Product boundary for behavior-lab artifacts, experiments, analytics, and live s
 Behavior Lab is the product surface for testing how target agents or workflows
 behave under simulated users, profiles, data bundles, and scenarios. It is not
 the regression-eval system. Regression evals remain in `moa-eval`; the `Eval`
-service and `EvalRun` workflow are internal-only and compiled behind
-`internal-eval-runner`.
+service is internal-only and compiled behind `internal-eval-runner`, with
+hosted run status persisted in Postgres.
 
 ## Product Boundary
 
@@ -17,7 +17,7 @@ Behavior Lab uses existing typed services:
   runs, proposes reviewed improvements, and reads score summaries.
 - `ExperimentRun` owns run-level workflow orchestration.
 - `ExperimentTrialRun` owns per-trial simulator turns and target execution.
-- `Analytics` reads product insights from scoped analytics views.
+- Direct edge analytics routes read product insights from scoped analytics views.
 
 The public edge routes are:
 
@@ -87,8 +87,9 @@ stop reason, and trace ID.
 
 Score rows land in `analytics.scores`. `Experiments/scores` returns run score
 summaries plus trial rollups and scenario breakdowns. `Experiments/compare`
-returns run comparisons plus scenario and variant deltas. `Analytics` owns
-broader product insights; clients should not query raw SQL from the UI.
+returns run comparisons plus scenario and variant deltas. Direct edge analytics
+routes own broader product insights; clients should not query raw SQL from the
+UI.
 
 Experiment-derived improvements cross one explicit review boundary:
 `Experiments/propose_improvements` creates proposed `learning_candidates` and
@@ -101,8 +102,8 @@ as live behavior.
 ## Future MCP Adapter
 
 Product/default MCP should be a thin adapter over `Artifacts`, `Experiments`,
-`Analytics`, `Workflows`, and other typed services. It must not own Behavior
-Lab domain logic, bypass service authorization, or publish public
+direct edge analytics reads, `Workflows`, and other typed services. It must not
+own Behavior Lab domain logic, bypass service authorization, or publish public
 `/v1/evals/*` semantics. If internal eval is exposed at all, it remains
 `internal-eval-runner` gated.
 

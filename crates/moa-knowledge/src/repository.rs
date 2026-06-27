@@ -25,6 +25,19 @@ use crate::{
 const LIST_CONNECTIONS_LIMIT: i64 = 100;
 const LIST_OBJECTS_LIMIT: u32 = 500;
 
+fn active_sync_run_status_values() -> Vec<String> {
+    [
+        SyncRunStatus::Queued,
+        SyncRunStatus::ProviderSyncing,
+        SyncRunStatus::ProviderSynced,
+        SyncRunStatus::ParsePending,
+        SyncRunStatus::Ingesting,
+    ]
+    .into_iter()
+    .map(|status| status.as_str().to_string())
+    .collect()
+}
+
 /// Result of looking up a linked connection by provider-owned account identity.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +48,26 @@ pub enum ProviderAccountConnectionLookup {
     Unique(KnowledgeConnection),
     /// More than one local connection matched the provider-owned account identity.
     Ambiguous { matches: usize },
+}
+
+/// Result of atomically claiming an active sync run for one connection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncRunClaim {
+    /// This caller inserted the active sync run and owns launching work.
+    Claimed(KnowledgeSyncRun),
+    /// Another caller already owns an active sync run for the same connection.
+    AlreadyRunning(KnowledgeSyncRun),
+}
+
+/// Result of atomically claiming ingestion for one object content version.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocumentVersionIngestionClaim {
+    /// This caller owns graph/vector writes for the document version.
+    Claimed(DocumentVersion),
+    /// Another worker is currently processing the same document version.
+    AlreadyInProgress(DocumentVersion),
+    /// The same document version has already completed ingestion.
+    AlreadyCompleted(DocumentVersion),
 }
 
 /// Persistence seam for tenant knowledge rows.
@@ -73,6 +106,12 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Saves a sync run.
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
+
+    /// Atomically claims the active sync slot for one tenant connection.
+    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> Result<SyncRunClaim> {
+        self.create_sync_run(run.clone()).await?;
+        Ok(SyncRunClaim::Claimed(run))
+    }
 
     /// Gets one sync run by identifier.
     async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>>;
@@ -157,6 +196,37 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Saves an immutable document version.
     async fn insert_document_version(&self, version: DocumentVersion) -> Result<()>;
+
+    /// Atomically claims graph/vector ingestion for one document content version.
+    async fn claim_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version: DocumentVersion,
+    ) -> Result<DocumentVersionIngestionClaim> {
+        let _ = sync_run_uid;
+        self.insert_document_version(version.clone()).await?;
+        Ok(DocumentVersionIngestionClaim::Claimed(version))
+    }
+
+    /// Marks a claimed document version ingestion as completed.
+    async fn complete_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+    ) -> Result<()> {
+        let _ = (sync_run_uid, version_uid);
+        Ok(())
+    }
+
+    /// Marks a claimed document version ingestion as failed so a retry can reclaim it.
+    async fn fail_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+    ) -> Result<()> {
+        let _ = (sync_run_uid, version_uid);
+        Ok(())
+    }
 
     /// Saves normalized blocks for a document version.
     async fn replace_blocks(&self, version_uid: Uuid, blocks: Vec<KnowledgeBlock>) -> Result<()>;
@@ -521,6 +591,100 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             "record ingestion step parent sync run",
         )?;
         conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn claim_sync_run(&self, run: KnowledgeSyncRun) -> Result<SyncRunClaim> {
+        let mut conn = self.begin().await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO moa.knowledge_sync_runs (
+                sync_run_uid, tenant_id, storage_partition_id, connection_id, status,
+                parser_provider, max_records, records_seen, records_changed, records_deleted,
+                records_ingested, records_failed, objects_parsed, chunks_embedded,
+                graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16,
+                CASE
+                    WHEN $17::TEXT IS NULL THEN NULL
+                    ELSE jsonb_build_object('code', $17::TEXT)
+                END,
+                $18, $19
+            )
+            ON CONFLICT (tenant_id, connection_id)
+            WHERE status IN (
+                'queued',
+                'provider_syncing',
+                'provider_synced',
+                'parse_pending',
+                'ingesting'
+            )
+            DO NOTHING
+            RETURNING sync_run_uid, tenant_id, connection_id, status, parser_provider,
+                      max_records, records_seen, records_changed, records_deleted,
+                      records_ingested, records_failed, objects_parsed, chunks_embedded,
+                      graph_nodes_upserted, graph_edges_upserted,
+                      error->>'code' AS error_code, started_at, finished_at
+            "#,
+        )
+        .bind(run.sync_run_uid)
+        .bind(run.tenant_id.0)
+        .bind(storage_partition_id(run.tenant_id))
+        .bind(run.connection_uid)
+        .bind(run.status.as_str())
+        .bind(run.parser)
+        .bind(run.max_records.map(i64::from))
+        .bind(i64::try_from(run.records_seen).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_changed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_deleted).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_ingested).map_err(map_int_error)?)
+        .bind(i64::try_from(run.records_failed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.objects_parsed).map_err(map_int_error)?)
+        .bind(i64::try_from(run.chunks_embedded).map_err(map_int_error)?)
+        .bind(i64::try_from(run.graph_nodes_upserted).map_err(map_int_error)?)
+        .bind(i64::try_from(run.graph_edges_upserted).map_err(map_int_error)?)
+        .bind(run.error_code)
+        .bind(run.started_at)
+        .bind(run.finished_at)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if let Some(row) = inserted {
+            let run = sync_run_from_row(&row)?;
+            conn.commit().await.map_err(map_moa_error)?;
+            return Ok(SyncRunClaim::Claimed(run));
+        }
+
+        let existing = sqlx::query(
+            r#"
+            SELECT sync_run_uid, tenant_id, connection_id, status, parser_provider,
+                   max_records, records_seen, records_changed, records_deleted,
+                   records_ingested, records_failed, objects_parsed, chunks_embedded,
+                   graph_nodes_upserted, graph_edges_upserted,
+                   error->>'code' AS error_code, started_at, finished_at
+            FROM moa.knowledge_sync_runs
+            WHERE tenant_id = $1
+              AND connection_id = $2
+              AND status = ANY($3::TEXT[])
+            ORDER BY started_at DESC, sync_run_uid DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(run.tenant_id.0)
+        .bind(run.connection_uid)
+        .bind(active_sync_run_status_values())
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        conn.commit().await.map_err(map_moa_error)?;
+        let row = existing.ok_or_else(|| {
+            Error::Repository("active sync run claim did not return a visible run".to_string())
+        })?;
+        let run = sync_run_from_row(&row)?;
+        Ok(SyncRunClaim::AlreadyRunning(run))
     }
 
     async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>> {
@@ -1092,7 +1256,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             SELECT $1, tenant_id, storage_partition_id, object_uid, $3, $4, $5, $6, $7
             FROM moa.knowledge_objects
             WHERE object_uid = $2
-            ON CONFLICT (tenant_id, object_id, content_hash) DO NOTHING
+            ON CONFLICT DO NOTHING
             "#,
         )
         .bind(version.version_uid)
@@ -1102,6 +1266,189 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(version.content_hash)
         .bind(version.metadata)
         .bind(version.created_at)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn claim_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version: DocumentVersion,
+    ) -> Result<DocumentVersionIngestionClaim> {
+        let mut conn = self.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO moa.knowledge_document_versions (
+                document_version_uid, tenant_id, storage_partition_id, object_id,
+                parser_provider, parser_job_id, content_hash, metadata, created_at
+            )
+            SELECT $1, tenant_id, storage_partition_id, object_uid, $3, $4, $5, $6, $7
+            FROM moa.knowledge_objects
+            WHERE object_uid = $2
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(version.version_uid)
+        .bind(version.object_uid)
+        .bind(&version.parser)
+        .bind(&version.parser_job_id)
+        .bind(&version.content_hash)
+        .bind(&version.metadata)
+        .bind(version.created_at)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let version_row = sqlx::query(
+            r#"
+            SELECT document_version_uid, object_id, parser_provider, parser_job_id,
+                   content_hash, metadata, created_at
+            FROM moa.knowledge_document_versions
+            WHERE object_id = $1 AND content_hash = $2
+            "#,
+        )
+        .bind(version.object_uid)
+        .bind(&version.content_hash)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let version = version_row
+            .as_ref()
+            .map(document_version_from_row)
+            .transpose()?
+            .ok_or_else(|| {
+                Error::Repository(
+                    "document version ingestion claim parent object was not visible".to_string(),
+                )
+            })?;
+
+        let inserted = sqlx::query_scalar::<_, bool>(
+            r#"
+            WITH inserted AS (
+                INSERT INTO moa.knowledge_object_ingestion_claims (
+                    tenant_id, storage_partition_id, object_id, content_hash,
+                    document_version_id, claimed_by_sync_run_id, status
+                )
+                SELECT o.tenant_id, o.storage_partition_id, o.object_uid, $2,
+                       $3, $4, 'started'
+                FROM moa.knowledge_objects o
+                WHERE o.object_uid = $1
+                ON CONFLICT (tenant_id, object_id, content_hash) DO NOTHING
+                RETURNING 1
+            )
+            SELECT EXISTS(SELECT 1 FROM inserted)
+            "#,
+        )
+        .bind(version.object_uid)
+        .bind(&version.content_hash)
+        .bind(version.version_uid)
+        .bind(sync_run_uid)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        if inserted {
+            conn.commit().await.map_err(map_moa_error)?;
+            return Ok(DocumentVersionIngestionClaim::Claimed(version));
+        }
+
+        let reclaimed = sqlx::query_scalar::<_, bool>(
+            r#"
+            WITH reclaimed AS (
+                UPDATE moa.knowledge_object_ingestion_claims
+                SET status = 'started',
+                    claimed_by_sync_run_id = $3,
+                    completed_by_sync_run_id = NULL,
+                    claimed_at = now(),
+                    completed_at = NULL,
+                    updated_at = now()
+                WHERE object_id = $1
+                  AND content_hash = $2
+                  AND status = 'failed'
+                RETURNING 1
+            )
+            SELECT EXISTS(SELECT 1 FROM reclaimed)
+            "#,
+        )
+        .bind(version.object_uid)
+        .bind(&version.content_hash)
+        .bind(sync_run_uid)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        if reclaimed {
+            conn.commit().await.map_err(map_moa_error)?;
+            return Ok(DocumentVersionIngestionClaim::Claimed(version));
+        }
+
+        let status = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT status
+            FROM moa.knowledge_object_ingestion_claims
+            WHERE object_id = $1 AND content_hash = $2
+            "#,
+        )
+        .bind(version.object_uid)
+        .bind(&version.content_hash)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        Ok(match status.as_str() {
+            "completed" => DocumentVersionIngestionClaim::AlreadyCompleted(version),
+            _ => DocumentVersionIngestionClaim::AlreadyInProgress(version),
+        })
+    }
+
+    async fn complete_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+    ) -> Result<()> {
+        let mut conn = self.begin().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE moa.knowledge_object_ingestion_claims
+            SET status = 'completed',
+                completed_by_sync_run_id = $1,
+                completed_at = now(),
+                updated_at = now()
+            WHERE document_version_id = $2
+              AND claimed_by_sync_run_id = $1
+              AND status = 'started'
+            "#,
+        )
+        .bind(sync_run_uid)
+        .bind(version_uid)
+        .execute(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        ensure_rows_affected(
+            result.rows_affected(),
+            "complete document version ingestion claim",
+        )?;
+        conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn fail_document_version_ingestion(
+        &self,
+        sync_run_uid: Uuid,
+        version_uid: Uuid,
+    ) -> Result<()> {
+        let mut conn = self.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE moa.knowledge_object_ingestion_claims
+            SET status = 'failed',
+                updated_at = now()
+            WHERE document_version_id = $2
+              AND claimed_by_sync_run_id = $1
+              AND status = 'started'
+            "#,
+        )
+        .bind(sync_run_uid)
+        .bind(version_uid)
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;

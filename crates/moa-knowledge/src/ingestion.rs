@@ -31,7 +31,7 @@ use crate::{
         classify_failure, failed_outcome,
     },
     parser::DocumentParser,
-    repository::KnowledgeRepository,
+    repository::{DocumentVersionIngestionClaim, KnowledgeRepository},
 };
 
 /// Graph write report returned by the tenant-knowledge graph sink.
@@ -613,9 +613,13 @@ where
         let outcome = self
             .persist_parsed(sync_run_uid, object, parsed, Vec::new())
             .await?;
-        Ok(RecordIngestionOutcome::Ingested {
-            embeddings_created: outcome.embeddings_created,
-        })
+        if outcome.ingested {
+            Ok(RecordIngestionOutcome::Ingested {
+                embeddings_created: outcome.embeddings_created,
+            })
+        } else {
+            Ok(RecordIngestionOutcome::Skipped)
+        }
     }
 
     async fn persist_parsed(
@@ -668,6 +672,7 @@ where
             return Ok(PersistedIngestion {
                 delta: KnowledgeGraphDelta::default(),
                 embeddings_created: 0,
+                ingested: false,
             });
         }
 
@@ -686,20 +691,77 @@ where
         {
             latest
         } else {
-            let version = DocumentVersion {
+            DocumentVersion {
                 version_uid: stable_uid(&format!("version:{}:{content_hash}", object.object_uid)),
                 object_uid: object.object_uid,
-                parser: parsed.parser,
-                parser_job_id: parsed.parser_job_id,
+                parser: parsed.parser.clone(),
+                parser_job_id: parsed.parser_job_id.clone(),
                 content_hash,
-                metadata: parsed.metadata,
+                metadata: parsed.metadata.clone(),
                 created_at: Utc::now(),
-            };
-            self.repository
-                .insert_document_version(version.clone())
-                .await?;
-            version
+            }
         };
+        let version = match self
+            .repository
+            .claim_document_version_ingestion(sync_run_uid, version)
+            .await?
+        {
+            DocumentVersionIngestionClaim::Claimed(version) => version,
+            DocumentVersionIngestionClaim::AlreadyInProgress(_version)
+            | DocumentVersionIngestionClaim::AlreadyCompleted(_version) => {
+                self.record_step(
+                    sync_run_uid,
+                    Some(object.object_uid),
+                    "normalized",
+                    StepOutcome {
+                        status: IngestionStepStatus::Skipped,
+                        counters: json!({ "blocks_total": 0, "chunks_total": 0 }),
+                        summary: Some("content version already claimed".to_string()),
+                        retry_count: 0,
+                        error_code: None,
+                        duration_ms: None,
+                    },
+                )
+                .await?;
+                return Ok(PersistedIngestion {
+                    delta: KnowledgeGraphDelta::default(),
+                    embeddings_created: 0,
+                    ingested: false,
+                });
+            }
+        };
+        let version_uid = version.version_uid;
+        let persisted = self
+            .persist_claimed_version(
+                sync_run_uid,
+                object,
+                version,
+                parsed,
+                previous_chunks,
+                deleted_chunk_uids,
+            )
+            .await;
+        if persisted.is_ok() {
+            self.repository
+                .complete_document_version_ingestion(sync_run_uid, version_uid)
+                .await?;
+        } else {
+            self.repository
+                .fail_document_version_ingestion(sync_run_uid, version_uid)
+                .await?;
+        }
+        persisted
+    }
+
+    async fn persist_claimed_version(
+        &self,
+        sync_run_uid: Uuid,
+        object: KnowledgeObject,
+        version: DocumentVersion,
+        parsed: ParsedDocument,
+        previous_chunks: Vec<KnowledgeChunk>,
+        deleted_chunk_uids: Vec<Uuid>,
+    ) -> Result<PersistedIngestion> {
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -1013,6 +1075,7 @@ where
         Ok(PersistedIngestion {
             delta,
             embeddings_created: embeddings.len() as u64,
+            ingested: true,
         })
     }
 
@@ -1405,6 +1468,7 @@ enum RecordIngestionOutcome {
 struct PersistedIngestion {
     delta: KnowledgeGraphDelta,
     embeddings_created: u64,
+    ingested: bool,
 }
 
 fn chunk_graph_uid(

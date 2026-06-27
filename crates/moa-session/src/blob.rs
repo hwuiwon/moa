@@ -1,11 +1,16 @@
 //! Blob storage and claim-check helpers for large session event payloads.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
+use moa_core::config::SessionBlobBackend;
 use moa_core::{BlobStore, ClaimCheck, Event, MoaConfig, MoaError, Result, SessionId};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
 
 const BLOB_REF_MARKER: &str = "__moa_blob_ref";
 const PREVIEW_BYTES: usize = 1024;
@@ -30,9 +35,12 @@ impl FileBlobStore {
 
     /// Creates a blob store using the configured blob directory.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        Ok(Self::new(expand_local_path(Path::new(
-            &config.session.blob_dir,
-        ))?))
+        config.session.validate_blob_backend(config.cloud.enabled)?;
+        let blob_dir = match config.session.blob_dir.as_deref() {
+            Some(path) if !path.trim().is_empty() => expand_local_path(Path::new(path))?,
+            _ => Self::default_dir()?,
+        };
+        Ok(Self::new(blob_dir))
     }
 
     /// Returns the default shared blob directory.
@@ -67,6 +75,109 @@ impl FileBlobStore {
 
     fn blob_path(&self, session_id: &SessionId, blob_id: &str) -> PathBuf {
         self.session_dir(session_id).join(blob_id)
+    }
+}
+
+/// PostgreSQL-backed blob store for durable claim-check payloads.
+#[derive(Debug, Clone)]
+pub struct PostgresBlobStore {
+    pool: PgPool,
+}
+
+impl PostgresBlobStore {
+    /// Creates a Postgres blob store and ensures its table exists.
+    pub async fn new(pool: PgPool) -> Result<Self> {
+        let store = Self { pool };
+        store.ensure_table().await?;
+        Ok(store)
+    }
+
+    async fn ensure_table(&self) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS session_blobs (
+                session_id UUID NOT NULL,
+                blob_id TEXT NOT NULL,
+                content BYTEA NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (session_id, blob_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BlobStore for PostgresBlobStore {
+    /// Stores a blob under its SHA-256 identifier.
+    async fn store(&self, session_id: &SessionId, content: &[u8]) -> Result<String> {
+        let blob_id = hex::encode(Sha256::digest(content));
+        sqlx::query(
+            "INSERT INTO session_blobs (session_id, blob_id, content)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (session_id, blob_id) DO NOTHING",
+        )
+        .bind(session_id.0)
+        .bind(&blob_id)
+        .bind(content)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(blob_id)
+    }
+
+    /// Retrieves a previously stored blob.
+    async fn get(&self, session_id: &SessionId, blob_id: &str) -> Result<Vec<u8>> {
+        let row =
+            sqlx::query("SELECT content FROM session_blobs WHERE session_id = $1 AND blob_id = $2")
+                .bind(session_id.0)
+                .bind(blob_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+        row.map(|row| row.get::<Vec<u8>, _>("content"))
+            .ok_or_else(|| MoaError::BlobNotFound(blob_id.to_string()))
+    }
+
+    /// Deletes every blob belonging to one session.
+    async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
+        sqlx::query("DELETE FROM session_blobs WHERE session_id = $1")
+            .bind(session_id.0)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Returns whether the blob already exists.
+    async fn exists(&self, session_id: &SessionId, blob_id: &str) -> Result<bool> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM session_blobs WHERE session_id = $1 AND blob_id = $2
+            )",
+        )
+        .bind(session_id.0)
+        .bind(blob_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(exists)
+    }
+}
+
+/// Builds the configured claim-check blob store for a session store.
+pub async fn blob_store_from_config(
+    config: &MoaConfig,
+    pool: PgPool,
+) -> Result<Arc<dyn BlobStore>> {
+    match config.session.blob_backend {
+        SessionBlobBackend::Local => Ok(Arc::new(FileBlobStore::from_config(config)?)),
+        SessionBlobBackend::Postgres => Ok(Arc::new(PostgresBlobStore::new(pool).await?)),
+        SessionBlobBackend::ObjectStore => Err(MoaError::ConfigError(
+            "session.blob_backend = object_store is not implemented; use postgres for durable cloud claim-check payloads".to_string(),
+        )),
     }
 }
 
@@ -300,6 +411,10 @@ fn expand_local_path(path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+fn map_sqlx_error(error: sqlx::Error) -> MoaError {
+    MoaError::StorageError(error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +436,29 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(store.exists(&session_id, &first).await.expect("exists"));
+    }
+
+    #[tokio::test]
+    async fn file_blob_store_reads_blob_written_by_previous_instance() {
+        // Pins: claim-check payloads survive replacing the blob-store instance.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blob_dir = dir.path().join("blobs");
+        let writer = FileBlobStore::new(blob_dir.clone());
+        let session_id = SessionId::new();
+        let blob_id = writer
+            .store(&session_id, b"durable payload")
+            .await
+            .expect("store payload");
+
+        let reader = FileBlobStore::new(blob_dir);
+
+        assert_eq!(
+            reader
+                .get(&session_id, &blob_id)
+                .await
+                .expect("read payload"),
+            b"durable payload"
+        );
     }
 
     #[tokio::test]

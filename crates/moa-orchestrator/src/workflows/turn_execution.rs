@@ -679,7 +679,7 @@ async fn run_once_inside_workflow(
 
     let meta = load_session_meta(ctx, session_id).await?;
     OrchestratorCtx::current_tool_router()
-        .set_trusted_sandbox_files(&meta, trusted_sandbox_files)
+        .set_trusted_sandbox_files(&meta, trusted_sandbox_files.clone())
         .await;
     let active_segment = ensure_current_segment(ctx, session_id, &meta, &mut request).await?;
     if let Some(segment) = active_segment.as_ref() {
@@ -792,6 +792,7 @@ async fn run_once_inside_workflow(
             meta: &meta,
             session_id,
             active_canary: active_canary.as_deref(),
+            trusted_sandbox_files: &trusted_sandbox_files,
             turn_evidence,
         },
         &allowed_tools,
@@ -868,6 +869,7 @@ struct RootToolContext<'a> {
     meta: &'a SessionMeta,
     session_id: SessionId,
     active_canary: Option<&'a str>,
+    trusted_sandbox_files: &'a [SandboxFile],
     turn_evidence: &'a mut TurnEvidence,
 }
 
@@ -937,6 +939,7 @@ async fn handle_tool_call(
             tool_call,
             allowed_tools,
             active_canary,
+            trusted_sandbox_files: tool_context.trusted_sandbox_files,
             origin: GovernedInvocationOrigin::RootTurn,
             progress: GovernedInvocationProgress {
                 turn_id,
