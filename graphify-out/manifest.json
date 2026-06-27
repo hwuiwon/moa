@@ -300,9 +300,9 @@
     "semantic_hash": "a644e1846d6419a2657b2ab83ce58bb3"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-brain/src/pipeline/memory.rs": {
-    "mtime": 1782498781.884447,
-    "ast_hash": "4a30825124d2615ce108a7a8f4031e4c",
-    "semantic_hash": "4a30825124d2615ce108a7a8f4031e4c"
+    "mtime": 1782520796.6525393,
+    "ast_hash": "ced54d3ed98d8ed9863f6c6c476ae8df",
+    "semantic_hash": "ced54d3ed98d8ed9863f6c6c476ae8df"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-brain/src/pipeline/mod.rs": {
     "mtime": 1782328839.1366754,
@@ -415,17 +415,17 @@
     "semantic_hash": "c9904f5d31fcf809d095f3fc1509742a"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-brain/src/retrieval/cache.rs": {
-    "mtime": 1782497904.439933,
-    "ast_hash": "ca7d5e87dad8a0bd146ec758dad54adf",
-    "semantic_hash": "ca7d5e87dad8a0bd146ec758dad54adf"
+    "mtime": 1782519107.4827194,
+    "ast_hash": "7d662aad1a61af61e9b9c97910d5f82b",
+    "semantic_hash": "7d662aad1a61af61e9b9c97910d5f82b"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-brain/src/retrieval/hybrid.rs": {
-    "mtime": 1782498781.906997,
-    "ast_hash": "3c1afa90b61d9e77942f98c9d6369a2c",
-    "semantic_hash": "3c1afa90b61d9e77942f98c9d6369a2c"
+    "mtime": 1782518879.530638,
+    "ast_hash": "fe827cf8a7525f63e462ac160c6c5130",
+    "semantic_hash": "fe827cf8a7525f63e462ac160c6c5130"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-brain/src/retrieval/legs.rs": {
-    "mtime": 1782454358.5998275,
+    "mtime": 1782519368.9990463,
     "ast_hash": "9cc9519b3ce3e83561193ad1c5f2810a",
     "semantic_hash": "9cc9519b3ce3e83561193ad1c5f2810a"
   },
@@ -560,9 +560,9 @@
     "semantic_hash": "ee2bf38bea2d22f550060351546f0a60"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-core/src/config/env_overlay.rs": {
-    "mtime": 1782491414.1300807,
-    "ast_hash": "3652077a2145d953fee44c03d3ed036c",
-    "semantic_hash": "3652077a2145d953fee44c03d3ed036c"
+    "mtime": 1782522701.6869047,
+    "ast_hash": "80416dbb026ed4b5c19524273f1e952c",
+    "semantic_hash": "80416dbb026ed4b5c19524273f1e952c"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-core/src/config/lineage.rs": {
     "mtime": 1782328839.1265273,
@@ -580,9 +580,9 @@
     "semantic_hash": "f41d5064965093e637b8f579d0147ef8"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-core/src/config/mod.rs": {
-    "mtime": 1782446798.0040135,
-    "ast_hash": "248068f4f707f1e2f407e2447300f8c5",
-    "semantic_hash": "248068f4f707f1e2f407e2447300f8c5"
+    "mtime": 1782519102.3590946,
+    "ast_hash": "19f8410119871dd1c4259980e8567664",
+    "semantic_hash": "19f8410119871dd1c4259980e8567664"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-core/src/config/orchestrator.rs": {
     "mtime": 1782328839.125947,
@@ -795,9 +795,9 @@
     "semantic_hash": "e73a9f3681ff0bbe82cd75545b361702"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-edge/src/main.rs": {
-    "mtime": 1782423510.6320508,
-    "ast_hash": "066803cc8bcfdb1212e950f33229d69a",
-    "semantic_hash": "066803cc8bcfdb1212e950f33229d69a"
+    "mtime": 1782519107.5915992,
+    "ast_hash": "70691ae565407296abdd1bea54a7cd52",
+    "semantic_hash": "70691ae565407296abdd1bea54a7cd52"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-edge/src/proxy.rs": {
     "mtime": 1782328839.1715844,
@@ -805,9 +805,9 @@
     "semantic_hash": "eab4d5e40f4197da238603d9c238dfd5"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-edge/src/routes.rs": {
-    "mtime": 1782490686.1731074,
-    "ast_hash": "1f29d5190c25b2468244737574a2f84f",
-    "semantic_hash": "1f29d5190c25b2468244737574a2f84f"
+    "mtime": 1782519107.5906563,
+    "ast_hash": "28b4cf995b876bf58986d9ff51f33bd3",
+    "semantic_hash": "28b4cf995b876bf58986d9ff51f33bd3"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-eval/core/src/engine.rs": {
     "mtime": 1782328839.1944385,
@@ -1770,9 +1770,9 @@
     "semantic_hash": "66c5ea62abc078ca8692a43c4be79d86"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-lineage/audit/src/export.rs": {
-    "mtime": 1782412094.6878266,
-    "ast_hash": "d144de5bf67b787e77d7ed0f2c4dc836",
-    "semantic_hash": "d144de5bf67b787e77d7ed0f2c4dc836"
+    "mtime": 1782512174.6457326,
+    "ast_hash": "7cc5729dc45cecf733a65fabd5849fd3",
+    "semantic_hash": "7cc5729dc45cecf733a65fabd5849fd3"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-lineage/audit/src/lib.rs": {
     "mtime": 1782328839.1459734,
@@ -1785,9 +1785,9 @@
     "semantic_hash": "9335c71b1a03ff652275d179e17514ab"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-lineage/audit/src/signing.rs": {
-    "mtime": 1782412094.6899161,
-    "ast_hash": "d470271b9a05ad2d175794d1e1436ae5",
-    "semantic_hash": "d470271b9a05ad2d175794d1e1436ae5"
+    "mtime": 1782512174.6451468,
+    "ast_hash": "c8de677134d21a776dbb64876e1944bb",
+    "semantic_hash": "c8de677134d21a776dbb64876e1944bb"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-lineage/audit/src/vault.rs": {
     "mtime": 1782412094.6910284,
@@ -1795,9 +1795,9 @@
     "semantic_hash": "638013a3f5a188620cd74aa86afb8f96"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-lineage/audit/tests/dsar.rs": {
-    "mtime": 1782412314.606034,
-    "ast_hash": "b4433de612666499e66e4f4ccedb07a0",
-    "semantic_hash": "b4433de612666499e66e4f4ccedb07a0"
+    "mtime": 1782512174.6462183,
+    "ast_hash": "7692cd735ef8f9f26bba71bdca41723a",
+    "semantic_hash": "7692cd735ef8f9f26bba71bdca41723a"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-lineage/audit/tests/hash_chain.rs": {
     "mtime": 1782328839.1758409,
@@ -2070,9 +2070,9 @@
     "semantic_hash": "442c89027d954fb25e28504eccc1f5e8"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-memory/graph/src/write.rs": {
-    "mtime": 1782453520.1807644,
-    "ast_hash": "bc041c27b67d551977af8f64d47eb29a",
-    "semantic_hash": "bc041c27b67d551977af8f64d47eb29a"
+    "mtime": 1782518849.341121,
+    "ast_hash": "c58ae552f75af436c7b1068a966718ab",
+    "semantic_hash": "c58ae552f75af436c7b1068a966718ab"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-memory/ingest/src/chunking.rs": {
     "mtime": 1782328839.2189376,
@@ -4420,9 +4420,9 @@
     "semantic_hash": "0dce845469703d1914603aa418921ada"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-agents/src/resolver.rs": {
-    "mtime": 1782511963.3178723,
-    "ast_hash": "f603349f9d242310eb37c3ca44d35cca",
-    "semantic_hash": "f603349f9d242310eb37c3ca44d35cca"
+    "mtime": 1782512070.971415,
+    "ast_hash": "53a6d5cf0864022de336022021009bf2",
+    "semantic_hash": "53a6d5cf0864022de336022021009bf2"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-agents/tests/resolver_db_memory.rs": {
     "mtime": 1782417772.8651013,
@@ -4500,9 +4500,9 @@
     "semantic_hash": "2c8dd95cc1f75de5691563e30150ba65"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-memory/lifecycle/tests/consolidation_contact_scope_db_memory.rs": {
-    "mtime": 1782417793.4799237,
-    "ast_hash": "f0030355e642d594ced70133ceda8acb",
-    "semantic_hash": "f0030355e642d594ced70133ceda8acb"
+    "mtime": 1782512294.9084249,
+    "ast_hash": "20ee8c04189d9f86866c1c2bd8b2697f",
+    "semantic_hash": "20ee8c04189d9f86866c1c2bd8b2697f"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/src/guardrails.rs": {
     "mtime": 1782328839.194264,
@@ -4915,14 +4915,14 @@
     "semantic_hash": "9c8e5d6fbf5dee3daf52009d8ef8980f"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-core/src/config/knowledge.rs": {
-    "mtime": 1782490987.3249981,
-    "ast_hash": "9ae4f33d1128e8015c1f297058e044a1",
-    "semantic_hash": "9ae4f33d1128e8015c1f297058e044a1"
+    "mtime": 1782523919.2414422,
+    "ast_hash": "4154f3c7dd59c24a8e2ac1c08a799b86",
+    "semantic_hash": "4154f3c7dd59c24a8e2ac1c08a799b86"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-core/src/wire/knowledge.rs": {
-    "mtime": 1782504322.368821,
-    "ast_hash": "da48287e777c3ed6d23ae90495f435f1",
-    "semantic_hash": "da48287e777c3ed6d23ae90495f435f1"
+    "mtime": 1782522888.4103081,
+    "ast_hash": "40fce6422309b48dee1bd6170c6b3677",
+    "semantic_hash": "40fce6422309b48dee1bd6170c6b3677"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/chunking.rs": {
     "mtime": 1782485580.5915706,
@@ -4930,14 +4930,14 @@
     "semantic_hash": "8d56899942e05aae5a7be4e832cf062d"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/contact_groups.rs": {
-    "mtime": 1782496067.6960595,
-    "ast_hash": "0a779de76b65316ddd0c7db975fada84",
-    "semantic_hash": "0a779de76b65316ddd0c7db975fada84"
+    "mtime": 1782518486.2481053,
+    "ast_hash": "e77fc7dde0eb7b08dbd09dfb852bc3c5",
+    "semantic_hash": "e77fc7dde0eb7b08dbd09dfb852bc3c5"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/domain.rs": {
-    "mtime": 1782511900.2975304,
-    "ast_hash": "37cde135d24a16c9174a63693d598883",
-    "semantic_hash": "37cde135d24a16c9174a63693d598883"
+    "mtime": 1782522881.7053256,
+    "ast_hash": "5cd5b2a6322ab181bbed447bfc83833c",
+    "semantic_hash": "5cd5b2a6322ab181bbed447bfc83833c"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/error.rs": {
     "mtime": 1782449030.1844692,
@@ -4950,9 +4950,9 @@
     "semantic_hash": "3cb531a3b9a304b1e736bca4cf744e81"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/ingestion.rs": {
-    "mtime": 1782511397.535873,
-    "ast_hash": "9a8a1dc7ab07fdf4b22097ca8ddaeea4",
-    "semantic_hash": "9a8a1dc7ab07fdf4b22097ca8ddaeea4"
+    "mtime": 1782519107.7683902,
+    "ast_hash": "3d94c4ab03580f338679d52c69539224",
+    "semantic_hash": "3d94c4ab03580f338679d52c69539224"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/lib.rs": {
     "mtime": 1782449030.184383,
@@ -4960,24 +4960,24 @@
     "semantic_hash": "b27e1818b2c72c36eb7fc93afb3e4537"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/normalize.rs": {
-    "mtime": 1782476555.976365,
-    "ast_hash": "7bf2e8225a7ab66b38a59aab7f9fa5b2",
-    "semantic_hash": "7bf2e8225a7ab66b38a59aab7f9fa5b2"
+    "mtime": 1782519612.1708686,
+    "ast_hash": "650f02a17eb42c080efd060229ff7288",
+    "semantic_hash": "650f02a17eb42c080efd060229ff7288"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/observability.rs": {
-    "mtime": 1782509392.1412265,
-    "ast_hash": "757e284097eddbdee2d01e4a07e6f69e",
-    "semantic_hash": "757e284097eddbdee2d01e4a07e6f69e"
+    "mtime": 1782518796.81493,
+    "ast_hash": "1e8b037484084a720c69c40ad77124e0",
+    "semantic_hash": "1e8b037484084a720c69c40ad77124e0"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/parser/llamaparse.rs": {
-    "mtime": 1782500836.4521613,
-    "ast_hash": "053a917255462ba7b1739aab77d379bf",
-    "semantic_hash": "053a917255462ba7b1739aab77d379bf"
+    "mtime": 1782522687.591787,
+    "ast_hash": "c0cb24d1813fe4bf34a3394cc684c3f9",
+    "semantic_hash": "c0cb24d1813fe4bf34a3394cc684c3f9"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/parser/mod.rs": {
-    "mtime": 1782502061.0355504,
-    "ast_hash": "603f4a8f40f716081acc2cd18e4172cf",
-    "semantic_hash": "603f4a8f40f716081acc2cd18e4172cf"
+    "mtime": 1782519124.983256,
+    "ast_hash": "7b0d0cb5223f059a27f07a3ce1e9e8a4",
+    "semantic_hash": "7b0d0cb5223f059a27f07a3ce1e9e8a4"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/parser/native.rs": {
     "mtime": 1782471269.8073199,
@@ -4985,34 +4985,34 @@
     "semantic_hash": "0e60eeb1d7cebbda5d42e5b1a7be8aea"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/parser/reducto.rs": {
-    "mtime": 1782500848.5129242,
-    "ast_hash": "7b4c422b1cb21d55c4af0d5919960605",
-    "semantic_hash": "7b4c422b1cb21d55c4af0d5919960605"
+    "mtime": 1782524674.1338224,
+    "ast_hash": "2ae8c885cd171f18f62fd5915c1b5136",
+    "semantic_hash": "2ae8c885cd171f18f62fd5915c1b5136"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/parser/unstructured.rs": {
-    "mtime": 1782500842.4185164,
-    "ast_hash": "c5e06f290ba9eff77dc53c4953cd0f1b",
-    "semantic_hash": "c5e06f290ba9eff77dc53c4953cd0f1b"
+    "mtime": 1782522986.495504,
+    "ast_hash": "60e8cb0477c868307f42745ccce0b58d",
+    "semantic_hash": "60e8cb0477c868307f42745ccce0b58d"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/providers/merge.rs": {
-    "mtime": 1782502939.2162077,
-    "ast_hash": "1dec7ff9cb3f8f01ae4cf9613a3f36c4",
-    "semantic_hash": "1dec7ff9cb3f8f01ae4cf9613a3f36c4"
+    "mtime": 1782522986.4969518,
+    "ast_hash": "541adf99c2586ab7e6697a678cb221ab",
+    "semantic_hash": "541adf99c2586ab7e6697a678cb221ab"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/providers/mod.rs": {
-    "mtime": 1782449034.8381968,
-    "ast_hash": "84261dd6b47f602851d7393015112991",
-    "semantic_hash": "84261dd6b47f602851d7393015112991"
+    "mtime": 1782519272.4236653,
+    "ast_hash": "6a66e88bf388a7ff0dfbd1f11ede4d44",
+    "semantic_hash": "6a66e88bf388a7ff0dfbd1f11ede4d44"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/providers/nango.rs": {
-    "mtime": 1782486889.5578513,
-    "ast_hash": "c6641b362122846f9295cdebe0b42668",
-    "semantic_hash": "c6641b362122846f9295cdebe0b42668"
+    "mtime": 1782518136.7515254,
+    "ast_hash": "fc8cdc530277eaa9412bdd9eaca63ad7",
+    "semantic_hash": "fc8cdc530277eaa9412bdd9eaca63ad7"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/src/repository.rs": {
-    "mtime": 1782511900.298645,
-    "ast_hash": "a9b58b6ccc47a658c7e4846eb8207a3f",
-    "semantic_hash": "a9b58b6ccc47a658c7e4846eb8207a3f"
+    "mtime": 1782519481.4318354,
+    "ast_hash": "ca4ae83275c75c593059a04abe1dfc05",
+    "semantic_hash": "ca4ae83275c75c593059a04abe1dfc05"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/chunking.rs": {
     "mtime": 1782471269.8164153,
@@ -5030,19 +5030,19 @@
     "semantic_hash": "a1e2796b5184ec32124d0f4b2d1e79c9"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/parser_llamaparse.rs": {
-    "mtime": 1782501767.4910111,
-    "ast_hash": "a53efe8b91c9c9b78b146277d8d777a7",
-    "semantic_hash": "a53efe8b91c9c9b78b146277d8d777a7"
+    "mtime": 1782522718.6369553,
+    "ast_hash": "28b366f13741d76909d274b31a3338a3",
+    "semantic_hash": "28b366f13741d76909d274b31a3338a3"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/parser_reducto.rs": {
-    "mtime": 1782502098.8942,
-    "ast_hash": "175d284ac16a722ed7bbe7c838d789bc",
-    "semantic_hash": "175d284ac16a722ed7bbe7c838d789bc"
+    "mtime": 1782524525.8816154,
+    "ast_hash": "cb91489d1f950f423e87ca7a341f0073",
+    "semantic_hash": "cb91489d1f950f423e87ca7a341f0073"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/parser_unstructured.rs": {
-    "mtime": 1782501746.629952,
-    "ast_hash": "2d78712d3928005eb4e3f54c6502e9a4",
-    "semantic_hash": "2d78712d3928005eb4e3f54c6502e9a4"
+    "mtime": 1782523869.090747,
+    "ast_hash": "a001c96ffee1d1648238c585d4723bfb",
+    "semantic_hash": "a001c96ffee1d1648238c585d4723bfb"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/repository_db_knowledge.rs": {
     "mtime": 1782504405.0058875,
@@ -5055,29 +5055,29 @@
     "semantic_hash": "d43f51c75aca14a2506ce08e1b424a3b"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-migrations/migrations/postgres/V000311__tenant_knowledge_base.sql": {
-    "mtime": 1782512023.2774541,
-    "ast_hash": "78c838ad1de9b49ae93f265f23983063",
-    "semantic_hash": "78c838ad1de9b49ae93f265f23983063"
+    "mtime": 1782519240.8349683,
+    "ast_hash": "958549d3c253f8ace1afded85c90be57",
+    "semantic_hash": "958549d3c253f8ace1afded85c90be57"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-brain/tests/tenant_contact_knowledge_retrieval_db_memory.rs": {
-    "mtime": 1782511509.1789303,
-    "ast_hash": "56c98007a2ca37898a148ad16745d199",
-    "semantic_hash": "56c98007a2ca37898a148ad16745d199"
+    "mtime": 1782520864.1949067,
+    "ast_hash": "e8b10c05ab06e11913dbc05ae4a31060",
+    "semantic_hash": "e8b10c05ab06e11913dbc05ae4a31060"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/contact_groups_db_knowledge.rs": {
-    "mtime": 1782496796.5556078,
-    "ast_hash": "c7ff77c631550edbbe8234ae5a4338c0",
-    "semantic_hash": "c7ff77c631550edbbe8234ae5a4338c0"
+    "mtime": 1782519540.4290786,
+    "ast_hash": "06fac8606ee3a191ea918dec8ea77074",
+    "semantic_hash": "06fac8606ee3a191ea918dec8ea77074"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/observability_db_knowledge.rs": {
-    "mtime": 1782505383.0098188,
-    "ast_hash": "ca9c3616aeca5b155da5bc766112ad5e",
-    "semantic_hash": "ca9c3616aeca5b155da5bc766112ad5e"
+    "mtime": 1782520840.8401737,
+    "ast_hash": "6070174d72870adcf54d5fa000561ac9",
+    "semantic_hash": "6070174d72870adcf54d5fa000561ac9"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/provider_merge.rs": {
-    "mtime": 1782502993.1598022,
-    "ast_hash": "a33eaa4290eec6db36006a4970d149cd",
-    "semantic_hash": "a33eaa4290eec6db36006a4970d149cd"
+    "mtime": 1782522913.632392,
+    "ast_hash": "d7be188e946ca8287865f87b8bf746a3",
+    "semantic_hash": "d7be188e946ca8287865f87b8bf746a3"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/provider_nango.rs": {
     "mtime": 1782501133.2686596,
@@ -5095,33 +5095,43 @@
     "semantic_hash": "db0e0898eef0fb70591b8041584b3123"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/src/services/knowledge/link.rs": {
-    "mtime": 1782486045.1549535,
-    "ast_hash": "c6ad10fc697bd5d1153899c0521d3b45",
-    "semantic_hash": "c6ad10fc697bd5d1153899c0521d3b45"
+    "mtime": 1782522898.086668,
+    "ast_hash": "64b95faa6022b06c3c1db315f6a9d464",
+    "semantic_hash": "64b95faa6022b06c3c1db315f6a9d464"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/src/services/knowledge/mod.rs": {
-    "mtime": 1782499355.045825,
-    "ast_hash": "0ba55c8d929d36fde772ca7875bc114d",
-    "semantic_hash": "0ba55c8d929d36fde772ca7875bc114d"
+    "mtime": 1782519108.0393734,
+    "ast_hash": "f95a3783a8bfad2bd1699147de06b0e6",
+    "semantic_hash": "f95a3783a8bfad2bd1699147de06b0e6"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/src/services/knowledge/sync.rs": {
-    "mtime": 1782509338.9420116,
-    "ast_hash": "0a9acd1a5a314ec39a4d4dfc42454200",
-    "semantic_hash": "0a9acd1a5a314ec39a4d4dfc42454200"
+    "mtime": 1782518271.6177936,
+    "ast_hash": "b81be3155012b6d5330232b7ff9f61ff",
+    "semantic_hash": "b81be3155012b6d5330232b7ff9f61ff"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/src/services/knowledge/webhook.rs": {
-    "mtime": 1782509350.72996,
-    "ast_hash": "58edcb94ef211d7fb4b09596b10cec30",
-    "semantic_hash": "58edcb94ef211d7fb4b09596b10cec30"
+    "mtime": 1782518253.935586,
+    "ast_hash": "2d90e43a29003a1828b25048ad0baa98",
+    "semantic_hash": "2d90e43a29003a1828b25048ad0baa98"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/src/services/knowledge/webhook_verifier.rs": {
-    "mtime": 1782502045.1157537,
-    "ast_hash": "9ce98ce320c1184095bb1929610c3306",
-    "semantic_hash": "9ce98ce320c1184095bb1929610c3306"
+    "mtime": 1782518393.782805,
+    "ast_hash": "b15f88d45ae5f979f6c43cbd834d1121",
+    "semantic_hash": "b15f88d45ae5f979f6c43cbd834d1121"
   },
   "/Users/hwuiwon/Github/moa/crates/moa-orchestrator/tests/knowledge_service.rs": {
-    "mtime": 1782511334.6861923,
-    "ast_hash": "ed5674e2abca6590c749e1044aa81c4c",
-    "semantic_hash": "ed5674e2abca6590c749e1044aa81c4c"
+    "mtime": 1782519876.0547864,
+    "ast_hash": "4d5c48f9cee6fde16bbc5d99050325c0",
+    "semantic_hash": "4d5c48f9cee6fde16bbc5d99050325c0"
+  },
+  "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/parser_live.rs": {
+    "mtime": 1782524288.8938687,
+    "ast_hash": "87a6cdebc429cb021128f63e455a416b",
+    "semantic_hash": "87a6cdebc429cb021128f63e455a416b"
+  },
+  "/Users/hwuiwon/Github/moa/crates/moa-knowledge/tests/provider_live.rs": {
+    "mtime": 1782522949.0562766,
+    "ast_hash": "8dbd6a5763933fc896c3d5a134ed9a61",
+    "semantic_hash": "8dbd6a5763933fc896c3d5a134ed9a61"
   }
 }
