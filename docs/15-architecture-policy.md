@@ -9,11 +9,12 @@ type instead of defining a lookalike.
 
 ### `moa-core`
 
-`moa-core` owns tenant primitives, session/event DTOs, shared errors, config,
-and trait surfaces. It does not depend on the memory subsystem.
+`moa-core` owns tenant primitives, platform RLS context, session/event DTOs,
+shared errors, config, and trait surfaces. It does not depend on the memory
+subsystem.
 
 - IDs: `TenantId`, `StoragePartitionId` for storage partition internals, `UserId`, `SessionId`
-- Scopes: `MemoryScope`, `ScopeTier`, `ScopeContext`
+- Platform RLS context: `RlsContext`
 - Config and errors: `MoaConfig`, `MoaError`, `Result`
 - Session and event DTOs: `SessionMeta`, `SessionStatus`, `Event`,
   `EventRecord`, `EventStream`, `EventRange`, `EventFilter`
@@ -26,6 +27,7 @@ and trait surfaces. It does not depend on the memory subsystem.
 
 | Crate | Owns |
 |---|---|
+| `moa-memory/types` | Memory-specific runtime scopes such as `MemoryScope` and `ScopeTier`, plus conversion into `moa-core::RlsContext` at memory boundaries |
 | `moa-memory/graph` | Graph-primary storage, `GraphStore`, `AgeGraphStore`, node/edge labels, write intents, `PiiClass`, changelog rows, lexical index types |
 | `moa-memory/vector` | Embedding and vector-index abstractions, `VectorStore`, `PgvectorStore`, `TurbopufferStore`, vector query/result DTOs |
 | `moa-memory/pii` | Privacy classification and redaction clients, `PiiClassifier`, `PiiResult`, `PiiSpan`, `PiiCategory` |
@@ -62,7 +64,9 @@ not define its own privacy class enum.
 |---|---|
 | ID newtype shared by two or more crates | `moa-core` |
 | Trait surface shared by two or more crates | `moa-core` |
+| Platform DB/RLS context | `moa-core` |
 | Implementation of a `moa-core` trait | Implementing crate |
+| Memory-specific runtime scope | `moa-memory/types` |
 | Graph node, edge, or sidecar type | `moa-memory/graph` |
 | Embedding or vector-index type | `moa-memory/vector` |
 | Privacy classifier type | `moa-memory/pii` |

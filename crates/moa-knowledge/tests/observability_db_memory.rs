@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::RlsContext;
 use moa_core::{MoaError, TenantId, traits::EmbeddingProvider};
 use moa_knowledge::{
     chunking::ChunkingConfig,
@@ -25,7 +26,6 @@ use moa_knowledge::{
     parser::DocumentParser,
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres;
 use serde_json::json;
 use uuid::Uuid;
@@ -180,7 +180,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     let tenant_id = TenantId::from(Uuid::now_v7());
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
-        ScopeContext::tenant(tenant_id),
+        RlsContext::tenant(tenant_id),
     ));
     let connection_uid = Uuid::now_v7();
     repository

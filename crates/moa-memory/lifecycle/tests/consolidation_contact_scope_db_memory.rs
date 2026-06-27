@@ -1,10 +1,10 @@
 //! Postgres-backed checks for contact-local memory consolidation.
 
 use chrono::{Duration, TimeZone, Utc};
+use moa_core::RlsContext;
 use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_lifecycle::merge_duplicates;
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
 use sqlx::PgPool;
@@ -87,7 +87,7 @@ async fn create_contact_fact(
 ) -> Uuid {
     let graph = AgeGraphStore::scoped_for_app_role(
         pool.clone(),
-        ScopeContext::contact(tenant_id, contact_id),
+        RlsContext::contact(tenant_id, contact_id),
     );
     let uid = Uuid::now_v7();
     graph

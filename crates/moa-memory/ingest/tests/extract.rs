@@ -2,7 +2,7 @@
 
 use moa_memory_ingest::{
     FactExtractor, HeuristicFactExtractor, IngestError, ScriptedFactExtractor, TurnChunk,
-    extract_facts, extract_facts_checked, extraction_confidence_hint,
+    extract_facts, extraction_confidence_hint,
 };
 use serde::Deserialize;
 
@@ -31,7 +31,8 @@ fn extract_emits_expected_facts_from_canonical_paragraph_describing_a_service() 
     let expected: ExpectedFacts =
         serde_json::from_str(include_str!("support/fixtures/expected_facts_simple.json"))
             .expect("expected fact fixture parses");
-    let facts = extract_facts(&[chunk(include_str!("support/fixtures/document_simple.md"))]);
+    let facts = extract_facts(&[chunk(include_str!("support/fixtures/document_simple.md"))])
+        .expect("canonical fixture should extract");
 
     assert_eq!(facts.len(), expected.facts.len());
     for (fact, expected) in facts.iter().zip(expected.facts.iter()) {
@@ -47,7 +48,7 @@ async fn heuristic_extractor_matches_deterministic_extract_facts_output() {
     let chunks = [chunk(
         "Fact: API runs_on_port 3000\nFact: worker_queue uses Redis",
     )];
-    let expected = extract_facts(&chunks);
+    let expected = extract_facts(&chunks).expect("expected facts should extract");
 
     let facts = HeuristicFactExtractor
         .extract(&chunks)
@@ -61,8 +62,12 @@ async fn heuristic_extractor_matches_deterministic_extract_facts_output() {
 async fn scripted_extractor_can_emit_fact_for_text_skipped_by_heuristic() {
     // Pins: scripted extraction can supply corpus facts for non-declarative transcript text.
     let chunks = [chunk("Should we use Redis? Please review the design.")];
-    assert_eq!(extract_facts(&chunks), Vec::new());
-    let extractor = ScriptedFactExtractor::from_summaries(["planner chooses Redis"]);
+    assert_eq!(
+        extract_facts(&chunks).expect("question chunk should extract"),
+        Vec::new()
+    );
+    let extractor = ScriptedFactExtractor::from_summaries(["planner chooses Redis"])
+        .expect("scripted fixture should parse");
 
     let facts = extractor
         .extract(&chunks)
@@ -89,7 +94,8 @@ fn extract_assigns_confidence_scores_consistent_with_text_qualifiers() {
 
 #[test]
 fn extract_handles_negation_correctly_in_emitted_facts() {
-    let facts = extract_facts(&[chunk("Fact: API does_NOT_support batch_requests")]);
+    let facts = extract_facts(&[chunk("Fact: API does_NOT_support batch_requests")])
+        .expect("negation fact should extract");
 
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].subject, "API");
@@ -102,7 +108,8 @@ fn extract_strips_marked_fact_is_connector_from_object() {
     // Pins: marked corpus facts connect dependency objects to ownership subjects through one entity.
     let facts = extract_facts(&[chunk(
         "Fact: tenant shared audit-shipper-dep-test depends_on is lib-audit-wire-test.",
-    )]);
+    )])
+    .expect("marked fact should extract");
 
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].subject, "audit-shipper-dep-test");
@@ -112,7 +119,8 @@ fn extract_strips_marked_fact_is_connector_from_object() {
 
 #[test]
 fn extract_skips_questions_and_imperatives_yielding_no_facts() {
-    let facts = extract_facts(&[chunk("Should we use Redis? Please review the design.")]);
+    let facts = extract_facts(&[chunk("Should we use Redis? Please review the design.")])
+        .expect("question chunk should extract");
 
     assert!(facts.is_empty(), "questions and imperatives are not facts");
 }
@@ -125,7 +133,7 @@ fn extract_returns_typed_error_for_chunks_exceeding_max_size() {
         token_estimate: 12_500,
     };
 
-    let error = extract_facts_checked(&[oversized]).expect_err("oversized chunk must fail");
+    let error = extract_facts(&[oversized]).expect_err("oversized chunk must fail");
 
     assert!(matches!(
         error,

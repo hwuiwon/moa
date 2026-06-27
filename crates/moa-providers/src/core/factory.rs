@@ -2,16 +2,12 @@
 
 use std::sync::Arc;
 
-use moa_core::{LLMProvider, MoaConfig, MoaError, Result};
+use moa_core::{LLMProvider, MoaConfig, MoaError, ModelId, Result};
 
-use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
-
-const PROVIDER_ANTHROPIC: &str = "anthropic";
-const PROVIDER_OPENAI: &str = "openai";
-const PROVIDER_GOOGLE: &str = "google";
-const REWRITER_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
-const REWRITER_OPENAI_MODEL: &str = "gpt-5.4-mini";
-const REWRITER_GOOGLE_MODEL: &str = "gemini-3-flash-preview";
+use crate::ProviderRegistry;
+use crate::routing::{
+    ProviderId, infer_provider_id, provider_descriptor_by_name, split_explicit_provider,
+};
 
 /// Resolved provider/model choice used to construct one provider instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,14 +35,17 @@ pub fn resolve_provider_selection(
         ));
     }
 
-    if let Some((provider_name, model_id)) = split_explicit_provider(requested) {
+    if let Some((provider_id, model_id)) = split_explicit_provider(requested) {
+        let provider_name = provider_id.as_str();
         return Ok(ProviderSelection {
             provider_name: provider_name.to_string(),
             model_id: normalize_model_for_provider(provider_name, model_id),
         });
     }
 
-    let provider_name = infer_provider_name(requested).unwrap_or(default_provider);
+    let provider_name = infer_provider_id(requested)
+        .map(ProviderId::as_str)
+        .unwrap_or(default_provider);
     validate_provider_name(provider_name)?;
 
     Ok(ProviderSelection {
@@ -66,81 +65,34 @@ pub fn build_provider_from_selection(
     config: &MoaConfig,
     selection: &ProviderSelection,
 ) -> Result<Arc<dyn LLMProvider>> {
-    let provider: Arc<dyn LLMProvider> = match selection.provider_name.as_str() {
-        PROVIDER_ANTHROPIC => Arc::new(AnthropicProvider::from_config_with_model(
-            config,
-            selection.model_id.clone(),
-        )?),
-        PROVIDER_OPENAI => Arc::new(OpenAIProvider::from_config_with_model(
-            config,
-            selection.model_id.clone(),
-        )?),
-        PROVIDER_GOOGLE => Arc::new(GeminiProvider::from_config_with_model(
-            config,
-            selection.model_id.clone(),
-        )?),
-        unsupported => {
-            return Err(MoaError::ConfigError(format!(
-                "unsupported provider '{unsupported}'"
-            )));
-        }
-    };
-
-    Ok(provider)
+    let provider_id = selection.provider_name.parse::<ProviderId>()?;
+    ProviderRegistry::from_config(config)
+        .provider_for_id(provider_id, &ModelId::new(selection.model_id.clone()))
+        .map(|resolved| resolved.provider)
 }
 
 /// Builds the configured query-rewriter provider, preferring explicit and auxiliary models.
 pub fn resolve_rewriter_provider(config: &MoaConfig) -> Result<Arc<dyn LLMProvider>> {
-    let model = config
-        .query_rewrite
-        .model
-        .as_deref()
-        .or(config.models.auxiliary.as_deref())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| default_rewriter_model(config));
-    let selection = resolve_provider_selection(config, Some(&model))?;
-    build_provider_from_selection(config, &selection)
+    let mut query_rewrite = config.query_rewrite.clone();
+    query_rewrite.enabled = true;
+    if query_rewrite.model.is_none() {
+        query_rewrite.model = config.models.auxiliary.clone();
+    }
+
+    ProviderRegistry::from_config(config)
+        .resolve_rewriter_provider(&query_rewrite)?
+        .ok_or_else(|| {
+            MoaError::ConfigError("query rewriter provider is not configured".to_string())
+        })
 }
 
-fn split_explicit_provider(model: &str) -> Option<(&str, &str)> {
-    let (provider_name, model_id) = model.split_once(':')?;
-    let provider_name = provider_name.trim();
-    let model_id = model_id.trim();
-
-    if model_id.is_empty() || !matches_provider_name(provider_name) {
-        return None;
-    }
-
-    Some((provider_name, model_id))
-}
-
-fn infer_provider_name(model: &str) -> Option<&'static str> {
-    if model.starts_with("claude-") {
-        return Some(PROVIDER_ANTHROPIC);
-    }
-
-    if model.starts_with("gemini-") {
-        return Some(PROVIDER_GOOGLE);
-    }
-
-    if is_openai_model(model) {
-        return Some(PROVIDER_OPENAI);
-    }
-
-    None
-}
-
+#[cfg(test)]
 fn default_rewriter_model(config: &MoaConfig) -> String {
-    match config.general.default_provider.trim() {
-        PROVIDER_ANTHROPIC => REWRITER_ANTHROPIC_MODEL.to_string(),
-        PROVIDER_GOOGLE => REWRITER_GOOGLE_MODEL.to_string(),
-        PROVIDER_OPENAI => REWRITER_OPENAI_MODEL.to_string(),
-        _ => match infer_provider_name(config.models.main.as_str()) {
-            Some(PROVIDER_ANTHROPIC) => REWRITER_ANTHROPIC_MODEL.to_string(),
-            Some(PROVIDER_GOOGLE) => REWRITER_GOOGLE_MODEL.to_string(),
-            _ => REWRITER_OPENAI_MODEL.to_string(),
-        },
-    }
+    let provider_id = provider_descriptor_by_name(config.general.default_provider.trim())
+        .map(|descriptor| descriptor.id)
+        .or_else(|| infer_provider_id(config.models.main.as_str()))
+        .unwrap_or(ProviderId::OpenAI);
+    provider_id.descriptor().rewriter_default_model.to_string()
 }
 
 fn normalize_model_for_provider(provider_name: &str, model: &str) -> String {
@@ -148,16 +100,8 @@ fn normalize_model_for_provider(provider_name: &str, model: &str) -> String {
     model.trim().to_string()
 }
 
-fn is_openai_model(model: &str) -> bool {
-    model.starts_with("gpt-")
-        || model.starts_with("chatgpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-}
-
 fn validate_provider_name(provider_name: &str) -> Result<()> {
-    if matches_provider_name(provider_name) {
+    if provider_descriptor_by_name(provider_name).is_some() {
         return Ok(());
     }
 
@@ -166,21 +110,13 @@ fn validate_provider_name(provider_name: &str) -> Result<()> {
     )))
 }
 
-fn matches_provider_name(provider_name: &str) -> bool {
-    matches!(
-        provider_name,
-        PROVIDER_ANTHROPIC | PROVIDER_OPENAI | PROVIDER_GOOGLE
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::MoaConfig;
 
-    use super::{
-        PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI, default_rewriter_model,
-        resolve_provider_selection,
-    };
+    use crate::core::models::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI};
+
+    use super::{default_rewriter_model, resolve_provider_selection};
 
     #[test]
     fn infers_openai_for_gpt_models() {

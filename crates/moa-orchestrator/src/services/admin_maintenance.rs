@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::RlsContext;
 use moa_core::wire::admin::{
     CheckpointCleanupResponse, CheckpointCreateRequest, CheckpointCreateResponse,
     CheckpointListResponse, CheckpointRollbackRequest, CheckpointRollbackResponse,
     VectorPromoteRequest, VectorPromotionResponse, VectorPromotionUpdateRequest,
 };
 use moa_core::{BranchManager, StoragePartitionId, TenantId};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
     PgvectorStore, PromotionOptions, PromotionReport, TurbopufferStore, VectorPartitionPromotion,
     finalize_promotion, rollback_promotion,
@@ -84,7 +84,7 @@ impl AdminMaintenance for AdminMaintenanceImpl {
             .run(|| async move {
                 let storage_partition_id =
                     StoragePartitionId::for_tenant(request.tenant_id).to_string();
-                let scope = ScopeContext::tenant(request.tenant_id);
+                let scope = RlsContext::tenant(request.tenant_id);
                 let pgvector = Arc::new(PgvectorStore::new_for_control_plane(pool.clone(), scope));
                 let turbopuffer = Arc::new(
                     TurbopufferStore::from_config(&config)

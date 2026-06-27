@@ -28,9 +28,8 @@ pub use entity_resolution::{
 pub use error::{IngestError, Result};
 pub use extract::{
     ClassifiedFact, EmbeddedFact, ExtractedFact, ExtractedFactScopeHint, IngestApplyReport,
-    IngestDecision, SessionTurn, TurnChunk, chunk_turn, extract_facts, extract_facts_checked,
-    extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
-    should_ingest_degraded,
+    IngestDecision, SessionTurn, TurnChunk, chunk_turn, extract_facts, extraction_confidence_hint,
+    fact_hash, fact_uid_from_hash, scoped_fact_uid, should_ingest_degraded,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use extractor::ScriptedFactExtractor;

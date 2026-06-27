@@ -1,11 +1,11 @@
 //! Memory-owned privacy erasure helpers.
 
+use moa_core::RlsContext;
 use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     AgeGraphStore, ChangelogRecord, write::hard_purge_with_audit, write_and_bump,
 };
-use moa_memory_types::ScopeContext;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -141,7 +141,7 @@ fn erase_graph_store(
     Ok(AgeGraphStore::scoped_for_app_role(pool.clone(), scope))
 }
 
-fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Result<ScopeContext> {
+fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Result<RlsContext> {
     let contact_subject = subject_user_id
         .strip_prefix(CONTACT_SUBJECT_PREFIX)
         .unwrap_or(subject_user_id);
@@ -152,7 +152,7 @@ fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Res
                 "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"
             )))
         })?;
-    Ok(ScopeContext::contact(tenant_id, contact_id))
+    Ok(RlsContext::contact(tenant_id, contact_id))
 }
 
 fn erase_audit_metadata(audit: &GraphErasureAudit) -> Value {

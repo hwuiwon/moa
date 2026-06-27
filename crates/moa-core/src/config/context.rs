@@ -298,3 +298,215 @@ impl Default for CompactionConfig {
         }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies budgeting, compaction, session-limit, tool, rewrite, and resolution overrides.
+    pub(in crate::config) fn apply_context_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::set_copy_if_some;
+
+        set_copy_if_some(
+            &mut config.budgets.daily_tenant_cents,
+            self.budgets_daily_tenant_cents,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.max_turns,
+            self.session_limits_max_turns,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.simple_max_turns,
+            self.session_limits_simple_max_turns,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.standard_max_turns,
+            self.session_limits_standard_max_turns,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.max_tool_calls,
+            self.session_limits_max_tool_calls,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.loop_detection_threshold,
+            self.session_limits_loop_detection_threshold,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.progress_first_delay_ms,
+            self.session_limits_progress_first_delay_ms,
+        );
+        set_copy_if_some(
+            &mut config.session_limits.progress_interval_ms,
+            self.session_limits_progress_interval_ms,
+        );
+        self.apply_tooling(config);
+        self.apply_query_rewrite(config);
+        self.apply_resolution(config);
+        set_copy_if_some(
+            &mut config.context_snapshot.enabled,
+            self.context_snapshot_enabled,
+        );
+        set_copy_if_some(
+            &mut config.context_snapshot.max_size_bytes,
+            self.context_snapshot_max_size_bytes,
+        );
+    }
+
+    /// Applies session-history compaction environment overrides.
+    pub(in crate::config) fn apply_compaction_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::set_copy_if_some;
+
+        set_copy_if_some(&mut config.compaction.enabled, self.compaction_enabled);
+        set_copy_if_some(
+            &mut config.compaction.event_threshold,
+            self.compaction_event_threshold,
+        );
+        set_copy_if_some(
+            &mut config.compaction.token_ratio_threshold,
+            self.compaction_token_ratio_threshold,
+        );
+        set_copy_if_some(
+            &mut config.compaction.recent_turns_verbatim,
+            self.compaction_recent_turns_verbatim,
+        );
+        set_copy_if_some(
+            &mut config.compaction.preserve_errors,
+            self.compaction_preserve_errors,
+        );
+        set_copy_if_some(
+            &mut config.compaction.tier2_trigger_blocks_past_bp4,
+            self.compaction_tier2_trigger_blocks_past_bp4,
+        );
+        set_copy_if_some(
+            &mut config.compaction.tier3_trigger_fraction,
+            self.compaction_tier3_trigger_fraction,
+        );
+        set_copy_if_some(
+            &mut config.compaction.max_input_tokens_per_turn,
+            self.compaction_max_input_tokens_per_turn,
+        );
+    }
+
+    fn apply_tooling(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::set_copy_if_some;
+
+        set_copy_if_some(
+            &mut config.tool_output.max_replay_chars,
+            self.tool_output_max_replay_chars,
+        );
+        set_copy_if_some(
+            &mut config.tool_output.max_bash_lines,
+            self.tool_output_max_bash_lines,
+        );
+        set_copy_if_some(
+            &mut config.tool_output.head_ratio,
+            self.tool_output_head_ratio,
+        );
+        set_copy_if_some(
+            &mut config.tool_budgets.file_read,
+            self.tool_budgets_file_read,
+        );
+        set_copy_if_some(
+            &mut config.tool_budgets.bash_stdout,
+            self.tool_budgets_bash_stdout,
+        );
+        set_copy_if_some(
+            &mut config.tool_budgets.bash_stderr,
+            self.tool_budgets_bash_stderr,
+        );
+        set_copy_if_some(&mut config.tool_budgets.grep, self.tool_budgets_grep);
+        set_copy_if_some(
+            &mut config.tool_budgets.file_search,
+            self.tool_budgets_file_search,
+        );
+        set_copy_if_some(
+            &mut config.tool_budgets.memory_search,
+            self.tool_budgets_memory_search,
+        );
+        set_copy_if_some(
+            &mut config.tool_budgets.file_outline,
+            self.tool_budgets_file_outline,
+        );
+        set_copy_if_some(&mut config.tool_budgets.default, self.tool_budgets_default);
+        if let Some(max_manifest_chars) = self.skill_budget_max_manifest_chars {
+            config.skill_budget.max_manifest_chars = Some(max_manifest_chars);
+        }
+        set_copy_if_some(
+            &mut config.skill_budget.max_per_skill_chars,
+            self.skill_budget_max_per_skill_chars,
+        );
+        set_copy_if_some(
+            &mut config.skill_budget.show_token_estimates,
+            self.skill_budget_show_token_estimates,
+        );
+    }
+
+    fn apply_query_rewrite(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_copy_if_some, set_option_if_some};
+
+        set_copy_if_some(
+            &mut config.query_rewrite.enabled,
+            self.query_rewrite_enabled,
+        );
+        set_option_if_some(&mut config.query_rewrite.model, &self.query_rewrite_model);
+        set_copy_if_some(
+            &mut config.query_rewrite.timeout_ms,
+            self.query_rewrite_timeout_ms,
+        );
+        set_copy_if_some(
+            &mut config.query_rewrite.min_query_tokens,
+            self.query_rewrite_min_query_tokens,
+        );
+        set_copy_if_some(
+            &mut config.query_rewrite.skip_single_turn,
+            self.query_rewrite_skip_single_turn,
+        );
+        set_copy_if_some(
+            &mut config.query_rewrite.circuit_breaker_threshold,
+            self.query_rewrite_circuit_breaker_threshold,
+        );
+        set_copy_if_some(
+            &mut config.query_rewrite.circuit_breaker_window_secs,
+            self.query_rewrite_circuit_breaker_window_secs,
+        );
+        set_copy_if_some(
+            &mut config.query_rewrite.circuit_breaker_cooldown_secs,
+            self.query_rewrite_circuit_breaker_cooldown_secs,
+        );
+    }
+
+    fn apply_resolution(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::set_copy_if_some;
+
+        set_copy_if_some(&mut config.resolution.enabled, self.resolution_enabled);
+        set_copy_if_some(
+            &mut config.resolution.weights.tool,
+            self.resolution_weights_tool,
+        );
+        set_copy_if_some(
+            &mut config.resolution.weights.verification,
+            self.resolution_weights_verification,
+        );
+        set_copy_if_some(
+            &mut config.resolution.weights.continuation,
+            self.resolution_weights_continuation,
+        );
+        set_copy_if_some(
+            &mut config.resolution.weights.self_assessment,
+            self.resolution_weights_self_assessment,
+        );
+        set_copy_if_some(
+            &mut config.resolution.weights.structural,
+            self.resolution_weights_structural,
+        );
+        set_copy_if_some(
+            &mut config.resolution.rephrase_similarity_threshold,
+            self.resolution_rephrase_similarity_threshold,
+        );
+        set_copy_if_some(
+            &mut config.resolution.structural_min_samples,
+            self.resolution_structural_min_samples,
+        );
+        set_copy_if_some(
+            &mut config.resolution.idle_timeout_minutes,
+            self.resolution_idle_timeout_minutes,
+        );
+    }
+}

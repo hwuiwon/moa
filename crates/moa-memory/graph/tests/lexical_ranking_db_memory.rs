@@ -1,11 +1,11 @@
 //! Integration coverage for weighted lexical seed ranking.
 
 use chrono::{DateTime, Duration, Utc};
+use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_memory_graph::{
     AgeGraphStore, GraphStore, LexicalStore, NodeLabel, NodeWriteIntent, PiiClass,
 };
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -13,12 +13,12 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
     let storage_partition_id = storage_partition_id.as_ref();
     let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
         .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
-    ScopeContext::tenant(tenant_id)
+    RlsContext::tenant(tenant_id)
 }
 
 fn stable_uuid_from_label(label: &str) -> Uuid {
@@ -46,7 +46,7 @@ async fn configured_test_db() -> Option<TestDb> {
     )
 }
 
-fn scope(storage_partition_id: &str) -> ScopeContext {
+fn scope(storage_partition_id: &str) -> RlsContext {
     tenant_scope(storage_partition_id)
 }
 

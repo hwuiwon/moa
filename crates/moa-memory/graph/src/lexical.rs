@@ -1,8 +1,8 @@
 //! Lexical lookup over the `moa.node_index` sidecar.
 
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::{GraphError, NodeIndexRow};
@@ -11,7 +11,7 @@ use crate::{GraphError, NodeIndexRow};
 #[derive(Clone)]
 pub struct LexicalStore {
     pool: PgPool,
-    scope: Option<ScopeContext>,
+    scope: Option<RlsContext>,
     assume_app_role: bool,
 }
 
@@ -26,7 +26,7 @@ impl LexicalStore {
     }
 
     /// Creates a lexical store that installs scope GUCs before lookup.
-    pub fn scoped(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn scoped(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope: Some(scope),
@@ -35,7 +35,7 @@ impl LexicalStore {
     }
 
     /// Creates a scoped lexical store that assumes `moa_app` inside each transaction.
-    pub fn scoped_for_app_role(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn scoped_for_app_role(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope: Some(scope),

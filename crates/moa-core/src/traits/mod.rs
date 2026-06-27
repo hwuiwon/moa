@@ -9,18 +9,25 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::analytics::{
+    CacheDailyMetric, SessionAnalyticsSummary, SessionTurnMetric, TenantAnalyticsSummary,
+    ToolCallSummary,
+};
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
-    Channel, ChannelCapabilities, CheckpointHandle, CheckpointInfo, ClaimCheck, CompletionRequest,
-    CompletionStream, ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange,
-    EventRecord, ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus,
-    InboundMessage, LearningCandidate, LearningCandidateStatusUpdate, MessageId, ModelCapabilities,
-    OutboundMessage, ProcessorOutput, SandboxFile, SegmentAssessment, SegmentBaseline,
-    SegmentCompletion, SegmentId, SequenceNum, SessionFilter, SessionId, SessionMeta,
-    SessionStatus, SessionSummary, SkillResolutionRate, TaskSegment, TaskStrategySuccessRate,
-    TenantId, ToolOutput, WorkingContext,
+    Channel, ChannelAccountId, ChannelCapabilities, ChannelRef, CheckpointHandle, CheckpointInfo,
+    ClaimCheck, CompletionRequest, CompletionStream, ContactId, ContactPointId, ContextSnapshot,
+    Credential as StoredCredential, EventFilter, EventRange, EventRecord, EventType,
+    ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus, InboundMessage,
+    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry,
+    MessageId, ModelCapabilities, OutboundMessage, ProcessorOutput, SandboxFile, SegmentAssessment,
+    SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionChannelBinding,
+    SessionChannelBindingId, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionSummary,
+    SkillResolutionRate, StoragePartitionId, TaskSegment, TaskStrategySuccessRate, TenantId,
+    ToolCallId, ToolOutput, WorkingContext,
 };
+use crate::wire::analytics::LearningCandidateSummary;
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;
@@ -161,6 +168,141 @@ pub trait SessionStore: Send + Sync {
     async fn delete_empty_session(&self, session_id: SessionId) -> Result<()>;
 }
 
+/// Owned request to replace a session's active channel route binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionChannelBindingUpdate {
+    /// Tenant that owns the contact and session.
+    pub tenant_id: TenantId,
+    /// Storage partition that owns the session.
+    pub storage_partition_id: StoragePartitionId,
+    /// Session whose active channel is changing.
+    pub session_id: SessionId,
+    /// Contact associated with the route.
+    pub contact_id: ContactId,
+    /// Channel account used by the route, when applicable.
+    pub channel_account_id: Option<ChannelAccountId>,
+    /// Contact point backing email or SMS routes, when applicable.
+    pub contact_point_id: Option<ContactPointId>,
+    /// Concrete channel route.
+    pub channel_ref: ChannelRef,
+    /// Optional caller-supplied reason.
+    pub reason: Option<String>,
+}
+
+/// Focused contract for channel route bindings attached to sessions.
+#[async_trait]
+pub trait SessionChannelStore: Send + Sync {
+    /// Replaces the active channel binding for one session.
+    async fn replace_session_channel_binding(
+        &self,
+        update: SessionChannelBindingUpdate,
+    ) -> Result<SessionChannelBindingId>;
+
+    /// Loads the active channel binding for one session, when present.
+    async fn get_active_session_channel_binding(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionChannelBinding>>;
+}
+
+/// Focused contract for event-idempotency lookups that avoid decoding payloads.
+#[async_trait]
+pub trait SessionEventLookupStore: Send + Sync {
+    /// Returns whether a persisted tool event already exists.
+    async fn tool_event_exists(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: SessionId,
+        event_type: EventType,
+        tool_call_id: ToolCallId,
+    ) -> Result<bool>;
+
+    /// Returns whether a persisted action-review event already exists.
+    async fn action_review_event_exists(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: SessionId,
+        event_type: EventType,
+        review_id: uuid::Uuid,
+    ) -> Result<bool>;
+}
+
+/// Focused contract for analytics read models derived from the session log.
+#[async_trait]
+pub trait SessionAnalyticsStore: Send + Sync {
+    /// Loads one session analytics summary row.
+    async fn get_session_summary(&self, session_id: SessionId) -> Result<SessionAnalyticsSummary>;
+
+    /// Lists per-tool analytics rows, optionally scoped to one tenant.
+    async fn list_tool_call_summaries(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<ToolCallSummary>>;
+
+    /// Lists per-turn analytics rows for one session.
+    async fn list_session_turn_metrics(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<SessionTurnMetric>>;
+
+    /// Loads aggregated tenant analytics over a recent day window.
+    async fn get_tenant_stats(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<TenantAnalyticsSummary>;
+
+    /// Loads aggregated tenant analytics over a recent day window through control-plane RLS.
+    async fn get_tenant_stats_control_plane(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<TenantAnalyticsSummary>;
+
+    /// Lists daily cache trend rows for one tenant.
+    async fn list_cache_daily_metrics(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<Vec<CacheDailyMetric>>;
+
+    /// Lists daily cache trend rows for one tenant through control-plane RLS.
+    async fn list_cache_daily_metrics_control_plane(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<Vec<CacheDailyMetric>>;
+
+    /// Lists redacted learning-candidate summaries for one tenant.
+    async fn list_learning_candidate_summaries(
+        &self,
+        tenant_id: TenantId,
+        status: Option<LearningCandidateStatus>,
+        limit: u32,
+    ) -> Result<Vec<LearningCandidateSummary>>;
+
+    /// Refreshes materialized analytics views used by this contract.
+    async fn refresh_analytics_materialized_views(&self) -> Result<()>;
+}
+
+/// Focused contract for learning-log entries.
+#[async_trait]
+pub trait SessionLearningLogStore: Send + Sync {
+    /// Appends one learning-log entry.
+    async fn append_learning(&self, entry: &LearningEntry) -> Result<()>;
+
+    /// Lists current learning-log entries for one tenant.
+    async fn list_learnings(
+        &self,
+        tenant_id: &str,
+        learning_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LearningEntry>>;
+
+    /// Invalidates every current learning-log entry in a batch.
+    async fn rollback_batch(&self, batch_id: uuid::Uuid) -> Result<u64>;
+}
+
 /// Focused contract for task-segment persistence and segment-derived aggregates.
 #[async_trait]
 pub trait SegmentStore: Send + Sync {
@@ -234,6 +376,13 @@ pub trait ExperienceStore: Send + Sync {
     /// Appends or idempotently refreshes one derived experience record.
     async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()>;
 
+    /// Loads one experience record for a session, when present.
+    async fn get_experience_record(
+        &self,
+        session_id: SessionId,
+        experience_id: uuid::Uuid,
+    ) -> Result<Option<ExperienceRecord>>;
+
     /// Lists experience records for a session in creation order.
     async fn list_experience_records(&self, session_id: SessionId)
     -> Result<Vec<ExperienceRecord>>;
@@ -277,6 +426,31 @@ pub trait LearningCandidateStore: Send + Sync {
         &self,
         update: &LearningCandidateStatusUpdate,
     ) -> Result<()>;
+}
+
+/// Aggregate repository contract used by the orchestrator runtime seam.
+pub trait SessionRepository:
+    SessionStore
+    + SessionChannelStore
+    + SessionEventLookupStore
+    + SessionAnalyticsStore
+    + SessionLearningLogStore
+    + SegmentStore
+    + ExperienceStore
+    + LearningCandidateStore
+{
+}
+
+impl<T> SessionRepository for T where
+    T: SessionStore
+        + SessionChannelStore
+        + SessionEventLookupStore
+        + SessionAnalyticsStore
+        + SessionLearningLogStore
+        + SegmentStore
+        + ExperienceStore
+        + LearningCandidateStore
+{
 }
 
 /// Durable blob store used by the claim-check session event pattern.

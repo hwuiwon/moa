@@ -58,11 +58,6 @@ path = "examples/chat_harness.rs"
 required-features = ["eval-harness"]
 
 [[test]]
-name = "brain_turn_db"
-path = "tests/brain_turn_db.rs"
-required-features = ["eval-harness"]
-
-[[test]]
 name = "brain_turn_cache_replay_db_memory"
 path = "tests/brain_turn_cache_replay_db_memory.rs"
 required-features = ["eval-harness"]

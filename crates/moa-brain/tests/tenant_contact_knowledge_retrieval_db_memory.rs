@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use moa_brain::pipeline::memory::GraphMemoryRetriever;
+use moa_core::RlsContext;
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, ContextProcessor,
     LineageHandle, ModelCapabilities, ModelId, SessionId, SessionMeta, TenantId, TokenPricing,
@@ -12,7 +13,6 @@ use moa_core::{
 };
 use moa_lineage_core::{LineageEvent, RetrievalLineage};
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde_json::{Value, json};
@@ -33,9 +33,9 @@ async fn mock_tenant_and_contact_retrieval() {
     let tenant_id = TenantId::new();
     let contact_id = ContactId::new();
     let other_contact_id = ContactId::new();
-    let tenant_scope = ScopeContext::tenant(tenant_id);
-    let contact_scope = ScopeContext::contact(tenant_id, contact_id);
-    let other_contact_scope = ScopeContext::contact(tenant_id, other_contact_id);
+    let tenant_scope = RlsContext::tenant(tenant_id);
+    let contact_scope = RlsContext::contact(tenant_id, contact_id);
+    let other_contact_scope = RlsContext::contact(tenant_id, other_contact_id);
     seed_storage_partition_embedder_state(&pool, tenant_id)
         .await
         .expect("seed tenant vector embedder state");
@@ -275,7 +275,7 @@ async fn mock_tenant_and_contact_retrieval() {
         .expect("drop isolated schema");
 }
 
-fn graph_store(pool: PgPool, scope: ScopeContext) -> AgeGraphStore {
+fn graph_store(pool: PgPool, scope: RlsContext) -> AgeGraphStore {
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     AgeGraphStore::scoped_for_app_role(pool, scope).with_vector_store(vector)
 }

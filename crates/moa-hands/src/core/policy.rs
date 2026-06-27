@@ -157,6 +157,7 @@ impl ToolRouter {
         };
         let action_pattern = if needs_review_preview {
             action_pattern_for(
+                &invocation.name,
                 tool_definition.policy.input_shape,
                 &policy_input.normalized_input,
             )
@@ -229,11 +230,15 @@ impl ToolRouter {
         definition: &moa_core::ToolDefinition,
         invocation: &ToolInvocation,
     ) -> Result<ToolPolicyInput> {
-        let normalized_input =
-            normalized_input_for(definition.policy.input_shape, &invocation.input)?;
+        let normalized_input = normalized_input_for(
+            &invocation.name,
+            definition.policy.input_shape,
+            &invocation.input,
+        )?;
         Ok(ToolPolicyInput {
             tool_name: invocation.name.clone(),
             input_summary: summary_for(
+                &invocation.name,
                 definition.policy.input_shape,
                 &invocation.input,
                 &normalized_input,

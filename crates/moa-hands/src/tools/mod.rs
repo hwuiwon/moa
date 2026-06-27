@@ -9,6 +9,7 @@ pub mod file_search;
 pub mod file_write;
 pub mod grep;
 pub mod memory;
+pub(crate) mod sandbox_descriptor;
 pub mod session_search;
 pub mod str_replace;
 pub mod tool_result;

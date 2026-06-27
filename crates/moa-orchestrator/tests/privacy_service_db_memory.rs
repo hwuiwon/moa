@@ -5,12 +5,12 @@ use std::{collections::BTreeMap, io::Read, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
+use moa_core::RlsContext;
 use moa_core::wire::privacy::ContactErasureScope;
 use moa_core::{ContactId, TenantId};
 use moa_lineage_audit::PiiVault;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_pii::erasure::begin_app_scoped_tx;
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::PgvectorStore;
 use moa_orchestrator::services::privacy::repository::collect_privacy_export_data_sections;
 use moa_orchestrator::services::privacy::{
@@ -80,7 +80,7 @@ fn tenant_workspace() -> (Uuid, String) {
 }
 
 fn erase_test_graph(pool: &PgPool, tenant_id: Uuid, contact_id: Uuid) -> AgeGraphStore {
-    let scope = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
+    let scope = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), scope.clone());
     AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(Arc::new(vector))
 }

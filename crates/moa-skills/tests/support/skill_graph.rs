@@ -1,8 +1,9 @@
 //! Shared graph-backed skill integration fixtures.
 
+use moa_core::RlsContext;
 use moa_core::{ActionRuleScope, MoaError, Result, TenantId};
 use moa_memory_graph::AgeGraphStore;
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -22,7 +23,7 @@ pub(crate) fn memory_scope(storage_partition_id: &str) -> MemoryScope {
 }
 
 pub(crate) fn graph_store(pool: &sqlx::PgPool, scope: &MemoryScope) -> AgeGraphStore {
-    AgeGraphStore::scoped_for_app_role(pool.clone(), ScopeContext::from(scope.clone()))
+    AgeGraphStore::scoped_for_app_role(pool.clone(), RlsContext::from(scope.clone()))
 }
 
 fn tenant_id_from_storage_partition(storage_partition_id: &str) -> TenantId {

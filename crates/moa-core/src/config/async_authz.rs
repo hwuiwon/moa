@@ -47,3 +47,16 @@ impl AsyncAuthzKind {
 fn default_timeout_secs() -> u64 {
     900
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies async authorization environment overrides.
+    pub(in crate::config) fn apply_async_authz_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::set_copy_if_some;
+
+        set_copy_if_some(&mut config.async_authz.provider, self.async_authz_provider);
+        set_copy_if_some(
+            &mut config.async_authz.default_timeout_secs,
+            self.async_authz_default_timeout_secs,
+        );
+    }
+}

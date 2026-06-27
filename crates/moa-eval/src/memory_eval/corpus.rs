@@ -93,16 +93,12 @@ pub struct LedgerFact {
     /// Gold answer text expected when this fact satisfies a probe.
     pub answer: String,
     /// Prior facts superseded by this fact.
-    #[serde(default)]
     pub supersedes: Vec<String>,
     /// Canonical fact id restated verbatim by this fact.
-    #[serde(default)]
     pub restates: Option<String>,
     /// Synthetic prior retrieval uses for quality-score seeding.
-    #[serde(default)]
     pub prior_uses: Option<u32>,
     /// Synthetic prior successful retrieval uses for quality-score seeding.
-    #[serde(default)]
     pub prior_successes: Option<u32>,
     /// Synthetic session containing the source turn for this fact.
     pub source_session_id: SessionId,
@@ -578,34 +574,6 @@ mod tests {
         CORPUS_SCHEMA_VERSION, CorpusManifest, CorpusProfile, LedgerFact, TranscriptStyle,
         validate_corpus,
     };
-
-    #[test]
-    fn ledger_fact_deserializes_without_optional_lifecycle_fields() {
-        // Pins: old corpus ledger rows remain readable after adding lifecycle metadata.
-        let raw = serde_json::json!({
-            "storage_partition_id": "tenant-a",
-            "user_id": "user-a",
-            "scope": "tenant",
-            "fact_id": "fact-a",
-            "valid_from": "2026-01-01T00:00:00Z",
-            "valid_to": null,
-            "subject": "service",
-            "predicate": "deploy_target",
-            "object": "staging",
-            "answer": "service deploys to staging.",
-            "supersedes": [],
-            "source_session_id": "00000000-0000-8000-8000-000000000001",
-            "source_turn_seq": 1,
-            "pii_class": "none",
-            "expected_redacted": false
-        });
-
-        let fact: LedgerFact = serde_json::from_value(raw).expect("ledger fact parses");
-
-        assert_eq!(fact.restates, None);
-        assert_eq!(fact.prior_uses, None);
-        assert_eq!(fact.prior_successes, None);
-    }
 
     #[test]
     fn validate_corpus_rejects_restatement_with_mismatched_spo() {

@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moa_core::MoaConfig;
+use moa_core::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
 use moka::future::Cache;
 use reqwest::Client;
@@ -52,7 +52,7 @@ pub enum Conflict {
 #[derive(Clone)]
 pub struct ContradictionContext {
     pool: PgPool,
-    scope: ScopeContext,
+    scope: RlsContext,
     vector: Arc<dyn VectorStore>,
     assume_app_role: bool,
 }
@@ -60,7 +60,7 @@ pub struct ContradictionContext {
 impl ContradictionContext {
     /// Creates a contradiction context using production RLS role assumptions.
     #[must_use]
-    pub fn new(pool: PgPool, scope: ScopeContext, vector: Arc<dyn VectorStore>) -> Self {
+    pub fn new(pool: PgPool, scope: RlsContext, vector: Arc<dyn VectorStore>) -> Self {
         Self {
             pool,
             scope,
@@ -74,7 +74,7 @@ impl ContradictionContext {
     /// This is used by local integration tests that connect with the owner role while still
     /// exercising production RLS policies.
     #[must_use]
-    pub fn for_app_role(pool: PgPool, scope: ScopeContext, vector: Arc<dyn VectorStore>) -> Self {
+    pub fn for_app_role(pool: PgPool, scope: RlsContext, vector: Arc<dyn VectorStore>) -> Self {
         Self {
             pool,
             scope,
@@ -91,7 +91,7 @@ impl ContradictionContext {
 
     /// Returns the request scope used for RLS GUCs.
     #[must_use]
-    pub fn scope(&self) -> &ScopeContext {
+    pub fn scope(&self) -> &RlsContext {
         &self.scope
     }
 

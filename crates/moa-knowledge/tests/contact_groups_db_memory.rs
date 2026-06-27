@@ -5,6 +5,7 @@ use moa_contacts::{
     domain::{hash_contact_point_from_env, normalize_contact_point},
     repository::resolve_verified_contact_ids,
 };
+use moa_core::RlsContext;
 use moa_core::{ContactId, ContactPointKind, StoragePartitionId, TenantId};
 use moa_knowledge::{
     contact_groups::{
@@ -14,7 +15,6 @@ use moa_knowledge::{
     domain::{KnowledgeObject, ObjectStatus},
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -25,7 +25,7 @@ const TEST_HASH_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161
 fn repository(db: &postgres::TestDb, tenant_id: TenantId) -> PostgresKnowledgeRepository {
     PostgresKnowledgeRepository::scoped_for_app_role(
         db.store().pool().clone(),
-        ScopeContext::tenant(tenant_id),
+        RlsContext::tenant(tenant_id),
     )
 }
 

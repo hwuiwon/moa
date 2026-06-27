@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_db::ScopedConn;
 use moa_memory_graph::{
     EdgeLabel, GraphExpansionHit, GraphStore, NodeIndexRow, NodeLabel, PiiClass,
     push_validity_filter,
 };
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{VectorQuery, VectorStore};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -540,7 +541,7 @@ pub async fn begin_scoped<'a>(
     scope: &MemoryScope,
     assume_app_role: bool,
 ) -> Result<ScopedConn<'a>> {
-    let scope_context = ScopeContext::from(scope.clone());
+    let scope_context = RlsContext::from(scope.clone());
     let mut conn = ScopedConn::begin(pool, &scope_context).await?;
     if assume_app_role {
         sqlx::query("SET LOCAL ROLE moa_app")

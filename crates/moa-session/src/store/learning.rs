@@ -108,3 +108,23 @@ impl PostgresSessionStore {
         Ok(affected)
     }
 }
+
+#[async_trait]
+impl SessionLearningLogStore for PostgresSessionStore {
+    async fn append_learning(&self, entry: &LearningEntry) -> Result<()> {
+        PostgresSessionStore::append_learning(self, entry).await
+    }
+
+    async fn list_learnings(
+        &self,
+        tenant_id: &str,
+        learning_type: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LearningEntry>> {
+        PostgresSessionStore::list_learnings(self, tenant_id, learning_type, limit).await
+    }
+
+    async fn rollback_batch(&self, batch_id: Uuid) -> Result<u64> {
+        PostgresSessionStore::rollback_batch(self, batch_id).await
+    }
+}

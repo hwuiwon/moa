@@ -7,24 +7,15 @@ use crate::adapters::mcp::McpDiscoveredTool;
 use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
     ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, SandboxTier, ToolBudgetConfig,
-    ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec, read_tool_policy,
-    write_tool_policy,
+    ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::adapters::tool_route::SandboxToolRoute;
+use crate::tools::sandbox_descriptor::{
+    SandboxToolDescriptor, default_sandbox_tool_descriptors, sandbox_tool_descriptors,
+};
 
 use super::DEFAULT_PROVIDER_NAME;
-
-pub(crate) fn execute_tool_policy(input_shape: ToolInputShape) -> ToolPolicySpec {
-    ToolPolicySpec {
-        risk_level: moa_core::RiskLevel::High,
-        default_effect: ActionPolicyEffect::Allow,
-        action_class: ActionClass::CommandExecution,
-        input_shape,
-        diff_strategy: ToolDiffStrategy::None,
-    }
-}
 
 /// Tool execution routing target.
 pub enum ToolExecution {
@@ -65,6 +56,16 @@ impl RegisteredTool {
                 idempotency_class,
                 max_output_tokens: default_budget_for_tool(name),
             },
+            execution: ToolExecution::Hand {
+                provider: DEFAULT_PROVIDER_NAME.to_string(),
+                tier: SandboxTier::Local,
+            },
+        }
+    }
+
+    fn sandbox_hand(descriptor: &SandboxToolDescriptor) -> Self {
+        Self {
+            definition: descriptor.definition(default_budget_for_tool(descriptor.name)),
             execution: ToolExecution::Hand {
                 provider: DEFAULT_PROVIDER_NAME.to_string(),
                 tier: SandboxTier::Local,
@@ -120,114 +121,9 @@ impl ToolRegistry {
         registry.register_builtin(Arc::new(session_search::SessionSearchTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultReadTool));
         registry.register_builtin(Arc::new(tool_result::ToolResultSearchTool));
-        registry.register_hand(
-            SandboxToolRoute::Bash.name(),
-            "Purpose: run a non-interactive shell command inside the active workspace root. Use when: tests, builds, package managers, git inspection, or commands native file tools cannot express. Do not use: routine repository navigation, source reading, or text edits that file_search, grep, file_outline, file_read, str_replace, or file_write can handle. If blocked: keep commands targeted, preserve stderr/stdout, and stop after repeated failures instead of looping.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "cmd": { "type": "string", "description": "Shell command to execute." },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Optional timeout override in seconds." }
-                },
-                "required": ["cmd"],
-                "additionalProperties": false
-            }),
-            execute_tool_policy(ToolInputShape::Command),
-            IdempotencyClass::NonIdempotent,
-        );
-        registry.register_hand(
-            SandboxToolRoute::FileOutline.name(),
-            "Purpose: inspect a Python file's symbol outline without reading the full file. Use when: a large Python source file needs class, function, method, or line-number orientation. Do not use: non-Python files or exact content searches where grep is better. If blocked: fall back to a narrow file_read range after locating the nearest symbol.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path within the workspace root. Currently supports Python files." },
-                    "symbol": { "type": "string", "description": "Optional class, function, or method name to focus on." }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-            read_tool_policy(ToolInputShape::Path),
-            IdempotencyClass::Idempotent,
-        );
-        registry.register_hand(
-            SandboxToolRoute::Grep.name(),
-            "Purpose: search workspace file contents with regex or literal patterns. Use when: locating symbols, strings, errors, tests, or references before reading files. Do not use: broad exploratory filesystem walks or generated/vendor directories. If blocked: narrow path, enable literal matching for exact strings, or read a small matching range.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "Regex pattern to search for. Use literal for exact string matching." },
-                    "path": { "type": "string", "description": "Optional subdirectory or file to search within. Defaults to the workspace root." },
-                    "context_lines": { "type": "integer", "minimum": 0, "maximum": 5, "description": "Optional number of surrounding lines to include for each match. Default: 0." },
-                    "literal": { "type": "boolean", "description": "Treat pattern as a literal string instead of a regex. Default: false." }
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-            read_tool_policy(ToolInputShape::Pattern),
-            IdempotencyClass::Idempotent,
-        );
-        registry.register_hand(
-            SandboxToolRoute::FileRead.name(),
-            "Purpose: read UTF-8 text from a workspace file. Use when: you already know the relevant file or line range. Do not use: whole large files before searching or outlining. If blocked: use grep or file_outline first, then retry with a narrower start_line/end_line range.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
-                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line to read, inclusive." },
-                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based last line to read, inclusive. Ranges are clamped and truncated to 200 lines." }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }),
-            read_tool_policy(ToolInputShape::Path),
-            IdempotencyClass::Idempotent,
-        );
-        registry.register_hand(
-            SandboxToolRoute::StrReplace.name(),
-            "Purpose: replace one unique string match in an existing UTF-8 text file. Use when: editing an existing file with enough surrounding context to make old_str match exactly once. Do not use: new files, ambiguous matches, or line-number-only insertions. If blocked: read a narrower span and retry with more exact context.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
-                    "old_str": { "type": "string", "description": "Exact existing string to replace. Must be non-empty and must match exactly once." },
-                    "new_str": { "type": "string", "description": "Replacement string. Empty deletes the matched region." }
-                },
-                "required": ["path", "old_str", "new_str"],
-                "additionalProperties": false
-            }),
-            write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::StrReplace),
-            IdempotencyClass::NonIdempotent,
-        );
-        registry.register_hand(
-            SandboxToolRoute::FileWrite.name(),
-            "Purpose: create or deliberately overwrite a UTF-8 text file inside the active workspace root. Use when: adding a new file or replacing a whole generated/test fixture file intentionally. Do not use: small edits to existing source files where str_replace is safer. If blocked: verify the relative path and avoid `..` or paths outside the workspace.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path within the workspace root. Bash `cd` state does not carry over." },
-                    "content": { "type": "string", "description": "Full file contents to write." }
-                },
-                "required": ["path", "content"],
-                "additionalProperties": false
-            }),
-            write_tool_policy(ToolInputShape::Path, ToolDiffStrategy::FileWrite),
-            IdempotencyClass::NonIdempotent,
-        );
-        registry.register_hand(
-            SandboxToolRoute::FileSearch.name(),
-            "Purpose: find files inside the active workspace root with a glob pattern. Use when: locating paths before reading or editing. Do not use: content search, shell globbing, or generated/vendor directory exploration. If blocked: tighten the glob or switch to grep when the identifier is content rather than a path.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "Glob pattern such as **/*.rs, evaluated from the workspace root." }
-                },
-                "required": ["pattern"],
-                "additionalProperties": false
-            }),
-            read_tool_policy(ToolInputShape::Pattern),
-            IdempotencyClass::Idempotent,
-        );
+        for descriptor in sandbox_tool_descriptors() {
+            registry.register_sandbox_tool(descriptor);
+        }
         registry.default_loadout = [
             "memory_remember".to_string(),
             "memory_forget".to_string(),
@@ -238,9 +134,9 @@ impl ToolRegistry {
         ]
         .into_iter()
         .chain(
-            SandboxToolRoute::DEFAULT_LOADOUT
+            default_sandbox_tool_descriptors()
                 .into_iter()
-                .map(|route| route.name().to_string()),
+                .map(|descriptor| descriptor.name.to_string()),
         )
         .collect();
         registry
@@ -264,6 +160,13 @@ impl ToolRegistry {
         self.tools.insert(
             name.to_string(),
             RegisteredTool::hand(name, description, schema, policy, idempotency_class),
+        );
+    }
+
+    fn register_sandbox_tool(&mut self, descriptor: &SandboxToolDescriptor) {
+        self.tools.insert(
+            descriptor.name.to_string(),
+            RegisteredTool::sandbox_hand(descriptor),
         );
     }
 
@@ -343,14 +246,19 @@ fn default_budget_for_tool(tool_name: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxToolRoute, ToolRegistry};
+    use crate::tools::sandbox_descriptor::{
+        default_sandbox_tool_descriptors, sandbox_tool_descriptors,
+    };
+
+    use super::ToolRegistry;
 
     #[test]
     fn default_local_prompt_schemas_keep_structured_hand_tool_guidance() {
         // Pins: prompt-facing hand tool descriptions carry usage policy without changing schemas.
         let registry = ToolRegistry::default_local();
 
-        for name in SandboxToolRoute::ALL.map(SandboxToolRoute::name) {
+        for descriptor in sandbox_tool_descriptors() {
+            let name = descriptor.name;
             let description = registry
                 .get(name)
                 .expect("default tool should exist")
@@ -404,5 +312,40 @@ mod tests {
             ],
             "default local loadout order changed"
         );
+    }
+
+    #[test]
+    fn default_local_uses_sandbox_descriptors_as_source_of_truth() {
+        // Pins: default registry metadata is generated from sandbox descriptors.
+        let registry = ToolRegistry::default_local();
+
+        for descriptor in sandbox_tool_descriptors() {
+            let definition = registry
+                .get(descriptor.name)
+                .expect("descriptor-owned tool should be registered");
+            assert_eq!(definition.name, descriptor.name);
+            assert_eq!(definition.description, descriptor.description);
+            assert_eq!(definition.schema, (descriptor.schema)());
+            assert_eq!(definition.policy, descriptor.policy);
+            assert_eq!(definition.idempotency_class, descriptor.idempotency_class);
+        }
+
+        let registered_loadout = registry
+            .default_tool_schemas()
+            .into_iter()
+            .map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("schema should include name")
+                    .to_string()
+            })
+            .skip(6)
+            .collect::<Vec<_>>();
+        let descriptor_loadout = default_sandbox_tool_descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.name.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(registered_loadout, descriptor_loadout);
     }
 }

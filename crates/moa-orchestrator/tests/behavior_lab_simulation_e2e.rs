@@ -12,6 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use moa_core::RlsContext;
 use moa_core::wire::artifacts::{
     ArtifactImportRequest, ArtifactImportResponse, ArtifactPublishRequest, ArtifactPublishResponse,
 };
@@ -32,7 +33,6 @@ use moa_core::{
     traits::Identity,
 };
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres::test_database_url;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -938,9 +938,9 @@ fn scope_parts(scope: &ActionRuleScope) -> (&'static str, Option<String>, Option
     }
 }
 
-fn scope_context(scope: &ActionRuleScope) -> ScopeContext {
+fn scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
 }
 

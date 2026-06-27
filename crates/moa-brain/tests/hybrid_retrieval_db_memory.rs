@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -14,7 +15,7 @@ use moa_memory_ingest::{
     SessionTurn, fact_hash, fact_uid_from_hash, ingest_turn_direct_with_ctx,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, TurbopufferStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use secrecy::SecretString;
@@ -56,12 +57,12 @@ fn test_storage_partition_id() -> String {
     Uuid::now_v7().to_string()
 }
 
-fn tenant_scope(storage_partition_id: &str) -> ScopeContext {
-    ScopeContext::tenant(tenant_id_from_storage_partition_id(storage_partition_id))
+fn tenant_scope(storage_partition_id: &str) -> RlsContext {
+    RlsContext::tenant(tenant_id_from_storage_partition_id(storage_partition_id))
 }
 
-fn contact_scope(storage_partition_id: &str, user_id: &str) -> ScopeContext {
-    ScopeContext::contact(
+fn contact_scope(storage_partition_id: &str, user_id: &str) -> RlsContext {
+    RlsContext::contact(
         tenant_id_from_storage_partition_id(storage_partition_id),
         contact_id_from_user_id(user_id),
     )
@@ -545,7 +546,7 @@ async fn user_scope_fact_invisible_to_other_user_at_any_k() {
         ctx,
         SessionTurn {
             tenant_id: tenant_id_from_storage_partition_id(&storage_partition_id),
-            contact_id: contact_id_from_user_id(user_a),
+            contact_id: Some(contact_id_from_user_id(user_a)),
             session_id: SessionId::new(),
             turn_seq: 1,
             transcript: format!("user: {summary}"),

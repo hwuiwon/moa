@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use moa_memory_types::{MemoryScope, ScopeContext, ScopeTier};
+use moa_memory_types::{MemoryScope, ScopeTier};
 use moka::future::Cache;
 use sqlx::PgPool;
 
@@ -66,7 +67,7 @@ struct PostgresChangelogVersionReader {
 #[async_trait]
 impl ChangelogVersionReader for PostgresChangelogVersionReader {
     async fn current_version(&self, scope: &MemoryScope) -> Result<i64> {
-        let scope_context = ScopeContext::from(scope.clone());
+        let scope_context = RlsContext::from(scope.clone());
         let mut conn = ScopedConn::begin(&self.pool, &scope_context).await?;
         if self.assume_app_role {
             sqlx::query("SET LOCAL ROLE moa_app")

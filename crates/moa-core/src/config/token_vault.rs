@@ -31,3 +31,13 @@ impl TokenVaultKind {
         self.into()
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies token-vault environment overrides.
+    pub(in crate::config) fn apply_token_vault_overlay(&self, config: &mut super::MoaConfig) {
+        super::env_overlay::set_copy_if_some(
+            &mut config.token_vault.provider,
+            self.token_vault_provider,
+        );
+    }
+}

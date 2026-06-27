@@ -34,7 +34,7 @@ impl Stack {
         let mut fixtures = Vec::with_capacity(cfg.tenants);
         for tenant_index in 0..cfg.tenants {
             let tenant_id = TenantId::new();
-            let scope = ScopeContext::tenant(tenant_id);
+            let scope = RlsContext::tenant(tenant_id);
             let vector = Arc::new(PgvectorStore::new_for_app_role(
                 self.pool.clone(),
                 scope.clone(),
@@ -121,7 +121,7 @@ pub(super) struct TenantRetriever {
 
 impl TenantRetriever {
     fn new(pool: PgPool, tenant_id: TenantId) -> Self {
-        let scope_ctx = ScopeContext::tenant(tenant_id);
+        let scope_ctx = RlsContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             pool.clone(),
             scope_ctx.clone(),

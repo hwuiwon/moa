@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{StoragePartitionId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{GraphStore, NodeIndexRow, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{VectorQuery, VectorStore};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -241,7 +241,7 @@ impl EntityResolver {
     async fn lookup_block_candidates(
         &self,
         pool: &PgPool,
-        scope: &ScopeContext,
+        scope: &RlsContext,
         normalized_name: &str,
     ) -> Result<Vec<NodeIndexRow>> {
         let storage_partition_id = Some(scope.tenant_id().to_string());
@@ -283,7 +283,7 @@ impl EntityResolver {
     async fn lookup_embedding_candidates(
         &self,
         pool: &PgPool,
-        scope: &ScopeContext,
+        scope: &RlsContext,
         pii_class: PiiClass,
         embedding: Vec<f32>,
     ) -> Result<Vec<EmbeddingCandidate>> {
@@ -418,7 +418,7 @@ impl EntityResolver {
 #[derive(Debug, Clone)]
 pub struct EntityResolutionRequest<'a> {
     /// Request scope used for RLS and entity ownership.
-    pub scope: &'a ScopeContext,
+    pub scope: &'a RlsContext,
     /// Extracted subject or object mention.
     pub name: &'a str,
     /// PII class inherited from the redacted fact.
@@ -471,7 +471,7 @@ pub fn normalize_entity_name(name: &str) -> String {
     }
 }
 
-fn deterministic_entity_uid(scope: &ScopeContext, normalized_name: &str) -> Uuid {
+fn deterministic_entity_uid(scope: &RlsContext, normalized_name: &str) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(b"moa:entity:v1");
     hasher.update([0]);
@@ -494,8 +494,8 @@ fn deterministic_entity_uid(scope: &ScopeContext, normalized_name: &str) -> Uuid
 
 #[cfg(test)]
 mod tests {
+    use moa_core::RlsContext;
     use moa_core::{ContactId, TenantId};
-    use moa_memory_types::ScopeContext;
     use uuid::Uuid;
 
     use super::{deterministic_entity_uid, normalize_entity_name};
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn deterministic_entity_uid_is_stable_inside_scope() {
         // Pins: eval graph expansion is not perturbed by fresh entity UUIDs.
-        let scope = ScopeContext::tenant(TenantId::from(Uuid::from_u128(0x1000)));
+        let scope = RlsContext::tenant(TenantId::from(Uuid::from_u128(0x1000)));
         let normalized = normalize_entity_name("Lib Audit Wire");
 
         let first = deterministic_entity_uid(&scope, &normalized);
@@ -524,8 +524,8 @@ mod tests {
     fn deterministic_entity_uid_includes_contact_scope() {
         // Pins: same entity text in different contact scopes does not alias.
         let tenant_id = TenantId::from(Uuid::from_u128(0x1000));
-        let contact_a = ScopeContext::contact(tenant_id, ContactId(Uuid::from_u128(0x2000)));
-        let contact_b = ScopeContext::contact(tenant_id, ContactId(Uuid::from_u128(0x2001)));
+        let contact_a = RlsContext::contact(tenant_id, ContactId(Uuid::from_u128(0x2000)));
+        let contact_b = RlsContext::contact(tenant_id, ContactId(Uuid::from_u128(0x2001)));
         let normalized = normalize_entity_name("repo/search-platform");
 
         let uid_a = deterministic_entity_uid(&contact_a, &normalized);

@@ -3,12 +3,12 @@
 use chrono::Utc;
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft};
+use moa_core::RlsContext;
 use moa_core::{
     ActionRuleScope, LearningCandidate, MoaError, Result, SessionMeta, SkillMetadata, TaskFacetSet,
     TaskFingerprint,
 };
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use moa_session::PostgresSessionStore;
 use serde_json::json;
 use sqlx::PgConnection;
@@ -117,8 +117,7 @@ pub(crate) async fn store_skill_draft_proposal(
     let scope = ActionRuleScope::Tenant {
         tenant_id: session.tenant_id,
     };
-    let mut conn =
-        ScopedConn::begin(store.pool(), &ScopeContext::tenant(session.tenant_id)).await?;
+    let mut conn = ScopedConn::begin(store.pool(), &RlsContext::tenant(session.tenant_id)).await?;
     acquire_proposal_advisory_lock(conn.as_mut(), candidate_id).await?;
 
     if let Some(existing) = store

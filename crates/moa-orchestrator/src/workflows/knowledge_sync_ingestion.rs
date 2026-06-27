@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_core::RlsContext;
 use moa_core::{CredentialVault, TenantId};
 use moa_knowledge::{
     domain::{
@@ -12,7 +13,6 @@ use moa_knowledge::{
     observability::classify_failure,
     repository::{KnowledgeRepository as _, PostgresKnowledgeRepository},
 };
-use moa_memory_types::ScopeContext;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -253,7 +253,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
                         TerminalError::new_with_code(404, "knowledge sync run not found")
                     })?;
                 let repository =
-                    PostgresKnowledgeRepository::scoped(pool, ScopeContext::tenant(run.tenant_id));
+                    PostgresKnowledgeRepository::scoped(pool, RlsContext::tenant(run.tenant_id));
                 let mut run = repository
                     .get_sync_run(sync_run_uid)
                     .await
@@ -394,7 +394,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         self.ctx
             .run(|| async move {
                 let repository =
-                    PostgresKnowledgeRepository::scoped(pool, ScopeContext::tenant(tenant_id));
+                    PostgresKnowledgeRepository::scoped(pool, RlsContext::tenant(tenant_id));
                 let mut run = repository
                     .get_sync_run(sync_run_uid)
                     .await
@@ -458,7 +458,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
         self.ctx
             .run(|| async move {
                 let repository =
-                    PostgresKnowledgeRepository::scoped(pool, ScopeContext::tenant(tenant_id));
+                    PostgresKnowledgeRepository::scoped(pool, RlsContext::tenant(tenant_id));
                 let Some(mut run) = repository
                     .get_sync_run(sync_run_uid)
                     .await

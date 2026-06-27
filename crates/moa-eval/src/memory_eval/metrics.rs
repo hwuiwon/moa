@@ -246,35 +246,26 @@ impl RetrievedCandidate {
 /// Aggregated memory-retrieval metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalMetrics {
-    /// Suite-agnostic retrieval metrics serialized flat for report compatibility.
+    /// Suite-agnostic retrieval metrics serialized flat in reports.
     #[serde(flatten)]
     pub core: RetrievalCoreMetrics,
     /// Fraction of ledger facts resolved to graph nodes during ingestion.
     pub ingestion_coverage: MetricSummary,
     /// Fraction of resolved ledger facts stored with the expected scope.
-    #[serde(default)]
     pub scope_match_rate: MetricSummary,
     /// Fraction of resolved contact-expected ledger facts stored with contact scope.
-    #[serde(default)]
-    #[serde(alias = "scope_match_rate_user")]
     pub scope_match_rate_contact: MetricSummary,
     /// Fraction of resolved tenant-expected ledger facts stored with tenant scope.
-    #[serde(default)]
     pub scope_match_rate_tenant: MetricSummary,
     /// Fraction of stored Fact nodes that mapped back to a ledger fact.
-    #[serde(default)]
     pub extraction_precision: MetricSummary,
     /// Active Entity node count over distinct normalized ledger entity mentions in their storage scopes.
-    #[serde(default)]
     pub entity_fragmentation: MetricSummary,
     /// Mean pre-rerank recall@4 over probes with expected facts.
-    #[serde(default)]
     pub pre_rerank_recall_at_4: MetricSummary,
     /// Mean pre-rerank recall@25 over probes with expected facts.
-    #[serde(default)]
     pub pre_rerank_recall_at_25: MetricSummary,
     /// Mean post-rerank recall@4 over probes with expected facts.
-    #[serde(default)]
     pub post_rerank_recall_at_4: MetricSummary,
     /// Fraction of judged answers that were faithful.
     pub answer_faithfulness: MetricSummary,
@@ -285,13 +276,10 @@ pub struct RetrievalMetrics {
     /// Fraction of temporal probes that answered for the requested valid-time instant.
     pub temporal_as_of_accuracy: MetricSummary,
     /// Fraction of temporal probes whose query text produced an absolute temporal filter.
-    #[serde(default)]
     pub temporal_parse_rate: MetricSummary,
     /// Number of temporal probes where the parser fired but produced the wrong instant.
-    #[serde(default)]
     pub temporal_parse_mismatch_count: usize,
     /// Fraction of preference probes whose expected preference appears in digest or top-4 context.
-    #[serde(default)]
     pub preference_context_rate: MetricSummary,
 }
 
@@ -780,7 +768,6 @@ fn percentile_retrieval_latency_ms(probe_results: &[ProbeResult], percentile: f6
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use uuid::Uuid;
 
     use super::*;
@@ -810,32 +797,6 @@ mod tests {
         assert_eq!(report.metrics.preference_context_rate.numerator, 1.0);
         assert_eq!(report.metrics.preference_context_rate.denominator, 2);
         assert_eq!(report.metrics.preference_context_rate.value, 0.5);
-    }
-
-    #[test]
-    fn retrieval_metrics_deserialize_without_preference_context_rate() {
-        // Pins: pre-digest reports load with a default preference_context_rate.
-        let metrics = serde_json::from_value::<RetrievalMetrics>(json!({
-            "recall_at_4": metric(),
-            "recall_at_25": metric(),
-            "mrr": metric(),
-            "ndcg_at_4": metric(),
-            "zero_recall_rate": metric(),
-            "per_leg_recall": {
-                "graph": metric(),
-                "vector": metric(),
-                "lexical": metric()
-            },
-            "cross_user_leak_count": 0,
-            "ingestion_coverage": metric(),
-            "answer_faithfulness": metric(),
-            "abstention_correctness": metric(),
-            "pii_redaction_rate": metric(),
-            "temporal_as_of_accuracy": metric()
-        }))
-        .expect("old metrics JSON should deserialize");
-
-        assert_eq!(metrics.preference_context_rate, MetricSummary::default());
     }
 
     #[test]
@@ -900,13 +861,5 @@ mod tests {
             temporal_filter_matches_as_of: None,
             preference_context_hit,
         }
-    }
-
-    fn metric() -> serde_json::Value {
-        json!({
-            "numerator": 0.0,
-            "denominator": 0,
-            "value": 0.0
-        })
     }
 }

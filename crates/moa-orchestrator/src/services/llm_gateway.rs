@@ -49,8 +49,8 @@ impl LLMGatewayImpl {
         request: CompletionRequest,
     ) -> moa_core::Result<CompletionResponse> {
         let requested_model = request.model.as_ref().map(ModelId::as_str);
-        let (provider_kind, model) = self.providers.resolve_provider_kind(requested_model)?;
-        let resolved = self.providers.provider_for_kind(provider_kind, &model)?;
+        let (provider_id, model) = self.providers.resolve_provider_id(requested_model)?;
+        let resolved = self.providers.provider_for_id(provider_id, &model)?;
         let mut request = request;
         request.model = Some(resolved.model.clone());
 
@@ -69,9 +69,9 @@ impl LLMGateway for LLMGatewayImpl {
     ) -> Result<Json<CompletionResponse>, HandlerError> {
         let request = request.into_inner();
         annotate_restate_handler_span("LLMGateway", "complete");
-        let (provider_kind, _) = self
+        let (provider_id, _) = self
             .providers
-            .resolve_provider_kind(request.model.as_ref().map(ModelId::as_str))
+            .resolve_provider_id(request.model.as_ref().map(ModelId::as_str))
             .map_err(to_handler_error)?;
         let request_for_run = request.clone();
         let service = self.clone();
@@ -96,8 +96,8 @@ impl LLMGateway for LLMGatewayImpl {
             moa_core::StopReason::Cancelled => "cancelled",
             moa_core::StopReason::Other(_) => "other",
         };
-        let provider_name = genai_provider_name(provider_kind.as_str());
-        let operation_name = genai_operation_name(provider_kind.as_str());
+        let provider_name = genai_provider_name(provider_id.as_str());
+        let operation_name = genai_operation_name(provider_id.as_str());
         let span = tracing::Span::current();
         span.set_attribute("gen_ai.operation.name", operation_name);
         span.set_attribute("gen_ai.provider.name", provider_name.to_string());
@@ -122,7 +122,7 @@ impl LLMGateway for LLMGatewayImpl {
             );
         }
         record_llm_cost_cents(
-            provider_kind.as_str(),
+            provider_id.as_str(),
             response.model.as_str(),
             cost_cents as u64,
         );
@@ -251,7 +251,7 @@ pub(crate) fn session_turn_from_completion_request(
     }
     Some(SessionTurn {
         tenant_id,
-        contact_id,
+        contact_id: Some(contact_id),
         session_id,
         turn_seq,
         dominant_pii_class: dominant_pii_class_hint(&transcript).to_string(),
@@ -353,7 +353,7 @@ mod tests {
         .expect("request metadata should produce an ingestable turn");
 
         assert_eq!(turn.tenant_id, tenant_id);
-        assert_eq!(turn.contact_id, contact_id);
+        assert_eq!(turn.contact_id, Some(contact_id));
         assert_eq!(turn.session_id, session_id);
         assert_eq!(turn.turn_seq, 42);
         assert_eq!(turn.finalized_at, finalized_at);

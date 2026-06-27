@@ -7,14 +7,30 @@ use uuid::Uuid;
 
 use crate::types::{
     ActionEnvelope, ActionReviewDecision, ActionReviewPreview, Attachment, CacheReport, Channel,
-    ContactId, EventType, GuardrailDirection, GuardrailMode, ModelId, ModelTier, SegmentId,
-    SessionActorRef, SessionChannelBindingId, SessionStatus, SubAgentId, SubAgentState, TenantId,
-    ToolCallId, ToolOutput,
+    ContactId, GuardrailDirection, GuardrailMode, ModelId, ModelTier, SegmentId, SessionActorRef,
+    SessionChannelBindingId, SessionStatus, SubAgentId, SubAgentState, TenantId, ToolCallId,
+    ToolOutput,
 };
 
 /// Append-only session event payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::EnumDiscriminants)]
 #[serde(tag = "type", content = "data")]
+#[strum_discriminants(name(EventType))]
+#[strum_discriminants(derive(
+    std::hash::Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString
+))]
+#[strum_discriminants(serde(rename_all = "snake_case"))]
+#[strum_discriminants(doc = "Event type discriminator used for filtering and indexing.")]
+#[strum_discriminants(
+    doc = "The strum IntoStaticStr/EnumString derives intentionally use the verbatim"
+)]
+#[strum_discriminants(
+    doc = "PascalCase variant names, which are the persisted database representation."
+)]
 pub enum Event {
     /// Session was created.
     SessionCreated {
@@ -396,76 +412,12 @@ pub enum Event {
 impl Event {
     /// Returns the event discriminator.
     pub fn event_type(&self) -> EventType {
-        match self {
-            Self::SessionCreated { .. } => EventType::SessionCreated,
-            Self::SessionStatusChanged { .. } => EventType::SessionStatusChanged,
-            Self::SessionChannelChanged { .. } => EventType::SessionChannelChanged,
-            Self::SessionCompleted { .. } => EventType::SessionCompleted,
-            Self::SegmentStarted { .. } => EventType::SegmentStarted,
-            Self::SegmentCompleted { .. } => EventType::SegmentCompleted,
-            Self::UserMessage { .. } => EventType::UserMessage,
-            Self::QueuedMessage { .. } => EventType::QueuedMessage,
-            Self::BrainThinking { .. } => EventType::BrainThinking,
-            Self::BrainResponse { .. } => EventType::BrainResponse,
-            Self::ProgressUpdate { .. } => EventType::ProgressUpdate,
-            Self::GuardrailCheck { .. } => EventType::GuardrailCheck,
-            Self::ToolCall { .. } => EventType::ToolCall,
-            Self::ToolResult { .. } => EventType::ToolResult,
-            Self::ToolError { .. } => EventType::ToolError,
-            Self::ActionReviewRequested { .. } => EventType::ActionReviewRequested,
-            Self::ActionReviewDecided { .. } => EventType::ActionReviewDecided,
-            Self::SubAgentSpawned { .. } => EventType::SubAgentSpawned,
-            Self::SubAgentMessageSent { .. } => EventType::SubAgentMessageSent,
-            Self::SubAgentStatusChanged { .. } => EventType::SubAgentStatusChanged,
-            Self::SubAgentNotificationDelivered { .. } => EventType::SubAgentNotificationDelivered,
-            Self::MemoryRead { .. } => EventType::MemoryRead,
-            Self::MemoryWrite { .. } => EventType::MemoryWrite,
-            Self::MemoryIngest { .. } => EventType::MemoryIngest,
-            Self::HandProvisioned { .. } => EventType::HandProvisioned,
-            Self::HandDestroyed { .. } => EventType::HandDestroyed,
-            Self::HandError { .. } => EventType::HandError,
-            Self::Checkpoint { .. } => EventType::Checkpoint,
-            Self::CacheReport { .. } => EventType::CacheReport,
-            Self::Error { .. } => EventType::Error,
-            Self::Warning { .. } => EventType::Warning,
-        }
+        EventType::from(self)
     }
 
     /// Returns a stable type name for storage.
     pub fn type_name(&self) -> &'static str {
-        match self {
-            Self::SessionCreated { .. } => "SessionCreated",
-            Self::SessionStatusChanged { .. } => "SessionStatusChanged",
-            Self::SessionChannelChanged { .. } => "SessionChannelChanged",
-            Self::SessionCompleted { .. } => "SessionCompleted",
-            Self::SegmentStarted { .. } => "SegmentStarted",
-            Self::SegmentCompleted { .. } => "SegmentCompleted",
-            Self::UserMessage { .. } => "UserMessage",
-            Self::QueuedMessage { .. } => "QueuedMessage",
-            Self::BrainThinking { .. } => "BrainThinking",
-            Self::BrainResponse { .. } => "BrainResponse",
-            Self::ProgressUpdate { .. } => "ProgressUpdate",
-            Self::GuardrailCheck { .. } => "GuardrailCheck",
-            Self::ToolCall { .. } => "ToolCall",
-            Self::ToolResult { .. } => "ToolResult",
-            Self::ToolError { .. } => "ToolError",
-            Self::ActionReviewRequested { .. } => "ActionReviewRequested",
-            Self::ActionReviewDecided { .. } => "ActionReviewDecided",
-            Self::SubAgentSpawned { .. } => "SubAgentSpawned",
-            Self::SubAgentMessageSent { .. } => "SubAgentMessageSent",
-            Self::SubAgentStatusChanged { .. } => "SubAgentStatusChanged",
-            Self::SubAgentNotificationDelivered { .. } => "SubAgentNotificationDelivered",
-            Self::MemoryRead { .. } => "MemoryRead",
-            Self::MemoryWrite { .. } => "MemoryWrite",
-            Self::MemoryIngest { .. } => "MemoryIngest",
-            Self::HandProvisioned { .. } => "HandProvisioned",
-            Self::HandDestroyed { .. } => "HandDestroyed",
-            Self::HandError { .. } => "HandError",
-            Self::Checkpoint { .. } => "Checkpoint",
-            Self::CacheReport { .. } => "CacheReport",
-            Self::Error { .. } => "Error",
-            Self::Warning { .. } => "Warning",
-        }
+        self.event_type().as_str()
     }
 
     /// Returns input tokens attributed to the event.
@@ -567,6 +519,17 @@ impl Event {
             Self::BrainResponse { output_tokens, .. } => self.input_tokens() + output_tokens,
             _ => 0,
         }
+    }
+}
+
+impl EventType {
+    /// Returns the stable database representation.
+    ///
+    /// This is the verbatim PascalCase variant name (the persisted form), which
+    /// is intentionally distinct from the snake_case serde/JSON representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        self.into()
     }
 }
 
@@ -733,6 +696,34 @@ mod tests {
             assert_eq!(event.event_type(), expected_type);
             assert_eq!(event.type_name(), expected_name);
         }
+    }
+
+    #[test]
+    fn event_type_uses_event_discriminant_with_stable_names_events() {
+        // Pins: EventType is derived from Event while preserving storage and JSON names.
+        let event = Event::Warning {
+            message: "heads up".to_string(),
+        };
+
+        assert_eq!(event.event_type(), EventType::Warning);
+        assert_eq!(event.type_name(), "Warning");
+        assert_eq!(EventType::Warning.as_str(), "Warning");
+        assert_eq!(
+            serde_json::to_string(&EventType::ToolCall).expect("serialize event type"),
+            "\"tool_call\""
+        );
+        assert_eq!(
+            serde_json::from_str::<EventType>("\"tool_call\"").expect("deserialize event type"),
+            EventType::ToolCall
+        );
+        assert_eq!(
+            "ToolCall".parse::<EventType>().expect("parse DB name"),
+            EventType::ToolCall
+        );
+        assert!(
+            "tool_call".parse::<EventType>().is_err(),
+            "DB parser should keep using PascalCase names"
+        );
     }
 
     #[test]

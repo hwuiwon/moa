@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use moa_core::RlsContext;
 use moa_core::{ContactId, StoragePartitionId, TenantId};
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -192,14 +192,14 @@ pub trait KnowledgeRepository: Send + Sync {
 #[derive(Clone)]
 pub struct PostgresKnowledgeRepository {
     pool: PgPool,
-    scope: Option<ScopeContext>,
+    scope: Option<RlsContext>,
     assume_app_role: bool,
 }
 
 impl PostgresKnowledgeRepository {
     /// Creates a repository that applies tenant scope before each operation.
     #[must_use]
-    pub fn scoped(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn scoped(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope: Some(scope),
@@ -225,7 +225,7 @@ impl PostgresKnowledgeRepository {
     /// This is intended for integration tests that connect as the owner role but
     /// still need to exercise application RLS policies.
     #[must_use]
-    pub fn scoped_for_app_role(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn scoped_for_app_role(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope: Some(scope),

@@ -6,19 +6,17 @@
 //! surface like top-level session turns.
 
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use moa_core::wire::session_store::{AppendEventRequest, RecordSegmentToolUseRequest};
 use moa_core::wire::turn::{
-    RunSubAgentTurnRequest, TurnComplexityClass, TurnOutcome, TurnOutcomeKind, TurnPhase,
-    TurnProgress,
+    RunSubAgentTurnRequest, TurnOutcome, TurnOutcomeKind, TurnPhase, TurnProgress,
 };
 use moa_core::{
-    ActionPolicyEffect, CompletionContent, CompletionRequest, CompletionResponse, Event, ModelTier,
-    SessionId, SessionMeta, StopReason, SubAgentToolRecord, SubAgentTurnOutcomeRecord,
+    CompletionContent, CompletionRequest, CompletionResponse, Event, ModelTier, SessionId,
+    SessionMeta, StopReason, SubAgentToolRecord, SubAgentTurnOutcomeRecord,
     SubAgentTurnPreparation, SubAgentTurnResponseRecord, TokenUsage, ToolCallContent, ToolCallId,
-    ToolCallRequest, ToolInvocation, ToolOutput, TurnOutcome as CoreTurnOutcome,
-    is_delegation_tool_name,
+    ToolInvocation, ToolOutput, TurnOutcome as CoreTurnOutcome,
 };
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
@@ -33,31 +31,23 @@ use tracing::Instrument;
 
 use crate::OrchestratorCtx;
 use crate::objects::sub_agent::{MAX_SUB_AGENT_TURNS_PER_WORKFLOW, SubAgentClient};
-use crate::services::{
-    action_policy::{ActionPolicyClient, PrepareActionReviewRequest},
-    action_reviews::{ActionReviewsClient, RequestActionReview},
-    llm_gateway::LLMGatewayClient,
-    session_store::RestateSessionStoreClient,
-    tool_executor::ToolExecutorClient,
+use crate::services::{llm_gateway::LLMGatewayClient, session_store::RestateSessionStoreClient};
+use crate::tool_invocation::governed::{
+    GovernedInvocationOrigin, GovernedInvocationOutcome, GovernedInvocationProgress,
+    GovernedInvocationRequest, invoke_governed_tool,
+    record_segment_tool_use as record_governed_segment_tool_use,
 };
 use crate::turn::util::{
-    TurnEvidence, allowed_tool_names, annotate_unresolved_verification, blocked_canary_tool_output,
-    denied_tool_output, disallowed_tool_output, meaningful_cancel_reason, response_tool_calls,
-    stable_tool_call_id, tool_call_is_allowed, tool_input_leaks_canary, turn_outcome_for_response,
+    TurnEvidence, allowed_tool_names, annotate_unresolved_verification, response_tool_calls,
+    stable_tool_call_id, turn_outcome_for_response,
+};
+use crate::turn_driver::{
+    model_loop as driver_model_loop, progress as driver_progress, segments as driver_segments,
 };
 use crate::workflows::turn_progress::{self, SUMMARY_CALLING_MODEL};
 use crate::workflows::turn_responsiveness::{
-    ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState, TurnResponsivenessInput,
-    classify_turn_request, effective_tool_cap, effective_turn_cap, progress_cap, progress_count,
+    ToolBudgetDecision, ToolBudgetExhausted, ToolBudgetState,
 };
-
-const K_CANCEL_REASON_PROMISE: &str = "cancel_reason";
-const K_PHASE: &str = "phase";
-const K_COMPLEXITY_CLASS: &str = "complexity_class";
-const K_ITERATION: &str = "iteration";
-const K_MAX_TURNS: &str = "max_turns";
-const K_TOOL_CALLS: &str = "tool_calls";
-const K_MAX_TOOL_CALLS: &str = "max_tool_calls";
 
 #[derive(Clone, Debug)]
 enum SubAgentIterationOutcome {
@@ -103,7 +93,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
     ) -> Result<Json<TurnOutcome>, HandlerError> {
         annotate_restate_handler_span("SubAgentTurnExecution", "run");
         let request = request.into_inner();
-        ctx.set(K_PHASE, Json::from(TurnPhase::Compiling));
+        driver_progress::set_phase(&ctx, TurnPhase::Compiling);
 
         let workflow_started = Instant::now();
         let outcome = match run_sub_agent_inside_workflow(&ctx, &request).await {
@@ -126,7 +116,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
             TurnOutcomeKind::Failed => TurnPhase::Failed,
         };
         turn_progress::finish(&ctx).await?;
-        ctx.set(K_PHASE, Json::from(phase));
+        driver_progress::set_phase(&ctx, phase);
         notify_sub_agent_of_outcome(&ctx, &request.sub_agent_id, &outcome);
         Ok(Json::from(outcome))
     }
@@ -138,20 +128,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
         reason: Json<String>,
     ) -> Result<(), HandlerError> {
         annotate_restate_handler_span("SubAgentTurnExecution", "request_cancel");
-        let phase = ctx
-            .get::<Json<TurnPhase>>(K_PHASE)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default();
-        if is_terminal_phase(&phase) {
-            return Ok(());
-        }
-
-        let Some(reason) = meaningful_cancel_reason(Some(reason.into_inner())) else {
-            return Ok(());
-        };
-        ctx.resolve_promise(K_CANCEL_REASON_PROMISE, reason);
-        Ok(())
+        driver_progress::request_cancel(&ctx, reason.into_inner()).await
     }
 
     #[tracing::instrument(skip(self, ctx))]
@@ -160,52 +137,7 @@ impl SubAgentTurnExecution for SubAgentTurnExecutionImpl {
         ctx: SharedWorkflowContext<'_>,
     ) -> Result<Json<TurnProgress>, HandlerError> {
         annotate_restate_handler_span("SubAgentTurnExecution", "progress");
-        let phase = ctx
-            .get::<Json<TurnPhase>>(K_PHASE)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default();
-        let cancel_reason =
-            meaningful_cancel_reason(ctx.peek_promise::<String>(K_CANCEL_REASON_PROMISE).await?);
-        let complexity_class = ctx
-            .get::<Json<TurnComplexityClass>>(K_COMPLEXITY_CLASS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default();
-        let iteration = ctx
-            .get::<Json<u32>>(K_ITERATION)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default();
-        let max_turns = ctx
-            .get::<Json<Option<u32>>>(K_MAX_TURNS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(None);
-        let tool_calls = ctx
-            .get::<Json<u32>>(K_TOOL_CALLS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or_default();
-        let max_tool_calls = ctx
-            .get::<Json<Option<u32>>>(K_MAX_TOOL_CALLS)
-            .await?
-            .map(Json::into_inner)
-            .unwrap_or(None);
-        let progress = turn_progress::snapshot(&ctx, is_terminal_phase(&phase)).await?;
-        Ok(Json::from(TurnProgress {
-            turn_id: ctx.key().to_string(),
-            phase,
-            complexity_class,
-            iteration,
-            max_turns,
-            tool_calls,
-            max_tool_calls,
-            elapsed_ms: progress.elapsed_ms,
-            last_progress_summary: progress.last_summary,
-            cancel_requested: cancel_reason.is_some(),
-            cancel_reason,
-        }))
+        driver_progress::snapshot(&ctx).await
     }
 }
 
@@ -214,34 +146,28 @@ async fn run_sub_agent_inside_workflow(
     request: &RunSubAgentTurnRequest,
 ) -> Result<TurnOutcome, HandlerError> {
     let session_limits = &OrchestratorCtx::current_config().session_limits;
-    let selected_class = classify_turn_request(TurnResponsivenessInput {
-        user_text: "",
-        attachment_count: 0,
-        request_max_turns: request.max_turns,
-        has_recent_target: true,
-        is_workflow_context: false,
-        is_sub_agent_context: true,
-        available_tool_count: 0,
-    });
-    let request_or_default_cap = request.max_turns.or(Some(
-        MAX_SUB_AGENT_TURNS_PER_WORKFLOW.min(u32::MAX as usize) as u32,
-    ));
-    let max_turns = effective_turn_cap(request_or_default_cap, selected_class, session_limits);
-    let max_tool_calls = effective_tool_cap(selected_class, session_limits);
-    let mut tool_budget =
-        ToolBudgetState::new(max_tool_calls, session_limits.loop_detection_threshold);
-    ctx.set(K_COMPLEXITY_CLASS, Json::from(selected_class));
-    ctx.set(K_ITERATION, Json::from(0_u32));
-    ctx.set(K_MAX_TURNS, Json::from(progress_cap(max_turns)));
-    ctx.set(K_TOOL_CALLS, Json::from(0_u32));
-    ctx.set(K_MAX_TOOL_CALLS, Json::from(progress_cap(max_tool_calls)));
+    let loop_plan = driver_model_loop::sub_agent_loop_plan(
+        driver_model_loop::SubAgentLoopPlanRequest {
+            request_max_turns: request.max_turns,
+            default_max_turns: MAX_SUB_AGENT_TURNS_PER_WORKFLOW,
+        },
+        session_limits,
+    );
+    let max_turns = loop_plan.max_turns;
+    let mut tool_budget = loop_plan.tool_budget();
+    driver_progress::initialize_loop_progress(
+        ctx,
+        loop_plan.complexity_class,
+        loop_plan.max_turns,
+        loop_plan.max_tool_calls,
+    );
     turn_progress::initialize(ctx).await?;
     let mut turn_evidence = TurnEvidence::default();
     let mut last_request_meta = None;
     let mut last_parent_session = None;
     for turn_number in 1..=max_turns {
-        ctx.set(K_ITERATION, Json::from(progress_count(turn_number)));
-        if let Some(reason) = cancel_requested(ctx).await? {
+        driver_progress::set_iteration(ctx, turn_number);
+        if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
             ctx.object_client::<SubAgentClient>(request.sub_agent_id.clone())
                 .cancel(reason.clone())
                 .send();
@@ -252,7 +178,7 @@ async fn run_sub_agent_inside_workflow(
             });
         }
 
-        ctx.set(K_PHASE, Json::from(TurnPhase::Compiling));
+        driver_progress::set_phase(ctx, TurnPhase::Compiling);
         let preparation = ctx
             .object_client::<SubAgentClient>(request.sub_agent_id.clone())
             .prepare_turn()
@@ -354,16 +280,16 @@ async fn run_sub_agent_iteration(
         .await?;
     let allowed_tools = allowed_tool_names(&input.completion_request);
 
-    ctx.set(K_PHASE, Json::from(TurnPhase::Streaming));
-    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    driver_progress::set_phase(ctx, TurnPhase::Streaming);
+    let cadence = driver_progress::current_cadence();
     turn_progress::maybe_emit(
         ctx,
         input.parent_session,
         &input.request.turn_id,
         TurnPhase::Streaming,
         SUMMARY_CALLING_MODEL,
-        progress_first_delay_ms,
-        progress_interval_ms,
+        cadence.first_delay_ms,
+        cadence.interval_ms,
     )
     .await?;
     let span = llm_call_span(&input.meta);
@@ -371,7 +297,7 @@ async fn run_sub_agent_iteration(
     let response = {
         let _guard = span.enter();
         restate_sdk::select! {
-            reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
+            reason = ctx.promise::<String>(driver_progress::TurnStateKey::CANCEL_REASON_PROMISE) => {
                 let reason = reason?;
                 ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
                     .cancel(reason.clone())
@@ -411,7 +337,7 @@ async fn run_sub_agent_iteration(
     }
 
     for (index, tool_call) in response_tool_calls(&response).into_iter().enumerate() {
-        if let Some(reason) = cancel_requested(ctx).await? {
+        if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
             ctx.object_client::<SubAgentClient>(input.request.sub_agent_id.clone())
                 .cancel(reason.clone())
                 .send();
@@ -423,15 +349,9 @@ async fn run_sub_agent_iteration(
         {
             ToolBudgetDecision::Allow {
                 attempted_tool_calls,
-            } => ctx.set(
-                K_TOOL_CALLS,
-                Json::from(progress_count(attempted_tool_calls)),
-            ),
+            } => driver_progress::set_tool_calls(ctx, attempted_tool_calls),
             ToolBudgetDecision::Stop(exhaustion) => {
-                ctx.set(
-                    K_TOOL_CALLS,
-                    Json::from(progress_count(input.tool_budget.attempted_tool_calls())),
-                );
+                driver_progress::set_tool_calls(ctx, input.tool_budget.attempted_tool_calls());
                 let message = record_sub_agent_budget_stop(
                     ctx,
                     input.request,
@@ -487,14 +407,7 @@ async fn attach_active_segment_metadata(
     else {
         return Ok(());
     };
-    request.metadata.insert(
-        "_moa.segment_id".to_string(),
-        serde_json::json!(segment.id.to_string()),
-    );
-    request.metadata.insert(
-        "_moa.segment_index".to_string(),
-        serde_json::json!(segment.segment_index),
-    );
+    driver_segments::insert_active_segment_metadata(request, &segment);
     Ok(())
 }
 
@@ -514,188 +427,74 @@ async fn handle_tool_call(
     tool_call: &ToolCallContent,
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
-    ctx.set(K_PHASE, Json::from(TurnPhase::Tooling));
+    driver_progress::set_phase(ctx, TurnPhase::Tooling);
     let sub_agent_id = tool_context.sub_agent_id;
     let meta = tool_context.meta;
     let session_id = tool_context.session_id;
     let tool_id = stable_tool_call_id(session_id, index, tool_call);
-    let invocation = tool_call.invocation.clone();
-
-    if !tool_call_is_allowed(allowed_tools, &invocation.name) {
-        append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
-        let output = disallowed_tool_output(&invocation.name);
-        append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
-        record_denied_tool(
-            ctx,
-            tool_context.turn_id,
-            sub_agent_id,
-            tool_id,
-            &invocation,
-            &output,
-        )
-        .await?;
-        turn_evidence.record_tool_result(&invocation, &output);
-        return Ok(());
-    }
-
-    if is_delegation_tool_name(&invocation.name) {
-        handle_delegation_tool(
-            ctx,
-            tool_context.turn_id,
-            sub_agent_id,
+    let cadence = driver_progress::current_cadence();
+    let outcome = invoke_governed_tool(
+        ctx,
+        GovernedInvocationRequest {
+            session: meta,
             session_id,
             tool_id,
             tool_call,
-            turn_evidence,
-        )
-        .await?;
-        return Ok(());
-    }
+            allowed_tools,
+            active_canary: tool_context.active_canary,
+            origin: GovernedInvocationOrigin::SubAgent {
+                sub_agent_id,
+                turn_id: tool_context.turn_id,
+            },
+            progress: GovernedInvocationProgress {
+                turn_id: tool_context.turn_id,
+                first_delay_ms: cadence.first_delay_ms,
+                interval_ms: cadence.interval_ms,
+            },
+        },
+    )
+    .await?;
 
-    append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
-
-    let prepared_action = ctx
-        .service_client::<ActionPolicyClient>()
-        .prepare_action_review(Json(PrepareActionReviewRequest {
-            session: meta.clone(),
-            invocation: invocation.clone(),
-            review_id: tool_id.0,
-            tool_call_id: tool_id,
-            sub_agent_id: Some(sub_agent_id.to_string()),
-            origin_kind: Some("sub_agent".to_string()),
-            origin_id: Some(sub_agent_id.to_string()),
-            origin_step_id: Some(tool_context.turn_id.to_string()),
-            idempotency_key: invocation.id.clone(),
-        }))
-        .call()
-        .await?
-        .into_inner();
-
-    if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
-        let reason = prepared_action
-            .reason
-            .as_deref()
-            .unwrap_or("denied by action policy");
-        let output = denied_tool_output(format!(
-            "Tool {} denied by action policy: {reason}",
-            invocation.name
-        ));
-        append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
-        record_denied_tool(
-            ctx,
-            tool_context.turn_id,
-            sub_agent_id,
-            tool_id,
-            &invocation,
-            &output,
-        )
-        .await?;
-        turn_evidence.record_tool_result(&invocation, &output);
-        return Ok(());
-    }
-
-    if matches!(prepared_action.effect, ActionPolicyEffect::AdminReview) {
-        let tool_request = ToolCallRequest {
-            tool_call_id: tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            tool_name: invocation.name.clone(),
-            input: invocation.input.clone(),
-            active_canary: tool_context.active_canary.map(ToOwned::to_owned),
-            session_id: Some(session_id),
-            tenant_id: meta.tenant_id,
-            user_id: storage_user_id(meta),
-            idempotency_key: invocation.id.clone(),
-        };
-        if tool_input_leaks_canary(tool_context.active_canary, &tool_request.input)
-            .map_err(|error| TerminalError::new(format!("serialize tool input: {error}")))?
-        {
-            let output = blocked_canary_tool_output(&invocation.name);
-            append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
-            record_denied_tool(
+    match outcome {
+        GovernedInvocationOutcome::Completed(result) => {
+            if result.should_record_denied_sub_agent_tool() {
+                record_denied_tool(
+                    ctx,
+                    tool_context.turn_id,
+                    sub_agent_id,
+                    result.tool_id,
+                    &result.invocation,
+                    &result.output,
+                )
+                .await?;
+            } else {
+                record_tool_result(
+                    ctx,
+                    tool_context.turn_id,
+                    sub_agent_id,
+                    result.tool_id,
+                    &result.invocation,
+                    &result.output,
+                )
+                .await?;
+            }
+            turn_evidence.record_tool_result(&result.invocation, &result.output);
+            if result.should_record_segment_tool_use() {
+                record_governed_segment_tool_use(ctx, session_id, &result.invocation.name).await?;
+            }
+        }
+        GovernedInvocationOutcome::Delegation { tool_id, .. } => {
+            handle_delegation_tool(
                 ctx,
                 tool_context.turn_id,
                 sub_agent_id,
+                session_id,
                 tool_id,
-                &invocation,
-                &output,
+                tool_call,
+                turn_evidence,
             )
             .await?;
-            turn_evidence.record_tool_result(&invocation, &output);
-            return Ok(());
         }
-        ctx.service_client::<ActionReviewsClient>()
-            .request(Json::from(RequestActionReview {
-                envelope: prepared_action.envelope,
-                preview: prepared_action.preview,
-                tool_request,
-            }))
-            .call()
-            .await?;
-        let output = ToolOutput::error(
-            format!(
-                "Action is pending tenant admin review: {}: {}",
-                invocation.name, prepared_action.input_summary
-            ),
-            Duration::ZERO,
-        );
-        append_tool_result_event(ctx, session_id, tool_id, &invocation, &output).await?;
-        record_denied_tool(
-            ctx,
-            tool_context.turn_id,
-            sub_agent_id,
-            tool_id,
-            &invocation,
-            &output,
-        )
-        .await?;
-        turn_evidence.record_tool_result(&invocation, &output);
-        return Ok(());
-    }
-
-    let span = tool_dispatch_span(&invocation.name);
-    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
-    turn_progress::maybe_emit(
-        ctx,
-        session_id,
-        tool_context.turn_id,
-        TurnPhase::Tooling,
-        turn_progress::running_tool_summary(&invocation.name),
-        progress_first_delay_ms,
-        progress_interval_ms,
-    )
-    .await?;
-    let dispatch_started = Instant::now();
-    let output = ctx
-        .service_client::<ToolExecutorClient>()
-        .execute(Json::from(ToolCallRequest {
-            tool_call_id: tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            tool_name: invocation.name.clone(),
-            input: invocation.input.clone(),
-            active_canary: tool_context.active_canary.map(ToOwned::to_owned),
-            session_id: Some(session_id),
-            tenant_id: meta.tenant_id,
-            user_id: storage_user_id(meta),
-            idempotency_key: invocation.id.clone(),
-        }))
-        .call()
-        .instrument(span)
-        .await?
-        .into_inner();
-    record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
-
-    record_tool_result(
-        ctx,
-        tool_context.turn_id,
-        sub_agent_id,
-        tool_id,
-        &invocation,
-        &output,
-    )
-    .await?;
-    turn_evidence.record_tool_result(&invocation, &output);
-    if !output.is_error {
-        record_segment_tool_use(ctx, session_id, &invocation.name).await?;
     }
     Ok(())
 }
@@ -720,15 +519,15 @@ async fn handle_delegation_tool(
     };
 
     let span = tool_dispatch_span(&invocation.name);
-    let (progress_first_delay_ms, progress_interval_ms) = progress_cadence();
+    let cadence = driver_progress::current_cadence();
     turn_progress::maybe_emit(
         ctx,
         session_id,
         turn_id,
         TurnPhase::Tooling,
         turn_progress::running_tool_summary(&invocation.name),
-        progress_first_delay_ms,
-        progress_interval_ms,
+        cadence.first_delay_ms,
+        cadence.interval_ms,
     )
     .await?;
     let dispatch_started = Instant::now();
@@ -981,29 +780,6 @@ async fn append_tool_call_event(
     .map(|_| ())
 }
 
-async fn append_tool_result_event(
-    ctx: &WorkflowContext<'_>,
-    session_id: SessionId,
-    tool_id: ToolCallId,
-    invocation: &ToolInvocation,
-    output: &ToolOutput,
-) -> Result<(), HandlerError> {
-    append_session_event(
-        ctx,
-        session_id,
-        Event::ToolResult {
-            tool_id,
-            provider_tool_use_id: invocation.id.clone(),
-            output: output.clone(),
-            original_output_tokens: output.original_output_tokens,
-            success: false,
-            duration_ms: 0,
-        },
-    )
-    .await
-    .map(|_| ())
-}
-
 async fn append_delegation_tool_result(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
@@ -1044,12 +820,6 @@ async fn append_session_event(
     Ok(sequence_num)
 }
 
-async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, HandlerError> {
-    Ok(meaningful_cancel_reason(
-        ctx.peek_promise::<String>(K_CANCEL_REASON_PROMISE).await?,
-    ))
-}
-
 fn notify_sub_agent_of_outcome(
     ctx: &WorkflowContext<'_>,
     sub_agent_id: &str,
@@ -1082,18 +852,6 @@ fn workflow_outcome_from_core(
     }
 }
 
-fn is_terminal_phase(phase: &TurnPhase) -> bool {
-    matches!(
-        phase,
-        TurnPhase::Completed | TurnPhase::Cancelled | TurnPhase::Failed
-    )
-}
-
-fn progress_cadence() -> (u64, u64) {
-    let limits = &OrchestratorCtx::current_config().session_limits;
-    (limits.progress_first_delay_ms, limits.progress_interval_ms)
-}
-
 fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
     match kind {
         TurnOutcomeKind::Completed => "completed",
@@ -1102,43 +860,11 @@ fn turn_outcome_kind_label(kind: &TurnOutcomeKind) -> &'static str {
     }
 }
 
-fn storage_user_id(meta: &SessionMeta) -> moa_core::UserId {
-    let value = meta
-        .contact
-        .as_ref()
-        .map(|contact| contact.contact_id.to_string())
-        .or_else(|| meta.created_by.as_ref().map(session_actor_storage_id))
-        .unwrap_or_else(|| format!("tenant:{}", meta.tenant_id));
-    moa_core::UserId::new(value)
-}
-
-fn session_actor_storage_id(actor: &moa_core::SessionActorRef) -> String {
-    match actor {
-        moa_core::SessionActorRef::Identity { id } => format!("identity:{id}"),
-        moa_core::SessionActorRef::Contact { id } => id.to_string(),
-        moa_core::SessionActorRef::Anonymous => "anonymous".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use moa_core::SessionId;
-    use moa_core::wire::turn::TurnPhase;
 
-    use super::{is_terminal_phase, parent_session_from_initial_message};
-
-    #[test]
-    fn terminal_phase_detection_matches_workflow_lifecycle() {
-        // Pins: cancellation requests stop mutating completed sub-agent workflows.
-        assert!(!is_terminal_phase(&TurnPhase::Pending));
-        assert!(!is_terminal_phase(&TurnPhase::Compiling));
-        assert!(!is_terminal_phase(&TurnPhase::Streaming));
-        assert!(!is_terminal_phase(&TurnPhase::Tooling));
-        assert!(!is_terminal_phase(&TurnPhase::Persisting));
-        assert!(is_terminal_phase(&TurnPhase::Completed));
-        assert!(is_terminal_phase(&TurnPhase::Cancelled));
-        assert!(is_terminal_phase(&TurnPhase::Failed));
-    }
+    use super::parent_session_from_initial_message;
 
     #[test]
     fn reserved_child_parent_session_requires_initial_message() {

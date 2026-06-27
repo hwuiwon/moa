@@ -15,6 +15,7 @@ use moa_brain::{
     planning::{NerExtractor, PlanningCtx, QueryPlanner, QueryRetrievalCtx, retrieve_for_query},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalHit},
 };
+use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_eval::golden::comparator::dump_traces;
@@ -25,7 +26,7 @@ use moa_memory_ingest::{
     ingest_turn_direct_with_ctx,
 };
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde::Deserialize;
@@ -141,7 +142,7 @@ struct GoldenStack {
     tenant_uuid: Uuid,
     user_uuid: Uuid,
     session_id: SessionId,
-    scope: ScopeContext,
+    scope: RlsContext,
     graph: Arc<dyn GraphStore>,
     vector: Arc<PgvectorStore>,
     embedder: Arc<GoldenEmbedder>,
@@ -158,7 +159,7 @@ impl GoldenStack {
         let tenant_uuid = Uuid::now_v7();
         let user_uuid = Uuid::now_v7();
         let tenant_id = TenantId::from(tenant_uuid);
-        let scope = ScopeContext::tenant(tenant_id);
+        let scope = RlsContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
         let graph = Arc::new(
             AgeGraphStore::scoped_for_app_role(pool.clone(), scope.clone())
@@ -221,7 +222,7 @@ impl GoldenStack {
 
 async fn seed_tenant_embedder_state(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     storage_partition_id: Uuid,
 ) -> TestResult {
     let mut conn = ScopedConn::begin(pool, scope).await.map_err(box_error)?;
@@ -358,7 +359,7 @@ async fn run_golden_100_e2e(stack: &GoldenStack) -> TestResult {
     let other_tenant_id = TenantId::new();
     seed_tenant_embedder_state(
         &stack.pool,
-        &ScopeContext::tenant(other_tenant_id),
+        &RlsContext::tenant(other_tenant_id),
         other_tenant_id.0,
     )
     .await?;
@@ -412,7 +413,7 @@ struct RetrievalHarness {
 
 impl RetrievalHarness {
     fn new(stack: &GoldenStack, scope: MemoryScope) -> Self {
-        let scope_ctx = ScopeContext::from(scope.clone());
+        let scope_ctx = RlsContext::from(scope.clone());
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             stack.pool.clone(),
             scope_ctx.clone(),
@@ -514,7 +515,7 @@ fn load_queries() -> TestResult<GoldenQueries> {
 fn session_turn(stack: &GoldenStack, fixture: &GoldenFixture, turn_seq: u64) -> SessionTurn {
     SessionTurn {
         tenant_id: TenantId::from(stack.tenant_uuid),
-        contact_id: ContactId(stack.user_uuid),
+        contact_id: Some(ContactId(stack.user_uuid)),
         session_id: stack.session_id,
         turn_seq,
         transcript: format!("Fact: tenant shared {}", fixture.summary),
@@ -716,7 +717,7 @@ async fn scoped_conn<'a>(
     pool: &'a PgPool,
     storage_partition_id: Uuid,
 ) -> TestResult<ScopedConn<'a>> {
-    let scope = ScopeContext::tenant(TenantId::from(storage_partition_id));
+    let scope = RlsContext::tenant(TenantId::from(storage_partition_id));
     let mut conn = ScopedConn::begin(pool, &scope).await.map_err(box_error)?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())

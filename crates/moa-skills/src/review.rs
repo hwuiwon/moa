@@ -5,12 +5,12 @@ use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactFile, ArtifactRegistry, StoredArtifactRevision};
 use moa_artifacts::resolver::ArtifactResolver;
 use moa_artifacts::validation::{ValidationReport, validate_for_status};
+use moa_core::RlsContext;
 use moa_core::{
     ActionRuleScope, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
     LearningCandidateType, LearningEntry, MoaError, StoragePartitionId, TenantId,
 };
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use std::future::Future;
@@ -349,9 +349,9 @@ fn tenant_artifact_scope(tenant_id: TenantId) -> ActionRuleScope {
     ActionRuleScope::Tenant { tenant_id }
 }
 
-fn artifact_scope_context(scope: &ActionRuleScope) -> Result<ScopeContext> {
+fn artifact_scope_context(scope: &ActionRuleScope) -> Result<RlsContext> {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => Ok(ScopeContext::tenant(*tenant_id)),
+        ActionRuleScope::Tenant { tenant_id } => Ok(RlsContext::tenant(*tenant_id)),
     }
 }
 

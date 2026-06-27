@@ -18,6 +18,7 @@ use moa_brain::{
     GraphMemoryPipelineOptions,
     build_default_graph_memory_pipeline_with_rewriter_runtime_and_instructions,
 };
+use moa_core::RlsContext;
 use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream, ContactId,
     ContextMessage, ContextProcessor, LLMProvider, MessageRole, MoaConfig, ModelCapabilities,
@@ -27,7 +28,6 @@ use moa_core::{
 };
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeLabel, PiiClass};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorStore};
 use moa_session::testing;
 use serde_json::json;
@@ -582,7 +582,7 @@ async fn seed_memory_rows(
     hits: &[MemoryHit],
     clock_at: DateTime<Utc>,
 ) -> Result<()> {
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::contact(tenant_id, contact_id))
+    let mut conn = ScopedConn::begin(pool, &RlsContext::contact(tenant_id, contact_id))
         .await
         .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
     sqlx::query("SET LOCAL ROLE moa_app")
@@ -659,7 +659,7 @@ async fn seed_other_tenant_vector_noise(
     .await
     .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
 
-    let vector = PgvectorStore::new(pool.clone(), ScopeContext::tenant(other_tenant_id));
+    let vector = PgvectorStore::new(pool.clone(), RlsContext::tenant(other_tenant_id));
     vector
         .upsert(&[VectorItem {
             uid,
@@ -683,7 +683,7 @@ async fn seed_workspace_embedder_state(
     storage_partition_id: &str,
     model: &str,
 ) -> Result<()> {
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id))
+    let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(*tenant_id))
         .await
         .map_err(|error| moa_core::MoaError::StorageError(error.to_string()))?;
     sqlx::query("SET LOCAL ROLE moa_app")

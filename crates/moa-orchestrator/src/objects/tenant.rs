@@ -428,7 +428,7 @@ async fn persist_policy_rules(rules: &[ActionPolicyRule]) -> Result<(), HandlerE
         return Ok(());
     }
 
-    let store = OrchestratorCtx::current_session_store();
+    let store = OrchestratorCtx::current().action_policy_store();
     let result: Result<(), MoaError> = async {
         for rule in rules.iter().cloned() {
             store.upsert_action_policy_rule(rule).await?;

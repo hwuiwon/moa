@@ -161,7 +161,6 @@ services:
       MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
       MOA_RESTATE_ADMIN_URL: http://restate:9070
       MOA_RESTATE_INGRESS_URL: http://restate:8080
-      MOA_AUTH_HEADER_TRUST: ${MOA_AUTH_HEADER_TRUST:-lenient}
       MOA_LOCAL_SANDBOX_DIR: /var/lib/moa/sandbox
       MOA_LOCAL_MEMORY_DIR: /var/lib/moa/memory
       MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH: /var/lib/moa/lineage-journal

@@ -82,8 +82,8 @@ fn checked_memory_scope_rejects_mismatched_contact_identity() {
 }
 
 #[test]
-fn checked_ingest_contact_id_uses_contact_identity() {
-    // Pins: document ingestion attribution comes from the trusted contact identity when absent.
+fn checked_ingest_contact_id_does_not_synthesize_missing_contact() {
+    // Pins: document ingestion with no contact_id remains tenant-owned instead of borrowing the caller id.
     let agent_id =
         Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("fixture agent id parses");
     let acting_user_id =
@@ -95,8 +95,25 @@ fn checked_ingest_contact_id_uses_contact_identity() {
         Some(UserId::new(acting_user_id.to_string()))
     );
     assert_eq!(
-        checked_ingest_contact_id(None, &identity).expect("identity id should be used"),
-        ContactId(agent_id)
+        checked_ingest_contact_id(None, &identity).expect("missing contact is tenant-owned"),
+        None
+    );
+}
+
+#[test]
+fn checked_ingest_contact_id_accepts_explicit_contact_owner() {
+    // Pins: contact-owned document ingestion must name the contact owner explicitly.
+    let user_id =
+        Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("fixture user id parses");
+    let identity = user_identity(user_id);
+    let contact_id = ContactId(
+        Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("fixture contact id parses"),
+    );
+
+    assert_eq!(
+        checked_ingest_contact_id(Some(contact_id), &identity)
+            .expect("explicit contact owner should be accepted"),
+        Some(contact_id)
     );
 }
 
@@ -142,8 +159,8 @@ fn document_ingest_session_id_is_stable_for_client_retries() {
         metadata: json!({"ignored_for_identity": true}),
     };
 
-    let first = document_ingest_session_id(tenant_id, contact_id, 0, &document);
-    let retry = document_ingest_session_id(tenant_id, contact_id, 0, &document);
+    let first = document_ingest_session_id(tenant_id, Some(contact_id), 0, &document);
+    let retry = document_ingest_session_id(tenant_id, Some(contact_id), 0, &document);
 
     assert_eq!(first, retry);
     assert_eq!(first.0.get_variant(), Variant::RFC4122);
@@ -172,18 +189,38 @@ fn document_ingest_session_id_separates_source_content_and_index() {
         ..document.clone()
     };
 
-    let baseline = document_ingest_session_id(tenant_id, contact_id, 0, &document);
+    let baseline = document_ingest_session_id(tenant_id, Some(contact_id), 0, &document);
 
     assert_ne!(
         baseline,
-        document_ingest_session_id(tenant_id, contact_id, 0, &changed_content)
+        document_ingest_session_id(tenant_id, Some(contact_id), 0, &changed_content)
     );
     assert_ne!(
         baseline,
-        document_ingest_session_id(tenant_id, contact_id, 0, &changed_source)
+        document_ingest_session_id(tenant_id, Some(contact_id), 0, &changed_source)
     );
     assert_ne!(
         baseline,
-        document_ingest_session_id(tenant_id, contact_id, 1, &document)
+        document_ingest_session_id(tenant_id, Some(contact_id), 1, &document)
+    );
+}
+
+#[test]
+fn document_ingest_session_id_separates_tenant_and_contact_owners() {
+    // Pins: tenant-owned and contact-owned document ingestion never address the same VO.
+    let tenant_id =
+        TenantId(Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("tenant id"));
+    let contact_id =
+        ContactId(Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").expect("contact id"));
+    let document = MemoryIngestDocument {
+        source_name: "runbook.md".to_string(),
+        content: "rotate API keys quarterly".to_string(),
+        source_uri: Some("s3://docs/runbook.md".to_string()),
+        metadata: json!({}),
+    };
+
+    assert_ne!(
+        document_ingest_session_id(tenant_id, None, 0, &document),
+        document_ingest_session_id(tenant_id, Some(contact_id), 0, &document)
     );
 }

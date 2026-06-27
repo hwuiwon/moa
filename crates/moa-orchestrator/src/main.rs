@@ -12,15 +12,12 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Router, serve};
 use clap::{Parser, Subcommand};
-use moa_core::MoaConfig;
-use moa_core::config::AuthHeaderTrustKind;
 use moa_observability::{TelemetryConfig, init_observability, metrics_endpoint_url};
 use moa_orchestrator::{
     config::{
         ProvidersOverride, load_moa_config_from_env, restate_admin_url, restate_ingress_url,
         skip_fga_from_env,
     },
-    ctx::{self, HeaderTrustMode},
     runtime::{
         database::{apply_database_migrations, build_database_pool, database_search_path},
         deps::RuntimeDeps,
@@ -73,10 +70,8 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let moa_config = load_moa_config_from_env()?;
-    let header_trust_mode = header_trust_mode_from_config(&moa_config);
     let skip_fga = skip_fga_from_env();
     let moa_config = Arc::new(moa_config);
-    let _ = ctx::HEADER_TRUST_MODE.set(header_trust_mode);
     let _telemetry = init_observability(
         moa_config.as_ref(),
         &TelemetryConfig {
@@ -154,7 +149,6 @@ async fn main() -> anyhow::Result<()> {
         port = args.port,
         health_port = args.health_port,
         scim_port = args.scim_port,
-        header_trust_mode = ?header_trust_mode,
         restate_admin_url = %probe_state.admin_base_url(),
         metrics_url = metrics_endpoint_url(&moa_config.metrics).unwrap_or_else(|| "disabled".to_string()),
         "starting moa-orchestrator"
@@ -240,13 +234,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn header_trust_mode_from_config(config: &MoaConfig) -> HeaderTrustMode {
-    match config.auth.header_trust {
-        AuthHeaderTrustKind::Strict => HeaderTrustMode::Strict,
-        AuthHeaderTrustKind::Lenient => HeaderTrustMode::Lenient,
-    }
 }
 
 #[derive(Clone)]

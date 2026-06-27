@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use moa_core::RlsContext;
 use moa_core::{MoaConfig, TenantId, traits::EmbeddingProvider};
 use moa_knowledge::{
     chunking::ChunkingConfig,
@@ -19,7 +20,7 @@ use moa_knowledge::{
     repository::PostgresKnowledgeRepository,
 };
 use moa_memory_graph::AgeGraphStore;
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
     EmbedderConstructionRole, PgvectorStore, VectorStore, build_embedder_from_config,
 };
@@ -91,7 +92,7 @@ fn build_ingestion_pipeline(
     provider: String,
     parser_label: String,
 ) -> Result<ProductionKnowledgeIngestionPipeline, KnowledgeServiceError> {
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped(
         pool.clone(),
         scope.clone(),

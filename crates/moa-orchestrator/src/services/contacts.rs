@@ -12,7 +12,7 @@ use moa_contacts::repository::{
     ensure_contact_token_grant_active, issue_contact, load_contact_ref, promoted_from_contact,
     resolve_contact_session_channel, start_contact_verification,
 };
-use moa_core::traits::{Identity, IdentityType};
+use moa_core::traits::{Identity, IdentityType, SessionChannelBindingUpdate};
 use moa_core::wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
 use moa_core::{
     ChannelAccountRef, ChannelRef, ContactId, ContactPointId, ContactRef,
@@ -27,7 +27,6 @@ use moa_core::{
 };
 use moa_core::{MoaError, SessionStore};
 use moa_observability::restate_observability::annotate_restate_handler_span;
-use moa_session::store::SessionChannelBindingReplacement;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -395,17 +394,17 @@ impl Contacts for ContactsImpl {
                     .await
                     .map_err(session_store_handler_error)?;
                 store
-                    .replace_session_channel_binding(SessionChannelBindingReplacement {
+                    .replace_session_channel_binding(SessionChannelBindingUpdate {
                         tenant_id,
-                        storage_partition_id: &storage_partition_id_for_create,
+                        storage_partition_id: storage_partition_id_for_create,
                         session_id,
                         contact_id: contact.contact_id,
                         channel_account_id: channel_account
                             .as_ref()
                             .map(|account| account.channel_account_id),
                         contact_point_id,
-                        channel_ref: &channel_ref,
-                        reason: channel_reason.as_deref(),
+                        channel_ref,
+                        reason: channel_reason,
                     })
                     .await
                     .map_err(session_store_handler_error)?;
@@ -492,9 +491,9 @@ impl Contacts for ContactsImpl {
                         .await
                         .map_err(contact_error_handler_error)?;
                 let binding_id = store
-                    .replace_session_channel_binding(SessionChannelBindingReplacement {
+                    .replace_session_channel_binding(SessionChannelBindingUpdate {
                         tenant_id,
-                        storage_partition_id: &storage_partition_id,
+                        storage_partition_id,
                         session_id,
                         contact_id: contact.contact_id,
                         channel_account_id: resolved
@@ -502,8 +501,8 @@ impl Contacts for ContactsImpl {
                             .as_ref()
                             .map(|account| account.channel_account_id),
                         contact_point_id: resolved.contact_point_id,
-                        channel_ref: &resolved.channel_ref,
-                        reason: request.reason.as_deref(),
+                        channel_ref: resolved.channel_ref.clone(),
+                        reason: request.reason.clone(),
                     })
                     .await
                     .map_err(session_store_handler_error)?;

@@ -16,9 +16,7 @@ use moa_core::{
 };
 use moa_eval_core::{ActionPolicyOverride, AgentConfig, EvalError, InstructionOverride, Result};
 use moa_hands::ToolRouter;
-use moa_providers::{
-    build_provider_from_selection, resolve_provider_selection, resolve_rewriter_provider,
-};
+use moa_providers::ProviderRegistry;
 use moa_security::{ActionPolicies, ActionPolicyRuleStore};
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
@@ -92,8 +90,12 @@ pub async fn build_agent_environment(
     agent_config: &AgentConfig,
     temp_dir: &Path,
 ) -> Result<AgentEnvironment> {
-    let selection = resolve_provider_selection(base_config, agent_config.model.as_deref())?;
-    let llm_provider = build_provider_from_selection(base_config, &selection)?;
+    let provider_registry = ProviderRegistry::from_config(base_config);
+    let requested_model = agent_config
+        .model
+        .as_deref()
+        .unwrap_or(base_config.models.main.as_str());
+    let llm_provider = provider_registry.provider_for_model(Some(requested_model))?;
     build_agent_environment_with_provider(base_config, agent_config, temp_dir, llm_provider).await
 }
 
@@ -156,6 +158,7 @@ pub(crate) async fn build_agent_environment_with_provider(
             segment_store: segment_store.clone(),
             graph_pool: session_store_concrete.pool().clone(),
             llm_provider: llm_provider.clone(),
+            provider_registry: ProviderRegistry::from_config(base_config),
             lineage: lineage.clone(),
         },
         tool_router.as_ref(),
@@ -255,6 +258,7 @@ struct EvalPipelineDeps {
     segment_store: Arc<dyn SegmentStore>,
     graph_pool: sqlx::PgPool,
     llm_provider: Arc<dyn LLMProvider>,
+    provider_registry: ProviderRegistry,
     lineage: Arc<dyn LineageHandle>,
 }
 
@@ -268,8 +272,11 @@ async fn build_pipeline(
         load_workspace_instructions(base_config, &agent_config.instructions).await?;
     let user_instructions = base_config.general.user_instructions.clone();
     let tool_schemas = tool_router.tool_schemas();
-    let query_rewrite_provider =
-        resolve_eval_rewriter_provider(base_config, deps.llm_provider.clone());
+    let query_rewrite_provider = resolve_eval_rewriter_provider(
+        base_config,
+        &deps.provider_registry,
+        deps.llm_provider.clone(),
+    );
     let mut eval_config = base_config.clone();
     eval_config.general.workspace_instructions = workspace_instructions;
     eval_config.general.user_instructions = user_instructions;
@@ -297,6 +304,7 @@ async fn build_pipeline(
 
 fn resolve_eval_rewriter_provider(
     base_config: &MoaConfig,
+    provider_registry: &ProviderRegistry,
     fallback_provider: Arc<dyn LLMProvider>,
 ) -> Option<Arc<dyn LLMProvider>> {
     if !base_config.query_rewrite.enabled {
@@ -304,8 +312,13 @@ fn resolve_eval_rewriter_provider(
     }
 
     if base_config.query_rewrite.model.is_some() || base_config.models.auxiliary.is_some() {
-        match resolve_rewriter_provider(base_config) {
-            Ok(provider) => return Some(provider),
+        let mut query_rewrite = base_config.query_rewrite.clone();
+        if query_rewrite.model.is_none() {
+            query_rewrite.model = base_config.models.auxiliary.clone();
+        }
+        match provider_registry.resolve_rewriter_provider(&query_rewrite) {
+            Ok(Some(provider)) => return Some(provider),
+            Ok(None) => {}
             Err(error) => {
                 tracing::warn!(
                     error = %error,

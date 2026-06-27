@@ -262,13 +262,6 @@ impl<'a> QueryRetrievalCtx<'a> {
         self.disable_leg_timeouts = true;
         self
     }
-
-    /// Disables graph expansion for deterministic compatibility evals.
-    #[must_use]
-    pub fn with_graph_expansion_disabled(mut self) -> Self {
-        self.disable_graph_expansion = true;
-        self
-    }
 }
 
 /// Plans, embeds, and retrieves graph-memory hits for one query.

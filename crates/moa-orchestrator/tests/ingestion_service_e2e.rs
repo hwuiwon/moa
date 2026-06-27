@@ -139,7 +139,7 @@ fn object_url(ingress: &str, turn: &SessionTurn) -> String {
 fn realistic_turn() -> SessionTurn {
     SessionTurn {
         tenant_id: TenantId::new(),
-        contact_id: ContactId::new(),
+        contact_id: Some(ContactId::new()),
         session_id: SessionId::new(),
         turn_seq: 42,
         transcript: [
@@ -162,7 +162,7 @@ fn realistic_turn() -> SessionTurn {
 fn same_fact_turn(tenant_id: TenantId, session_id: SessionId, turn_seq: u64) -> SessionTurn {
     SessionTurn {
         tenant_id,
-        contact_id: ContactId::new(),
+        contact_id: Some(ContactId::new()),
         session_id,
         turn_seq,
         transcript: [
@@ -183,7 +183,7 @@ fn low_pii_degraded_skip_turn() -> SessionTurn {
     for turn_seq in 1..=512 {
         let turn = SessionTurn {
             tenant_id,
-            contact_id,
+            contact_id: Some(contact_id),
             session_id,
             turn_seq,
             transcript: [
@@ -205,7 +205,7 @@ fn low_pii_degraded_skip_turn() -> SessionTurn {
 fn sensitive_degraded_turn() -> SessionTurn {
     SessionTurn {
         tenant_id: TenantId::new(),
-        contact_id: ContactId::new(),
+        contact_id: Some(ContactId::new()),
         session_id: SessionId::new(),
         turn_seq: 7,
         transcript: [

@@ -11,6 +11,7 @@ use crate::{
     extraction_confidence_hint, fact_hash, fact_uid_from_hash, scoped_fact_uid,
     should_ingest_degraded,
 };
+use moa_core::RlsContext;
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -20,7 +21,6 @@ use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
     redact_text,
 };
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use restate_sdk::prelude::*;
 use secrecy::SecretString;
@@ -531,26 +531,29 @@ fn decision_from_conflict(conflict: Conflict, fact: EmbeddedFact) -> IngestDecis
 fn decision_scope(
     turn: &SessionTurn,
     decision: &IngestDecision,
-) -> Result<ScopeContext, IngestError> {
+) -> Result<RlsContext, IngestError> {
     match decision_fact(decision) {
         Some(fact) => fact_scope(turn, fact),
-        None => turn_contact_scope(turn),
+        None => turn_default_scope(turn),
     }
 }
 
-fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> Result<ScopeContext, IngestError> {
+fn fact_scope(turn: &SessionTurn, fact: &EmbeddedFact) -> Result<RlsContext, IngestError> {
     match fact.classified.fact.scope_hint {
-        ExtractedFactScopeHint::Contact => turn_contact_scope(turn),
+        ExtractedFactScopeHint::Contact => turn_default_scope(turn),
         ExtractedFactScopeHint::Tenant => turn_tenant_scope(turn),
     }
 }
 
-fn turn_tenant_scope(turn: &SessionTurn) -> Result<ScopeContext, IngestError> {
-    Ok(ScopeContext::tenant(turn.tenant_id))
+fn turn_tenant_scope(turn: &SessionTurn) -> Result<RlsContext, IngestError> {
+    Ok(RlsContext::tenant(turn.tenant_id))
 }
 
-fn turn_contact_scope(turn: &SessionTurn) -> Result<ScopeContext, IngestError> {
-    Ok(ScopeContext::contact(turn.tenant_id, turn.contact_id))
+fn turn_default_scope(turn: &SessionTurn) -> Result<RlsContext, IngestError> {
+    match turn.contact_id {
+        Some(contact_id) => Ok(RlsContext::contact(turn.tenant_id, contact_id)),
+        None => turn_tenant_scope(turn),
+    }
 }
 
 async fn apply_decisions(
@@ -596,7 +599,7 @@ async fn apply_decisions(
 
 async fn apply_one_decision(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     entity_resolver: &EntityResolver,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
     turn: &SessionTurn,
@@ -624,7 +627,7 @@ async fn apply_one_decision(
 
 async fn apply_one_decision_with_graph(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     graph: &dyn GraphStore,
     entity_resolver: &EntityResolver,
     turn: &SessionTurn,
@@ -665,7 +668,7 @@ async fn apply_one_decision_with_graph(
 
 fn graph_store(
     pool: PgPool,
-    scope: ScopeContext,
+    scope: RlsContext,
     fact: &EmbeddedFact,
     entity_vector: Option<Arc<dyn VectorStore>>,
 ) -> AgeGraphStore {
@@ -681,7 +684,7 @@ fn graph_store(
 
 fn node_intent(
     turn: &SessionTurn,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     fact: &EmbeddedFact,
     hash: &[u8],
     fact_uid: uuid::Uuid,
@@ -720,17 +723,31 @@ fn node_intent(
         embedding: fact.embedding.clone(),
         embedding_model: fact.embedding_model.clone(),
         embedding_model_version: fact.embedding_model_version,
-        actor_id: turn.contact_id.to_string(),
-        actor_kind: "contact".to_string(),
+        actor_id: turn_actor_id(turn),
+        actor_kind: turn_actor_kind(turn).to_string(),
     }
 }
 
-fn scope_storage_partition_id(scope: &ScopeContext) -> Option<String> {
+fn scope_storage_partition_id(scope: &RlsContext) -> Option<String> {
     Some(scope.tenant_id().to_string())
 }
 
-fn scope_user_id(scope: &ScopeContext) -> Option<String> {
+fn scope_user_id(scope: &RlsContext) -> Option<String> {
     scope.contact_id().map(|contact_id| contact_id.to_string())
+}
+
+fn turn_actor_id(turn: &SessionTurn) -> String {
+    turn.contact_id
+        .map(|contact_id| contact_id.to_string())
+        .unwrap_or_else(|| turn.tenant_id.to_string())
+}
+
+fn turn_actor_kind(turn: &SessionTurn) -> &'static str {
+    if turn.contact_id.is_some() {
+        "contact"
+    } else {
+        "system"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -741,7 +758,7 @@ struct ResolvedFactEntities {
 
 async fn resolve_fact_entities(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     graph: &dyn GraphStore,
     entity_resolver: &EntityResolver,
     turn: &SessionTurn,
@@ -749,7 +766,8 @@ async fn resolve_fact_entities(
 ) -> Result<ResolvedFactEntities, HandlerError> {
     let extracted = &fact.classified.fact;
     let confidence = extracted_confidence(extracted);
-    let actor_id = turn.contact_id.to_string();
+    let actor_id = turn_actor_id(turn);
+    let actor_kind = turn_actor_kind(turn);
     let subject = entity_resolver
         .resolve(
             pool,
@@ -761,7 +779,7 @@ async fn resolve_fact_entities(
                 confidence,
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
-                actor_kind: "contact",
+                actor_kind,
             },
         )
         .await
@@ -777,7 +795,7 @@ async fn resolve_fact_entities(
                 confidence,
                 valid_from: turn.finalized_at,
                 actor_id: &actor_id,
-                actor_kind: "contact",
+                actor_kind,
             },
         )
         .await
@@ -795,7 +813,7 @@ fn extracted_confidence(fact: &ExtractedFact) -> f64 {
 async fn attach_fact_entity_edges(
     graph: &dyn GraphStore,
     turn: &SessionTurn,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     fact_uid: uuid::Uuid,
     fact: &EmbeddedFact,
     entities: &ResolvedFactEntities,
@@ -828,7 +846,7 @@ async fn attach_fact_entity_edges(
 
 fn entity_fact_edge_intent(
     turn: &SessionTurn,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     entity_uid: uuid::Uuid,
     fact_uid: uuid::Uuid,
     role: &str,
@@ -843,14 +861,14 @@ fn entity_fact_edge_intent(
         storage_partition_id: scope_storage_partition_id(scope),
         contact_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
-        actor_id: turn.contact_id.to_string(),
-        actor_kind: "contact".to_string(),
+        actor_id: turn_actor_id(turn),
+        actor_kind: turn_actor_kind(turn).to_string(),
     }
 }
 
 fn fact_entity_edge_intent(
     turn: &SessionTurn,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     fact_uid: uuid::Uuid,
     entity_uid: uuid::Uuid,
     role: &str,
@@ -866,8 +884,8 @@ fn fact_entity_edge_intent(
         storage_partition_id: scope_storage_partition_id(scope),
         contact_id: scope_user_id(scope),
         scope: scope.tier_str().to_string(),
-        actor_id: turn.contact_id.to_string(),
-        actor_kind: "contact".to_string(),
+        actor_id: turn_actor_id(turn),
+        actor_kind: turn_actor_kind(turn).to_string(),
     }
 }
 
@@ -948,7 +966,7 @@ async fn storage_partition_degraded(
 
 async fn dedup_fact_uid(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     turn: &SessionTurn,
     hash: &[u8],
 ) -> Result<Option<uuid::Uuid>, HandlerError> {
@@ -984,7 +1002,7 @@ async fn dedup_fact_uid(
 
 async fn insert_dedup(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     turn: &SessionTurn,
     hash: &[u8],
     fact_uid: uuid::Uuid,
@@ -1016,7 +1034,7 @@ async fn insert_dedup(
 
 async fn write_dlq(
     pool: &PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     turn: &SessionTurn,
     decision: &IngestDecision,
     error: &str,
@@ -1273,7 +1291,7 @@ mod tests {
         let contact_id = ContactId(uuid::Uuid::from_u128(0x2000));
         crate::SessionTurn {
             tenant_id,
-            contact_id,
+            contact_id: Some(contact_id),
             session_id: SessionId(uuid::Uuid::now_v7()),
             turn_seq: 1,
             transcript: "user: checkout-service depends on libfoo".to_string(),

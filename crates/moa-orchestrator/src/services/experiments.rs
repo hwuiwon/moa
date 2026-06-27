@@ -3,7 +3,7 @@
 use moa_agents::{AgentResolver, AgentRuntimePolicy};
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
-use moa_core::traits::Identity;
+use moa_core::traits::{Identity, LearningCandidateStore};
 use moa_core::wire::experiments::{
     AgentArtifactDependencyDelta, AgentDependencyChange, AgentRevisionCompareRequest,
     AgentRevisionCompareResponse, AgentRevisionSimulationCompareRequest,
@@ -30,7 +30,6 @@ use moa_observability::record_experiment_learning_candidates;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use moa_scoring::ScoringError;
 use moa_scoring::{ExperimentRunScoreRef, experiment_score_breakdown_for_tenant};
-use moa_session::PostgresSessionStore;
 use restate_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -268,7 +267,7 @@ impl Experiments for ExperimentsImpl {
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
         let runtime = OrchestratorCtx::current();
         let pool = runtime.graph_pool();
-        let session_store = runtime.session_store();
+        let session_store = runtime.learning_candidate_store();
 
         Ok(ctx
             .run(|| async move {
@@ -457,7 +456,7 @@ async fn cancel_inner(
 
 async fn propose_improvements_inner(
     pool: sqlx::PgPool,
-    session_store: Arc<PostgresSessionStore>,
+    session_store: Arc<dyn LearningCandidateStore>,
     request: ExperimentProposeImprovementsRequest,
 ) -> Result<ExperimentProposeImprovementsResponse, HandlerError> {
     let proposal = propose_improvement_candidate(pool, request)

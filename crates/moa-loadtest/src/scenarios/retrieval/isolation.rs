@@ -85,8 +85,7 @@ pub(super) async fn attack_vector_oracle(stack: &Stack) -> Result<(), String> {
     let embedding = first_embedding(&stack.pool, tenant_a)
         .await
         .map_err(display)?;
-    let vector =
-        PgvectorStore::new_for_app_role(stack.pool.clone(), ScopeContext::tenant(tenant_b));
+    let vector = PgvectorStore::new_for_app_role(stack.pool.clone(), RlsContext::tenant(tenant_b));
     let matches = moa_memory_vector::VectorStore::knn(
         &vector,
         &moa_memory_vector::VectorQuery {
@@ -191,7 +190,7 @@ pub(super) async fn app_scoped_conn<'a>(
     pool: &'a PgPool,
     tenant_id: TenantId,
 ) -> moa_core::Result<ScopedConn<'a>> {
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let mut conn = ScopedConn::begin(pool, &scope).await?;
     sqlx::query("SET LOCAL ROLE moa_app")
         .execute(conn.as_mut())

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{ContactId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass, cypher};
@@ -13,7 +14,6 @@ use moa_memory_ingest::{
     FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_session::testing;
 use serde_json::json;
@@ -131,7 +131,7 @@ fn test_ctx(
     delay: Duration,
     pii_class: PiiClass,
 ) -> FastPathCtx {
-    let scope = ScopeContext::tenant(TenantId::from(tenant_id));
+    let scope = RlsContext::tenant(TenantId::from(tenant_id));
     test_ctx_for_scope(pool, scope, conflict, delay, pii_result(pii_class))
 }
 
@@ -143,13 +143,13 @@ fn contact_test_ctx(
     delay: Duration,
     pii_class: PiiClass,
 ) -> FastPathCtx {
-    let scope = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
+    let scope = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     test_ctx_for_scope(pool, scope, conflict, delay, pii_result(pii_class))
 }
 
 fn test_ctx_for_scope(
     pool: &PgPool,
-    scope: ScopeContext,
+    scope: RlsContext,
     conflict: Conflict,
     delay: Duration,
     pii_result: PiiResult,
@@ -166,7 +166,7 @@ fn test_ctx_for_scope(
 
 fn test_ctx_for_scope_with_embedder(
     pool: &PgPool,
-    scope: ScopeContext,
+    scope: RlsContext,
     conflict: Conflict,
     delay: Duration,
     embedder: Arc<dyn EmbeddingProvider>,
@@ -211,7 +211,7 @@ fn contact_remember_request(tenant_id: Uuid, contact_id: Uuid, text: &str) -> Fa
 }
 
 async fn tenant_scoped_conn<'a>(pool: &'a PgPool, tenant_id: Uuid) -> ScopedConn<'a> {
-    let scope = ScopeContext::tenant(TenantId::from(tenant_id));
+    let scope = RlsContext::tenant(TenantId::from(tenant_id));
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .expect("begin scoped test transaction");
@@ -291,7 +291,7 @@ async fn node_valid_to_for_contact(
     contact_id: Uuid,
     uid: Uuid,
 ) -> Option<DateTime<Utc>> {
-    let scope = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
+    let scope = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .expect("begin contact scoped test transaction");
@@ -448,7 +448,7 @@ async fn fast_remember_fail_closed_pii_without_spans_errors_before_embedding_or_
         .expect("create isolated Postgres store");
     let tenant_id = Uuid::now_v7();
     let embedder = RecordingEmbedder::new();
-    let scope = ScopeContext::tenant(TenantId::from(tenant_id));
+    let scope = RlsContext::tenant(TenantId::from(tenant_id));
     let ctx = test_ctx_for_scope_with_embedder(
         session_store.pool(),
         scope,
@@ -511,7 +511,7 @@ async fn fast_remember_successful_pii_classification_embeds_and_stores_redacted_
         .expect("test fixture contains email");
     let email_end = email_start + "dana@example.com".len();
     let redacted_text = "contact email [EMAIL_REDACTED] deploys auth";
-    let scope = ScopeContext::tenant(TenantId::from(tenant_id));
+    let scope = RlsContext::tenant(TenantId::from(tenant_id));
     let ctx = test_ctx_for_scope_with_embedder(
         session_store.pool(),
         scope,

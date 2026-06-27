@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
+use moa_core::RlsContext;
 use moa_core::{
     ContactId, MemoryDigestConfig, StoragePartitionId, TenantId, traits::EmbeddingProvider,
 };
@@ -12,7 +13,6 @@ use moa_memory_graph::{
     NodePropertyUpdateIntent, PiiClass,
 };
 use moa_memory_ingest::normalize_entity_name;
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::PgvectorStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -757,11 +757,11 @@ impl LifecycleNodeRow {
             .unwrap_or_default()
     }
 
-    fn scope_context(&self) -> ScopeContext {
+    fn scope_context(&self) -> RlsContext {
         let tenant_id = TenantId::from(self.tenant_id);
         match self.contact_id {
-            Some(contact_id) => ScopeContext::contact(tenant_id, ContactId(contact_id)),
-            None => ScopeContext::tenant(tenant_id),
+            Some(contact_id) => RlsContext::contact(tenant_id, ContactId(contact_id)),
+            None => RlsContext::tenant(tenant_id),
         }
     }
 

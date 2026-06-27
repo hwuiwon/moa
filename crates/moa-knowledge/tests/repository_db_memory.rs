@@ -1,6 +1,7 @@
 //! Postgres repository coverage for tenant knowledge-base RLS and timelines.
 
 use chrono::{Duration, Utc};
+use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_knowledge::{
     domain::{
@@ -9,7 +10,6 @@ use moa_knowledge::{
     },
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres;
 use serde_json::json;
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 fn repository(db: &postgres::TestDb, tenant_id: TenantId) -> PostgresKnowledgeRepository {
     PostgresKnowledgeRepository::scoped_for_app_role(
         db.store().pool().clone(),
-        ScopeContext::tenant(tenant_id),
+        RlsContext::tenant(tenant_id),
     )
 }
 

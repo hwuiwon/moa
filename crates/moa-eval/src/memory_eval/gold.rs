@@ -5,13 +5,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{ContactId, UserId};
 use moa_memory_graph::{AgeGraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_ingest::{
     FactExtractor, IngestApplyReport, IngestCtx, SessionTurn, chunk_turn, fact_hash,
     ingest_turn_direct_with_ctx,
 };
-use moa_memory_types::{ScopeContext, ScopeTier};
+use moa_memory_types::ScopeTier;
 use moa_memory_vector::PgvectorStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -103,10 +104,8 @@ pub struct ScopeMatchBreakdown {
     /// Resolved records with any expected scope.
     pub overall_total: usize,
     /// Resolved records expected to be contact-scoped and stored as contact-scoped.
-    #[serde(alias = "user_matches")]
     pub contact_matches: usize,
     /// Resolved records expected to be contact-scoped.
-    #[serde(alias = "user_total")]
     pub contact_total: usize,
     /// Resolved records expected to be tenant-scoped and stored as tenant-scoped.
     pub tenant_matches: usize,
@@ -548,7 +547,7 @@ async fn expected_fact_hashes(
 ) -> Result<BTreeSet<String>> {
     let turn = SessionTurn {
         tenant_id: tenant_id_from_storage_partition_id(&source.session.storage_partition_id),
-        contact_id: contact_id_from_user_id(&source.session.user_id),
+        contact_id: Some(contact_id_from_user_id(&source.session.user_id)),
         session_id: source.session.session_id,
         turn_seq: source.turn.turn_seq,
         transcript: source.turn.transcript.clone(),
@@ -659,7 +658,7 @@ fn record_for_fact(
 }
 
 fn ingest_ctx_for_turn(base: &IngestCtx, turn: &SessionTurn) -> IngestCtx {
-    let scope = ScopeContext::tenant(turn.tenant_id);
+    let scope = RlsContext::tenant(turn.tenant_id);
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         base.pool.clone(),
         scope.clone(),
@@ -864,7 +863,7 @@ pub(crate) fn session_turn(
 ) -> Result<SessionTurn> {
     Ok(SessionTurn {
         tenant_id: tenant_id_from_storage_partition_id(&source.session.storage_partition_id),
-        contact_id: contact_id_from_user_id(&source.session.user_id),
+        contact_id: Some(contact_id_from_user_id(&source.session.user_id)),
         session_id: source.session.session_id,
         turn_seq: source.turn.turn_seq,
         transcript: source.turn.transcript.clone(),
@@ -1236,7 +1235,8 @@ mod tests {
             session: &session,
             turn: &session.turns[0],
         };
-        let extractor = ScriptedFactExtractor::from_summaries(["runtime uses restate"]);
+        let extractor = ScriptedFactExtractor::from_summaries(["runtime uses restate"])
+            .expect("scripted fixture should parse");
 
         let hashes = expected_fact_hashes(&extractor, &fact, &source)
             .await

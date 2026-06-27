@@ -1,6 +1,6 @@
 //! Runtime registry for configured LLM provider families.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 #[cfg(feature = "scripted-provider")]
@@ -15,12 +15,11 @@ use serde::Deserialize;
 #[cfg(feature = "scripted-provider")]
 use serde_json::Value;
 
+use crate::ModelRouter;
 use crate::routing::{
-    DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, ProviderKind,
-    REWRITER_ANTHROPIC_MODEL, REWRITER_GOOGLE_MODEL, REWRITER_OPENAI_MODEL, infer_provider_kind,
+    PROVIDER_DESCRIPTORS, ProviderDescriptor, ProviderId, infer_provider_id,
     split_explicit_provider,
 };
-use crate::{AnthropicProvider, GeminiProvider, ModelRouter, OpenAIProvider};
 #[cfg(feature = "scripted-provider")]
 use crate::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
 
@@ -35,19 +34,32 @@ type ProviderCache = Arc<RwLock<HashMap<ProviderCacheKey, ResolvedProvider>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProviderCacheKey {
-    kind: ProviderKind,
+    id: ProviderId,
     model: ModelId,
 }
 
 #[derive(Clone)]
 struct RegisteredProvider {
+    descriptor: &'static ProviderDescriptor,
     default_model: String,
     source: ProviderSource,
 }
 
 impl RegisteredProvider {
-    fn from_static(provider: Arc<dyn LLMProvider>) -> Self {
+    fn from_factory(descriptor: &'static ProviderDescriptor, factory: ProviderFactory) -> Self {
         Self {
+            descriptor,
+            default_model: descriptor.default_model.to_string(),
+            source: ProviderSource::Factory(factory),
+        }
+    }
+
+    fn from_static(
+        descriptor: &'static ProviderDescriptor,
+        provider: Arc<dyn LLMProvider>,
+    ) -> Self {
+        Self {
+            descriptor,
             default_model: provider.capabilities().model_id.to_string(),
             source: ProviderSource::Static(provider),
         }
@@ -80,9 +92,7 @@ pub struct ResolvedProvider {
 /// Runtime registry for configured provider families.
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
-    anthropic: Option<RegisteredProvider>,
-    openai: Option<RegisteredProvider>,
-    google: Option<RegisteredProvider>,
+    providers: BTreeMap<ProviderId, RegisteredProvider>,
     provider_cache: ProviderCache,
 }
 
@@ -90,57 +100,34 @@ impl ProviderRegistry {
     /// Builds a registry from the provider API keys available in the environment.
     #[must_use]
     pub fn from_env() -> Self {
-        Self {
-            anthropic: configured_env("ANTHROPIC_API_KEY").then_some(RegisteredProvider {
-                default_model: DEFAULT_ANTHROPIC_MODEL.to_string(),
-                source: ProviderSource::Factory(Arc::new(build_anthropic_provider)),
-            }),
-            openai: configured_env("OPENAI_API_KEY").then_some(RegisteredProvider {
-                default_model: DEFAULT_OPENAI_MODEL.to_string(),
-                source: ProviderSource::Factory(Arc::new(build_openai_provider)),
-            }),
-            google: configured_env("GOOGLE_API_KEY").then_some(RegisteredProvider {
-                default_model: DEFAULT_GOOGLE_MODEL.to_string(),
-                source: ProviderSource::Factory(Arc::new(build_google_provider)),
-            }),
-            provider_cache: ProviderCache::default(),
+        let config = MoaConfig::default();
+        let mut registry = Self::default();
+        for descriptor in PROVIDER_DESCRIPTORS {
+            if configured_env((descriptor.api_key_env)(&config)) {
+                registry.register_factory(
+                    descriptor,
+                    Arc::new(move |model| (descriptor.build_from_env)(model)),
+                );
+            }
         }
+        registry
     }
 
     /// Builds a registry from configured provider API key environment names.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
         let config = Arc::new(config.clone());
-        Self {
-            anthropic: configured_env(&config.providers.anthropic.api_key_env).then(|| {
+        let mut registry = Self::default();
+        for descriptor in PROVIDER_DESCRIPTORS {
+            if configured_env((descriptor.api_key_env)(&config)) {
                 let config = config.clone();
-                RegisteredProvider {
-                    default_model: DEFAULT_ANTHROPIC_MODEL.to_string(),
-                    source: ProviderSource::Factory(Arc::new(move |model| {
-                        build_anthropic_provider_from_config(&config, model)
-                    })),
-                }
-            }),
-            openai: configured_env(&config.providers.openai.api_key_env).then(|| {
-                let config = config.clone();
-                RegisteredProvider {
-                    default_model: DEFAULT_OPENAI_MODEL.to_string(),
-                    source: ProviderSource::Factory(Arc::new(move |model| {
-                        build_openai_provider_from_config(&config, model)
-                    })),
-                }
-            }),
-            google: configured_env(&config.providers.google.api_key_env).then(|| {
-                let config = config.clone();
-                RegisteredProvider {
-                    default_model: DEFAULT_GOOGLE_MODEL.to_string(),
-                    source: ProviderSource::Factory(Arc::new(move |model| {
-                        build_google_provider_from_config(&config, model)
-                    })),
-                }
-            }),
-            provider_cache: ProviderCache::default(),
+                registry.register_factory(
+                    descriptor,
+                    Arc::new(move |model| (descriptor.build_from_config)(&config, model)),
+                );
+            }
         }
+        registry
     }
 
     /// Builds a registry from preconstructed provider instances.
@@ -150,12 +137,17 @@ impl ProviderRegistry {
         openai: Option<Arc<dyn LLMProvider>>,
         google: Option<Arc<dyn LLMProvider>>,
     ) -> Self {
-        Self {
-            anthropic: anthropic.map(RegisteredProvider::from_static),
-            openai: openai.map(RegisteredProvider::from_static),
-            google: google.map(RegisteredProvider::from_static),
-            provider_cache: ProviderCache::default(),
+        let mut registry = Self::default();
+        if let Some(provider) = openai {
+            registry.register_static(ProviderId::OpenAI, provider);
         }
+        if let Some(provider) = anthropic {
+            registry.register_static(ProviderId::Anthropic, provider);
+        }
+        if let Some(provider) = google {
+            registry.register_static(ProviderId::Google, provider);
+        }
+        registry
     }
 
     /// Builds a deterministic scripted registry from a JSON fixture file.
@@ -212,18 +204,18 @@ impl ProviderRegistry {
 
     #[cfg(feature = "scripted-provider")]
     fn all_kinds_from_static(provider: Arc<dyn LLMProvider>) -> Self {
-        Self::with_static_providers(
-            Some(provider.clone()),
-            Some(provider.clone()),
-            Some(provider),
-        )
+        let mut registry = Self::default();
+        for descriptor in PROVIDER_DESCRIPTORS {
+            registry.register_static(descriptor.id, provider.clone());
+        }
+        registry
     }
 
-    /// Resolves which provider family should serve the requested model.
-    pub fn resolve_provider_kind(
+    /// Resolves which provider id should serve the requested model.
+    pub fn resolve_provider_id(
         &self,
         requested_model: Option<&str>,
-    ) -> moa_core::Result<(ProviderKind, ModelId)> {
+    ) -> moa_core::Result<(ProviderId, ModelId)> {
         match requested_model {
             Some(requested_model) => self.resolve_requested_model(requested_model),
             None => self.resolve_default_model(),
@@ -235,9 +227,9 @@ impl ProviderRegistry {
         &self,
         requested_model: Option<&str>,
     ) -> moa_core::Result<ModelCapabilities> {
-        let (provider_kind, model) = self.resolve_provider_kind(requested_model)?;
+        let (provider_id, model) = self.resolve_provider_id(requested_model)?;
         Ok(self
-            .provider_for_kind(provider_kind, &model)?
+            .provider_for_id(provider_id, &model)?
             .provider
             .capabilities())
     }
@@ -252,30 +244,17 @@ impl ProviderRegistry {
         }
 
         if let Some(model) = config.model.as_deref() {
-            let (kind, model) = self.resolve_provider_kind(Some(model))?;
-            return Ok(Some(self.provider_for_kind(kind, &model)?.provider));
+            let (id, model) = self.resolve_provider_id(Some(model))?;
+            return Ok(Some(self.provider_for_id(id, &model)?.provider));
         }
 
-        if self.anthropic.is_some() {
-            let model = ModelId::new(REWRITER_ANTHROPIC_MODEL);
-            return Ok(Some(
-                self.provider_for_kind(ProviderKind::Anthropic, &model)?
-                    .provider,
-            ));
-        }
-        if self.openai.is_some() {
-            let model = ModelId::new(REWRITER_OPENAI_MODEL);
-            return Ok(Some(
-                self.provider_for_kind(ProviderKind::OpenAI, &model)?
-                    .provider,
-            ));
-        }
-        if self.google.is_some() {
-            let model = ModelId::new(REWRITER_GOOGLE_MODEL);
-            return Ok(Some(
-                self.provider_for_kind(ProviderKind::Google, &model)?
-                    .provider,
-            ));
+        if let Some((id, provider)) = self
+            .providers
+            .iter()
+            .min_by_key(|(_, provider)| provider.descriptor.rewriter_priority)
+        {
+            let model = ModelId::new(provider.descriptor.rewriter_default_model);
+            return Ok(Some(self.provider_for_id(*id, &model)?.provider));
         }
 
         Ok(None)
@@ -298,18 +277,18 @@ impl ProviderRegistry {
         &self,
         requested_model: Option<&str>,
     ) -> moa_core::Result<Arc<dyn LLMProvider>> {
-        let (kind, model) = self.resolve_provider_kind(requested_model)?;
-        Ok(self.provider_for_kind(kind, &model)?.provider)
+        let (id, model) = self.resolve_provider_id(requested_model)?;
+        Ok(self.provider_for_id(id, &model)?.provider)
     }
 
-    /// Resolves a provider instance for an already-selected provider family and model.
-    pub fn provider_for_kind(
+    /// Resolves a provider instance for an already-selected provider id and model.
+    pub fn provider_for_id(
         &self,
-        kind: ProviderKind,
+        id: ProviderId,
         model: &ModelId,
     ) -> moa_core::Result<ResolvedProvider> {
         let cache_key = ProviderCacheKey {
-            kind,
+            id,
             model: model.clone(),
         };
         if let Some(resolved) = self.cached_provider(&cache_key) {
@@ -317,9 +296,9 @@ impl ProviderRegistry {
         }
 
         let provider = self
-            .provider_entry(kind)
+            .provider_entry(id)
             .ok_or_else(|| {
-                MoaError::ConfigError(format!("{} provider is not configured", kind.as_str()))
+                MoaError::ConfigError(format!("{} provider is not configured", id.as_str()))
             })?
             .build(model.as_str())?;
 
@@ -334,75 +313,55 @@ impl ProviderRegistry {
     fn resolve_requested_model(
         &self,
         requested_model: &str,
-    ) -> moa_core::Result<(ProviderKind, ModelId)> {
+    ) -> moa_core::Result<(ProviderId, ModelId)> {
         let trimmed = requested_model.trim();
         if trimmed.is_empty() {
             return self.resolve_default_model();
         }
 
-        if let Some((provider_kind, model_id)) = split_explicit_provider(trimmed) {
-            self.provider_entry(provider_kind).ok_or_else(|| {
+        if let Some((provider_id, model_id)) = split_explicit_provider(trimmed) {
+            self.provider_entry(provider_id).ok_or_else(|| {
                 MoaError::ConfigError(format!(
                     "{} provider is not configured",
-                    provider_kind.as_str()
+                    provider_id.as_str()
                 ))
             })?;
-            return Ok((provider_kind, ModelId::new(model_id)));
+            return Ok((provider_id, ModelId::new(model_id)));
         }
 
-        if let Some(provider_kind) = self.provider_kind_for_default_model(trimmed) {
-            return Ok((provider_kind, ModelId::new(trimmed)));
+        if let Some(provider_id) = self.provider_id_for_default_model(trimmed) {
+            return Ok((provider_id, ModelId::new(trimmed)));
         }
 
-        let provider_kind = infer_provider_kind(trimmed).ok_or_else(|| {
+        let provider_id = infer_provider_id(trimmed).ok_or_else(|| {
             MoaError::ConfigError(format!(
                 "could not infer a configured provider for model `{trimmed}`"
             ))
         })?;
-        self.provider_entry(provider_kind).ok_or_else(|| {
+        self.provider_entry(provider_id).ok_or_else(|| {
             MoaError::ConfigError(format!(
                 "{} provider is not configured",
-                provider_kind.as_str()
+                provider_id.as_str()
             ))
         })?;
 
-        Ok((provider_kind, ModelId::new(trimmed)))
+        Ok((provider_id, ModelId::new(trimmed)))
     }
 
-    fn provider_kind_for_default_model(&self, model: &str) -> Option<ProviderKind> {
-        if self
-            .openai
-            .as_ref()
-            .is_some_and(|provider| provider.default_model == model)
-        {
-            return Some(ProviderKind::OpenAI);
-        }
-        if self
-            .anthropic
-            .as_ref()
-            .is_some_and(|provider| provider.default_model == model)
-        {
-            return Some(ProviderKind::Anthropic);
-        }
-        if self
-            .google
-            .as_ref()
-            .is_some_and(|provider| provider.default_model == model)
-        {
-            return Some(ProviderKind::Google);
-        }
-        None
+    fn provider_id_for_default_model(&self, model: &str) -> Option<ProviderId> {
+        self.providers
+            .iter()
+            .find(|(_, provider)| provider.default_model == model)
+            .map(|(id, _)| *id)
     }
 
-    fn resolve_default_model(&self) -> moa_core::Result<(ProviderKind, ModelId)> {
-        if let Some(provider) = &self.openai {
-            return Ok((ProviderKind::OpenAI, provider.default_model()));
-        }
-        if let Some(provider) = &self.anthropic {
-            return Ok((ProviderKind::Anthropic, provider.default_model()));
-        }
-        if let Some(provider) = &self.google {
-            return Ok((ProviderKind::Google, provider.default_model()));
+    fn resolve_default_model(&self) -> moa_core::Result<(ProviderId, ModelId)> {
+        if let Some((id, provider)) = self
+            .providers
+            .iter()
+            .min_by_key(|(_, provider)| provider.descriptor.default_priority)
+        {
+            return Ok((*id, provider.default_model()));
         }
 
         Err(MoaError::ConfigError(
@@ -410,12 +369,25 @@ impl ProviderRegistry {
         ))
     }
 
-    fn provider_entry(&self, kind: ProviderKind) -> Option<&RegisteredProvider> {
-        match kind {
-            ProviderKind::Anthropic => self.anthropic.as_ref(),
-            ProviderKind::OpenAI => self.openai.as_ref(),
-            ProviderKind::Google => self.google.as_ref(),
-        }
+    fn provider_entry(&self, id: ProviderId) -> Option<&RegisteredProvider> {
+        self.providers.get(&id)
+    }
+
+    fn register_factory(
+        &mut self,
+        descriptor: &'static ProviderDescriptor,
+        factory: ProviderFactory,
+    ) {
+        self.providers.insert(
+            descriptor.id,
+            RegisteredProvider::from_factory(descriptor, factory),
+        );
+    }
+
+    fn register_static(&mut self, id: ProviderId, provider: Arc<dyn LLMProvider>) {
+        let descriptor = id.descriptor();
+        self.providers
+            .insert(id, RegisteredProvider::from_static(descriptor, provider));
     }
 
     fn cached_provider(&self, key: &ProviderCacheKey) -> Option<ResolvedProvider> {
@@ -439,45 +411,6 @@ fn configured_env(key: &str) -> bool {
     std::env::var(key)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
-}
-
-fn build_anthropic_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(AnthropicProvider::from_env(model)?))
-}
-
-fn build_openai_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(OpenAIProvider::from_env(model)?))
-}
-
-fn build_google_provider(model: &str) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(GeminiProvider::from_env(model)?))
-}
-
-fn build_anthropic_provider_from_config(
-    config: &MoaConfig,
-    model: &str,
-) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(AnthropicProvider::from_config_with_model(
-        config, model,
-    )?))
-}
-
-fn build_openai_provider_from_config(
-    config: &MoaConfig,
-    model: &str,
-) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(OpenAIProvider::from_config_with_model(
-        config, model,
-    )?))
-}
-
-fn build_google_provider_from_config(
-    config: &MoaConfig,
-    model: &str,
-) -> moa_core::Result<Arc<dyn LLMProvider>> {
-    Ok(Arc::new(GeminiProvider::from_config_with_model(
-        config, model,
-    )?))
 }
 
 #[cfg(feature = "scripted-provider")]
@@ -652,10 +585,7 @@ mod tests {
         ModelId, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
     };
 
-    use super::{
-        ProviderCache, ProviderFactory, ProviderKind, ProviderRegistry, ProviderSource,
-        RegisteredProvider,
-    };
+    use super::{ProviderFactory, ProviderId, ProviderRegistry};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -751,12 +681,33 @@ mod tests {
         config.providers.openai.api_key_env = "MOA_TEST_OPENAI_API_KEY".to_string();
 
         let registry = ProviderRegistry::from_config(&config);
-        let (kind, model) = registry
-            .resolve_provider_kind(Some("openai:gpt-5.4-mini"))
+        let (id, model) = registry
+            .resolve_provider_id(Some("openai:gpt-5.4-mini"))
             .expect("configured custom OpenAI env should enable provider");
 
-        assert_eq!(kind, ProviderKind::OpenAI);
+        assert_eq!(id, ProviderId::OpenAI);
         assert_eq!(model, ModelId::new("gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn provider_registry_uses_deterministic_provider_id_map() {
+        // Pins: provider registration is a deterministic map, not provider-specific slots.
+        let registry = ProviderRegistry::with_static_providers(
+            Some(provider("claude-sonnet-4-6")),
+            Some(provider("gpt-5.4")),
+            Some(provider("gemini-3-flash-preview")),
+        );
+
+        let provider_ids = registry.providers.keys().copied().collect::<Vec<_>>();
+
+        assert_eq!(
+            provider_ids,
+            vec![
+                ProviderId::OpenAI,
+                ProviderId::Anthropic,
+                ProviderId::Google
+            ]
+        );
     }
 
     #[test]
@@ -770,15 +721,8 @@ mod tests {
                 model: model.to_string(),
             }))
         });
-        let registry = ProviderRegistry {
-            anthropic: None,
-            openai: Some(RegisteredProvider {
-                default_model: "gpt-cache".to_string(),
-                source: ProviderSource::Factory(factory),
-            }),
-            google: None,
-            provider_cache: ProviderCache::default(),
-        };
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(ProviderId::OpenAI.descriptor(), factory);
 
         let first = registry
             .provider_for_model(Some("openai:gpt-cache"))
@@ -804,22 +748,22 @@ mod tests {
             Some(provider("gemini-3-flash-preview")),
         );
 
-        let (kind, model) = registry
-            .resolve_provider_kind(Some("claude-sonnet-4-6"))
+        let (id, model) = registry
+            .resolve_provider_id(Some("claude-sonnet-4-6"))
             .expect("claude model should resolve");
-        assert_eq!(kind, ProviderKind::Anthropic);
+        assert_eq!(id, ProviderId::Anthropic);
         assert_eq!(model, ModelId::new("claude-sonnet-4-6"));
 
-        let (kind, model) = registry
-            .resolve_provider_kind(Some("gpt-5.4"))
+        let (id, model) = registry
+            .resolve_provider_id(Some("gpt-5.4"))
             .expect("gpt model should resolve");
-        assert_eq!(kind, ProviderKind::OpenAI);
+        assert_eq!(id, ProviderId::OpenAI);
         assert_eq!(model, ModelId::new("gpt-5.4"));
 
-        let (kind, model) = registry
-            .resolve_provider_kind(Some("google:gemini-3-flash-preview"))
+        let (id, model) = registry
+            .resolve_provider_id(Some("google:gemini-3-flash-preview"))
             .expect("prefixed google model should resolve");
-        assert_eq!(kind, ProviderKind::Google);
+        assert_eq!(id, ProviderId::Google);
         assert_eq!(model, ModelId::new("gemini-3-flash-preview"));
     }
 
@@ -832,11 +776,11 @@ mod tests {
             None,
         );
 
-        let (kind, model) = registry
-            .resolve_provider_kind(Some("scripted-loadtest"))
+        let (id, model) = registry
+            .resolve_provider_id(Some("scripted-loadtest"))
             .expect("configured static default model should resolve");
 
-        assert_eq!(kind, ProviderKind::OpenAI);
+        assert_eq!(id, ProviderId::OpenAI);
         assert_eq!(model, ModelId::new("scripted-loadtest"));
     }
 
@@ -847,7 +791,7 @@ mod tests {
             ProviderRegistry::with_static_providers(None, Some(provider("gpt-5.4")), None);
 
         let error = registry
-            .resolve_provider_kind(Some("claude-sonnet-4-6"))
+            .resolve_provider_id(Some("claude-sonnet-4-6"))
             .expect_err("unconfigured Anthropic provider should fail");
 
         assert!(

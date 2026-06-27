@@ -7,6 +7,5 @@ license.workspace = true
 [dependencies]
 metrics.workspace = true
 moa-core = { workspace = true }
-moa-memory-types = { workspace = true }
 sqlx = { workspace = true, features = ["chrono", "uuid"] }
 workspace-hack = { workspace = true }

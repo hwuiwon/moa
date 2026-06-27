@@ -23,10 +23,11 @@ use moa_brain::{
     planning::{PlannedQuery, Strategy},
     retrieval::{CachedHybridRetriever, HybridRetriever, RetrievalRequest},
 };
+use moa_core::RlsContext;
 use moa_core::{StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VECTOR_DIMENSION};
 use moa_session::{PostgresSessionStore, testing::cleanup_test_schema};
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};

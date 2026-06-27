@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{
@@ -14,7 +15,6 @@ use moa_memory_graph::{
 };
 use moa_memory_ingest::{IngestCtx, RrfPlusJudgeDetector, SessionTurn};
 use moa_memory_pii::{PiiClassifier, PiiError, PiiResult, PiiSpan};
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use serde_json::{Value, json};
@@ -135,7 +135,7 @@ pub(crate) async fn ingest_ctx_with_pii(
     pii: Arc<dyn PiiClassifier>,
 ) -> IngestCtx {
     seed_workspace_embedder_state(pool, storage_partition_id).await;
-    let scope = ScopeContext::tenant(TenantId::from(storage_partition_id));
+    let scope = RlsContext::tenant(TenantId::from(storage_partition_id));
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph = Arc::new(
         AgeGraphStore::scoped_for_app_role(pool.clone(), scope).with_vector_store(vector.clone()),
@@ -157,7 +157,7 @@ pub(crate) fn turn(
 ) -> SessionTurn {
     SessionTurn {
         tenant_id: TenantId::from(storage_partition_id),
-        contact_id: slow_path_contact_id(),
+        contact_id: Some(slow_path_contact_id()),
         session_id: SessionId::new(),
         turn_seq,
         transcript: transcript.into(),
@@ -213,7 +213,7 @@ pub(crate) async fn create_fact(
     valid_from: DateTime<Utc>,
 ) -> Uuid {
     seed_workspace_embedder_state(pool, storage_partition_id).await;
-    let ctx = ScopeContext::tenant(TenantId::from(storage_partition_id));
+    let ctx = RlsContext::tenant(TenantId::from(storage_partition_id));
     let vector = PgvectorStore::new_for_app_role(pool.clone(), ctx.clone());
     let graph =
         AgeGraphStore::scoped_for_app_role(pool.clone(), ctx).with_vector_store(Arc::new(vector));
@@ -251,7 +251,7 @@ pub(crate) async fn scoped_conn<'a>(
     pool: &'a PgPool,
     storage_partition_id: Uuid,
 ) -> ScopedConn<'a> {
-    let scope = ScopeContext::tenant(TenantId::from(storage_partition_id));
+    let scope = RlsContext::tenant(TenantId::from(storage_partition_id));
     scoped_conn_for_scope(pool, scope).await
 }
 
@@ -259,7 +259,7 @@ pub(crate) async fn user_scoped_conn<'a>(
     pool: &'a PgPool,
     storage_partition_id: Uuid,
 ) -> ScopedConn<'a> {
-    let scope = ScopeContext::contact(TenantId::from(storage_partition_id), slow_path_contact_id());
+    let scope = RlsContext::contact(TenantId::from(storage_partition_id), slow_path_contact_id());
     scoped_conn_for_scope(pool, scope).await
 }
 
@@ -267,7 +267,7 @@ fn slow_path_contact_id() -> ContactId {
     ContactId(Uuid::from_u128(0x5_10a7))
 }
 
-async fn scoped_conn_for_scope<'a>(pool: &'a PgPool, scope: ScopeContext) -> ScopedConn<'a> {
+async fn scoped_conn_for_scope<'a>(pool: &'a PgPool, scope: RlsContext) -> ScopedConn<'a> {
     let mut conn = ScopedConn::begin(pool, &scope)
         .await
         .expect("begin scoped test transaction");

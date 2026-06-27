@@ -20,7 +20,7 @@ pub struct HeuristicFactExtractor;
 #[async_trait]
 impl FactExtractor for HeuristicFactExtractor {
     async fn extract(&self, chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
-        Ok(extract_facts(chunks))
+        extract_facts(chunks)
     }
 }
 
@@ -42,8 +42,7 @@ impl ScriptedFactExtractor {
     }
 
     /// Creates a scripted extractor by parsing summary strings into fact DTOs.
-    #[must_use]
-    pub fn from_summaries<I, S>(summaries: I) -> Self
+    pub fn from_summaries<I, S>(summaries: I) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -55,9 +54,9 @@ impl ScriptedFactExtractor {
                 index,
                 text,
                 token_estimate: 1,
-            }]));
+            }])?);
         }
-        Self::new(facts)
+        Ok(Self::new(facts))
     }
 }
 

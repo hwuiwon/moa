@@ -17,7 +17,7 @@ use moa_lineage_core::{
     RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{EmbedderConstructionRole, PgvectorStore, build_embedder_from_config};
 use moa_observability::record_memory_operation;
 use restate_sdk::prelude::*;
@@ -246,7 +246,7 @@ fn memory_stack(scope: &MemoryScope) -> (Arc<dyn GraphStore>, Arc<HybridRetrieve
     let config = runtime.config();
     let vector = Arc::new(PgvectorStore::new_for_app_role(
         pool.clone(),
-        ScopeContext::new(scope.clone()),
+        scope.to_rls_context(),
     ));
     let retriever = HybridRetriever::from_config(config.as_ref(), pool, graph.clone(), vector)
         .with_assume_app_role(true);
@@ -256,7 +256,7 @@ fn memory_stack(scope: &MemoryScope) -> (Arc<dyn GraphStore>, Arc<HybridRetrieve
 fn graph_store(scope: &MemoryScope) -> AgeGraphStore {
     AgeGraphStore::scoped_for_app_role(
         OrchestratorCtx::current_graph_pool(),
-        ScopeContext::new(scope.clone()),
+        scope.to_rls_context(),
     )
 }
 

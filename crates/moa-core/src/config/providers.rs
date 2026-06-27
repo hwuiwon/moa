@@ -93,3 +93,45 @@ impl Default for ProvidersConfig {
         }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies provider, model, and general runtime environment overrides.
+    pub(in crate::config) fn apply_provider_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_copy_if_some, set_if_some, set_option_if_some};
+
+        set_if_some(
+            &mut config.general.default_provider,
+            &self.general_default_provider,
+        );
+        set_if_some(
+            &mut config.general.reasoning_effort,
+            &self.general_reasoning_effort,
+        );
+        set_copy_if_some(
+            &mut config.general.web_search_enabled,
+            self.general_web_search_enabled,
+        );
+        set_option_if_some(
+            &mut config.general.workspace_instructions,
+            &self.general_workspace_instructions,
+        );
+        set_option_if_some(
+            &mut config.general.user_instructions,
+            &self.general_user_instructions,
+        );
+        set_if_some(&mut config.models.main, &self.models_main);
+        set_option_if_some(&mut config.models.auxiliary, &self.models_auxiliary);
+        set_if_some(
+            &mut config.providers.anthropic.api_key_env,
+            &self.providers_anthropic_api_key_env,
+        );
+        set_if_some(
+            &mut config.providers.openai.api_key_env,
+            &self.providers_openai_api_key_env,
+        );
+        set_if_some(
+            &mut config.providers.google.api_key_env,
+            &self.providers_google_api_key_env,
+        );
+    }
+}

@@ -1,8 +1,9 @@
 //! Skill rendering with linked graph lessons.
 
+use moa_core::RlsContext;
 use moa_core::{MoaError, Result};
 use moa_db::ScopedConn;
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
@@ -56,7 +57,7 @@ pub async fn render(
     scope: &MemoryScope,
     ctx: &SkillRenderContext,
 ) -> Result<String> {
-    let mut conn = ScopedConn::begin(&ctx.pool, &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(&ctx.pool, &RlsContext::from(scope.clone())).await?;
     if ctx.assume_app_role {
         set_app_role(conn.as_mut()).await?;
     }

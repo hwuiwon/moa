@@ -1,10 +1,11 @@
 //! Skill lesson graph helpers.
 
 use chrono::Utc;
+use moa_core::RlsContext;
 use moa_core::{MoaError, Result, StoragePartitionId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -61,7 +62,7 @@ pub async fn learn_lesson(
         ));
     }
 
-    let scope_context = ScopeContext::from(scope.clone());
+    let scope_context = RlsContext::from(scope.clone());
     let storage_partition_id =
         Some(StoragePartitionId::for_tenant(scope_context.tenant_id()).to_string());
     let contact_id = scope_context

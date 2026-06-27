@@ -138,3 +138,60 @@ pub struct McpServerConfig {
     /// Optional credential injection configuration.
     pub credentials: Option<McpCredentialConfig>,
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies local runtime environment overrides.
+    pub(in crate::config) fn apply_local_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_copy_if_some, set_if_some};
+
+        set_copy_if_some(&mut config.local.docker_enabled, self.local_docker_enabled);
+        set_if_some(&mut config.local.sandbox_dir, &self.local_sandbox_dir);
+        set_if_some(&mut config.local.memory_dir, &self.local_memory_dir);
+    }
+
+    /// Applies cloud runtime and cloud hands environment overrides.
+    pub(in crate::config) fn apply_cloud_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{any_present, set_copy_if_some, set_option_if_some};
+
+        set_copy_if_some(&mut config.cloud.enabled, self.cloud_enabled);
+        set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
+        if any_present(&[
+            self.cloud_hands_default_provider.is_some(),
+            self.cloud_hands_daytona_api_key_env.is_some(),
+            self.cloud_hands_daytona_api_url.is_some(),
+            self.cloud_hands_daytona_default_image.is_some(),
+            self.cloud_hands_e2b_api_key_env.is_some(),
+            self.cloud_hands_e2b_api_url.is_some(),
+            self.cloud_hands_e2b_domain.is_some(),
+            self.cloud_hands_e2b_template.is_some(),
+        ]) {
+            let hands = config
+                .cloud
+                .hands
+                .get_or_insert_with(CloudHandsConfig::default);
+            set_option_if_some(
+                &mut hands.default_provider,
+                &self.cloud_hands_default_provider,
+            );
+            set_option_if_some(
+                &mut hands.daytona_api_key_env,
+                &self.cloud_hands_daytona_api_key_env,
+            );
+            set_option_if_some(
+                &mut hands.daytona_api_url,
+                &self.cloud_hands_daytona_api_url,
+            );
+            set_option_if_some(
+                &mut hands.daytona_default_image,
+                &self.cloud_hands_daytona_default_image,
+            );
+            set_option_if_some(
+                &mut hands.e2b_api_key_env,
+                &self.cloud_hands_e2b_api_key_env,
+            );
+            set_option_if_some(&mut hands.e2b_api_url, &self.cloud_hands_e2b_api_url);
+            set_option_if_some(&mut hands.e2b_domain, &self.cloud_hands_e2b_domain);
+            set_option_if_some(&mut hands.e2b_template, &self.cloud_hands_e2b_template);
+        }
+    }
+}

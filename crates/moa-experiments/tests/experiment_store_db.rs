@@ -1,4 +1,5 @@
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::RlsContext;
 use moa_core::{ActionRuleScope, ModelId, Result, SessionId, StoragePartitionId, TenantId, UserId};
 use moa_db::ScopedConn;
 use moa_experiments::{
@@ -9,7 +10,6 @@ use moa_experiments::{
     },
     store::ExperimentStore,
 };
-use moa_memory_types::ScopeContext;
 use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1165,8 +1165,8 @@ fn scope_storage_partition_id(scope: &ActionRuleScope) -> String {
     }
 }
 
-fn scope_context(scope: &ActionRuleScope) -> ScopeContext {
+fn scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
 }

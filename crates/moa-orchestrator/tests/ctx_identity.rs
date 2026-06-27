@@ -2,34 +2,16 @@
 
 use moa_core::TenantId;
 use moa_core::traits::IdentityType;
-use moa_orchestrator::ctx::{HeaderTrustMode, IdentityHeaderError, extract_identity};
+use moa_orchestrator::ctx::{IdentityHeaderError, extract_identity};
 use restate_sdk::prelude::HeaderMap;
 use uuid::Uuid;
 
 #[test]
-fn header_trust_mode_defaults_to_strict() {
-    // Pins: missing identity headers fail closed unless lenient mode is explicitly selected.
-    assert_eq!(HeaderTrustMode::default(), HeaderTrustMode::Strict);
-}
-
-#[test]
-fn missing_headers_in_lenient_mode_returns_none() {
-    // Pins: lenient mode accepts pre-auth-pack calls without identity headers.
+fn missing_headers_returns_missing_error() {
+    // Pins: calls that bypass moa-edge identity injection fail closed.
     let headers = HeaderMap::with_capacity(0);
 
-    let identity = extract_identity(&headers, HeaderTrustMode::Lenient)
-        .expect("lenient missing headers should not error");
-
-    assert_eq!(identity, None);
-}
-
-#[test]
-fn missing_headers_in_strict_mode_returns_missing_error() {
-    // Pins: strict mode rejects calls that bypass moa-edge identity injection.
-    let headers = HeaderMap::with_capacity(0);
-
-    let error = extract_identity(&headers, HeaderTrustMode::Strict)
-        .expect_err("strict mode should reject missing identity headers");
+    let error = extract_identity(&headers).expect_err("missing identity headers should fail");
 
     assert_eq!(error, IdentityHeaderError::Missing("x-moa-identity-type"));
 }
@@ -52,7 +34,7 @@ fn full_header_set_produces_expected_identity() {
     headers.insert("x-moa-api-key-id", api_key_id.to_string());
     headers.insert("x-moa-acting-on-behalf-of", acting_user_id.to_string());
 
-    let identity = extract_identity(&headers, HeaderTrustMode::Strict)
+    let identity = extract_identity(&headers)
         .expect("full identity headers should parse")
         .expect("full identity headers should produce identity");
 
@@ -69,8 +51,8 @@ fn partial_header_set_returns_malformed_error() {
     let mut headers = HeaderMap::with_capacity(1);
     headers.insert("x-moa-identity-type", "user".to_string());
 
-    let error = extract_identity(&headers, HeaderTrustMode::Lenient)
-        .expect_err("partial identity header set should be malformed");
+    let error =
+        extract_identity(&headers).expect_err("partial identity header set should be malformed");
 
     assert_eq!(
         error,
@@ -92,8 +74,7 @@ fn unknown_identity_type_returns_unknown_type_error() {
         "22222222-2222-2222-2222-222222222222".to_string(),
     );
 
-    let error = extract_identity(&headers, HeaderTrustMode::Strict)
-        .expect_err("unknown identity type should be rejected");
+    let error = extract_identity(&headers).expect_err("unknown identity type should be rejected");
 
     assert_eq!(error, IdentityHeaderError::UnknownType("robot".to_string()));
 }

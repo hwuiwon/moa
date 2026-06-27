@@ -2,10 +2,10 @@
 
 mod support;
 
+use moa_core::RlsContext;
 use moa_core::{MoaError, Result};
 use moa_db::ScopedConn;
 use moa_memory_graph::GraphStore;
-use moa_memory_types::ScopeContext;
 use moa_skills::lessons::{LessonContext, learn_lesson};
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use sqlx::Row;
@@ -43,7 +43,7 @@ async fn learn_lesson_writes_graph_node() -> Result<()> {
     )
     .await?;
 
-    let mut conn = ScopedConn::begin(store.pool(), &ScopeContext::from(scope.clone())).await?;
+    let mut conn = ScopedConn::begin(store.pool(), &RlsContext::from(scope.clone())).await?;
     set_app_role(conn.as_mut()).await?;
     let row = sqlx::query(
         r#"

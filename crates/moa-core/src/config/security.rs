@@ -24,3 +24,23 @@ impl Default for PermissionsConfig {
         }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies permission-policy environment overrides.
+    pub(in crate::config) fn apply_permissions_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_copy_if_some, set_vec_if_some};
+
+        set_copy_if_some(
+            &mut config.permissions.default_effect,
+            self.permissions_default_effect,
+        );
+        set_vec_if_some(
+            &mut config.permissions.admin_review,
+            &self.permissions_admin_review,
+        );
+        set_vec_if_some(
+            &mut config.permissions.always_deny,
+            &self.permissions_always_deny,
+        );
+    }
+}

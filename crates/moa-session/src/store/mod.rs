@@ -5,6 +5,10 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use chrono::{DateTime, Utc};
+use moa_core::traits::{
+    SessionAnalyticsStore, SessionChannelBindingUpdate, SessionChannelStore,
+    SessionEventLookupStore, SessionLearningLogStore,
+};
 use moa_core::wire::analytics::LearningCandidateSummary;
 use moa_core::{
     ActionPolicyRule, BlobStore, CacheDailyMetric, ChannelAccountId, ChannelRef, ClaimCheck,
@@ -12,10 +16,11 @@ use moa_core::{
     EventType, ExperienceAttribution, ExperienceRecord, ExperienceStore, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateStore, LearningEntry,
     MoaConfig, MoaError, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
-    SegmentStore, SessionAnalyticsSummary, SessionChannelBinding, SessionFilter, SessionId,
-    SessionMeta, SessionStatus, SessionStore, SessionSummary, SessionTurnMetric,
-    SkillResolutionRate, StoragePartitionId, TaskSegment, TaskStrategySuccessRate,
-    TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary, record_session_event_replay,
+    SegmentStore, SessionAnalyticsSummary, SessionChannelBinding, SessionChannelBindingId,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
+    SessionTurnMetric, SkillResolutionRate, StoragePartitionId, TaskSegment,
+    TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary,
+    record_session_event_replay,
 };
 use moa_observability::{
     record_session_created, record_session_event_append, record_session_event_decoded_bytes,
@@ -385,6 +390,76 @@ impl PostgresSessionStore {
             Some(schema_name) => qualified_name(schema_name, table_name),
             None => table_name.to_string(),
         }
+    }
+}
+
+#[async_trait]
+impl SessionAnalyticsStore for PostgresSessionStore {
+    async fn get_session_summary(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<SessionAnalyticsSummary> {
+        PostgresSessionStore::get_session_summary(self, session_id).await
+    }
+
+    async fn list_tool_call_summaries(
+        &self,
+        tenant_id: Option<&moa_core::TenantId>,
+    ) -> Result<Vec<ToolCallSummary>> {
+        PostgresSessionStore::list_tool_call_summaries(self, tenant_id).await
+    }
+
+    async fn list_session_turn_metrics(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Vec<SessionTurnMetric>> {
+        PostgresSessionStore::list_session_turn_metrics(self, session_id).await
+    }
+
+    async fn get_tenant_stats(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<TenantAnalyticsSummary> {
+        PostgresSessionStore::get_tenant_stats(self, tenant_id, days).await
+    }
+
+    async fn get_tenant_stats_control_plane(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<TenantAnalyticsSummary> {
+        PostgresSessionStore::get_tenant_stats_control_plane(self, tenant_id, days).await
+    }
+
+    async fn list_cache_daily_metrics(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<Vec<CacheDailyMetric>> {
+        PostgresSessionStore::list_cache_daily_metrics(self, tenant_id, days).await
+    }
+
+    async fn list_cache_daily_metrics_control_plane(
+        &self,
+        tenant_id: &TenantId,
+        days: u32,
+    ) -> Result<Vec<CacheDailyMetric>> {
+        PostgresSessionStore::list_cache_daily_metrics_control_plane(self, tenant_id, days).await
+    }
+
+    async fn list_learning_candidate_summaries(
+        &self,
+        tenant_id: TenantId,
+        status: Option<LearningCandidateStatus>,
+        limit: u32,
+    ) -> Result<Vec<LearningCandidateSummary>> {
+        PostgresSessionStore::list_learning_candidate_summaries(self, tenant_id, status, limit)
+            .await
+    }
+
+    async fn refresh_analytics_materialized_views(&self) -> Result<()> {
+        PostgresSessionStore::refresh_analytics_materialized_views(self).await
     }
 }
 

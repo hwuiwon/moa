@@ -14,7 +14,6 @@ pub use responses::{
 };
 pub use session_search::session_search_response_from_events;
 
-use moa_core::traits::SessionStore as _;
 use moa_core::wire::analytics::{
     CacheStatsRequest, CacheStatsResponse, ExperimentAnalyticsRequest, ExperimentAnalyticsResponse,
     LearningCandidateListRequest, LearningCandidateListResponse, SessionSearchRequest,

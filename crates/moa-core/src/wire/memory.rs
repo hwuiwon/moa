@@ -124,7 +124,7 @@ pub struct MemoryIngestDocument {
 pub struct MemoryIngestRequest {
     /// Tenant receiving the ingested documents.
     pub tenant_id: TenantId,
-    /// Contact associated with the ingestion request, if any.
+    /// Contact owner for contact memory; absent means tenant-owned ingestion.
     pub contact_id: Option<ContactId>,
     /// Documents to ingest.
     #[serde(default)]

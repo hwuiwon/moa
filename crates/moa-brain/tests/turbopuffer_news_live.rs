@@ -6,11 +6,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalRequest};
+use moa_core::RlsContext;
 use moa_core::{ContactId, SessionId, StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
     CohereV4Embedder, PgvectorStore, PromotionOptions, TurbopufferStore, VectorPartitionPromotion,
     finalize_promotion,
@@ -79,14 +80,14 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let contact_id = ContactId::new();
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id);
     let workspace_text = storage_partition_id.to_string();
-    let tenant_scope = ScopeContext::tenant(tenant_id);
-    let contact_scope = ScopeContext::contact(tenant_id, contact_id);
+    let tenant_scope = RlsContext::tenant(tenant_id);
+    let contact_scope = RlsContext::contact(tenant_id, contact_id);
     let embedder = CohereV4Embedder::new(SecretString::from(cohere_api_key()?));
     seed_workspace_embedder_state(&pool, &tenant_scope, &workspace_text, &embedder).await?;
     let transcript = news_transcript().await?;
     let turn = SessionTurn {
         tenant_id,
-        contact_id,
+        contact_id: Some(contact_id),
         session_id: SessionId::new(),
         turn_seq: 1,
         transcript,
@@ -199,7 +200,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
 
 async fn seed_workspace_embedder_state(
     pool: &sqlx::PgPool,
-    scope: &ScopeContext,
+    scope: &RlsContext,
     storage_partition_id: &str,
     embedder: &CohereV4Embedder,
 ) -> TestResult {

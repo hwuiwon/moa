@@ -23,3 +23,13 @@ impl Default for SkillLearningConfig {
         Self { min_tool_calls: 5 }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies learning-loop environment overrides.
+    pub(in crate::config) fn apply_learning_overlay(&self, config: &mut super::MoaConfig) {
+        super::env_overlay::set_copy_if_some(
+            &mut config.learning.skills.min_tool_calls,
+            self.learning_skills_min_tool_calls,
+        );
+    }
+}

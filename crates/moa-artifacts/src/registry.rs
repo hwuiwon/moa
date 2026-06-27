@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{ActionRuleScope, MoaError, Result, SessionId, StoragePartitionId, UserId};
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Row};
@@ -40,9 +40,9 @@ impl ArtifactScopeParts {
     }
 }
 
-fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+fn artifact_scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
 }
 

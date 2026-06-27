@@ -35,3 +35,36 @@ impl Default for MessagingConfig {
         }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies messaging adapter environment overrides.
+    pub(in crate::config) fn apply_messaging_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_if_some, set_option_if_some};
+
+        set_if_some(
+            &mut config.messaging.slack_token_env,
+            &self.messaging_slack_token_env,
+        );
+        set_if_some(
+            &mut config.messaging.slack_app_token_env,
+            &self.messaging_slack_app_token_env,
+        );
+        set_if_some(
+            &mut config.messaging.postmark_base_url,
+            &self.messaging_postmark_base_url,
+        );
+        set_if_some(
+            &mut config.messaging.postmark_message_stream,
+            &self.messaging_postmark_message_stream,
+        );
+        set_if_some(&mut config.messaging.email_from, &self.messaging_email_from);
+        set_option_if_some(
+            &mut config.messaging.email_reply_to,
+            &self.messaging_email_reply_to,
+        );
+        set_if_some(
+            &mut config.messaging.twilio_base_url,
+            &self.messaging_twilio_base_url,
+        );
+    }
+}

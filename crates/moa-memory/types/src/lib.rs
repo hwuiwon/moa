@@ -1,6 +1,6 @@
 //! Memory-owned scope types shared by retrieval, ingestion, and storage crates.
 
-use moa_core::{ContactId, TenantId};
+use moa_core::{ContactId, RlsContext, TenantId};
 use serde::{Deserialize, Serialize};
 
 /// Runtime graph-memory scope.
@@ -79,62 +79,28 @@ impl MemoryScope {
     }
 }
 
-/// Request-local scope values used to install Postgres RLS GUCs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ScopeContext {
-    scope: MemoryScope,
-}
-
-impl ScopeContext {
-    /// Creates a scope context from a concrete memory scope.
-    pub fn new(scope: MemoryScope) -> Self {
-        Self { scope }
-    }
-
-    /// Creates a tenant-local scope context.
-    pub fn tenant(tenant_id: TenantId) -> Self {
-        Self::new(MemoryScope::Tenant { tenant_id })
-    }
-
-    /// Creates a contact-local scope context.
-    pub fn contact(tenant_id: TenantId, contact_id: ContactId) -> Self {
-        Self::new(MemoryScope::Contact {
-            tenant_id,
-            contact_id,
-        })
-    }
-
-    /// Returns the concrete memory scope for this context.
-    pub fn scope(&self) -> &MemoryScope {
-        &self.scope
-    }
-
-    /// Returns the tenant identifier for this context.
-    pub fn tenant_id(&self) -> TenantId {
-        self.scope.tenant_id()
-    }
-
-    /// Returns the contact identifier for contact-local memory.
-    pub fn contact_id(&self) -> Option<ContactId> {
-        self.scope.contact_id()
-    }
-
-    /// Returns the tier discriminator for this context.
-    pub fn tier(&self) -> ScopeTier {
-        self.scope.tier()
-    }
-
-    /// Returns the canonical SQL value for the scope tier.
-    pub fn tier_str(&self) -> &'static str {
-        match self.scope.tier() {
-            ScopeTier::Tenant => "tenant",
-            ScopeTier::Contact => "contact",
+impl MemoryScope {
+    /// Converts this memory-specific scope into the platform RLS context.
+    #[must_use]
+    pub fn to_rls_context(&self) -> RlsContext {
+        match self {
+            MemoryScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
+            MemoryScope::Contact {
+                tenant_id,
+                contact_id,
+            } => RlsContext::contact(*tenant_id, *contact_id),
         }
     }
 }
 
-impl From<MemoryScope> for ScopeContext {
+impl From<&MemoryScope> for RlsContext {
+    fn from(scope: &MemoryScope) -> Self {
+        scope.to_rls_context()
+    }
+}
+
+impl From<MemoryScope> for RlsContext {
     fn from(scope: MemoryScope) -> Self {
-        Self::new(scope)
+        scope.to_rls_context()
     }
 }

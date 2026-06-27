@@ -7,10 +7,15 @@ use moa_authz::FgaClient;
 use moa_brain::pipeline::{memory::GraphMemoryRetriever, skills::SkillInjector};
 use moa_core::{
     Channel, LineageHandle, MoaConfig,
-    traits::{ChannelAdapter, EmbeddingProvider, Identity, IdentityType},
+    traits::{
+        ChannelAdapter, EmbeddingProvider, ExperienceStore, Identity, IdentityType,
+        LearningCandidateStore, SegmentStore, SessionAnalyticsStore, SessionChannelStore,
+        SessionEventLookupStore, SessionLearningLogStore, SessionRepository, SessionStore,
+    },
 };
 use moa_hands::ToolRouter;
 use moa_providers::ProviderRegistry;
+use moa_security::ActionPolicyRuleStore;
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use uuid::Uuid;
@@ -20,7 +25,17 @@ static CTX: OnceLock<Arc<OrchestratorCtx>> = OnceLock::new();
 /// Persistence dependencies shared by handlers that read or write product data.
 #[derive(Clone)]
 pub struct PersistenceDeps {
-    session_store: Arc<PostgresSessionStore>,
+    session_repository: Arc<dyn SessionRepository>,
+    session_store: Arc<dyn SessionStore>,
+    segment_store: Arc<dyn SegmentStore>,
+    experience_store: Arc<dyn ExperienceStore>,
+    learning_candidate_store: Arc<dyn LearningCandidateStore>,
+    analytics_store: Arc<dyn SessionAnalyticsStore>,
+    event_lookup_store: Arc<dyn SessionEventLookupStore>,
+    learning_log_store: Arc<dyn SessionLearningLogStore>,
+    channel_store: Arc<dyn SessionChannelStore>,
+    action_policy_store: Arc<dyn ActionPolicyRuleStore>,
+    session_store_backend: Arc<PostgresSessionStore>,
     graph_pool: sqlx::PgPool,
 }
 
@@ -29,15 +44,85 @@ impl PersistenceDeps {
     #[must_use]
     pub fn new(session_store: Arc<PostgresSessionStore>, graph_pool: sqlx::PgPool) -> Self {
         Self {
-            session_store,
+            session_repository: session_store.clone(),
+            session_store: session_store.clone(),
+            segment_store: session_store.clone(),
+            experience_store: session_store.clone(),
+            learning_candidate_store: session_store.clone(),
+            analytics_store: session_store.clone(),
+            event_lookup_store: session_store.clone(),
+            learning_log_store: session_store.clone(),
+            channel_store: session_store.clone(),
+            action_policy_store: session_store.clone(),
+            session_store_backend: session_store,
             graph_pool,
         }
     }
 
-    /// Returns the Postgres-backed session store.
+    /// Returns the session repository contract.
     #[must_use]
-    pub fn session_store(&self) -> Arc<PostgresSessionStore> {
+    pub fn session_store(&self) -> Arc<dyn SessionRepository> {
+        self.session_repository.clone()
+    }
+
+    /// Returns the durable session event store contract.
+    #[must_use]
+    pub fn session_event_store(&self) -> Arc<dyn SessionStore> {
         self.session_store.clone()
+    }
+
+    /// Returns the task-segment store contract.
+    #[must_use]
+    pub fn segment_store(&self) -> Arc<dyn SegmentStore> {
+        self.segment_store.clone()
+    }
+
+    /// Returns the experience store contract.
+    #[must_use]
+    pub fn experience_store(&self) -> Arc<dyn ExperienceStore> {
+        self.experience_store.clone()
+    }
+
+    /// Returns the learning-candidate store contract.
+    #[must_use]
+    pub fn learning_candidate_store(&self) -> Arc<dyn LearningCandidateStore> {
+        self.learning_candidate_store.clone()
+    }
+
+    /// Returns the analytics read-model store contract.
+    #[must_use]
+    pub fn analytics_store(&self) -> Arc<dyn SessionAnalyticsStore> {
+        self.analytics_store.clone()
+    }
+
+    /// Returns the event idempotency lookup contract.
+    #[must_use]
+    pub fn event_lookup_store(&self) -> Arc<dyn SessionEventLookupStore> {
+        self.event_lookup_store.clone()
+    }
+
+    /// Returns the learning-log store contract.
+    #[must_use]
+    pub fn learning_log_store(&self) -> Arc<dyn SessionLearningLogStore> {
+        self.learning_log_store.clone()
+    }
+
+    /// Returns the session channel-binding store contract.
+    #[must_use]
+    pub fn channel_store(&self) -> Arc<dyn SessionChannelStore> {
+        self.channel_store.clone()
+    }
+
+    /// Returns the action-policy rule store contract.
+    #[must_use]
+    pub fn action_policy_store(&self) -> Arc<dyn ActionPolicyRuleStore> {
+        self.action_policy_store.clone()
+    }
+
+    /// Returns the concrete Postgres session-store backend for composition-only surfaces.
+    #[must_use]
+    pub fn session_store_backend(&self) -> Arc<PostgresSessionStore> {
+        self.session_store_backend.clone()
     }
 
     /// Returns the Postgres pool used by graph-memory and application repositories.
@@ -299,7 +384,7 @@ impl OrchestratorCtx {
 
     /// Returns the current session store.
     #[must_use]
-    pub fn current_session_store() -> Arc<PostgresSessionStore> {
+    pub fn current_session_store() -> Arc<dyn SessionRepository> {
         Self::current().session_store()
     }
 
@@ -389,8 +474,26 @@ impl OrchestratorCtx {
 
     /// Returns the session store from persistence dependencies.
     #[must_use]
-    pub fn session_store(&self) -> Arc<PostgresSessionStore> {
+    pub fn session_store(&self) -> Arc<dyn SessionRepository> {
         self.persistence.session_store()
+    }
+
+    /// Returns the learning-candidate store contract.
+    #[must_use]
+    pub fn learning_candidate_store(&self) -> Arc<dyn LearningCandidateStore> {
+        self.persistence.learning_candidate_store()
+    }
+
+    /// Returns the action-policy rule store contract.
+    #[must_use]
+    pub fn action_policy_store(&self) -> Arc<dyn ActionPolicyRuleStore> {
+        self.persistence.action_policy_store()
+    }
+
+    /// Returns the concrete session-store backend for composition-only surfaces.
+    #[must_use]
+    pub fn session_store_backend(&self) -> Arc<PostgresSessionStore> {
+        self.persistence.session_store_backend()
     }
 
     /// Returns the graph/application Postgres pool from persistence dependencies.
@@ -480,19 +583,6 @@ pub enum IdentityHeaderError {
     UnknownType(String),
 }
 
-/// Controls how the orchestrator treats missing edge identity headers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HeaderTrustMode {
-    /// Reject requests that do not include the required identity header set.
-    #[default]
-    Strict,
-    /// Accept requests without identity headers while Phase 1 handlers are wired.
-    Lenient,
-}
-
-/// Process-wide identity header trust mode.
-pub static HEADER_TRUST_MODE: OnceLock<HeaderTrustMode> = OnceLock::new();
-
 /// Common header access for all Restate handler context variants.
 pub trait RequestHeaders {
     /// Returns the request headers attached to the current Restate invocation.
@@ -537,7 +627,6 @@ impl RequestHeaders for restate_sdk::context::SharedWorkflowContext<'_> {
 /// parsed only after the core set is valid.
 pub fn extract_identity(
     headers: &restate_sdk::context::HeaderMap,
-    mode: HeaderTrustMode,
 ) -> Result<Option<Identity>, IdentityHeaderError> {
     let get = |name: &'static str| headers.get(name).map(String::as_str);
     let raw_type = get("x-moa-identity-type");
@@ -545,10 +634,9 @@ pub fn extract_identity(
     let raw_tenant = get("x-moa-tenant-id");
 
     let (raw_type, raw_id, raw_tenant) = match (raw_type, raw_id, raw_tenant) {
-        (None, None, None) if mode == HeaderTrustMode::Strict => {
+        (None, None, None) => {
             return Err(IdentityHeaderError::Missing("x-moa-identity-type"));
         }
-        (None, None, None) => return Ok(None),
         (Some(raw_type), Some(raw_id), Some(raw_tenant)) => (raw_type, raw_id, raw_tenant),
         _ => {
             return Err(IdentityHeaderError::Malformed(
@@ -576,13 +664,15 @@ pub fn extract_identity(
     }))
 }
 
-/// Extract identity from a Restate handler context using the configured trust mode.
+/// Extract identity from a Restate handler context.
 pub fn current_identity(
     ctx: &impl RequestHeaders,
 ) -> Result<Option<Identity>, IdentityHeaderError> {
-    let mode = HEADER_TRUST_MODE.get().copied().unwrap_or_default();
-    let identity = extract_identity(ctx.request_headers(), mode)?;
-    tracing::debug!(mode = ?mode, has_identity = identity.is_some(), "extracted request identity");
+    let identity = extract_identity(ctx.request_headers())?;
+    tracing::debug!(
+        has_identity = identity.is_some(),
+        "extracted request identity"
+    );
     Ok(identity)
 }
 

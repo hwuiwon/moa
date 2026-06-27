@@ -196,7 +196,8 @@ mod tests {
     #[tokio::test]
     async fn counting_extractor_records_estimated_chat_tokens() {
         // Pins: extractor counting records input and structured fact output text.
-        let extractor = ScriptedFactExtractor::from_summaries(["The user prefers Rust."]);
+        let extractor = ScriptedFactExtractor::from_summaries(["The user prefers Rust."])
+            .expect("scripted fixture should parse");
         let ledger = Arc::new(Mutex::new(CostLedger::new(1.0)));
         let counting = CountingExtractor::new(extractor, ledger.clone());
 

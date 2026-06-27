@@ -8,9 +8,6 @@ pub struct AuthConfig {
     /// Selected authentication provider.
     #[serde(default)]
     pub provider: AuthProviderKind,
-    /// How strictly internal handlers require trusted identity headers.
-    #[serde(default)]
-    pub header_trust: AuthHeaderTrustKind,
     /// Local API-key provider settings.
     #[serde(default)]
     pub local: Option<LocalAuthConfig>,
@@ -28,28 +25,6 @@ pub struct AuthConfig {
     pub contact_tokens: ContactTokenConfig,
 }
 
-/// Trusted identity header handling mode.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum AuthHeaderTrustKind {
-    /// Reject requests that do not include the required identity header set.
-    #[default]
-    Strict,
-    /// Accept requests without identity headers for transitional local wiring.
-    Lenient,
-}
-
-impl AuthHeaderTrustKind {
-    /// Return the serialized configuration value.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        self.into()
-    }
-}
-
 /// Supported authentication provider kinds.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr,
@@ -61,7 +36,6 @@ pub enum AuthProviderKind {
     #[default]
     Local,
     /// Disable credential checks and assign a fixed service identity.
-    #[serde(alias = "none")]
     Disabled,
     /// Auth0-backed authentication.
     Auth0,
@@ -141,5 +115,157 @@ impl Default for ContactTokenConfig {
             verified_ttl_seconds: 86_400,
             verification_ttl_seconds: 600,
         }
+    }
+}
+
+impl super::MoaEnvOverlay {
+    /// Applies authentication environment overrides.
+    pub(in crate::config) fn apply_auth_overlay(
+        &self,
+        config: &mut super::MoaConfig,
+    ) -> crate::Result<()> {
+        use super::env_overlay::{set_copy_if_some, set_option_if_some};
+
+        set_copy_if_some(&mut config.auth.provider, self.auth_provider);
+        self.apply_auth0(config)?;
+        set_option_if_some(
+            &mut config.auth.auth0_webhook_secret,
+            &self.auth_auth0_webhook_secret,
+        );
+        self.apply_oidc(config)?;
+        self.apply_contact_tokens(config)?;
+
+        Ok(())
+    }
+
+    fn apply_auth0(&self, config: &mut super::MoaConfig) -> crate::Result<()> {
+        use super::env_overlay::{any_present, require_non_empty, set_if_some};
+
+        if !any_present(&[
+            self.auth_auth0_domain.is_some(),
+            self.auth_auth0_audience.is_some(),
+            self.auth_auth0_client_id_env.is_some(),
+            self.auth_auth0_client_secret_env.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let mut auth0 = config
+            .auth
+            .auth0
+            .clone()
+            .unwrap_or_else(|| Auth0AuthConfig {
+                domain: String::new(),
+                audience: String::new(),
+                client_id_env: String::new(),
+                client_secret_env: String::new(),
+            });
+        set_if_some(&mut auth0.domain, &self.auth_auth0_domain);
+        set_if_some(&mut auth0.audience, &self.auth_auth0_audience);
+        set_if_some(&mut auth0.client_id_env, &self.auth_auth0_client_id_env);
+        set_if_some(
+            &mut auth0.client_secret_env,
+            &self.auth_auth0_client_secret_env,
+        );
+        require_non_empty("MOA_AUTH_AUTH0_DOMAIN", &auth0.domain)?;
+        require_non_empty("MOA_AUTH_AUTH0_AUDIENCE", &auth0.audience)?;
+        require_non_empty("MOA_AUTH_AUTH0_CLIENT_ID_ENV", &auth0.client_id_env)?;
+        require_non_empty("MOA_AUTH_AUTH0_CLIENT_SECRET_ENV", &auth0.client_secret_env)?;
+        config.auth.auth0 = Some(auth0);
+        Ok(())
+    }
+
+    fn apply_oidc(&self, config: &mut super::MoaConfig) -> crate::Result<()> {
+        use super::env_overlay::{any_present, require_non_empty, set_if_some};
+
+        if !any_present(&[
+            self.auth_oidc_issuer.is_some(),
+            self.auth_oidc_audience.is_some(),
+            self.auth_oidc_jwks_url.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let mut oidc = config.auth.oidc.clone().unwrap_or_else(|| OidcAuthConfig {
+            issuer: String::new(),
+            audience: String::new(),
+            jwks_url: String::new(),
+        });
+        set_if_some(&mut oidc.issuer, &self.auth_oidc_issuer);
+        set_if_some(&mut oidc.audience, &self.auth_oidc_audience);
+        set_if_some(&mut oidc.jwks_url, &self.auth_oidc_jwks_url);
+        require_non_empty("MOA_AUTH_OIDC_ISSUER", &oidc.issuer)?;
+        require_non_empty("MOA_AUTH_OIDC_AUDIENCE", &oidc.audience)?;
+        require_non_empty("MOA_AUTH_OIDC_JWKS_URL", &oidc.jwks_url)?;
+        config.auth.oidc = Some(oidc);
+        Ok(())
+    }
+
+    fn apply_contact_tokens(&self, config: &mut super::MoaConfig) -> crate::Result<()> {
+        use super::env_overlay::{any_present, require_non_empty, set_copy_if_some, set_if_some};
+
+        if !any_present(&[
+            self.auth_contact_tokens_issuer.is_some(),
+            self.auth_contact_tokens_audience.is_some(),
+            self.auth_contact_tokens_key_id.is_some(),
+            self.auth_contact_tokens_private_key_pem_env.is_some(),
+            self.auth_contact_tokens_public_key_pem_env.is_some(),
+            self.auth_contact_tokens_contact_point_hash_key_env
+                .is_some(),
+            self.auth_contact_tokens_unverified_ttl_seconds.is_some(),
+            self.auth_contact_tokens_verified_ttl_seconds.is_some(),
+            self.auth_contact_tokens_verification_ttl_seconds.is_some(),
+        ]) {
+            return Ok(());
+        }
+
+        let mut contact_tokens: ContactTokenConfig = config.auth.contact_tokens.clone();
+        set_if_some(&mut contact_tokens.issuer, &self.auth_contact_tokens_issuer);
+        set_if_some(
+            &mut contact_tokens.audience,
+            &self.auth_contact_tokens_audience,
+        );
+        set_if_some(&mut contact_tokens.key_id, &self.auth_contact_tokens_key_id);
+        set_if_some(
+            &mut contact_tokens.private_key_pem_env,
+            &self.auth_contact_tokens_private_key_pem_env,
+        );
+        set_if_some(
+            &mut contact_tokens.public_key_pem_env,
+            &self.auth_contact_tokens_public_key_pem_env,
+        );
+        set_if_some(
+            &mut contact_tokens.contact_point_hash_key_env,
+            &self.auth_contact_tokens_contact_point_hash_key_env,
+        );
+        set_copy_if_some(
+            &mut contact_tokens.unverified_ttl_seconds,
+            self.auth_contact_tokens_unverified_ttl_seconds,
+        );
+        set_copy_if_some(
+            &mut contact_tokens.verified_ttl_seconds,
+            self.auth_contact_tokens_verified_ttl_seconds,
+        );
+        set_copy_if_some(
+            &mut contact_tokens.verification_ttl_seconds,
+            self.auth_contact_tokens_verification_ttl_seconds,
+        );
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_ISSUER", &contact_tokens.issuer)?;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_AUDIENCE", &contact_tokens.audience)?;
+        require_non_empty("MOA_AUTH_CONTACT_TOKENS_KEY_ID", &contact_tokens.key_id)?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM_ENV",
+            &contact_tokens.private_key_pem_env,
+        )?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM_ENV",
+            &contact_tokens.public_key_pem_env,
+        )?;
+        require_non_empty(
+            "MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_ENV",
+            &contact_tokens.contact_point_hash_key_env,
+        )?;
+        config.auth.contact_tokens = contact_tokens;
+        Ok(())
     }
 }

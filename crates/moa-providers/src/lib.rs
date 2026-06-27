@@ -29,5 +29,6 @@ pub use embedding::MockEmbedding;
 pub use embedding::{OpenAIEmbedding, build_embedding_provider_from_config};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use routing::{
-    DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, ProviderKind,
+    DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, PROVIDER_DESCRIPTORS,
+    ProviderDescriptor, ProviderId, infer_provider_id, provider_descriptor_by_name,
 };

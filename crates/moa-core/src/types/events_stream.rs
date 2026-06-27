@@ -4,105 +4,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::events::Event;
+use crate::events::{Event, EventType};
 
 use super::{BrainId, ContactId, SessionId, TenantId};
 
 /// Monotonic event sequence number within a session.
 pub type SequenceNum = u64;
-
-/// Event type discriminator used for filtering and indexing.
-///
-/// The strum `IntoStaticStr`/`EnumString` derives intentionally use the verbatim
-/// PascalCase variant names — that is the persisted database representation
-/// (see `event_type_to_db`), which differs from the snake_case serde/JSON form.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    strum::IntoStaticStr,
-    strum::EnumString,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum EventType {
-    /// `SessionCreated`.
-    SessionCreated,
-    /// `SessionStatusChanged`.
-    SessionStatusChanged,
-    /// `SessionChannelChanged`.
-    SessionChannelChanged,
-    /// `SessionCompleted`.
-    SessionCompleted,
-    /// `SegmentStarted`.
-    SegmentStarted,
-    /// `SegmentCompleted`.
-    SegmentCompleted,
-    /// `UserMessage`.
-    UserMessage,
-    /// `QueuedMessage`.
-    QueuedMessage,
-    /// `BrainThinking`.
-    BrainThinking,
-    /// `BrainResponse`.
-    BrainResponse,
-    /// `ProgressUpdate`.
-    ProgressUpdate,
-    /// `GuardrailCheck`.
-    GuardrailCheck,
-    /// `ToolCall`.
-    ToolCall,
-    /// `ToolResult`.
-    ToolResult,
-    /// `ToolError`.
-    ToolError,
-    /// `ActionReviewRequested`.
-    ActionReviewRequested,
-    /// `ActionReviewDecided`.
-    ActionReviewDecided,
-    /// `SubAgentSpawned`.
-    SubAgentSpawned,
-    /// `SubAgentMessageSent`.
-    SubAgentMessageSent,
-    /// `SubAgentStatusChanged`.
-    SubAgentStatusChanged,
-    /// `SubAgentNotificationDelivered`.
-    SubAgentNotificationDelivered,
-    /// `MemoryRead`.
-    MemoryRead,
-    /// `MemoryWrite`.
-    MemoryWrite,
-    /// `MemoryIngest`.
-    MemoryIngest,
-    /// `HandProvisioned`.
-    HandProvisioned,
-    /// `HandDestroyed`.
-    HandDestroyed,
-    /// `HandError`.
-    HandError,
-    /// `Checkpoint`.
-    Checkpoint,
-    /// `CacheReport`.
-    CacheReport,
-    /// `Error`.
-    Error,
-    /// `Warning`.
-    Warning,
-}
-
-impl EventType {
-    /// Returns the stable database representation.
-    ///
-    /// This is the verbatim PascalCase variant name (the persisted form), which
-    /// is intentionally distinct from the snake_case serde/JSON representation.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        self.into()
-    }
-}
 
 /// Event listing range.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

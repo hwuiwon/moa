@@ -7,13 +7,9 @@ use serde::Deserialize;
 use crate::error::{MoaError, Result};
 
 use super::{
-    AsyncAuthzKind, Auth0AuthConfig, AuthHeaderTrustKind, AuthProviderKind, AuthzEngine,
-    ContactTokenConfig, MemoryRerankerMode, OidcAuthConfig, OpenFgaConfig, OtlpProtocol,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, MemoryRerankerMode, MoaConfig, OtlpProtocol,
     TokenVaultKind,
 };
-use super::{CloudHandsConfig, MoaConfig};
-
-const OPENFGA_DEFAULT_TIMEOUT_MS: u64 = 5000;
 
 /// Optional flat environment overrides for `MoaConfig`.
 ///
@@ -72,8 +68,6 @@ pub struct MoaEnvOverlay {
     pub database_neon_suspend_timeout_seconds: Option<u64>,
     /// `MOA_AUTH_PROVIDER`.
     pub auth_provider: Option<AuthProviderKind>,
-    /// `MOA_AUTH_HEADER_TRUST`.
-    pub auth_header_trust: Option<AuthHeaderTrustKind>,
     /// `MOA_AUTH_AUTH0_DOMAIN`.
     pub auth_auth0_domain: Option<String>,
     /// `MOA_AUTH_AUTH0_AUDIENCE`.
@@ -486,832 +480,28 @@ impl MoaEnvOverlay {
 
     /// Applies this overlay to a typed MOA config.
     pub fn apply_to(&self, config: &mut MoaConfig) -> Result<()> {
-        set_if_some(
-            &mut config.general.default_provider,
-            &self.general_default_provider,
-        );
-        set_if_some(
-            &mut config.general.reasoning_effort,
-            &self.general_reasoning_effort,
-        );
-        set_copy_if_some(
-            &mut config.general.web_search_enabled,
-            self.general_web_search_enabled,
-        );
-        set_option_if_some(
-            &mut config.general.workspace_instructions,
-            &self.general_workspace_instructions,
-        );
-        set_option_if_some(
-            &mut config.general.user_instructions,
-            &self.general_user_instructions,
-        );
-        set_if_some(&mut config.models.main, &self.models_main);
-        set_option_if_some(&mut config.models.auxiliary, &self.models_auxiliary);
-        set_if_some(
-            &mut config.providers.anthropic.api_key_env,
-            &self.providers_anthropic_api_key_env,
-        );
-        set_if_some(
-            &mut config.providers.openai.api_key_env,
-            &self.providers_openai_api_key_env,
-        );
-        set_if_some(
-            &mut config.providers.google.api_key_env,
-            &self.providers_google_api_key_env,
-        );
-        set_if_some(&mut config.database.url, &self.database_url);
-        set_option_if_some(&mut config.database.admin_url, &self.database_admin_url);
-        set_option_if_some(&mut config.database.schema, &self.database_schema);
-        set_copy_if_some(
-            &mut config.database.max_connections,
-            self.database_max_connections,
-        );
-        set_copy_if_some(
-            &mut config.database.connect_timeout_seconds,
-            self.database_connect_timeout_seconds,
-        );
-        set_copy_if_some(
-            &mut config.database.neon.enabled,
-            self.database_neon_enabled,
-        );
-        set_if_some(
-            &mut config.database.neon.api_key_env,
-            &self.database_neon_api_key_env,
-        );
-        set_if_some(
-            &mut config.database.neon.project_id,
-            &self.database_neon_project_id,
-        );
-        set_if_some(
-            &mut config.database.neon.parent_branch_id,
-            &self.database_neon_parent_branch_id,
-        );
-        set_copy_if_some(
-            &mut config.database.neon.max_checkpoints,
-            self.database_neon_max_checkpoints,
-        );
-        set_copy_if_some(
-            &mut config.database.neon.checkpoint_ttl_hours,
-            self.database_neon_checkpoint_ttl_hours,
-        );
-        set_copy_if_some(&mut config.database.neon.pooled, self.database_neon_pooled);
-        set_copy_if_some(
-            &mut config.database.neon.suspend_timeout_seconds,
-            self.database_neon_suspend_timeout_seconds,
-        );
-        set_copy_if_some(&mut config.auth.provider, self.auth_provider);
-        set_copy_if_some(&mut config.auth.header_trust, self.auth_header_trust);
-        self.apply_auth0(config)?;
-        set_option_if_some(
-            &mut config.auth.auth0_webhook_secret,
-            &self.auth_auth0_webhook_secret,
-        );
-        self.apply_oidc(config)?;
-        self.apply_contact_tokens(config)?;
-        set_copy_if_some(&mut config.authz.engine, self.authz_engine);
-        self.apply_openfga(config)?;
-        set_copy_if_some(&mut config.token_vault.provider, self.token_vault_provider);
-        set_copy_if_some(&mut config.async_authz.provider, self.async_authz_provider);
-        set_copy_if_some(
-            &mut config.async_authz.default_timeout_secs,
-            self.async_authz_default_timeout_secs,
-        );
-        set_copy_if_some(
-            &mut config.audit_security.emit_authz_allows,
-            self.audit_security_emit_authz_allows,
-        );
-        set_option_if_some(
-            &mut config.compliance.privacy_approval_public_key_hex,
-            &self.privacy_approval_public_key_hex,
-        );
-        set_option_if_some(
-            &mut config.compliance.privacy_export_signing_key_hex,
-            &self.privacy_export_signing_key_hex,
-        );
-        set_if_some(
-            &mut config.compliance.privacy_export_signing_key_id,
-            &self.privacy_export_signing_key_id,
-        );
-        set_option_if_some(
-            &mut config.compliance.lineage_audit_signing_key_hex,
-            &self.lineage_audit_signing_key_hex,
-        );
-        set_if_some(
-            &mut config.compliance.lineage_audit_signing_key_id,
-            &self.lineage_audit_signing_key_id,
-        );
-        set_option_if_some(
-            &mut config.compliance.pii_vault_secret_hex,
-            &self.pii_vault_secret_hex,
-        );
-        set_copy_if_some(&mut config.local.docker_enabled, self.local_docker_enabled);
-        set_if_some(&mut config.local.sandbox_dir, &self.local_sandbox_dir);
-        set_if_some(&mut config.local.memory_dir, &self.local_memory_dir);
-        set_copy_if_some(
-            &mut config.memory.auto_bootstrap,
-            self.memory_auto_bootstrap,
-        );
-        set_if_some(
-            &mut config.memory.embedding_provider,
-            &self.memory_embedding_provider,
-        );
-        set_if_some(
-            &mut config.memory.embedding_model,
-            &self.memory_embedding_model,
-        );
-        set_copy_if_some(
-            &mut config.memory.retrieval.reranker_mode,
-            self.memory_retrieval_reranker_mode,
-        );
-        set_copy_if_some(
-            &mut config.memory.retrieval.lineage_enabled,
-            self.memory_retrieval_lineage_enabled,
-        );
-        set_copy_if_some(
-            &mut config.memory.digest.enabled,
-            self.memory_digest_enabled,
-        );
-        set_copy_if_some(
-            &mut config.memory.digest.max_tokens,
-            self.memory_digest_max_tokens,
-        );
-        set_copy_if_some(
-            &mut config.memory.digest.rebuild_min_interval_hours,
-            self.memory_digest_rebuild_min_interval_hours,
-        );
-        set_copy_if_some(
-            &mut config.memory.extraction.enabled,
-            self.memory_extraction_enabled,
-        );
-        set_if_some(
-            &mut config.memory.extraction.api_key_env,
-            &self.memory_extraction_api_key_env,
-        );
-        set_if_some(
-            &mut config.memory.extraction.model,
-            &self.memory_extraction_model,
-        );
-        set_copy_if_some(
-            &mut config.memory.extraction.max_facts_per_chunk,
-            self.memory_extraction_max_facts_per_chunk,
-        );
-        set_copy_if_some(
-            &mut config.memory.extraction.timeout_ms,
-            self.memory_extraction_timeout_ms,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.name,
-            &self.memory_vector_embedder_name,
-        );
-        set_copy_if_some(
-            &mut config.memory.vector.embedder.output_dim,
-            self.memory_vector_embedder_output_dim,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.cohere.api_key_env,
-            &self.memory_vector_embedder_cohere_api_key_env,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.gemini.api_key_env,
-            &self.memory_vector_embedder_gemini_api_key_env,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.gemini.default_role,
-            &self.memory_vector_embedder_gemini_default_role,
-        );
-        self.apply_knowledge(config);
-        set_option_if_some(&mut config.memory.pii_service_url, &self.pii_service_url);
-        set_if_some(
-            &mut config.memory.vector.turbopuffer.api_key_env,
-            &self.turbopuffer_api_key_env,
-        );
-        set_option_if_some(
-            &mut config.memory.vector.turbopuffer.base_url,
-            &self.turbopuffer_base_url,
-        );
-        set_option_if_some(
-            &mut config.memory.vector.turbopuffer.environment,
-            &self.turbopuffer_environment,
-        );
-        set_copy_if_some(
-            &mut config.memory.vector.turbopuffer.baa_enabled,
-            self.turbopuffer_baa,
-        );
-        set_copy_if_some(&mut config.cloud.enabled, self.cloud_enabled);
-        set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
-        self.apply_cloud(config);
-        set_if_some(
-            &mut config.messaging.slack_token_env,
-            &self.messaging_slack_token_env,
-        );
-        set_if_some(
-            &mut config.messaging.slack_app_token_env,
-            &self.messaging_slack_app_token_env,
-        );
-        set_if_some(
-            &mut config.messaging.postmark_base_url,
-            &self.messaging_postmark_base_url,
-        );
-        set_if_some(
-            &mut config.messaging.postmark_message_stream,
-            &self.messaging_postmark_message_stream,
-        );
-        set_if_some(&mut config.messaging.email_from, &self.messaging_email_from);
-        set_option_if_some(
-            &mut config.messaging.email_reply_to,
-            &self.messaging_email_reply_to,
-        );
-        set_if_some(
-            &mut config.messaging.twilio_base_url,
-            &self.messaging_twilio_base_url,
-        );
-        set_copy_if_some(
-            &mut config.permissions.default_effect,
-            self.permissions_default_effect,
-        );
-        set_vec_if_some(
-            &mut config.permissions.admin_review,
-            &self.permissions_admin_review,
-        );
-        set_vec_if_some(
-            &mut config.permissions.always_deny,
-            &self.permissions_always_deny,
-        );
-        set_copy_if_some(
-            &mut config.session.blob_threshold_bytes,
-            self.session_blob_threshold_bytes,
-        );
-        set_if_some(&mut config.session.blob_dir, &self.session_blob_dir);
-        self.apply_compaction(config);
-        if let Some(restate_ingress_url) = &self.restate_ingress_url {
-            config.orchestrator.restate_ingress_url = Some(restate_ingress_url.clone());
-            config.orchestrator.endpoint = Some(restate_ingress_url.clone());
-        }
-        if let Some(endpoint) = &self.orchestrator_endpoint {
-            config.orchestrator.endpoint = Some(endpoint.clone());
-        }
-        set_option_if_some(
-            &mut config.orchestrator.restate_admin_url,
-            &self.restate_admin_url,
-        );
-        set_option_if_some(
-            &mut config.orchestrator.llm_gateway_url,
-            &self.restate_llm_gateway_url,
-        );
-        set_option_if_some(
-            &mut config.orchestrator.health_url,
-            &self.orchestrator_health_url,
-        );
-        self.apply_observability(config);
-        set_copy_if_some(&mut config.metrics.enabled, self.metrics_enabled);
-        set_if_some(&mut config.metrics.listen, &self.metrics_listen);
-        set_copy_if_some(
-            &mut config.budgets.daily_tenant_cents,
-            self.budgets_daily_tenant_cents,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.max_turns,
-            self.session_limits_max_turns,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.simple_max_turns,
-            self.session_limits_simple_max_turns,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.standard_max_turns,
-            self.session_limits_standard_max_turns,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.max_tool_calls,
-            self.session_limits_max_tool_calls,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.loop_detection_threshold,
-            self.session_limits_loop_detection_threshold,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.progress_first_delay_ms,
-            self.session_limits_progress_first_delay_ms,
-        );
-        set_copy_if_some(
-            &mut config.session_limits.progress_interval_ms,
-            self.session_limits_progress_interval_ms,
-        );
-        self.apply_tooling(config);
-        self.apply_query_rewrite(config);
-        self.apply_resolution(config);
-        self.apply_learning(config);
-        set_copy_if_some(
-            &mut config.context_snapshot.enabled,
-            self.context_snapshot_enabled,
-        );
-        set_copy_if_some(
-            &mut config.context_snapshot.max_size_bytes,
-            self.context_snapshot_max_size_bytes,
-        );
+        self.apply_provider_overlay(config);
+        self.apply_database_overlay(config);
+        self.apply_auth_overlay(config)?;
+        self.apply_authz_overlay(config)?;
+        self.apply_token_vault_overlay(config);
+        self.apply_async_authz_overlay(config);
+        self.apply_audit_security_overlay(config);
+        self.apply_compliance_overlay(config);
+        self.apply_local_overlay(config);
+        self.apply_memory_overlay(config);
+        self.apply_knowledge_overlay(config);
+        self.apply_cloud_overlay(config);
+        self.apply_messaging_overlay(config);
+        self.apply_permissions_overlay(config);
+        self.apply_session_overlay(config);
+        self.apply_compaction_overlay(config);
+        self.apply_orchestrator_overlay(config);
+        self.apply_observability_overlay(config);
+        self.apply_metrics_overlay(config);
+        self.apply_context_overlay(config);
+        self.apply_learning_overlay(config);
         config.validate()
-    }
-
-    fn apply_auth0(&self, config: &mut MoaConfig) -> Result<()> {
-        if !any_present(&[
-            self.auth_auth0_domain.is_some(),
-            self.auth_auth0_audience.is_some(),
-            self.auth_auth0_client_id_env.is_some(),
-            self.auth_auth0_client_secret_env.is_some(),
-        ]) {
-            return Ok(());
-        }
-
-        let mut auth0 = config
-            .auth
-            .auth0
-            .clone()
-            .unwrap_or_else(|| Auth0AuthConfig {
-                domain: String::new(),
-                audience: String::new(),
-                client_id_env: String::new(),
-                client_secret_env: String::new(),
-            });
-        set_if_some(&mut auth0.domain, &self.auth_auth0_domain);
-        set_if_some(&mut auth0.audience, &self.auth_auth0_audience);
-        set_if_some(&mut auth0.client_id_env, &self.auth_auth0_client_id_env);
-        set_if_some(
-            &mut auth0.client_secret_env,
-            &self.auth_auth0_client_secret_env,
-        );
-        require_non_empty("MOA_AUTH_AUTH0_DOMAIN", &auth0.domain)?;
-        require_non_empty("MOA_AUTH_AUTH0_AUDIENCE", &auth0.audience)?;
-        require_non_empty("MOA_AUTH_AUTH0_CLIENT_ID_ENV", &auth0.client_id_env)?;
-        require_non_empty("MOA_AUTH_AUTH0_CLIENT_SECRET_ENV", &auth0.client_secret_env)?;
-        config.auth.auth0 = Some(auth0);
-        Ok(())
-    }
-
-    fn apply_oidc(&self, config: &mut MoaConfig) -> Result<()> {
-        if !any_present(&[
-            self.auth_oidc_issuer.is_some(),
-            self.auth_oidc_audience.is_some(),
-            self.auth_oidc_jwks_url.is_some(),
-        ]) {
-            return Ok(());
-        }
-
-        let mut oidc = config.auth.oidc.clone().unwrap_or_else(|| OidcAuthConfig {
-            issuer: String::new(),
-            audience: String::new(),
-            jwks_url: String::new(),
-        });
-        set_if_some(&mut oidc.issuer, &self.auth_oidc_issuer);
-        set_if_some(&mut oidc.audience, &self.auth_oidc_audience);
-        set_if_some(&mut oidc.jwks_url, &self.auth_oidc_jwks_url);
-        require_non_empty("MOA_AUTH_OIDC_ISSUER", &oidc.issuer)?;
-        require_non_empty("MOA_AUTH_OIDC_AUDIENCE", &oidc.audience)?;
-        require_non_empty("MOA_AUTH_OIDC_JWKS_URL", &oidc.jwks_url)?;
-        config.auth.oidc = Some(oidc);
-        Ok(())
-    }
-
-    fn apply_contact_tokens(&self, config: &mut MoaConfig) -> Result<()> {
-        if !any_present(&[
-            self.auth_contact_tokens_issuer.is_some(),
-            self.auth_contact_tokens_audience.is_some(),
-            self.auth_contact_tokens_key_id.is_some(),
-            self.auth_contact_tokens_private_key_pem_env.is_some(),
-            self.auth_contact_tokens_public_key_pem_env.is_some(),
-            self.auth_contact_tokens_contact_point_hash_key_env
-                .is_some(),
-            self.auth_contact_tokens_unverified_ttl_seconds.is_some(),
-            self.auth_contact_tokens_verified_ttl_seconds.is_some(),
-            self.auth_contact_tokens_verification_ttl_seconds.is_some(),
-        ]) {
-            return Ok(());
-        }
-
-        let mut contact_tokens: ContactTokenConfig = config.auth.contact_tokens.clone();
-        set_if_some(&mut contact_tokens.issuer, &self.auth_contact_tokens_issuer);
-        set_if_some(
-            &mut contact_tokens.audience,
-            &self.auth_contact_tokens_audience,
-        );
-        set_if_some(&mut contact_tokens.key_id, &self.auth_contact_tokens_key_id);
-        set_if_some(
-            &mut contact_tokens.private_key_pem_env,
-            &self.auth_contact_tokens_private_key_pem_env,
-        );
-        set_if_some(
-            &mut contact_tokens.public_key_pem_env,
-            &self.auth_contact_tokens_public_key_pem_env,
-        );
-        set_if_some(
-            &mut contact_tokens.contact_point_hash_key_env,
-            &self.auth_contact_tokens_contact_point_hash_key_env,
-        );
-        set_copy_if_some(
-            &mut contact_tokens.unverified_ttl_seconds,
-            self.auth_contact_tokens_unverified_ttl_seconds,
-        );
-        set_copy_if_some(
-            &mut contact_tokens.verified_ttl_seconds,
-            self.auth_contact_tokens_verified_ttl_seconds,
-        );
-        set_copy_if_some(
-            &mut contact_tokens.verification_ttl_seconds,
-            self.auth_contact_tokens_verification_ttl_seconds,
-        );
-        require_non_empty("MOA_AUTH_CONTACT_TOKENS_ISSUER", &contact_tokens.issuer)?;
-        require_non_empty("MOA_AUTH_CONTACT_TOKENS_AUDIENCE", &contact_tokens.audience)?;
-        require_non_empty("MOA_AUTH_CONTACT_TOKENS_KEY_ID", &contact_tokens.key_id)?;
-        require_non_empty(
-            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM_ENV",
-            &contact_tokens.private_key_pem_env,
-        )?;
-        require_non_empty(
-            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM_ENV",
-            &contact_tokens.public_key_pem_env,
-        )?;
-        require_non_empty(
-            "MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_ENV",
-            &contact_tokens.contact_point_hash_key_env,
-        )?;
-        config.auth.contact_tokens = contact_tokens;
-        Ok(())
-    }
-
-    fn apply_openfga(&self, config: &mut MoaConfig) -> Result<()> {
-        if !any_present(&[
-            self.authz_openfga_url.is_some(),
-            self.authz_openfga_preshared_key.is_some(),
-            self.authz_openfga_store_id.is_some(),
-            self.authz_openfga_model_id.is_some(),
-            self.authz_openfga_timeout_ms.is_some(),
-        ]) {
-            return Ok(());
-        }
-
-        let mut openfga = config
-            .authz
-            .openfga
-            .clone()
-            .unwrap_or_else(|| OpenFgaConfig {
-                url: String::new(),
-                preshared_key: String::new(),
-                store_id: String::new(),
-                model_id: String::new(),
-                timeout_ms: OPENFGA_DEFAULT_TIMEOUT_MS,
-            });
-        set_if_some(&mut openfga.url, &self.authz_openfga_url);
-        set_if_some(
-            &mut openfga.preshared_key,
-            &self.authz_openfga_preshared_key,
-        );
-        set_if_some(&mut openfga.store_id, &self.authz_openfga_store_id);
-        set_if_some(&mut openfga.model_id, &self.authz_openfga_model_id);
-        set_copy_if_some(&mut openfga.timeout_ms, self.authz_openfga_timeout_ms);
-        require_non_empty("MOA_AUTHZ_OPENFGA_URL", &openfga.url)?;
-        require_non_empty("MOA_AUTHZ_OPENFGA_PRESHARED_KEY", &openfga.preshared_key)?;
-        require_non_empty("MOA_AUTHZ_OPENFGA_STORE_ID", &openfga.store_id)?;
-        require_non_empty("MOA_AUTHZ_OPENFGA_MODEL_ID", &openfga.model_id)?;
-        config.authz.openfga = Some(openfga);
-        Ok(())
-    }
-
-    fn apply_cloud(&self, config: &mut MoaConfig) {
-        if any_present(&[
-            self.cloud_hands_default_provider.is_some(),
-            self.cloud_hands_daytona_api_key_env.is_some(),
-            self.cloud_hands_daytona_api_url.is_some(),
-            self.cloud_hands_daytona_default_image.is_some(),
-            self.cloud_hands_e2b_api_key_env.is_some(),
-            self.cloud_hands_e2b_api_url.is_some(),
-            self.cloud_hands_e2b_domain.is_some(),
-            self.cloud_hands_e2b_template.is_some(),
-        ]) {
-            let hands = config
-                .cloud
-                .hands
-                .get_or_insert_with(CloudHandsConfig::default);
-            set_option_if_some(
-                &mut hands.default_provider,
-                &self.cloud_hands_default_provider,
-            );
-            set_option_if_some(
-                &mut hands.daytona_api_key_env,
-                &self.cloud_hands_daytona_api_key_env,
-            );
-            set_option_if_some(
-                &mut hands.daytona_api_url,
-                &self.cloud_hands_daytona_api_url,
-            );
-            set_option_if_some(
-                &mut hands.daytona_default_image,
-                &self.cloud_hands_daytona_default_image,
-            );
-            set_option_if_some(
-                &mut hands.e2b_api_key_env,
-                &self.cloud_hands_e2b_api_key_env,
-            );
-            set_option_if_some(&mut hands.e2b_api_url, &self.cloud_hands_e2b_api_url);
-            set_option_if_some(&mut hands.e2b_domain, &self.cloud_hands_e2b_domain);
-            set_option_if_some(&mut hands.e2b_template, &self.cloud_hands_e2b_template);
-        }
-    }
-
-    fn apply_knowledge(&self, config: &mut MoaConfig) {
-        set_vec_if_some(
-            &mut config.knowledge.providers.enabled,
-            &self.knowledge_providers_enabled,
-        );
-        set_vec_if_some(
-            &mut config.knowledge.parsers.enabled,
-            &self.knowledge_parsers_enabled,
-        );
-        set_if_some(
-            &mut config.knowledge.parser.default,
-            &self.knowledge_parser_default,
-        );
-        set_if_some(
-            &mut config.knowledge.parser.external_default,
-            &self.knowledge_external_parser_default,
-        );
-        set_if_some(
-            &mut config.knowledge.nango.api_base_url,
-            &self.nango_api_base_url,
-        );
-        set_if_some(
-            &mut config.knowledge.merge.api_base_url,
-            &self.merge_api_base_url,
-        );
-        set_if_some(
-            &mut config.knowledge.llamaparse.api_base_url,
-            &self.llamaparse_api_url,
-        );
-        set_option_if_some(
-            &mut config.knowledge.llamaparse.webhook_header_name,
-            &self.llamaparse_webhook_header_name,
-        );
-        set_option_if_some(
-            &mut config.knowledge.llamaparse.webhook_header_value,
-            &self.llamaparse_webhook_header_value,
-        );
-        set_if_some(&mut config.knowledge.llamaparse.tier, &self.llamaparse_tier);
-        set_if_some(
-            &mut config.knowledge.unstructured.api_base_url,
-            &self.unstructured_api_url,
-        );
-        set_if_some(
-            &mut config.knowledge.unstructured.strategy,
-            &self.unstructured_strategy,
-        );
-        set_if_some(
-            &mut config.knowledge.unstructured.chunking_strategy,
-            &self.unstructured_chunking_strategy,
-        );
-        set_if_some(
-            &mut config.knowledge.reducto.api_base_url,
-            &self.reducto_api_url,
-        );
-        set_option_if_some(
-            &mut config.knowledge.reducto.webhook_header_name,
-            &self.reducto_webhook_header_name,
-        );
-        set_option_if_some(
-            &mut config.knowledge.reducto.webhook_header_value,
-            &self.reducto_webhook_header_value,
-        );
-        set_if_some(
-            &mut config.knowledge.reducto.parse_mode,
-            &self.reducto_parse_mode,
-        );
-        set_copy_if_some(
-            &mut config.knowledge.reducto.async_enabled,
-            self.reducto_async_enabled,
-        );
-        set_if_some(
-            &mut config.knowledge.reducto.chunk_mode,
-            &self.reducto_chunk_mode,
-        );
-        set_copy_if_some(
-            &mut config.knowledge.observability.query_trace_enabled,
-            self.knowledge_query_trace_enabled,
-        );
-    }
-
-    fn apply_compaction(&self, config: &mut MoaConfig) {
-        set_copy_if_some(&mut config.compaction.enabled, self.compaction_enabled);
-        set_copy_if_some(
-            &mut config.compaction.event_threshold,
-            self.compaction_event_threshold,
-        );
-        set_copy_if_some(
-            &mut config.compaction.token_ratio_threshold,
-            self.compaction_token_ratio_threshold,
-        );
-        set_copy_if_some(
-            &mut config.compaction.recent_turns_verbatim,
-            self.compaction_recent_turns_verbatim,
-        );
-        set_copy_if_some(
-            &mut config.compaction.preserve_errors,
-            self.compaction_preserve_errors,
-        );
-        set_copy_if_some(
-            &mut config.compaction.tier2_trigger_blocks_past_bp4,
-            self.compaction_tier2_trigger_blocks_past_bp4,
-        );
-        set_copy_if_some(
-            &mut config.compaction.tier3_trigger_fraction,
-            self.compaction_tier3_trigger_fraction,
-        );
-        set_copy_if_some(
-            &mut config.compaction.max_input_tokens_per_turn,
-            self.compaction_max_input_tokens_per_turn,
-        );
-    }
-
-    fn apply_observability(&self, config: &mut MoaConfig) {
-        set_copy_if_some(
-            &mut config.observability.enabled,
-            self.observability_enabled,
-        );
-        set_if_some(
-            &mut config.observability.service_name,
-            &self.observability_service_name,
-        );
-        set_option_if_some(
-            &mut config.observability.otlp_endpoint,
-            &self.observability_otlp_endpoint,
-        );
-        set_copy_if_some(
-            &mut config.observability.otlp_protocol,
-            self.observability_otlp_protocol,
-        );
-        if let Some(headers) = &self.observability_otlp_headers {
-            config.observability.otlp_headers = headers.clone();
-        }
-        set_option_if_some(
-            &mut config.observability.environment,
-            &self.observability_environment,
-        );
-        set_option_if_some(
-            &mut config.observability.release,
-            &self.observability_release,
-        );
-        set_copy_if_some(
-            &mut config.observability.sample_rate,
-            self.observability_sample_rate,
-        );
-        set_copy_if_some(
-            &mut config.observability.lineage.enabled,
-            self.observability_lineage_enabled,
-        );
-        set_copy_if_some(
-            &mut config.observability.lineage.channel_capacity,
-            self.observability_lineage_channel_capacity,
-        );
-        set_copy_if_some(
-            &mut config.observability.lineage.batch_size,
-            self.observability_lineage_batch_size,
-        );
-        set_copy_if_some(
-            &mut config.observability.lineage.batch_max_age_secs,
-            self.observability_lineage_batch_max_age_secs,
-        );
-        set_if_some(
-            &mut config.observability.lineage.journal_path,
-            &self.observability_lineage_journal_path,
-        );
-        set_copy_if_some(
-            &mut config.observability.lineage.sample_pgvector_explain,
-            self.observability_lineage_sample_pgvector_explain,
-        );
-    }
-
-    fn apply_tooling(&self, config: &mut MoaConfig) {
-        set_copy_if_some(
-            &mut config.tool_output.max_replay_chars,
-            self.tool_output_max_replay_chars,
-        );
-        set_copy_if_some(
-            &mut config.tool_output.max_bash_lines,
-            self.tool_output_max_bash_lines,
-        );
-        set_copy_if_some(
-            &mut config.tool_output.head_ratio,
-            self.tool_output_head_ratio,
-        );
-        set_copy_if_some(
-            &mut config.tool_budgets.file_read,
-            self.tool_budgets_file_read,
-        );
-        set_copy_if_some(
-            &mut config.tool_budgets.bash_stdout,
-            self.tool_budgets_bash_stdout,
-        );
-        set_copy_if_some(
-            &mut config.tool_budgets.bash_stderr,
-            self.tool_budgets_bash_stderr,
-        );
-        set_copy_if_some(&mut config.tool_budgets.grep, self.tool_budgets_grep);
-        set_copy_if_some(
-            &mut config.tool_budgets.file_search,
-            self.tool_budgets_file_search,
-        );
-        set_copy_if_some(
-            &mut config.tool_budgets.memory_search,
-            self.tool_budgets_memory_search,
-        );
-        set_copy_if_some(
-            &mut config.tool_budgets.file_outline,
-            self.tool_budgets_file_outline,
-        );
-        set_copy_if_some(&mut config.tool_budgets.default, self.tool_budgets_default);
-        if let Some(max_manifest_chars) = self.skill_budget_max_manifest_chars {
-            config.skill_budget.max_manifest_chars = Some(max_manifest_chars);
-        }
-        set_copy_if_some(
-            &mut config.skill_budget.max_per_skill_chars,
-            self.skill_budget_max_per_skill_chars,
-        );
-        set_copy_if_some(
-            &mut config.skill_budget.show_token_estimates,
-            self.skill_budget_show_token_estimates,
-        );
-    }
-
-    fn apply_query_rewrite(&self, config: &mut MoaConfig) {
-        set_copy_if_some(
-            &mut config.query_rewrite.enabled,
-            self.query_rewrite_enabled,
-        );
-        set_option_if_some(&mut config.query_rewrite.model, &self.query_rewrite_model);
-        set_copy_if_some(
-            &mut config.query_rewrite.timeout_ms,
-            self.query_rewrite_timeout_ms,
-        );
-        set_copy_if_some(
-            &mut config.query_rewrite.min_query_tokens,
-            self.query_rewrite_min_query_tokens,
-        );
-        set_copy_if_some(
-            &mut config.query_rewrite.skip_single_turn,
-            self.query_rewrite_skip_single_turn,
-        );
-        set_copy_if_some(
-            &mut config.query_rewrite.circuit_breaker_threshold,
-            self.query_rewrite_circuit_breaker_threshold,
-        );
-        set_copy_if_some(
-            &mut config.query_rewrite.circuit_breaker_window_secs,
-            self.query_rewrite_circuit_breaker_window_secs,
-        );
-        set_copy_if_some(
-            &mut config.query_rewrite.circuit_breaker_cooldown_secs,
-            self.query_rewrite_circuit_breaker_cooldown_secs,
-        );
-    }
-
-    fn apply_resolution(&self, config: &mut MoaConfig) {
-        set_copy_if_some(&mut config.resolution.enabled, self.resolution_enabled);
-        set_copy_if_some(
-            &mut config.resolution.weights.tool,
-            self.resolution_weights_tool,
-        );
-        set_copy_if_some(
-            &mut config.resolution.weights.verification,
-            self.resolution_weights_verification,
-        );
-        set_copy_if_some(
-            &mut config.resolution.weights.continuation,
-            self.resolution_weights_continuation,
-        );
-        set_copy_if_some(
-            &mut config.resolution.weights.self_assessment,
-            self.resolution_weights_self_assessment,
-        );
-        set_copy_if_some(
-            &mut config.resolution.weights.structural,
-            self.resolution_weights_structural,
-        );
-        set_copy_if_some(
-            &mut config.resolution.rephrase_similarity_threshold,
-            self.resolution_rephrase_similarity_threshold,
-        );
-        set_copy_if_some(
-            &mut config.resolution.structural_min_samples,
-            self.resolution_structural_min_samples,
-        );
-        set_copy_if_some(
-            &mut config.resolution.idle_timeout_minutes,
-            self.resolution_idle_timeout_minutes,
-        );
-    }
-
-    fn apply_learning(&self, config: &mut MoaConfig) {
-        set_copy_if_some(
-            &mut config.learning.skills.min_tool_calls,
-            self.learning_skills_min_tool_calls,
-        );
     }
 }
 
@@ -1384,7 +574,8 @@ fn parse_error(env_name: &'static str, value: &str, error: impl std::fmt::Displa
     MoaError::ConfigError(format!("{env_name} value `{value}` is invalid: {error}"))
 }
 
-fn require_non_empty(env_name: &'static str, value: &str) -> Result<()> {
+/// Requires that a partially configured nested section has a non-empty field.
+pub(in crate::config) fn require_non_empty(env_name: &'static str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(MoaError::ConfigError(format!(
             "{env_name} is required when configuring this section"
@@ -1403,31 +594,36 @@ fn split_list(value: String) -> Vec<String> {
         .collect()
 }
 
-fn set_if_some(target: &mut String, value: &Option<String>) {
+/// Replaces a string config value when its env overlay value is present.
+pub(in crate::config) fn set_if_some(target: &mut String, value: &Option<String>) {
     if let Some(value) = value {
         *target = value.clone();
     }
 }
 
-fn set_option_if_some(target: &mut Option<String>, value: &Option<String>) {
+/// Replaces an optional string config value when its env overlay value is present.
+pub(in crate::config) fn set_option_if_some(target: &mut Option<String>, value: &Option<String>) {
     if let Some(value) = value {
         *target = Some(value.clone());
     }
 }
 
-fn set_vec_if_some(target: &mut Vec<String>, value: &Option<Vec<String>>) {
+/// Replaces a vector config value when its env overlay value is present.
+pub(in crate::config) fn set_vec_if_some(target: &mut Vec<String>, value: &Option<Vec<String>>) {
     if let Some(value) = value {
         *target = value.clone();
     }
 }
 
-fn set_copy_if_some<T: Copy>(target: &mut T, value: Option<T>) {
+/// Replaces a copyable config value when its env overlay value is present.
+pub(in crate::config) fn set_copy_if_some<T: Copy>(target: &mut T, value: Option<T>) {
     if let Some(value) = value {
         *target = value;
     }
 }
 
-fn any_present(values: &[bool]) -> bool {
+/// Returns whether any field in one nested overlay section was set.
+pub(in crate::config) fn any_present(values: &[bool]) -> bool {
     values.iter().any(|value| *value)
 }
 
@@ -1446,7 +642,6 @@ mod tests {
             ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
             ("MOA_DATABASE_MAX_CONNECTIONS", "42"),
             ("MOA_AUTH_PROVIDER", "oidc"),
-            ("MOA_AUTH_HEADER_TRUST", "lenient"),
             ("MOA_AUTHZ_ENGINE", "openfga"),
             ("MOA_AUTHZ_OPENFGA_URL", "http://openfga.example"),
             ("MOA_AUTHZ_OPENFGA_PRESHARED_KEY", "shared-key"),
@@ -1529,7 +724,6 @@ mod tests {
         assert_eq!(config.database.url, "postgres://moa:test@db.example/moa");
         assert_eq!(config.database.max_connections, 42);
         assert_eq!(config.auth.provider, AuthProviderKind::Oidc);
-        assert_eq!(config.auth.header_trust, AuthHeaderTrustKind::Lenient);
         assert_eq!(
             config.auth.auth0_webhook_secret.as_deref(),
             Some("webhook-secret")

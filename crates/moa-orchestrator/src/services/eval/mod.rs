@@ -13,6 +13,7 @@ use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 #[cfg(feature = "internal-eval-runner")]
 use moa_core::ActionRuleScope;
+use moa_core::RlsContext;
 use moa_core::wire::eval::{
     EvalCompareRequest, EvalCompareResponse, EvalCompareRow, EvalDatasetListRequest,
     EvalDatasetListResponse, EvalDatasetRegisterRequest, EvalDatasetRegisterResponse,
@@ -38,7 +39,6 @@ use moa_lineage_core::{LineageEvent, LineageSink};
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 #[cfg(feature = "internal-eval-runner")]
 use moa_lineage_sink::{MpscSink, MpscSinkConfig};
-use moa_memory_types::ScopeContext;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 #[cfg(feature = "internal-eval-runner")]
 use moa_scoring::{SCORE_RUN_SOURCE_EVAL_REPLAY, ensure_score_run_parent};
@@ -814,7 +814,7 @@ async fn ensure_eval_replay_score_run_parent(
     run_id: Uuid,
 ) -> Result<(), EvalServiceError> {
     let scope = ActionRuleScope::Tenant { tenant_id };
-    let scope_context = ScopeContext::tenant(tenant_id);
+    let scope_context = RlsContext::tenant(tenant_id);
     let mut conn = ScopedConn::begin(pool, &scope_context)
         .await
         .map_err(|error| EvalServiceError::Runtime {

@@ -13,6 +13,9 @@ use serde_json::Value;
 use tokio::fs;
 
 use crate::tools::file_read::resolve_sandbox_path;
+use crate::tools::sandbox_descriptor::{
+    SandboxActionPattern, SandboxReviewPreviewMetadata, sandbox_tool_descriptor,
+};
 use crate::tools::str_replace::plan_str_replace;
 
 /// Recognized login shell wrapper prefixes used by the bash tool.
@@ -25,7 +28,18 @@ const SHELL_WRAPPERS: &[(&str, &[&str])] = &[
 const BARE_SHELL_NAMES: &[&str] = &["zsh", "bash", "sh", "dash", "fish"];
 const MAX_REVIEW_DIFF_CHARS: usize = 16_384;
 
-pub(super) fn normalized_input_for(input_shape: ToolInputShape, input: &Value) -> Result<String> {
+pub(super) fn normalized_input_for(
+    tool_name: &str,
+    input_shape: ToolInputShape,
+    input: &Value,
+) -> Result<String> {
+    let input_shape = sandbox_tool_descriptor(tool_name)
+        .map(|descriptor| descriptor.normalization.input_shape)
+        .unwrap_or(input_shape);
+    normalized_input_for_shape(input_shape, input)
+}
+
+fn normalized_input_for_shape(input_shape: ToolInputShape, input: &Value) -> Result<String> {
     let value = match input_shape {
         ToolInputShape::Command => required_string_field(input, "cmd")?,
         ToolInputShape::Path => required_string_field(input, "path")?,
@@ -39,10 +53,14 @@ pub(super) fn normalized_input_for(input_shape: ToolInputShape, input: &Value) -
 }
 
 pub(super) fn summary_for(
+    tool_name: &str,
     input_shape: ToolInputShape,
     input: &Value,
     normalized_input: &str,
 ) -> String {
+    let input_shape = sandbox_tool_descriptor(tool_name)
+        .map(|descriptor| descriptor.normalization.input_shape)
+        .unwrap_or(input_shape);
     match input_shape {
         ToolInputShape::Command => normalized_input.to_string(),
         ToolInputShape::Path => {
@@ -92,26 +110,46 @@ pub(super) fn unwrap_shell_wrapper(normalized_input: &str) -> Option<String> {
     None
 }
 
-pub(super) fn action_pattern_for(input_shape: ToolInputShape, normalized_input: &str) -> String {
+pub(super) fn action_pattern_for(
+    tool_name: &str,
+    input_shape: ToolInputShape,
+    normalized_input: &str,
+) -> String {
+    if let Some(descriptor) = sandbox_tool_descriptor(tool_name) {
+        return match descriptor.normalization.action_pattern {
+            SandboxActionPattern::NormalizedInput => normalized_input.to_string(),
+            SandboxActionPattern::ShellFirstCommand => shell_action_pattern_for(normalized_input),
+        };
+    }
+    action_pattern_for_shape(input_shape, normalized_input)
+}
+
+fn action_pattern_for_shape(input_shape: ToolInputShape, normalized_input: &str) -> String {
     if matches!(input_shape, ToolInputShape::Command) {
-        let effective_command =
-            unwrap_shell_wrapper(normalized_input).unwrap_or_else(|| normalized_input.to_string());
-        let sub_commands = split_shell_chain(&effective_command);
-        let target = sub_commands
-            .first()
-            .map(std::string::String::as_str)
-            .unwrap_or(effective_command.as_str());
-        let tokens = shell_words::split(target).unwrap_or_default();
-        if let Some(command) = tokens.first() {
-            if BARE_SHELL_NAMES.contains(&command.as_str()) {
-                return normalized_input.to_string();
-            }
-            return if tokens.len() == 1 {
-                command.clone()
-            } else {
-                format!("{command} *")
-            };
+        return shell_action_pattern_for(normalized_input);
+    }
+
+    normalized_input.to_string()
+}
+
+fn shell_action_pattern_for(normalized_input: &str) -> String {
+    let effective_command =
+        unwrap_shell_wrapper(normalized_input).unwrap_or_else(|| normalized_input.to_string());
+    let sub_commands = split_shell_chain(&effective_command);
+    let target = sub_commands
+        .first()
+        .map(std::string::String::as_str)
+        .unwrap_or(effective_command.as_str());
+    let tokens = shell_words::split(target).unwrap_or_default();
+    if let Some(command) = tokens.first() {
+        if BARE_SHELL_NAMES.contains(&command.as_str()) {
+            return normalized_input.to_string();
         }
+        return if tokens.len() == 1 {
+            command.clone()
+        } else {
+            format!("{command} *")
+        };
     }
 
     normalized_input.to_string()
@@ -122,6 +160,10 @@ pub(super) fn review_fields_for(
     input_shape: ToolInputShape,
     invocation: &ToolInvocation,
 ) -> Vec<ActionReviewField> {
+    if let Some(descriptor) = sandbox_tool_descriptor(&invocation.name) {
+        return sandbox_review_fields_for(sandbox_root, descriptor.review_preview, invocation);
+    }
+
     match input_shape {
         ToolInputShape::Command => {
             let command = invocation
@@ -201,6 +243,97 @@ pub(super) fn review_fields_for(
                 }]
             })
             .unwrap_or_default(),
+    }
+}
+
+fn sandbox_review_fields_for(
+    sandbox_root: Option<&Path>,
+    preview: SandboxReviewPreviewMetadata,
+    invocation: &ToolInvocation,
+) -> Vec<ActionReviewField> {
+    match preview {
+        SandboxReviewPreviewMetadata::Command {
+            command_field,
+            command_label,
+            working_dir_label,
+        } => {
+            let command = invocation
+                .input
+                .get(command_field)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mut fields = vec![ActionReviewField {
+                label: command_label.to_string(),
+                value: command,
+            }];
+            if let Some(sandbox_root) = sandbox_root {
+                fields.push(ActionReviewField {
+                    label: working_dir_label.to_string(),
+                    value: sandbox_root.display().to_string(),
+                });
+            }
+            fields
+        }
+        SandboxReviewPreviewMetadata::SingleField { field, label } => {
+            single_review_field(label, &invocation.input, field)
+        }
+        SandboxReviewPreviewMetadata::FileWrite {
+            path_field,
+            content_field,
+        } => {
+            let mut fields = single_review_field("Path", &invocation.input, path_field);
+            let content_len = invocation
+                .input
+                .get(content_field)
+                .and_then(Value::as_str)
+                .map(|content| content.chars().count())
+                .unwrap_or_default();
+            fields.push(ActionReviewField {
+                label: "Content".to_string(),
+                value: format!("{content_len} chars"),
+            });
+            fields
+        }
+        SandboxReviewPreviewMetadata::StrReplace {
+            path_field,
+            old_field,
+            new_field,
+            insert_after_line_field,
+        } => {
+            let mut fields = single_review_field("Path", &invocation.input, path_field);
+            let old_len = invocation
+                .input
+                .get(old_field)
+                .and_then(Value::as_str)
+                .map(|content| content.chars().count())
+                .unwrap_or_default();
+            let new_len = invocation
+                .input
+                .get(new_field)
+                .and_then(Value::as_str)
+                .map(|content| content.chars().count())
+                .unwrap_or_default();
+            fields.push(ActionReviewField {
+                label: "Old string".to_string(),
+                value: format!("{old_len} chars"),
+            });
+            fields.push(ActionReviewField {
+                label: "New string".to_string(),
+                value: format!("{new_len} chars"),
+            });
+            if let Some(insert_after_line) = invocation
+                .input
+                .get(insert_after_line_field)
+                .and_then(Value::as_u64)
+            {
+                fields.push(ActionReviewField {
+                    label: "Insert after line".to_string(),
+                    value: insert_after_line.to_string(),
+                });
+            }
+            fields
+        }
     }
 }
 
@@ -339,7 +472,7 @@ pub(super) fn expand_local_path(path: &str) -> Result<PathBuf> {
 mod tests {
     use moa_core::ToolInputShape;
 
-    use super::{action_pattern_for, unwrap_shell_wrapper};
+    use super::{action_pattern_for_shape, unwrap_shell_wrapper};
 
     #[test]
     fn unwrap_shell_wrapper_recognizes_supported_forms() {
@@ -367,7 +500,7 @@ mod tests {
 
     #[test]
     fn action_pattern_unwraps_zsh_wrapper() {
-        let pattern = action_pattern_for(
+        let pattern = action_pattern_for_shape(
             ToolInputShape::Command,
             r#"zsh -lc "cd server && rg -n 'class' .""#,
         );
@@ -378,20 +511,20 @@ mod tests {
 
     #[test]
     fn action_pattern_simple_command() {
-        let pattern = action_pattern_for(ToolInputShape::Command, "npm test");
+        let pattern = action_pattern_for_shape(ToolInputShape::Command, "npm test");
         assert_eq!(pattern, "npm *");
     }
 
     #[test]
     fn action_pattern_single_token() {
-        let pattern = action_pattern_for(ToolInputShape::Command, "pwd");
+        let pattern = action_pattern_for_shape(ToolInputShape::Command, "pwd");
         assert_eq!(pattern, "pwd");
     }
 
     #[test]
     fn action_pattern_nested_shell_not_recursed() {
         let input = r#"bash -c "bash -c 'rm -rf /'""#;
-        let pattern = action_pattern_for(ToolInputShape::Command, input);
+        let pattern = action_pattern_for_shape(ToolInputShape::Command, input);
 
         assert_eq!(pattern, input);
         assert!(!pattern.starts_with("rm"));
@@ -399,7 +532,7 @@ mod tests {
 
     #[test]
     fn action_pattern_chained_inner_uses_first_subcommand() {
-        let pattern = action_pattern_for(
+        let pattern = action_pattern_for_shape(
             ToolInputShape::Command,
             r#"zsh -lc "npm install && npm test""#,
         );
@@ -410,7 +543,7 @@ mod tests {
     #[test]
     fn action_pattern_malformed_wrapper_falls_back_to_full_input() {
         let input = r#"zsh -lc "unterminated"#;
-        let pattern = action_pattern_for(ToolInputShape::Command, input);
+        let pattern = action_pattern_for_shape(ToolInputShape::Command, input);
 
         assert_eq!(pattern, input);
     }

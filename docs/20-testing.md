@@ -93,8 +93,16 @@ The nextest profiles in `.config/nextest.toml` are mostly suffix-based. Keep
 new out-of-line test targets on one of these suffixes so the filters stay short:
 `*_unit.rs`, `*_offline.rs`, `*_component.rs`, `*_db.rs`, `*_db_memory.rs`,
 `*_service_e2e.rs`, `*_provider_e2e.rs`, `*_eval.rs`, `*_live.rs`, and
-`*_docker.rs`. Mixed E2E binaries can use exact module selectors when one file
-contains service and provider lanes.
+`*_docker.rs`. When a file starts mixing runtime requirements, split it into
+lane-specific binaries before adding profile selectors. For example, memory
+eval corpus and metric tests belong in `_offline` or `_eval` targets, graph
+gold-resolution and tenant knowledge graph/vector tests belong in
+`_db_memory`, local hand-tool filesystem tests belong in `_offline`,
+session-search tests belong in `_db`, Docker hardening belongs in `_docker`,
+and Restate service/provider E2E coverage should use surface-specific
+`*_service_e2e.rs` or `*_provider_e2e.rs` binaries. If an existing mixed
+integration-test binary cannot be split immediately, give the resource-backed
+test function the same lane suffix so nextest can keep it out of `fast-pr`.
 
 If a crate-private inline unit test needs a slow resource and cannot move to an
 integration test without exposing internals, put the lane marker in the test
@@ -113,7 +121,11 @@ The report is written under `target/cargo-timings/`.
 ## Architecture Boundary Check
 
 Run the boundary scanner after touching Restate handlers, workflows, runtime
-dependency wiring, or domain repository seams:
+dependency wiring, domain repository seams, workspace crate dependencies,
+`moa-core` top-level re-exports, or central hotspot files such as
+`crates/moa-edge/src/routes.rs`,
+`crates/moa-core/src/config/env_overlay.rs`, and
+`crates/moa-orchestrator/src/workflows/turn_execution.rs`:
 
 ```bash
 cargo run -p xtask -- check-architecture-boundaries
@@ -127,6 +139,14 @@ The check fails on new direct SQL in
 record it in the scanner allowlist with a concrete reason and exact expected
 count. Prefer moving SQL to a repository or domain crate and passing concrete
 dependencies from the composition root instead of expanding the allowlist.
+
+The same command also reports and enforces architecture budgets from Cargo
+metadata and current source files: workspace package/default-member counts,
+`moa-core` direct and transitive reverse dependencies, configured LOC budgets,
+forbidden dependency directions from `docs/15-architecture-policy.md`, and the
+`moa-core` top-level re-export budget. If one of these numbers grows
+intentionally, update the scanner budget in the same change with the measured
+count and the reason for accepting the growth.
 
 ## Clean E2E Runner
 

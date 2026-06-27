@@ -364,6 +364,73 @@ impl PostgresSessionStore {
     }
 }
 
+#[async_trait]
+impl SessionChannelStore for PostgresSessionStore {
+    async fn replace_session_channel_binding(
+        &self,
+        update: SessionChannelBindingUpdate,
+    ) -> Result<SessionChannelBindingId> {
+        PostgresSessionStore::replace_session_channel_binding(
+            self,
+            SessionChannelBindingReplacement {
+                tenant_id: update.tenant_id,
+                storage_partition_id: &update.storage_partition_id,
+                session_id: update.session_id,
+                contact_id: update.contact_id,
+                channel_account_id: update.channel_account_id,
+                contact_point_id: update.contact_point_id,
+                channel_ref: &update.channel_ref,
+                reason: update.reason.as_deref(),
+            },
+        )
+        .await
+    }
+
+    async fn get_active_session_channel_binding(
+        &self,
+        session_id: moa_core::SessionId,
+    ) -> Result<Option<SessionChannelBinding>> {
+        PostgresSessionStore::get_active_session_channel_binding(self, session_id).await
+    }
+}
+
+#[async_trait]
+impl SessionEventLookupStore for PostgresSessionStore {
+    async fn tool_event_exists(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: moa_core::SessionId,
+        event_type: EventType,
+        tool_call_id: ToolCallId,
+    ) -> Result<bool> {
+        PostgresSessionStore::tool_event_exists(
+            self,
+            storage_partition_id,
+            session_id,
+            event_type,
+            tool_call_id,
+        )
+        .await
+    }
+
+    async fn action_review_event_exists(
+        &self,
+        storage_partition_id: &StoragePartitionId,
+        session_id: moa_core::SessionId,
+        event_type: EventType,
+        review_id: Uuid,
+    ) -> Result<bool> {
+        PostgresSessionStore::action_review_event_exists(
+            self,
+            storage_partition_id,
+            session_id,
+            event_type,
+            review_id,
+        )
+        .await
+    }
+}
+
 fn agent_context_from_row(row: &sqlx::postgres::PgRow) -> Result<Option<moa_core::AgentContext>> {
     let Some(revision_uid) = row
         .try_get::<Option<Uuid>, _>("agent_revision_uid")
@@ -1137,6 +1204,14 @@ impl SegmentStore for PostgresSessionStore {
 impl ExperienceStore for PostgresSessionStore {
     async fn append_experience_record(&self, experience: &ExperienceRecord) -> Result<()> {
         PostgresSessionStore::append_experience_record(self, experience).await
+    }
+
+    async fn get_experience_record(
+        &self,
+        session_id: moa_core::SessionId,
+        experience_id: uuid::Uuid,
+    ) -> Result<Option<ExperienceRecord>> {
+        PostgresSessionStore::get_experience_record(self, session_id, experience_id).await
     }
 
     async fn list_experience_records(

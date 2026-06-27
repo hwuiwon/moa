@@ -8,6 +8,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use moa_core::RlsContext;
 use moa_core::{
     ContactId, SessionId, StoragePartitionId, TenantId, UserId,
     traits::EmbeddingProvider,
@@ -47,7 +48,7 @@ use moa_lineage_core::{
     RetrievalLineage, RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
     KnowledgeCredentialStore, KnowledgeIngestionRunner, KnowledgeService, KnowledgeServiceError,
@@ -819,7 +820,7 @@ async fn query_trace_is_present_and_does_not_hydrate_cross_contact_memory() {
 }
 
 #[tokio::test]
-async fn query_trace_renders_populated_retrieval_lineage_db() {
+async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
     // Pins: query_trace renders persisted retrieval lineage without hydrating unrelated contact memory.
     let db = moa_test_support::postgres::bootstrap_test_db()
         .await
@@ -983,7 +984,7 @@ async fn query_trace_renders_populated_retrieval_lineage_db() {
 }
 
 #[tokio::test]
-async fn mock_connector_end_to_end() {
+async fn mock_connector_end_to_end_db_memory() {
     // Pins: fake Merge and Nango connector syncs can be manually driven through tenant KB ingestion and inspected without external credentials.
     let db = moa_test_support::postgres::bootstrap_test_db()
         .await
@@ -1056,7 +1057,7 @@ async fn mock_connector_end_to_end() {
     assert_eq!(merge_provider.trigger_sync_count(), 1);
     assert_eq!(nango_provider.trigger_sync_count(), 1);
 
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope.clone(),
@@ -1586,7 +1587,7 @@ fn knowledge_handlers_are_authorized_or_have_webhook_safety_comment() {
 }
 
 #[tokio::test]
-async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_ingests_db_knowledge() {
+async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_ingests_db_memory() {
     // Pins: a provider-synced run lists changed records with its cursor/limit/watermark and applies them to tenant graph/vector knowledge.
     let db = moa_test_support::postgres::bootstrap_test_db()
         .await
@@ -1595,7 +1596,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let modified_after = Utc::now();
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope,
@@ -1721,7 +1722,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
 }
 
 #[tokio::test]
-async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_knowledge() {
+async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memory() {
     // Pins: provider record-listing failures mark the DB sync run retryable without applying any records.
     let db = moa_test_support::postgres::bootstrap_test_db()
         .await
@@ -1730,7 +1731,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_know
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let modified_after = Utc::now();
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope,
@@ -1956,7 +1957,7 @@ fn knowledge_sync_ingestion_workflow_loads_run_and_uses_page_journal_boundaries(
     assert!(
         source.contains("prepare_ingestion_run")
             && source.contains("get_sync_run(sync_run_uid)")
-            && source.contains("ScopeContext::tenant(run.tenant_id)"),
+            && source.contains("RlsContext::tenant(run.tenant_id)"),
         "workflow should prepare from the stored sync run under the derived tenant scope"
     );
     assert!(
@@ -2642,7 +2643,7 @@ fn task14_ingestion_pipeline(
     tenant_id: TenantId,
     provider: &str,
 ) -> Arc<Task14KnowledgeIngestionPipeline> {
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
     let graph_store =
         Arc::new(AgeGraphStore::scoped_for_app_role(pool, scope.clone()).with_vector_store(vector));

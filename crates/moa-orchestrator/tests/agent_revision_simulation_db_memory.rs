@@ -3,6 +3,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::RlsContext;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::experiments::{
     AgentRevisionSimulationCompareRequest, AgentRevisionSimulationVariant,
@@ -15,7 +16,6 @@ use moa_experiments::model::{
     NewExperimentTrial,
 };
 use moa_experiments::store::ExperimentStore;
-use moa_memory_types::ScopeContext;
 use moa_orchestrator::services::experiments::compare_agent_revision_simulation_inner;
 use serde_json::json;
 use uuid::Uuid;
@@ -202,7 +202,7 @@ async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) 
     let storage_partition_id = StoragePartitionId::for_tenant(*tenant_id).to_string();
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id)).await?;
+    let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(*tenant_id)).await?;
     sqlx::query(
         r#"
         INSERT INTO moa.artifact (

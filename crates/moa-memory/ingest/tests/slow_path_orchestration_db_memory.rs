@@ -369,13 +369,15 @@ async fn slow_path_uses_scripted_extractor_for_fact_heuristic_would_skip() {
         index: 0,
         text: transcript.to_string(),
         token_estimate: 10,
-    }]);
+    }])
+    .expect("heuristic probe should extract");
     assert_eq!(heuristic_probe, Vec::new());
     let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id)
         .await
-        .with_extractor(Arc::new(ScriptedFactExtractor::from_summaries([
-            "handoff note names standup owner",
-        ])));
+        .with_extractor(Arc::new(
+            ScriptedFactExtractor::from_summaries(["handoff note names standup owner"])
+                .expect("scripted fixture should parse"),
+        ));
 
     let report = ingest_turn_direct_with_ctx(ctx, turn(storage_partition_id, transcript, 7))
         .await

@@ -4,11 +4,7 @@ use std::sync::Arc;
 
 use moa_core::{LLMProvider, MoaConfig, ModelTask, Result};
 
-use crate::core::factory::{
-    ProviderSelection, build_provider_from_selection, resolve_provider_selection,
-};
-use crate::core::models::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI};
-use crate::{AnthropicProvider, GeminiProvider, OpenAIProvider};
+use crate::ProviderRegistry;
 
 /// Routes model calls to the configured main or auxiliary provider instance.
 pub struct ModelRouter {
@@ -25,24 +21,7 @@ impl ModelRouter {
 
     /// Builds a router from the configured main and auxiliary model settings.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        let main_selection =
-            resolve_provider_selection(config, Some(config.model_for_task(ModelTask::MainLoop)))?;
-        let main_provider = ProviderInstance::from_selection(config, &main_selection)?;
-        let auxiliary_selection = config
-            .models
-            .auxiliary
-            .as_deref()
-            .map(|model| resolve_provider_selection(config, Some(model)))
-            .transpose()?;
-        let auxiliary = match auxiliary_selection.as_ref() {
-            Some(selection) if selection.provider_name == main_selection.provider_name => {
-                Some(main_provider.clone_arc_with_model(selection.model_id.clone())?)
-            }
-            Some(selection) => Some(build_provider_from_selection(config, selection)?),
-            None => None,
-        };
-
-        Ok(Self::new(main_provider.into_arc(), auxiliary))
+        ProviderRegistry::from_config(config).model_router_for_config(config)
     }
 
     /// Returns the provider instance that should execute one logical model task.
@@ -54,49 +33,6 @@ impl ModelRouter {
             | ModelTask::Consolidation
             | ModelTask::SkillDistillation
             | ModelTask::Subagent => self.auxiliary.as_ref().unwrap_or(&self.main).clone(),
-        }
-    }
-}
-
-enum ProviderInstance {
-    Anthropic(AnthropicProvider),
-    OpenAI(Box<OpenAIProvider>),
-    Gemini(GeminiProvider),
-}
-
-impl ProviderInstance {
-    fn from_selection(config: &MoaConfig, selection: &ProviderSelection) -> Result<Self> {
-        match selection.provider_name.as_str() {
-            PROVIDER_ANTHROPIC => Ok(Self::Anthropic(AnthropicProvider::from_config_with_model(
-                config,
-                selection.model_id.clone(),
-            )?)),
-            PROVIDER_OPENAI => Ok(Self::OpenAI(Box::new(
-                OpenAIProvider::from_config_with_model(config, selection.model_id.clone())?,
-            ))),
-            PROVIDER_GOOGLE => Ok(Self::Gemini(GeminiProvider::from_config_with_model(
-                config,
-                selection.model_id.clone(),
-            )?)),
-            other => {
-                unreachable!("validated provider selection contained unsupported provider {other}")
-            }
-        }
-    }
-
-    fn into_arc(self) -> Arc<dyn LLMProvider> {
-        match self {
-            Self::Anthropic(provider) => Arc::new(provider),
-            Self::OpenAI(provider) => Arc::new(*provider),
-            Self::Gemini(provider) => Arc::new(provider),
-        }
-    }
-
-    fn clone_arc_with_model(&self, model_id: String) -> Result<Arc<dyn LLMProvider>> {
-        match self {
-            Self::Anthropic(provider) => Ok(Arc::new(provider.clone_with_model(model_id)?)),
-            Self::OpenAI(provider) => Ok(Arc::new(provider.clone_with_model(model_id)?)),
-            Self::Gemini(provider) => Ok(Arc::new(provider.clone_with_model(model_id)?)),
         }
     }
 }

@@ -7,8 +7,8 @@ use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
     Event, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
-    SessionStatus, SessionStore as _, TenantId, ToolCallId, ToolCallRequest, ToolDefinition,
-    ToolFailureClass, ToolInvocation, ToolOutput, classify_tool_error,
+    SessionStatus, TenantId, ToolCallId, ToolCallRequest, ToolDefinition, ToolFailureClass,
+    ToolInvocation, ToolOutput, classify_tool_error,
 };
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};

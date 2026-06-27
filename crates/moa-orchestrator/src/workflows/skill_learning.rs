@@ -71,7 +71,7 @@ impl SkillLearning for SkillLearningImpl {
         annotate_restate_handler_span("SkillLearning", "run");
         let request = request.into_inner();
         let runtime = OrchestratorCtx::current();
-        let store = runtime.session_store();
+        let store = runtime.session_store_backend();
         let config = runtime.config().as_ref().clone();
         let router = match runtime
             .provider_registry()

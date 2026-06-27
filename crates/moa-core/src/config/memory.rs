@@ -263,3 +263,100 @@ impl Default for GeminiEmbedderConfig {
         }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies memory, extraction, retrieval, digest, and vector environment overrides.
+    pub(in crate::config) fn apply_memory_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_copy_if_some, set_if_some, set_option_if_some};
+
+        set_copy_if_some(
+            &mut config.memory.auto_bootstrap,
+            self.memory_auto_bootstrap,
+        );
+        set_if_some(
+            &mut config.memory.embedding_provider,
+            &self.memory_embedding_provider,
+        );
+        set_if_some(
+            &mut config.memory.embedding_model,
+            &self.memory_embedding_model,
+        );
+        set_copy_if_some(
+            &mut config.memory.retrieval.reranker_mode,
+            self.memory_retrieval_reranker_mode,
+        );
+        set_copy_if_some(
+            &mut config.memory.retrieval.lineage_enabled,
+            self.memory_retrieval_lineage_enabled,
+        );
+        set_copy_if_some(
+            &mut config.memory.digest.enabled,
+            self.memory_digest_enabled,
+        );
+        set_copy_if_some(
+            &mut config.memory.digest.max_tokens,
+            self.memory_digest_max_tokens,
+        );
+        set_copy_if_some(
+            &mut config.memory.digest.rebuild_min_interval_hours,
+            self.memory_digest_rebuild_min_interval_hours,
+        );
+        set_copy_if_some(
+            &mut config.memory.extraction.enabled,
+            self.memory_extraction_enabled,
+        );
+        set_if_some(
+            &mut config.memory.extraction.api_key_env,
+            &self.memory_extraction_api_key_env,
+        );
+        set_if_some(
+            &mut config.memory.extraction.model,
+            &self.memory_extraction_model,
+        );
+        set_copy_if_some(
+            &mut config.memory.extraction.max_facts_per_chunk,
+            self.memory_extraction_max_facts_per_chunk,
+        );
+        set_copy_if_some(
+            &mut config.memory.extraction.timeout_ms,
+            self.memory_extraction_timeout_ms,
+        );
+        set_if_some(
+            &mut config.memory.vector.embedder.name,
+            &self.memory_vector_embedder_name,
+        );
+        set_copy_if_some(
+            &mut config.memory.vector.embedder.output_dim,
+            self.memory_vector_embedder_output_dim,
+        );
+        set_if_some(
+            &mut config.memory.vector.embedder.cohere.api_key_env,
+            &self.memory_vector_embedder_cohere_api_key_env,
+        );
+        set_if_some(
+            &mut config.memory.vector.embedder.gemini.api_key_env,
+            &self.memory_vector_embedder_gemini_api_key_env,
+        );
+        set_if_some(
+            &mut config.memory.vector.embedder.gemini.default_role,
+            &self.memory_vector_embedder_gemini_default_role,
+        );
+        set_option_if_some(&mut config.memory.pii_service_url, &self.pii_service_url);
+        set_if_some(
+            &mut config.memory.vector.turbopuffer.api_key_env,
+            &self.turbopuffer_api_key_env,
+        );
+        set_option_if_some(
+            &mut config.memory.vector.turbopuffer.base_url,
+            &self.turbopuffer_base_url,
+        );
+        set_option_if_some(
+            &mut config.memory.vector.turbopuffer.environment,
+            &self.turbopuffer_environment,
+        );
+        set_copy_if_some(
+            &mut config.memory.vector.turbopuffer.baa_enabled,
+            self.turbopuffer_baa,
+        );
+    }
+}

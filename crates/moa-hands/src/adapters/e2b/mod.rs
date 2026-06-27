@@ -21,6 +21,9 @@ use tokio::time::Instant;
 use crate::tools::edit_output::{
     ExistingFileContent, build_file_write_output, build_text_edit_output,
 };
+use crate::tools::sandbox_descriptor::{
+    SandboxToolCapability, supported_capability_for_tool, unsupported_tool,
+};
 use crate::tools::str_replace::plan_str_replace;
 use crate::tools::{file_outline, file_read, grep};
 
@@ -29,8 +32,7 @@ use client::{
     expect_success_json, http_error, parse_e2b_connect_stream, required_string_field, shell_escape,
 };
 
-use super::tool_route::{SandboxToolRoute, unsupported_tool};
-
+const E2B_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
 const DEFAULT_E2B_API_URL: &str = "https://api.e2b.dev";
 const DEFAULT_E2B_DOMAIN: &str = "e2b.app";
 const DEFAULT_E2B_TEMPLATE: &str = "base";
@@ -411,8 +413,8 @@ impl HandProvider for E2BHandProvider {
         };
         let sandbox = self.connected_sandbox(sandbox_id).await?;
         let payload: Value = serde_json::from_str(input)?;
-        match SandboxToolRoute::from_name(tool) {
-            Some(SandboxToolRoute::Bash) => {
+        match supported_capability_for_tool(tool, E2B_SUPPORTED_CAPABILITIES) {
+            Some(SandboxToolCapability::Bash) => {
                 self.execute_bash(
                     sandbox_id,
                     &sandbox,
@@ -420,21 +422,21 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::Grep) => {
+            Some(SandboxToolCapability::Grep) => {
                 let command = grep::remote_shell_command(input, "/")?;
                 self.execute_bash(sandbox_id, &sandbox, &command).await
             }
-            Some(SandboxToolRoute::FileOutline) => {
+            Some(SandboxToolCapability::FileOutline) => {
                 let path = required_string_field(&payload, "path")?;
                 let content = self.read_file(sandbox_id, &sandbox, path).await?.to_text();
                 file_outline::execute_with_content(input, path, &content)
             }
-            Some(SandboxToolRoute::FileRead) => {
+            Some(SandboxToolCapability::FileRead) => {
                 let path = required_string_field(&payload, "path")?;
                 let content = self.read_file(sandbox_id, &sandbox, path).await?.to_text();
                 file_read::execute_with_content(input, path, &content)
             }
-            Some(SandboxToolRoute::StrReplace) => {
+            Some(SandboxToolCapability::StrReplace) => {
                 self.str_replace_file(
                     sandbox_id,
                     &sandbox,
@@ -443,7 +445,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::FileWrite) => {
+            Some(SandboxToolCapability::FileWrite) => {
                 self.write_file(
                     sandbox_id,
                     &sandbox,
@@ -452,7 +454,7 @@ impl HandProvider for E2BHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::FileSearch) => {
+            Some(SandboxToolCapability::FileSearch) => {
                 let pattern = shell_escape(required_string_field(&payload, "pattern")?);
                 self.execute_bash(
                     sandbox_id,

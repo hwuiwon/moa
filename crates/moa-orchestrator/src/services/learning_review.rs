@@ -62,7 +62,7 @@ impl LearningReview for LearningReviewImpl {
         annotate_restate_handler_span("LearningReview", "get");
         let request = request.into_inner();
         authorize_tenant_operator(&ctx, request.tenant_id).await?;
-        let store = OrchestratorCtx::current_session_store();
+        let store = OrchestratorCtx::current().session_store_backend();
 
         Ok(ctx
             .run(|| async move {
@@ -85,7 +85,7 @@ impl LearningReview for LearningReviewImpl {
         let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
         let runtime = OrchestratorCtx::current();
-        let store = runtime.session_store();
+        let store = runtime.session_store_backend();
         let pool = runtime.graph_pool();
         let config = runtime.config();
         #[cfg(feature = "internal-eval-runner")]
@@ -126,7 +126,7 @@ impl LearningReview for LearningReviewImpl {
         let mut request = request.into_inner();
         let identity = authorize_tenant_operator(&ctx, request.tenant_id).await?;
         request.reviewer_subject = fga_subject(&identity);
-        let store = OrchestratorCtx::current_session_store();
+        let store = OrchestratorCtx::current().session_store_backend();
 
         Ok(ctx
             .run(|| async move {

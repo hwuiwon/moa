@@ -120,21 +120,6 @@ impl AnthropicProvider {
         Self::new(api_key, default_model)
     }
 
-    /// Clones this provider while swapping the default model id.
-    pub(crate) fn clone_with_model(&self, default_model: impl Into<String>) -> Result<Self> {
-        let default_model = canonical_model_id(&default_model.into())?;
-        let default_capabilities = capabilities_for_model(&default_model)?;
-        Ok(Self {
-            client: self.client.clone(),
-            api_key: self.api_key.clone(),
-            default_model,
-            default_capabilities,
-            messages_url: self.messages_url.clone(),
-            retry_policy: self.retry_policy.clone(),
-            web_search_enabled: self.web_search_enabled,
-        })
-    }
-
     /// Overrides the Messages API URL, primarily for tests.
     pub fn with_messages_url(mut self, messages_url: impl Into<String>) -> Self {
         self.messages_url = Arc::from(messages_url.into());

@@ -2,12 +2,12 @@
 
 use chrono::{DateTime, Utc};
 use moa_artifacts::simulation::ExperimentTargetKind;
+use moa_core::RlsContext;
 use moa_core::{
     ActionRuleScope, MoaError, ModelId, Result as MoaResult, SessionId, StoragePartitionId,
     TenantId,
 };
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use moa_scoring::{
     SCORE_RUN_SOURCE_EXPERIMENT_RUN, SCORE_RUN_SOURCE_EXPERIMENT_TRIAL, ensure_score_run_parent,
 };
@@ -1101,9 +1101,9 @@ fn scope_from_parts(
     }
 }
 
-fn experiment_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+fn experiment_scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
 }
 

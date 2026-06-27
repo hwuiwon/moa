@@ -20,3 +20,16 @@ impl Default for SessionConfig {
         }
     }
 }
+
+impl super::MoaEnvOverlay {
+    /// Applies session storage environment overrides.
+    pub(in crate::config) fn apply_session_overlay(&self, config: &mut super::MoaConfig) {
+        use super::env_overlay::{set_copy_if_some, set_if_some};
+
+        set_copy_if_some(
+            &mut config.session.blob_threshold_bytes,
+            self.session_blob_threshold_bytes,
+        );
+        set_if_some(&mut config.session.blob_dir, &self.session_blob_dir);
+    }
+}

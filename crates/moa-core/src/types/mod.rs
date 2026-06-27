@@ -28,6 +28,7 @@ mod snapshot;
 mod sub_agent;
 mod tools;
 
+pub use crate::events::EventType;
 pub use action_policy::{
     ActionClass, ActionEnvelope, ActionPolicyDecision, ActionPolicyEffect, ActionPolicyRule,
     ActionReviewDecision, ActionReviewField, ActionReviewFileDiff, ActionReviewPreview,
@@ -66,7 +67,7 @@ pub use context::{
     ContextMessage, ContextSourceKind, ContextSourceRef, ExcludedItem, MessageRole,
     ProcessorOutput, WorkingContext, estimate_text_tokens,
 };
-pub use events_stream::{ClaimCheck, EventFilter, EventRange, EventRecord, EventType, SequenceNum};
+pub use events_stream::{ClaimCheck, EventFilter, EventRange, EventRecord, SequenceNum};
 pub use experience::{
     AttributionEffect, AttributionSubjectType, ExperienceAttribution, ExperienceRecord,
     ExperienceResource, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
@@ -85,7 +86,7 @@ pub use identifiers::{
     BrainId, ModelId, SegmentId, SessionId, StoragePartitionId, TenantId, ToolCallId, UserId,
 };
 pub use learning::LearningEntry;
-pub use memory::SkillMetadata;
+pub use memory::{RlsContext, SkillMetadata};
 pub use model::{Credential, ModelCapabilities, ProviderNativeTool, TokenPricing, ToolCallFormat};
 pub use observability::{
     CacheReport, TraceContext, full_request_fingerprint, genai_operation_name, genai_provider_name,

@@ -13,8 +13,8 @@ use moa_core::wire::turn::{
 use moa_core::{
     ActiveSegment, CancelMode, ConsumeSubAgentChildResultInput, ConsumeSubAgentChildResultOutput,
     ContactRef, EventRange, EventRecord, MarkSubAgentChildTerminalInput, MoaError,
-    Result as MoaResult, SessionId, SessionMeta, SessionStatus, SessionStore as _,
-    SubAgentChildRef, SubAgentTerminalResult, UserMessage,
+    Result as MoaResult, SessionId, SessionMeta, SessionStatus, SubAgentChildRef,
+    SubAgentTerminalResult, UserMessage,
 };
 use moa_observability::record_turn_event_persist_duration;
 use restate_sdk::prelude::*;

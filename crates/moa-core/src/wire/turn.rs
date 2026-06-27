@@ -111,25 +111,21 @@ pub struct TurnProgress {
     /// Current durable phase.
     pub phase: TurnPhase,
     /// Deterministic complexity class selected for the turn.
-    #[serde(default)]
     pub complexity_class: TurnComplexityClass,
     /// Current model-loop iteration, starting at `0` before the first call.
-    #[serde(default)]
     pub iteration: u32,
     /// Effective model-loop cap for this turn, when bounded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
     /// Tool calls issued so far during this turn.
-    #[serde(default)]
     pub tool_calls: u32,
     /// Effective tool-call cap for this turn, when bounded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<u32>,
     /// Elapsed turn runtime in milliseconds.
-    #[serde(default)]
     pub elapsed_ms: u64,
     /// Last durable progress summary emitted for this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_progress_summary: Option<String>,
     /// Whether a cancel signal has been recorded.
     pub cancel_requested: bool,
@@ -317,31 +313,6 @@ mod tests {
 
         let decoded: TurnProgress = serde_json::from_str(&json).expect("deserialize turn progress");
         assert_eq!(decoded, progress);
-    }
-
-    #[test]
-    fn progress_projection_defaults_new_fields_from_old_payload() {
-        // Pins: existing progress clients can deserialize payloads written before responsiveness fields.
-        let json = r#"{
-            "turn_id": "turn-123",
-            "phase": "Streaming",
-            "cancel_requested": false,
-            "cancel_reason": null
-        }"#;
-
-        let decoded: TurnProgress =
-            serde_json::from_str(json).expect("deserialize old turn progress payload");
-        assert_eq!(decoded.turn_id, "turn-123");
-        assert_eq!(decoded.phase, TurnPhase::Streaming);
-        assert_eq!(decoded.complexity_class, TurnComplexityClass::Standard);
-        assert_eq!(decoded.iteration, 0);
-        assert_eq!(decoded.max_turns, None);
-        assert_eq!(decoded.tool_calls, 0);
-        assert_eq!(decoded.max_tool_calls, None);
-        assert_eq!(decoded.elapsed_ms, 0);
-        assert_eq!(decoded.last_progress_summary, None);
-        assert!(!decoded.cancel_requested);
-        assert_eq!(decoded.cancel_reason, None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! pgvector-backed graph-memory vector store.
 
 use async_trait::async_trait;
+use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use pgvector::HalfVector;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
@@ -16,7 +16,7 @@ use crate::{
 #[derive(Clone)]
 pub struct PgvectorStore {
     pool: PgPool,
-    scope: ScopeContext,
+    scope: RlsContext,
     assume_app_role: bool,
     control_plane: bool,
     exact_search: bool,
@@ -24,7 +24,7 @@ pub struct PgvectorStore {
 
 impl PgvectorStore {
     /// Creates a pgvector store for one request scope.
-    pub fn new(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn new(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope,
@@ -38,7 +38,7 @@ impl PgvectorStore {
     ///
     /// This is intended for integration tests that connect through the local owner role while
     /// still exercising production RLS policies.
-    pub fn new_for_app_role(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn new_for_app_role(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope,
@@ -52,7 +52,7 @@ impl PgvectorStore {
     ///
     /// This is intended for administrative operations, such as backend promotion,
     /// that must validate both tenant and contact-owned vectors in one tenant.
-    pub fn new_for_control_plane(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn new_for_control_plane(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope,
@@ -75,7 +75,7 @@ impl PgvectorStore {
     }
 
     /// Returns the request scope used for RLS GUCs.
-    pub fn scope(&self) -> &ScopeContext {
+    pub fn scope(&self) -> &RlsContext {
         &self.scope
     }
 

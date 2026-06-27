@@ -8,11 +8,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{MoaConfig, SessionId};
 use moa_db::ScopedConn;
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -469,7 +470,7 @@ impl HybridRetriever {
     }
 
     async fn vector_backend_state(&self, req: &RetrievalRequest) -> Result<VectorBackendState> {
-        let scope = ScopeContext::new(req.scope.clone());
+        let scope = req.scope.to_rls_context();
         let mut conn = ScopedConn::begin(&self.pool, &scope).await?;
         if self.assume_app_role {
             sqlx::query("SET LOCAL ROLE moa_app")
@@ -713,7 +714,7 @@ async fn hydrate_knowledge_chunks(
         return Ok(());
     }
 
-    let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(scope.tenant_id())).await?;
+    let mut conn = ScopedConn::begin(pool, &RlsContext::tenant(scope.tenant_id())).await?;
     if assume_app_role {
         sqlx::query("SET LOCAL ROLE moa_app")
             .execute(conn.as_mut())

@@ -3340,7 +3340,6 @@ version = "0.1.0"
 dependencies = [
  "metrics",
  "moa-core",
- "moa-memory-types",
  "sqlx",
  "workspace-hack",
 ]

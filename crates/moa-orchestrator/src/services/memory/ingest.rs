@@ -16,7 +16,7 @@ use super::responses::ingest_result_from_report;
 pub(super) async fn ingest_documents_inner(
     ctx: &Context<'_>,
     request: MemoryIngestRequest,
-    contact_id: ContactId,
+    contact_id: Option<ContactId>,
 ) -> Result<MemoryIngestResponse, HandlerError> {
     let started = Instant::now();
     let mut results = Vec::with_capacity(request.documents.len());
@@ -69,14 +69,17 @@ fn ingest_transcript(source_name: &str, content: &str) -> String {
 #[must_use]
 pub fn document_ingest_session_id(
     tenant_id: moa_core::TenantId,
-    contact_id: ContactId,
+    contact_id: Option<ContactId>,
     index: usize,
     document: &MemoryIngestDocument,
 ) -> SessionId {
     let mut hasher = blake3::Hasher::new();
     update_hash_field(&mut hasher, "kind", "memory_ingest_document:v1");
     update_hash_field(&mut hasher, "tenant_id", &tenant_id.to_string());
-    update_hash_field(&mut hasher, "contact_id", &contact_id.to_string());
+    let owner = contact_id
+        .map(|contact_id| contact_id.to_string())
+        .unwrap_or_else(|| "tenant".to_string());
+    update_hash_field(&mut hasher, "owner", &owner);
     update_hash_field(&mut hasher, "index", &index.to_string());
     update_hash_field(&mut hasher, "source_name", &document.source_name);
     update_hash_field(

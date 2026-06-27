@@ -1,10 +1,10 @@
 //! Tenant/contact RLS coverage for graph-memory writes.
 
 use chrono::Utc;
+use moa_core::RlsContext;
 use moa_core::{ContactId, TenantId};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
-use moa_memory_types::ScopeContext;
 use moa_session::testing;
 use serde_json::json;
 use uuid::Uuid;
@@ -41,7 +41,7 @@ async fn contact_scoped_graph_write_sets_contact_and_blocks_other_contact_db_mem
     let contact_b = ContactId(Uuid::now_v7());
     let graph = AgeGraphStore::scoped_for_app_role(
         store.pool().clone(),
-        ScopeContext::contact(tenant_id, contact_a),
+        RlsContext::contact(tenant_id, contact_a),
     );
 
     let uid = graph

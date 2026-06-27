@@ -6,9 +6,10 @@ use moa_artifacts::registry::{
     ArtifactFile, ArtifactRegistry, ArtifactScopeParts, NewPublishedArtifactRevision,
     StoredArtifactRevision, insert_published_revision,
 };
+use moa_core::RlsContext;
 use moa_core::{ActionRuleScope, MoaError, Result, SkillMetadata, TenantId, UserId};
 use moa_db::ScopedConn;
-use moa_memory_types::{MemoryScope, ScopeContext};
+use moa_memory_types::MemoryScope;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -321,9 +322,9 @@ fn tenant_memory_scope(tenant_id: TenantId) -> MemoryScope {
     MemoryScope::Tenant { tenant_id }
 }
 
-fn artifact_scope_context(scope: &ActionRuleScope) -> ScopeContext {
+fn artifact_scope_context(scope: &ActionRuleScope) -> RlsContext {
     match scope {
-        ActionRuleScope::Tenant { tenant_id } => ScopeContext::tenant(*tenant_id),
+        ActionRuleScope::Tenant { tenant_id } => RlsContext::tenant(*tenant_id),
     }
 }
 

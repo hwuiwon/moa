@@ -54,11 +54,11 @@ pub fn checked_memory_scope(
     }
 }
 
-/// Returns the trusted user id to attach to a document ingestion turn.
+/// Returns the explicit contact owner for a document ingestion turn.
 pub fn checked_ingest_contact_id(
     requested_contact_id: Option<ContactId>,
     identity: &Identity,
-) -> Result<ContactId, UserScopeError> {
+) -> Result<Option<ContactId>, UserScopeError> {
     if let Some(requested) = requested_contact_id {
         if identity.identity_type == IdentityType::Contact && ContactId(identity.id) != requested {
             return Err(UserScopeError::Mismatch {
@@ -66,8 +66,8 @@ pub fn checked_ingest_contact_id(
                 effective: identity.id.to_string(),
             });
         }
-        return Ok(requested);
+        return Ok(Some(requested));
     }
 
-    Ok(ContactId(identity.id))
+    Ok(None)
 }

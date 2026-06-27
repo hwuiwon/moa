@@ -18,6 +18,7 @@ use std::{
 use async_trait::async_trait;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
+use moa_core::RlsContext;
 use moa_core::{
     Credential, CredentialVault, MoaConfig, MoaError, TenantId,
     wire::knowledge::{
@@ -36,7 +37,6 @@ use moa_knowledge::{
     providers::{LinkedIntegrationProvider, merge::MergeProvider, nango::NangoProvider},
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
-use moa_memory_types::ScopeContext;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
 use uuid::Uuid;
@@ -460,7 +460,7 @@ impl KnowledgeRepositorySource {
             Self::Fixed(repository) => repository.clone(),
             Self::Postgres { pool } => Arc::new(PostgresKnowledgeRepository::scoped(
                 pool.clone(),
-                ScopeContext::tenant(tenant_id),
+                RlsContext::tenant(tenant_id),
             )),
         }
     }

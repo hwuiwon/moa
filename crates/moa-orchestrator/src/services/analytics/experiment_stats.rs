@@ -1,12 +1,12 @@
 //! Experiment analytics SQL orchestration and response assembly.
 
+use moa_core::RlsContext;
 use moa_core::wire::analytics::{
     ExperimentAnalyticsRequest, ExperimentAnalyticsResponse, ExperimentRunTrendPoint,
     ExperimentScoreRunRef, ExperimentStatusCount, ExperimentTrialTrendPoint,
 };
 use moa_core::{MoaError, TenantId};
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use restate_sdk::prelude::*;
 use sqlx::{Row, postgres::PgRow};
 
@@ -17,7 +17,7 @@ pub(super) async fn experiment_stats_inner(
     pool: sqlx::PgPool,
     request: ExperimentAnalyticsRequest,
 ) -> Result<ExperimentAnalyticsResponse, HandlerError> {
-    let mut conn = ScopedConn::begin(&pool, &ScopeContext::tenant(request.tenant_id))
+    let mut conn = ScopedConn::begin(&pool, &RlsContext::tenant(request.tenant_id))
         .await
         .map_err(to_handler_error)?;
     let status_rows = sqlx::query(

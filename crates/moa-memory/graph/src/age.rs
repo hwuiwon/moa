@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
+use moa_core::RlsContext;
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::VectorStore;
 use sqlx::{PgConnection, PgPool};
 
@@ -16,7 +16,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AgeGraphStore {
     pub(crate) pool: PgPool,
-    pub(crate) scope: Option<ScopeContext>,
+    pub(crate) scope: Option<RlsContext>,
     pub(crate) assume_app_role: bool,
     pub(crate) vector: Option<Arc<dyn VectorStore>>,
 }
@@ -36,7 +36,7 @@ impl AgeGraphStore {
     }
 
     /// Creates an AGE graph store that installs scope GUCs for each operation.
-    pub fn scoped(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn scoped(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope: Some(scope),
@@ -49,7 +49,7 @@ impl AgeGraphStore {
     ///
     /// This is intended for integration tests that connect as `moa_owner` while still exercising
     /// application RLS policies.
-    pub fn scoped_for_app_role(pool: PgPool, scope: ScopeContext) -> Self {
+    pub fn scoped_for_app_role(pool: PgPool, scope: RlsContext) -> Self {
         Self {
             pool,
             scope: Some(scope),
@@ -70,7 +70,7 @@ impl AgeGraphStore {
     }
 
     /// Returns the request scope installed before graph operations, when configured.
-    pub fn scope(&self) -> Option<&ScopeContext> {
+    pub fn scope(&self) -> Option<&RlsContext> {
         self.scope.as_ref()
     }
 

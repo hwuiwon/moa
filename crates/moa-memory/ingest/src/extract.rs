@@ -17,8 +17,8 @@ pub const MAX_EXTRACT_CHUNK_CHARS: usize = 32_768;
 pub struct SessionTurn {
     /// Tenant that owns the session.
     pub tenant_id: TenantId,
-    /// Contact that produced the session turn.
-    pub contact_id: ContactId,
+    /// Contact that produced the session turn, when this is contact-owned memory.
+    pub contact_id: Option<ContactId>,
     /// Session identifier.
     pub session_id: SessionId,
     /// Durable turn sequence, normally the persisted `BrainResponse` event sequence number.
@@ -69,10 +69,8 @@ pub struct ExtractedFact {
     /// Source chunk index.
     pub source_chunk: usize,
     /// Scope hint used by slow-path ingestion when writing graph rows.
-    #[serde(default)]
     pub scope_hint: ExtractedFactScopeHint,
     /// Optional model-provided confidence for this extracted fact.
-    #[serde(default)]
     pub confidence: Option<f64>,
 }
 
@@ -145,28 +143,11 @@ pub fn chunk_turn(
     crate::chunking::chunk_turn(turn, target_tokens, overlap_tokens)
 }
 
-/// Extracts deterministic fact candidates from chunks.
+/// Extracts deterministic fact candidates from chunks after validating chunk size.
 ///
 /// This is the local deterministic scaffold for M10. Production LLM extraction can replace this
 /// helper behind the same DTOs without changing the Restate journal shape.
-#[must_use]
-pub fn extract_facts(chunks: &[TurnChunk]) -> Vec<ExtractedFact> {
-    chunks
-        .iter()
-        .flat_map(|chunk| {
-            candidate_fact_summaries(&chunk.text)
-                .into_iter()
-                .map(move |summary| extracted_fact_from_summary(chunk.index, summary))
-        })
-        .collect()
-}
-
-/// Extracts deterministic fact candidates after validating chunk size.
-///
-/// The local extractor keeps size validation separate from [`extract_facts`] so existing Restate
-/// journals that call the original helper stay byte-compatible while tests and future production
-/// callers can fail with a typed error before oversized chunks reach model-backed extractors.
-pub fn extract_facts_checked(chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
+pub fn extract_facts(chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
     for chunk in chunks {
         let actual_chars = chunk.text.chars().count();
         if actual_chars > MAX_EXTRACT_CHUNK_CHARS {
@@ -177,7 +158,14 @@ pub fn extract_facts_checked(chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>>
             });
         }
     }
-    Ok(extract_facts(chunks))
+    Ok(chunks
+        .iter()
+        .flat_map(|chunk| {
+            candidate_fact_summaries(&chunk.text)
+                .into_iter()
+                .map(move |summary| extracted_fact_from_summary(chunk.index, summary))
+        })
+        .collect())
 }
 
 /// Returns a deterministic confidence hint for one extracted fact summary.
@@ -378,7 +366,7 @@ mod tests {
     fn turn(transcript: &str) -> SessionTurn {
         SessionTurn {
             tenant_id: TenantId::new(),
-            contact_id: ContactId::new(),
+            contact_id: Some(ContactId::new()),
             session_id: SessionId::new(),
             turn_seq: 7,
             transcript: transcript.to_string(),
@@ -395,7 +383,7 @@ mod tests {
             100,
         )
         .expect("chunk explicit facts");
-        let facts = extract_facts(&chunks);
+        let facts = extract_facts(&chunks).expect("extract explicit facts");
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].summary, "auth service uses JWT");
     }
@@ -404,7 +392,7 @@ mod tests {
     fn extraction_defaults_unmarked_facts_to_contact_scope() {
         let chunks =
             chunk_turn(&turn("Fact: auth service uses JWT"), 700, 100).expect("chunk one fact");
-        let facts = extract_facts(&chunks);
+        let facts = extract_facts(&chunks).expect("extract one fact");
 
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Contact);
@@ -418,7 +406,7 @@ mod tests {
             100,
         )
         .expect("chunk marked facts");
-        let facts = extract_facts(&chunks);
+        let facts = extract_facts(&chunks).expect("extract marked facts");
 
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Tenant);
@@ -433,36 +421,16 @@ mod tests {
     fn fact_uid_is_stable_for_same_fact() {
         let chunks =
             chunk_turn(&turn("Fact: auth service uses JWT"), 700, 100).expect("chunk one fact");
-        let facts = extract_facts(&chunks);
+        let facts = extract_facts(&chunks).expect("extract one fact");
         let hash = fact_hash(&facts[0]).expect("hash fact");
         assert_eq!(facts[0].uid, fact_uid_from_hash(&hash));
-    }
-
-    #[test]
-    fn extracted_fact_deserializes_without_confidence_field() {
-        // Pins: Restate journal entries without model confidence keep deserializing.
-        let json = serde_json::json!({
-            "uid": uuid::Uuid::now_v7(),
-            "subject": "auth",
-            "predicate": "uses",
-            "object": "JWT",
-            "summary": "auth uses JWT",
-            "source_chunk": 0,
-            "scope_hint": "tenant"
-        });
-
-        let fact: ExtractedFact =
-            serde_json::from_value(json).expect("extracted fact JSON should deserialize");
-
-        assert_eq!(fact.confidence, None);
-        assert_eq!(fact.scope_hint, ExtractedFactScopeHint::Tenant);
     }
 
     #[test]
     fn scoped_fact_uid_differs_by_tenant() {
         let chunks =
             chunk_turn(&turn("Fact: auth service uses JWT"), 700, 100).expect("chunk one fact");
-        let facts = extract_facts(&chunks);
+        let facts = extract_facts(&chunks).expect("extract one fact");
         let hash = fact_hash(&facts[0]).expect("hash fact");
         let session_id = SessionId::new();
 

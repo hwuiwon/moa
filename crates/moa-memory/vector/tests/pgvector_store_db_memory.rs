@@ -1,9 +1,9 @@
 //! Integration tests for the pgvector `halfvec(1024)` graph-memory store.
 
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{ContactId, TenantId};
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{PgvectorStore, VectorItem, VectorQuery, VectorStore};
 use moa_session::testing;
 use sqlx::PgPool;
@@ -12,12 +12,12 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
     let storage_partition_id = storage_partition_id.as_ref();
     let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
         .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
-    ScopeContext::tenant(tenant_id)
+    RlsContext::tenant(tenant_id)
 }
 
 fn stable_uuid_from_label(label: &str) -> Uuid {
@@ -103,7 +103,7 @@ async fn insert_contact_node_index_rows(
 ) {
     let tenant_id =
         Uuid::parse_str(storage_partition_id).expect("test storage partition id should be a UUID");
-    let ctx = ScopeContext::contact(TenantId::from(tenant_id), contact_id);
+    let ctx = RlsContext::contact(TenantId::from(tenant_id), contact_id);
     let mut conn = ScopedConn::begin(pool, &ctx)
         .await
         .expect("begin contact node_index seed transaction");
@@ -331,7 +331,7 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
 
     let contact_store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        ScopeContext::contact(tenant_id, contact_id),
+        RlsContext::contact(tenant_id, contact_id),
     );
     contact_store
         .upsert(std::slice::from_ref(&item))
@@ -348,7 +348,7 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
     };
     let tenant_store = PgvectorStore::new_for_app_role(
         session_store.pool().clone(),
-        ScopeContext::tenant(tenant_id),
+        RlsContext::tenant(tenant_id),
     );
     let tenant_matches = tenant_store
         .knn(&query)
@@ -362,7 +362,7 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
 
     let control_plane_store = PgvectorStore::new_for_control_plane(
         session_store.pool().clone(),
-        ScopeContext::tenant(tenant_id),
+        RlsContext::tenant(tenant_id),
     );
     let control_plane_matches = control_plane_store
         .knn(&query)

@@ -108,8 +108,50 @@ readers = ["services/audit-shipper"]
 [[table]]
 name = "moa.node_index"
 schema = "moa"
-owner = "moa-session"
-readers = ["moa-memory/graph", "moa-memory/lifecycle", "moa-memory/vector"]
+owner = "moa-memory/graph"
+readers = ["moa-memory/lifecycle", "moa-memory/vector", "moa-brain", "moa-knowledge"]
+
+[[table]]
+name = "moa.embeddings"
+schema = "moa"
+owner = "moa-memory/vector"
+readers = ["moa-memory/graph", "moa-brain"]
+
+[[table]]
+name = "moa.graph_changelog"
+schema = "moa"
+owner = "moa-memory/graph"
+readers = ["moa-memory/lifecycle", "moa-memory/pii"]
+
+[[table]]
+name = "moa.storage_partition_state"
+schema = "moa"
+owner = "moa-memory/graph"
+readers = ["moa-memory/ingest", "moa-memory/lifecycle", "moa-memory/vector"]
+
+[[table]]
+name = "moa.ingest_dedup"
+schema = "moa"
+owner = "moa-memory/ingest"
+readers = ["moa-memory/graph"]
+
+[[table]]
+name = "moa.ingest_dlq"
+schema = "moa"
+owner = "moa-memory/ingest"
+readers = ["moa-memory/graph"]
+
+[[table]]
+name = "moa.memory_digests"
+schema = "moa"
+owner = "moa-memory/lifecycle"
+readers = ["moa-brain"]
+
+[[table]]
+name = "moa.retrieval_lineage"
+schema = "moa"
+owner = "moa-memory/lifecycle"
+readers = ["moa-brain", "moa-memory/graph"]
 
 [[table]]
 name = "analytics.turn_lineage"

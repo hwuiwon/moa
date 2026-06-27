@@ -2,8 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use moa_core::{ContactId, MoaError, Result, StoragePartitionId, TenantId};
-use moa_memory_types::ScopeContext;
+use moa_core::{ContactId, MoaError, Result, RlsContext, TenantId};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 struct DbScopeGucs {
@@ -28,7 +27,7 @@ pub struct ScopedConn<'p> {
 
 impl<'p> ScopedConn<'p> {
     /// Begins a transaction and applies the provided request scope to Postgres GUCs.
-    pub async fn begin(pool: &'p PgPool, ctx: &ScopeContext) -> Result<Self> {
+    pub async fn begin(pool: &'p PgPool, ctx: &RlsContext) -> Result<Self> {
         let begin_started = Instant::now();
         let tx = pool.begin().await;
         record_scoped_transaction_begin_duration(begin_started.elapsed());
@@ -44,7 +43,7 @@ impl<'p> ScopedConn<'p> {
 
     /// Begins a tenant-scoped transaction without contact access.
     pub async fn begin_tenant(pool: &'p PgPool, tenant_id: TenantId) -> Result<Self> {
-        Self::begin(pool, &ScopeContext::tenant(tenant_id)).await
+        Self::begin(pool, &RlsContext::tenant(tenant_id)).await
     }
 
     /// Begins a contact-scoped transaction inside one tenant.
@@ -53,7 +52,7 @@ impl<'p> ScopedConn<'p> {
         tenant_id: TenantId,
         contact_id: ContactId,
     ) -> Result<Self> {
-        Self::begin(pool, &ScopeContext::contact(tenant_id, contact_id)).await
+        Self::begin(pool, &RlsContext::contact(tenant_id, contact_id)).await
     }
 
     /// Begins an explicit tenant control-plane transaction.
@@ -81,10 +80,9 @@ impl<'p> ScopedConn<'p> {
     }
 
     /// Applies MOA scope GUCs to an existing transaction.
-    pub async fn apply_gucs(tx: &mut Transaction<'_, Postgres>, ctx: &ScopeContext) -> Result<()> {
-        let tenant_id = ctx.tenant_id();
-        let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
-        let tenant_id = tenant_id.to_string();
+    pub async fn apply_gucs(tx: &mut Transaction<'_, Postgres>, ctx: &RlsContext) -> Result<()> {
+        let tenant_id = ctx.tenant_id().to_string();
+        let storage_partition_id = ctx.storage_partition_id().to_string();
         let contact_id = ctx
             .contact_id()
             .map(|contact_id| contact_id.to_string())

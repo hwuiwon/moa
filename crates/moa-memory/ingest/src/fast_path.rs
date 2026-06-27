@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::RlsContext;
 use moa_core::{
     ContactId, MemoryToolExecutor, MoaError, SessionActorRef, SessionMeta, StoragePartitionId,
     TenantId, ToolOutput, traits::EmbeddingProvider,
@@ -17,7 +18,6 @@ use moa_memory_graph::{
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
 };
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
     CohereV4Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
 };
@@ -70,7 +70,7 @@ pub enum ForgetPattern {
 #[derive(Clone)]
 pub struct FastPathCtx {
     pool: PgPool,
-    scope: ScopeContext,
+    scope: RlsContext,
     graph: Arc<dyn GraphStore>,
     vector: Arc<dyn VectorStore>,
     embedder: Arc<dyn EmbeddingProvider>,
@@ -84,7 +84,7 @@ impl FastPathCtx {
     #[must_use]
     pub fn new(
         pool: PgPool,
-        scope: ScopeContext,
+        scope: RlsContext,
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
         embedder: Arc<dyn EmbeddingProvider>,
@@ -112,7 +112,7 @@ impl FastPathCtx {
 
     /// Returns the scope used for direct SQL lookups.
     #[must_use]
-    pub fn scope(&self) -> &ScopeContext {
+    pub fn scope(&self) -> &RlsContext {
         &self.scope
     }
 
@@ -602,8 +602,8 @@ fn runtime_ctx_for_scope(
         }
     };
     let scope_ctx = match contact_id {
-        Some(contact_id) => ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id)),
-        None => ScopeContext::tenant(TenantId::from(tenant_id)),
+        Some(contact_id) => RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id)),
+        None => RlsContext::tenant(TenantId::from(tenant_id)),
     };
     Ok((runtime_fast_ctx(scope_ctx)?, tenant_id, contact_id))
 }
@@ -613,7 +613,7 @@ fn runtime_ctx_for_contact(
     contact_id: Uuid,
 ) -> Result<FastPathCtx, FastError> {
     let tenant_id = tenant_uuid(session);
-    let scope_ctx = ScopeContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
+    let scope_ctx = RlsContext::contact(TenantId::from(tenant_id), ContactId(contact_id));
     runtime_fast_ctx(scope_ctx)
 }
 
@@ -648,7 +648,7 @@ fn actor_id_from_session(session: &SessionMeta) -> Uuid {
     }
 }
 
-fn runtime_fast_ctx(scope: ScopeContext) -> Result<FastPathCtx, FastError> {
+fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     let runtime = current_runtime()?;
     let pool = runtime.pool().clone();
     let vector: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));

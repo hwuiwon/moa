@@ -1,8 +1,8 @@
 //! Integration coverage for workspace embedder switching guards.
 
+use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use moa_memory_vector::{
     Error, PgvectorStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore,
 };
@@ -13,12 +13,12 @@ use uuid::Uuid;
 
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn tenant_scope(storage_partition_id: impl AsRef<str>) -> ScopeContext {
+fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
     let storage_partition_id = storage_partition_id.as_ref();
     let tenant_id = Uuid::parse_str(storage_partition_id)
         .map(TenantId::from)
         .unwrap_or_else(|_| TenantId::from(stable_uuid_from_label(storage_partition_id)));
-    ScopeContext::tenant(tenant_id)
+    RlsContext::tenant(tenant_id)
 }
 
 fn stable_uuid_from_label(label: &str) -> Uuid {
@@ -51,7 +51,7 @@ fn basis_vector(index: usize) -> Vec<f32> {
     vector
 }
 
-fn scope(storage_partition_id: &str) -> ScopeContext {
+fn scope(storage_partition_id: &str) -> RlsContext {
     tenant_scope(storage_partition_id)
 }
 

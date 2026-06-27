@@ -21,10 +21,10 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::tools::sandbox_descriptor::{SandboxToolCapability, supported_capability_for_tool};
 use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep, str_replace};
 
-use super::tool_route::SandboxToolRoute;
-
+const LOCAL_SUPPORTED_CAPABILITIES: &[SandboxToolCapability] = &SandboxToolCapability::ALL;
 const DEFAULT_DOCKER_IMAGE: &str = "alpine:3.20";
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 const DOCKER_DETECTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -200,8 +200,8 @@ impl LocalHandProvider {
         hard_cancel_token: Option<&CancellationToken>,
     ) -> Result<ToolOutput> {
         let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
-        match SandboxToolRoute::from_name(tool) {
-            Some(SandboxToolRoute::Bash) => {
+        match supported_capability_for_tool(tool, LOCAL_SUPPORTED_CAPABILITIES) {
+            Some(SandboxToolCapability::Bash) => {
                 bash::execute_local(
                     &sandbox.execution_root,
                     input,
@@ -210,22 +210,22 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::Grep) => {
+            Some(SandboxToolCapability::Grep) => {
                 grep::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips).await
             }
-            Some(SandboxToolRoute::FileOutline) => {
+            Some(SandboxToolCapability::FileOutline) => {
                 file_outline::execute(&sandbox.execution_root, input).await
             }
-            Some(SandboxToolRoute::FileRead) => {
+            Some(SandboxToolCapability::FileRead) => {
                 file_read::execute(&sandbox.execution_root, input).await
             }
-            Some(SandboxToolRoute::StrReplace) => {
+            Some(SandboxToolCapability::StrReplace) => {
                 str_replace::execute(&sandbox.execution_root, input).await
             }
-            Some(SandboxToolRoute::FileWrite) => {
+            Some(SandboxToolCapability::FileWrite) => {
                 file_write::execute(&sandbox.execution_root, input).await
             }
-            Some(SandboxToolRoute::FileSearch) => {
+            Some(SandboxToolCapability::FileSearch) => {
                 file_search::execute(&sandbox.execution_root, input, &sandbox.extra_search_skips)
                     .await
             }
@@ -252,8 +252,8 @@ impl LocalHandProvider {
                 MoaError::ProviderError(format!("unknown docker sandbox handle: {container_id}"))
             })?;
 
-        match SandboxToolRoute::from_name(tool) {
-            Some(SandboxToolRoute::Bash) => {
+        match supported_capability_for_tool(tool, LOCAL_SUPPORTED_CAPABILITIES) {
+            Some(SandboxToolCapability::Bash) => {
                 bash::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
@@ -263,10 +263,10 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::Grep) => {
+            Some(SandboxToolCapability::Grep) => {
                 grep::execute(&sandbox.sandbox_dir, input, &sandbox.extra_search_skips).await
             }
-            Some(SandboxToolRoute::FileOutline) => {
+            Some(SandboxToolCapability::FileOutline) => {
                 file_outline::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
@@ -276,7 +276,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::FileRead) => {
+            Some(SandboxToolCapability::FileRead) => {
                 file_read::execute_docker_bind_mount(
                     &sandbox.sandbox_dir,
                     &sandbox.workspace_mount,
@@ -284,7 +284,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::StrReplace) => {
+            Some(SandboxToolCapability::StrReplace) => {
                 str_replace::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,
@@ -294,7 +294,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::FileWrite) => {
+            Some(SandboxToolCapability::FileWrite) => {
                 file_write::execute_docker_bind_mount(
                     &sandbox.sandbox_dir,
                     &sandbox.workspace_mount,
@@ -302,7 +302,7 @@ impl LocalHandProvider {
                 )
                 .await
             }
-            Some(SandboxToolRoute::FileSearch) => {
+            Some(SandboxToolCapability::FileSearch) => {
                 file_search::execute_docker(
                     container_id,
                     &sandbox.workspace_mount,

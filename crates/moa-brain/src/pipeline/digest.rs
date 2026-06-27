@@ -2,12 +2,12 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use moa_core::RlsContext;
 use moa_core::{
     ContextMessage, ContextProcessor, MemoryDigestConfig, MoaError, ProcessorOutput, Result,
     WorkingContext,
 };
 use moa_db::ScopedConn;
-use moa_memory_types::ScopeContext;
 use serde_json::json;
 use sqlx::Row;
 
@@ -29,8 +29,8 @@ impl DigestProcessor {
     async fn read_digest_rows(&self, ctx: &WorkingContext) -> Result<Vec<DigestRow>> {
         let contact_id = ctx.contact.as_ref().map(|contact| contact.contact_id);
         let scope = contact_id
-            .map(|contact_id| ScopeContext::contact(ctx.tenant_id, contact_id))
-            .unwrap_or_else(|| ScopeContext::tenant(ctx.tenant_id));
+            .map(|contact_id| RlsContext::contact(ctx.tenant_id, contact_id))
+            .unwrap_or_else(|| RlsContext::tenant(ctx.tenant_id));
         let mut conn = ScopedConn::begin(&self.pool, &scope).await?;
         let rows = sqlx::query(
             r#"

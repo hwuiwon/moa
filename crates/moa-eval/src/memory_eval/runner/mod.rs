@@ -15,6 +15,7 @@ use moa_brain::retrieval::{
     CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig, Reranker,
     RetrievalHit,
 };
+use moa_core::RlsContext;
 use moa_core::{
     ContactId, MemoryDigestConfig, UserId, config::MemoryExtractionConfig,
     traits::EmbeddingProvider,
@@ -30,7 +31,7 @@ use moa_memory_ingest::{
 };
 use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoothed_quality};
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
-use moa_memory_types::{MemoryScope, ScopeContext, ScopeTier};
+use moa_memory_types::{MemoryScope, ScopeTier};
 use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
 use moa_session::PostgresSessionStore;
 use secrecy::SecretString;
@@ -1171,7 +1172,7 @@ async fn retrieve_probe(
         tenant_id: tenant_id_from_storage_partition_id(&probe.storage_partition_id),
         contact_id: contact_id_from_user_id(&probe.user_id),
     };
-    let scope_context = ScopeContext::new(scope.clone());
+    let scope_context = scope.to_rls_context();
     let mut vector_store = PgvectorStore::new_for_app_role(pool.clone(), scope_context.clone());
     if deterministic_replay {
         vector_store = vector_store.with_exact_search(true);
@@ -2047,7 +2048,7 @@ async fn extracted_embedding_texts(
         for turn in &session.turns {
             let session_turn = SessionTurn {
                 tenant_id: tenant_id_from_storage_partition_id(&session.storage_partition_id),
-                contact_id: contact_id_from_user_id(&session.user_id),
+                contact_id: Some(contact_id_from_user_id(&session.user_id)),
                 session_id: session.session_id,
                 turn_seq: turn.turn_seq,
                 transcript: turn.transcript.clone(),
@@ -2172,7 +2173,7 @@ impl IsolatedEvalStore {
         entity_blocking_enabled: bool,
     ) -> IngestCtx {
         let tenant_id = tenant_id_from_label(&format!("memory-eval-runner-{}", self.schema_name));
-        let scope = ScopeContext::tenant(tenant_id);
+        let scope = RlsContext::tenant(tenant_id);
         let vector = Arc::new(PgvectorStore::new_for_app_role(
             self.pool().clone(),
             scope.clone(),

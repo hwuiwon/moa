@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::RlsContext;
 use moa_core::{
     AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContextMessage, ContextProcessor,
     ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MoaError, NullLineageHandle,
@@ -20,7 +21,7 @@ use moa_lineage_core::{
     records::RetrievalSelectedHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass};
-use moa_memory_types::{MemoryScope, ScopeContext, ScopeTier};
+use moa_memory_types::{MemoryScope, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION, VectorStore};
 use sqlx::PgPool;
 use tracing::Span;
@@ -129,7 +130,7 @@ impl ScopedRetrievalRuntimeFactory for PostgresScopedRetrievalRuntimeFactory {
         pool: &PgPool,
         assume_app_role: bool,
     ) -> ScopedRetrievalRuntime {
-        let scope_context = ScopeContext::from(scope.clone());
+        let scope_context = RlsContext::from(scope.clone());
         let vector: Arc<dyn VectorStore> = if assume_app_role {
             Arc::new(PgvectorStore::new_for_app_role(
                 pool.clone(),

@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use moa_core::RlsContext;
 use moa_core::{TenantId, traits::EmbeddingProvider};
 use moa_knowledge::{
     chunking::{ChunkingConfig, content_hash},
@@ -26,7 +27,6 @@ use moa_knowledge::{
     parser::DocumentParser,
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
-use moa_memory_types::ScopeContext;
 use moa_test_support::postgres;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -225,7 +225,7 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope,
@@ -424,7 +424,7 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope,
@@ -556,7 +556,7 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope,
@@ -704,7 +704,7 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
     let pool = db.store().pool().clone();
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
-    let scope = ScopeContext::tenant(tenant_id);
+    let scope = RlsContext::tenant(tenant_id);
     let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
         pool.clone(),
         scope,

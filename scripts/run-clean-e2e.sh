@@ -302,7 +302,7 @@ export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
 
 run cargo test -p moa-orchestrator --tests --locked -- --test-threads=1
 run cargo test -p moa-orchestrator --lib --locked --features provider-overrides,skill-learning runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
-run cargo test -p moa-orchestrator --test skill_learning_review --locked --features provider-overrides,skill-learning -- --test-threads=1
+run cargo test -p moa-orchestrator --test skill_learning_review_db --locked --features provider-overrides,skill-learning -- --test-threads=1
 run cargo test -p moa-orchestrator --test skill_learning_workflow --locked --features provider-overrides,skill-learning -- --test-threads=1
 run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
 run cargo test -p moa-eval --test golden_eval --locked
