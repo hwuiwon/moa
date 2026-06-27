@@ -3,7 +3,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
 use moa_core::{ExcludedItem, SkillMetadata, TaskStrategySuccessRate};
 
 use crate::pipeline::memory::extract_search_keywords;
@@ -51,25 +50,11 @@ pub(super) fn rank_skills(
     resolution_rates: &HashMap<String, f64>,
     task_strategy_rates: &HashMap<String, TaskStrategySuccessRate>,
 ) -> Vec<RankedSkill> {
-    let max_use_count = skills
-        .iter()
-        .map(|skill| skill.use_count)
-        .max()
-        .unwrap_or(0);
-    let newest = skills.iter().filter_map(|skill| skill.last_used).max();
-    let oldest = skills.iter().filter_map(|skill| skill.last_used).min();
-
     let mut ranked = skills
         .iter()
         .cloned()
         .map(|metadata| {
             let keyword_overlap = keyword_overlap_score(query_keywords, &metadata);
-            let normalized_use_count = if max_use_count == 0 {
-                0.0
-            } else {
-                f64::from(metadata.use_count) / f64::from(max_use_count)
-            };
-            let recency_score = normalized_recency_score(metadata.last_used, oldest, newest);
             let manifest_entry = format_manifest_entry(&metadata, budget);
             let global_rate = resolution_rates
                 .get(&metadata.name)
@@ -85,23 +70,13 @@ pub(super) fn rank_skills(
                 .map(task_rate_weight)
                 .unwrap_or(0.0);
             let score = if task_weight > 0.0 {
-                (0.35 * keyword_overlap)
-                    + (0.30 * task_rate * task_weight)
-                    + (0.15 * global_rate)
-                    + (0.12 * normalized_use_count)
-                    + (0.08 * recency_score)
+                (0.45 * keyword_overlap) + (0.45 * task_rate * task_weight) + (0.10 * global_rate)
             } else if !task_strategy_rates.is_empty() {
-                (0.30 * keyword_overlap)
-                    + (0.25 * global_rate)
-                    + (0.20 * normalized_use_count)
-                    + (0.10 * recency_score)
+                (0.60 * keyword_overlap) + (0.15 * global_rate)
             } else if resolution_rates.contains_key(&metadata.name) {
-                (0.3 * keyword_overlap)
-                    + (0.4 * global_rate)
-                    + (0.2 * normalized_use_count)
-                    + (0.1 * recency_score)
+                (0.45 * keyword_overlap) + (0.55 * global_rate)
             } else {
-                (0.3 * keyword_overlap) + (0.5 * normalized_use_count) + (0.2 * recency_score)
+                keyword_overlap
             };
 
             RankedSkill {
@@ -287,23 +262,6 @@ fn keyword_overlap_score(query_keywords: &[String], metadata: &SkillMetadata) ->
     overlap as f64 / query_keywords.len() as f64
 }
 
-fn normalized_recency_score(
-    last_used: Option<DateTime<Utc>>,
-    oldest: Option<DateTime<Utc>>,
-    newest: Option<DateTime<Utc>>,
-) -> f64 {
-    match (last_used, oldest, newest) {
-        (Some(last_used), Some(oldest), Some(newest)) if newest > oldest => {
-            let total_span = (newest - oldest).num_seconds() as f64;
-            let distance_from_oldest = (last_used - oldest).num_seconds() as f64;
-            (distance_from_oldest / total_span).clamp(0.0, 1.0)
-        }
-        (Some(_), Some(_), Some(_)) => 1.0,
-        (Some(_), _, _) => 1.0,
-        _ => 0.0,
-    }
-}
-
 fn compare_ranked_skills(left: &RankedSkill, right: &RankedSkill) -> Ordering {
     right
         .score
@@ -355,8 +313,6 @@ mod tests {
                 test_skill(
                     &format!("skill-{index:02}"),
                     &format!("Workflow number {index:02}"),
-                    30 - index as u32,
-                    index as i64,
                 )
             })
             .collect::<Vec<_>>();
@@ -390,7 +346,7 @@ mod tests {
 
     #[test]
     fn long_skill_entries_are_truncated_with_ellipsis() {
-        let skill = test_skill("very-long-skill", &"x".repeat(4_000), 1, 0);
+        let skill = test_skill("very-long-skill", &"x".repeat(4_000));
         let budget = ResolvedSkillBudget {
             max_manifest_chars: DEFAULT_MIN_MANIFEST_CHARS,
             max_per_skill_chars: 120,
@@ -406,7 +362,7 @@ mod tests {
     #[test]
     fn manifest_entry_includes_actions_only_when_present() {
         // Pins: artifact-backed skill actions are visible in the compact skill manifest.
-        let mut skill = test_skill("refund-helper", "Refund workflow", 1, 0);
+        let mut skill = test_skill("refund-helper", "Refund workflow");
         let budget = ResolvedSkillBudget {
             max_manifest_chars: DEFAULT_MIN_MANIFEST_CHARS,
             max_per_skill_chars: 512,
@@ -424,9 +380,9 @@ mod tests {
     #[test]
     fn selection_reports_excluded_items_with_reasons() {
         let skills = vec![
-            test_skill("alpha", "Alpha workflow", 10, 0),
-            test_skill("beta", "Beta workflow", 9, 1),
-            test_skill("gamma", "Gamma workflow", 1, 2),
+            test_skill("alpha", "Alpha workflow"),
+            test_skill("beta", "Beta workflow"),
+            test_skill("gamma", "Gamma workflow"),
         ];
         let budget = resolved_budget(
             MANIFEST_PREAMBLE.chars().count() + MANIFEST_FOOTER.chars().count() + 60,
@@ -447,8 +403,8 @@ mod tests {
     #[test]
     fn ranking_prefers_keyword_overlap_then_deterministic_name_tie_breaks() {
         let skills = vec![
-            test_skill("alpha-auth", "Handle auth failures", 5, 0),
-            test_skill("beta-db", "Handle database failures", 5, 0),
+            test_skill("alpha-auth", "Handle auth failures"),
+            test_skill("beta-db", "Handle database failures"),
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
 
@@ -467,8 +423,8 @@ mod tests {
     #[test]
     fn ranking_uses_resolution_rate_when_available() {
         let skills = vec![
-            test_skill("high-use", "General workflow", 100, 0),
-            test_skill("high-resolution", "General workflow", 1, 5),
+            test_skill("high-use", "General workflow"),
+            test_skill("high-resolution", "General workflow"),
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
         let resolution_rates = HashMap::from([
@@ -485,8 +441,8 @@ mod tests {
     fn task_conditioned_skill_ranking_can_beat_higher_global_rate_with_enough_evidence() {
         // Pins: task-specific skill success can outrank a globally better skill when evidence is strong.
         let skills = vec![
-            test_skill("global-winner", "Rust auth workflow", 10, 0),
-            test_skill("task-winner", "Rust auth workflow", 10, 0),
+            test_skill("global-winner", "Rust auth workflow"),
+            test_skill("task-winner", "Rust auth workflow"),
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
         let resolution_rates = HashMap::from([
@@ -523,11 +479,12 @@ mod tests {
     #[test]
     fn emitted_manifest_entries_are_alphabetical_even_when_ranked_input_is_not() {
         let skills = vec![
-            test_skill("zeta", "Zeta workflow", 10, 0),
-            test_skill("alpha", "Alpha workflow", 1, 5),
+            test_skill("zeta", "Zeta workflow"),
+            test_skill("alpha", "Alpha workflow"),
         ];
         let budget = resolved_budget(DEFAULT_MIN_MANIFEST_CHARS);
-        let ranked = rank_skills(&skills, &[], &budget, &HashMap::new(), &HashMap::new());
+        let resolution_rates = HashMap::from([("zeta".to_string(), 1.0)]);
+        let ranked = rank_skills(&skills, &[], &budget, &resolution_rates, &HashMap::new());
         assert_eq!(ranked[0].metadata.name, "zeta");
         assert_eq!(ranked[1].metadata.name, "alpha");
 

@@ -367,8 +367,6 @@ mod tests {
         let skills = skills(vec![(
             "debug-oauth",
             "OAuth refresh-token debugging workflow",
-            3,
-            0,
         )]);
 
         let output = SkillInjector::from_skills(skills)
@@ -408,11 +406,11 @@ mod tests {
     async fn emits_all_skills_alphabetically_when_budget_allows() {
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
         let skills = skills(vec![
-            ("zeta", "Zeta workflow", 1, 2),
-            ("alpha", "Alpha workflow", 10, 0),
-            ("gamma", "Gamma workflow", 5, 1),
-            ("beta", "Beta workflow", 7, 3),
-            ("delta", "Delta workflow", 3, 4),
+            ("zeta", "Zeta workflow"),
+            ("alpha", "Alpha workflow"),
+            ("gamma", "Gamma workflow"),
+            ("beta", "Beta workflow"),
+            ("delta", "Delta workflow"),
         ]);
 
         let output = SkillInjector::from_skills(skills)
@@ -437,8 +435,8 @@ mod tests {
     #[tokio::test]
     async fn identical_query_produces_identical_manifest_output() {
         let static_skills = skills(vec![
-            ("auth", "Handle auth incidents", 9, 0),
-            ("db", "Handle database incidents", 7, 1),
+            ("auth", "Handle auth incidents"),
+            ("db", "Handle database incidents"),
         ]);
 
         let mut first = moa_core::WorkingContext::new(&session(), capabilities(200_000));
@@ -461,9 +459,9 @@ mod tests {
     #[tokio::test]
     async fn different_queries_keep_manifest_identical_when_selected_set_does_not_change() {
         let static_skills = skills(vec![
-            ("auth", "Handle auth incidents", 9, 0),
-            ("db", "Handle database incidents", 7, 1),
-            ("deploy", "Handle deploy incidents", 5, 2),
+            ("auth", "Handle auth incidents"),
+            ("db", "Handle database incidents"),
+            ("deploy", "Handle deploy incidents"),
         ]);
 
         let mut first = moa_core::WorkingContext::new(&session(), capabilities(200_000));
@@ -486,9 +484,9 @@ mod tests {
     #[tokio::test]
     async fn process_uses_budget_override_and_reports_excluded_skills() {
         let static_skills = skills(vec![
-            ("alpha", "Alpha workflow", 10, 0),
-            ("beta", "Beta workflow", 9, 1),
-            ("gamma", "Gamma workflow", 8, 2),
+            ("alpha", "Alpha workflow"),
+            ("beta", "Beta workflow"),
+            ("gamma", "Gamma workflow"),
         ]);
         let mut ctx = moa_core::WorkingContext::new(&session(), capabilities(200_000));
 
@@ -516,11 +514,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinned_skill_policy_selects_pinned_skill_before_higher_ranked_skill() {
+    async fn pinned_skill_policy_selects_pinned_skill_before_ranked_fill() {
         // Pins: configured-agent pinned skills reserve slots before relevance ranking fills budget.
         let static_skills = skills(vec![
-            ("popular", "Popular workflow", 100, 0),
-            ("pinned", "Pinned workflow", 0, 1),
+            ("popular", "Popular workflow"),
+            ("pinned", "Pinned workflow"),
         ]);
         let mut session = session();
         session.agent_context = Some(agent_context_with_skill_policy(AgentSkillPolicy {

@@ -56,7 +56,7 @@ before diving into the numbered specs.
 | 10 | Tenants accumulate learning entries and outcome aggregates without requiring durable session routing labels. | Implemented |
 | 11 | Skill ranking uses tenant-level resolution outcomes plus dynamic query relevance. | Implemented |
 | 12 | Learning is recorded in a bitemporal append-only `learning_log` with provenance, confidence, batch IDs, and invalidation via `valid_to`. | Implemented |
-| 13 | Skills are ranked with a mix of keyword relevance, resolution rate, use count, and recency, with prompt-budget controls. | Implemented |
+| 13 | Skills are ranked with a mix of keyword relevance, tenant/task resolution rates, and prompt-budget controls. | Implemented |
 | 14 | REST/gateway and API automation surfaces share the same hosted runtime model. | Implemented |
 | 15 | Lineage, scoring, cold export, and compliance audit tiers are first-class enterprise evidence planes, not debugging-only logs. | Implemented |
 | 16 | Local development exercises the same hosted API surface against the Restate-backed orchestrator, not a separate personal-agent product. | Implemented |

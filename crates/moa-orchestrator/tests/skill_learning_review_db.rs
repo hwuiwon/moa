@@ -575,11 +575,7 @@ mod skill_learning_review {
          allowed-tools: bash file_read\n\
          metadata:\n\
            moa-version: \"1.0\"\n\
-           moa-one-liner: \"{description}\"\n\
            moa-tags: \"review, skill\"\n\
-           moa-auto-generated: \"true\"\n\
-           moa-use-count: \"0\"\n\
-           moa-success-rate: \"1.0\"\n\
            moa-estimated-tokens: \"300\"\n\
          ---\n\n\
          # {skill_name}\n\n\

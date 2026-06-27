@@ -23,7 +23,6 @@ allowed-tools:
   - Bash(git:*)
 metadata:
   moa-tags: "providers, llm, embeddings, hands, mcp, platform-adapters, integrations"
-  moa-one-liner: "Workflow for adding LLM, embedding, hand, MCP, and platform-adapter provider implementations"
 ---
 
 # Provider Integration

@@ -183,7 +183,7 @@ async fn distillation_below_similarity_threshold_creates_new_skill() {
 }
 
 #[tokio::test]
-async fn distilled_skill_includes_lineage_pointer_to_originating_session() {
+async fn distillation_candidate_includes_lineage_pointer_to_originating_session() {
     let Some(test_db) = configured_test_db().await else {
         return;
     };
@@ -192,7 +192,7 @@ async fn distilled_skill_includes_lineage_pointer_to_originating_session() {
     let proposed = skill_markdown(
         "auth-lineage-distilled",
         "Capture lineage for distilled auth sessions",
-        "Keep a reproducible pointer to the source session.",
+        "Keep the reusable auth workflow steps concise.",
         "1.0",
     );
 
@@ -204,7 +204,7 @@ async fn distilled_skill_includes_lineage_pointer_to_originating_session() {
         Some(learning_store(&test_db)),
     )
     .await
-    .expect("distill with lineage");
+    .expect("distill candidate with lineage");
 
     let DistillationOutcome::NewSkillProposed { proposal } = outcome else {
         panic!("expected lineage proposal");

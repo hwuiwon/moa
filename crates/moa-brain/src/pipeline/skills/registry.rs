@@ -284,10 +284,6 @@ fn skill_metadata_from_row(row: sqlx::postgres::PgRow) -> Result<SkillMetadata> 
         allowed_tools: skill.allowed_tools,
         actions,
         estimated_tokens: estimate_tokens(&source_text).max(1),
-        use_count: 0,
-        last_used: None,
-        success_rate: 1.0,
-        auto_generated: false,
     })
 }
 

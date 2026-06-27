@@ -75,7 +75,7 @@ Current learning types include:
 Skills are stored through the skill registry, while ranking uses tenant-level outcomes. `skill_resolution_rates` aggregates resolved, partial, and failed segments by tenant and skill name.
 
 `SkillInjector` combines those rates with task-conditioned strategy rates,
-query relevance, use count, and recency to decide which skill metadata fits
+and query relevance to decide which skill metadata fits
 inside the prompt budget. Task-conditioned rates are keyed by task fingerprint,
 not by a fixed intent taxonomy.
 

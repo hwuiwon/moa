@@ -43,7 +43,7 @@ All per-turn runtime state belongs in the dynamic tail:
   altering the stable prefix.
 - `SkillInjector` injects a compact selected-skill manifest after query
   rewriting. The selection can depend on query keywords, tenant-level learning,
-  use count, and recency, so it is not part of the stable prefix.
+  and task-conditioned outcomes, so it is not part of the stable prefix.
 - `DigestProcessor` injects standing user and tenant-visible memory after query
   rewriting and skill selection.
 - `MemoryRetriever` injects relevant memory after query rewriting and before

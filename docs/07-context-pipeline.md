@@ -95,8 +95,7 @@ revisions and ranks skills with:
 
 - keyword overlap against the current query
 - tenant-level skill resolution rates from `skill_resolution_rates`
-- normalized use count
-- recency
+- task-conditioned strategy success from `task_strategy_success_rates`
 
 When multiple visible skills share a name, the latest published tenant row wins.
 There is no contact-scoped skill inheritance, and tenant-learned skills stay
@@ -115,9 +114,9 @@ Artifact-backed skills can expose named actions. When present, action names are
 included in the compact manifest so the model can choose a linked capability
 without loading the full package body.
 
-The selected manifest is not part of the stable prefix because query keywords,
-tenant-level learning, and recency can legitimately change which skills are
-shown for one turn.
+The selected manifest is not part of the stable prefix because query keywords
+and tenant-level learning can legitimately change which skills are shown for one
+turn.
 
 ## Memory Retrieval
 

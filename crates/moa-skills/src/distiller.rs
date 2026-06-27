@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_core::{
     AttributionEffect, AttributionSubjectType, CompletionRequest, ContextMessage, Event,
     EventRecord, ExperienceAttribution, ExperienceRecord, MoaConfig, ModelTask, Result,
@@ -15,9 +14,7 @@ use moa_session::{PostgresSessionStore, create_session_store};
 use crate::format::{
     SkillDocument, build_skill_path, parse_skill_markdown, skill_metadata_from_document,
 };
-use crate::improver::{
-    ImprovementResult, format_events_for_learning, normalize_llm_markdown, record_successful_use,
-};
+use crate::improver::{ImprovementResult, format_events_for_learning, normalize_llm_markdown};
 use crate::package::SkillPackage;
 use crate::proposals::{
     SkillDraftProposal, SkillProposalOperation, SkillProposalSource, store_skill_draft_proposal,
@@ -200,8 +197,7 @@ pub async fn distill_skill_with_learning(
         .collect()
         .await?;
     let skill_markdown = normalize_llm_markdown(&response.text);
-    let mut skill = parse_skill_markdown(skill_markdown)?;
-    normalize_new_skill(session, &mut skill);
+    let skill = parse_skill_markdown(skill_markdown)?;
     let path = build_skill_path(&skill.frontmatter.name);
     let markdown = render_skill_for_registry(&skill)?;
     let metadata = skill_metadata_from_document(path, &skill);
@@ -285,8 +281,7 @@ pub async fn distill_skill_from_experience_with_learning(
         .collect()
         .await?;
     let skill_markdown = normalize_llm_markdown(&response.text);
-    let mut skill = parse_skill_markdown(skill_markdown)?;
-    normalize_new_skill(session, &mut skill);
+    let skill = parse_skill_markdown(skill_markdown)?;
     let path = build_skill_path(&skill.frontmatter.name);
     let markdown = render_skill_for_registry(&skill)?;
     let metadata = skill_metadata_from_document(path.clone(), &skill);
@@ -342,7 +337,7 @@ Output only a complete SKILL.md document using the Agent Skills format from agen
 Use spec-compatible top-level frontmatter fields such as `name`, `description`, optional \
 `compatibility`, optional `allowed-tools`, and a `metadata` map for project-specific bookkeeping.
 Store project-specific fields inside `metadata` using `moa-` prefixes, including at least \
-`moa-version`, `moa-one-liner`, `moa-tags`, and `moa-estimated-tokens`.
+`moa-version`, `moa-tags`, and `moa-estimated-tokens`.
 The skill should include when-to-use guidance, a numbered procedure, pitfalls, and verification steps.
 Learn only durable workflow structure. Do not copy secrets, transient IDs, or one-off paths unless \
 the path is essential to the workflow.";
@@ -514,22 +509,6 @@ fn tokenize(text: &str) -> HashSet<String> {
         .filter(|token| token.len() >= 3)
         .map(str::to_ascii_lowercase)
         .collect()
-}
-
-fn normalize_new_skill(session: &SessionMeta, skill: &mut SkillDocument) {
-    let now = Utc::now();
-    skill.frontmatter.set_auto_generated(true);
-    skill
-        .frontmatter
-        .set_source_session(Some(session.id.to_string()));
-    skill
-        .frontmatter
-        .set_derived_from_session(Some(session.id.to_string()));
-    skill.frontmatter.set_updated(now);
-    record_successful_use(skill, now);
-    if skill.frontmatter.use_count() == 0 {
-        skill.frontmatter.set_use_count(1);
-    }
 }
 
 #[cfg(test)]

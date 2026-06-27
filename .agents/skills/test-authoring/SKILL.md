@@ -23,7 +23,6 @@ allowed-tools:
   - Bash(git:*)
 metadata:
   moa-tags: "testing, test-authoring, unit-test, integration-test, snapshot, live-test, mutation-verify, naming, parallel-safe"
-  moa-one-liner: "Workflow for authoring effective Rust tests in MOA, with naming, parallel-safety, mutation-verification, and self-review"
 ---
 
 # Test Authoring

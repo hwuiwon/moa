@@ -15,7 +15,25 @@ MOA uses Agent Skills-style packages:
     assets/
 ```
 
-`SKILL.md` contains YAML frontmatter plus markdown instructions. MOA-specific metadata is stored under `metadata` with `moa-` keys such as source session, version, estimated tokens, use count, last used, and success signals.
+`SKILL.md` contains YAML frontmatter plus markdown instructions. MOA only
+interprets package-descriptive frontmatter:
+
+| Field | Purpose |
+|---|---|
+| `name` | Stable package name and artifact name |
+| `description` | Human-readable summary used for search and compact manifests |
+| `license`, `compatibility` | Agent Skills-compatible descriptive metadata |
+| `allowed-tools` | Tool expectations copied into the canonical skill definition when `skill.moa.yaml` is absent |
+| `metadata.moa-version` | Human-authored package semantic version |
+| `metadata.moa-tags` | Search and ranking tags |
+| `metadata.moa-estimated-tokens` | Optional deterministic override for instruction token estimates |
+
+Runtime provenance and quality signals such as source session, use count, last
+used time, success rate, brain affinity, generated/improved flags, and rollback
+counts are not `SKILL.md` fields. They belong to artifact revisions, learning
+candidates, `learning_log`, regression evidence, and tenant-scoped analytics
+views. Imports reject unsupported `metadata.moa-*` keys so stale runtime fields
+do not re-enter package revisions.
 
 `SKILL.md` is required. Supporting files are optional, but when present they
 are part of the same package revision and may include scripts, references,
@@ -80,7 +98,7 @@ hand under `.moa/skills/<skill>/...` before the first hand tool executes.
 
 | Tier | Loaded into context | When |
 |---|---|---|
-| Metadata | name, description, tags, allowed tools, action names, estimates | stage 4 skill manifest |
+| Metadata | name, description, tags, action names, estimates | stage 5 skill manifest |
 | `SKILL.md` | full instructions | read from `.moa/skills/<skill>/SKILL.md` when the agent activates the skill |
 | Resources | scripts, references, assets | only when needed for execution |
 
@@ -93,8 +111,6 @@ The skill manifest is budgeted and sorted deterministically for cache stability.
 - keyword overlap with the current task
 - task-conditioned strategy success for the current task fingerprint
 - tenant-level resolution rate for the skill
-- normalized use count
-- recency
 
 Resolution-rate data comes from the `skill_resolution_rates` materialized view over `task_segments`. This means a skill that often leads to resolved tasks for a tenant can outrank a merely popular skill.
 Task-conditioned data comes from `task_strategy_success_rates`, which groups

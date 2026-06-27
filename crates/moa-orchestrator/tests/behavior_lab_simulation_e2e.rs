@@ -1213,8 +1213,6 @@ description: "Resolve damaged or spilled food delivery support requests from cle
 allowed-tools: file_read
 metadata:
   moa-tags: "support,delivery,refund,replacement,food"
-  moa-use-count: "6"
-  moa-success-rate: "0.96"
 ---
 
 # Delivery Support

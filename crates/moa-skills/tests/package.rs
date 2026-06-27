@@ -8,8 +8,6 @@ description: "Skill package fixture"
 allowed-tools: bash file_read
 metadata:
   moa-tags: "package, fixture"
-  moa-use-count: "3"
-  moa-success-rate: "0.75"
   moa-estimated-tokens: "120"
 ---
 
@@ -51,8 +49,6 @@ fn validates_required_skill_md_and_deterministic_file_manifest() {
     assert_eq!(first.package_hash, second.package_hash);
     assert_eq!(first.manifest.skill_md_estimated_tokens, 120);
     assert_eq!(first.manifest.allowed_tools, vec!["bash", "file_read"]);
-    assert_eq!(first.manifest.use_count, 3);
-    assert_eq!(first.manifest.success_rate, 0.75);
     assert!(first.manifest.files[1].executable);
 }
 

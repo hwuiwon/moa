@@ -1,22 +1,11 @@
 //! Shared fixtures for skill-injection unit tests.
 
-use chrono::{TimeZone, Utc};
 use moa_core::{
     Channel, ModelCapabilities, ModelId, SessionId, SessionMeta, SkillMetadata, TenantId,
     TokenPricing, ToolCallFormat,
 };
 
 use super::tier1_metadata::ResolvedSkillBudget;
-
-pub(super) fn fixed_time() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 4, 16, 12, 0, 0)
-        .single()
-        .expect("fixed skill timestamp should be valid")
-}
-
-pub(super) fn older_time(days: i64) -> chrono::DateTime<Utc> {
-    fixed_time() - chrono::Duration::days(days)
-}
 
 pub(super) fn capabilities(context_window: usize) -> ModelCapabilities {
     ModelCapabilities {
@@ -57,12 +46,7 @@ pub(super) fn resolved_budget(max_manifest_chars: usize) -> ResolvedSkillBudget 
     }
 }
 
-pub(super) fn test_skill(
-    name: &str,
-    description: &str,
-    use_count: u32,
-    last_used_days_ago: i64,
-) -> SkillMetadata {
+pub(super) fn test_skill(name: &str, description: &str) -> SkillMetadata {
     SkillMetadata {
         artifact_revision_uid: None,
         path: format!(".moa/skills/{name}/SKILL.md"),
@@ -72,16 +56,12 @@ pub(super) fn test_skill(
         allowed_tools: vec!["bash".to_string()],
         actions: Vec::new(),
         estimated_tokens: 1_200,
-        use_count,
-        last_used: Some(older_time(last_used_days_ago)),
-        success_rate: 0.9,
-        auto_generated: false,
     }
 }
 
-pub(super) fn skills(entries: Vec<(&str, &str, u32, i64)>) -> Vec<SkillMetadata> {
+pub(super) fn skills(entries: Vec<(&str, &str)>) -> Vec<SkillMetadata> {
     entries
         .into_iter()
-        .map(|(name, description, use_count, days)| test_skill(name, description, use_count, days))
+        .map(|(name, description)| test_skill(name, description))
         .collect()
 }

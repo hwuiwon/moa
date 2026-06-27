@@ -76,10 +76,6 @@ impl Skill {
                 .map(|action| action.id.clone())
                 .collect(),
             estimated_tokens: self.manifest.skill_md_estimated_tokens.max(1),
-            use_count: self.manifest.use_count,
-            last_used: self.manifest.last_used,
-            success_rate: self.manifest.success_rate,
-            auto_generated: self.manifest.auto_generated,
         })
     }
 }
@@ -158,12 +154,7 @@ impl SkillRegistry {
             .iter()
             .map(Skill::metadata)
             .collect::<Result<Vec<_>>>()?;
-        metadata.sort_by(|left, right| {
-            right
-                .use_count
-                .cmp(&left.use_count)
-                .then_with(|| left.name.cmp(&right.name))
-        });
+        metadata.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(metadata)
     }
 

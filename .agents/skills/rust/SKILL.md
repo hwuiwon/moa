@@ -22,7 +22,6 @@ allowed-tools:
   - Bash(git:*)
 metadata:
   moa-tags: "rust, conventions, code-quality, clippy, async, errors, doc-comments"
-  moa-one-liner: "Rust implementation and review workflow for the MOA workspace"
 ---
 
 # Rust

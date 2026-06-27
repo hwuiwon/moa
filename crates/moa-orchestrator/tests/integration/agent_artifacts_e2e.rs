@@ -839,8 +839,6 @@ description: "Classify damaged food delivery complaints and decide whether refun
 allowed-tools: file_read
 metadata:
   moa-tags: "support,refund,food-delivery,damaged-order,evidence,credit,replacement"
-  moa-use-count: "5"
-  moa-success-rate: "0.95"
 ---
 
 # Refund Triage

@@ -427,8 +427,6 @@ description: "Resolve damaged or spilled food delivery support requests from cle
 allowed-tools: file_read
 metadata:
   moa-tags: "support,delivery,refund,replacement,food"
-  moa-use-count: "4"
-  moa-success-rate: "0.94"
 ---
 
 # Delivery Support

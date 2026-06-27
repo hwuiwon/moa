@@ -664,7 +664,6 @@ async fn seed_experience_learning_skills(
         "generic-debugger",
         "General troubleshooting workflow for broad software incidents.",
         &["general"],
-        500,
     )
     .await?;
     insert_eval_skill(
@@ -673,7 +672,6 @@ async fn seed_experience_learning_skills(
         "api-contract-repair",
         "Rust auth API contract repair workflow for cargo test verification.",
         &["api-contract", "rust-auth"],
-        1,
     )
     .await?;
     Ok(())
@@ -705,7 +703,6 @@ async fn seed_learning_matrix_skills(
         "general-troubleshooting-runbook",
         "Very broad troubleshooting workflow for software work, debugging, validation, config updates, code edits, and documentation cleanup.",
         &["general", "debug", "validator"],
-        1_000,
     )
     .await?;
     insert_eval_skill(
@@ -717,7 +714,6 @@ async fn seed_learning_matrix_skills(
             matrix_case.category
         ),
         &[matrix_case.category.as_str(), "general", "validator"],
-        750,
     )
     .await?;
     insert_eval_skill(
@@ -726,7 +722,6 @@ async fn seed_learning_matrix_skills(
         &matrix_case.expected_skill,
         &matrix_case.skill_description,
         &matrix_case.tags,
-        1,
     )
     .await?;
     Ok(())
@@ -745,14 +740,13 @@ async fn insert_eval_skill<T: AsRef<str>>(
     name: &str,
     description: &str,
     tags: &[T],
-    use_count: u32,
 ) -> TestResult {
     let tag_values = tags
         .iter()
         .map(|tag| tag.as_ref().to_string())
         .collect::<Vec<_>>();
     let skill_md = format!(
-        "---\nname: {name}\ndescription: >-\n  {}\nallowed-tools: file_write\nmetadata:\n  moa-tags: \"{}\"\n  moa-use-count: \"{use_count}\"\n  moa-success-rate: \"1.0\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
+        "---\nname: {name}\ndescription: >-\n  {}\nallowed-tools: file_write\nmetadata:\n  moa-tags: \"{}\"\n  moa-estimated-tokens: \"24\"\n---\n\n{description}\n",
         indent_frontmatter_block(description),
         tag_values.join(", ")
     );

@@ -47,17 +47,7 @@ compatibility: "Requires local repo access"
 allowed-tools: bash file_read file_search
 metadata:
   moa-version: "1.0"
-  moa-one-liner: "Repeatable OAuth refresh-token debugging workflow"
   moa-tags: "oauth, auth, debugging"
-  moa-created: "2026-04-09T14:30:00Z"
-  moa-updated: "2026-04-09T16:00:00Z"
-  moa-auto-generated: "true"
-  moa-source-session: "session-1"
-  moa-use-count: "0"
-  moa-last-used: "2026-04-09T16:00:00Z"
-  moa-success-rate: "1.0"
-  moa-brain-affinity: "coding"
-  moa-sandbox-tier: "container"
   moa-estimated-tokens: "900"
 ---
 
@@ -75,17 +65,7 @@ compatibility: "Requires local repo access"
 allowed-tools: bash file_read file_search file_write
 metadata:
   moa-version: "1.0"
-  moa-one-liner: "Repeatable OAuth refresh-token debugging workflow with regression checks"
   moa-tags: "oauth, auth, debugging"
-  moa-created: "2026-04-09T14:30:00Z"
-  moa-updated: "2026-04-09T16:30:00Z"
-  moa-auto-generated: "true"
-  moa-source-session: "session-2"
-  moa-use-count: "0"
-  moa-last-used: "2026-04-09T16:30:00Z"
-  moa-success-rate: "1.0"
-  moa-brain-affinity: "coding"
-  moa-sandbox-tier: "container"
   moa-estimated-tokens: "950"
 ---
 

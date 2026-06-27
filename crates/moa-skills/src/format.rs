@@ -1,34 +1,15 @@
 //! Agent Skill markdown parsing and rendering utilities.
 
-use std::collections::HashMap;
-
-#[cfg(feature = "skill-learning")]
-use chrono::SecondsFormat;
-use chrono::{DateTime, Utc};
 use moa_core::{MoaError, Result, SkillMetadata};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use tracing::warn;
 
 const FRONTMATTER_DELIMITER: &str = "---";
 const DEFAULT_VERSION: &str = "1.0";
-const DEFAULT_SUCCESS_RATE: f32 = 1.0;
 const META_VERSION: &str = "moa-version";
-const META_ONE_LINER: &str = "moa-one-liner";
 const META_TAGS: &str = "moa-tags";
-const META_CREATED: &str = "moa-created";
-const META_UPDATED: &str = "moa-updated";
-const META_AUTO_GENERATED: &str = "moa-auto-generated";
-#[cfg(feature = "skill-learning")]
-const META_SOURCE_SESSION: &str = "moa-source-session";
-#[cfg(feature = "skill-learning")]
-const META_DERIVED_FROM_SESSION: &str = "derived-from-session";
-const META_USE_COUNT: &str = "moa-use-count";
-const META_LAST_USED: &str = "moa-last-used";
-const META_SUCCESS_RATE: &str = "moa-success-rate";
 const META_ESTIMATED_TOKENS: &str = "moa-estimated-tokens";
-#[cfg(feature = "skill-learning")]
-const META_IMPROVED_FROM: &str = "moa-improved-from";
-const META_REGRESSION_COUNT: &str = "moa-regression-count";
 
 /// Fully parsed Agent Skill document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,113 +59,15 @@ impl SkillFrontmatter {
         self.insert_metadata(META_VERSION, value.into());
     }
 
-    /// Returns the concise one-line summary used in MOA UIs.
-    pub fn one_liner(&self) -> String {
-        self.metadata_string(META_ONE_LINER)
-            .unwrap_or_else(|| self.description.clone())
-    }
-
     /// Returns the normalized skill tags.
     pub fn tags(&self) -> Vec<String> {
         metadata_csv(&self.metadata, META_TAGS)
-    }
-
-    /// Returns the creation timestamp tracked by MOA.
-    pub fn created(&self) -> DateTime<Utc> {
-        self.metadata_timestamp(META_CREATED)
-            .unwrap_or_else(Utc::now)
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_created(&mut self, value: DateTime<Utc>) {
-        self.insert_metadata(META_CREATED, format_timestamp(value));
-    }
-
-    /// Returns the last-updated timestamp tracked by MOA.
-    pub fn updated(&self) -> DateTime<Utc> {
-        self.metadata_timestamp(META_UPDATED)
-            .unwrap_or_else(|| self.created())
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_updated(&mut self, value: DateTime<Utc>) {
-        self.insert_metadata(META_UPDATED, format_timestamp(value));
-    }
-
-    /// Returns whether MOA auto-generated the skill.
-    pub fn auto_generated(&self) -> bool {
-        self.metadata_bool(META_AUTO_GENERATED).unwrap_or(false)
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_auto_generated(&mut self, value: bool) {
-        self.insert_metadata(META_AUTO_GENERATED, value.to_string());
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_source_session(&mut self, value: Option<String>) {
-        self.set_optional_metadata(META_SOURCE_SESSION, value);
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_derived_from_session(&mut self, value: Option<String>) {
-        self.set_optional_metadata(META_DERIVED_FROM_SESSION, value);
-    }
-
-    /// Returns how many times MOA has used this skill.
-    pub fn use_count(&self) -> u32 {
-        self.metadata_u32(META_USE_COUNT).unwrap_or(0)
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_use_count(&mut self, value: u32) {
-        self.insert_metadata(META_USE_COUNT, value.to_string());
-    }
-
-    /// Returns the last time MOA used this skill, when known.
-    pub fn last_used(&self) -> Option<DateTime<Utc>> {
-        self.metadata_timestamp(META_LAST_USED)
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_last_used(&mut self, value: Option<DateTime<Utc>>) {
-        self.set_optional_metadata(META_LAST_USED, value.map(format_timestamp));
-    }
-
-    /// Returns the tracked success rate for this skill.
-    pub fn success_rate(&self) -> f32 {
-        self.metadata_f32(META_SUCCESS_RATE)
-            .unwrap_or(DEFAULT_SUCCESS_RATE)
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_success_rate(&mut self, value: f32) {
-        self.insert_metadata(META_SUCCESS_RATE, value.to_string());
     }
 
     /// Returns the estimated token cost of loading the full skill body.
     pub fn estimated_tokens(&self, body: &str) -> usize {
         self.metadata_usize(META_ESTIMATED_TOKENS)
             .unwrap_or_else(|| estimate_skill_tokens(body))
-    }
-
-    #[cfg(feature = "skill-learning")]
-    pub(crate) fn set_improved_from(&mut self, value: Option<String>) {
-        self.set_optional_metadata(META_IMPROVED_FROM, value);
-    }
-
-    /// Returns how many candidate improvements were rolled back for this skill.
-    pub fn regression_count(&self) -> u32 {
-        self.metadata_u32(META_REGRESSION_COUNT).unwrap_or(0)
-    }
-
-    /// Returns one raw metadata value by key.
-    pub fn metadata_value(&self, key: &str) -> Option<&str> {
-        self.metadata
-            .get(key)
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
     }
 
     fn metadata_string(&self, key: &str) -> Option<String> {
@@ -196,44 +79,14 @@ impl SkillFrontmatter {
             .map(ToOwned::to_owned)
     }
 
-    pub(crate) fn metadata_timestamp(&self, key: &str) -> Option<DateTime<Utc>> {
-        self.metadata_string(key)
-            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-            .map(|value| value.with_timezone(&Utc))
-    }
-
-    pub(crate) fn metadata_bool(&self, key: &str) -> Option<bool> {
-        self.metadata_string(key)
-            .and_then(|value| value.parse::<bool>().ok())
-    }
-
-    pub(crate) fn metadata_u32(&self, key: &str) -> Option<u32> {
-        self.metadata_string(key)
-            .and_then(|value| value.parse::<u32>().ok())
-    }
-
     pub(crate) fn metadata_usize(&self, key: &str) -> Option<usize> {
         self.metadata_string(key)
             .and_then(|value| value.parse::<usize>().ok())
     }
 
-    pub(crate) fn metadata_f32(&self, key: &str) -> Option<f32> {
-        self.metadata_string(key)
-            .and_then(|value| value.parse::<f32>().ok())
-    }
-
     #[cfg(feature = "skill-learning")]
     fn insert_metadata(&mut self, key: &str, value: String) {
         self.metadata.insert(key.to_string(), value);
-    }
-
-    #[cfg(feature = "skill-learning")]
-    fn set_optional_metadata(&mut self, key: &str, value: Option<String>) {
-        if let Some(value) = value {
-            self.insert_metadata(key, value);
-        } else {
-            self.metadata.remove(key);
-        }
     }
 }
 
@@ -272,10 +125,6 @@ pub fn skill_metadata_from_document(path: String, skill: &SkillDocument) -> Skil
         allowed_tools: skill.frontmatter.allowed_tools.clone(),
         actions: Vec::new(),
         estimated_tokens: skill.frontmatter.estimated_tokens(&skill.body),
-        use_count: skill.frontmatter.use_count(),
-        last_used: skill.frontmatter.last_used(),
-        success_rate: skill.frontmatter.success_rate(),
-        auto_generated: skill.frontmatter.auto_generated(),
     }
 }
 
@@ -342,27 +191,23 @@ fn validate_skill_document(skill: &SkillDocument) -> Result<()> {
         );
     }
 
+    for key in skill.frontmatter.metadata.keys() {
+        if key.starts_with("moa-") && !is_supported_moa_metadata_key(key) {
+            return Err(MoaError::ValidationError(format!(
+                "unsupported MOA skill metadata key `{key}`"
+            )));
+        }
+    }
+
     if skill.frontmatter.version().trim().is_empty() {
         return Err(MoaError::ValidationError(
             "skill version metadata must not be empty".to_string(),
         ));
     }
 
-    if skill.frontmatter.one_liner().trim().is_empty() {
-        return Err(MoaError::ValidationError(
-            "skill summary metadata must not be empty".to_string(),
-        ));
-    }
-
     if skill.frontmatter.estimated_tokens(&skill.body) == 0 {
         return Err(MoaError::ValidationError(
             "skill frontmatter `moa-estimated-tokens` must be greater than zero".to_string(),
-        ));
-    }
-
-    if !(0.0..=1.0).contains(&skill.frontmatter.success_rate()) {
-        return Err(MoaError::ValidationError(
-            "skill `success_rate` must be between 0.0 and 1.0".to_string(),
         ));
     }
 
@@ -373,9 +218,8 @@ fn estimate_skill_tokens(body: &str) -> usize {
     body.split_whitespace().count().max(1)
 }
 
-#[cfg(feature = "skill-learning")]
-fn format_timestamp(value: DateTime<Utc>) -> String {
-    value.to_rfc3339_opts(SecondsFormat::Secs, true)
+fn is_supported_moa_metadata_key(key: &str) -> bool {
+    matches!(key, META_VERSION | META_TAGS | META_ESTIMATED_TOKENS)
 }
 
 fn metadata_csv(metadata: &HashMap<String, String>, key: &str) -> Vec<String> {
@@ -436,17 +280,7 @@ compatibility: "Requires flyctl auth and repo write access"
 allowed-tools: bash file_read
 metadata:
   moa-version: "1.2"
-  moa-one-liner: "Fly.io deploy workflow with health checks"
   moa-tags: "deployment, fly, devops"
-  moa-created: "2026-04-09T14:30:00Z"
-  moa-updated: "2026-04-09T16:00:00Z"
-  moa-auto-generated: "true"
-  moa-source-session: "abc123"
-  moa-use-count: "7"
-  moa-last-used: "2026-04-09T16:00:00Z"
-  moa-success-rate: "0.86"
-  moa-brain-affinity: "devops"
-  moa-sandbox-tier: "container"
   moa-estimated-tokens: "1200"
 ---
 
@@ -460,10 +294,6 @@ Run the deploy flow.
         let skill = parse_skill_markdown(VALID_SKILL).unwrap();
 
         assert_eq!(skill.frontmatter.name, "deploy-to-fly");
-        assert_eq!(
-            skill.frontmatter.one_liner(),
-            "Fly.io deploy workflow with health checks"
-        );
         assert_eq!(
             skill.frontmatter.tags(),
             vec!["deployment", "fly", "devops"]
@@ -527,10 +357,6 @@ description: "Minimal Agent Skills document"
         let skill = parse_skill_markdown(minimal).unwrap();
 
         assert_eq!(skill.frontmatter.version(), "1.0");
-        assert_eq!(
-            skill.frontmatter.one_liner(),
-            "Minimal Agent Skills document"
-        );
         assert!(skill.frontmatter.tags().is_empty());
         assert!(skill.frontmatter.allowed_tools.is_empty());
         assert!(skill.frontmatter.estimated_tokens(&skill.body) > 0);

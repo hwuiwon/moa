@@ -411,13 +411,7 @@ fn skill_markdown(name: &str, description: &str, body: &str) -> String {
          allowed-tools: bash file_search file_read\n\
          metadata:\n\
            moa-version: \"1.0\"\n\
-           moa-one-liner: \"{description}\"\n\
            moa-tags: \"rust, workflow\"\n\
-           moa-created: \"2026-06-18T00:00:00Z\"\n\
-           moa-updated: \"2026-06-18T00:00:00Z\"\n\
-           moa-auto-generated: \"true\"\n\
-           moa-use-count: \"0\"\n\
-           moa-success-rate: \"1.0\"\n\
            moa-estimated-tokens: \"300\"\n\
          ---\n\n\
          # {name}\n\n\

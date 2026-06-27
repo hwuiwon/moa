@@ -23,7 +23,6 @@ allowed-tools:
   - Bash(git:*)
 metadata:
   moa-tags: "memory-pack, graph-memory, migrations, retrieval, ingestion, rls, pgvector, age"
-  moa-one-liner: "Implementation workflow for sequence/memory-pack graph-memory steps"
 ---
 
 # Memory Pack

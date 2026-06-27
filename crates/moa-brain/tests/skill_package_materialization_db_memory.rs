@@ -467,7 +467,6 @@ description: "DB-backed package materialization fixture"
 allowed-tools: file_read bash
 metadata:
   moa-tags: "package, materialization"
-  moa-use-count: "10"
   moa-estimated-tokens: "80"
 ---
 

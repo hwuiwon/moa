@@ -19,7 +19,6 @@ allowed-tools:
   - Read
 metadata:
   moa-tags: "validation, regression, release, orchestrator, provider, restate"
-  moa-one-liner: "Certification workflow for MOA changes, deterministic gates first and live checks where needed"
 ---
 
 # Certify

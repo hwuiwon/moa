@@ -19,7 +19,6 @@ allowed-tools:
   - Read
 metadata:
   moa-tags: "debugging, tracing, observability, restate, replay, analytics"
-  moa-one-liner: "Runtime forensics workflow for reconstructing MOA failures from events, traces, and analytics"
 ---
 
 # Runtime Forensics

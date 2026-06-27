@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use moa_core::{
     ActionRuleScope, CompletionRequest, ContextMessage, Event, EventRecord, MoaConfig, ModelTask,
     Result, SessionMeta, SkillMetadata,
@@ -145,8 +144,6 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
         .collect()
         .await?;
     let updated_text = normalize_llm_markdown(&response.text);
-    let now = Utc::now();
-
     if updated_text.trim() == "UNCHANGED" {
         return Ok(ImprovementResult::Unchanged {
             metadata: skill_metadata_from_document(existing.path.clone(), &current),
@@ -160,24 +157,10 @@ pub(crate) async fn improve_skill_with_learning_for_sources(
             reason: "skill improvement changed the target skill name".to_string(),
         });
     }
-    improved
-        .frontmatter
-        .set_created(current.frontmatter.created());
-    improved.frontmatter.set_updated(now);
-    improved
-        .frontmatter
-        .set_auto_generated(current.frontmatter.auto_generated());
-    improved
-        .frontmatter
-        .set_source_session(Some(session.id.to_string()));
-    improved
-        .frontmatter
-        .set_improved_from(Some(previous_version.clone()));
     let breaking_change = skill_signature_changed(&current, &improved);
     improved
         .frontmatter
         .set_version(bump_version_for_change(&previous_version, breaking_change));
-    record_successful_use_with_baseline(&mut improved, &current, now);
 
     let candidate_markdown = render_skill_markdown(&improved)?;
     let metadata = skill_metadata_from_document(existing.path.clone(), &improved);
@@ -238,39 +221,6 @@ pub(crate) fn normalize_llm_markdown(text: &str) -> &str {
     trimmed
 }
 
-pub(crate) fn record_successful_use(skill: &mut SkillDocument, now: chrono::DateTime<Utc>) {
-    let previous_uses = skill.frontmatter.use_count();
-    let previous_success_rate = skill.frontmatter.success_rate();
-    let next_uses = previous_uses.saturating_add(1);
-    skill.frontmatter.set_use_count(next_uses);
-    skill.frontmatter.set_success_rate(blended_success_rate(
-        previous_uses,
-        previous_success_rate,
-        next_uses,
-    ));
-    skill.frontmatter.set_last_used(Some(now));
-    skill.frontmatter.set_updated(now);
-}
-
-pub(crate) fn record_successful_use_with_baseline(
-    next_skill: &mut SkillDocument,
-    previous_skill: &SkillDocument,
-    now: chrono::DateTime<Utc>,
-) {
-    let previous_uses = previous_skill.frontmatter.use_count();
-    let next_uses = previous_uses.saturating_add(1);
-    next_skill.frontmatter.set_use_count(next_uses);
-    next_skill.frontmatter.set_last_used(Some(now));
-    next_skill
-        .frontmatter
-        .set_success_rate(blended_success_rate(
-            previous_uses,
-            previous_skill.frontmatter.success_rate(),
-            next_uses,
-        ));
-    next_skill.frontmatter.set_updated(now);
-}
-
 pub(crate) fn bump_version(version: &str) -> String {
     let mut parts = Vec::new();
     for segment in version.split('.') {
@@ -316,20 +266,13 @@ fn skill_signature_changed(previous: &SkillDocument, candidate: &SkillDocument) 
         || previous.frontmatter.compatibility != candidate.frontmatter.compatibility
 }
 
-fn blended_success_rate(previous_uses: u32, previous_success_rate: f32, next_uses: u32) -> f32 {
-    if next_uses == 0 {
-        return 1.0;
-    }
-    ((previous_success_rate * previous_uses as f32) + 1.0) / next_uses as f32
-}
-
 const SKILL_IMPROVEMENT_SYSTEM_PROMPT: &str = "\
 You are improving an existing Agent Skill.
 Compare the current skill document with the successful execution provided by the user.
 If the execution shows a better reusable approach, output the complete updated SKILL.md using the \
 Agent Skills format from agentskills.io.
-Keep spec-compatible top-level frontmatter fields and preserve project-specific bookkeeping in the \
-`metadata` map with `moa-` prefixes.
+Keep spec-compatible top-level frontmatter fields and only use MOA metadata for `moa-version`, \
+`moa-tags`, and `moa-estimated-tokens`.
 If the existing skill is still correct, output exactly UNCHANGED.";
 
 fn build_improvement_request(current_skill: &str, events: &[EventRecord]) -> CompletionRequest {
