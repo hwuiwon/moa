@@ -25,6 +25,18 @@ use crate::{
 const LIST_CONNECTIONS_LIMIT: i64 = 100;
 const LIST_OBJECTS_LIMIT: u32 = 500;
 
+/// Result of looking up a linked connection by provider-owned account identity.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderAccountConnectionLookup {
+    /// No local connection matched the provider-owned account identity.
+    NotFound,
+    /// Exactly one local connection matched the provider-owned account identity.
+    Unique(KnowledgeConnection),
+    /// More than one local connection matched the provider-owned account identity.
+    Ambiguous { matches: usize },
+}
+
 /// Persistence seam for tenant knowledge rows.
 #[async_trait]
 pub trait KnowledgeRepository: Send + Sync {
@@ -43,6 +55,14 @@ pub trait KnowledgeRepository: Send + Sync {
         tenant_id: TenantId,
         provider: Option<&str>,
     ) -> Result<Vec<KnowledgeConnectionProjection>>;
+
+    /// Resolves a provider-owned account identity to a local connection.
+    async fn lookup_connection_by_provider_account(
+        &self,
+        provider: &str,
+        connector: Option<&str>,
+        provider_account_id: &str,
+    ) -> Result<ProviderAccountConnectionLookup>;
 
     /// Saves a sync run.
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
@@ -69,6 +89,13 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Records one ingestion step.
     async fn record_ingestion_step(&self, step: KnowledgeIngestionStep) -> Result<()>;
+
+    /// Records one ingestion step once and applies counters only when inserted.
+    async fn record_ingestion_step_once(
+        &self,
+        step: KnowledgeIngestionStep,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> Result<bool>;
 
     /// Loads a redacted ingestion timeline for one sync run.
     async fn sync_run_steps(
@@ -104,6 +131,13 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Gets the chunks attached to one document version.
     async fn chunks_for_version(&self, version_uid: Uuid) -> Result<Vec<KnowledgeChunk>>;
+
+    /// Returns whether final object ingestion completed after a version timestamp.
+    async fn object_ingestion_completed_since(
+        &self,
+        object_uid: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool>;
 
     /// Loads an object inspection projection with bounded service-side rendering inputs.
     async fn inspect_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>>;
@@ -158,7 +192,7 @@ pub trait KnowledgeRepository: Send + Sync {
 #[derive(Clone)]
 pub struct PostgresKnowledgeRepository {
     pool: PgPool,
-    scope: ScopeContext,
+    scope: Option<ScopeContext>,
     assume_app_role: bool,
 }
 
@@ -168,7 +202,20 @@ impl PostgresKnowledgeRepository {
     pub fn scoped(pool: PgPool, scope: ScopeContext) -> Self {
         Self {
             pool,
-            scope,
+            scope: Some(scope),
+            assume_app_role: false,
+        }
+    }
+
+    /// Creates a repository with tenant control-plane visibility.
+    ///
+    /// This is used for signed webhook binding lookups before the webhook has
+    /// been resolved to a tenant-local connection.
+    #[must_use]
+    pub fn control_plane(pool: PgPool) -> Self {
+        Self {
+            pool,
+            scope: None,
             assume_app_role: false,
         }
     }
@@ -181,7 +228,7 @@ impl PostgresKnowledgeRepository {
     pub fn scoped_for_app_role(pool: PgPool, scope: ScopeContext) -> Self {
         Self {
             pool,
-            scope,
+            scope: Some(scope),
             assume_app_role: true,
         }
     }
@@ -230,9 +277,14 @@ impl PostgresKnowledgeRepository {
     }
 
     async fn begin(&self) -> Result<ScopedConn<'_>> {
-        let mut conn = ScopedConn::begin(&self.pool, &self.scope)
-            .await
-            .map_err(map_moa_error)?;
+        let mut conn = match &self.scope {
+            Some(scope) => ScopedConn::begin(&self.pool, scope)
+                .await
+                .map_err(map_moa_error)?,
+            None => ScopedConn::begin_control_plane(&self.pool)
+                .await
+                .map_err(map_moa_error)?,
+        };
         if self.assume_app_role {
             sqlx::query("SET LOCAL ROLE moa_app")
                 .execute(conn.as_mut())
@@ -342,24 +394,53 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         rows.iter().map(connection_projection_from_row).collect()
     }
 
+    async fn lookup_connection_by_provider_account(
+        &self,
+        provider: &str,
+        connector: Option<&str>,
+        provider_account_id: &str,
+    ) -> Result<ProviderAccountConnectionLookup> {
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
+                   credential_ref, status, metadata, created_at, updated_at, last_synced_at
+            FROM moa.knowledge_connections
+            WHERE provider = $1
+              AND ($2::TEXT IS NULL OR provider_config_key = $2)
+              AND provider_connection_id = $3
+            ORDER BY tenant_id ASC, connection_uid ASC
+            LIMIT 2
+            "#,
+        )
+        .bind(provider)
+        .bind(connector)
+        .bind(provider_account_id)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        provider_account_lookup_from_rows(&rows)
+    }
+
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
         let mut conn = self.begin().await?;
         let result = sqlx::query(
             r#"
             INSERT INTO moa.knowledge_sync_runs (
                 sync_run_uid, tenant_id, storage_partition_id, connection_id, status,
-                parser_provider, records_seen, records_changed, records_deleted,
+                parser_provider, max_records, records_seen, records_changed, records_deleted,
                 records_ingested, records_failed, objects_parsed, chunks_embedded,
                 graph_nodes_upserted, graph_edges_upserted, error, started_at, finished_at
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15,
+                $14, $15, $16,
                 CASE
-                    WHEN $16::TEXT IS NULL THEN NULL
-                    ELSE jsonb_build_object('code', $16::TEXT)
+                    WHEN $17::TEXT IS NULL THEN NULL
+                    ELSE jsonb_build_object('code', $17::TEXT)
                 END,
-                $17, $18
+                $18, $19
             )
             "#,
         )
@@ -369,6 +450,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(run.connection_uid)
         .bind(run.status.as_str())
         .bind(run.parser)
+        .bind(run.max_records.map(i64::from))
         .bind(i64::try_from(run.records_seen).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_changed).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_deleted).map_err(map_int_error)?)
@@ -395,7 +477,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         let mut conn = self.begin().await?;
         let row = sqlx::query(
             r#"
-            SELECT sync_run_uid, tenant_id, connection_id, parser_provider, status,
+            SELECT sync_run_uid, tenant_id, connection_id, parser_provider, max_records, status,
                    records_seen, records_changed, records_deleted, records_ingested,
                    records_failed, objects_parsed, chunks_embedded, graph_nodes_upserted,
                    graph_edges_upserted, error->>'code' AS error_code,
@@ -424,11 +506,11 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         let mut conn = self.begin().await?;
         let row = sqlx::query(
             r#"
-            SELECT sync_run_uid, tenant_id, connection_id, status, parser_provider,
+            SELECT sync_run_uid, tenant_id, connection_id, status, parser_provider, max_records,
                    records_seen, records_changed, records_deleted, records_ingested,
                    records_failed, objects_parsed, chunks_embedded,
                    graph_nodes_upserted, graph_edges_upserted,
-                   error, started_at, finished_at
+                   error->>'code' AS error_code, started_at, finished_at
             FROM moa.knowledge_sync_runs
             WHERE connection_id = $1
               AND (cardinality($2::TEXT[]) = 0 OR status = ANY($2::TEXT[]))
@@ -452,20 +534,21 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             UPDATE moa.knowledge_sync_runs
             SET status = $2,
                 parser_provider = $3,
-                records_seen = $4,
-                records_changed = $5,
-                records_deleted = $6,
-                records_ingested = $7,
-                records_failed = $8,
-                objects_parsed = $9,
-                chunks_embedded = $10,
-                graph_nodes_upserted = $11,
-                graph_edges_upserted = $12,
+                max_records = $4,
+                records_seen = $5,
+                records_changed = $6,
+                records_deleted = $7,
+                records_ingested = $8,
+                records_failed = $9,
+                objects_parsed = $10,
+                chunks_embedded = $11,
+                graph_nodes_upserted = $12,
+                graph_edges_upserted = $13,
                 error = CASE
-                    WHEN $13::TEXT IS NULL THEN NULL
-                    ELSE jsonb_build_object('code', $13::TEXT)
+                    WHEN $14::TEXT IS NULL THEN NULL
+                    ELSE jsonb_build_object('code', $14::TEXT)
                 END,
-                finished_at = $14,
+                finished_at = $15,
                 updated_at = now()
             WHERE sync_run_uid = $1
             "#,
@@ -473,6 +556,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(run.sync_run_uid)
         .bind(run.status.as_str())
         .bind(run.parser)
+        .bind(run.max_records.map(i64::from))
         .bind(i64::try_from(run.records_seen).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_changed).map_err(map_int_error)?)
         .bind(i64::try_from(run.records_deleted).map_err(map_int_error)?)
@@ -545,6 +629,25 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
                    $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL
             FROM moa.knowledge_sync_runs
             WHERE sync_run_uid = $2
+            ON CONFLICT (
+                tenant_id,
+                sync_run_id,
+                (COALESCE(object_id, '00000000-0000-0000-0000-000000000000'::UUID)),
+                stage,
+                attempt
+            )
+            DO UPDATE SET
+                step_uid = EXCLUDED.step_uid,
+                status = EXCLUDED.status,
+                started_at = EXCLUDED.started_at,
+                ended_at = EXCLUDED.ended_at,
+                duration_ms = EXCLUDED.duration_ms,
+                counters = EXCLUDED.counters,
+                safe_summary = EXCLUDED.safe_summary,
+                error_code = EXCLUDED.error_code,
+                error_message = NULL,
+                updated_at = now()
+            WHERE moa.knowledge_ingestion_steps.stage = 'provider_records_listed'
             "#,
         )
         .bind(step.step_uid)
@@ -563,6 +666,101 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .await
         .map_err(map_sqlx_error)?;
         conn.commit().await.map_err(map_moa_error)
+    }
+
+    async fn record_ingestion_step_once(
+        &self,
+        step: KnowledgeIngestionStep,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> Result<bool> {
+        let mut conn = self.begin().await?;
+        let row = sqlx::query(
+            r#"
+            WITH parent AS (
+                SELECT tenant_id, storage_partition_id, sync_run_uid
+                FROM moa.knowledge_sync_runs
+                WHERE sync_run_uid = $2
+            ),
+            inserted AS (
+                INSERT INTO moa.knowledge_ingestion_steps (
+                    step_uid, tenant_id, storage_partition_id, sync_run_id, object_id,
+                    stage, status, started_at, ended_at, duration_ms, attempt, counters,
+                    safe_summary, error_code, error_message
+                )
+                SELECT $1, tenant_id, storage_partition_id, sync_run_uid, $3,
+                       $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL
+                FROM parent
+                ON CONFLICT (
+                    tenant_id,
+                    sync_run_id,
+                    (COALESCE(object_id, '00000000-0000-0000-0000-000000000000'::UUID)),
+                    stage,
+                    attempt
+                )
+                DO NOTHING
+                RETURNING 1
+            ),
+            updated AS (
+                UPDATE moa.knowledge_sync_runs
+                SET records_seen = records_seen + $13,
+                    records_changed = records_changed + $14,
+                    records_deleted = records_deleted + $15,
+                    records_ingested = records_ingested + $16,
+                    records_failed = records_failed + $17,
+                    objects_parsed = objects_parsed + $18,
+                    chunks_embedded = chunks_embedded + $19,
+                    graph_nodes_upserted = graph_nodes_upserted + $20,
+                    graph_edges_upserted = graph_edges_upserted + $21,
+                    updated_at = now()
+                WHERE sync_run_uid = $2
+                  AND EXISTS (SELECT 1 FROM inserted)
+                RETURNING 1
+            )
+            SELECT EXISTS(SELECT 1 FROM parent) AS parent_visible,
+                   EXISTS(SELECT 1 FROM inserted) AS inserted,
+                   EXISTS(SELECT 1 FROM updated) AS updated
+            "#,
+        )
+        .bind(step.step_uid)
+        .bind(step.sync_run_uid)
+        .bind(step.object_uid)
+        .bind(&step.step)
+        .bind(step.status.as_str())
+        .bind(step.started_at)
+        .bind(step.ended_at)
+        .bind(step.duration_ms.map(|value| value as i64))
+        .bind(i32::try_from(step.retry_count).map_err(map_int_error)?)
+        .bind(step.counters)
+        .bind(step.summary)
+        .bind(step.error_code)
+        .bind(i64::try_from(counter_delta.records_seen).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.records_changed).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.records_deleted).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.records_ingested).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.records_failed).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.objects_parsed).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.chunks_embedded).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.graph_nodes_upserted).map_err(map_int_error)?)
+        .bind(i64::try_from(counter_delta.graph_edges_upserted).map_err(map_int_error)?)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+
+        let parent_visible: bool = row.try_get("parent_visible").map_err(map_sqlx_error)?;
+        let inserted: bool = row.try_get("inserted").map_err(map_sqlx_error)?;
+        let updated: bool = row.try_get("updated").map_err(map_sqlx_error)?;
+        if !parent_visible {
+            return Err(Error::Repository(
+                "record ingestion step parent sync run was not visible".to_string(),
+            ));
+        }
+        if inserted && !updated {
+            return Err(Error::Repository(
+                "record ingestion step counters were not applied".to_string(),
+            ));
+        }
+        Ok(inserted)
     }
 
     async fn sync_run_steps(
@@ -761,6 +959,34 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .map_err(map_sqlx_error)?;
         conn.commit().await.map_err(map_moa_error)?;
         rows.iter().map(chunk_from_row).collect()
+    }
+
+    async fn object_ingestion_completed_since(
+        &self,
+        object_uid: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let mut conn = self.begin().await?;
+        let completed = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM moa.knowledge_ingestion_steps
+                WHERE object_id = $1
+                  AND stage = 'contact_groups_derived'
+                  AND status = 'completed'
+                  AND counters @> '{"records_ingested": 1}'::JSONB
+                  AND COALESCE(ended_at, started_at) >= $2
+            )
+            "#,
+        )
+        .bind(object_uid)
+        .bind(since)
+        .fetch_one(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        Ok(completed)
     }
 
     async fn inspect_object(&self, object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>> {
@@ -1212,6 +1438,15 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
         Ok(Vec::new())
     }
 
+    async fn lookup_connection_by_provider_account(
+        &self,
+        _provider: &str,
+        _connector: Option<&str>,
+        _provider_account_id: &str,
+    ) -> Result<ProviderAccountConnectionLookup> {
+        Ok(ProviderAccountConnectionLookup::NotFound)
+    }
+
     async fn create_sync_run(&self, _run: KnowledgeSyncRun) -> Result<()> {
         Ok(())
     }
@@ -1242,6 +1477,14 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
 
     async fn record_ingestion_step(&self, _step: KnowledgeIngestionStep) -> Result<()> {
         Ok(())
+    }
+
+    async fn record_ingestion_step_once(
+        &self,
+        _step: KnowledgeIngestionStep,
+        _counter_delta: KnowledgeSyncCounters,
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     async fn sync_run_steps(
@@ -1284,6 +1527,14 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
 
     async fn chunks_for_version(&self, _version_uid: Uuid) -> Result<Vec<KnowledgeChunk>> {
         Ok(Vec::new())
+    }
+
+    async fn object_ingestion_completed_since(
+        &self,
+        _object_uid: Uuid,
+        _since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        Ok(false)
     }
 
     async fn inspect_object(&self, _object_uid: Uuid) -> Result<Option<KnowledgeObjectInspection>> {
@@ -1394,7 +1645,20 @@ fn connection_projection_from_row(
     })
 }
 
+fn provider_account_lookup_from_rows(
+    rows: &[sqlx::postgres::PgRow],
+) -> Result<ProviderAccountConnectionLookup> {
+    match rows {
+        [] => Ok(ProviderAccountConnectionLookup::NotFound),
+        [row] => connection_from_row(row).map(ProviderAccountConnectionLookup::Unique),
+        rows => Ok(ProviderAccountConnectionLookup::Ambiguous {
+            matches: rows.len(),
+        }),
+    }
+}
+
 fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeSyncRun> {
+    let max_records: Option<i64> = row.try_get("max_records").map_err(map_sqlx_error)?;
     let records_seen: i64 = row.try_get("records_seen").map_err(map_sqlx_error)?;
     let records_changed: i64 = row.try_get("records_changed").map_err(map_sqlx_error)?;
     let records_deleted: i64 = row.try_get("records_deleted").map_err(map_sqlx_error)?;
@@ -1416,6 +1680,10 @@ fn sync_run_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeSyncRun> {
         ),
         connection_uid: row.try_get("connection_id").map_err(map_sqlx_error)?,
         parser: row.try_get("parser_provider").map_err(map_sqlx_error)?,
+        max_records: max_records
+            .map(u32::try_from)
+            .transpose()
+            .map_err(map_int_error)?,
         status: sync_run_status(row.try_get("status").map_err(map_sqlx_error)?)?,
         records_seen: u64::try_from(records_seen).map_err(map_int_error)?,
         records_changed: u64::try_from(records_changed).map_err(map_int_error)?,

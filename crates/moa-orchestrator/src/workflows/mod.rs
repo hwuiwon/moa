@@ -9,6 +9,7 @@ pub mod eval_run;
 pub mod experiment_run;
 #[cfg(feature = "experiments")]
 pub mod experiment_trial_run;
+pub mod knowledge_sync_ingestion;
 pub(crate) mod progress_delivery;
 #[cfg(feature = "skill-learning")]
 pub mod skill_learning;

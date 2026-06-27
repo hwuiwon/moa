@@ -218,7 +218,7 @@ async fn changed_records_request_includes_modified_after_and_maps_results() {
 
 #[tokio::test]
 async fn linked_account_synced_webhook_verifies_signature_and_rejects_bad_signature() {
-    // Pins: Merge linked-account synced webhooks are trusted only after signature verification.
+    // Pins: Merge linked-account synced webhooks are trusted only after signature verification, and signed linked account IDs are preserved for local binding.
     let signature_key = "merge-webhook-secret";
     let provider = MergeProvider::with_client(
         reqwest::Client::new(),

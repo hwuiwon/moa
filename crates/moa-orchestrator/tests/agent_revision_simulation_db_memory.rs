@@ -199,7 +199,7 @@ fn new_trial(
 
 async fn insert_artifact_revision(pool: &sqlx::PgPool, scope: &ActionRuleScope) -> Result<Uuid> {
     let ActionRuleScope::Tenant { tenant_id } = scope;
-    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(*tenant_id).to_string();
     let artifact_uid = Uuid::now_v7();
     let revision_uid = Uuid::now_v7();
     let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(*tenant_id)).await?;

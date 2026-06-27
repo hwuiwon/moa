@@ -9,16 +9,19 @@ use async_trait::async_trait;
 use chrono::Utc;
 use moa_core::{TenantId, traits::EmbeddingProvider};
 use moa_knowledge::{
-    chunking::ChunkingConfig,
+    chunking::{ChunkingConfig, content_hash},
     domain::{
-        ConnectionStatus, DocumentElement, DocumentElementKind, KnowledgeConnection,
-        KnowledgeSyncRun, ParsedDocument, ProviderRecord, RecordPage, SyncRunStatus,
+        ConnectionStatus, DocumentElement, DocumentElementKind, DocumentVersion,
+        IngestionStepStatus, KnowledgeChunk, KnowledgeConnection, KnowledgeIngestionStep,
+        KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, ParsedDocument,
+        ProviderRecord, RecordPage, SyncRunStatus,
     },
     graph_delta::KnowledgeGraphDelta,
     ingestion::{
         GraphWriteReport, KnowledgeGraphWriter, KnowledgeIngestionPipeline,
         KnowledgeIngestionPipelineConfig,
     },
+    normalize::normalize_text,
     observability::MetricsIngestionObserver,
     parser::DocumentParser,
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
@@ -283,6 +286,10 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
         .expect("ingest first record");
     assert_eq!(first.records_ingested, 1);
     assert_eq!(first.embeddings_created, 2);
+    let first_counters = sync_counters(&pool, first_run).await;
+    assert_eq!(first_counters.records_seen, 1);
+    assert_eq!(first_counters.records_changed, 1);
+    assert_eq!(first_counters.records_ingested, 1);
     assert_eq!(embedder.embedded_count(), 2);
     assert_eq!(graph.vector_count(), 2);
     let object_uid = object_uid(connection_uid);
@@ -312,6 +319,10 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
         .await
         .expect("skip unchanged record");
     assert_eq!(unchanged.records_skipped, 1);
+    let unchanged_counters = sync_counters(&pool, unchanged_run).await;
+    assert_eq!(unchanged_counters.records_seen, 1);
+    assert_eq!(unchanged_counters.records_changed, 0);
+    assert_eq!(unchanged_counters.records_ingested, 0);
     assert_eq!(embedder.embedded_count(), 2);
     assert_eq!(version_count(&pool, object_uid).await, 1);
     assert_eq!(chunk_count(&pool, object_uid).await, 2);
@@ -352,6 +363,9 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
         .await
         .expect("handle provider deletion");
     assert_eq!(deleted.records_deleted, 1);
+    let delete_counters = sync_counters(&pool, delete_run).await;
+    assert_eq!(delete_counters.records_seen, 1);
+    assert_eq!(delete_counters.records_deleted, 1);
     assert_eq!(graph.vector_count(), 0);
     assert_eq!(object_status(&pool, object_uid).await, "deleted");
     assert_eq!(tombstoned_chunk_count(&pool, object_uid).await, 3);
@@ -392,12 +406,427 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
     );
 
     let counters = sync_counters(&pool, edit_run).await;
+    assert_eq!(counters.records_seen, 1);
     assert_eq!(counters.records_changed, 1);
     assert_eq!(counters.records_ingested, 1);
     assert_eq!(counters.chunks_embedded, 1);
 
     let graph_json = graph.properties_json();
     assert_no_secret_text(&graph_json);
+}
+
+#[tokio::test]
+async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_once() {
+    // Pins: replaying one provider page for the same sync run does not duplicate step counters or graph identities.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = ScopeContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let observer = Arc::new(MetricsIngestionObserver);
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder.clone(),
+        graph,
+        observer,
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_replay".to_string(),
+            credential_ref: "vault://knowledge/replay".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+
+    let first = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record(
+                    "replay-token",
+                    false,
+                    "Alpha is ready.\n\nBudget is 10.",
+                )],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("first page apply should ingest");
+    assert_eq!(first.records_listed, 1);
+    assert_eq!(first.records_ingested, 1);
+    assert_eq!(first.records_skipped, 0);
+    assert_eq!(first.embeddings_created, 2);
+
+    let object_uid = object_uid(connection_uid);
+    let first_counters = sync_counters(&pool, sync_run_uid).await;
+    assert_eq!(first_counters.records_seen, 1);
+    assert_eq!(first_counters.records_changed, 1);
+    assert_eq!(first_counters.records_deleted, 0);
+    assert_eq!(first_counters.records_ingested, 1);
+    assert_eq!(first_counters.records_failed, 0);
+    assert_eq!(first_counters.objects_parsed, 1);
+    assert_eq!(first_counters.chunks_embedded, 2);
+    assert!(first_counters.graph_nodes_upserted > 0);
+    assert!(first_counters.graph_edges_upserted > 0);
+    let first_identities = stored_identities(&pool, object_uid).await;
+    assert_eq!(first_identities.object_uid, object_uid);
+
+    let replay = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record(
+                    "replay-token",
+                    false,
+                    "Alpha is ready.\n\nBudget is 10.",
+                )],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("replayed page apply should not fail on duplicate steps");
+    assert_eq!(replay.records_listed, 1);
+    assert_eq!(replay.records_ingested, 0);
+    assert_eq!(replay.records_skipped, 1);
+    assert_eq!(replay.embeddings_created, 0);
+
+    assert_eq!(sync_counters(&pool, sync_run_uid).await, first_counters);
+    assert_eq!(stored_identities(&pool, object_uid).await, first_identities);
+    assert_eq!(embedder.embedded_count(), 2);
+
+    let steps = repository
+        .sync_run_steps(sync_run_uid, Some(object_uid))
+        .await
+        .expect("read object steps");
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step.step == "object_change_checked")
+            .count(),
+        1
+    );
+    let object_change = steps
+        .iter()
+        .find(|step| step.step == "object_change_checked")
+        .expect("object change step should exist");
+    assert_eq!(object_change.counters["records_seen"], json!(1));
+    assert_eq!(object_change.counters["records_changed"], json!(1));
+}
+
+#[tokio::test]
+async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ingestion() {
+    // Pins: replay after object/change-token advancement must resume missing parse, graph, vector, and final success work.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = ScopeContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let observer = Arc::new(MetricsIngestionObserver);
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder.clone(),
+        graph,
+        observer,
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_partial_replay".to_string(),
+            credential_ref: "vault://knowledge/partial-replay".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+    let object_uid = object_uid(connection_uid);
+    repository
+        .upsert_object(KnowledgeObject {
+            object_uid,
+            tenant_id,
+            connection_uid,
+            object_type: "page".to_string(),
+            source_id: "doc-1".to_string(),
+            parent_source_id: None,
+            source_uri: Some("https://example.test/doc-1".to_string()),
+            title: Some("Alpha Plan".to_string()),
+            change_token: Some("partial-token".to_string()),
+            metadata: credentialish_metadata(),
+            status: ObjectStatus::Active,
+            source_updated_at: Some(Utc::now()),
+            deleted_at: None,
+        })
+        .await
+        .expect("seed partially advanced object row");
+    repository
+        .record_ingestion_step_once(
+            KnowledgeIngestionStep {
+                step_uid: Uuid::now_v7(),
+                sync_run_uid,
+                object_uid: Some(object_uid),
+                step: "object_change_checked".to_string(),
+                status: IngestionStepStatus::Completed,
+                started_at: Utc::now(),
+                ended_at: Some(Utc::now()),
+                duration_ms: Some(1),
+                counters: json!({ "records_seen": 1, "records_changed": 1 }),
+                summary: None,
+                retry_count: 0,
+                error_code: None,
+            },
+            KnowledgeSyncCounters {
+                records_seen: 1,
+                records_changed: 1,
+                ..KnowledgeSyncCounters::default()
+            },
+        )
+        .await
+        .expect("seed object change step")
+        .then_some(())
+        .expect("seeded object change step should insert");
+    assert_eq!(
+        sync_counters(&pool, sync_run_uid).await,
+        Counters {
+            records_seen: 1,
+            records_changed: 1,
+            records_deleted: 0,
+            records_ingested: 0,
+            records_failed: 0,
+            objects_parsed: 0,
+            chunks_embedded: 0,
+            graph_nodes_upserted: 0,
+            graph_edges_upserted: 0,
+        }
+    );
+
+    let replay = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record(
+                    "partial-token",
+                    false,
+                    "Alpha is ready.\n\nBudget is 10.",
+                )],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("partial-progress replay should finish ingestion");
+
+    assert_eq!(replay.records_listed, 1);
+    assert_eq!(replay.records_ingested, 1);
+    assert_eq!(replay.records_skipped, 0);
+    assert_eq!(replay.embeddings_created, 2);
+    let counters = sync_counters(&pool, sync_run_uid).await;
+    assert_eq!(counters.records_seen, 1);
+    assert_eq!(counters.records_changed, 1);
+    assert_eq!(counters.records_ingested, 1);
+    assert_eq!(counters.records_failed, 0);
+    assert_eq!(counters.objects_parsed, 1);
+    assert_eq!(counters.chunks_embedded, 2);
+    assert!(counters.graph_nodes_upserted > 0);
+    assert!(counters.graph_edges_upserted > 0);
+    assert_eq!(version_count(&pool, object_uid).await, 1);
+    assert_eq!(chunk_count(&pool, object_uid).await, 2);
+    assert_eq!(chunks_with_graph_uid(&pool, object_uid).await, 2);
+    assert_eq!(embedder.embedded_count(), 2);
+}
+
+#[tokio::test]
+async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion() {
+    // Pins: graph_node_uid on chunks is not enough replay proof before final records_ingested step.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = ScopeContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let observer = Arc::new(MetricsIngestionObserver);
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder.clone(),
+        graph,
+        observer,
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 1,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_graph_uid_replay".to_string(),
+            credential_ref: "vault://knowledge/graph-uid-replay".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: credentialish_metadata(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let sync_run_uid = create_run(&repository, tenant_id, connection_uid).await;
+    let object_uid = object_uid(connection_uid);
+    repository
+        .upsert_object(KnowledgeObject {
+            object_uid,
+            tenant_id,
+            connection_uid,
+            object_type: "page".to_string(),
+            source_id: "doc-1".to_string(),
+            parent_source_id: None,
+            source_uri: Some("https://example.test/doc-1".to_string()),
+            title: Some("Alpha Plan".to_string()),
+            change_token: Some("graph-midpoint-token".to_string()),
+            metadata: credentialish_metadata(),
+            status: ObjectStatus::Active,
+            source_updated_at: Some(Utc::now()),
+            deleted_at: None,
+        })
+        .await
+        .expect("seed partially advanced object row");
+    repository
+        .record_ingestion_step_once(
+            KnowledgeIngestionStep {
+                step_uid: Uuid::now_v7(),
+                sync_run_uid,
+                object_uid: Some(object_uid),
+                step: "object_change_checked".to_string(),
+                status: IngestionStepStatus::Completed,
+                started_at: Utc::now(),
+                ended_at: Some(Utc::now()),
+                duration_ms: Some(1),
+                counters: json!({ "records_seen": 1, "records_changed": 1 }),
+                summary: None,
+                retry_count: 0,
+                error_code: None,
+            },
+            KnowledgeSyncCounters {
+                records_seen: 1,
+                records_changed: 1,
+                ..KnowledgeSyncCounters::default()
+            },
+        )
+        .await
+        .expect("seed object change step")
+        .then_some(())
+        .expect("seeded object change step should insert");
+    seed_graph_linked_partial_version(&repository, object_uid, "Alpha is ready.\n\nBudget is 10.")
+        .await;
+
+    let replay = pipeline
+        .ingest_record_page(
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![record(
+                    "graph-midpoint-token",
+                    false,
+                    "Alpha is ready.\n\nBudget is 10.",
+                )],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("graph-uid midpoint replay should finish ingestion");
+
+    assert_eq!(replay.records_listed, 1);
+    assert_eq!(replay.records_ingested, 1);
+    assert_eq!(replay.records_skipped, 0);
+    assert_eq!(replay.embeddings_created, 2);
+    let counters = sync_counters(&pool, sync_run_uid).await;
+    assert_eq!(counters.records_seen, 1);
+    assert_eq!(counters.records_changed, 1);
+    assert_eq!(counters.records_ingested, 1);
+    assert_eq!(counters.records_failed, 0);
+    assert_eq!(counters.objects_parsed, 1);
+    assert_eq!(counters.chunks_embedded, 2);
+    assert!(counters.graph_nodes_upserted > 0);
+    assert!(counters.graph_edges_upserted > 0);
+    assert_eq!(chunks_with_graph_uid(&pool, object_uid).await, 2);
+    assert_eq!(embedder.embedded_count(), 2);
 }
 
 async fn create_run(
@@ -412,6 +841,7 @@ async fn create_run(
             tenant_id,
             connection_uid,
             parser: Some("test_parser".to_string()),
+            max_records: None,
             status: SyncRunStatus::Ingesting,
             records_seen: 0,
             records_changed: 0,
@@ -596,17 +1026,71 @@ async fn connection_metadata(pool: &sqlx::PgPool, connection_uid: Uuid) -> Value
     .expect("read connection metadata")
 }
 
+async fn seed_graph_linked_partial_version(
+    repository: &PostgresKnowledgeRepository,
+    object_uid: Uuid,
+    text: &str,
+) {
+    let normalized = normalize_text(text);
+    let hash = content_hash(&normalized);
+    let version = DocumentVersion {
+        version_uid: moa_knowledge::graph_delta::stable_uid(&format!(
+            "version:{object_uid}:{hash}"
+        )),
+        object_uid,
+        parser: "test_parser".to_string(),
+        parser_job_id: None,
+        content_hash: hash.clone(),
+        metadata: json!({ "partial": true }),
+        created_at: Utc::now(),
+    };
+    repository
+        .insert_document_version(version.clone())
+        .await
+        .expect("seed partial document version");
+    repository
+        .replace_chunks(
+            version.version_uid,
+            vec![KnowledgeChunk {
+                chunk_uid: moa_knowledge::graph_delta::stable_uid(&format!(
+                    "partial-chunk:{}:{hash}",
+                    version.version_uid
+                )),
+                version_uid: version.version_uid,
+                graph_node_uid: Some(moa_knowledge::graph_delta::stable_uid(&format!(
+                    "partial-graph-node:{object_uid}:{hash}"
+                ))),
+                chunk_hash: format!("partial-{hash}"),
+                block_hashes: vec![hash],
+                text: text.to_string(),
+                heading_path: Vec::new(),
+                ordinal: 0,
+                token_count: 1,
+                metadata: json!({ "active": true, "partial": true }),
+            }],
+        )
+        .await
+        .expect("seed graph-linked partial chunk");
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Counters {
+    records_seen: i64,
     records_changed: i64,
+    records_deleted: i64,
     records_ingested: i64,
+    records_failed: i64,
+    objects_parsed: i64,
     chunks_embedded: i64,
+    graph_nodes_upserted: i64,
+    graph_edges_upserted: i64,
 }
 
 async fn sync_counters(pool: &sqlx::PgPool, sync_run_uid: Uuid) -> Counters {
-    let row = sqlx::query_as::<_, (i64, i64, i64)>(
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64, i64)>(
         r#"
-        SELECT records_changed, records_ingested, chunks_embedded
+        SELECT records_seen, records_changed, records_deleted, records_ingested, records_failed,
+               objects_parsed, chunks_embedded, graph_nodes_upserted, graph_edges_upserted
         FROM moa.knowledge_sync_runs
         WHERE sync_run_uid = $1
         "#,
@@ -616,8 +1100,55 @@ async fn sync_counters(pool: &sqlx::PgPool, sync_run_uid: Uuid) -> Counters {
     .await
     .expect("read sync counters");
     Counters {
-        records_changed: row.0,
-        records_ingested: row.1,
-        chunks_embedded: row.2,
+        records_seen: row.0,
+        records_changed: row.1,
+        records_deleted: row.2,
+        records_ingested: row.3,
+        records_failed: row.4,
+        objects_parsed: row.5,
+        chunks_embedded: row.6,
+        graph_nodes_upserted: row.7,
+        graph_edges_upserted: row.8,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredIdentities {
+    object_uid: Uuid,
+    version_uids: Vec<Uuid>,
+    chunks: Vec<(Uuid, Option<Uuid>, String)>,
+}
+
+async fn stored_identities(pool: &sqlx::PgPool, object_uid: Uuid) -> StoredIdentities {
+    let version_uids = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT document_version_uid
+        FROM moa.knowledge_document_versions
+        WHERE object_id = $1
+        ORDER BY created_at ASC, document_version_uid ASC
+        "#,
+    )
+    .bind(object_uid)
+    .fetch_all(pool)
+    .await
+    .expect("read document version identities");
+    let chunks = sqlx::query_as::<_, (Uuid, Option<Uuid>, String)>(
+        r#"
+        SELECT chunk_uid, graph_node_uid, chunk_hash
+        FROM moa.knowledge_chunks c
+        JOIN moa.knowledge_document_versions v
+          ON v.document_version_uid = c.document_version_id
+        WHERE v.object_id = $1
+        ORDER BY c.ordinal ASC, c.chunk_uid ASC
+        "#,
+    )
+    .bind(object_uid)
+    .fetch_all(pool)
+    .await
+    .expect("read chunk identities");
+    StoredIdentities {
+        object_uid,
+        version_uids,
+        chunks,
     }
 }

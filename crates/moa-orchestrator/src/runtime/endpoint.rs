@@ -58,6 +58,7 @@ use crate::{
     workflows::{
         artifact_workflow_execution::{ArtifactWorkflowExecution, ArtifactWorkflowExecutionImpl},
         consolidate::{Consolidate, ConsolidateImpl},
+        knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl},
         sub_agent_turn_execution::{SubAgentTurnExecution, SubAgentTurnExecutionImpl},
         turn_execution::{TurnExecution, TurnExecutionImpl},
     },
@@ -82,6 +83,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "Health",
     "IngestionVO",
     "Knowledge",
+    "KnowledgeSyncIngestion",
     "LearningReview",
     "LineageAdmin",
     "LLMGateway",
@@ -176,6 +178,7 @@ pub fn build_endpoint(
         .bind(WhoamiImpl.serve())
         .bind(WorkflowsImpl.serve())
         .bind(ArtifactWorkflowExecutionImpl.serve())
+        .bind(KnowledgeSyncIngestionImpl.serve())
         .bind(ConsolidateImpl.serve());
     #[cfg(feature = "internal-eval-runner")]
     let endpoint = endpoint.bind(EvalRunImpl.serve());

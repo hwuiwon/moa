@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use moa_core::{
     ContactId, SessionId, StoragePartitionId, TenantId, UserId,
@@ -33,11 +33,14 @@ use moa_knowledge::{
     },
     ingestion::{
         KnowledgeIngestionPipeline, KnowledgeIngestionPipelineConfig, MemoryKnowledgeGraphWriter,
+        PageIngestionReport,
     },
     observability::MetricsIngestionObserver,
     parser::DocumentParser,
     providers::LinkedIntegrationProvider,
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        KnowledgeRepository, PostgresKnowledgeRepository, ProviderAccountConnectionLookup,
+    },
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, GraphPath, LineageEvent, RecordKind, RerankHit,
@@ -47,9 +50,16 @@ use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, Pi
 use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
 use moa_orchestrator::services::knowledge::{
-    KnowledgeCredentialStore, KnowledgeService, ParserWebhookVerifier, StaticKnowledgeProviders,
+    KnowledgeCredentialStore, KnowledgeIngestionRunner, KnowledgeService, KnowledgeServiceError,
+    KnowledgeWebhookVerifier, ParserWebhookVerifier, StaticKnowledgeProviders,
+};
+use moa_orchestrator::workflows::knowledge_sync_ingestion::{
+    KnowledgeSyncIngestionDurableSteps, KnowledgeSyncIngestionRequest,
+    KnowledgeSyncPageApplication, KnowledgeSyncPreparedRun, KnowledgeSyncProviderPage,
+    run_knowledge_sync_ingestion_workflow,
 };
 use reqwest::header::HeaderMap;
+use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use tokio_util::bytes::Bytes;
@@ -63,7 +73,7 @@ const RAW_DOCUMENT_TAIL: &str = "RAW_FULL_DOCUMENT_TAIL_SHOULD_NOT_APPEAR";
 const OTHER_CONTACT_MEMORY: &str = "other contact private memory should not appear";
 
 #[tokio::test]
-async fn manual_sync_triggers_provider_and_does_not_ingest_inline() {
+async fn knowledge_auto_sync_manual_sync_triggers_provider_and_does_not_ingest_inline() {
     // Pins: manual sync returns after provider trigger and only touches sync-run state.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection = fixture_connection(tenant_id);
@@ -101,17 +111,58 @@ async fn manual_sync_triggers_provider_and_does_not_ingest_inline() {
 }
 
 #[tokio::test]
-async fn duplicate_provider_webhook_records_once_and_enqueues_once() {
-    // Pins: duplicate provider deliveries are idempotent and enqueue ingestion only once.
+async fn knowledge_auto_sync_manual_sync_immediate_provider_completion_marks_run_ready_for_workflow()
+ {
+    // Pins: immediate provider completion marks the run provider-synced and records the same ingestion enqueue marker used by webhooks.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection = fixture_connection(tenant_id);
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
     repository
         .insert_connection(connection.clone())
         .expect("fixture connection should be inserted");
-    let provider = Arc::new(FakeLinkedIntegrationProvider::default());
+    let provider = Arc::new(FakeLinkedIntegrationProvider::with_trigger_status(
+        "completed",
+    ));
     let service = fixture_service(repository.clone(), provider.clone(), 80);
-    let request = webhook_request(tenant_id, connection.connection_uid, "evt-duplicate");
+
+    let response = service
+        .sync_connection(KnowledgeSyncRequest {
+            tenant_id,
+            connection_uid: connection.connection_uid,
+            parser: Some("native".to_string()),
+            max_records: Some(25),
+        })
+        .await
+        .expect("manual sync should accept an immediate provider completion");
+
+    assert_eq!(response.status, "provider_synced");
+    assert_eq!(provider.trigger_sync_count(), 1);
+    assert_eq!(provider.list_changed_records_count(), 0);
+    assert_eq!(repository.op_count("create_sync_run"), 1);
+    assert_eq!(repository.op_count("update_sync_run"), 1);
+    assert_eq!(repository.op_count("record_ingestion_step"), 2);
+    assert_eq!(repository.sync_run_count(), 1);
+    assert_eq!(repository.step_count(), 2);
+}
+
+#[tokio::test]
+async fn knowledge_auto_sync_duplicate_webhook_does_not_double_dispatch_or_count() {
+    // Pins: duplicate provider deliveries are idempotent and enqueue ingestion only once.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection =
+        fixture_connection_for_provider(tenant_id, "nango", "google-drive", "provider-account-1");
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture connection should be inserted");
+    let service = fixture_webhook_service(repository.clone(), "nango", 80);
+    let request = signed_connection_webhook_request(
+        "nango",
+        tenant_id,
+        connection.connection_uid,
+        "evt-duplicate",
+        "sync:completed",
+    );
 
     let first = service
         .provider_webhook(request.clone())
@@ -128,14 +179,302 @@ async fn duplicate_provider_webhook_records_once_and_enqueues_once() {
     assert!(second.duplicate);
     assert!(!second.ingestion_enqueued);
     assert!(second.sync_run_uid.is_none());
-    assert_eq!(provider.verify_webhook_count(), 2);
     assert_eq!(repository.provider_event_count(), 1);
     assert_eq!(repository.sync_run_count(), 1);
     assert_eq!(repository.step_count(), 1);
 }
 
 #[tokio::test]
-async fn parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
+async fn knowledge_auto_sync_provider_webhook_dispatches_once_offline() {
+    // Pins: Merge linked_account.synced is an enabled provider completion signal.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection =
+        fixture_connection_for_provider(tenant_id, "merge", "merge", "linked-account-123");
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture Merge connection should be inserted");
+    let service = fixture_webhook_service(repository.clone(), "merge", 80);
+    let request = signed_provider_webhook_request(
+        "merge",
+        json!({
+            "event_id": "evt-merge-synced",
+            "event_type": "linked_account.synced",
+            "linked_account": { "id": "linked-account-123" }
+        }),
+    );
+
+    let response = service
+        .provider_webhook(request)
+        .await
+        .expect("Merge synced webhook should enqueue ingestion");
+
+    assert!(response.ingestion_enqueued);
+    assert!(response.sync_run_uid.is_some());
+    assert_eq!(repository.provider_event_count(), 1);
+    assert_eq!(repository.sync_run_count(), 1);
+    assert_eq!(repository.step_count(), 1);
+}
+
+#[tokio::test]
+async fn knowledge_auto_sync_distinct_events_reuse_active_connection_run() {
+    // Pins: distinct completion events for one connection do not create parallel active runs.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection =
+        fixture_connection_for_provider(tenant_id, "nango", "google-drive", "provider-account-1");
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture Nango connection should be inserted");
+    let service = fixture_webhook_service(repository.clone(), "nango", 80);
+    let first_request = signed_connection_webhook_request(
+        "nango",
+        tenant_id,
+        connection.connection_uid,
+        "evt-nango-sync-completed",
+        "sync.completed",
+    );
+    let second_request = signed_connection_webhook_request(
+        "nango",
+        tenant_id,
+        connection.connection_uid,
+        "evt-nango-sync-colon-completed",
+        "sync:completed",
+    );
+
+    let first = service
+        .provider_webhook(first_request)
+        .await
+        .expect("first Nango completion should enqueue ingestion");
+    let second = service
+        .provider_webhook(second_request)
+        .await
+        .expect("second Nango completion should reuse the active run");
+
+    assert!(first.ingestion_enqueued);
+    assert!(!second.duplicate);
+    assert!(!second.ingestion_enqueued);
+    assert_eq!(second.sync_run_uid, first.sync_run_uid);
+    assert_eq!(repository.provider_event_count(), 2);
+    assert_eq!(repository.sync_run_count(), 1);
+    assert_eq!(repository.step_count(), 1);
+    assert_eq!(repository.op_count("create_sync_run"), 1);
+}
+
+#[tokio::test]
+async fn non_sync_provider_webhook_is_stored_without_enqueueing() {
+    // Pins: unrelated provider events are persisted for audit but do not start ingestion.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection =
+        fixture_connection_for_provider(tenant_id, "nango", "google-drive", "provider-account-1");
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture Nango connection should be inserted");
+    let service = fixture_webhook_service(repository.clone(), "nango", 80);
+    let request = signed_connection_webhook_request(
+        "nango",
+        tenant_id,
+        connection.connection_uid,
+        "evt-nango-connection-updated",
+        "connection.updated",
+    );
+
+    let response = service
+        .provider_webhook(request)
+        .await
+        .expect("non-sync provider event should be recorded");
+
+    assert!(!response.duplicate);
+    assert!(!response.ingestion_enqueued);
+    assert!(response.sync_run_uid.is_none());
+    assert_eq!(repository.provider_event_count(), 1);
+    assert_eq!(repository.sync_run_count(), 0);
+    assert_eq!(repository.step_count(), 0);
+}
+
+#[tokio::test]
+async fn provider_webhook_resolves_signed_provider_account_identity() {
+    // Pins: signed provider account metadata resolves the local connection without tenant fields.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let mut connection = fixture_connection(tenant_id);
+    connection.provider = "nango".to_string();
+    connection.connector = "google-drive".to_string();
+    connection.provider_account_id = "conn_123".to_string();
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture Nango connection should be inserted");
+    let service = KnowledgeService::new(
+        repository.clone(),
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_webhook_verifier("nango", Arc::new(PayloadWebhookVerifier::new("nango"))),
+        ),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
+        80,
+    );
+    let request = signed_provider_webhook_request(
+        "nango",
+        json!({
+            "event_id": "evt-provider-account",
+            "event_type": "sync.completed",
+            "connection_id": "conn_123",
+            "provider_config_key": "google-drive"
+        }),
+    );
+
+    let response = service
+        .provider_webhook(request)
+        .await
+        .expect("signed provider account webhook should resolve");
+    let stored = repository
+        .provider_event(tenant_id, "nango", "evt-provider-account")
+        .expect("resolved provider event should be stored");
+
+    assert!(response.ingestion_enqueued);
+    assert!(response.sync_run_uid.is_some());
+    assert_eq!(stored.connection_uid, Some(connection.connection_uid));
+    assert_eq!(
+        repository.op_count("lookup_connection_by_provider_account"),
+        1
+    );
+    assert_eq!(repository.provider_event_count(), 1);
+    assert_eq!(repository.sync_run_count(), 1);
+    assert_eq!(repository.step_count(), 1);
+}
+
+#[tokio::test]
+async fn provider_webhook_rejects_ambiguous_provider_account_before_recording() {
+    // Pins: provider account webhooks fail closed when more than one local row matches.
+    let first_tenant = TenantId::from(Uuid::now_v7());
+    let second_tenant = TenantId::from(Uuid::now_v7());
+    let mut first = fixture_connection(first_tenant);
+    first.provider = "merge".to_string();
+    first.connector = "merge".to_string();
+    first.provider_account_id = "linked-account-123".to_string();
+    let mut second = fixture_connection(second_tenant);
+    second.provider = "merge".to_string();
+    second.connector = "merge".to_string();
+    second.provider_account_id = "linked-account-123".to_string();
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(first)
+        .expect("first Merge connection should be inserted");
+    repository
+        .insert_connection(second)
+        .expect("second Merge connection should be inserted");
+    let service = KnowledgeService::new(
+        repository.clone(),
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_webhook_verifier("merge", Arc::new(PayloadWebhookVerifier::new("merge"))),
+        ),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
+        80,
+    );
+    let request = signed_provider_webhook_request(
+        "merge",
+        json!({
+            "event_id": "evt-ambiguous",
+            "event_type": "linked_account.synced",
+            "linked_account": { "id": "linked-account-123" }
+        }),
+    );
+
+    let error = service
+        .provider_webhook(request)
+        .await
+        .expect_err("ambiguous provider account should be rejected");
+
+    assert!(error.to_string().contains("multiple knowledge connections"));
+    assert_eq!(
+        repository.op_count("lookup_connection_by_provider_account"),
+        1
+    );
+    assert_eq!(repository.provider_event_count(), 0);
+    assert_eq!(repository.sync_run_count(), 0);
+    assert_eq!(repository.step_count(), 0);
+}
+
+#[tokio::test]
+async fn provider_webhook_rejects_missing_verified_binding_before_recording() {
+    // Pins: unsigned request payload fields are ignored for webhook tenant binding.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection = fixture_connection(tenant_id);
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture connection should be inserted");
+    let service = KnowledgeService::new(
+        repository.clone(),
+        Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier(
+            "nango",
+            Arc::new(FixedWebhookVerifier::new(WebhookEvent {
+                provider: "nango".to_string(),
+                event_id: "evt-missing-binding".to_string(),
+                event_type: "sync.completed".to_string(),
+                metadata: json!({ "safe": "verified but unbound" }),
+            })),
+        )),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
+        80,
+    );
+    let request = signed_provider_webhook_request(
+        "nango",
+        json!({
+            "event_id": "evt-missing-binding",
+            "event_type": "sync.completed",
+            "tenant_id": tenant_id.to_string(),
+            "connection_uid": connection.connection_uid.to_string()
+        }),
+    );
+
+    let error = service
+        .provider_webhook(request)
+        .await
+        .expect_err("missing verified binding should be rejected");
+
+    assert!(error.to_string().contains("provider account binding"));
+    assert_eq!(repository.provider_event_count(), 0);
+    assert_eq!(repository.sync_run_count(), 0);
+    assert_eq!(repository.step_count(), 0);
+}
+
+#[tokio::test]
+async fn provider_webhook_rejects_signed_connection_for_different_provider_before_recording() {
+    // Pins: signed tenant/connection UUID binding must still match the verified provider.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let mut connection = fixture_connection(tenant_id);
+    connection.provider = "merge".to_string();
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture connection should be inserted");
+    let provider = Arc::new(FakeLinkedIntegrationProvider::default());
+    let service = fixture_service(repository.clone(), provider, 80);
+    let request = webhook_request(
+        tenant_id,
+        connection.connection_uid,
+        "evt-provider-mismatch",
+    );
+
+    let error = service
+        .provider_webhook(request)
+        .await
+        .expect_err("signed connection for a different provider should fail");
+
+    assert!(error.to_string().contains("knowledge connection not found"));
+    assert_eq!(repository.provider_event_count(), 0);
+    assert_eq!(repository.sync_run_count(), 0);
+    assert_eq!(repository.step_count(), 0);
+}
+
+#[tokio::test]
+async fn knowledge_auto_sync_parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
     // Pins: parser webhook HMAC verification is fakeable and persists only safe event metadata.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
@@ -152,6 +491,7 @@ async fn parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("llamaparse", verifier)),
         Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
         80,
     );
     let payload = parser_webhook_payload(tenant_id, connection_uid, "lp-job-1");
@@ -192,7 +532,7 @@ async fn parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
     assert!(bad_error.to_string().contains("signature"));
     assert_eq!(response.provider, "llamaparse");
     assert_eq!(response.event_id, "lp-job-1");
-    assert!(response.ingestion_enqueued);
+    assert!(!response.ingestion_enqueued);
     assert_eq!(
         stored.connection_uid,
         Some(connection_uid),
@@ -206,10 +546,12 @@ async fn parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
     assert!(!stored_json.contains(RAW_DOCUMENT_TAIL));
     assert!(!stored_json.contains("raw_document_text"));
     assert_eq!(repository.provider_event_count(), 1);
+    assert_eq!(repository.sync_run_count(), 0);
+    assert_eq!(repository.step_count(), 0);
 }
 
 #[tokio::test]
-async fn parser_webhook_rejects_bad_custom_header_and_accepts_good_header() {
+async fn knowledge_auto_sync_parser_webhook_rejects_bad_custom_header_and_accepts_good_header() {
     // Pins: parser webhook custom-header verification is fakeable without provider API calls.
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
@@ -227,6 +569,7 @@ async fn parser_webhook_rejects_bad_custom_header_and_accepts_good_header() {
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_webhook_verifier("reducto", verifier)),
         Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
         80,
     );
     let payload = parser_webhook_payload(tenant_id, connection_uid, "reducto-job-1");
@@ -263,10 +606,10 @@ async fn parser_webhook_rejects_bad_custom_header_and_accepts_good_header() {
     assert_eq!(response.provider, "reducto");
     assert_eq!(response.event_id, "reducto-job-1");
     assert_eq!(stored.connection_uid, Some(connection_uid));
-    assert!(response.ingestion_enqueued);
+    assert!(!response.ingestion_enqueued);
     assert_eq!(repository.provider_event_count(), 1);
-    assert_eq!(repository.sync_run_count(), 1);
-    assert_eq!(repository.step_count(), 1);
+    assert_eq!(repository.sync_run_count(), 0);
+    assert_eq!(repository.step_count(), 0);
 }
 
 #[tokio::test]
@@ -280,6 +623,7 @@ async fn exchange_stores_only_credential_reference_on_connection() {
         repository.clone(),
         Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider.clone())),
         credentials.clone(),
+        fake_ingestion_runner(),
         80,
     );
 
@@ -305,6 +649,74 @@ async fn exchange_stores_only_credential_reference_on_connection() {
     assert!(!connection.credential_ref.contains(SECRET_TOKEN));
     assert_eq!(response.provider, PROVIDER);
     assert_eq!(response.connector, CONNECTOR);
+}
+
+#[tokio::test]
+async fn knowledge_service_accepts_injected_ingestion_runner_without_global_config() {
+    // Pins: service tests can inject a deterministic ingestion runner without reading runtime config.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let sync_run_uid = Uuid::now_v7();
+    let runner = Arc::new(FakeKnowledgeIngestionRunner::default());
+    let service = KnowledgeService::new(
+        Arc::new(InMemoryKnowledgeRepository::default()),
+        Arc::new(StaticKnowledgeProviders::new()),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        runner.clone(),
+        80,
+    );
+    let run = KnowledgeSyncRun {
+        sync_run_uid,
+        tenant_id,
+        connection_uid,
+        parser: Some("native".to_string()),
+        max_records: Some(1),
+        status: SyncRunStatus::ProviderSynced,
+        records_seen: 0,
+        records_changed: 0,
+        records_deleted: 0,
+        records_ingested: 0,
+        records_failed: 0,
+        objects_parsed: 0,
+        chunks_embedded: 0,
+        graph_nodes_upserted: 0,
+        graph_edges_upserted: 0,
+        error_code: None,
+        started_at: Utc::now(),
+        finished_at: None,
+    };
+    let page = RecordPage {
+        records: vec![ProviderRecord {
+            source_id: "doc-1".to_string(),
+            object_type: "document".to_string(),
+            title: Some("Doc 1".to_string()),
+            source_uri: None,
+            change_token: Some("etag-1".to_string()),
+            deleted: false,
+            source_updated_at: None,
+            metadata: json!({}),
+            payload: json!({ "text": "hello" }),
+        }],
+        next_cursor: None,
+    };
+
+    let report = service
+        .ingestion_runner()
+        .ingest_record_page(&run, PROVIDER, page)
+        .await
+        .expect("deterministic runner should ingest the test page");
+
+    assert_eq!(report.records_listed, 1);
+    assert_eq!(
+        runner.calls(),
+        vec![FakeKnowledgeIngestionCall {
+            sync_run_uid,
+            connection_uid,
+            tenant_id,
+            provider: PROVIDER.to_string(),
+            records_listed: 1,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -521,6 +933,7 @@ async fn query_trace_renders_populated_retrieval_lineage_db() {
         pool,
         Arc::new(StaticKnowledgeProviders::new()),
         Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
         80,
     );
 
@@ -595,6 +1008,7 @@ async fn mock_connector_end_to_end() {
         pool.clone(),
         Arc::new(providers),
         Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
         96,
     );
 
@@ -1171,6 +1585,586 @@ fn knowledge_handlers_are_authorized_or_have_webhook_safety_comment() {
     );
 }
 
+#[tokio::test]
+async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_ingests_db_knowledge() {
+    // Pins: a provider-synced run lists changed records with its cursor/limit/watermark and applies them to tenant graph/vector knowledge.
+    let db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge auto-sync DB");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let modified_after = Utc::now();
+    let scope = ScopeContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "nango".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "nango-task14-account".to_string(),
+            credential_ref: "vault://knowledge/nango-task14".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({ "safe": "connection" }),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: Some(modified_after),
+        })
+        .await
+        .expect("seed Nango knowledge connection");
+    let sync_run_uid =
+        create_provider_synced_run(&repository, tenant_id, connection_uid, Some(2)).await;
+    let provider = Arc::new(Task14LinkedIntegrationProvider::new(
+        "nango",
+        "docs",
+        task14_nango_records(),
+    ));
+    let pipeline = task14_ingestion_pipeline(pool.clone(), repository.clone(), tenant_id, "nango");
+    let mut steps =
+        DbKnowledgeAutoSyncSteps::new(repository.clone(), provider.clone(), pipeline, 2, "task14");
+
+    let report = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect("provider-synced run should auto-ingest changed records");
+
+    assert_eq!(report.status, "completed");
+    assert_eq!(report.records_listed, 2);
+    assert_eq!(report.records_applied, 2);
+    assert_eq!(
+        provider.list_changed_record_requests(),
+        vec![FakeListChangedRecordsRequest {
+            connection_uid,
+            cursor: None,
+            limit: Some(2),
+            modified_after: Some(modified_after),
+        }]
+    );
+
+    let run = repository
+        .get_sync_run(sync_run_uid)
+        .await
+        .expect("read completed sync run")
+        .expect("completed sync run should exist");
+    assert_eq!(run.status, SyncRunStatus::Completed);
+    assert_eq!(run.records_seen, 2);
+    assert_eq!(run.records_changed, 2);
+    assert_eq!(run.records_deleted, 0);
+    assert_eq!(run.records_ingested, 2);
+    assert_eq!(run.records_failed, 0);
+    assert_eq!(run.objects_parsed, 2);
+    assert_eq!(run.chunks_embedded, 2);
+    assert!(run.graph_nodes_upserted > 0);
+    assert!(run.graph_edges_upserted > 0);
+    let updated_connection = repository
+        .get_connection(connection_uid)
+        .await
+        .expect("read updated connection")
+        .expect("connection should still exist");
+    assert!(
+        updated_connection.last_synced_at >= Some(modified_after),
+        "completion should advance the connection sync watermark"
+    );
+
+    let mut source_ids = repository
+        .list_objects(tenant_id, Some(connection_uid), None, 10)
+        .await
+        .expect("list ingested objects")
+        .into_iter()
+        .map(|object| object.object.source_id)
+        .collect::<Vec<_>>();
+    source_ids.sort();
+    assert_eq!(
+        source_ids,
+        vec![
+            "nango-llamaparse-policy".to_string(),
+            "nango-unstructured-guide".to_string(),
+        ]
+    );
+    let steps = repository
+        .sync_run_steps(sync_run_uid, None)
+        .await
+        .expect("read sync steps");
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step.step == "provider_records_listed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step.step == "object_change_checked")
+            .count(),
+        2
+    );
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| step.step == "graph_upserted")
+            .count(),
+        2
+    );
+    let label_counts = graph_label_counts(&pool, tenant_id).await;
+    assert_eq!(label_counts.get("Source"), Some(&2_i64));
+    assert_eq!(label_counts.get("Document"), Some(&2_i64));
+    assert_eq!(label_counts.get("Chunk"), Some(&2_i64));
+    assert_eq!(label_counts.get("Fact"), Some(&2_i64));
+    assert_eq!(chunk_vector_row_count(&pool, tenant_id).await, 2);
+}
+
+#[tokio::test]
+async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_knowledge() {
+    // Pins: provider record-listing failures mark the DB sync run retryable without applying any records.
+    let db = moa_test_support::postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge auto-sync failure DB");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let modified_after = Utc::now();
+    let scope = ScopeContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "nango".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "nango-task14-account".to_string(),
+            credential_ref: "vault://knowledge/nango-task14".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({ "safe": "connection" }),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: Some(modified_after),
+        })
+        .await
+        .expect("seed Nango knowledge connection");
+    let sync_run_uid =
+        create_provider_synced_run(&repository, tenant_id, connection_uid, Some(5)).await;
+    let provider = Arc::new(Task14LinkedIntegrationProvider::failing_list(
+        "nango",
+        "docs",
+        "upstream listing timeout",
+    ));
+    let pipeline = task14_ingestion_pipeline(pool.clone(), repository.clone(), tenant_id, "nango");
+    let mut steps =
+        DbKnowledgeAutoSyncSteps::new(repository.clone(), provider.clone(), pipeline, 2, "task14");
+
+    let error = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect_err("provider listing failure should stop the workflow");
+
+    assert!(
+        handler_error_text(&error).contains("upstream listing timeout"),
+        "workflow error should preserve the safe provider failure message"
+    );
+    assert_eq!(
+        provider.list_changed_record_requests(),
+        vec![FakeListChangedRecordsRequest {
+            connection_uid,
+            cursor: None,
+            limit: Some(2),
+            modified_after: Some(modified_after),
+        }]
+    );
+    let run = repository
+        .get_sync_run(sync_run_uid)
+        .await
+        .expect("read failed sync run")
+        .expect("failed sync run should exist");
+    assert_eq!(run.status, SyncRunStatus::FailedRetryable);
+    assert_eq!(run.error_code.as_deref(), Some("provider_error_retryable"));
+    assert_eq!(run.records_seen, 0);
+    assert_eq!(run.records_changed, 0);
+    assert_eq!(run.records_ingested, 0);
+    assert_eq!(run.records_failed, 1);
+    assert!(run.finished_at.is_some());
+    assert!(
+        repository
+            .list_objects(tenant_id, Some(connection_uid), None, 10)
+            .await
+            .expect("list objects after failed sync")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
+    // Pins: the workflow lists provider pages with cursor/limit state, applies only the capped records, and completes the run.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let sync_run_uid = Uuid::now_v7();
+    let modified_after = Utc::now();
+    let mut steps = FakeKnowledgeSyncIngestionSteps::new(KnowledgeSyncPreparedRun {
+        run: KnowledgeSyncRun {
+            sync_run_uid,
+            tenant_id,
+            connection_uid,
+            parser: Some("native".to_string()),
+            max_records: Some(3),
+            status: SyncRunStatus::ProviderSynced,
+            records_seen: 0,
+            records_changed: 0,
+            records_deleted: 0,
+            records_ingested: 0,
+            records_failed: 0,
+            objects_parsed: 0,
+            chunks_embedded: 0,
+            graph_nodes_upserted: 0,
+            graph_edges_upserted: 0,
+            error_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+        },
+        connection: KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: PROVIDER.to_string(),
+            connector: CONNECTOR.to_string(),
+            provider_account_id: "provider-account-1".to_string(),
+            credential_ref: "resolved-provider-token".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: Some(modified_after),
+        },
+        provider: PROVIDER.to_string(),
+        parser_label: "native".to_string(),
+        page_size: 2,
+        max_records: 3,
+    })
+    .with_pages(vec![
+        fake_record_page(&["doc-1", "doc-2"], Some("page-2")),
+        fake_record_page(&["doc-3", "doc-4"], Some("page-3")),
+    ]);
+
+    let report = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect("workflow should complete capped pagination");
+
+    assert_eq!(report.status, "completed");
+    assert_eq!(report.records_listed, 3);
+    assert_eq!(report.records_applied, 3);
+    assert_eq!(
+        steps.status_transitions,
+        vec![
+            SyncRunStatus::ProviderSynced,
+            SyncRunStatus::Ingesting,
+            SyncRunStatus::Completed
+        ]
+    );
+    assert_eq!(
+        steps.list_calls,
+        vec![
+            FakeListPageCall {
+                cursor: None,
+                limit: 2,
+                page_index: 0,
+                credential_ref: "resolved-provider-token".to_string(),
+                modified_after: Some(modified_after),
+            },
+            FakeListPageCall {
+                cursor: Some("page-2".to_string()),
+                limit: 1,
+                page_index: 1,
+                credential_ref: "resolved-provider-token".to_string(),
+                modified_after: Some(modified_after),
+            },
+        ]
+    );
+    assert_eq!(
+        steps.apply_calls,
+        vec![
+            FakeApplyPageCall {
+                page_index: 0,
+                source_ids: vec!["doc-1".to_string(), "doc-2".to_string()],
+            },
+            FakeApplyPageCall {
+                page_index: 1,
+                source_ids: vec!["doc-3".to_string()],
+            },
+        ]
+    );
+    assert!(steps.fail_calls.is_empty());
+}
+
+#[tokio::test]
+async fn knowledge_sync_ingestion_workflow_empty_page_completes_with_zero_counters() {
+    // Pins: an empty provider page still runs the page application boundary and completes with zero records.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let sync_run_uid = Uuid::now_v7();
+    let mut steps = FakeKnowledgeSyncIngestionSteps::new(fake_prepared_sync_run(
+        tenant_id,
+        connection_uid,
+        sync_run_uid,
+        10,
+    ))
+    .with_pages(vec![fake_record_page(&[], None)]);
+
+    let report = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect("empty provider page should complete");
+
+    assert_eq!(report.records_listed, 0);
+    assert_eq!(report.records_applied, 0);
+    assert_eq!(steps.list_calls.len(), 1);
+    assert_eq!(steps.apply_calls.len(), 1);
+    assert_eq!(steps.apply_calls[0].source_ids, Vec::<String>::new());
+    assert_eq!(
+        steps.status_transitions,
+        vec![
+            SyncRunStatus::ProviderSynced,
+            SyncRunStatus::Ingesting,
+            SyncRunStatus::Completed
+        ]
+    );
+}
+
+#[test]
+fn knowledge_sync_ingestion_workflow_loads_run_and_uses_page_journal_boundaries() {
+    // Pins: the workflow derives tenant/connection from the sync-run row, pages provider listing, and applies each page inside a runner journal point.
+    let source = include_str!("../src/workflows/knowledge_sync_ingestion.rs");
+
+    assert!(
+        source.contains("pub struct KnowledgeSyncIngestionRequest")
+            && source.contains("pub sync_run_uid: Uuid"),
+        "workflow input should contain sync_run_uid"
+    );
+    assert!(
+        source.contains("prepare_ingestion_run")
+            && source.contains("get_sync_run(sync_run_uid)")
+            && source.contains("ScopeContext::tenant(run.tenant_id)"),
+        "workflow should prepare from the stored sync run under the derived tenant scope"
+    );
+    assert!(
+        source.contains("tenant_id: prepared.run.tenant_id")
+            && source.contains("connection_uid: prepared.run.connection_uid"),
+        "workflow report should derive tenant and connection from the stored run"
+    );
+    assert!(
+        source.contains("connection.tenant_id != run.tenant_id")
+            && source.contains("connection.connection_uid != run.connection_uid"),
+        "workflow should fail closed when the stored run and connection do not share a tenant/connection"
+    );
+    assert!(
+        source.contains("run.status = SyncRunStatus::Ingesting")
+            && source.contains("run.status = SyncRunStatus::Completed")
+            && source.contains("connection.last_synced_at = Some(completed_at)"),
+        "workflow should transition ingesting to completed and update the connection sync watermark"
+    );
+    assert_eq!(
+        count_occurrences(source, "knowledge_sync_provider_page_listing_"),
+        1,
+        "workflow should reserve one page-indexed Restate journal callsite for provider page listing"
+    );
+    assert!(
+        source.contains(".list_changed_records(ListChangedRecordsRequest {")
+            && source.contains("cursor,")
+            && source.contains("modified_after,")
+            && source.contains("limit: Some(limit)"),
+        "provider listing journal step should pass cursor, modified_after, and page limit to the selected provider"
+    );
+    assert_eq!(
+        count_occurrences(source, "knowledge_sync_provider_page_application_"),
+        1,
+        "workflow should reserve one page-indexed Restate journal callsite for provider page application"
+    );
+    assert!(
+        source.contains("ProductionKnowledgeIngestionRunner::new(")
+            && source.contains("config.as_ref().clone()")
+            && source.contains(".ingest_record_page(&run, &page.provider, page.page)")
+            && source.contains("while records_processed < u64::from(prepared.max_records)"),
+        "page application journal step should call the production ingestion runner"
+    );
+    assert!(
+        !source.contains("KnowledgeIngestionPipeline::new(")
+            && !source.contains("build_embedder_from_config")
+            && !source.contains("MemoryKnowledgeGraphWriter::new("),
+        "workflow should not own parser/embedder/graph/vector factories after Task 5"
+    );
+    assert!(
+        !source.contains("Placeholder")
+            && !source.contains("let _ = (tenant_id, connection_uid, page);")
+            && !source.contains("records_listed: 0")
+            && !source.contains("records_applied: 0"),
+        "workflow must not leave placeholder no-op page listing or application code"
+    );
+    assert!(
+        source.contains(
+            "// SAFETY: Internal-only workflow; tenant and connection are derived from the stored sync run row."
+        ),
+        "workflow handler should explain why it has no caller authz"
+    );
+}
+
+#[test]
+fn knowledge_ingestion_runner_owns_production_factories_and_is_injectable() {
+    // Pins: Task 5 keeps parser/embedder/vector/graph factories in the Knowledge service seam.
+    let service_source = include_str!("../src/services/knowledge/mod.rs");
+    let ingest_source = include_str!("../src/services/knowledge/ingest.rs");
+
+    assert!(
+        ingest_source.contains("pub trait KnowledgeIngestionRunner")
+            && ingest_source.contains("run: &KnowledgeSyncRun")
+            && ingest_source.contains("page: RecordPage"),
+        "service seam should define a page-level ingestion runner over stored sync runs"
+    );
+    assert!(
+        ingest_source.contains("ProductionKnowledgeIngestionRunner")
+            && ingest_source.contains("KnowledgeIngestionPipeline::new("),
+        "production runner should build and call KnowledgeIngestionPipeline"
+    );
+    assert!(
+        ingest_source.contains("\"native\" =>")
+            && ingest_source.contains("NativeDocumentParser::new()")
+            && ingest_source.contains("\"llamaparse\" =>")
+            && ingest_source.contains("LlamaParseParser::new(")
+            && ingest_source.contains("\"unstructured\" =>")
+            && ingest_source.contains("UnstructuredParser::new(")
+            && ingest_source.contains("\"reducto\" =>")
+            && ingest_source.contains("ReductoParser::new("),
+        "production runner should own all configured parser factories"
+    );
+    assert!(
+        ingest_source
+            .contains("build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)"),
+        "production runner should build the ingestion-role embedder"
+    );
+    assert!(
+        ingest_source.contains("PostgresKnowledgeRepository::scoped(")
+            && ingest_source.contains("PgvectorStore::new(pool.clone(), scope.clone())")
+            && ingest_source
+                .contains("AgeGraphStore::scoped(pool, scope).with_vector_store(vector_store)")
+            && ingest_source.contains("MemoryKnowledgeGraphWriter::new(")
+            && ingest_source.contains("MemoryScope::Tenant { tenant_id }"),
+        "production runner should build tenant-scoped repository, vector, graph, and writer dependencies"
+    );
+    assert!(
+        ingest_source.contains("fn chunking_config(config: moa_core::config::KnowledgeChunkingConfig) -> ChunkingConfig")
+            && ingest_source.contains("target_tokens: config.target_tokens")
+            && ingest_source.contains("max_tokens: config.max_tokens")
+            && ingest_source.contains("min_tokens: config.min_tokens"),
+        "production runner should convert KnowledgeChunkingConfig into ChunkingConfig"
+    );
+    assert!(
+        ingest_source.contains("run.parser")
+            && ingest_source
+                .contains(".unwrap_or(config.knowledge.parser.external_default.clone())"),
+        "parser selection should use run.parser.unwrap_or(config.knowledge.parser.external_default)"
+    );
+    assert!(
+        service_source.contains("ingestion_runner: Arc<dyn KnowledgeIngestionRunner>")
+            && service_source.contains("pub fn new(")
+            && service_source.contains("pub fn from_postgres_pool("),
+        "KnowledgeService constructors should accept an injectable ingestion runner"
+    );
+    assert!(
+        service_source.contains("ProductionKnowledgeIngestionRunner::new("),
+        "production service construction should install the production ingestion runner"
+    );
+}
+
+#[test]
+fn knowledge_auto_sync_handlers_dispatch_ingestion_workflow_fire_and_forget() {
+    // Pins: Knowledge dispatches detached ingestion only after durable sync/webhook service work returns.
+    let source = include_str!("../src/services/knowledge/mod.rs");
+    let impl_source = source
+        .split("impl Knowledge for KnowledgeImpl")
+        .nth(1)
+        .expect("KnowledgeImpl implementation should exist");
+    let sync_body = handler_body(impl_source, "sync_connection");
+    let sync_step = sync_body
+        .find(".name(\"knowledge_sync_connection\")")
+        .expect("sync_connection should keep durable service work journaled");
+    let sync_dispatch = sync_body
+        .find("Self::dispatch_knowledge_sync_ingestion(&ctx, response.sync_run_uid);")
+        .expect("sync_connection should dispatch ingestion for provider-synced responses");
+    assert!(
+        sync_step < sync_dispatch,
+        "manual sync workflow dispatch should happen after durable sync_connection work"
+    );
+
+    let webhook_body = handler_body(impl_source, "provider_webhook");
+    let webhook_step = webhook_body
+        .find(".name(\"knowledge_provider_webhook\")")
+        .expect("provider_webhook should keep durable webhook work journaled");
+    let webhook_dispatch = webhook_body
+        .find("Self::dispatch_knowledge_sync_ingestion(&ctx, sync_run_uid);")
+        .expect("provider_webhook should dispatch ingestion after enqueueable webhook response");
+    assert!(
+        webhook_step < webhook_dispatch,
+        "webhook workflow dispatch should happen after durable webhook processing"
+    );
+
+    let helper = source
+        .split("fn dispatch_knowledge_sync_ingestion")
+        .nth(1)
+        .expect("dispatch helper should exist");
+    let helper_end = helper
+        .find("\n    }\n}")
+        .expect("dispatch helper should end before the impl closes");
+    let helper = &helper[..helper_end];
+    assert!(
+        helper
+            .contains("workflow_client::<KnowledgeSyncIngestionClient>(sync_run_uid.to_string())"),
+        "workflow key should be exactly sync_run_uid.to_string()"
+    );
+    assert!(
+        helper.contains(".run(Json::from(KnowledgeSyncIngestionRequest { sync_run_uid }))"),
+        "dispatch should pass sync_run_uid in the workflow input"
+    );
+    assert!(
+        helper.contains(".send();") && !helper.contains(".await"),
+        "dispatch should be fire-and-forget via send without awaiting"
+    );
+}
+
+#[test]
+fn knowledge_sync_ingestion_workflow_is_registered_in_endpoint() {
+    // Pins: the default Restate endpoint and readiness list include KnowledgeSyncIngestion.
+    let source = include_str!("../src/runtime/endpoint.rs");
+
+    assert!(
+        source.contains(
+            "knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl}"
+        ),
+        "endpoint should import the workflow trait and implementation"
+    );
+    assert_eq!(
+        count_occurrences(source, "\"KnowledgeSyncIngestion\""),
+        1,
+        "expected service names should include KnowledgeSyncIngestion exactly once"
+    );
+    assert_eq!(
+        count_occurrences(source, ".bind(KnowledgeSyncIngestionImpl.serve())"),
+        1,
+        "endpoint should bind KnowledgeSyncIngestion exactly once"
+    );
+}
+
 fn fixture_service(
     repository: Arc<dyn KnowledgeRepository>,
     provider: Arc<dyn LinkedIntegrationProvider>,
@@ -1180,8 +2174,558 @@ fn fixture_service(
         repository,
         Arc::new(StaticKnowledgeProviders::new().with_provider(PROVIDER, provider)),
         Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
         max_preview_chars,
     )
+}
+
+fn fixture_webhook_service(
+    repository: Arc<dyn KnowledgeRepository>,
+    provider: &'static str,
+    max_preview_chars: usize,
+) -> KnowledgeService {
+    KnowledgeService::new(
+        repository,
+        Arc::new(
+            StaticKnowledgeProviders::new()
+                .with_webhook_verifier(provider, Arc::new(PayloadWebhookVerifier::new(provider))),
+        ),
+        Arc::new(FakeKnowledgeCredentialStore::default()),
+        fake_ingestion_runner(),
+        max_preview_chars,
+    )
+}
+
+fn fake_ingestion_runner() -> Arc<dyn KnowledgeIngestionRunner> {
+    Arc::new(FakeKnowledgeIngestionRunner::default())
+}
+
+#[derive(Debug)]
+struct FakeKnowledgeSyncIngestionSteps {
+    prepared: KnowledgeSyncPreparedRun,
+    pages: Vec<RecordPage>,
+    list_calls: Vec<FakeListPageCall>,
+    apply_calls: Vec<FakeApplyPageCall>,
+    fail_calls: Vec<FakeFailCall>,
+    status_transitions: Vec<SyncRunStatus>,
+}
+
+impl FakeKnowledgeSyncIngestionSteps {
+    fn new(prepared: KnowledgeSyncPreparedRun) -> Self {
+        Self {
+            prepared,
+            pages: Vec::new(),
+            list_calls: Vec::new(),
+            apply_calls: Vec::new(),
+            fail_calls: Vec::new(),
+            status_transitions: Vec::new(),
+        }
+    }
+
+    fn with_pages(mut self, pages: Vec<RecordPage>) -> Self {
+        self.pages = pages;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeListPageCall {
+    cursor: Option<String>,
+    limit: u32,
+    page_index: u32,
+    credential_ref: String,
+    modified_after: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeListChangedRecordsRequest {
+    connection_uid: Uuid,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    modified_after: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeApplyPageCall {
+    page_index: u32,
+    source_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeFailCall {
+    stage: &'static str,
+    error_message: String,
+}
+
+#[async_trait]
+impl KnowledgeSyncIngestionDurableSteps for FakeKnowledgeSyncIngestionSteps {
+    async fn prepare_ingestion_run(
+        &mut self,
+        request: &KnowledgeSyncIngestionRequest,
+    ) -> Result<KnowledgeSyncPreparedRun, HandlerError> {
+        if request.sync_run_uid != self.prepared.run.sync_run_uid {
+            return Err(TerminalError::new_with_code(404, "sync run mismatch").into());
+        }
+        self.status_transitions.push(self.prepared.run.status);
+        self.prepared.run.status = SyncRunStatus::Ingesting;
+        self.status_transitions.push(self.prepared.run.status);
+        Ok(self.prepared.clone())
+    }
+
+    async fn list_changed_records_page(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        cursor: Option<String>,
+        limit: u32,
+        page_index: u32,
+    ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
+        self.list_calls.push(FakeListPageCall {
+            cursor,
+            limit,
+            page_index,
+            credential_ref: prepared.connection.credential_ref.clone(),
+            modified_after: prepared.connection.last_synced_at,
+        });
+        let page = if self.pages.is_empty() {
+            RecordPage {
+                records: Vec::new(),
+                next_cursor: None,
+            }
+        } else {
+            self.pages.remove(0)
+        };
+        let records_listed = page.records.len() as u64;
+        Ok(KnowledgeSyncProviderPage {
+            provider: prepared.provider.clone(),
+            page,
+            records_listed,
+        })
+    }
+
+    async fn apply_record_page(
+        &mut self,
+        _prepared: &KnowledgeSyncPreparedRun,
+        page: KnowledgeSyncProviderPage,
+        page_index: u32,
+    ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
+        let source_ids = page
+            .page
+            .records
+            .iter()
+            .map(|record| record.source_id.clone())
+            .collect::<Vec<_>>();
+        let records_applied = source_ids.len() as u64;
+        self.apply_calls.push(FakeApplyPageCall {
+            page_index,
+            source_ids,
+        });
+        Ok(KnowledgeSyncPageApplication {
+            records_listed: page.records_listed,
+            records_ingested: records_applied,
+            records_skipped: 0,
+            records_deleted: 0,
+            embeddings_created: 0,
+            records_applied,
+        })
+    }
+
+    async fn complete_ingestion_run(
+        &mut self,
+        _prepared: &KnowledgeSyncPreparedRun,
+    ) -> Result<(), HandlerError> {
+        self.status_transitions.push(SyncRunStatus::Completed);
+        Ok(())
+    }
+
+    async fn fail_ingestion_run(
+        &mut self,
+        _prepared: &KnowledgeSyncPreparedRun,
+        stage: &'static str,
+        error_message: String,
+    ) -> Result<(), HandlerError> {
+        self.fail_calls.push(FakeFailCall {
+            stage,
+            error_message,
+        });
+        Ok(())
+    }
+}
+
+fn fake_prepared_sync_run(
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    sync_run_uid: Uuid,
+    max_records: u32,
+) -> KnowledgeSyncPreparedRun {
+    KnowledgeSyncPreparedRun {
+        run: KnowledgeSyncRun {
+            sync_run_uid,
+            tenant_id,
+            connection_uid,
+            parser: Some("native".to_string()),
+            max_records: Some(max_records),
+            status: SyncRunStatus::ProviderSynced,
+            records_seen: 0,
+            records_changed: 0,
+            records_deleted: 0,
+            records_ingested: 0,
+            records_failed: 0,
+            objects_parsed: 0,
+            chunks_embedded: 0,
+            graph_nodes_upserted: 0,
+            graph_edges_upserted: 0,
+            error_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+        },
+        connection: KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: PROVIDER.to_string(),
+            connector: CONNECTOR.to_string(),
+            provider_account_id: "provider-account-1".to_string(),
+            credential_ref: "resolved-provider-token".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        },
+        provider: PROVIDER.to_string(),
+        parser_label: "native".to_string(),
+        page_size: 100,
+        max_records,
+    }
+}
+
+fn fake_record_page(source_ids: &[&str], next_cursor: Option<&str>) -> RecordPage {
+    RecordPage {
+        records: source_ids
+            .iter()
+            .map(|source_id| ProviderRecord {
+                source_id: (*source_id).to_string(),
+                object_type: "document".to_string(),
+                title: Some((*source_id).to_string()),
+                source_uri: None,
+                change_token: Some(format!("{source_id}-etag")),
+                deleted: false,
+                source_updated_at: None,
+                metadata: json!({}),
+                payload: json!({ "text": source_id }),
+            })
+            .collect(),
+        next_cursor: next_cursor.map(ToOwned::to_owned),
+    }
+}
+
+type Task14KnowledgeIngestionPipeline = KnowledgeIngestionPipeline<
+    PostgresKnowledgeRepository,
+    Task14Parser,
+    Task14Embedder,
+    MemoryKnowledgeGraphWriter<AgeGraphStore>,
+    MetricsIngestionObserver,
+>;
+
+struct DbKnowledgeAutoSyncSteps {
+    repository: Arc<PostgresKnowledgeRepository>,
+    provider: Arc<Task14LinkedIntegrationProvider>,
+    pipeline: Arc<Task14KnowledgeIngestionPipeline>,
+    page_size: u32,
+    parser_label: String,
+}
+
+impl DbKnowledgeAutoSyncSteps {
+    fn new(
+        repository: Arc<PostgresKnowledgeRepository>,
+        provider: Arc<Task14LinkedIntegrationProvider>,
+        pipeline: Arc<Task14KnowledgeIngestionPipeline>,
+        page_size: u32,
+        parser_label: impl Into<String>,
+    ) -> Self {
+        Self {
+            repository,
+            provider,
+            pipeline,
+            page_size,
+            parser_label: parser_label.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl KnowledgeSyncIngestionDurableSteps for DbKnowledgeAutoSyncSteps {
+    async fn prepare_ingestion_run(
+        &mut self,
+        request: &KnowledgeSyncIngestionRequest,
+    ) -> Result<KnowledgeSyncPreparedRun, HandlerError> {
+        let mut run = self
+            .repository
+            .get_sync_run(request.sync_run_uid)
+            .await
+            .map_err(test_handler_error)?
+            .ok_or_else(|| TerminalError::new_with_code(404, "knowledge sync run not found"))?;
+        let connection = self
+            .repository
+            .get_connection(run.connection_uid)
+            .await
+            .map_err(test_handler_error)?
+            .ok_or_else(|| TerminalError::new_with_code(404, "knowledge connection not found"))?;
+        if connection.tenant_id != run.tenant_id || connection.connection_uid != run.connection_uid
+        {
+            return Err(
+                TerminalError::new_with_code(404, "knowledge connection tenant mismatch").into(),
+            );
+        }
+        let max_records = run.max_records.unwrap_or(100);
+        run.status = SyncRunStatus::Ingesting;
+        run.parser = Some(self.parser_label.clone());
+        self.repository
+            .update_sync_run(run.clone())
+            .await
+            .map_err(test_handler_error)?;
+        Ok(KnowledgeSyncPreparedRun {
+            provider: connection.provider.clone(),
+            run,
+            connection,
+            parser_label: self.parser_label.clone(),
+            page_size: self.page_size,
+            max_records,
+        })
+    }
+
+    async fn list_changed_records_page(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        cursor: Option<String>,
+        limit: u32,
+        _page_index: u32,
+    ) -> Result<KnowledgeSyncProviderPage, HandlerError> {
+        let page = self
+            .provider
+            .list_changed_records(ListChangedRecordsRequest {
+                connection: prepared.connection.clone(),
+                cursor,
+                modified_after: prepared.connection.last_synced_at,
+                limit: Some(limit),
+            })
+            .await
+            .map_err(test_handler_error)?;
+        let records_listed = page.records.len() as u64;
+        Ok(KnowledgeSyncProviderPage {
+            provider: prepared.provider.clone(),
+            page,
+            records_listed,
+        })
+    }
+
+    async fn apply_record_page(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        page: KnowledgeSyncProviderPage,
+        _page_index: u32,
+    ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
+        let report = self
+            .pipeline
+            .ingest_record_page(
+                prepared.run.sync_run_uid,
+                prepared.run.connection_uid,
+                prepared.run.tenant_id,
+                page.page,
+            )
+            .await
+            .map_err(test_handler_error)?;
+        Ok(KnowledgeSyncPageApplication::from(report))
+    }
+
+    async fn complete_ingestion_run(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+    ) -> Result<(), HandlerError> {
+        let mut run = self
+            .repository
+            .get_sync_run(prepared.run.sync_run_uid)
+            .await
+            .map_err(test_handler_error)?
+            .ok_or_else(|| TerminalError::new_with_code(404, "knowledge sync run not found"))?;
+        run.status = SyncRunStatus::Completed;
+        run.error_code = None;
+        run.finished_at = Some(Utc::now());
+        self.repository
+            .update_sync_run(run)
+            .await
+            .map_err(test_handler_error)?;
+
+        let mut connection = self
+            .repository
+            .get_connection(prepared.run.connection_uid)
+            .await
+            .map_err(test_handler_error)?
+            .ok_or_else(|| TerminalError::new_with_code(404, "knowledge connection not found"))?;
+        connection.last_synced_at = Some(Utc::now());
+        self.repository
+            .upsert_connection(connection)
+            .await
+            .map_err(test_handler_error)?;
+        Ok(())
+    }
+
+    async fn fail_ingestion_run(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        stage: &'static str,
+        error_message: String,
+    ) -> Result<(), HandlerError> {
+        let Some(mut run) = self
+            .repository
+            .get_sync_run(prepared.run.sync_run_uid)
+            .await
+            .map_err(test_handler_error)?
+        else {
+            return Ok(());
+        };
+        let classification = moa_knowledge::observability::classify_failure(
+            stage,
+            &KnowledgeError::provider(prepared.provider.clone(), error_message),
+        );
+        run.status = if classification.retryable {
+            SyncRunStatus::FailedRetryable
+        } else {
+            SyncRunStatus::FailedTerminal
+        };
+        run.records_failed = run.records_failed.saturating_add(1);
+        run.error_code = Some(classification.error_code.to_string());
+        run.finished_at = Some(Utc::now());
+        self.repository
+            .update_sync_run(run)
+            .await
+            .map_err(test_handler_error)?;
+        Ok(())
+    }
+}
+
+async fn create_provider_synced_run(
+    repository: &PostgresKnowledgeRepository,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    max_records: Option<u32>,
+) -> Uuid {
+    let sync_run_uid = Uuid::now_v7();
+    repository
+        .create_sync_run(KnowledgeSyncRun {
+            sync_run_uid,
+            tenant_id,
+            connection_uid,
+            parser: Some("task14".to_string()),
+            max_records,
+            status: SyncRunStatus::ProviderSynced,
+            records_seen: 0,
+            records_changed: 0,
+            records_deleted: 0,
+            records_ingested: 0,
+            records_failed: 0,
+            objects_parsed: 0,
+            chunks_embedded: 0,
+            graph_nodes_upserted: 0,
+            graph_edges_upserted: 0,
+            error_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+        })
+        .await
+        .expect("create provider-synced sync run");
+    sync_run_uid
+}
+
+fn task14_ingestion_pipeline(
+    pool: sqlx::PgPool,
+    repository: Arc<PostgresKnowledgeRepository>,
+    tenant_id: TenantId,
+    provider: &str,
+) -> Arc<Task14KnowledgeIngestionPipeline> {
+    let scope = ScopeContext::tenant(tenant_id);
+    let vector = Arc::new(PgvectorStore::new_for_app_role(pool.clone(), scope.clone()));
+    let graph_store =
+        Arc::new(AgeGraphStore::scoped_for_app_role(pool, scope.clone()).with_vector_store(vector));
+    let graph_writer = Arc::new(MemoryKnowledgeGraphWriter::new(
+        graph_store,
+        MemoryScope::Tenant { tenant_id },
+        "knowledge-auto-sync-test",
+    ));
+    Arc::new(KnowledgeIngestionPipeline::new(
+        repository,
+        Arc::new(Task14Parser),
+        Arc::new(Task14Embedder),
+        graph_writer,
+        Arc::new(MetricsIngestionObserver),
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 128,
+                max_tokens: 256,
+                min_tokens: 1,
+            },
+            provider: provider.to_string(),
+            parser_label: "task14".to_string(),
+        },
+    ))
+}
+
+fn test_handler_error(error: impl std::fmt::Display) -> HandlerError {
+    TerminalError::new(error.to_string()).into()
+}
+
+fn handler_error_text(error: &HandlerError) -> String {
+    let error_ref = <HandlerError as AsRef<dyn std::error::Error + Send + Sync>>::as_ref(error);
+    error_ref.to_string()
+}
+
+#[derive(Debug, Clone, Default)]
+struct FakeKnowledgeIngestionRunner {
+    calls: Arc<Mutex<Vec<FakeKnowledgeIngestionCall>>>,
+}
+
+impl FakeKnowledgeIngestionRunner {
+    fn calls(&self) -> Vec<FakeKnowledgeIngestionCall> {
+        self.calls
+            .lock()
+            .expect("fake ingestion runner calls should not be poisoned")
+            .clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakeKnowledgeIngestionCall {
+    sync_run_uid: Uuid,
+    connection_uid: Uuid,
+    tenant_id: TenantId,
+    provider: String,
+    records_listed: u64,
+}
+
+#[async_trait]
+impl KnowledgeIngestionRunner for FakeKnowledgeIngestionRunner {
+    async fn ingest_record_page(
+        &self,
+        run: &KnowledgeSyncRun,
+        provider: &str,
+        page: RecordPage,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+        let records_listed = page.records.len() as u64;
+        self.calls
+            .lock()
+            .expect("fake ingestion runner calls should not be poisoned")
+            .push(FakeKnowledgeIngestionCall {
+                sync_run_uid: run.sync_run_uid,
+                connection_uid: run.connection_uid,
+                tenant_id: run.tenant_id,
+                provider: provider.to_string(),
+                records_listed,
+            });
+        Ok(PageIngestionReport {
+            records_listed,
+            records_ingested: records_listed,
+            ..PageIngestionReport::default()
+        })
+    }
 }
 
 fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
@@ -1198,6 +2742,19 @@ fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
         updated_at: Utc::now(),
         last_synced_at: None,
     }
+}
+
+fn fixture_connection_for_provider(
+    tenant_id: TenantId,
+    provider: &str,
+    connector: &str,
+    provider_account_id: &str,
+) -> KnowledgeConnection {
+    let mut connection = fixture_connection(tenant_id);
+    connection.provider = provider.to_string();
+    connection.connector = connector.to_string();
+    connection.provider_account_id = provider_account_id.to_string();
+    connection
 }
 
 fn fixture_object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject {
@@ -1252,6 +2809,48 @@ fn webhook_request(
         provider: PROVIDER.to_string(),
         event_id: event_id.to_string(),
         event_type: "sync.completed".to_string(),
+        payload,
+        headers: vec![("x-test-signature".to_string(), "valid".to_string())],
+        body_base64: None,
+    }
+}
+
+fn signed_connection_webhook_request(
+    provider: &str,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    event_id: &str,
+    event_type: &str,
+) -> KnowledgeProviderWebhookRequest {
+    signed_provider_webhook_request(
+        provider,
+        json!({
+            "tenant_id": tenant_id.to_string(),
+            "connection_uid": connection_uid.to_string(),
+            "event_id": event_id,
+            "event_type": event_type
+        }),
+    )
+}
+
+fn signed_provider_webhook_request(
+    provider: &str,
+    payload: Value,
+) -> KnowledgeProviderWebhookRequest {
+    let event_id = payload
+        .get("event_id")
+        .and_then(Value::as_str)
+        .expect("provider webhook fixture should include event_id")
+        .to_string();
+    let event_type = payload
+        .get("event_type")
+        .and_then(Value::as_str)
+        .expect("provider webhook fixture should include event_type")
+        .to_string();
+    KnowledgeProviderWebhookRequest {
+        provider: provider.to_string(),
+        event_id,
+        event_type,
         payload,
         headers: vec![("x-test-signature".to_string(), "valid".to_string())],
         body_base64: None,
@@ -1319,6 +2918,10 @@ fn handler_body<'a>(source: &'a str, method: &str) -> &'a str {
         .or_else(|| rest.find("\n/// Application logic"))
         .expect("handler body should be followed by another handler or application logic");
     &rest[..end]
+}
+
+fn count_occurrences(source: &str, needle: &str) -> usize {
+    source.matches(needle).count()
 }
 
 async fn complete_sync_run(
@@ -1474,6 +3077,7 @@ struct Task14LinkedIntegrationProvider {
     connector: &'static str,
     records: Arc<Vec<ProviderRecord>>,
     calls: Arc<Mutex<FakeProviderCalls>>,
+    list_error: Option<&'static str>,
 }
 
 impl Task14LinkedIntegrationProvider {
@@ -1483,6 +3087,21 @@ impl Task14LinkedIntegrationProvider {
             connector,
             records: Arc::new(records),
             calls: Arc::new(Mutex::new(FakeProviderCalls::default())),
+            list_error: None,
+        }
+    }
+
+    fn failing_list(
+        provider: &'static str,
+        connector: &'static str,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            provider,
+            connector,
+            records: Arc::new(Vec::new()),
+            calls: Arc::new(Mutex::new(FakeProviderCalls::default())),
+            list_error: Some(message),
         }
     }
 
@@ -1492,6 +3111,10 @@ impl Task14LinkedIntegrationProvider {
 
     fn list_changed_records_count(&self) -> usize {
         self.calls().list_changed_records
+    }
+
+    fn list_changed_record_requests(&self) -> Vec<FakeListChangedRecordsRequest> {
+        self.calls().list_changed_record_requests
     }
 
     fn calls(&self) -> FakeProviderCalls {
@@ -1560,7 +3183,10 @@ impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
         self.calls
             .lock()
             .expect("task14 fake provider call log should not be poisoned")
-            .list_changed_records += 1;
+            .record_list_changed_records_request(&req);
+        if let Some(message) = self.list_error {
+            return Err(KnowledgeError::provider(self.provider, message));
+        }
         let limit = req.limit.unwrap_or(u32::MAX) as usize;
         Ok(RecordPage {
             records: self.records.iter().take(limit).cloned().collect(),
@@ -1937,22 +3563,35 @@ fn provider_record(
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct FakeLinkedIntegrationProvider {
     calls: Arc<Mutex<FakeProviderCalls>>,
+    trigger_status: String,
+}
+
+impl Default for FakeLinkedIntegrationProvider {
+    fn default() -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(FakeProviderCalls::default())),
+            trigger_status: "accepted".to_string(),
+        }
+    }
 }
 
 impl FakeLinkedIntegrationProvider {
+    fn with_trigger_status(status: impl Into<String>) -> Self {
+        Self {
+            trigger_status: status.into(),
+            ..Self::default()
+        }
+    }
+
     fn trigger_sync_count(&self) -> usize {
         self.calls().trigger_sync
     }
 
     fn list_changed_records_count(&self) -> usize {
         self.calls().list_changed_records
-    }
-
-    fn verify_webhook_count(&self) -> usize {
-        self.calls().verify_webhook
     }
 
     fn exchange_count(&self) -> usize {
@@ -1973,6 +3612,79 @@ struct FakeProviderCalls {
     trigger_sync: usize,
     list_changed_records: usize,
     verify_webhook: usize,
+    list_changed_record_requests: Vec<FakeListChangedRecordsRequest>,
+}
+
+impl FakeProviderCalls {
+    fn record_list_changed_records_request(&mut self, req: &ListChangedRecordsRequest) {
+        self.list_changed_records += 1;
+        self.list_changed_record_requests
+            .push(FakeListChangedRecordsRequest {
+                connection_uid: req.connection.connection_uid,
+                cursor: req.cursor.clone(),
+                limit: req.limit,
+                modified_after: req.modified_after,
+            });
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PayloadWebhookVerifier {
+    provider: &'static str,
+}
+
+impl PayloadWebhookVerifier {
+    fn new(provider: &'static str) -> Self {
+        Self { provider }
+    }
+}
+
+#[async_trait]
+impl KnowledgeWebhookVerifier for PayloadWebhookVerifier {
+    async fn verify_webhook(
+        &self,
+        _headers: HeaderMap,
+        body: Bytes,
+    ) -> moa_knowledge::Result<WebhookEvent> {
+        let value: Value = serde_json::from_slice(&body)
+            .map_err(|error| KnowledgeError::provider(self.provider, error.to_string()))?;
+        let event_id = value
+            .get("event_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| KnowledgeError::provider(self.provider, "missing `event_id`"))?;
+        let event_type = value
+            .get("event_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| KnowledgeError::provider(self.provider, "missing `event_type`"))?;
+        Ok(WebhookEvent {
+            provider: self.provider.to_string(),
+            event_id: event_id.to_string(),
+            event_type: event_type.to_string(),
+            metadata: value,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FixedWebhookVerifier {
+    event: WebhookEvent,
+}
+
+impl FixedWebhookVerifier {
+    fn new(event: WebhookEvent) -> Self {
+        Self { event }
+    }
+}
+
+#[async_trait]
+impl KnowledgeWebhookVerifier for FixedWebhookVerifier {
+    async fn verify_webhook(
+        &self,
+        _headers: HeaderMap,
+        _body: Bytes,
+    ) -> moa_knowledge::Result<WebhookEvent> {
+        Ok(self.event.clone())
+    }
 }
 
 #[async_trait]
@@ -2018,19 +3730,19 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
         Ok(TriggeredSync {
             provider: PROVIDER.to_string(),
             provider_sync_id: Some(format!("sync-{}", req.connection.connection_uid)),
-            status: "accepted".to_string(),
-            metadata: json!({ "accepted": true }),
+            status: self.trigger_status.clone(),
+            metadata: json!({ "status": self.trigger_status.clone() }),
         })
     }
 
     async fn list_changed_records(
         &self,
-        _req: ListChangedRecordsRequest,
+        req: ListChangedRecordsRequest,
     ) -> moa_knowledge::Result<RecordPage> {
         self.calls
             .lock()
             .expect("fake provider call log should not be poisoned")
-            .list_changed_records += 1;
+            .record_list_changed_records_request(&req);
         Ok(RecordPage {
             records: Vec::new(),
             next_cursor: None,
@@ -2284,6 +3996,35 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         })
     }
 
+    async fn lookup_connection_by_provider_account(
+        &self,
+        provider: &str,
+        connector: Option<&str>,
+        provider_account_id: &str,
+    ) -> moa_knowledge::Result<ProviderAccountConnectionLookup> {
+        self.record_op("lookup_connection_by_provider_account")?;
+        self.with_state(|state| {
+            let matches = state
+                .connections
+                .values()
+                .filter(|connection| connection.provider == provider)
+                .filter(|connection| {
+                    connector.is_none_or(|connector| connector == connection.connector)
+                })
+                .filter(|connection| connection.provider_account_id == provider_account_id)
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [] => ProviderAccountConnectionLookup::NotFound,
+                [connection] => ProviderAccountConnectionLookup::Unique(connection.clone()),
+                matches => ProviderAccountConnectionLookup::Ambiguous {
+                    matches: matches.len(),
+                },
+            }
+        })
+    }
+
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> moa_knowledge::Result<()> {
         self.record_op("create_sync_run")?;
         self.with_state(|state| {
@@ -2351,6 +4092,39 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
         self.record_op("record_ingestion_step")?;
         self.with_state(|state| {
             state.steps.push(step);
+        })
+    }
+
+    async fn record_ingestion_step_once(
+        &self,
+        step: KnowledgeIngestionStep,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> moa_knowledge::Result<bool> {
+        self.record_op("record_ingestion_step_once")?;
+        self.with_state(|state| {
+            let step_object = step.object_uid.unwrap_or(Uuid::nil());
+            let exists = state.steps.iter().any(|existing| {
+                existing.sync_run_uid == step.sync_run_uid
+                    && existing.object_uid.unwrap_or(Uuid::nil()) == step_object
+                    && existing.step == step.step
+                    && existing.retry_count == step.retry_count
+            });
+            if exists {
+                return false;
+            }
+            if let Some(run) = state.sync_runs.get_mut(&step.sync_run_uid) {
+                run.records_seen += counter_delta.records_seen;
+                run.records_changed += counter_delta.records_changed;
+                run.records_deleted += counter_delta.records_deleted;
+                run.records_ingested += counter_delta.records_ingested;
+                run.records_failed += counter_delta.records_failed;
+                run.objects_parsed += counter_delta.objects_parsed;
+                run.chunks_embedded += counter_delta.chunks_embedded;
+                run.graph_nodes_upserted += counter_delta.graph_nodes_upserted;
+                run.graph_edges_upserted += counter_delta.graph_edges_upserted;
+            }
+            state.steps.push(step);
+            true
         })
     }
 
@@ -2465,6 +4239,27 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     ) -> moa_knowledge::Result<Vec<KnowledgeChunk>> {
         self.record_op("chunks_for_version")?;
         self.with_state(|state| state.chunks.get(&version_uid).cloned().unwrap_or_default())
+    }
+
+    async fn object_ingestion_completed_since(
+        &self,
+        object_uid: Uuid,
+        since: DateTime<Utc>,
+    ) -> moa_knowledge::Result<bool> {
+        self.record_op("object_ingestion_completed_since")?;
+        self.with_state(|state| {
+            state.steps.iter().any(|step| {
+                step.object_uid == Some(object_uid)
+                    && step.step == "contact_groups_derived"
+                    && step.status == moa_knowledge::domain::IngestionStepStatus::Completed
+                    && step
+                        .counters
+                        .get("records_ingested")
+                        .and_then(Value::as_u64)
+                        == Some(1)
+                    && step.ended_at.unwrap_or(step.started_at) >= since
+            })
+        })
     }
 
     async fn inspect_object(

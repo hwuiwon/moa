@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_sync_runs (
     trigger_reason TEXT,
     provider_sync_id TEXT,
     parser_provider TEXT,
+    max_records BIGINT,
     parser_job_count BIGINT NOT NULL DEFAULT 0,
     cursor_before JSONB,
     cursor_after JSONB,
@@ -79,7 +80,8 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_sync_runs (
     CHECK (objects_parsed >= 0),
     CHECK (chunks_embedded >= 0),
     CHECK (graph_nodes_upserted >= 0),
-    CHECK (graph_edges_upserted >= 0)
+    CHECK (graph_edges_upserted >= 0),
+    CHECK (max_records IS NULL OR max_records >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS knowledge_sync_runs_connection_started_idx

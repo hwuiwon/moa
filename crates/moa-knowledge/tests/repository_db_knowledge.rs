@@ -44,6 +44,7 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         tenant_id,
         connection_uid,
         parser: Some("native".to_string()),
+        max_records: None,
         status: SyncRunStatus::Ingesting,
         records_seen: 2,
         records_changed: 0,

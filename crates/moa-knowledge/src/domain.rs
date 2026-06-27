@@ -123,6 +123,9 @@ pub struct KnowledgeSyncRun {
     /// Parser selected for the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parser: Option<String>,
+    /// Optional provider-record limit for this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_records: Option<u32>,
     /// Current run status.
     pub status: SyncRunStatus,
     /// Number of source records observed.

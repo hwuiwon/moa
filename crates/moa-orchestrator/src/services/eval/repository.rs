@@ -223,7 +223,7 @@ pub(super) async fn load_dataset_items_for_tenant(
     dataset_id: Uuid,
     limit: Option<usize>,
 ) -> Result<Vec<ScopedDatasetItem>, EvalServiceError> {
-    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let storage_partition_id = StoragePartitionId::for_tenant(*tenant_id).to_string();
     let limit = i64::try_from(limit.unwrap_or(1000))
         .map_err(|_| EvalServiceError::IntegerTooLarge { field: "limit" })?;
     let rows = sqlx::query(

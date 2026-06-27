@@ -44,6 +44,7 @@ fn sync_run(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeSyncRun {
         tenant_id,
         connection_uid,
         parser: Some("native".to_string()),
+        max_records: None,
         status: SyncRunStatus::Ingesting,
         records_seen: 1,
         records_changed: 0,
@@ -130,6 +131,7 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
         .expect("insert tenant B connection");
 
     let mut run_a = sync_run(tenant_a, connection_a.connection_uid);
+    run_a.max_records = Some(25);
     let run_b = sync_run(tenant_b, connection_b.connection_uid);
     repo_a
         .create_sync_run(run_a.clone())
@@ -147,6 +149,7 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
         .expect("tenant A run should exist");
     assert_eq!(created.status, SyncRunStatus::Ingesting);
     assert_eq!(created.records_seen, 1);
+    assert_eq!(created.max_records, Some(25));
     assert_eq!(created.records_ingested, 0);
     assert_eq!(created.records_failed, 0);
 
@@ -202,6 +205,7 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
         .expect("tenant A updated run should exist");
     assert_eq!(updated.status, SyncRunStatus::Completed);
     assert_eq!(updated.parser.as_deref(), Some("llamaparse"));
+    assert_eq!(updated.max_records, Some(25));
     assert_eq!(updated.records_seen, 7);
     assert_eq!(updated.records_ingested, 4);
     assert_eq!(updated.records_failed, 2);

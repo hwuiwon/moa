@@ -295,15 +295,6 @@ where
             },
         )
         .await?;
-        self.repository
-            .add_sync_counters(
-                sync_run_uid,
-                KnowledgeSyncCounters {
-                    records_seen: records_listed,
-                    ..KnowledgeSyncCounters::default()
-                },
-            )
-            .await?;
 
         let mut report = PageIngestionReport {
             records_listed,
@@ -395,11 +386,22 @@ where
                 return Err(error);
             }
         };
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "parse_completed",
-            StepOutcome::completed(),
+            StepOutcome {
+                status: IngestionStepStatus::Completed,
+                counters: json!({ "objects_parsed": 1 }),
+                summary: None,
+                retry_count: 0,
+                error_code: None,
+                duration_ms: None,
+            },
+            KnowledgeSyncCounters {
+                objects_parsed: 1,
+                ..KnowledgeSyncCounters::default()
+            },
         )
         .await?;
         self.persist_parsed(sync_run_uid, object, parsed, Vec::new())
@@ -420,18 +422,25 @@ where
             && existing.status == crate::domain::ObjectStatus::Active
             && existing.change_token.is_some()
             && existing.change_token == object.change_token
+            && self
+                .record_has_completed_ingestion(&existing, object.clone(), &record)
+                .await?
         {
-            self.record_step(
+            self.record_counter_step(
                 sync_run_uid,
                 Some(existing.object_uid),
                 "object_change_checked",
                 StepOutcome {
                     status: IngestionStepStatus::Skipped,
-                    counters: json!({ "records_changed": 0 }),
+                    counters: json!({ "records_seen": 1, "records_changed": 0 }),
                     summary: Some("change token unchanged".to_string()),
                     retry_count: 0,
                     error_code: None,
                     duration_ms: None,
+                },
+                KnowledgeSyncCounters {
+                    records_seen: 1,
+                    ..KnowledgeSyncCounters::default()
                 },
             )
             .await?;
@@ -439,29 +448,25 @@ where
         }
 
         self.repository.upsert_object(object.clone()).await?;
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "object_change_checked",
             StepOutcome {
                 status: IngestionStepStatus::Completed,
-                counters: json!({ "records_changed": 1 }),
+                counters: json!({ "records_seen": 1, "records_changed": 1 }),
                 summary: None,
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
             },
+            KnowledgeSyncCounters {
+                records_seen: 1,
+                records_changed: 1,
+                ..KnowledgeSyncCounters::default()
+            },
         )
         .await?;
-        self.repository
-            .add_sync_counters(
-                sync_run_uid,
-                KnowledgeSyncCounters {
-                    records_changed: 1,
-                    ..KnowledgeSyncCounters::default()
-                },
-            )
-            .await?;
 
         let input = match self.parse_input_from_record(object.clone(), &record) {
             Ok(input) => input,
@@ -535,17 +540,21 @@ where
                 return Err(error);
             }
         };
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "parse_completed",
             StepOutcome {
                 status: IngestionStepStatus::Completed,
-                counters: json!({ "parser_items": parsed.elements.len() }),
+                counters: json!({ "parser_items": parsed.elements.len(), "objects_parsed": 1 }),
                 summary: None,
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
+            },
+            KnowledgeSyncCounters {
+                objects_parsed: 1,
+                ..KnowledgeSyncCounters::default()
             },
         )
         .await?;
@@ -576,9 +585,19 @@ where
         } else {
             Vec::new()
         };
+        let latest_version_completed = if let Some(latest) = &latest_version {
+            latest.content_hash == content_hash
+                && self
+                    .repository
+                    .object_ingestion_completed_since(object.object_uid, latest.created_at)
+                    .await?
+        } else {
+            false
+        };
         if let Some(latest) = &latest_version
             && latest.content_hash == content_hash
             && !latest_chunks.is_empty()
+            && latest_version_completed
         {
             self.record_step(
                 sync_run_uid,
@@ -600,7 +619,16 @@ where
             });
         }
 
-        let previous_chunks = latest_chunks;
+        let previous_chunks = if latest_version_completed {
+            latest_chunks
+        } else if latest_version
+            .as_ref()
+            .is_some_and(|latest| latest.content_hash == content_hash)
+        {
+            Vec::new()
+        } else {
+            latest_chunks
+        };
         let version = if let Some(latest) = latest_version
             && latest.content_hash == content_hash
         {
@@ -734,7 +762,7 @@ where
                 .zip(vectors)
                 .collect::<HashMap<_, _>>()
         };
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "embedded",
@@ -749,6 +777,10 @@ where
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
+            },
+            KnowledgeSyncCounters {
+                chunks_embedded: embeddings.len() as u64,
+                ..KnowledgeSyncCounters::default()
             },
         )
         .await?;
@@ -795,7 +827,7 @@ where
                 return Err(error);
             }
         };
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "graph_upserted",
@@ -809,6 +841,11 @@ where
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
+            },
+            KnowledgeSyncCounters {
+                graph_nodes_upserted: graph_report.nodes_upserted,
+                graph_edges_upserted: graph_report.edges_upserted,
+                ..KnowledgeSyncCounters::default()
             },
         )
         .await?;
@@ -899,7 +936,7 @@ where
                 .replace_contact_group_memberships(group_uid, memberships)
                 .await?;
         }
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "contact_groups_derived",
@@ -908,28 +945,19 @@ where
                 counters: json!({
                     "contact_groups": contact_group_count,
                     "contact_group_memberships_changed": contact_memberships,
+                    "records_ingested": 1,
                 }),
                 summary: None,
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
             },
+            KnowledgeSyncCounters {
+                records_ingested: 1,
+                ..KnowledgeSyncCounters::default()
+            },
         )
         .await?;
-
-        self.repository
-            .add_sync_counters(
-                sync_run_uid,
-                KnowledgeSyncCounters {
-                    records_ingested: 1,
-                    objects_parsed: 1,
-                    chunks_embedded: embeddings.len() as u64,
-                    graph_nodes_upserted: graph_report.nodes_upserted,
-                    graph_edges_upserted: graph_report.edges_upserted,
-                    ..KnowledgeSyncCounters::default()
-                },
-            )
-            .await?;
         Ok(PersistedIngestion {
             delta,
             embeddings_created: embeddings.len() as u64,
@@ -943,17 +971,22 @@ where
         _record: ProviderRecord,
     ) -> Result<u64> {
         self.repository.upsert_object(object.clone()).await?;
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "object_change_checked",
             StepOutcome {
                 status: IngestionStepStatus::Completed,
-                counters: json!({ "records_deleted": 1 }),
+                counters: json!({ "records_seen": 1, "records_deleted": 1 }),
                 summary: Some("provider record deleted".to_string()),
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
+            },
+            KnowledgeSyncCounters {
+                records_seen: 1,
+                records_deleted: 1,
+                ..KnowledgeSyncCounters::default()
             },
         )
         .await?;
@@ -1049,15 +1082,6 @@ where
             },
         )
         .await?;
-        self.repository
-            .add_sync_counters(
-                sync_run_uid,
-                KnowledgeSyncCounters {
-                    records_deleted: 1,
-                    ..KnowledgeSyncCounters::default()
-                },
-            )
-            .await?;
         Ok(1)
     }
 
@@ -1089,6 +1113,45 @@ where
             source_updated_at: record.source_updated_at,
             deleted_at: record.deleted.then(Utc::now),
         }
+    }
+
+    async fn record_has_completed_ingestion(
+        &self,
+        existing: &KnowledgeObject,
+        incoming: KnowledgeObject,
+        record: &ProviderRecord,
+    ) -> Result<bool> {
+        // The object row is advanced before parse and graph writes, so the token alone is not completion proof.
+        let input = match self.parse_input_from_record(incoming, record) {
+            Ok(input) => input,
+            Err(_) => return Ok(false),
+        };
+        let Some(text) = input.text.as_deref() else {
+            return Ok(false);
+        };
+        let incoming_hash = content_hash(&normalize_text(text));
+        let Some(version) = self
+            .repository
+            .latest_document_version(existing.object_uid)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if version.content_hash != incoming_hash {
+            return Ok(false);
+        }
+        if !self
+            .repository
+            .object_ingestion_completed_since(existing.object_uid, version.created_at)
+            .await?
+        {
+            return Ok(false);
+        }
+        let chunks = self
+            .repository
+            .chunks_for_version(version.version_uid)
+            .await?;
+        Ok(!chunks.is_empty() && chunks.iter().all(|chunk| chunk.graph_node_uid.is_some()))
     }
 
     fn parse_input_from_record(
@@ -1127,8 +1190,39 @@ where
         sync_run_uid: Uuid,
         object_uid: Option<Uuid>,
         stage: &'static str,
-        mut outcome: StepOutcome,
+        outcome: StepOutcome,
     ) -> Result<()> {
+        self.record_step_with_counters(sync_run_uid, object_uid, stage, outcome, None)
+            .await
+            .map(|_| ())
+    }
+
+    async fn record_counter_step(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+        stage: &'static str,
+        outcome: StepOutcome,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> Result<bool> {
+        self.record_step_with_counters(
+            sync_run_uid,
+            object_uid,
+            stage,
+            outcome,
+            Some(counter_delta),
+        )
+        .await
+    }
+
+    async fn record_step_with_counters(
+        &self,
+        sync_run_uid: Uuid,
+        object_uid: Option<Uuid>,
+        stage: &'static str,
+        mut outcome: StepOutcome,
+        counter_delta: Option<KnowledgeSyncCounters>,
+    ) -> Result<bool> {
         let started = std::time::Instant::now();
         let labels = StepLabels {
             provider: &self.provider,
@@ -1154,9 +1248,17 @@ where
         self.observer
             .record_step(sync_run_uid, object_uid, labels, outcome.clone())
             .await?;
-        self.repository
-            .record_ingestion_step(build_step_row(sync_run_uid, object_uid, stage, outcome))
-            .await
+        let step = build_step_row(sync_run_uid, object_uid, stage, outcome);
+        if let Some(counter_delta) = counter_delta {
+            self.repository
+                .record_ingestion_step_once(step, counter_delta)
+                .await
+        } else {
+            self.repository
+                .record_ingestion_step(step)
+                .await
+                .map(|()| true)
+        }
     }
 
     async fn record_failure_step(
@@ -1167,22 +1269,17 @@ where
         error: &Error,
     ) -> Result<FailureClassification> {
         let classification = classify_failure(stage, error);
-        self.record_step(
+        self.record_counter_step(
             sync_run_uid,
             object_uid,
             stage,
             failed_outcome(classification),
+            KnowledgeSyncCounters {
+                records_failed: 1,
+                ..KnowledgeSyncCounters::default()
+            },
         )
         .await?;
-        self.repository
-            .add_sync_counters(
-                sync_run_uid,
-                KnowledgeSyncCounters {
-                    records_failed: 1,
-                    ..KnowledgeSyncCounters::default()
-                },
-            )
-            .await?;
         if let Some(mut run) = self.repository.get_sync_run(sync_run_uid).await? {
             run.status = if classification.retryable {
                 SyncRunStatus::FailedRetryable

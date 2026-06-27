@@ -169,7 +169,7 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
 
 #[tokio::test]
 async fn sync_completed_webhook_verifies_signature_and_rejects_bad_signature() {
-    // Pins: Nango webhook payloads are trusted only after HMAC verification.
+    // Pins: Nango webhook payloads are trusted only after HMAC verification, and signed account fields are preserved for local binding.
     let signing_key = "nango-webhook-secret";
     let provider = NangoProvider::with_client(
         reqwest::Client::new(),
@@ -178,7 +178,7 @@ async fn sync_completed_webhook_verifies_signature_and_rejects_bad_signature() {
     )
     .with_webhook_signing_key(signing_key);
     let body = Bytes::from_static(
-        br#"{"id":"evt_1","type":"sync:completed","connection_id":"conn_123","sync_name":"documents"}"#,
+        br#"{"id":"evt_1","type":"sync:completed","connection_id":"conn_123","provider_config_key":"google-drive","sync_name":"documents"}"#,
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -194,6 +194,7 @@ async fn sync_completed_webhook_verifies_signature_and_rejects_bad_signature() {
     assert_eq!(event.event_id, "evt_1");
     assert_eq!(event.event_type, "sync:completed");
     assert_eq!(event.metadata["connection_id"], "conn_123");
+    assert_eq!(event.metadata["provider_config_key"], "google-drive");
 
     headers.insert(
         "x-nango-hmac-sha256",

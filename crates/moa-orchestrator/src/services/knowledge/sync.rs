@@ -17,7 +17,7 @@ use serde_json::json;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use super::{KnowledgeService, KnowledgeServiceError};
+use super::{KnowledgeService, KnowledgeServiceError, webhook::record_ingestion_enqueue_step};
 
 impl KnowledgeService {
     /// Starts a provider sync and returns after enqueueing provider-side work.
@@ -72,6 +72,7 @@ impl KnowledgeService {
             tenant_id: request.tenant_id,
             connection_uid: request.connection_uid,
             parser: request.parser,
+            max_records: request.max_records,
             status: SyncRunStatus::Queued,
             records_seen: 0,
             records_changed: 0,
@@ -148,7 +149,12 @@ impl KnowledgeService {
                 return Err(error.into());
             }
         };
-        run.status = SyncRunStatus::ProviderSyncing;
+        let provider_completed = provider_trigger_completed(&triggered.status);
+        run.status = if provider_completed {
+            SyncRunStatus::ProviderSynced
+        } else {
+            SyncRunStatus::ProviderSyncing
+        };
         repository.update_sync_run(run.clone()).await?;
         current_span.record("status", run.status.as_str());
         current_span.record("error_code", "none");
@@ -169,6 +175,9 @@ impl KnowledgeService {
                 error_code: None,
             })
             .await?;
+        if provider_completed {
+            record_ingestion_enqueue_step(&*repository, &run).await?;
+        }
         tracing::info!(
             sync_run_id = %run.sync_run_uid,
             provider = %provider_label,
@@ -276,6 +285,14 @@ impl KnowledgeService {
 
         Ok(KnowledgeConnectionListResponse { connections })
     }
+}
+
+fn provider_trigger_completed(status: &str) -> bool {
+    let normalized = status.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "completed" | "complete" | "success" | "succeeded"
+    )
 }
 
 pub(crate) fn step_view(step: KnowledgeIngestionStep) -> KnowledgeSyncStepView {

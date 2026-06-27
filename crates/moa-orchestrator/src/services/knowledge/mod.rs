@@ -1,11 +1,13 @@
 //! Restate service for tenant knowledge-base link, sync, webhook, and inspection APIs.
 
+mod ingest;
 mod inspect;
 mod link;
 mod sync;
 mod webhook;
 mod webhook_verifier;
 
+pub use ingest::{KnowledgeIngestionRunner, ProductionKnowledgeIngestionRunner};
 pub use webhook_verifier::{KnowledgeWebhookVerifier, ParserWebhookVerifier};
 
 use std::{
@@ -37,11 +39,15 @@ use moa_knowledge::{
 use moa_memory_types::ScopeContext;
 use moa_observability::restate_observability::annotate_restate_handler_span;
 use restate_sdk::prelude::*;
+use uuid::Uuid;
 
 use crate::{
     OrchestratorCtx,
     ctx::RequestHeaders,
     handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error},
+    workflows::knowledge_sync_ingestion::{
+        KnowledgeSyncIngestionClient, KnowledgeSyncIngestionRequest,
+    },
 };
 
 use self::webhook_verifier::LinkedProviderWebhookVerifier;
@@ -160,7 +166,7 @@ impl Knowledge for KnowledgeImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
         let service = production_service(request.tenant_id);
-        Ok(ctx
+        let response = ctx
             .run(|| async move {
                 service
                     .sync_connection(request)
@@ -169,7 +175,12 @@ impl Knowledge for KnowledgeImpl {
                     .map_err(knowledge_handler_error)
             })
             .name("knowledge_sync_connection")
-            .await?)
+            .await?
+            .into_inner();
+        if should_dispatch_knowledge_sync_ingestion(&response.status) {
+            Self::dispatch_knowledge_sync_ingestion(&ctx, response.sync_run_uid);
+        }
+        Ok(Json::from(response))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -314,7 +325,7 @@ impl Knowledge for KnowledgeImpl {
         annotate_restate_handler_span("Knowledge", "provider_webhook");
         let request = request.into_inner();
         let service = production_service_for_webhook();
-        Ok(ctx
+        let response = ctx
             .run(|| async move {
                 service
                     .provider_webhook(request)
@@ -323,7 +334,22 @@ impl Knowledge for KnowledgeImpl {
                     .map_err(knowledge_handler_error)
             })
             .name("knowledge_provider_webhook")
-            .await?)
+            .await?
+            .into_inner();
+        if response.ingestion_enqueued
+            && let Some(sync_run_uid) = response.sync_run_uid
+        {
+            Self::dispatch_knowledge_sync_ingestion(&ctx, sync_run_uid);
+        }
+        Ok(Json::from(response))
+    }
+}
+
+impl KnowledgeImpl {
+    fn dispatch_knowledge_sync_ingestion(ctx: &Context<'_>, sync_run_uid: Uuid) {
+        ctx.workflow_client::<KnowledgeSyncIngestionClient>(sync_run_uid.to_string())
+            .run(Json::from(KnowledgeSyncIngestionRequest { sync_run_uid }))
+            .send();
     }
 }
 
@@ -333,6 +359,7 @@ pub struct KnowledgeService {
     repository: KnowledgeRepositorySource,
     providers: Arc<dyn KnowledgeProviderResolver>,
     credentials: Arc<dyn KnowledgeCredentialStore>,
+    ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
     max_preview_chars: usize,
 }
 
@@ -343,12 +370,14 @@ impl KnowledgeService {
         repository: Arc<dyn KnowledgeRepository>,
         providers: Arc<dyn KnowledgeProviderResolver>,
         credentials: Arc<dyn KnowledgeCredentialStore>,
+        ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
         max_preview_chars: usize,
     ) -> Self {
         Self {
             repository: KnowledgeRepositorySource::Fixed(repository),
             providers,
             credentials,
+            ingestion_runner,
             max_preview_chars,
         }
     }
@@ -359,14 +388,22 @@ impl KnowledgeService {
         pool: sqlx::PgPool,
         providers: Arc<dyn KnowledgeProviderResolver>,
         credentials: Arc<dyn KnowledgeCredentialStore>,
+        ingestion_runner: Arc<dyn KnowledgeIngestionRunner>,
         max_preview_chars: usize,
     ) -> Self {
         Self {
             repository: KnowledgeRepositorySource::Postgres { pool },
             providers,
             credentials,
+            ingestion_runner,
             max_preview_chars,
         }
+    }
+
+    /// Returns the injected page-ingestion runner.
+    #[must_use]
+    pub fn ingestion_runner(&self) -> Arc<dyn KnowledgeIngestionRunner> {
+        self.ingestion_runner.clone()
     }
 
     fn provider(
@@ -385,6 +422,10 @@ impl KnowledgeService {
 
     fn repository(&self, tenant_id: TenantId) -> Arc<dyn KnowledgeRepository> {
         self.repository.repository(tenant_id)
+    }
+
+    fn webhook_lookup_repository(&self) -> Arc<dyn KnowledgeRepository> {
+        self.repository.webhook_lookup_repository()
     }
 
     async fn connection_with_credential(
@@ -421,6 +462,15 @@ impl KnowledgeRepositorySource {
                 pool.clone(),
                 ScopeContext::tenant(tenant_id),
             )),
+        }
+    }
+
+    fn webhook_lookup_repository(&self) -> Arc<dyn KnowledgeRepository> {
+        match self {
+            Self::Fixed(repository) => repository.clone(),
+            Self::Postgres { pool } => {
+                Arc::new(PostgresKnowledgeRepository::control_plane(pool.clone()))
+            }
         }
     }
 }
@@ -624,13 +674,15 @@ fn parse_credential_ref(value: &str) -> Option<(String, String)> {
     Some((service.to_string(), scope.to_string()))
 }
 
+/// Config-backed production provider resolver used by services and internal workflows.
 #[derive(Clone)]
-struct ConfigKnowledgeProviders {
+pub(crate) struct ConfigKnowledgeProviders {
     config: moa_core::config::KnowledgeConfig,
 }
 
 impl ConfigKnowledgeProviders {
-    fn new(config: moa_core::config::KnowledgeConfig) -> Self {
+    /// Builds a provider resolver from tenant knowledge configuration.
+    pub(crate) fn new(config: moa_core::config::KnowledgeConfig) -> Self {
         Self { config }
     }
 }
@@ -768,10 +820,14 @@ fn production_service_for_webhook() -> KnowledgeService {
 
 fn service_from_config(pool: sqlx::PgPool, config: &MoaConfig) -> KnowledgeService {
     KnowledgeService::from_postgres_pool(
-        pool,
+        pool.clone(),
         Arc::new(ConfigKnowledgeProviders::new(config.knowledge.clone())),
         Arc::new(VaultKnowledgeCredentialStore::new(
             knowledge_credential_vault(),
+        )),
+        Arc::new(ProductionKnowledgeIngestionRunner::new(
+            pool,
+            config.clone(),
         )),
         config.knowledge.observability.max_object_preview_chars,
     )
@@ -811,6 +867,10 @@ fn knowledge_handler_error(error: KnowledgeServiceError) -> HandlerError {
         Some(code) => TerminalError::new_with_code(code, error.to_string()).into(),
         None => HandlerError::from(error),
     }
+}
+
+fn should_dispatch_knowledge_sync_ingestion(status: &str) -> bool {
+    status == "provider_synced"
 }
 
 fn terminal_knowledge_error_code(error: &KnowledgeServiceError) -> Option<u16> {

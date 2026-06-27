@@ -267,7 +267,8 @@ fn sanitize_counters(counters: Value) -> Value {
                 .filter(|(key, _)| {
                     matches!(
                         key.as_str(),
-                        "records_listed"
+                        "records_seen"
+                            | "records_listed"
                             | "records_changed"
                             | "records_deleted"
                             | "records_ingested"
@@ -308,6 +309,15 @@ fn emit_counter_metrics(labels: StepLabels<'_>, status: &str, counters: &Value) 
             "action" => "listed"
         )
         .increment(records_listed);
+    }
+    let records_seen = safe_counter(counters, "records_seen");
+    if records_seen > 0 {
+        metrics::counter!(
+            "moa_knowledge_records_total",
+            "provider" => labels.provider.to_string(),
+            "action" => "seen"
+        )
+        .increment(records_seen);
     }
     for (key, action) in [
         ("records_changed", "changed"),
