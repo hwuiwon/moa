@@ -1,4 +1,4 @@
-include!("memory_eval_support/common.rs");
+include!("memory_eval_support/corpus.rs");
 
 #[tokio::test]
 async fn memory_eval_corpus_round_trips_versioned_jsonl() {

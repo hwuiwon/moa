@@ -34,13 +34,6 @@ where
 mod tests {
     use super::*;
     use eventsource_stream::Event as SseEvent;
-    use serde::Deserialize;
-
-    #[derive(Debug, Deserialize)]
-    struct Probe {
-        #[allow(dead_code)]
-        ok: bool,
-    }
 
     fn event(data: &str) -> SseEvent {
         SseEvent {
@@ -53,7 +46,7 @@ mod tests {
 
     #[test]
     fn decode_failure_surfaces_provider_quirk() {
-        let err = parse_sse_json::<Probe>(&event("{not json}")).expect_err("must fail");
+        let err = parse_sse_json::<serde_json::Value>(&event("{not json}")).expect_err("must fail");
         assert!(
             matches!(err, MoaError::ProviderQuirk(_)),
             "expected ProviderQuirk, got {err:?}"

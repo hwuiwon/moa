@@ -1,5 +1,6 @@
 //! Out-of-line tests for Slack messaging edit-window fallback control flow.
 
+#[path = "support/edit_window.rs"]
 mod support;
 
 use moa_core::{Channel, MessageId};

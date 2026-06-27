@@ -113,6 +113,7 @@ impl KnowledgeService {
             .trigger_sync(TriggerSyncRequest {
                 connection: provider_connection,
                 model: None,
+                variant: None,
             })
             .instrument(provider_span.clone())
             .await
@@ -280,6 +281,7 @@ impl KnowledgeService {
                     .last_sync_status
                     .map(|status| status.as_str().to_string()),
                 last_synced_at: projection.connection.last_synced_at,
+                source_selection: projection.connection.source_selection,
             })
             .collect();
 

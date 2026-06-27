@@ -1,5 +1,9 @@
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/common.rs");
+#[cfg(feature = "eval-harness")]
+include!("brain_turn_support/db.rs");
+#[cfg(feature = "eval-harness")]
+include!("brain_turn_support/session_search.rs");
 
 static BRAIN_TURN_SESSION_SEARCH_DB_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());

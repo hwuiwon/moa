@@ -273,6 +273,7 @@ fn sanitize_counters(counters: Value) -> Value {
                             | "records_deleted"
                             | "records_ingested"
                             | "records_failed"
+                            | "records_pruned"
                             | "objects_parsed"
                             | "bytes_fetched"
                             | "parser_pages"

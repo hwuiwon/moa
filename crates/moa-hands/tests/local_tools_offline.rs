@@ -1,4 +1,5 @@
 include!("local_tools_support/common.rs");
+include!("local_tools_support/offline.rs");
 
 #[tokio::test]
 async fn file_read_reads_written_content() {

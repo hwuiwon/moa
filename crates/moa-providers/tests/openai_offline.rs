@@ -1,4 +1,7 @@
-mod support;
+mod support {
+    pub mod openai_wiremock;
+    pub mod wiremock_common;
+}
 
 use std::time::Duration;
 
@@ -10,9 +13,9 @@ use serde_json::json;
 use tokio::time::{advance, timeout};
 use wiremock::MockServer;
 
-use support::wiremock_provider_helpers::{
-    OPENAI_MODEL, minimal_request, mount_always_status, mount_openai_sse, mount_retry_then_sse,
-    request_count, tool_request,
+use support::openai_wiremock::{OPENAI_MODEL, mount_openai_sse};
+use support::wiremock_common::{
+    minimal_request, mount_always_status, mount_retry_then_sse, request_count, tool_request,
 };
 
 const TEXT: &str = include_str!("support/fixtures/sse/openai_text.sse");

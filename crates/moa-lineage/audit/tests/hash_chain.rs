@@ -1,5 +1,6 @@
 //! Adversarial out-of-line tests for audit hash-chain verification.
 
+#[path = "support/hash_chain.rs"]
 mod support;
 
 use moa_lineage_core::chain::{LineageChainError, genesis_hash};

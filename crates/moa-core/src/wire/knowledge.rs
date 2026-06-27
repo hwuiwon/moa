@@ -21,6 +21,9 @@ pub struct KnowledgeCreateLinkTokenRequest {
     /// Optional end-user email address for providers that require it at link-token creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_user_email_address: Option<String>,
+    /// Provider-native source selection requested before link creation.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub source_selection: Value,
 }
 
 /// Response payload containing a linked-account token.
@@ -47,6 +50,9 @@ pub struct KnowledgeExchangeTokenRequest {
     pub provider: String,
     /// Token or code returned by the provider link flow.
     pub exchange_token: String,
+    /// Provider-native selected source state collected by the frontend.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub source_selection: Value,
 }
 
 /// Response payload for a completed linked-account token exchange.
@@ -60,6 +66,46 @@ pub struct KnowledgeExchangeTokenResponse {
     pub connector: String,
     /// Provider account identifier.
     pub provider_account_id: String,
+    /// Provider-native selected source state stored for the connection.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub source_selection: Value,
+    /// Automatically started sync run for the new connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_run_uid: Option<Uuid>,
+    /// Current status of the automatically started sync run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_status: Option<String>,
+}
+
+/// Request payload for updating a linked connection's selected sources.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeUpdateConnectionSourceSelectionRequest {
+    /// Tenant that owns the linked connection.
+    pub tenant_id: TenantId,
+    /// Tenant-owned connection identifier.
+    pub connection_uid: Uuid,
+    /// Provider-native selected source state. Empty means provider default/all.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub source_selection: Value,
+    /// Whether to start a sync after applying the new selection.
+    #[serde(default)]
+    pub sync: bool,
+}
+
+/// Response payload after updating selected sources for a linked connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeUpdateConnectionSourceSelectionResponse {
+    /// Tenant-owned connection identifier.
+    pub connection_uid: Uuid,
+    /// Provider-native selected source state stored for the connection.
+    #[serde(default)]
+    pub source_selection: Value,
+    /// Sync run started by the update, when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_run_uid: Option<Uuid>,
+    /// Current sync-run status, when a sync was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_status: Option<String>,
 }
 
 /// Request payload for starting a tenant knowledge sync.
@@ -217,6 +263,9 @@ pub struct KnowledgeConnectionSummary {
     /// Timestamp of the last successful sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_synced_at: Option<DateTime<Utc>>,
+    /// Provider-native selected source state stored for the connection.
+    #[serde(default)]
+    pub source_selection: Value,
 }
 
 /// Request payload for listing tenant knowledge connections.

@@ -193,6 +193,7 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
             credential_ref: "vault://tenant/test/knowledge".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection", "access_token": SECRET_TOKEN }),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,

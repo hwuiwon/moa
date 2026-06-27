@@ -129,9 +129,9 @@ pub struct ProviderDeliverySink {
     email: Option<PostmarkEmailClient>,
     #[cfg(feature = "twilio")]
     sms: Option<TwilioSmsClient>,
-    #[cfg_attr(not(feature = "postmark"), allow(dead_code))]
+    #[cfg(feature = "postmark")]
     email_from: String,
-    #[cfg_attr(not(feature = "postmark"), allow(dead_code))]
+    #[cfg(feature = "postmark")]
     email_reply_to: Option<String>,
 }
 
@@ -139,12 +139,16 @@ impl ProviderDeliverySink {
     /// Creates an empty provider-backed delivery sink.
     #[must_use]
     pub fn empty(email_from: impl Into<String>) -> Self {
+        #[cfg(not(feature = "postmark"))]
+        let _ = email_from;
         Self {
             #[cfg(feature = "postmark")]
             email: None,
             #[cfg(feature = "twilio")]
             sms: None,
+            #[cfg(feature = "postmark")]
             email_from: email_from.into(),
+            #[cfg(feature = "postmark")]
             email_reply_to: None,
         }
     }
@@ -156,13 +160,16 @@ impl ProviderDeliverySink {
         config: &MessagingConfig,
     ) -> Result<Self> {
         #[cfg(any(feature = "postmark", feature = "twilio"))]
-        let mut sink = Self::empty(config.email_from.clone())
-            .with_email_reply_to(config.email_reply_to.clone());
+        let mut sink = Self::empty(config.email_from.clone());
+        #[cfg(all(any(feature = "postmark", feature = "twilio"), feature = "postmark"))]
+        {
+            sink = sink.with_email_reply_to(config.email_reply_to.clone());
+        }
         #[cfg(not(any(feature = "postmark", feature = "twilio")))]
         let sink = {
             let _ = (vault, scope);
+            let _ = &config.email_reply_to;
             Self::empty(config.email_from.clone())
-                .with_email_reply_to(config.email_reply_to.clone())
         };
         #[cfg(feature = "postmark")]
         {
@@ -182,6 +189,7 @@ impl ProviderDeliverySink {
     }
 
     /// Sets the optional reply-to address for email delivery.
+    #[cfg(feature = "postmark")]
     #[must_use]
     pub fn with_email_reply_to(mut self, reply_to: Option<String>) -> Self {
         self.email_reply_to = reply_to;

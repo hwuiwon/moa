@@ -1,4 +1,4 @@
-//! Shared graph-ingestion assertions for Restate e2e tests.
+//! Graph-ingestion assertion for visible brain responses.
 
 use std::time::Duration;
 
@@ -6,38 +6,6 @@ use anyhow::{Context, Result, bail};
 use moa_core::{Event, EventRecord, SessionId, StoragePartitionId};
 use sqlx::PgPool;
 use tokio::time::sleep;
-
-/// Waits until the asynchronous turn-ingestion invocation has written graph nodes.
-pub async fn wait_for_ingested_turn(
-    pool: &PgPool,
-    storage_partition_id: &StoragePartitionId,
-    session_id: SessionId,
-) -> Result<i64> {
-    for _attempt in 0..60 {
-        let count = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT count(*)::bigint
-            FROM moa.node_index
-            WHERE storage_partition_id = $1
-              AND valid_to IS NULL
-              AND properties_summary->>'source_session_id' = $2
-            "#,
-        )
-        .bind(storage_partition_id.to_string())
-        .bind(session_id.to_string())
-        .fetch_one(pool)
-        .await
-        .context("count graph nodes for ingested turn")?;
-
-        if count > 0 {
-            return Ok(count);
-        }
-
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    bail!("timed out waiting for graph ingestion for session {session_id}")
-}
 
 /// Waits until graph ingestion has written nodes for every visible brain response.
 pub async fn wait_for_ingested_brain_responses(

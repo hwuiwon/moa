@@ -1,7 +1,5 @@
 //! Concurrent session event sequence invariant tests.
 
-mod shared;
-
 use std::sync::Arc;
 
 use moa_core::{
@@ -20,9 +18,7 @@ static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 const MAX_IN_FLIGHT_EMITS: usize = 64;
 
 async fn configured_test_db() -> Option<TestDb> {
-    if !shared::postgres_url_is_configured() {
-        return None;
-    }
+    std::env::var_os("MOA_DATABASE_URL")?;
     Some(
         bootstrap_test_db()
             .await

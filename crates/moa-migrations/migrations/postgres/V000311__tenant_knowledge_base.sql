@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_connections (
     credential_ref TEXT NOT NULL,
     status TEXT NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+    source_selection JSONB NOT NULL DEFAULT '{}'::JSONB,
     last_synced_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

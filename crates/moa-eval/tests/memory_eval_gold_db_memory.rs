@@ -1,4 +1,4 @@
-include!("memory_eval_support/common.rs");
+include!("memory_eval_support/gold.rs");
 
 #[tokio::test]
 async fn gold_resolution_reports_partial_and_full_ingestion_coverage() -> TestResult {

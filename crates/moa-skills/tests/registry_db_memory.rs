@@ -1,6 +1,7 @@
 //! Integration tests for graph-backed skill registry behavior.
 
-mod support;
+#[path = "support/skill_graph_registry.rs"]
+mod skill_graph;
 
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};
 use moa_artifacts::registry::{ArtifactRegistry, NewArtifactDraft, NewArtifactFile};
@@ -11,7 +12,7 @@ use moa_skills::package::{SkillPackage, SkillPackageFile, ValidatedSkillPackage}
 use moa_skills::registry::{NewSkill, SkillRegistry};
 use uuid::Uuid;
 
-use support::skill_graph::{
+use skill_graph::{
     DISTILLED_SKILL, GRAPH_TEST_LOCK, IMPROVED_SKILL, map_sqlx_error, purge_test_skill_name,
     tenant_scope,
 };

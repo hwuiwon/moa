@@ -323,6 +323,58 @@ where
         Ok(report)
     }
 
+    /// Tombstones active local objects that were absent from an exhaustive selected-source sync.
+    #[tracing::instrument(
+        name = "knowledge_source_selection_prune",
+        skip(self, seen_source_ids),
+        fields(
+            tenant_id = %tenant_id,
+            connection_id = %connection_uid,
+            sync_run_id = %sync_run_uid,
+            provider = %self.provider,
+            parser = %self.parser_label,
+            status = tracing::field::Empty,
+            error_code = tracing::field::Empty,
+            seen_sources = seen_source_ids.len()
+        )
+    )]
+    pub async fn prune_unseen_objects(
+        &self,
+        sync_run_uid: Uuid,
+        connection_uid: Uuid,
+        tenant_id: moa_core::TenantId,
+        seen_source_ids: &HashSet<String>,
+    ) -> Result<PageIngestionReport> {
+        let active_objects = self
+            .repository
+            .active_objects_for_connection(connection_uid)
+            .await?;
+        let mut report = PageIngestionReport::default();
+        for object in active_objects {
+            if object.tenant_id != tenant_id || seen_source_ids.contains(&object.source_id) {
+                continue;
+            }
+            let deleted = self.handle_pruned_object(sync_run_uid, object).await?;
+            report.records_deleted = report.records_deleted.saturating_add(deleted);
+        }
+        self.record_counter_step(
+            sync_run_uid,
+            None,
+            "source_selection_pruned",
+            StepOutcome {
+                status: IngestionStepStatus::Completed,
+                counters: json!({ "records_pruned": report.records_deleted }),
+                summary: Some("removed objects absent from selected provider sources".to_string()),
+                retry_count: 0,
+                error_code: None,
+                duration_ms: None,
+            },
+            KnowledgeSyncCounters::default(),
+        )
+        .await?;
+        Ok(report)
+    }
+
     /// Parses, normalizes, chunks, persists, and writes graph/vector state for one object.
     #[tracing::instrument(
         name = "knowledge_object_ingest",
@@ -971,23 +1023,59 @@ where
         _record: ProviderRecord,
     ) -> Result<u64> {
         self.repository.upsert_object(object.clone()).await?;
+        self.delete_object(
+            sync_run_uid,
+            object,
+            json!({ "records_seen": 1, "records_deleted": 1 }),
+            Some("provider record deleted".to_string()),
+            KnowledgeSyncCounters {
+                records_seen: 1,
+                records_deleted: 1,
+                ..KnowledgeSyncCounters::default()
+            },
+        )
+        .await
+    }
+
+    async fn handle_pruned_object(
+        &self,
+        sync_run_uid: Uuid,
+        object: KnowledgeObject,
+    ) -> Result<u64> {
+        self.delete_object(
+            sync_run_uid,
+            object,
+            json!({ "records_deleted": 1, "records_pruned": 1 }),
+            Some("provider record absent from selected sources".to_string()),
+            KnowledgeSyncCounters {
+                records_deleted: 1,
+                ..KnowledgeSyncCounters::default()
+            },
+        )
+        .await
+    }
+
+    async fn delete_object(
+        &self,
+        sync_run_uid: Uuid,
+        object: KnowledgeObject,
+        counters: Value,
+        summary: Option<String>,
+        counter_delta: KnowledgeSyncCounters,
+    ) -> Result<u64> {
         self.record_counter_step(
             sync_run_uid,
             Some(object.object_uid),
             "object_change_checked",
             StepOutcome {
                 status: IngestionStepStatus::Completed,
-                counters: json!({ "records_seen": 1, "records_deleted": 1 }),
-                summary: Some("provider record deleted".to_string()),
+                counters,
+                summary,
                 retry_count: 0,
                 error_code: None,
                 duration_ms: None,
             },
-            KnowledgeSyncCounters {
-                records_seen: 1,
-                records_deleted: 1,
-                ..KnowledgeSyncCounters::default()
-            },
+            counter_delta,
         )
         .await?;
         self.repository

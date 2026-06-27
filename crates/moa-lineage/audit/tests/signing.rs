@@ -1,5 +1,6 @@
 //! Adversarial out-of-line tests for Ed25519 audit signing helpers.
 
+#[path = "support/fixture_json.rs"]
 mod support;
 
 use moa_lineage_audit::{AuditError, SigningKey};

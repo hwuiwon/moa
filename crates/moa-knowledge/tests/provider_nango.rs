@@ -7,7 +7,8 @@ use moa_core::TenantId;
 use moa_knowledge::{
     Error,
     domain::{
-        ConnectionStatus, KnowledgeConnection, ListChangedRecordsRequest, TriggerSyncRequest,
+        ApplySourceSelectionRequest, ConnectionStatus, CreateLinkTokenRequest, KnowledgeConnection,
+        ListChangedRecordsRequest, TriggerSyncRequest,
     },
     providers::{LinkedIntegrationProvider, nango::NangoProvider},
 };
@@ -17,7 +18,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{bearer_token, body_json, method, path, query_param},
+    matchers::{bearer_token, body_json, header, method, path, query_param},
 };
 
 fn connection() -> KnowledgeConnection {
@@ -31,6 +32,7 @@ fn connection() -> KnowledgeConnection {
         credential_ref: "vault://tenant/nango/google-drive".to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
+        source_selection: json!({}),
         created_at: now,
         updated_at: now,
         last_synced_at: None,
@@ -51,6 +53,57 @@ fn signature(body: &[u8], signing_key: &str) -> String {
 }
 
 #[tokio::test]
+async fn link_token_creation_forwards_nango_metadata_selection() {
+    // Pins: Nango link-token creation uses the current connect-session shape.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/connect/sessions"))
+        .and(bearer_token("nango-test-key"))
+        .and(body_json(json!({
+            "tags": {
+                "tenant_id": connection().tenant_id.to_string(),
+                "external_account_id": "account-123"
+            },
+            "allowed_integrations": ["google-drive"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "token": "link-token-123",
+                "connect_link": "https://connect.nango.dev/session/link-token-123"
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let token = provider
+        .create_link_token(CreateLinkTokenRequest {
+            tenant_id: connection().tenant_id,
+            connector: "google-drive".to_string(),
+            external_account_id: Some("account-123".to_string()),
+            end_user_email_address: None,
+            redirect_url: None,
+            source_selection: json!({
+                "metadata": {
+                    "selected_folder_ids": ["folder-1"],
+                    "selected_file_ids": ["file-1"]
+                }
+            }),
+        })
+        .await
+        .expect("create Nango link token with source selection metadata");
+
+    assert_eq!(token.provider, "nango");
+    assert_eq!(token.token, "link-token-123");
+    assert_eq!(
+        token.link_url.as_deref(),
+        Some("https://connect.nango.dev/session/link-token-123")
+    );
+}
+
+#[tokio::test]
 async fn trigger_sync_posts_provider_config_connection_and_sync_name() {
     // Pins: Nango one-off sync trigger requests use the provider_config_key, connection_id, and sync name.
     let server = MockServer::start().await;
@@ -60,11 +113,10 @@ async fn trigger_sync_posts_provider_config_connection_and_sync_name() {
         .and(body_json(json!({
             "connection_id": "conn_123",
             "provider_config_key": "google-drive",
-            "sync_name": "documents"
+            "syncs": ["documents"]
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sync_id": "sync_456",
-            "status": "started",
+            "success": true,
             "provider_token": "must-redact"
         })))
         .expect(1)
@@ -77,14 +129,133 @@ async fn trigger_sync_posts_provider_config_connection_and_sync_name() {
         .trigger_sync(TriggerSyncRequest {
             connection: connection(),
             model: Some("documents".to_string()),
+            variant: None,
         })
         .await
         .expect("trigger sync through local Nango fixture");
 
     assert_eq!(triggered.provider, "nango");
-    assert_eq!(triggered.provider_sync_id.as_deref(), Some("sync_456"));
-    assert_eq!(triggered.status, "started");
+    assert_eq!(triggered.provider_sync_id, None);
+    assert_eq!(triggered.status, "accepted");
     assert!(triggered.metadata.get("provider_token").is_none());
+}
+
+#[tokio::test]
+async fn source_selection_updates_nango_metadata_and_sync_variants() {
+    // Pins: selected Nango sources are applied through connection metadata and optional sync variants.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/connections/metadata"))
+        .and(bearer_token("nango-test-key"))
+        .and(body_json(json!({
+            "connection_id": "conn_123",
+            "provider_config_key": "google-drive",
+            "metadata": {
+                "selected_folder_ids": ["folder-1"],
+                "selected_file_ids": ["file-1"]
+            }
+        })))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/sync/documents/variant/selected-sources"))
+        .and(bearer_token("nango-test-key"))
+        .and(body_json(json!({
+            "connection_id": "conn_123",
+            "provider_config_key": "google-drive"
+        })))
+        .respond_with(ResponseTemplate::new(409))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let mut connection = connection();
+    connection.source_selection = json!({
+        "metadata": {
+            "selected_folder_ids": ["folder-1"],
+            "selected_file_ids": ["file-1"]
+        },
+        "sync_name": "documents",
+        "variant": "selected-sources"
+    });
+
+    provider
+        .apply_source_selection(ApplySourceSelectionRequest { connection })
+        .await
+        .expect("apply Nango source selection through native primitives");
+}
+
+#[tokio::test]
+async fn trigger_and_records_list_include_selected_variant() {
+    // Pins: Nango sync trigger and record reads target the selected records-cache variant.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/sync/trigger"))
+        .and(bearer_token("nango-test-key"))
+        .and(body_json(json!({
+            "connection_id": "conn_123",
+            "provider_config_key": "google-drive",
+            "syncs": [
+                {
+                    "name": "documents",
+                    "variant": "selected-sources"
+                }
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/records"))
+        .and(bearer_token("nango-test-key"))
+        .and(header("Connection-Id", "conn_123"))
+        .and(header("Provider-Config-Key", "google-drive"))
+        .and(query_param("model", "documents"))
+        .and(query_param("limit", "1"))
+        .and(query_param("variant", "selected-sources"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [],
+            "next_cursor": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let mut connection = connection();
+    connection.source_selection = json!({
+        "model": "documents",
+        "variant": "selected-sources"
+    });
+
+    provider
+        .trigger_sync(TriggerSyncRequest {
+            connection: connection.clone(),
+            model: Some("documents".to_string()),
+            variant: None,
+        })
+        .await
+        .expect("trigger selected Nango variant");
+    let page = provider
+        .list_changed_records(ListChangedRecordsRequest {
+            connection,
+            cursor: None,
+            modified_after: None,
+            limit: Some(1),
+            variant: None,
+        })
+        .await
+        .expect("list selected Nango variant records");
+
+    assert_eq!(page.records.len(), 0);
 }
 
 #[tokio::test]
@@ -94,8 +265,9 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
     Mock::given(method("GET"))
         .and(path("/records"))
         .and(bearer_token("nango-test-key"))
-        .and(query_param("connection_id", "conn_123"))
-        .and(query_param("provider_config_key", "google-drive"))
+        .and(header("Connection-Id", "conn_123"))
+        .and(header("Provider-Config-Key", "google-drive"))
+        .and(query_param("model", "documents"))
         .and(query_param("cursor", "cursor-1"))
         .and(query_param("limit", "2"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -131,12 +303,15 @@ async fn records_list_maps_cursor_deleted_metadata_and_change_tokens() {
 
     let provider =
         NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let mut connection = connection();
+    connection.source_selection = json!({ "model": "documents" });
     let page = provider
         .list_changed_records(ListChangedRecordsRequest {
-            connection: connection(),
+            connection,
             cursor: Some("cursor-1".to_string()),
             modified_after: None,
             limit: Some(2),
+            variant: None,
         })
         .await
         .expect("list Nango records through local fixture");

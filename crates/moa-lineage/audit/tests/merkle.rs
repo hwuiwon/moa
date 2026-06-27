@@ -1,5 +1,6 @@
 //! Adversarial out-of-line tests for BLAKE3 Merkle roots and inclusion proofs.
 
+#[path = "support/fixture_json.rs"]
 mod support;
 
 use moa_lineage_audit::{

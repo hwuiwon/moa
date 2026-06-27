@@ -11,7 +11,7 @@ use moa_core::wire::turn::{QueueMessageRequest, SessionSnapshot};
 use moa_core::{
     ActionRuleScope, AgentSessionSelection, Channel, CompletionRequest, ContextMessage, Event,
     EventRange, EventRecord, EventType, MoaError, ModelId, SessionActorRef, SessionId, SessionMeta,
-    SessionStatus, SessionStore, TenantId,
+    SessionStatus, TenantId,
 };
 use moa_experiments::model::{
     ExperimentTarget, ExperimentTrialRecord, ExperimentTrialStatus, ExperimentTrialStopReason,

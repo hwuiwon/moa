@@ -1,7 +1,5 @@
 //! Shared helpers for session integration tests.
 
-#![allow(dead_code)]
-
 use moa_test_support::postgres::TestDb;
 use sqlx::{PgPool, postgres::PgQueryResult};
 use uuid::Uuid;

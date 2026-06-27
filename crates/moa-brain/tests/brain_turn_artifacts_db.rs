@@ -1,5 +1,9 @@
 #[cfg(feature = "eval-harness")]
 include!("brain_turn_support/common.rs");
+#[cfg(feature = "eval-harness")]
+include!("brain_turn_support/db.rs");
+#[cfg(feature = "eval-harness")]
+include!("brain_turn_support/artifacts.rs");
 
 #[tokio::test]
 async fn brain_turn_text_artifact_store_round_trips_db() {

@@ -32,6 +32,7 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
         credential_ref: format!("vault://tenant/{label}/merge"),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe_label": label }),
+        source_selection: json!({}),
         created_at: now,
         updated_at: now,
         last_synced_at: None,

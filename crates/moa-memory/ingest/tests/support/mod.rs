@@ -1,7 +1,5 @@
 //! Shared deterministic fixtures for slow-path ingestion integration tests.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -363,17 +361,6 @@ pub(crate) async fn user_entity_rows(
     .expect("read user entity rows");
     conn.commit().await.expect("commit user entity row read");
     rows
-}
-
-pub(crate) async fn active_fact_rows(
-    pool: &PgPool,
-    storage_partition_id: Uuid,
-) -> Vec<NodeIndexRow> {
-    fact_rows(pool, storage_partition_id)
-        .await
-        .into_iter()
-        .filter(|row| row.valid_to.is_none())
-        .collect()
 }
 
 pub(crate) async fn active_user_fact_rows(

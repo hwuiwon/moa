@@ -75,6 +75,9 @@ pub struct KnowledgeConnection {
     /// Safe provider metadata.
     #[serde(default)]
     pub metadata: Value,
+    /// Provider-native selected source state. Empty means provider default/all.
+    #[serde(default)]
+    pub source_selection: Value,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
@@ -565,6 +568,9 @@ pub struct CreateLinkTokenRequest {
     /// Optional redirect URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_url: Option<String>,
+    /// Provider-native selected source state requested before link creation.
+    #[serde(default)]
+    pub source_selection: Value,
 }
 
 /// Provider link token.
@@ -589,6 +595,16 @@ pub struct ExchangePublicTokenRequest {
     pub tenant_id: TenantId,
     /// Token returned by provider-hosted UI.
     pub public_token: String,
+    /// Provider-native selected source state collected by the frontend.
+    #[serde(default)]
+    pub source_selection: Value,
+}
+
+/// Request to apply provider-native selected source state to a linked account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplySourceSelectionRequest {
+    /// Connection whose provider-native selected sources should be applied.
+    pub connection: KnowledgeConnection,
 }
 
 /// Linked account returned by a provider after token exchange.
@@ -618,6 +634,9 @@ pub struct TriggerSyncRequest {
     /// Provider model or collection to sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider sync variant or partition name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
 }
 
 /// Provider sync trigger acknowledgement.
@@ -649,6 +668,9 @@ pub struct ListChangedRecordsRequest {
     /// Maximum records to return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Provider sync variant or partition name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
 }
 
 /// Page of normalized provider records.

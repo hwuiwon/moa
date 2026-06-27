@@ -2,6 +2,7 @@
 
 #![recursion_limit = "256"]
 
+#[path = "support/distillation.rs"]
 mod support;
 
 use moa_core::MoaConfig;

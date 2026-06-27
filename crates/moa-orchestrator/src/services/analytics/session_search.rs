@@ -20,7 +20,7 @@ pub fn session_search_response_from_events(
                 session_id: event.session_id,
                 event_id: event.id,
                 sequence_num: event.sequence_num,
-                event_type: event.event_type.clone(),
+                event_type: event.event_type,
                 timestamp: event.timestamp,
                 snippet: redacted_event_snippet(&event.event),
             })

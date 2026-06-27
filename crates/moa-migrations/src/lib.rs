@@ -147,6 +147,12 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
         name: "V000311__tenant_knowledge_base.sql",
         sql: include_str!("../migrations/postgres/V000311__tenant_knowledge_base.sql"),
     },
+    SchemaMigration {
+        name: "V000312__knowledge_connection_source_selection.sql",
+        sql: include_str!(
+            "../migrations/postgres/V000312__knowledge_connection_source_selection.sql"
+        ),
+    },
 ];
 
 const AUTH_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[SchemaMigration {

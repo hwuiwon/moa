@@ -1,15 +1,19 @@
 //! Wiremock offline counterpart for prompt-cache audit live coverage.
 
-mod support;
+#[path = "support/offline_session_store.rs"]
+mod offline_session_store;
+#[path = "support/openai_wiremock.rs"]
+mod openai_wiremock;
 
 use std::sync::Arc;
 
 use moa_brain::{TurnResult, build_default_pipeline, run_brain_turn};
-use moa_core::{Event, LLMProvider, MoaConfig, SessionStore};
+use moa_core::{Event, EventRange, LLMProvider, MoaConfig, SessionStore};
 use moa_providers::OpenAIProvider;
 use wiremock::MockServer;
 
-use support::{MockSessionStore, captured_json_bodies, mount_openai_text, session_meta};
+use offline_session_store::{MockSessionStore, session_meta};
+use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
 #[tokio::test]
 async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage() -> moa_core::Result<()> {
@@ -62,8 +66,8 @@ async fn cache_audit_offline_tracks_stable_prefix_reuse_and_cached_usage() -> mo
     assert_eq!(first_key, second_key);
 
     let brain_responses = store
-        .all_events()
-        .await
+        .get_events(session_id, EventRange::all())
+        .await?
         .into_iter()
         .filter(|record| matches!(record.event, Event::BrainResponse { .. }))
         .count();

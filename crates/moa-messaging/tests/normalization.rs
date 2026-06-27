@@ -1,5 +1,6 @@
 //! Out-of-line tests for Slack messaging inbound normalization.
 
+#[path = "support/normalization.rs"]
 mod support;
 
 use moa_core::{Channel, ChannelRef};

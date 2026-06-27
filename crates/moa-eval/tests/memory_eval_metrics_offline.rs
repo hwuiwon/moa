@@ -1,4 +1,4 @@
-include!("memory_eval_support/common.rs");
+include!("memory_eval_support/metrics.rs");
 
 #[test]
 fn retrieval_metrics_aggregate_exact_small_fixture() {

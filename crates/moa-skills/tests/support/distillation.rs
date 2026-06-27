@@ -1,11 +1,7 @@
-//! Shared fixtures and helpers for skill self-improvement integration tests.
-
-#![allow(dead_code)]
+//! Skill distillation integration-test fixtures.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,12 +12,10 @@ use moa_core::{
     ModelId, ModelTier, SessionId, SessionMeta, SessionStatus, StopReason, StoragePartitionId,
     TenantId, TokenPricing, TokenUsage, ToolCallFormat, ToolCallId, ToolOutput,
 };
-use moa_eval_core::{ExpectedOutput, TestCase, TestSuite};
 use moa_providers::ModelRouter;
 use moa_session::PostgresSessionStore;
 use moa_skills::format::{
     build_skill_path, parse_skill_markdown, render_skill_markdown, skill_metadata_from_document,
-    slugify_skill_name,
 };
 use moa_skills::registry::{NewSkill, Skill, SkillRegistry};
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
@@ -35,12 +29,6 @@ use uuid::Uuid;
 pub const SESSION_WITH_5_TOOL_CALLS: &str = include_str!("fixtures/session_with_5_tool_calls.json");
 /// Successful session fixture below the distillation threshold.
 pub const SESSION_WITH_4_TOOL_CALLS: &str = include_str!("fixtures/session_with_4_tool_calls.json");
-/// Baseline skill fixture used by improvement and regression tests.
-pub const BASELINE_SKILL: &str = include_str!("fixtures/baseline_skill.md");
-/// Known-good improvement fixture returned by the scripted LLM.
-pub const IMPROVED_SKILL: &str = include_str!("fixtures/improved_skill_diff.md");
-/// Known-bad improvement fixture returned by the scripted LLM.
-pub const REGRESSED_SKILL: &str = include_str!("fixtures/regressed_skill_diff.md");
 
 #[derive(Debug, Deserialize)]
 struct SessionFixture {
@@ -233,19 +221,6 @@ pub async fn seed_skill(
     skill_metadata_from_document(build_skill_path(&document.frontmatter.name), &document)
 }
 
-/// Loads the active skill row by name.
-pub async fn load_active_skill(
-    test_db: &TestDb,
-    scope: &ActionRuleScope,
-    skill_name: &str,
-) -> Skill {
-    SkillRegistry::new(test_db.store().pool().clone())
-        .load_by_name(scope, skill_name)
-        .await
-        .expect("load active skill")
-        .expect("active skill exists")
-}
-
 /// Loads the active skill row by name when one exists.
 pub async fn load_optional_active_skill(
     test_db: &TestDb,
@@ -256,104 +231,6 @@ pub async fn load_optional_active_skill(
         .load_by_name(scope, skill_name)
         .await
         .expect("load optional active skill")
-}
-
-/// Loads the active skill's required `SKILL.md` markdown by name.
-pub async fn load_active_skill_markdown(
-    test_db: &TestDb,
-    scope: &ActionRuleScope,
-    skill_name: &str,
-) -> String {
-    let registry = SkillRegistry::new(test_db.store().pool().clone());
-    let row = registry
-        .load_by_name(scope, skill_name)
-        .await
-        .expect("load active skill")
-        .expect("active skill exists");
-    registry
-        .load_skill_markdown(scope, row.skill_uid)
-        .await
-        .expect("load active skill markdown")
-}
-
-/// Writes a compact output-matching regression suite for a skill.
-pub async fn write_output_suite(
-    config: &MoaConfig,
-    storage_partition_id: &StoragePartitionId,
-    skill_name: &str,
-) {
-    let suite = TestSuite {
-        name: format!("{skill_name}-quality"),
-        description: Some("Skill regression fixture suite".to_string()),
-        cases: vec![TestCase {
-            name: "quality".to_string(),
-            input: "Run the auth refresh regression workflow".to_string(),
-            expected_output: Some(ExpectedOutput {
-                contains: vec!["kept".to_string(), "validated".to_string()],
-                ..ExpectedOutput::default()
-            }),
-            timeout_seconds: Some(10),
-            ..TestCase::default()
-        }],
-        default_timeout_seconds: 10,
-        tags: vec!["skill".to_string(), skill_name.to_string()],
-    };
-    let path = suite_path(config, storage_partition_id, skill_name);
-    tokio::fs::create_dir_all(path.parent().expect("suite path has parent"))
-        .await
-        .expect("create suite directory");
-    let rendered = toml::to_string_pretty(&suite).expect("render suite");
-    tokio::fs::write(path, rendered).await.expect("write suite");
-}
-
-/// Returns the active semantic version parsed from the skill markdown.
-pub async fn active_semantic_version(
-    test_db: &TestDb,
-    scope: &ActionRuleScope,
-    skill_name: &str,
-) -> String {
-    let markdown = load_active_skill_markdown(test_db, scope, skill_name).await;
-    parse_skill_markdown(&markdown)
-        .expect("parse active skill")
-        .frontmatter
-        .version()
-}
-
-/// Counts artifact revisions for one tenant skill name.
-pub async fn skill_row_count(
-    test_db: &TestDb,
-    storage_partition_id: &StoragePartitionId,
-    skill_name: &str,
-) -> i64 {
-    artifact_revision_count(test_db, storage_partition_id, skill_name).await
-}
-
-/// Counts artifact revisions for one tenant skill artifact.
-pub async fn artifact_revision_count(
-    test_db: &TestDb,
-    storage_partition_id: &StoragePartitionId,
-    skill_name: &str,
-) -> i64 {
-    sqlx::query_scalar(
-        "SELECT count(*) \
-         FROM moa.artifact a \
-         JOIN moa.artifact_revision r ON r.artifact_uid = a.artifact_uid \
-         WHERE a.storage_partition_id = $1 AND a.kind = 'skill' AND a.name = $2",
-    )
-    .bind(storage_partition_id.as_str())
-    .bind(skill_name)
-    .fetch_one(test_db.store().pool())
-    .await
-    .expect("count skill artifact revisions")
-}
-
-/// Removes all artifact rows for one test skill name.
-pub async fn purge_skill_name(test_db: &TestDb, skill_name: &str) {
-    sqlx::query("DELETE FROM moa.artifact WHERE kind = 'skill' AND name = $1")
-        .bind(skill_name)
-        .execute(test_db.store().pool())
-        .await
-        .expect("purge test skill artifact rows");
 }
 
 fn push_event(events: &mut Vec<EventRecord>, session_id: SessionId, event: Event) {
@@ -368,20 +245,6 @@ fn push_event(events: &mut Vec<EventRecord>, session_id: SessionId, event: Event
         hand_id: None,
         token_count: None,
     });
-}
-
-fn suite_path(
-    config: &MoaConfig,
-    storage_partition_id: &StoragePartitionId,
-    skill_name: &str,
-) -> PathBuf {
-    PathBuf::from(&config.local.memory_dir)
-        .join("workspaces")
-        .join(storage_partition_id.as_str())
-        .join("skills")
-        .join(slugify_skill_name(skill_name))
-        .join("tests")
-        .join("suite.toml")
 }
 
 struct TestProvider {
@@ -473,5 +336,3 @@ fn tenant_id_from_storage_partition(storage_partition_id: &StoragePartitionId) -
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     TenantId::from(Uuid::from_bytes(bytes))
 }
-
-pub mod skill_graph;

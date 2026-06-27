@@ -1,4 +1,5 @@
 include!("local_tools_support/common.rs");
+include!("local_tools_support/session_search.rs");
 
 use tokio::sync::Mutex;
 

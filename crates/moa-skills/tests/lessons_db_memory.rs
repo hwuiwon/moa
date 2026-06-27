@@ -1,6 +1,7 @@
 //! Integration tests for skill lesson learning in graph memory.
 
-mod support;
+#[path = "support/skill_graph_lessons.rs"]
+mod skill_graph;
 
 use moa_core::RlsContext;
 use moa_core::{MoaError, Result};
@@ -11,7 +12,7 @@ use moa_skills::registry::{NewSkill, SkillRegistry};
 use sqlx::Row;
 use uuid::Uuid;
 
-use support::skill_graph::{
+use skill_graph::{
     DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, map_sqlx_error, memory_scope, set_app_role,
     tenant_scope,
 };

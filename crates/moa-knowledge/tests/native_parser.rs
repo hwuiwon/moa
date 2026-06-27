@@ -45,6 +45,7 @@ fn parse_input(file_name: &str, mime_type: &str, text: &str) -> ParseInput {
         credential_ref: "vault://fixture".to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({}),
+        source_selection: json!({}),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         last_synced_at: None,

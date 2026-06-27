@@ -1,7 +1,7 @@
 //! Offline coverage for the tenant Knowledge service application surface.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -16,6 +16,7 @@ use moa_core::{
         KnowledgeExchangeTokenRequest, KnowledgeObjectInspectRequest, KnowledgeObjectListRequest,
         KnowledgeProviderWebhookRequest, KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest,
         KnowledgeSyncRequest, KnowledgeSyncStatusRequest,
+        KnowledgeUpdateConnectionSourceSelectionRequest,
     },
 };
 use moa_knowledge::{
@@ -23,9 +24,9 @@ use moa_knowledge::{
     chunking::ChunkingConfig,
     contact_groups::derive_contact_groups_from_object_with_resolved_members,
     domain::{
-        ConnectionStatus, ContactGroup, ContactGroupMembership, ContactGroupTarget,
-        CreateLinkTokenRequest, DocumentElement, DocumentElementKind, DocumentVersion,
-        ElementLayout, ExchangePublicTokenRequest, KnowledgeBlock, KnowledgeChunk,
+        ApplySourceSelectionRequest, ConnectionStatus, ContactGroup, ContactGroupMembership,
+        ContactGroupTarget, CreateLinkTokenRequest, DocumentElement, DocumentElementKind,
+        DocumentVersion, ElementLayout, ExchangePublicTokenRequest, KnowledgeBlock, KnowledgeChunk,
         KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
         KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, LinkToken,
@@ -633,6 +634,11 @@ async fn exchange_stores_only_credential_reference_on_connection() {
             tenant_id,
             provider: PROVIDER.to_string(),
             exchange_token: "public-token".to_string(),
+            source_selection: json!({
+                "metadata": {
+                    "selected_folder_ids": ["folder-1"]
+                }
+            }),
         })
         .await
         .expect("token exchange should persist a connection");
@@ -641,6 +647,14 @@ async fn exchange_stores_only_credential_reference_on_connection() {
         .expect("connection should be stored");
 
     assert_eq!(provider.exchange_count(), 1);
+    assert_eq!(provider.apply_source_selection_count(), 1);
+    assert_eq!(provider.trigger_sync_count(), 1);
+    assert_eq!(response.sync_status.as_deref(), Some("provider_syncing"));
+    assert_eq!(repository.sync_run_count(), 1);
+    assert_eq!(
+        provider.applied_source_selections(),
+        vec![json!({ "metadata": { "selected_folder_ids": ["folder-1"] } })]
+    );
     assert_eq!(credentials.stored_account_count(), 1);
     assert_eq!(
         connection.credential_ref,
@@ -648,8 +662,59 @@ async fn exchange_stores_only_credential_reference_on_connection() {
     );
     assert_ne!(connection.credential_ref, SECRET_TOKEN);
     assert!(!connection.credential_ref.contains(SECRET_TOKEN));
+    assert_eq!(
+        connection.source_selection,
+        json!({ "metadata": { "selected_folder_ids": ["folder-1"] } })
+    );
     assert_eq!(response.provider, PROVIDER);
     assert_eq!(response.connector, CONNECTOR);
+}
+
+#[tokio::test]
+async fn update_source_selection_persists_applies_and_optionally_syncs() {
+    // Pins: tenant admins can update provider-native selected sources and trigger ingestion follow-up.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let mut connection = fixture_connection(tenant_id);
+    connection.last_synced_at = Some(Utc::now());
+    let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    repository
+        .insert_connection(connection.clone())
+        .expect("fixture connection should be inserted");
+    let provider = Arc::new(FakeLinkedIntegrationProvider::default());
+    let service = fixture_service(repository.clone(), provider.clone(), 80);
+    let source_selection = json!({
+        "metadata": {
+            "selected_folder_ids": ["folder-a", "folder-b"]
+        },
+        "variant": "selected-sources"
+    });
+
+    let response = service
+        .update_connection_source_selection(KnowledgeUpdateConnectionSourceSelectionRequest {
+            tenant_id,
+            connection_uid: connection.connection_uid,
+            source_selection: source_selection.clone(),
+            sync: true,
+        })
+        .await
+        .expect("source selection update should persist and trigger sync");
+    let stored = repository
+        .connection(connection.connection_uid)
+        .expect("updated connection should stay stored");
+
+    assert_eq!(response.connection_uid, connection.connection_uid);
+    assert_eq!(response.source_selection, source_selection);
+    assert_eq!(response.sync_status.as_deref(), Some("provider_syncing"));
+    assert!(response.sync_run_uid.is_some());
+    assert_eq!(stored.source_selection, source_selection);
+    assert_eq!(stored.last_synced_at, None);
+    assert_eq!(provider.apply_source_selection_count(), 1);
+    assert_eq!(
+        provider.applied_source_selections(),
+        vec![stored.source_selection]
+    );
+    assert_eq!(provider.trigger_sync_count(), 1);
+    assert_eq!(repository.sync_run_count(), 1);
 }
 
 #[tokio::test]
@@ -1018,6 +1083,7 @@ async fn mock_connector_end_to_end_db_memory() {
             tenant_id,
             provider: "merge".to_string(),
             exchange_token: "merge-public-token".to_string(),
+            source_selection: json!({}),
         })
         .await
         .expect("merge link should store one fake connection");
@@ -1026,6 +1092,7 @@ async fn mock_connector_end_to_end_db_memory() {
             tenant_id,
             provider: "nango".to_string(),
             exchange_token: "nango-public-token".to_string(),
+            source_selection: json!({}),
         })
         .await
         .expect("nango link should store one fake connection");
@@ -1104,6 +1171,7 @@ async fn mock_connector_end_to_end_db_memory() {
             cursor: None,
             modified_after: None,
             limit: Some(10),
+            variant: None,
         })
         .await
         .expect("merge fake provider should return changed records");
@@ -1113,6 +1181,7 @@ async fn mock_connector_end_to_end_db_memory() {
             cursor: None,
             modified_after: None,
             limit: Some(10),
+            variant: None,
         })
         .await
         .expect("nango fake provider should return changed records");
@@ -1557,6 +1626,7 @@ fn knowledge_handlers_are_authorized_or_have_webhook_safety_comment() {
         "sync_status",
         "sync_events",
         "list_connections",
+        "update_connection_source_selection",
         "list_objects",
         "inspect_object",
         "query_trace",
@@ -1611,6 +1681,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
             credential_ref: "vault://knowledge/nango-task14".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection" }),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: Some(modified_after),
@@ -1638,6 +1709,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
     assert_eq!(report.status, "completed");
     assert_eq!(report.records_listed, 2);
     assert_eq!(report.records_applied, 2);
+    assert_eq!(report.records_pruned, 0);
     assert_eq!(
         provider.list_changed_record_requests(),
         vec![FakeListChangedRecordsRequest {
@@ -1645,6 +1717,7 @@ async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_inges
             cursor: None,
             limit: Some(2),
             modified_after: Some(modified_after),
+            variant: None,
         }]
     );
 
@@ -1746,6 +1819,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
             credential_ref: "vault://knowledge/nango-task14".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({ "safe": "connection" }),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: Some(modified_after),
@@ -1781,6 +1855,7 @@ async fn knowledge_auto_sync_record_listing_failure_marks_sync_retryable_db_memo
             cursor: None,
             limit: Some(2),
             modified_after: Some(modified_after),
+            variant: None,
         }]
     );
     let run = repository
@@ -1841,6 +1916,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
             credential_ref: "resolved-provider-token".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: Some(modified_after),
@@ -1865,6 +1941,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
     assert_eq!(report.status, "completed");
     assert_eq!(report.records_listed, 3);
     assert_eq!(report.records_applied, 3);
+    assert_eq!(report.records_pruned, 0);
     assert_eq!(
         steps.status_transitions,
         vec![
@@ -1906,6 +1983,7 @@ async fn knowledge_sync_ingestion_workflow_paginates_caps_and_completes() {
         ]
     );
     assert!(steps.fail_calls.is_empty());
+    assert!(steps.prune_calls.is_empty());
 }
 
 #[tokio::test]
@@ -1931,9 +2009,16 @@ async fn knowledge_sync_ingestion_workflow_empty_page_completes_with_zero_counte
 
     assert_eq!(report.records_listed, 0);
     assert_eq!(report.records_applied, 0);
+    assert_eq!(report.records_pruned, 0);
     assert_eq!(steps.list_calls.len(), 1);
     assert_eq!(steps.apply_calls.len(), 1);
     assert_eq!(steps.apply_calls[0].source_ids, Vec::<String>::new());
+    assert_eq!(
+        steps.prune_calls,
+        vec![FakePruneCall {
+            source_ids: Vec::new()
+        }]
+    );
     assert_eq!(
         steps.status_transitions,
         vec![
@@ -1942,6 +2027,39 @@ async fn knowledge_sync_ingestion_workflow_empty_page_completes_with_zero_counte
             SyncRunStatus::Completed
         ]
     );
+}
+
+#[tokio::test]
+async fn knowledge_sync_ingestion_workflow_prunes_after_full_selection_refresh() {
+    // Pins: a full selected-source refresh carries all seen source IDs into one durable prune step.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let sync_run_uid = Uuid::now_v7();
+    let mut steps = FakeKnowledgeSyncIngestionSteps::new(fake_prepared_sync_run(
+        tenant_id,
+        connection_uid,
+        sync_run_uid,
+        10,
+    ))
+    .with_pages(vec![fake_record_page(&["doc-b", "doc-a"], None)]);
+
+    let report = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect("full source selection refresh should complete and prune unseen objects");
+
+    assert_eq!(report.status, "completed");
+    assert_eq!(report.records_listed, 2);
+    assert_eq!(report.records_applied, 2);
+    assert_eq!(
+        steps.prune_calls,
+        vec![FakePruneCall {
+            source_ids: vec!["doc-a".to_string(), "doc-b".to_string()]
+        }]
+    );
+    assert!(steps.fail_calls.is_empty());
 }
 
 #[test]
@@ -2207,6 +2325,7 @@ struct FakeKnowledgeSyncIngestionSteps {
     pages: Vec<RecordPage>,
     list_calls: Vec<FakeListPageCall>,
     apply_calls: Vec<FakeApplyPageCall>,
+    prune_calls: Vec<FakePruneCall>,
     fail_calls: Vec<FakeFailCall>,
     status_transitions: Vec<SyncRunStatus>,
 }
@@ -2218,6 +2337,7 @@ impl FakeKnowledgeSyncIngestionSteps {
             pages: Vec::new(),
             list_calls: Vec::new(),
             apply_calls: Vec::new(),
+            prune_calls: Vec::new(),
             fail_calls: Vec::new(),
             status_transitions: Vec::new(),
         }
@@ -2244,11 +2364,17 @@ struct FakeListChangedRecordsRequest {
     cursor: Option<String>,
     limit: Option<u32>,
     modified_after: Option<DateTime<Utc>>,
+    variant: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeApplyPageCall {
     page_index: u32,
+    source_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FakePruneCall {
     source_ids: Vec<String>,
 }
 
@@ -2330,6 +2456,24 @@ impl KnowledgeSyncIngestionDurableSteps for FakeKnowledgeSyncIngestionSteps {
         })
     }
 
+    async fn prune_unseen_objects(
+        &mut self,
+        _prepared: &KnowledgeSyncPreparedRun,
+        seen_source_ids: HashSet<String>,
+    ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
+        let mut source_ids = seen_source_ids.into_iter().collect::<Vec<_>>();
+        source_ids.sort();
+        self.prune_calls.push(FakePruneCall { source_ids });
+        Ok(KnowledgeSyncPageApplication {
+            records_listed: 0,
+            records_ingested: 0,
+            records_skipped: 0,
+            records_deleted: 0,
+            embeddings_created: 0,
+            records_applied: 0,
+        })
+    }
+
     async fn complete_ingestion_run(
         &mut self,
         _prepared: &KnowledgeSyncPreparedRun,
@@ -2388,6 +2532,7 @@ fn fake_prepared_sync_run(
             credential_ref: "resolved-provider-token".to_string(),
             status: ConnectionStatus::Active,
             metadata: json!({}),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,
@@ -2508,6 +2653,7 @@ impl KnowledgeSyncIngestionDurableSteps for DbKnowledgeAutoSyncSteps {
                 cursor,
                 modified_after: prepared.connection.last_synced_at,
                 limit: Some(limit),
+                variant: None,
             })
             .await
             .map_err(test_handler_error)?;
@@ -2532,6 +2678,24 @@ impl KnowledgeSyncIngestionDurableSteps for DbKnowledgeAutoSyncSteps {
                 prepared.run.connection_uid,
                 prepared.run.tenant_id,
                 page.page,
+            )
+            .await
+            .map_err(test_handler_error)?;
+        Ok(KnowledgeSyncPageApplication::from(report))
+    }
+
+    async fn prune_unseen_objects(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        seen_source_ids: HashSet<String>,
+    ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
+        let report = self
+            .pipeline
+            .prune_unseen_objects(
+                prepared.run.sync_run_uid,
+                prepared.run.connection_uid,
+                prepared.run.tenant_id,
+                &seen_source_ids,
             )
             .await
             .map_err(test_handler_error)?;
@@ -2727,6 +2891,25 @@ impl KnowledgeIngestionRunner for FakeKnowledgeIngestionRunner {
             ..PageIngestionReport::default()
         })
     }
+
+    async fn prune_unseen_objects(
+        &self,
+        run: &KnowledgeSyncRun,
+        provider: &str,
+        seen_source_ids: &HashSet<String>,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+        self.calls
+            .lock()
+            .expect("fake ingestion runner calls should not be poisoned")
+            .push(FakeKnowledgeIngestionCall {
+                sync_run_uid: run.sync_run_uid,
+                connection_uid: run.connection_uid,
+                tenant_id: run.tenant_id,
+                provider: provider.to_string(),
+                records_listed: seen_source_ids.len() as u64,
+            });
+        Ok(PageIngestionReport::default())
+    }
 }
 
 fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
@@ -2739,6 +2922,7 @@ fn fixture_connection(tenant_id: TenantId) -> KnowledgeConnection {
         credential_ref: "vault://existing".to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": "connection" }),
+        source_selection: json!({}),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         last_synced_at: None,
@@ -3599,6 +3783,14 @@ impl FakeLinkedIntegrationProvider {
         self.calls().exchange_public_token
     }
 
+    fn apply_source_selection_count(&self) -> usize {
+        self.calls().apply_source_selection
+    }
+
+    fn applied_source_selections(&self) -> Vec<Value> {
+        self.calls().source_selection_requests
+    }
+
     fn calls(&self) -> FakeProviderCalls {
         self.calls
             .lock()
@@ -3610,10 +3802,12 @@ impl FakeLinkedIntegrationProvider {
 #[derive(Debug, Clone, Default)]
 struct FakeProviderCalls {
     exchange_public_token: usize,
+    apply_source_selection: usize,
     trigger_sync: usize,
     list_changed_records: usize,
     verify_webhook: usize,
     list_changed_record_requests: Vec<FakeListChangedRecordsRequest>,
+    source_selection_requests: Vec<Value>,
 }
 
 impl FakeProviderCalls {
@@ -3625,6 +3819,7 @@ impl FakeProviderCalls {
                 cursor: req.cursor.clone(),
                 limit: req.limit,
                 modified_after: req.modified_after,
+                variant: req.variant.clone(),
             });
     }
 }
@@ -3734,6 +3929,21 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
             status: self.trigger_status.clone(),
             metadata: json!({ "status": self.trigger_status.clone() }),
         })
+    }
+
+    async fn apply_source_selection(
+        &self,
+        req: ApplySourceSelectionRequest,
+    ) -> moa_knowledge::Result<()> {
+        let mut calls = self
+            .calls
+            .lock()
+            .expect("fake provider call log should not be poisoned");
+        calls.apply_source_selection += 1;
+        calls
+            .source_selection_requests
+            .push(req.connection.source_selection);
+        Ok(())
     }
 
     async fn list_changed_records(
@@ -3964,6 +4174,23 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     ) -> moa_knowledge::Result<Option<KnowledgeConnection>> {
         self.record_op("get_connection")?;
         self.with_state(|state| state.connections.get(&connection_uid).cloned())
+    }
+
+    async fn update_connection_source_selection(
+        &self,
+        connection_uid: Uuid,
+        source_selection: Value,
+    ) -> moa_knowledge::Result<KnowledgeConnection> {
+        self.record_op("update_connection_source_selection")?;
+        self.with_state(|state| {
+            let connection = state.connections.get_mut(&connection_uid).ok_or_else(|| {
+                KnowledgeError::Repository("connection should exist for fixture update".to_string())
+            })?;
+            connection.source_selection = source_selection;
+            connection.last_synced_at = None;
+            connection.updated_at = Utc::now();
+            Ok(connection.clone())
+        })?
     }
 
     async fn list_connections(
@@ -4223,6 +4450,22 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
                     object.connection_uid == connection_uid && object.source_id == source_id
                 })
                 .cloned()
+        })
+    }
+
+    async fn active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+    ) -> moa_knowledge::Result<Vec<KnowledgeObject>> {
+        self.record_op("active_objects_for_connection")?;
+        self.with_state(|state| {
+            state
+                .objects
+                .values()
+                .filter(|object| object.connection_uid == connection_uid)
+                .filter(|object| object.status != ObjectStatus::Deleted)
+                .cloned()
+                .collect()
         })
     }
 

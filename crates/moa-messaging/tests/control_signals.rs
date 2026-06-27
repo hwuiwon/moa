@@ -1,5 +1,6 @@
 //! Out-of-line tests for Slack messaging slash-command control-signal translation.
 
+#[path = "support/control_signals.rs"]
 mod support;
 
 use moa_core::{Channel, SessionSignal};

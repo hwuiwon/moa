@@ -2,6 +2,7 @@
 
 #![recursion_limit = "256"]
 
+#[path = "support/draft_proposals.rs"]
 mod support;
 
 use moa_artifacts::document::{ArtifactKind, ArtifactStatus};

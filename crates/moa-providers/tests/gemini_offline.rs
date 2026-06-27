@@ -1,4 +1,7 @@
-mod support;
+mod support {
+    pub mod gemini_wiremock;
+    pub mod wiremock_common;
+}
 
 use std::time::Duration;
 
@@ -10,9 +13,9 @@ use serde_json::json;
 use tokio::time::{advance, timeout};
 use wiremock::MockServer;
 
-use support::wiremock_provider_helpers::{
-    GEMINI_MODEL, minimal_request, mount_always_status, mount_gemini_sse, mount_retry_then_sse,
-    request_count, tool_request,
+use support::gemini_wiremock::{GEMINI_MODEL, mount_gemini_sse};
+use support::wiremock_common::{
+    minimal_request, mount_always_status, mount_retry_then_sse, request_count, tool_request,
 };
 
 const TEXT: &str = include_str!("support/fixtures/sse/gemini_text.sse");

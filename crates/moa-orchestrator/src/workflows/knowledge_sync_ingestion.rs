@@ -1,6 +1,6 @@
 //! Restate workflow that owns one tenant knowledge sync ingestion pass.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use moa_core::RlsContext;
@@ -46,6 +46,8 @@ pub struct KnowledgeSyncIngestionReport {
     pub records_listed: u64,
     /// Provider records applied by the page-application step.
     pub records_applied: u64,
+    /// Previously active local objects pruned because they were absent from a full selected-source sync.
+    pub records_pruned: u64,
     /// Human-readable workflow status.
     pub status: String,
 }
@@ -87,11 +89,11 @@ pub struct KnowledgeSyncPageApplication {
     pub records_ingested: u64,
     /// Number of unchanged records skipped by ingestion idempotency checks.
     pub records_skipped: u64,
-    /// Number of provider deletions applied locally.
+    /// Number of local deletions applied from provider deletes or source-selection pruning.
     pub records_deleted: u64,
     /// Number of embeddings created by the pipeline.
     pub embeddings_created: u64,
-    /// Number of provider records applied or intentionally skipped by local ingestion.
+    /// Number of records or prune deletions applied or intentionally skipped by local ingestion.
     pub records_applied: u64,
 }
 
@@ -150,6 +152,13 @@ pub trait KnowledgeSyncIngestionDurableSteps {
         page_index: u32,
     ) -> Result<KnowledgeSyncPageApplication, HandlerError>;
 
+    /// Tombstones active local objects absent from an exhaustive selected-source sync.
+    async fn prune_unseen_objects(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        seen_source_ids: HashSet<String>,
+    ) -> Result<KnowledgeSyncPageApplication, HandlerError>;
+
     /// Marks the run completed and advances the connection sync watermark.
     async fn complete_ingestion_run(
         &mut self,
@@ -175,24 +184,36 @@ pub async fn run_knowledge_sync_ingestion_workflow(
     let mut page_index = 0_u32;
     let mut records_processed = 0_u64;
     let mut records_applied = 0_u64;
+    let mut records_pruned = 0_u64;
+    let mut seen_source_ids = HashSet::new();
+    let mut listing_exhaustive = false;
 
     while records_processed < u64::from(prepared.max_records) {
         let remaining = u64::from(prepared.max_records).saturating_sub(records_processed);
         let limit = u32::try_from(remaining.min(u64::from(prepared.page_size))).map_err(|_| {
             HandlerError::from(TerminalError::new("knowledge sync page limit overflow"))
         })?;
-        let page = match steps
+        let listed_page = match steps
             .list_changed_records_page(&prepared, cursor.clone(), limit, page_index)
             .await
         {
-            Ok(page) => cap_provider_page(page, remaining),
+            Ok(page) => page,
             Err(error) => {
                 fail_prepared_run(steps, &prepared, "provider_records_listed", &error).await;
                 return Err(error);
             }
         };
+        let provider_next_cursor = listed_page.page.next_cursor.clone();
+        let provider_returned_over_limit = listed_page.records_listed > remaining;
+        let page = cap_provider_page(listed_page, remaining);
         let next_cursor = page.page.next_cursor.clone();
         let records_in_page = page.records_listed;
+        seen_source_ids.extend(
+            page.page
+                .records
+                .iter()
+                .map(|record| record.source_id.clone()),
+        );
         let empty_page = records_in_page == 0;
         let reached_cap =
             records_processed.saturating_add(records_in_page) >= u64::from(prepared.max_records);
@@ -208,10 +229,23 @@ pub async fn run_knowledge_sync_ingestion_workflow(
         records_applied = records_applied.saturating_add(application.records_applied);
 
         if next_cursor.is_none() || reached_cap || empty_page {
+            listing_exhaustive = provider_next_cursor.is_none() && !provider_returned_over_limit;
             break;
         }
         cursor = next_cursor;
         page_index = page_index.saturating_add(1);
+    }
+
+    if prepared.connection.last_synced_at.is_none() && listing_exhaustive {
+        let prune = match steps.prune_unseen_objects(&prepared, seen_source_ids).await {
+            Ok(prune) => prune,
+            Err(error) => {
+                fail_prepared_run(steps, &prepared, "source_selection_pruned", &error).await;
+                return Err(error);
+            }
+        };
+        records_pruned = prune.records_deleted;
+        records_applied = records_applied.saturating_add(prune.records_applied);
     }
 
     if let Err(error) = steps.complete_ingestion_run(&prepared).await {
@@ -225,6 +259,7 @@ pub async fn run_knowledge_sync_ingestion_workflow(
         connection_uid: prepared.run.connection_uid,
         records_listed: records_processed,
         records_applied,
+        records_pruned,
         status: "completed".to_string(),
     })
 }
@@ -341,6 +376,7 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
                         cursor,
                         modified_after,
                         limit: Some(limit),
+                        variant: None,
                     })
                     .await
                     .map_err(knowledge_ingestion_error)?;
@@ -378,6 +414,30 @@ impl KnowledgeSyncIngestionDurableSteps for RestateKnowledgeSyncIngestionSteps<'
             .name(format!(
                 "knowledge_sync_provider_page_application_{page_index}"
             ))
+            .await
+            .map(Json::into_inner)
+            .map_err(HandlerError::from)
+    }
+
+    async fn prune_unseen_objects(
+        &mut self,
+        prepared: &KnowledgeSyncPreparedRun,
+        seen_source_ids: HashSet<String>,
+    ) -> Result<KnowledgeSyncPageApplication, HandlerError> {
+        let pool = OrchestratorCtx::current_graph_pool();
+        let config = OrchestratorCtx::current_config();
+        let run = prepared.run.clone();
+        let provider = prepared.provider.clone();
+        self.ctx
+            .run(|| async move {
+                let runner = ProductionKnowledgeIngestionRunner::new(pool, config.as_ref().clone());
+                let report = runner
+                    .prune_unseen_objects(&run, &provider, &seen_source_ids)
+                    .await
+                    .map_err(knowledge_service_handler_error)?;
+                Ok::<_, HandlerError>(Json::from(KnowledgeSyncPageApplication::from(report)))
+            })
+            .name("knowledge_sync_source_selection_prune")
             .await
             .map(Json::into_inner)
             .map_err(HandlerError::from)

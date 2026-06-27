@@ -1,14 +1,13 @@
-//! Shared fixtures and assertions for lineage audit integration tests.
-
-#![allow(dead_code)]
-
-use std::path::PathBuf;
+//! Hash-chain fixtures for lineage audit tests.
 
 use blake3::Hash;
 use moa_lineage_core::chain::{
     HashChain, Result, canonical_json_bytes, canonical_payload_hash, genesis_hash, next_chain_hash,
 };
 use serde_json::Value;
+
+#[path = "fixture_jsonl.rs"]
+mod fixtures;
 
 /// One test audit record with the stored hashes needed by hash-chain tests.
 #[derive(Clone, Debug)]
@@ -21,32 +20,13 @@ pub(crate) struct ChainRecord {
     pub(crate) prev_hash: Option<Vec<u8>>,
 }
 
-/// Loads a JSON fixture by name.
-pub(crate) fn fixture_json(name: &str) -> Value {
-    serde_json::from_str(&fixture_text(name))
-        .unwrap_or_else(|error| panic!("failed to parse fixture {name}: {error}"))
-}
-
-/// Loads a JSONL fixture into one value per non-empty line.
-pub(crate) fn fixture_jsonl(name: &str) -> Vec<Value> {
-    fixture_text(name)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("failed to parse fixture {name} line: {error}"))
-        })
-        .collect()
-}
-
 /// Builds the minimal five-record hash-chain fixture.
 pub(crate) fn minimal_chain_records() -> Vec<ChainRecord> {
-    build_chain(fixture_jsonl("audit_records_minimal.jsonl"))
+    build_chain(fixtures::fixture_jsonl("audit_records_minimal.jsonl"))
         .expect("minimal hash-chain fixture should build")
 }
 
-/// Builds a chain from canonical payloads using the production append primitive.
-pub(crate) fn build_chain(records: Vec<Value>) -> Result<Vec<ChainRecord>> {
+fn build_chain(records: Vec<Value>) -> Result<Vec<ChainRecord>> {
     let mut prev = None;
     let mut out = Vec::with_capacity(records.len());
     for payload in records {
@@ -102,18 +82,4 @@ pub(crate) fn push_wrong_prev_hash_record(records: &mut Vec<ChainRecord>) {
         integrity_hash: integrity.as_bytes().to_vec(),
         prev_hash: Some(wrong_prev.as_bytes().to_vec()),
     });
-}
-
-/// Loads a UTF-8 fixture as text.
-pub(crate) fn fixture_text(name: &str) -> String {
-    std::fs::read_to_string(fixture_path(name))
-        .unwrap_or_else(|error| panic!("failed to read fixture {name}: {error}"))
-}
-
-fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("support")
-        .join("fixtures")
-        .join(name)
 }

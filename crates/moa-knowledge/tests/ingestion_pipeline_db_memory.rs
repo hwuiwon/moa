@@ -261,6 +261,7 @@ async fn ingestion_pipeline_skips_unchanged_reembeds_edits_and_tombstones_delete
             credential_ref: "vault://knowledge/test".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,
@@ -460,6 +461,7 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
             credential_ref: "vault://knowledge/replay".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,
@@ -548,6 +550,114 @@ async fn ingestion_pipeline_replaying_same_page_keeps_counters_and_identities_on
 }
 
 #[tokio::test]
+async fn ingestion_pipeline_prunes_unseen_objects_after_full_selection_refresh() {
+    // Pins: full selected-source refreshes tombstone previously active objects absent from the provider listing.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated Postgres");
+    let pool = db.store().pool().clone();
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let scope = RlsContext::tenant(tenant_id);
+    let repository = Arc::new(PostgresKnowledgeRepository::scoped_for_app_role(
+        pool.clone(),
+        scope,
+    ));
+    let parser = Arc::new(ParagraphParser);
+    let embedder = Arc::new(CountingEmbedder::default());
+    let graph = Arc::new(FakeGraphWriter::default());
+    let observer = Arc::new(MetricsIngestionObserver);
+    let pipeline = KnowledgeIngestionPipeline::new(
+        repository.clone(),
+        parser,
+        embedder,
+        graph.clone(),
+        observer,
+        KnowledgeIngestionPipelineConfig {
+            chunking: ChunkingConfig {
+                target_tokens: 4,
+                max_tokens: 16,
+                min_tokens: 1,
+            },
+            provider: "test_provider".to_string(),
+            parser_label: "test_parser".to_string(),
+        },
+    );
+
+    repository
+        .upsert_connection(KnowledgeConnection {
+            connection_uid,
+            tenant_id,
+            provider: "test_provider".to_string(),
+            connector: "docs".to_string(),
+            provider_account_id: "acct_prune".to_string(),
+            credential_ref: "vault://knowledge/prune".to_string(),
+            status: ConnectionStatus::Active,
+            metadata: json!({}),
+            source_selection: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_synced_at: None,
+        })
+        .await
+        .expect("upsert connection");
+    let initial_run = create_run(&repository, tenant_id, connection_uid).await;
+    pipeline
+        .ingest_record_page(
+            initial_run,
+            connection_uid,
+            tenant_id,
+            RecordPage {
+                records: vec![
+                    record_with_source("doc-keep", "v1", false, "Keep this source."),
+                    record_with_source("doc-drop", "v1", false, "Drop this source."),
+                ],
+                next_cursor: None,
+            },
+        )
+        .await
+        .expect("ingest initial selected sources");
+    assert_eq!(graph.vector_count(), 2);
+
+    let prune_run = create_run(&repository, tenant_id, connection_uid).await;
+    let seen_source_ids = HashSet::from(["doc-keep".to_string()]);
+    let report = pipeline
+        .prune_unseen_objects(prune_run, connection_uid, tenant_id, &seen_source_ids)
+        .await
+        .expect("prune sources absent from full refresh");
+
+    let keep_uid = object_uid_for_source(connection_uid, "doc-keep");
+    let drop_uid = object_uid_for_source(connection_uid, "doc-drop");
+    assert_eq!(report.records_deleted, 1);
+    assert_eq!(object_status(&pool, keep_uid).await, "active");
+    assert_eq!(object_status(&pool, drop_uid).await, "deleted");
+    assert_eq!(graph.vector_count(), 1);
+    assert_eq!(graph.invalidated_count(), 1);
+    assert_eq!(tombstoned_chunk_count(&pool, drop_uid).await, 1);
+    assert_eq!(tombstoned_chunk_count(&pool, keep_uid).await, 0);
+
+    let counters = sync_counters(&pool, prune_run).await;
+    assert_eq!(counters.records_seen, 0);
+    assert_eq!(counters.records_deleted, 1);
+    let run_steps = repository
+        .sync_run_steps(prune_run, None)
+        .await
+        .expect("read prune run timeline");
+    let rendered_steps = run_steps
+        .iter()
+        .map(|step| format!("{} {}", step.step, step.counters))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        run_steps
+            .iter()
+            .any(|step| step.step == "source_selection_pruned"
+                && step.counters["records_pruned"] == json!(1)),
+        "prune run should record a run-level selected-source prune step; got {rendered_steps}"
+    );
+}
+
+#[tokio::test]
 async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ingestion() {
     // Pins: replay after object/change-token advancement must resume missing parse, graph, vector, and final success work.
     let db = postgres::bootstrap_test_db()
@@ -592,6 +702,7 @@ async fn ingestion_pipeline_replay_after_change_token_only_progress_finishes_ing
             credential_ref: "vault://knowledge/partial-replay".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,
@@ -740,6 +851,7 @@ async fn ingestion_pipeline_replay_after_graph_uid_midpoint_finishes_ingestion()
             credential_ref: "vault://knowledge/graph-uid-replay".to_string(),
             status: ConnectionStatus::Active,
             metadata: credentialish_metadata(),
+            source_selection: json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_synced_at: None,
@@ -862,11 +974,24 @@ async fn create_run(
 }
 
 fn record(change_token: &str, deleted: bool, text: &str) -> ProviderRecord {
+    record_with_source("doc-1", change_token, deleted, text)
+}
+
+fn record_with_source(
+    source_id: &str,
+    change_token: &str,
+    deleted: bool,
+    text: &str,
+) -> ProviderRecord {
     ProviderRecord {
-        source_id: "doc-1".to_string(),
+        source_id: source_id.to_string(),
         object_type: "page".to_string(),
-        title: Some("Alpha Plan".to_string()),
-        source_uri: Some("https://example.test/doc-1".to_string()),
+        title: Some(if source_id == "doc-1" {
+            "Alpha Plan".to_string()
+        } else {
+            format!("Source {source_id}")
+        }),
+        source_uri: Some(format!("https://example.test/{source_id}")),
         change_token: Some(change_token.to_string()),
         deleted,
         source_updated_at: Some(Utc::now()),
@@ -933,7 +1058,13 @@ fn assert_no_secret_text(text: &str) {
 }
 
 fn object_uid(connection_uid: Uuid) -> Uuid {
-    moa_knowledge::graph_delta::stable_uid(&format!("knowledge-object:{connection_uid}:doc-1"))
+    object_uid_for_source(connection_uid, "doc-1")
+}
+
+fn object_uid_for_source(connection_uid: Uuid, source_id: &str) -> Uuid {
+    moa_knowledge::graph_delta::stable_uid(&format!(
+        "knowledge-object:{connection_uid}:{source_id}"
+    ))
 }
 
 async fn version_count(pool: &sqlx::PgPool, object_uid: Uuid) -> i64 {

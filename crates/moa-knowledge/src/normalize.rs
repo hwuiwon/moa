@@ -107,6 +107,17 @@ pub fn redact_provider_metadata(value: Value) -> Value {
     }
 }
 
+/// Redacts and normalizes provider-native selected source state.
+#[must_use]
+pub fn normalize_source_selection(value: Value) -> Value {
+    let value = redact_provider_metadata(value);
+    if value.is_null() {
+        Value::Object(Map::new())
+    } else {
+        value
+    }
+}
+
 /// Converts a provider record into a tenant knowledge object.
 #[must_use]
 pub fn normalize_provider_record(
@@ -177,4 +188,30 @@ fn is_secret_key(key: &str) -> bool {
 fn is_secret_value(value: &str) -> bool {
     let value = value.trim().to_ascii_lowercase();
     value.starts_with("bearer ") || value.contains("authorization: bearer ")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::normalize_source_selection;
+
+    #[test]
+    fn normalize_source_selection_defaults_to_empty_and_redacts_nested_secrets() {
+        // Pins: omitted selected-source state means provider default/all, not persisted JSON null.
+        assert_eq!(normalize_source_selection(json!(null)), json!({}));
+        assert_eq!(
+            normalize_source_selection(json!({
+                "metadata": {
+                    "selected_folder_ids": ["folder-1"],
+                    "access_token": "must-redact"
+                }
+            })),
+            json!({
+                "metadata": {
+                    "selected_folder_ids": ["folder-1"]
+                }
+            })
+        );
+    }
 }

@@ -32,6 +32,7 @@ fn connection(tenant_id: TenantId, label: &str) -> KnowledgeConnection {
         credential_ref: format!("vault://tenant/{label}/knowledge"),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe_label": label }),
+        source_selection: json!({}),
         created_at: now,
         updated_at: now,
         last_synced_at: None,
@@ -114,7 +115,8 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
     let repo_a = repository(&db, tenant_a);
     let repo_b = repository(&db, tenant_b);
 
-    let connection_a = connection(tenant_a, "tenant-a");
+    let mut connection_a = connection(tenant_a, "tenant-a");
+    connection_a.last_synced_at = Some(Utc::now());
     let connection_b = connection(tenant_b, "tenant-b");
     repo_a
         .upsert_connection(connection_a.clone())
@@ -124,6 +126,44 @@ async fn scoped_repository_hides_other_tenant_rows_and_returns_redacted_timeline
         .upsert_connection(connection_b.clone())
         .await
         .expect("insert tenant B connection");
+    let selected_sources = json!({
+        "metadata": {
+            "selected_folder_ids": ["folder-a"],
+            "access_token": "must-redact"
+        },
+        "variant": "selected-sources"
+    });
+    let updated_connection = repo_a
+        .update_connection_source_selection(connection_a.connection_uid, selected_sources)
+        .await
+        .expect("update tenant A source selection");
+    assert_eq!(
+        updated_connection.source_selection["metadata"]["selected_folder_ids"],
+        json!(["folder-a"])
+    );
+    assert!(
+        updated_connection.source_selection["metadata"]
+            .get("access_token")
+            .is_none()
+    );
+    assert_eq!(updated_connection.last_synced_at, None);
+    assert!(
+        repo_a
+            .update_connection_source_selection(connection_b.connection_uid, json!({}))
+            .await
+            .is_err(),
+        "tenant A must not update tenant B source selection"
+    );
+    let connection_summaries = repo_a
+        .list_connections(tenant_a, Some("nango"))
+        .await
+        .expect("list tenant A connections");
+    assert_eq!(connection_summaries.len(), 1);
+    assert_eq!(
+        connection_summaries[0].connection.source_selection["variant"],
+        "selected-sources"
+    );
+    assert_eq!(connection_summaries[0].connection.last_synced_at, None);
 
     let run_a = sync_run(tenant_a, connection_a.connection_uid);
     let run_b = sync_run(tenant_b, connection_b.connection_uid);

@@ -11,7 +11,15 @@ use serde::Deserialize;
 
 use crate::support::restate_runtime::{grant_tenant_operator, test_user_identity, with_identity};
 
-mod support;
+mod support {
+    pub mod grant_tenant_operator;
+    pub mod restate_identity;
+
+    pub mod restate_runtime {
+        pub use super::grant_tenant_operator::grant_tenant_operator;
+        pub use super::restate_identity::{test_user_identity, with_identity};
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct StartTurnResponse {

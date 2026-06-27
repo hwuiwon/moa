@@ -1,6 +1,7 @@
 //! Integration tests for rendering skills with learned graph lessons.
 
-mod support;
+#[path = "support/skill_graph_render.rs"]
+mod skill_graph;
 
 use moa_core::{MoaError, Result, TenantId};
 use moa_memory_graph::GraphStore;
@@ -9,9 +10,7 @@ use moa_skills::registry::{NewSkill, SkillRegistry};
 use moa_skills::render::{SkillRenderContext, render};
 use uuid::Uuid;
 
-use support::skill_graph::{
-    DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, memory_scope, tenant_scope,
-};
+use skill_graph::{DISTILLED_SKILL, GRAPH_TEST_LOCK, graph_store, memory_scope, tenant_scope};
 
 #[tokio::test]
 async fn render_with_graph_lessons() -> Result<()> {

@@ -30,6 +30,8 @@ use moa_core::{
         KnowledgeProviderWebhookResponse, KnowledgeQueryTraceRequest, KnowledgeQueryTraceResponse,
         KnowledgeSyncEventsRequest, KnowledgeSyncEventsResponse, KnowledgeSyncRequest,
         KnowledgeSyncResponse, KnowledgeSyncStatusRequest, KnowledgeSyncStatusResponse,
+        KnowledgeUpdateConnectionSourceSelectionRequest,
+        KnowledgeUpdateConnectionSourceSelectionResponse,
     },
 };
 use moa_knowledge::{
@@ -85,6 +87,11 @@ pub trait Knowledge {
     async fn list_connections(
         request: Json<KnowledgeConnectionListRequest>,
     ) -> Result<Json<KnowledgeConnectionListResponse>, HandlerError>;
+
+    /// Updates provider-native selected sources for one linked connection.
+    async fn update_connection_source_selection(
+        request: Json<KnowledgeUpdateConnectionSourceSelectionRequest>,
+    ) -> Result<Json<KnowledgeUpdateConnectionSourceSelectionResponse>, HandlerError>;
 
     /// Lists tenant knowledge source objects.
     async fn list_objects(
@@ -144,7 +151,7 @@ impl Knowledge for KnowledgeImpl {
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id).await?;
         let service = production_service(request.tenant_id);
-        Ok(ctx
+        let response = ctx
             .run(|| async move {
                 service
                     .exchange_public_token(request)
@@ -153,7 +160,17 @@ impl Knowledge for KnowledgeImpl {
                     .map_err(knowledge_handler_error)
             })
             .name("knowledge_exchange_public_token")
-            .await?)
+            .await?
+            .into_inner();
+        if response
+            .sync_status
+            .as_deref()
+            .is_some_and(should_dispatch_knowledge_sync_ingestion)
+            && let Some(sync_run_uid) = response.sync_run_uid
+        {
+            Self::dispatch_knowledge_sync_ingestion(&ctx, sync_run_uid);
+        }
+        Ok(Json::from(response))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -247,6 +264,38 @@ impl Knowledge for KnowledgeImpl {
             })
             .name("knowledge_list_connections")
             .await?)
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    async fn update_connection_source_selection(
+        &self,
+        ctx: Context<'_>,
+        request: Json<KnowledgeUpdateConnectionSourceSelectionRequest>,
+    ) -> Result<Json<KnowledgeUpdateConnectionSourceSelectionResponse>, HandlerError> {
+        annotate_restate_handler_span("Knowledge", "update_connection_source_selection");
+        let request = request.into_inner();
+        authorize_tenant(&ctx, request.tenant_id).await?;
+        let service = production_service(request.tenant_id);
+        let response = ctx
+            .run(|| async move {
+                service
+                    .update_connection_source_selection(request)
+                    .await
+                    .map(Json::from)
+                    .map_err(knowledge_handler_error)
+            })
+            .name("knowledge_update_connection_source_selection")
+            .await?
+            .into_inner();
+        if response
+            .sync_status
+            .as_deref()
+            .is_some_and(should_dispatch_knowledge_sync_ingestion)
+            && let Some(sync_run_uid) = response.sync_run_uid
+        {
+            Self::dispatch_knowledge_sync_ingestion(&ctx, sync_run_uid);
+        }
+        Ok(Json::from(response))
     }
 
     #[tracing::instrument(skip(self, ctx, request))]

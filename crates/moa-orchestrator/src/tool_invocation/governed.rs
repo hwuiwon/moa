@@ -134,7 +134,7 @@ pub(crate) enum GovernedInvocationEventPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GovernedInvocationOutcome {
     /// Tool call was fully handled by the governed coordinator.
-    Completed(GovernedInvocationResult),
+    Completed(Box<GovernedInvocationResult>),
     /// Tool call is a delegation tool and must stay on the workflow-owned path.
     Delegation {
         /// Stable tool-call id for the delegation path.
@@ -155,11 +155,13 @@ pub(crate) async fn invoke_governed_tool(
         append_tool_call_event(ctx, &request).await?;
         let output = disallowed_tool_output(&invocation.name);
         append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
-        return Ok(GovernedInvocationOutcome::Completed(completed_result(
-            request.tool_id,
-            invocation,
-            output,
-            GovernedInvocationDisposition::Disallowed,
+        return Ok(GovernedInvocationOutcome::Completed(Box::new(
+            completed_result(
+                request.tool_id,
+                invocation,
+                output,
+                GovernedInvocationDisposition::Disallowed,
+            ),
         )));
     }
 
@@ -182,11 +184,13 @@ pub(crate) async fn invoke_governed_tool(
     if matches!(prepared_action.effect, ActionPolicyEffect::Deny) {
         let output = denied_action_output(&prepared_action, &invocation);
         append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
-        return Ok(GovernedInvocationOutcome::Completed(completed_result(
-            request.tool_id,
-            invocation,
-            output,
-            GovernedInvocationDisposition::Denied,
+        return Ok(GovernedInvocationOutcome::Completed(Box::new(
+            completed_result(
+                request.tool_id,
+                invocation,
+                output,
+                GovernedInvocationDisposition::Denied,
+            ),
         )));
     }
 
@@ -209,11 +213,13 @@ async fn request_action_review(
     {
         let output = blocked_canary_tool_output(&invocation.name);
         append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
-        return Ok(GovernedInvocationOutcome::Completed(completed_result(
-            request.tool_id,
-            invocation,
-            output,
-            GovernedInvocationDisposition::CanaryBlocked,
+        return Ok(GovernedInvocationOutcome::Completed(Box::new(
+            completed_result(
+                request.tool_id,
+                invocation,
+                output,
+                GovernedInvocationDisposition::CanaryBlocked,
+            ),
         )));
     }
 
@@ -227,11 +233,13 @@ async fn request_action_review(
         .await?;
     let output = pending_review_output(&invocation, &prepared_action.input_summary);
     append_synthetic_tool_result(ctx, &request, &invocation, &output).await?;
-    Ok(GovernedInvocationOutcome::Completed(completed_result(
-        request.tool_id,
-        invocation,
-        output,
-        GovernedInvocationDisposition::ReviewPending,
+    Ok(GovernedInvocationOutcome::Completed(Box::new(
+        completed_result(
+            request.tool_id,
+            invocation,
+            output,
+            GovernedInvocationDisposition::ReviewPending,
+        ),
     )))
 }
 
@@ -261,7 +269,7 @@ async fn execute_allowed_tool(
         .into_inner();
     record_turn_tool_dispatch_duration(dispatch_started.elapsed(), 1);
 
-    Ok(GovernedInvocationOutcome::Completed(
+    Ok(GovernedInvocationOutcome::Completed(Box::new(
         GovernedInvocationResult {
             tool_id: request.tool_id,
             invocation,
@@ -269,7 +277,7 @@ async fn execute_allowed_tool(
             disposition: GovernedInvocationDisposition::Executed,
             event_plan: GovernedInvocationEventPlan::ToolExecutorResult,
         },
-    ))
+    )))
 }
 
 /// Records a successful segment tool use through the session-store service.

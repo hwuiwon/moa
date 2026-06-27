@@ -19,7 +19,7 @@ use crate::{
         SyncRunStatus,
     },
     error::{Error, Result},
-    normalize::redact_provider_metadata,
+    normalize::{normalize_source_selection, redact_provider_metadata},
 };
 
 const LIST_CONNECTIONS_LIMIT: i64 = 100;
@@ -48,6 +48,13 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Gets a linked connection by identifier.
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>>;
+
+    /// Updates provider-native selected source state and clears the sync watermark.
+    async fn update_connection_source_selection(
+        &self,
+        connection_uid: Uuid,
+        source_selection: serde_json::Value,
+    ) -> Result<KnowledgeConnection>;
 
     /// Lists linked-connection projections for a tenant.
     async fn list_connections(
@@ -125,6 +132,12 @@ pub trait KnowledgeRepository: Send + Sync {
         connection_uid: Uuid,
         source_id: &str,
     ) -> Result<Option<KnowledgeObject>>;
+
+    /// Lists active objects for one linked connection.
+    async fn active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+    ) -> Result<Vec<KnowledgeObject>>;
 
     /// Gets the latest document version for an object.
     async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>>;
@@ -307,18 +320,20 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             INSERT INTO moa.knowledge_connections (
                 connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
                 provider_connection_id, connector, credential_ref, status, metadata,
-                created_at, updated_at, last_synced_at
+                source_selection, created_at, updated_at, last_synced_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $5, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $5, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (tenant_id, provider, provider_config_key, provider_connection_id)
             DO UPDATE SET
                 credential_ref = EXCLUDED.credential_ref,
                 status = EXCLUDED.status,
                 metadata = EXCLUDED.metadata,
+                source_selection = EXCLUDED.source_selection,
                 last_synced_at = EXCLUDED.last_synced_at,
                 updated_at = EXCLUDED.updated_at
             RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
-                      credential_ref, status, metadata, created_at, updated_at, last_synced_at
+                      credential_ref, status, metadata, source_selection, created_at, updated_at,
+                      last_synced_at
             "#,
         )
         .bind(connection.connection_uid)
@@ -330,6 +345,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(&connection.credential_ref)
         .bind(connection.status.as_str())
         .bind(redact_provider_metadata(connection.metadata))
+        .bind(normalize_source_selection(connection.source_selection))
         .bind(connection.created_at)
         .bind(connection.updated_at)
         .bind(connection.last_synced_at)
@@ -345,7 +361,8 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         let row = sqlx::query(
             r#"
             SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-                   credential_ref, status, metadata, created_at, updated_at, last_synced_at
+                   credential_ref, status, metadata, source_selection, created_at, updated_at,
+                   last_synced_at
             FROM moa.knowledge_connections
             WHERE connection_uid = $1
             "#,
@@ -358,6 +375,38 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         row.as_ref().map(connection_from_row).transpose()
     }
 
+    async fn update_connection_source_selection(
+        &self,
+        connection_uid: Uuid,
+        source_selection: serde_json::Value,
+    ) -> Result<KnowledgeConnection> {
+        let mut conn = self.begin().await?;
+        let row = sqlx::query(
+            r#"
+            UPDATE moa.knowledge_connections
+            SET source_selection = $2,
+                last_synced_at = NULL,
+                updated_at = now()
+            WHERE connection_uid = $1
+            RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
+                      credential_ref, status, metadata, source_selection, created_at, updated_at,
+                      last_synced_at
+            "#,
+        )
+        .bind(connection_uid)
+        .bind(normalize_source_selection(source_selection))
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            return Err(Error::Repository(
+                "knowledge connection was not visible for source selection update".to_string(),
+            ));
+        };
+        conn.commit().await.map_err(map_moa_error)?;
+        connection_from_row(&row)
+    }
+
     async fn list_connections(
         &self,
         tenant_id: TenantId,
@@ -368,7 +417,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             r#"
             SELECT c.connection_uid, c.tenant_id, c.provider, c.connector,
                    c.provider_connection_id, c.credential_ref, c.status, c.metadata,
-                   c.created_at, c.updated_at, c.last_synced_at,
+                   c.source_selection, c.created_at, c.updated_at, c.last_synced_at,
                    latest.status AS last_sync_status
             FROM moa.knowledge_connections c
             LEFT JOIN LATERAL (
@@ -404,7 +453,8 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         let rows = sqlx::query(
             r#"
             SELECT connection_uid, tenant_id, provider, connector, provider_connection_id,
-                   credential_ref, status, metadata, created_at, updated_at, last_synced_at
+                   credential_ref, status, metadata, source_selection, created_at, updated_at,
+                   last_synced_at
             FROM moa.knowledge_connections
             WHERE provider = $1
               AND ($2::TEXT IS NULL OR provider_config_key = $2)
@@ -922,6 +972,30 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         row.as_ref().map(object_from_row).transpose()
     }
 
+    async fn active_objects_for_connection(
+        &self,
+        connection_uid: Uuid,
+    ) -> Result<Vec<KnowledgeObject>> {
+        let mut conn = self.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT object_uid, tenant_id, connection_id, object_type, external_object_id,
+                   parent_external_object_id, source_uri, title, change_token, metadata,
+                   status, last_modified_at, deleted_at
+            FROM moa.knowledge_objects
+            WHERE connection_id = $1
+              AND status <> 'deleted'
+            ORDER BY external_object_id ASC, object_uid ASC
+            "#,
+        )
+        .bind(connection_uid)
+        .fetch_all(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        rows.iter().map(object_from_row).collect()
+    }
+
     async fn latest_document_version(&self, object_uid: Uuid) -> Result<Option<DocumentVersion>> {
         let mut conn = self.begin().await?;
         let row = sqlx::query(
@@ -1430,6 +1504,16 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
         Ok(None)
     }
 
+    async fn update_connection_source_selection(
+        &self,
+        _connection_uid: Uuid,
+        _source_selection: serde_json::Value,
+    ) -> Result<KnowledgeConnection> {
+        Err(Error::Repository(
+            "knowledge connection source selection update is unavailable".to_string(),
+        ))
+    }
+
     async fn list_connections(
         &self,
         _tenant_id: TenantId,
@@ -1519,6 +1603,13 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
         _source_id: &str,
     ) -> Result<Option<KnowledgeObject>> {
         Ok(None)
+    }
+
+    async fn active_objects_for_connection(
+        &self,
+        _connection_uid: Uuid,
+    ) -> Result<Vec<KnowledgeObject>> {
+        Ok(Vec::new())
     }
 
     async fn latest_document_version(&self, _object_uid: Uuid) -> Result<Option<DocumentVersion>> {
@@ -1625,6 +1716,7 @@ fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeConnectio
         credential_ref: row.try_get("credential_ref").map_err(map_sqlx_error)?,
         status: connection_status(row.try_get("status").map_err(map_sqlx_error)?)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
+        source_selection: row.try_get("source_selection").map_err(map_sqlx_error)?,
         created_at: row.try_get("created_at").map_err(map_sqlx_error)?,
         updated_at: row.try_get("updated_at").map_err(map_sqlx_error)?,
         last_synced_at: row.try_get("last_synced_at").map_err(map_sqlx_error)?,

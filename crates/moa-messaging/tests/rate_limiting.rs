@@ -1,5 +1,6 @@
 //! Out-of-line tests for Slack messaging rate-limit control flow.
 
+#[path = "support/rate_limiting.rs"]
 mod support;
 
 use std::sync::Arc;

@@ -1,17 +1,18 @@
 //! Offline brain turn coverage using mock stores/providers and wiremock.
 
 include!("brain_turn_support/common.rs");
+include!("brain_turn_support/offline.rs");
 
-#[path = "support/mod.rs"]
-mod wiremock_support;
+#[path = "support/offline_session_store.rs"]
+mod offline_session_store;
+#[path = "support/openai_wiremock.rs"]
+mod openai_wiremock;
 
 use moa_providers::OpenAIProvider;
 use wiremock::MockServer;
 
-use wiremock_support::{
-    MockSessionStore as WiremockMockSessionStore, captured_json_bodies, mount_openai_text,
-    session_meta,
-};
+use offline_session_store::{MockSessionStore as WiremockMockSessionStore, session_meta};
+use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
 #[tokio::test]
 async fn offline_brain_turn_returns_response() -> moa_core::Result<()> {

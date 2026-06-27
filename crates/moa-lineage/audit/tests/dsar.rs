@@ -1,5 +1,6 @@
 //! Out-of-line tests for DSAR JSONL exports and signed manifests.
 
+#[path = "support/fixture_jsonl.rs"]
 mod support;
 
 use std::sync::Arc;

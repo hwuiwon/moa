@@ -5,8 +5,9 @@ use std::{collections::HashMap, path::PathBuf};
 use moa_core::TenantId;
 use moa_knowledge::{
     domain::CreateLinkTokenRequest,
-    providers::{LinkedIntegrationProvider, merge::MergeProvider},
+    providers::{LinkedIntegrationProvider, merge::MergeProvider, nango::NangoProvider},
 };
+use serde_json::json;
 use uuid::Uuid;
 
 const LIVE_FLAG: &str = "MOA_RUN_LIVE_KNOWLEDGE_PROVIDER_TESTS";
@@ -29,11 +30,45 @@ async fn merge_live_creates_link_token() {
             external_account_id: Some(account_id.clone()),
             end_user_email_address: Some(format!("{account_id}@example.com")),
             redirect_url: Some("https://example.com/merge/callback".to_string()),
+            source_selection: json!({}),
         })
         .await
         .expect("merge live link token creation should succeed");
 
     assert_eq!(token.provider, "merge");
+    assert!(!token.token.trim().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires MOA_RUN_LIVE_KNOWLEDGE_PROVIDER_TESTS=1, NANGO_API_KEY, and a configured Nango provider config key"]
+async fn nango_live_creates_link_token() {
+    // Pins: the Nango adapter can create a connect-session link token against the live API.
+    require_live_flag();
+    let api_key = required_secret("NANGO_API_KEY");
+    let connector =
+        optional_secret("NANGO_PROVIDER_CONFIG_KEY").unwrap_or_else(|| "google-drive".to_string());
+    let provider = NangoProvider::new("https://api.nango.dev", api_key)
+        .expect("nango provider should initialize");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let account_id = format!("moa-live-{}", Uuid::now_v7());
+
+    let token = provider
+        .create_link_token(CreateLinkTokenRequest {
+            tenant_id,
+            connector,
+            external_account_id: Some(account_id),
+            end_user_email_address: None,
+            redirect_url: Some("https://example.com/nango/callback".to_string()),
+            source_selection: json!({
+                "metadata": {
+                    "selected_folder_ids": ["moa-live-smoke"]
+                }
+            }),
+        })
+        .await
+        .expect("nango live link token creation should succeed");
+
+    assert_eq!(token.provider, "nango");
     assert!(!token.token.trim().is_empty());
 }
 
@@ -46,11 +81,14 @@ fn require_live_flag() {
 }
 
 fn required_secret(name: &str) -> String {
+    optional_secret(name).unwrap_or_else(|| panic!("{name} must be set when {LIVE_FLAG}=1"))
+}
+
+fn optional_secret(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .and_then(non_empty)
         .or_else(|| dotenv_values().remove(name).and_then(non_empty))
-        .unwrap_or_else(|| panic!("{name} must be set when {LIVE_FLAG}=1"))
 }
 
 fn dotenv_values() -> HashMap<String, String> {

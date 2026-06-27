@@ -8,7 +8,7 @@ use moa_core::wire::knowledge::{
     KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest, KnowledgeExchangeTokenRequest,
     KnowledgeObjectInspectRequest, KnowledgeObjectListRequest, KnowledgeProviderWebhookRequest,
     KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest, KnowledgeSyncRequest,
-    KnowledgeSyncStatusRequest,
+    KnowledgeSyncStatusRequest, KnowledgeUpdateConnectionSourceSelectionRequest,
 };
 
 use super::{
@@ -53,6 +53,13 @@ pub(super) fn translate(
         "/v1/knowledge/connections" => translate_knowledge_json_body::<
             KnowledgeConnectionListRequest,
         >(body, "/Knowledge/list_connections", tenant_id),
+        "/v1/knowledge/connections/source-selection" => {
+            translate_knowledge_json_body::<KnowledgeUpdateConnectionSourceSelectionRequest>(
+                body,
+                "/Knowledge/update_connection_source_selection",
+                tenant_id,
+            )
+        }
         "/v1/knowledge/objects" => translate_knowledge_json_body::<KnowledgeObjectListRequest>(
             body,
             "/Knowledge/list_objects",
@@ -196,6 +203,22 @@ mod tests {
                 serde_json::json!({
                     "tenant_id": test_tenant_json(),
                     "provider": "nango"
+                }),
+            ),
+            (
+                "/v1/knowledge/connections/source-selection",
+                "/Knowledge/update_connection_source_selection",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "connection_uid": connection_uid,
+                    "source_selection": {
+                        "nango": {
+                            "metadata": {
+                                "selected_folder_ids": ["folder-1"]
+                            }
+                        }
+                    },
+                    "sync": true
                 }),
             ),
             (

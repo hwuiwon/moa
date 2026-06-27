@@ -37,6 +37,7 @@ fn connection() -> KnowledgeConnection {
         credential_ref: "account-token-123".to_string(),
         status: ConnectionStatus::Active,
         metadata: json!({ "safe": true }),
+        source_selection: json!({}),
         created_at: now,
         updated_at: now,
         last_synced_at: None,
@@ -88,6 +89,7 @@ async fn link_token_creation_posts_merge_link_shape() {
             external_account_id: Some("operator-facing-account".to_string()),
             end_user_email_address: Some("operator@example.com".to_string()),
             redirect_url: Some("https://app.example/merge/callback".to_string()),
+            source_selection: json!({}),
         })
         .await
         .expect("create Merge link token through local fixture");
@@ -127,6 +129,7 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
         .exchange_public_token(ExchangePublicTokenRequest {
             tenant_id: tenant_id(),
             public_token: "public/token?abc".to_string(),
+            source_selection: json!({}),
         })
         .await
         .expect("exchange Merge public token through local fixture");
@@ -189,6 +192,7 @@ async fn changed_records_request_includes_modified_after_and_maps_results() {
             cursor: Some("cursor-1".to_string()),
             modified_after: Some(modified_after),
             limit: Some(2),
+            variant: None,
         })
         .await
         .expect("list Merge records through local fixture");

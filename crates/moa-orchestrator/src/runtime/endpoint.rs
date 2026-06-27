@@ -81,7 +81,11 @@ impl RestateBinding {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(
+        not(feature = "experiments"),
+        not(feature = "internal-eval-runner"),
+        not(feature = "skill-learning")
+    ))]
     const fn name_only(name: &'static str) -> Self {
         Self { name, bind: None }
     }

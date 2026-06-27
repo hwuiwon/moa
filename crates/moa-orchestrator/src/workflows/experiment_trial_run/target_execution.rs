@@ -257,7 +257,7 @@ async fn create_new_session(
     identity: &Identity,
     agent: AgentSessionSelection,
 ) -> Result<(SessionId, SessionMeta), HandlerError> {
-    let store = OrchestratorCtx::current_session_store();
+    let store = OrchestratorCtx::current().session_store_backend();
     let pool = OrchestratorCtx::current_graph_pool();
     let identity = identity.clone();
     Ok(ctx

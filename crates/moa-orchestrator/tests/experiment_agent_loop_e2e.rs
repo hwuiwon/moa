@@ -34,7 +34,32 @@ use crate::support::restate_runtime::{
 };
 use crate::support::session_store_service::get_events_request;
 
-mod support;
+mod support {
+    pub mod grant_tenant_admin;
+    pub mod restate_admin_url;
+    pub mod restate_identity;
+    pub mod restate_ingress_url;
+    pub mod restate_lock;
+    pub mod restate_ports;
+    pub mod restate_register;
+    pub mod session_get_events;
+
+    pub mod restate_runtime {
+        pub use super::grant_tenant_admin::grant_tenant_admin;
+        pub use super::restate_admin_url::restate_admin_url;
+        pub use super::restate_identity::{test_user_identity, with_identity};
+        pub use super::restate_ingress_url::restate_ingress_url;
+        pub use super::restate_lock::RESTATE_E2E_LOCK;
+        pub use super::restate_ports::{
+            OrchestratorPorts, deployment_endpoint_url, reserve_orchestrator_ports,
+        };
+        pub use super::restate_register::register_deployment;
+    }
+
+    pub mod session_store_service {
+        pub use super::session_get_events::get_events_request;
+    }
+}
 
 const SUPPORT_SKILL_PATH: &str = ".moa/skills/delivery-support/SKILL.md";
 const SUPPORT_SKILL_PROVIDER_ID: &str = "read_delivery_support_skill";

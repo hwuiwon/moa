@@ -1,6 +1,7 @@
 //! Wiremock offline counterpart for query rewrite live coverage.
 
-mod support;
+#[path = "support/openai_wiremock.rs"]
+mod openai_wiremock;
 
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use moa_providers::OpenAIProvider;
 use serde_json::json;
 use wiremock::MockServer;
 
-use support::{captured_json_bodies, mount_openai_text};
+use openai_wiremock::{captured_json_bodies, mount_openai_text};
 
 #[tokio::test]
 async fn query_rewrite_offline_resolves_coreference_without_new_entities() -> moa_core::Result<()> {

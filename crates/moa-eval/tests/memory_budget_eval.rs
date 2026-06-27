@@ -1,4 +1,4 @@
-include!("memory_eval_support/common.rs");
+include!("memory_eval_support/budget.rs");
 
 #[test]
 fn budget_gate_zero_leak_fixture_passes_with_previous_report() -> TestResult {

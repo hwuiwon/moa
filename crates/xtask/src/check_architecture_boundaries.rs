@@ -914,8 +914,7 @@ impl DependencySelector {
             Self::Exact(expected) => package == expected,
             Self::Prefix(prefix) => package.starts_with(prefix),
             Self::WorkspaceExcept(excluded) => {
-                graph.workspace_members.contains(package)
-                    && !excluded.iter().any(|candidate| package == *candidate)
+                graph.workspace_members.contains(package) && !excluded.contains(&package)
             }
         }
     }
@@ -940,9 +939,10 @@ impl PackageGraph {
     fn direct_reverse_dependencies(&self, package: &str) -> BTreeSet<String> {
         self.dependencies
             .iter()
-            .filter_map(|(candidate, dependencies)| {
-                (candidate != package && dependencies.contains(package)).then(|| candidate.clone())
+            .filter(|(candidate, dependencies)| {
+                candidate.as_str() != package && dependencies.contains(package)
             })
+            .map(|(candidate, _dependencies)| candidate.clone())
             .collect()
     }
 
@@ -1462,11 +1462,9 @@ fn count_top_level_comma_items(source: &str) -> usize {
                 depth = depth.saturating_sub(1);
                 has_item = true;
             }
-            ',' if depth == 0 => {
-                if has_item {
-                    count += 1;
-                    has_item = false;
-                }
+            ',' if depth == 0 && has_item => {
+                count += 1;
+                has_item = false;
             }
             character if !character.is_whitespace() => {
                 has_item = true;

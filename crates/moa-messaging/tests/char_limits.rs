@@ -1,5 +1,6 @@
 //! Out-of-line tests for Slack messaging outbound text limits.
 
+#[path = "support/char_limits.rs"]
 mod support;
 
 use moa_messaging::{SLACK_MAX_MESSAGE_LENGTH, SlackRenderer};

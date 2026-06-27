@@ -2,6 +2,7 @@
 
 #![recursion_limit = "256"]
 
+#[path = "support/regression.rs"]
 mod support;
 
 use moa_skills::format::parse_skill_markdown;

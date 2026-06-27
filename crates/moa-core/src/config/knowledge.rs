@@ -389,71 +389,6 @@ pub fn optional_env_secret(env_name: &str) -> Result<Option<String>> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn knowledge_selected_provider_requires_key_only_when_selected() {
-        // Pins: enabled providers do not require API keys until a sync/link request selects one.
-        let mut config = KnowledgeConfig::default();
-        config.nango.api_key_env = "MOA_TEST_MISSING_NANGO_KNOWLEDGE_KEY".to_string();
-
-        assert_eq!(
-            config
-                .selected_provider_api_key("nango")
-                .expect_err("selected provider without key should fail")
-                .to_string(),
-            "missing environment variable: MOA_TEST_MISSING_NANGO_KNOWLEDGE_KEY"
-        );
-    }
-
-    #[test]
-    fn knowledge_disabled_provider_does_not_leak_key_requirement() {
-        // Pins: disabled provider selection fails on enablement before checking credentials.
-        let mut config = KnowledgeConfig::default();
-        config.providers.enabled = vec!["merge".to_string()];
-
-        assert_eq!(
-            config
-                .selected_provider_api_key("nango")
-                .expect_err("disabled provider should fail")
-                .to_string(),
-            "configuration error: knowledge provider `nango` is not enabled"
-        );
-    }
-
-    #[test]
-    fn knowledge_native_parser_needs_no_key_but_external_parser_does() {
-        // Pins: native parsing is local while external parser credentials are request-time requirements.
-        let mut config = KnowledgeConfig::default();
-        config.llamaparse.api_key_env = "MOA_TEST_MISSING_LLAMAPARSE_KNOWLEDGE_KEY".to_string();
-
-        assert_eq!(
-            config
-                .selected_parser_api_key("native")
-                .expect("native parser should be local"),
-            None
-        );
-        assert_eq!(
-            config
-                .selected_parser_api_key("llamaparse")
-                .expect_err("selected external parser without key should fail")
-                .to_string(),
-            "missing environment variable: MOA_TEST_MISSING_LLAMAPARSE_KNOWLEDGE_KEY"
-        );
-    }
-
-    #[test]
-    fn unstructured_defaults_use_auto_partitioning_and_section_chunks() {
-        // Pins: production Unstructured parsing defaults to automatic partitioning and section-preserving chunks.
-        let config = UnstructuredKnowledgeParserConfig::default();
-
-        assert_eq!(config.strategy, "auto");
-        assert_eq!(config.chunking_strategy, "by_title");
-    }
-}
-
 impl super::MoaEnvOverlay {
     /// Applies tenant knowledge provider, parser, and observability environment overrides.
     pub(in crate::config) fn apply_knowledge_overlay(&self, config: &mut super::MoaConfig) {
@@ -538,5 +473,70 @@ impl super::MoaEnvOverlay {
             &mut config.knowledge.observability.query_trace_enabled,
             self.knowledge_query_trace_enabled,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knowledge_selected_provider_requires_key_only_when_selected() {
+        // Pins: enabled providers do not require API keys until a sync/link request selects one.
+        let mut config = KnowledgeConfig::default();
+        config.nango.api_key_env = "MOA_TEST_MISSING_NANGO_KNOWLEDGE_KEY".to_string();
+
+        assert_eq!(
+            config
+                .selected_provider_api_key("nango")
+                .expect_err("selected provider without key should fail")
+                .to_string(),
+            "missing environment variable: MOA_TEST_MISSING_NANGO_KNOWLEDGE_KEY"
+        );
+    }
+
+    #[test]
+    fn knowledge_disabled_provider_does_not_leak_key_requirement() {
+        // Pins: disabled provider selection fails on enablement before checking credentials.
+        let mut config = KnowledgeConfig::default();
+        config.providers.enabled = vec!["merge".to_string()];
+
+        assert_eq!(
+            config
+                .selected_provider_api_key("nango")
+                .expect_err("disabled provider should fail")
+                .to_string(),
+            "configuration error: knowledge provider `nango` is not enabled"
+        );
+    }
+
+    #[test]
+    fn knowledge_native_parser_needs_no_key_but_external_parser_does() {
+        // Pins: native parsing is local while external parser credentials are request-time requirements.
+        let mut config = KnowledgeConfig::default();
+        config.llamaparse.api_key_env = "MOA_TEST_MISSING_LLAMAPARSE_KNOWLEDGE_KEY".to_string();
+
+        assert_eq!(
+            config
+                .selected_parser_api_key("native")
+                .expect("native parser should be local"),
+            None
+        );
+        assert_eq!(
+            config
+                .selected_parser_api_key("llamaparse")
+                .expect_err("selected external parser without key should fail")
+                .to_string(),
+            "missing environment variable: MOA_TEST_MISSING_LLAMAPARSE_KNOWLEDGE_KEY"
+        );
+    }
+
+    #[test]
+    fn unstructured_defaults_use_auto_partitioning_and_section_chunks() {
+        // Pins: production Unstructured parsing defaults to automatic partitioning and section-preserving chunks.
+        let config = UnstructuredKnowledgeParserConfig::default();
+
+        assert_eq!(config.strategy, "auto");
+        assert_eq!(config.chunking_strategy, "by_title");
     }
 }

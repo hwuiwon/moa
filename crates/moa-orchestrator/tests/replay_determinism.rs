@@ -11,7 +11,16 @@
 //   the nondeterministic sources are still behind `ctx.run(...)` when it becomes active.
 //
 
-mod support;
+mod support {
+    pub mod durable_step_replay_recorder;
+    pub mod fake_clock;
+
+    pub mod durable_step_recorder {
+        pub use super::durable_step_replay_recorder::{
+            DurableStep, Recorder, assert_traces_identical,
+        };
+    }
+}
 
 use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Utc};

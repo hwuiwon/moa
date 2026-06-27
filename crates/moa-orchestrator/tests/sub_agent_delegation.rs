@@ -1,6 +1,8 @@
 //! Deterministic scaffolding for sub-agent delegation helper behavior.
 
-mod support;
+mod support {
+    pub mod durable_step_recorder;
+}
 
 use moa_core::{
     AttachSubAgentResultWaiterInput, AttachSubAgentResultWaiterOutput,
@@ -288,8 +290,6 @@ fn operation_labels(trace: &[DurableStep]) -> Vec<String> {
             DurableStep::Invoke {
                 service, method, ..
             } => format!("invoke:{service}/{method}"),
-            DurableStep::Sleep { duration_ms } => format!("sleep:{duration_ms}"),
-            DurableStep::State { op, key, .. } => format!("state:{op}/{key}"),
         })
         .collect()
 }

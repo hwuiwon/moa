@@ -1,6 +1,6 @@
 //! Tenant knowledge ingestion runner and production dependency factories.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use moa_core::RlsContext;
@@ -37,6 +37,14 @@ pub trait KnowledgeIngestionRunner: Send + Sync {
         provider: &str,
         page: RecordPage,
     ) -> Result<PageIngestionReport, KnowledgeServiceError>;
+
+    /// Tombstones active local objects absent from an exhaustive selected-source sync.
+    async fn prune_unseen_objects(
+        &self,
+        run: &KnowledgeSyncRun,
+        provider: &str,
+        seen_source_ids: &HashSet<String>,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError>;
 }
 
 /// Production ingestion runner backed by Postgres, configured parsers, and graph memory stores.
@@ -72,6 +80,31 @@ impl KnowledgeIngestionRunner for ProductionKnowledgeIngestionRunner {
         )?;
         pipeline
             .ingest_record_page(run.sync_run_uid, run.connection_uid, run.tenant_id, page)
+            .await
+            .map_err(KnowledgeServiceError::from)
+    }
+
+    async fn prune_unseen_objects(
+        &self,
+        run: &KnowledgeSyncRun,
+        provider: &str,
+        seen_source_ids: &HashSet<String>,
+    ) -> Result<PageIngestionReport, KnowledgeServiceError> {
+        let parser_label = selected_parser_label(&self.config, run);
+        let pipeline = build_ingestion_pipeline(
+            self.pool.clone(),
+            run.tenant_id,
+            &self.config,
+            provider.to_string(),
+            parser_label,
+        )?;
+        pipeline
+            .prune_unseen_objects(
+                run.sync_run_uid,
+                run.connection_uid,
+                run.tenant_id,
+                seen_source_ids,
+            )
             .await
             .map_err(KnowledgeServiceError::from)
     }

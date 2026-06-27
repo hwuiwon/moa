@@ -1,5 +1,4 @@
 //! Shared helpers for offline brain integration tests.
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,15 +8,13 @@ use chrono::{DateTime, Utc};
 use moa_core::{
     Channel, ContactId, ContactRef, ContactVerificationState, ContextMessage, Event, EventFilter,
     EventRange, EventRecord, ModelCapabilities, ModelId, Result, SequenceNum, SessionActorRef,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
-    StoragePartitionId, TenantId, TokenPricing, ToolCallFormat, WorkingContext,
+    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary, TenantId,
+    TokenPricing, ToolCallFormat, WorkingContext,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use wiremock::matchers::any;
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DEFAULT_CLOCK: &str = "2026-05-07T12:00:00Z";
 const WORKSPACE_ROOT_METADATA_KEY: &str = "_moa.runtime.workspace_root";
@@ -294,11 +291,6 @@ impl MockSessionStore {
             events: Arc::new(Mutex::new(events)),
         }
     }
-
-    /// Returns all stored events for assertions.
-    pub async fn all_events(&self) -> Vec<EventRecord> {
-        self.events.lock().await.clone()
-    }
 }
 
 #[async_trait]
@@ -410,10 +402,6 @@ pub fn session_meta(label: &str, model: &str) -> SessionMeta {
     }
 }
 
-fn tenant_id_from_storage_partition_id(storage_partition_id: &StoragePartitionId) -> TenantId {
-    tenant_id_from_label(storage_partition_id.as_str())
-}
-
 fn tenant_id_from_label(label: &str) -> TenantId {
     Uuid::parse_str(label)
         .map(TenantId::from)
@@ -448,91 +436,6 @@ fn contact_ref(tenant_id: TenantId, contact_id: ContactId) -> ContactRef {
         session_ids: Vec::new(),
         verified_contact_point_ids: Vec::new(),
     }
-}
-
-/// Mounts a wiremock OpenAI Responses stream that returns the supplied text.
-pub async fn mount_openai_text(server: &MockServer, text: impl Into<String>, cached_tokens: usize) {
-    Mock::given(any())
-        .respond_with(openai_text_response(text.into(), cached_tokens))
-        .mount(server)
-        .await;
-}
-
-/// Returns captured request bodies as JSON values.
-pub async fn captured_json_bodies(server: &MockServer) -> Vec<serde_json::Value> {
-    server
-        .received_requests()
-        .await
-        .expect("wiremock should expose captured requests")
-        .into_iter()
-        .filter_map(|request| serde_json::from_slice(&request.body).ok())
-        .collect()
-}
-
-fn openai_text_response(text: String, cached_tokens: usize) -> ResponseTemplate {
-    let events = [
-        json!({
-            "type": "response.created",
-            "sequence_number": 0,
-            "response": {
-                "id": "resp_offline",
-                "object": "response",
-                "created_at": 1,
-                "model": "gpt-5.4",
-                "output": [],
-                "status": "in_progress"
-            }
-        }),
-        json!({
-            "type": "response.output_text.delta",
-            "sequence_number": 1,
-            "item_id": "msg_1",
-            "output_index": 0,
-            "content_index": 0,
-            "delta": text,
-            "logprobs": null
-        }),
-        json!({
-            "type": "response.completed",
-            "sequence_number": 2,
-            "response": {
-                "id": "resp_offline",
-                "object": "response",
-                "created_at": 1,
-                "completed_at": 2,
-                "model": "gpt-5.4",
-                "output": [{
-                    "type": "message",
-                    "id": "msg_1",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{
-                        "type": "output_text",
-                        "text": text,
-                        "annotations": [],
-                        "logprobs": null
-                    }]
-                }],
-                "status": "completed",
-                "usage": {
-                    "input_tokens": 16,
-                    "input_tokens_details": { "cached_tokens": cached_tokens },
-                    "output_tokens": 4,
-                    "output_tokens_details": { "reasoning_tokens": 0 },
-                    "total_tokens": 20
-                }
-            }
-        }),
-    ];
-    let body = events
-        .into_iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .collect::<String>();
-
-    ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .insert_header("cache-control", "no-cache")
-        .set_body_raw(body, "text/event-stream")
 }
 
 fn parse_utc(timestamp: &str) -> DateTime<Utc> {

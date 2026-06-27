@@ -1,17 +1,9 @@
-//! Wiremock helpers for offline provider transport coverage.
-#![allow(dead_code)]
+//! Shared wiremock helpers for offline provider transport coverage.
 
 use moa_core::{CompletionRequest, ContextMessage};
 use serde_json::json;
-use wiremock::matchers::{any, body_string_contains, header_exists, method};
+use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// Canonical Anthropic model used by offline provider tests.
-pub const ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
-/// Canonical OpenAI model used by offline provider tests.
-pub const OPENAI_MODEL: &str = "gpt-5.4";
-/// Canonical Gemini model used by offline provider tests.
-pub const GEMINI_MODEL: &str = "gemini-3-flash-preview";
 
 /// Builds a minimal completion request with deterministic output controls.
 pub fn minimal_request(prompt: impl Into<String>) -> CompletionRequest {
@@ -34,8 +26,7 @@ pub fn tool_request(prompt: impl Into<String>) -> CompletionRequest {
     }
 }
 
-/// Returns the shared function tool used by provider tool-call tests.
-pub fn emit_token_tool() -> serde_json::Value {
+fn emit_token_tool() -> serde_json::Value {
     json!({
         "name": "emit_token",
         "description": "Echoes a validation token.",
@@ -48,47 +39,6 @@ pub fn emit_token_tool() -> serde_json::Value {
             "additionalProperties": false
         }
     })
-}
-
-/// Mounts a single Anthropic SSE response and basic request-shape matchers.
-pub async fn mount_anthropic_sse(
-    server: &MockServer,
-    sse_body: &'static str,
-    expected_body_fragment: &str,
-) {
-    Mock::given(method("POST"))
-        .and(header_exists("x-api-key"))
-        .and(header_exists("anthropic-version"))
-        .and(body_string_contains(expected_body_fragment))
-        .respond_with(sse_response(fixture_body(sse_body)))
-        .mount(server)
-        .await;
-}
-
-/// Mounts a single OpenAI Responses SSE response and basic request-shape matchers.
-pub async fn mount_openai_sse(
-    server: &MockServer,
-    sse_body: &'static str,
-    _expected_body_fragment: &str,
-) {
-    Mock::given(any())
-        .respond_with(sse_response(fixture_body(sse_body)))
-        .mount(server)
-        .await;
-}
-
-/// Mounts a single Gemini SSE response and basic request-shape matchers.
-pub async fn mount_gemini_sse(
-    server: &MockServer,
-    sse_body: &'static str,
-    expected_body_fragment: &str,
-) {
-    Mock::given(method("POST"))
-        .and(header_exists("x-goog-api-key"))
-        .and(body_string_contains(expected_body_fragment))
-        .respond_with(sse_response(fixture_body(sse_body)))
-        .mount(server)
-        .await;
 }
 
 /// Mounts one retryable status response followed by a successful SSE response.
@@ -143,7 +93,8 @@ pub fn fixture_body(raw: &'static str) -> String {
         + "\n"
 }
 
-fn sse_response(body: String) -> ResponseTemplate {
+/// Builds a text/event-stream response.
+pub fn sse_response(body: String) -> ResponseTemplate {
     ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")
         .insert_header("cache-control", "no-cache")

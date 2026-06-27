@@ -6,8 +6,9 @@ use reqwest::header::HeaderMap;
 
 use crate::{
     domain::{
-        CreateLinkTokenRequest, ExchangePublicTokenRequest, LinkToken, LinkedAccount,
-        ListChangedRecordsRequest, RecordPage, TriggerSyncRequest, TriggeredSync, WebhookEvent,
+        ApplySourceSelectionRequest, CreateLinkTokenRequest, ExchangePublicTokenRequest, LinkToken,
+        LinkedAccount, ListChangedRecordsRequest, RecordPage, TriggerSyncRequest, TriggeredSync,
+        WebhookEvent,
     },
     error::Result,
 };
@@ -27,6 +28,11 @@ pub trait LinkedIntegrationProvider: Send + Sync {
 
     /// Triggers a provider-side sync for one connection.
     async fn trigger_sync(&self, req: TriggerSyncRequest) -> Result<TriggeredSync>;
+
+    /// Applies provider-native selected source state for one connection.
+    async fn apply_source_selection(&self, _req: ApplySourceSelectionRequest) -> Result<()> {
+        Ok(())
+    }
 
     /// Lists changed source records from the provider cache or API.
     async fn list_changed_records(&self, req: ListChangedRecordsRequest) -> Result<RecordPage>;
