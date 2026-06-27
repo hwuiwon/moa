@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// HTTP client for Merge tenant knowledge connections.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MergeProvider {
     client: Client,
     base_url: String,
@@ -90,19 +90,36 @@ impl LinkedIntegrationProvider for MergeProvider {
             magic_link_url: Option<String>,
             expires_at: Option<chrono::DateTime<chrono::Utc>>,
         }
+        let end_user_origin_id = req
+            .external_account_id
+            .clone()
+            .unwrap_or_else(|| req.tenant_id.to_string());
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "end_user_origin_id".to_string(),
+            Value::String(end_user_origin_id),
+        );
+        if let Some(email) = req.end_user_email_address {
+            body.insert("end_user_email_address".to_string(), Value::String(email));
+        }
+        body.insert(
+            "end_user_organization_name".to_string(),
+            Value::String(req.tenant_id.to_string()),
+        );
+        body.insert("categories".to_string(), json!([req.connector]));
+        if let Some(redirect_url) = req.redirect_url {
+            body.insert("redirect_uri".to_string(), Value::String(redirect_url));
+        }
         let response = self
             .client
             .post(self.url("/api/integrations/create-link-token"))
             .bearer_auth(&self.api_key)
-            .json(&json!({
-                "end_user_origin_id": req.external_account_id.unwrap_or_else(|| req.tenant_id.to_string()),
-                "end_user_organization_name": req.tenant_id.to_string(),
-                "categories": [req.connector],
-                "redirect_uri": req.redirect_url,
-            }))
+            .json(&Value::Object(body))
             .send()
             .await
-            .map_err(|error| Error::provider("merge", format!("link token request failed: {error}")))?;
+            .map_err(|error| {
+                Error::provider("merge", format!("link token request failed: {error}"))
+            })?;
         let response: Response = http::json_response(response).await?;
         Ok(LinkToken {
             provider: "merge".to_string(),
@@ -142,7 +159,8 @@ impl LinkedIntegrationProvider for MergeProvider {
             provider: "merge".to_string(),
             connector: "merge".to_string(),
             provider_account_id,
-            credential_ref: format!("merge:{account_token}"),
+            credential_ref: "merge-account-token".to_string(),
+            credential_material: Some(account_token),
             metadata: redact_provider_metadata(response.integration.unwrap_or(Value::Null)),
         })
     }

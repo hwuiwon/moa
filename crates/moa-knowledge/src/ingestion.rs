@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     chunking::{ChunkingConfig, blocks_to_chunks, content_hash, elements_to_blocks},
+    contact_groups::derive_contact_groups_from_object,
     domain::{
         DocumentVersion, IngestionStepStatus, KnowledgeChunk, KnowledgeObject,
         KnowledgeSyncCounters, ParsedDocument, ProviderRecord, RecordPage, SyncRunStatus,
@@ -99,14 +100,19 @@ where
             if !seen_node_uids.insert(node.uid) {
                 continue;
             }
-            if self
+            if let Some(existing) = self
                 .graph
                 .get_node(node.uid)
                 .await
                 .map_err(map_graph_error)?
-                .is_some()
             {
-                continue;
+                if existing.valid_to.is_none() {
+                    continue;
+                }
+                self.graph
+                    .hard_purge(node.uid, "knowledge_node_reactivated")
+                    .await
+                    .map_err(map_graph_error)?;
             }
             let properties = compact_properties(node.properties.clone());
             let embedding = embeddings.get(&node.uid).cloned();
@@ -285,6 +291,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -424,6 +431,7 @@ where
                     summary: Some("change token unchanged".to_string()),
                     retry_count: 0,
                     error_code: None,
+                    duration_ms: None,
                 },
             )
             .await?;
@@ -441,6 +449,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -481,6 +490,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -535,6 +545,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -554,11 +565,20 @@ where
         deleted_chunk_uids: Vec<Uuid>,
     ) -> Result<PersistedIngestion> {
         let content_hash = content_hash(&normalize_text(&parsed.text));
-        if let Some(latest) = self
+        let latest_version = self
             .repository
             .latest_document_version(object.object_uid)
-            .await?
+            .await?;
+        let latest_chunks = if let Some(latest) = &latest_version {
+            self.repository
+                .chunks_for_version(latest.version_uid)
+                .await?
+        } else {
+            Vec::new()
+        };
+        if let Some(latest) = &latest_version
             && latest.content_hash == content_hash
+            && !latest_chunks.is_empty()
         {
             self.record_step(
                 sync_run_uid,
@@ -566,10 +586,11 @@ where
                 "normalized",
                 StepOutcome {
                     status: IngestionStepStatus::Skipped,
-                    counters: json!({ "blocks_total": 0, "chunks_total": 0 }),
+                    counters: json!({ "blocks_total": 0, "chunks_total": latest_chunks.len() }),
                     summary: Some("content hash unchanged".to_string()),
                     retry_count: 0,
                     error_code: None,
+                    duration_ms: None,
                 },
             )
             .await?;
@@ -579,29 +600,26 @@ where
             });
         }
 
-        let previous_chunks = if let Some(latest) = self
-            .repository
-            .latest_document_version(object.object_uid)
-            .await?
+        let previous_chunks = latest_chunks;
+        let version = if let Some(latest) = latest_version
+            && latest.content_hash == content_hash
         {
-            self.repository
-                .chunks_for_version(latest.version_uid)
-                .await?
+            latest
         } else {
-            Vec::new()
+            let version = DocumentVersion {
+                version_uid: stable_uid(&format!("version:{}:{content_hash}", object.object_uid)),
+                object_uid: object.object_uid,
+                parser: parsed.parser,
+                parser_job_id: parsed.parser_job_id,
+                content_hash,
+                metadata: parsed.metadata,
+                created_at: Utc::now(),
+            };
+            self.repository
+                .insert_document_version(version.clone())
+                .await?;
+            version
         };
-        let version = DocumentVersion {
-            version_uid: stable_uid(&format!("version:{}:{content_hash}", object.object_uid)),
-            object_uid: object.object_uid,
-            parser: parsed.parser,
-            parser_job_id: parsed.parser_job_id,
-            content_hash,
-            metadata: parsed.metadata,
-            created_at: Utc::now(),
-        };
-        self.repository
-            .insert_document_version(version.clone())
-            .await?;
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -636,6 +654,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -675,6 +694,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -728,6 +748,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -787,6 +808,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -856,9 +878,27 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
+        let contact_delta = derive_contact_groups_from_object(&object);
+        let contact_group_count = contact_delta.groups.len();
+        let mut contact_memberships = 0_u64;
+        for group in contact_delta.groups {
+            let group_uid = group.group_uid;
+            self.repository.upsert_contact_group(group).await?;
+            let memberships = contact_delta
+                .memberships
+                .iter()
+                .filter(|membership| membership.group_uid == group_uid)
+                .cloned()
+                .collect::<Vec<_>>();
+            contact_memberships = contact_memberships.saturating_add(memberships.len() as u64);
+            self.repository
+                .replace_contact_group_memberships(group_uid, memberships)
+                .await?;
+        }
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
@@ -866,13 +906,13 @@ where
             StepOutcome {
                 status: IngestionStepStatus::Completed,
                 counters: json!({
-                    "records_ingested": 1,
-                    "objects_parsed": 1,
-                    "chunks_embedded": embeddings.len(),
+                    "contact_groups": contact_group_count,
+                    "contact_group_memberships_changed": contact_memberships,
                 }),
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -913,6 +953,7 @@ where
                 summary: Some("provider record deleted".to_string()),
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -990,6 +1031,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -1003,6 +1045,7 @@ where
                 summary: None,
                 retry_count: 0,
                 error_code: None,
+                duration_ms: None,
             },
         )
         .await?;
@@ -1084,8 +1127,9 @@ where
         sync_run_uid: Uuid,
         object_uid: Option<Uuid>,
         stage: &'static str,
-        outcome: StepOutcome,
+        mut outcome: StepOutcome,
     ) -> Result<()> {
+        let started = std::time::Instant::now();
         let labels = StepLabels {
             provider: &self.provider,
             parser: &self.parser_label,
@@ -1102,6 +1146,11 @@ where
             "error_code",
             outcome.error_code.as_deref().unwrap_or("none"),
         );
+        outcome.duration_ms = outcome.duration_ms.or_else(|| {
+            u64::try_from(started.elapsed().as_millis())
+                .ok()
+                .map(|duration| duration.max(1))
+        });
         self.observer
             .record_step(sync_run_uid, object_uid, labels, outcome.clone())
             .await?;

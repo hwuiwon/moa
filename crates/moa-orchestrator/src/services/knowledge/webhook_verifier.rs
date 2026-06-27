@@ -9,6 +9,7 @@ use moa_knowledge::{
     providers::LinkedIntegrationProvider,
 };
 use reqwest::header::{HeaderMap, HeaderName};
+use subtle::ConstantTimeEq;
 use tokio_util::bytes::Bytes;
 
 /// Verifies one raw provider webhook and normalizes its safe event metadata.
@@ -109,7 +110,7 @@ impl ParserWebhookVerifier {
                 format!("webhook header `{name}` failed: {error}"),
             )
         })?;
-        if actual == expected_value {
+        if actual.as_bytes().ct_eq(expected_value.as_bytes()).into() {
             return Ok(());
         }
         Err(moa_knowledge::Error::provider(

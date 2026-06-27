@@ -140,6 +140,11 @@ async fn parser_webhook_rejects_bad_signature_and_stores_redacted_metadata() {
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let mut connection = fixture_connection(tenant_id);
+    connection.connection_uid = connection_uid;
+    repository
+        .insert_connection(connection)
+        .expect("seed signed parser webhook connection");
     let verifier = Arc::new(
         ParserWebhookVerifier::new("llamaparse").with_signing_key("llamaparse-webhook-secret"),
     );
@@ -209,6 +214,11 @@ async fn parser_webhook_rejects_bad_custom_header_and_accepts_good_header() {
     let tenant_id = TenantId::from(Uuid::now_v7());
     let connection_uid = Uuid::now_v7();
     let repository = Arc::new(InMemoryKnowledgeRepository::default());
+    let mut connection = fixture_connection(tenant_id);
+    connection.connection_uid = connection_uid;
+    repository
+        .insert_connection(connection)
+        .expect("seed signed parser webhook connection");
     let verifier = Arc::new(
         ParserWebhookVerifier::new("reducto")
             .with_custom_header("x-reducto-webhook-secret", "expected-header-secret"),
@@ -1093,7 +1103,13 @@ async fn mock_connector_end_to_end() {
         .await
         .expect("load derived target group")
         .expect("target group should exist");
-    assert_eq!(target.group.group_key, "merge:account:acct-task14");
+    assert_eq!(
+        target.group.group_key,
+        format!(
+            "merge:{}:account:acct-task14",
+            merge_connection.connection_uid
+        )
+    );
     assert_eq!(
         target
             .members
@@ -1512,7 +1528,8 @@ impl LinkedIntegrationProvider for Task14LinkedIntegrationProvider {
             provider: self.provider.to_string(),
             connector: self.connector.to_string(),
             provider_account_id: format!("{}-task14-account", self.provider),
-            credential_ref: format!("{}-raw-token-should-enter-vault", self.provider),
+            credential_ref: format!("{}-account-token", self.provider),
+            credential_material: Some(format!("{}-raw-token-should-enter-vault", self.provider)),
             metadata: json!({
                 "provider": self.provider,
                 "access_token": format!("{}-secret", self.provider),
@@ -1984,7 +2001,8 @@ impl LinkedIntegrationProvider for FakeLinkedIntegrationProvider {
             provider: PROVIDER.to_string(),
             connector: CONNECTOR.to_string(),
             provider_account_id: "provider-account-1".to_string(),
-            credential_ref: SECRET_TOKEN.to_string(),
+            credential_ref: "provider-account-token".to_string(),
+            credential_material: Some(SECRET_TOKEN.to_string()),
             metadata: json!({
                 "safe": "account",
                 "access_token": SECRET_TOKEN
@@ -2069,6 +2087,27 @@ impl KnowledgeCredentialStore for FakeKnowledgeCredentialStore {
             .expect("fake credential store should not be poisoned")
             .push(account.clone());
         Ok(self.vault_ref_for(tenant_id))
+    }
+
+    async fn resolve_linked_account(
+        &self,
+        _tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<String, moa_orchestrator::services::knowledge::KnowledgeServiceError> {
+        let accounts = self
+            .accounts
+            .lock()
+            .expect("fake credential store should not be poisoned");
+        accounts
+            .iter()
+            .find(|account| account.provider_account_id == connection.provider_account_id)
+            .and_then(|account| account.credential_material.clone())
+            .or_else(|| Some(connection.credential_ref.clone()))
+            .ok_or_else(|| {
+                moa_orchestrator::services::knowledge::KnowledgeServiceError::Credential(
+                    "fake credential not found".to_string(),
+                )
+            })
     }
 }
 
@@ -2196,12 +2235,13 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     async fn upsert_connection(
         &self,
         connection: KnowledgeConnection,
-    ) -> moa_knowledge::Result<()> {
+    ) -> moa_knowledge::Result<KnowledgeConnection> {
         self.record_op("upsert_connection")?;
         self.with_state(|state| {
             state
                 .connections
-                .insert(connection.connection_uid, connection);
+                .insert(connection.connection_uid, connection.clone());
+            connection
         })
     }
 
@@ -2257,6 +2297,23 @@ impl KnowledgeRepository for InMemoryKnowledgeRepository {
     ) -> moa_knowledge::Result<Option<KnowledgeSyncRun>> {
         self.record_op("get_sync_run")?;
         self.with_state(|state| state.sync_runs.get(&sync_run_uid).cloned())
+    }
+
+    async fn latest_sync_run_for_connection(
+        &self,
+        connection_uid: Uuid,
+        statuses: &[SyncRunStatus],
+    ) -> moa_knowledge::Result<Option<KnowledgeSyncRun>> {
+        self.record_op("latest_sync_run_for_connection")?;
+        self.with_state(|state| {
+            state
+                .sync_runs
+                .values()
+                .filter(|run| run.connection_uid == connection_uid)
+                .filter(|run| statuses.is_empty() || statuses.contains(&run.status))
+                .max_by_key(|run| (run.started_at, run.sync_run_uid))
+                .cloned()
+        })
     }
 
     async fn update_sync_run(&self, run: KnowledgeSyncRun) -> moa_knowledge::Result<()> {

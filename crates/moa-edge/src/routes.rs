@@ -31,11 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[cfg(feature = "auth0")]
 use hmac::{Hmac, Mac};
-#[cfg(feature = "auth0")]
 use sha2::Sha256;
-#[cfg(feature = "auth0")]
 use subtle::ConstantTimeEq;
 
 const KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES: usize = 256 * 1024;
@@ -47,10 +44,29 @@ pub struct AppState {
     pub auth: Arc<dyn AuthProvider>,
     /// Shared secret used to verify Auth0 connection-linked webhooks.
     pub auth0_webhook_secret: Option<String>,
+    /// Secrets used to verify public tenant-knowledge webhooks at the edge.
+    pub knowledge_webhooks: KnowledgeWebhookEdgeConfig,
     /// Postgres pool used by unauthenticated webhooks that update auth metadata.
     pub pool: Arc<sqlx::PgPool>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
+}
+
+/// Edge-local verification config for public tenant-knowledge webhooks.
+#[derive(Clone, Debug, Default)]
+pub struct KnowledgeWebhookEdgeConfig {
+    /// Nango HMAC signing key.
+    pub nango_signing_key: Option<String>,
+    /// Merge HMAC signature key.
+    pub merge_signature_key: Option<String>,
+    /// LlamaParse HMAC or Svix signing key.
+    pub llamaparse_signing_key: Option<String>,
+    /// Optional LlamaParse custom header gate.
+    pub llamaparse_custom_header: Option<(String, String)>,
+    /// Reducto HMAC or Svix signing key.
+    pub reducto_signing_key: Option<String>,
+    /// Optional Reducto custom header gate.
+    pub reducto_custom_header: Option<(String, String)>,
 }
 
 /// Build the edge router.
@@ -404,6 +420,18 @@ async fn forward_knowledge_provider_webhook(
     body: Bytes,
     provider: &'static str,
 ) -> axum::response::Response {
+    if let Err((status, message)) =
+        verify_knowledge_webhook_at_edge(provider, &headers, &body, &state.knowledge_webhooks)
+    {
+        tracing::warn!(
+            provider,
+            status = status.as_u16(),
+            message,
+            "knowledge webhook rejected"
+        );
+        return (status, message).into_response();
+    }
+
     let RouteTranslation::Forward { method, path, body } =
         translate_knowledge_provider_webhook(provider, &headers, &body)
     else {
@@ -421,6 +449,174 @@ async fn forward_knowledge_provider_webhook(
             (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
         }
     }
+}
+
+fn verify_knowledge_webhook_at_edge(
+    provider: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    config: &KnowledgeWebhookEdgeConfig,
+) -> Result<(), (StatusCode, &'static str)> {
+    match provider {
+        "nango" => {
+            let signing_key = config
+                .nango_signing_key
+                .as_deref()
+                .ok_or((StatusCode::UNAUTHORIZED, "missing webhook verifier"))?;
+            verify_hmac_header(headers, body, signing_key, "x-nango-hmac-sha256")
+        }
+        "merge" => {
+            let signing_key = config
+                .merge_signature_key
+                .as_deref()
+                .ok_or((StatusCode::UNAUTHORIZED, "missing webhook verifier"))?;
+            verify_hmac_header(headers, body, signing_key, "x-merge-webhook-signature")
+        }
+        "llamaparse" => verify_parser_webhook_at_edge(
+            "llamaparse",
+            headers,
+            body,
+            config.llamaparse_signing_key.as_deref(),
+            config.llamaparse_custom_header.as_ref(),
+        ),
+        "reducto" => verify_parser_webhook_at_edge(
+            "reducto",
+            headers,
+            body,
+            config.reducto_signing_key.as_deref(),
+            config.reducto_custom_header.as_ref(),
+        ),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "unknown knowledge webhook provider",
+        )),
+    }
+}
+
+fn verify_parser_webhook_at_edge(
+    parser: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: Option<&str>,
+    custom_header: Option<&(String, String)>,
+) -> Result<(), (StatusCode, &'static str)> {
+    if let Some((name, expected)) = custom_header
+        && !verify_custom_header(headers, name, expected)
+    {
+        return Err((StatusCode::UNAUTHORIZED, "invalid webhook header"));
+    }
+    let signing_key = signing_key.ok_or((StatusCode::UNAUTHORIZED, "missing webhook verifier"))?;
+    if webhook_header_value(headers, &["svix-signature", "x-svix-signature"]).is_some() {
+        return verify_svix_signature_at_edge(headers, body, signing_key);
+    }
+    let parser_header = format!("x-{parser}-webhook-signature");
+    verify_hmac_header_candidates(
+        headers,
+        body,
+        signing_key,
+        &[parser_header.as_str(), "x-moa-knowledge-webhook-signature"],
+    )
+}
+
+fn verify_hmac_header(
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: &str,
+    header_name: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    verify_hmac_header_candidates(headers, body, signing_key, &[header_name])
+}
+
+fn verify_hmac_header_candidates(
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: &str,
+    header_names: &[&str],
+) -> Result<(), (StatusCode, &'static str)> {
+    let signature = webhook_header_value(headers, header_names)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let signature = decode_webhook_signature(&signature)
+        .ok_or((StatusCode::UNAUTHORIZED, "invalid webhook signature"))?;
+    verify_hmac_signature(signing_key.as_bytes(), body, &signature)
+}
+
+fn verify_svix_signature_at_edge(
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    let message_id = webhook_header_value(headers, &["svix-id", "x-svix-id"])
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let timestamp = webhook_header_value(headers, &["svix-timestamp", "x-svix-timestamp"])
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let timestamp = timestamp
+        .parse::<i64>()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid webhook signature"))?;
+    let now = chrono::Utc::now().timestamp();
+    if (now - timestamp).abs() > 300 {
+        return Err((StatusCode::UNAUTHORIZED, "stale webhook signature"));
+    }
+    let signature = webhook_header_value(headers, &["svix-signature", "x-svix-signature"])
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let key = svix_signing_key(signing_key)
+        .ok_or((StatusCode::UNAUTHORIZED, "invalid webhook verifier"))?;
+    let body = std::str::from_utf8(body)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid webhook signature"))?;
+    let signed_payload = format!("{message_id}.{timestamp}.{body}");
+    for candidate in signature.split_whitespace() {
+        if let Some(encoded) = candidate.strip_prefix("v1,")
+            && let Some(signature) = decode_base64_signature(encoded)
+            && verify_hmac_signature(&key, signed_payload.as_bytes(), &signature).is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err((StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+}
+
+fn verify_hmac_signature(
+    signing_key: &[u8],
+    body: &[u8],
+    signature: &[u8],
+) -> Result<(), (StatusCode, &'static str)> {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(signing_key) else {
+        return Err((StatusCode::UNAUTHORIZED, "invalid webhook verifier"));
+    };
+    mac.update(body);
+    mac.verify_slice(signature)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+}
+
+fn verify_custom_header(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|actual| actual.as_bytes().ct_eq(expected.as_bytes()).into())
+}
+
+fn decode_webhook_signature(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim().trim_start_matches("sha256=");
+    if let Ok(decoded) = hex::decode(value)
+        && decoded.len() == 32
+    {
+        return Some(decoded);
+    }
+    decode_base64_signature(value)
+}
+
+fn decode_base64_signature(value: &str) -> Option<Vec<u8>> {
+    general_purpose::STANDARD
+        .decode(value.trim())
+        .or_else(|_| general_purpose::URL_SAFE.decode(value.trim()))
+        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(value.trim()))
+        .ok()
+}
+
+fn svix_signing_key(signing_key: &str) -> Option<Vec<u8>> {
+    let Some(encoded) = signing_key.trim().strip_prefix("whsec_") else {
+        return Some(signing_key.as_bytes().to_vec());
+    };
+    decode_base64_signature(encoded)
 }
 
 async fn forward_public_contact_route<const N: usize>(

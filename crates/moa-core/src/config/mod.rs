@@ -43,6 +43,7 @@ pub use knowledge::{
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
     KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig,
     NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
+    optional_env_secret,
 };
 pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;

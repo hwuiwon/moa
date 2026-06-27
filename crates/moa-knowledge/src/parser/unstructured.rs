@@ -1,6 +1,6 @@
 //! Unstructured partitioning parser adapter.
 
-use reqwest::Client;
+use reqwest::{Client, multipart};
 use serde_json::{Value, json};
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// HTTP adapter for Unstructured partitioning.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UnstructuredParser {
     client: Client,
     base_url: String,
@@ -65,30 +65,80 @@ impl UnstructuredParser {
 impl DocumentParser for UnstructuredParser {
     async fn parse(&self, input: ParseInput) -> Result<ParsedDocument> {
         self.validate_config()?;
+        let (bytes, file_name) = self.materialize_input(&input).await?;
+        let mut file_part = multipart::Part::bytes(bytes).file_name(file_name);
+        if let Some(mime_type) = input.mime_type.as_deref() {
+            file_part = file_part.mime_str(mime_type).map_err(|error| {
+                Error::parser("unstructured", format!("invalid MIME type: {error}"))
+            })?;
+        }
+        let mut form = multipart::Form::new()
+            .part("files", file_part)
+            .text("strategy", self.strategy.clone())
+            .text("chunking_strategy", self.chunking_strategy.clone())
+            .text("coordinates", "true");
+        if let Some(options) = input
+            .options
+            .get("chunking_options")
+            .and_then(Value::as_object)
+        {
+            for (key, value) in options {
+                if let Some(value) = option_text(value) {
+                    form = form.text(key.clone(), value);
+                }
+            }
+        }
         let response = self
             .client
             .post(self.url("/general/v0/general"))
-            .bearer_auth(&self.api_key)
-            .json(&json!({
-                "url": input.source_url,
-                "content": input.text,
-                "filename": input.file_name,
-                "strategy": self.strategy,
-                "chunking_strategy": self.chunking_strategy,
-                "chunking_options": input.options.get("chunking_options").cloned().unwrap_or(Value::Null),
-                "coordinates": true,
-            }))
+            .header("unstructured-api-key", &self.api_key)
+            .multipart(form)
             .send()
             .await
             .map_err(|error| {
                 Error::parser("unstructured", format!("partition request failed: {error}"))
             })?;
         let value: Value = http::json_response(response).await?;
+        ensure_unstructured_not_failed(&value)?;
         Ok(map_unstructured_elements(value))
     }
 }
 
 impl UnstructuredParser {
+    async fn materialize_input(&self, input: &ParseInput) -> Result<(Vec<u8>, String)> {
+        let file_name = input
+            .file_name
+            .clone()
+            .unwrap_or_else(|| "document.bin".to_string());
+        if let Some(bytes) = input.bytes.clone() {
+            return Ok((bytes, file_name));
+        }
+        if let Some(text) = input.text.as_deref() {
+            return Ok((text.as_bytes().to_vec(), file_name));
+        }
+        let source_url = input.source_url.as_deref().ok_or_else(|| {
+            Error::parser(
+                "unstructured",
+                "parse input requires bytes, text, or source_url",
+            )
+        })?;
+        validate_fetch_url(source_url)?;
+        let response = self.client.get(source_url).send().await.map_err(|error| {
+            Error::parser("unstructured", format!("source URL fetch failed: {error}"))
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::parser(
+                "unstructured",
+                format!("source URL fetch failed with status {status}"),
+            ));
+        }
+        let bytes = response.bytes().await.map_err(|error| {
+            Error::parser("unstructured", format!("source URL read failed: {error}"))
+        })?;
+        Ok((bytes.to_vec(), file_name))
+    }
+
     fn validate_config(&self) -> Result<()> {
         if self.base_url.trim().is_empty() {
             return Err(Error::Config(
@@ -107,6 +157,28 @@ impl UnstructuredParser {
         }
         Ok(())
     }
+}
+
+fn validate_fetch_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|error| Error::parser("unstructured", format!("invalid source_url: {error}")))?;
+    if matches!(url.scheme(), "http" | "https") {
+        return Ok(());
+    }
+    Err(Error::parser(
+        "unstructured",
+        "source_url must use http or https",
+    ))
+}
+
+fn option_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .or_else(|| value.as_u64().map(|value| value.to_string()))
+        .or_else(|| value.as_i64().map(|value| value.to_string()))
+        .or_else(|| value.as_f64().map(|value| value.to_string()))
+        .or_else(|| value.as_bool().map(|value| value.to_string()))
 }
 
 /// Maps Unstructured partition elements into a parsed document.
@@ -197,6 +269,24 @@ fn map_kind(raw: &str) -> DocumentElementKind {
         "CompositeElement" => DocumentElementKind::ParserChunk,
         _ => DocumentElementKind::Other,
     }
+}
+
+fn ensure_unstructured_not_failed(value: &Value) -> Result<()> {
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(status.as_str(), "error" | "failed" | "failure") {
+        return Err(Error::parser("unstructured", "partition job failed"));
+    }
+    if value.get("errors").is_some() {
+        return Err(Error::parser(
+            "unstructured",
+            "partition response returned errors",
+        ));
+    }
+    Ok(())
 }
 
 fn coordinates_to_layout(metadata: &Value) -> Option<ElementLayout> {

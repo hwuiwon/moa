@@ -206,7 +206,7 @@ async fn mock_tenant_and_contact_retrieval() {
             .count(),
         2
     );
-    assert_eq!(contact_trace.timings.total_ms > 0, true);
+    assert!(contact_trace.timings.total_ms > 0);
 
     let tenant_session = tenant_only_session(tenant_id);
     let mut tenant_ctx = moa_core::WorkingContext::new(&tenant_session, capabilities());

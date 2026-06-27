@@ -18,6 +18,9 @@ pub struct KnowledgeCreateLinkTokenRequest {
     /// Optional caller-facing account or contact reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_account_id: Option<String>,
+    /// Optional end-user email address for providers that require it at link-token creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_user_email_address: Option<String>,
 }
 
 /// Response payload containing a linked-account token.

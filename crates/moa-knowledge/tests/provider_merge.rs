@@ -65,6 +65,7 @@ async fn link_token_creation_posts_merge_link_shape() {
         .and(bearer_token("merge-test-key"))
         .and(body_json(json!({
             "end_user_origin_id": "operator-facing-account",
+            "end_user_email_address": "operator@example.com",
             "end_user_organization_name": tenant_id().to_string(),
             "categories": ["crm"],
             "redirect_uri": "https://app.example/merge/callback"
@@ -85,6 +86,7 @@ async fn link_token_creation_posts_merge_link_shape() {
             tenant_id: tenant_id(),
             connector: "crm".to_string(),
             external_account_id: Some("operator-facing-account".to_string()),
+            end_user_email_address: Some("operator@example.com".to_string()),
             redirect_url: Some("https://app.example/merge/callback".to_string()),
         })
         .await
@@ -131,7 +133,11 @@ async fn public_token_exchange_gets_account_token_path_and_maps_metadata() {
 
     assert_eq!(account.provider, "merge");
     assert_eq!(account.provider_account_id, "linked-account-123");
-    assert_eq!(account.credential_ref, "merge:account-token-123");
+    assert_eq!(account.credential_ref, "merge-account-token");
+    assert_eq!(
+        account.credential_material.as_deref(),
+        Some("account-token-123")
+    );
     assert_eq!(account.metadata["name"], "Salesforce");
     assert!(account.metadata.get("access_token").is_none());
 }

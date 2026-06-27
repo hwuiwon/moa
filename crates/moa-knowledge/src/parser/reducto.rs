@@ -2,6 +2,7 @@
 
 use reqwest::Client;
 use serde_json::{Value, json};
+use tokio::time::{Duration, sleep};
 
 use crate::{
     domain::{DocumentElement, DocumentElementKind, ElementLayout, ParseInput, ParsedDocument},
@@ -11,8 +12,11 @@ use crate::{
     providers::http,
 };
 
+const POLL_ATTEMPTS: usize = 30;
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 /// HTTP adapter for Reducto Parse.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReductoParser {
     client: Client,
     base_url: String,
@@ -84,19 +88,43 @@ impl DocumentParser for ReductoParser {
             .options
             .get("file_id")
             .or_else(|| input.options.get("reducto_file_id"))
-            .cloned();
-        let presigned_url = input.options.get("presigned_url").cloned();
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let parser_input = file_id
+            .or_else(|| input.source_url.clone())
+            .or_else(|| {
+                input
+                    .options
+                    .get("presigned_url")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .ok_or_else(|| {
+                Error::parser("reducto", "parse input requires source_url or file_id")
+            })?;
+        let mut settings = serde_json::Map::new();
+        settings.insert(
+            "force_url_result".to_string(),
+            Value::Bool(self.force_url_result),
+        );
+        if matches!(self.parse_mode.as_str(), "ocr" | "hybrid") {
+            settings.insert(
+                "extraction_mode".to_string(),
+                Value::String(self.parse_mode.clone()),
+            );
+        }
         let response = self
             .client
             .post(self.url(endpoint))
             .bearer_auth(&self.api_key)
             .json(&json!({
-                "document_url": input.source_url,
-                "presigned_url": presigned_url,
-                "file_id": file_id,
-                "mode": self.parse_mode,
-                "chunk_mode": self.chunk_mode,
-                "force_url_result": self.force_url_result,
+                "input": parser_input,
+                "options": {
+                    "chunking": {
+                        "chunk_mode": self.chunk_mode,
+                    },
+                },
+                "settings": settings,
             }))
             .send()
             .await
@@ -105,22 +133,46 @@ impl DocumentParser for ReductoParser {
         if self.async_enabled {
             let job_id = string_field(&value, &["job_id", "id"])
                 .ok_or_else(|| Error::parser("reducto", "async parse response missing job_id"))?;
-            let response = self
-                .client
-                .get(self.url(&format!("/job/{job_id}")))
-                .bearer_auth(&self.api_key)
-                .send()
-                .await
-                .map_err(|error| {
-                    Error::parser("reducto", format!("job retrieval failed: {error}"))
-                })?;
-            value = http::json_response(response).await?;
+            for attempt in 0..POLL_ATTEMPTS {
+                let response = self
+                    .client
+                    .get(self.url(&format!("/job/{job_id}")))
+                    .bearer_auth(&self.api_key)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        Error::parser("reducto", format!("job retrieval failed: {error}"))
+                    })?;
+                value = http::json_response(response).await?;
+                ensure_reducto_not_failed(&value)?;
+                if !is_pending_status(&value) {
+                    break;
+                }
+                if attempt + 1 == POLL_ATTEMPTS {
+                    return Err(Error::parser("reducto", "async parse job did not complete"));
+                }
+                sleep(POLL_INTERVAL).await;
+            }
         }
-        if let Some(result_url) = string_field(&value, &["result_url", "url", "result_url.url"]) {
+        ensure_reducto_not_failed(&value)?;
+        if let Some(result_url) = string_field(
+            &value,
+            &[
+                "result_url",
+                "url",
+                "result_url.url",
+                "result.url",
+                "result.result_url",
+                "result.result.url",
+            ],
+        ) {
+            validate_result_url(&self.base_url, &result_url)?;
             let response = self.client.get(result_url).send().await.map_err(|error| {
                 Error::parser("reducto", format!("URL result retrieval failed: {error}"))
             })?;
-            value = http::json_response(response).await?;
+            let result = http::json_response(response).await?;
+            ensure_reducto_not_failed(&result)?;
+            value = merge_result_metadata(value, result);
         }
         Ok(map_reducto_result(value))
     }
@@ -253,12 +305,45 @@ pub fn map_reducto_result(value: Value) -> ParsedDocument {
             "parser_errors": value.get("errors").or_else(|| value.pointer("/result/errors")).cloned().unwrap_or(Value::Null),
             "processing_duration": value.get("duration").or_else(|| value.get("processing_duration")).cloned().unwrap_or(Value::Null),
             "usage": value.get("usage").cloned().unwrap_or(Value::Null),
-            "usage_pages": value.pointer("/usage/pages").or_else(|| value.get("usage_pages")).cloned().unwrap_or(Value::Null),
+            "usage_pages": value.pointer("/usage/pages").or_else(|| value.pointer("/usage/num_pages")).or_else(|| value.get("usage_pages")).cloned().unwrap_or(Value::Null),
             "usage_credits": value.pointer("/usage/credits").or_else(|| value.get("usage_credits")).cloned().unwrap_or(Value::Null),
             "studio_link": value.get("studio_link").cloned().unwrap_or(Value::Null),
             "parse_mode": value.get("parse_mode").or_else(|| value.get("mode")).cloned().unwrap_or(Value::Null)
         }),
     }
+}
+
+fn merge_result_metadata(envelope: Value, mut result: Value) -> Value {
+    let Some(result_object) = result.as_object_mut() else {
+        return envelope;
+    };
+    for (key, paths) in [
+        ("job_id", &["job_id", "id", "result.job_id"][..]),
+        ("status", &["status", "result.status"][..]),
+        ("duration", &["duration", "result.duration"][..]),
+        (
+            "processing_duration",
+            &[
+                "processing_duration",
+                "duration",
+                "result.processing_duration",
+                "result.duration",
+            ][..],
+        ),
+        ("usage", &["usage", "result.usage"][..]),
+        ("studio_link", &["studio_link", "result.studio_link"][..]),
+        (
+            "parse_mode",
+            &["parse_mode", "mode", "result.parse_mode", "result.mode"][..],
+        ),
+    ] {
+        if result_object.get(key).is_none()
+            && let Some(value) = value_field(&envelope, paths)
+        {
+            result_object.insert(key.to_string(), value);
+        }
+    }
+    result
 }
 
 fn block_layout(block: &Value) -> Option<ElementLayout> {
@@ -283,6 +368,52 @@ fn block_layout(block: &Value) -> Option<ElementLayout> {
     })
 }
 
+fn ensure_reducto_not_failed(value: &Value) -> Result<()> {
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/result/status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(status.as_str(), "error" | "failed" | "failure") {
+        return Err(Error::parser("reducto", "parse job failed"));
+    }
+    if value.get("errors").is_some() || value.pointer("/result/errors").is_some() {
+        return Err(Error::parser("reducto", "parse job returned errors"));
+    }
+    Ok(())
+}
+
+fn is_pending_status(value: &Value) -> bool {
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/result/status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        status.as_str(),
+        "pending" | "queued" | "running" | "processing"
+    )
+}
+
+fn validate_result_url(base_url: &str, result_url: &str) -> Result<()> {
+    let result = reqwest::Url::parse(result_url)
+        .map_err(|error| Error::parser("reducto", format!("result_url was invalid: {error}")))?;
+    if result.scheme() == "https" {
+        return Ok(());
+    }
+    let base = reqwest::Url::parse(base_url)
+        .map_err(|error| Error::parser("reducto", format!("api_base_url was invalid: {error}")))?;
+    if result.scheme() == base.scheme() && result.host_str() == base.host_str() {
+        return Ok(());
+    }
+    Err(Error::parser(
+        "reducto",
+        "result_url must be HTTPS or same-origin as api_base_url",
+    ))
+}
+
 fn map_kind(raw: &str) -> DocumentElementKind {
     match raw.to_ascii_lowercase().as_str() {
         "title" | "heading" | "header" => DocumentElementKind::Heading,
@@ -300,5 +431,19 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
             current = current.get(segment)?;
         }
         current.as_str().map(ToOwned::to_owned)
+    })
+}
+
+fn value_field(value: &Value, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| {
+        let mut current = value;
+        for segment in key.split('.') {
+            current = current.get(segment)?;
+        }
+        if current.is_null() {
+            None
+        } else {
+            Some(current.clone())
+        }
     })
 }

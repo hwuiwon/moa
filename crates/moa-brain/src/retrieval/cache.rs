@@ -354,6 +354,14 @@ fn canonicalize(
         out.push_str(label);
         out.push(',');
     }
+    out.push_str("|disable_leg_timeouts=");
+    out.push_str(if req.disable_leg_timeouts { "1" } else { "0" });
+    out.push_str("|disable_graph_expansion=");
+    out.push_str(if req.disable_graph_expansion {
+        "1"
+    } else {
+        "0"
+    });
     out.push_str("|pii=");
     out.push_str(req.max_pii_class.as_str());
     out.push_str("|k=");

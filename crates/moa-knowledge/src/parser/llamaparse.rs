@@ -2,6 +2,7 @@
 
 use reqwest::Client;
 use serde_json::{Value, json};
+use tokio::time::{Duration, sleep};
 
 use crate::{
     domain::{DocumentElement, DocumentElementKind, ParseInput, ParsedDocument},
@@ -11,8 +12,11 @@ use crate::{
     providers::http,
 };
 
+const POLL_ATTEMPTS: usize = 30;
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 /// HTTP adapter for LlamaParse.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlamaParseParser {
     client: Client,
     base_url: String,
@@ -72,6 +76,7 @@ impl DocumentParser for LlamaParseParser {
         let expand = if self.expand.is_empty() {
             vec![
                 "markdown".to_string(),
+                "markdown_full".to_string(),
                 "items".to_string(),
                 "page_metadata".to_string(),
                 "metadata".to_string(),
@@ -80,43 +85,77 @@ impl DocumentParser for LlamaParseParser {
         } else {
             self.expand.clone()
         };
+        let source_url = input.source_url.clone();
+        let file_id = input
+            .options
+            .get("file_id")
+            .or_else(|| input.options.get("llamaparse_file_id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        if source_url.is_none() && file_id.is_none() {
+            return Err(Error::parser(
+                "llamaparse",
+                "parse input requires source_url or file_id",
+            ));
+        }
+        let mut body = serde_json::Map::new();
+        if let Some(source_url) = source_url {
+            body.insert("source_url".to_string(), Value::String(source_url));
+        }
+        if let Some(file_id) = file_id {
+            body.insert("file_id".to_string(), Value::String(file_id));
+        }
+        body.insert("tier".to_string(), Value::String(self.tier.clone()));
+        body.insert("version".to_string(), Value::String(self.version.clone()));
+        if cost_optimizer_supported(&self.tier) {
+            body.insert(
+                "processing_options".to_string(),
+                json!({ "cost_optimizer": { "enable": true } }),
+            );
+        }
         let response = self
             .client
-            .post(self.url("/api/v1/parsing/job"))
+            .post(self.url("/api/v2/parse"))
             .bearer_auth(&self.api_key)
-            .json(&json!({
-                "file_url": input.source_url,
-                "file_name": input.file_name,
-                "tier": self.tier,
-                "version": self.version,
-                "expand": expand,
-                "content": input.text,
-            }))
+            .json(&Value::Object(body))
             .send()
             .await
             .map_err(|error| {
                 Error::parser("llamaparse", format!("parse submission failed: {error}"))
             })?;
         let submitted: Value = http::json_response(response).await?;
-        let job_id = string_field(&submitted, &["id", "job_id"])
+        let job_id = string_field(&submitted, &["id", "job.id", "job_id"])
             .ok_or_else(|| Error::parser("llamaparse", "parse response missing job id"))?;
         let result = if submitted.get("markdown").is_some() || submitted.get("items").is_some() {
             submitted
         } else {
-            let mut url = parse_url(&self.url(&format!("/api/v1/parsing/job/{job_id}/result")))?;
+            let mut url = parse_url(&self.url(&format!("/api/v2/parse/{job_id}")))?;
             url.query_pairs_mut()
                 .append_pair("expand", &expand.join(","));
-            let response = self
-                .client
-                .get(url)
-                .bearer_auth(&self.api_key)
-                .send()
-                .await
-                .map_err(|error| {
-                    Error::parser("llamaparse", format!("result retrieval failed: {error}"))
-                })?;
-            http::json_response(response).await?
+            let mut result = Value::Null;
+            for attempt in 0..POLL_ATTEMPTS {
+                let response = self
+                    .client
+                    .get(url.clone())
+                    .bearer_auth(&self.api_key)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        Error::parser("llamaparse", format!("result retrieval failed: {error}"))
+                    })?;
+                result = http::json_response(response).await?;
+                ensure_llamaparse_not_failed(&result)?;
+                if !is_pending_status(&result) {
+                    break;
+                }
+                if attempt + 1 == POLL_ATTEMPTS {
+                    return Err(Error::parser("llamaparse", "parse job did not complete"));
+                }
+                sleep(POLL_INTERVAL).await;
+            }
+            result
         };
+        ensure_llamaparse_not_failed(&result)?;
         Ok(map_llamaparse_result(job_id, result))
     }
 }
@@ -148,13 +187,8 @@ impl LlamaParseParser {
 /// Maps a LlamaParse result payload into a parsed document.
 #[must_use]
 pub fn map_llamaparse_result(job_id: String, value: Value) -> ParsedDocument {
-    let markdown = string_field(&value, &["markdown", "result.markdown"]).unwrap_or_default();
-    let items = value
-        .get("items")
-        .or_else(|| value.pointer("/result/items"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let markdown = llamaparse_markdown(&value);
+    let items = llamaparse_items(&value);
     let mut elements = Vec::new();
     let mut heading_path = Vec::<String>::new();
     for (ordinal, item) in items.iter().enumerate() {
@@ -195,7 +229,7 @@ pub fn map_llamaparse_result(job_id: String, value: Value) -> ParsedDocument {
                 "page_number": page_number,
                 "item_type": raw_type,
                 "parser_timing": value.get("timing").or_else(|| value.get("parser_timing")).cloned().unwrap_or(Value::Null),
-                "parser_version": value.get("version").or_else(|| value.pointer("/job_metadata/version")).cloned().unwrap_or(Value::Null),
+                "parser_version": value.get("version").or_else(|| value.pointer("/job/version")).or_else(|| value.pointer("/job_metadata/version")).cloned().unwrap_or(Value::Null),
                 "metadata": item.get("metadata").cloned().unwrap_or(Value::Null)
             }),
         });
@@ -218,15 +252,69 @@ pub fn map_llamaparse_result(job_id: String, value: Value) -> ParsedDocument {
         text: normalize_text(&markdown),
         elements,
         metadata: json!({
-            "parser_status": value.get("status").or_else(|| value.pointer("/job_metadata/status")).cloned().unwrap_or(Value::Null),
+            "parser_status": value.get("status").or_else(|| value.pointer("/job/status")).or_else(|| value.pointer("/job_metadata/status")).cloned().unwrap_or(Value::Null),
             "parser_errors": value.get("errors").or_else(|| value.pointer("/metadata/errors")).cloned().unwrap_or(Value::Null),
             "metadata": value.get("metadata").cloned().unwrap_or(Value::Null),
             "job_metadata": value.get("job_metadata").cloned().unwrap_or(Value::Null),
-            "page_metadata": value.get("page_metadata").or_else(|| value.get("pages")).cloned().unwrap_or(Value::Null),
+            "page_metadata": value.get("page_metadata").or_else(|| value.pointer("/metadata/pages")).or_else(|| value.get("pages")).cloned().unwrap_or(Value::Null),
             "parser_timing": value.get("timing").or_else(|| value.get("parser_timing")).cloned().unwrap_or(Value::Null),
-            "parser_version": value.get("version").or_else(|| value.pointer("/job_metadata/version")).cloned().unwrap_or(Value::Null)
+            "parser_version": value.get("version").or_else(|| value.pointer("/job/version")).or_else(|| value.pointer("/job_metadata/version")).cloned().unwrap_or(Value::Null)
         }),
     }
+}
+
+fn llamaparse_markdown(value: &Value) -> String {
+    if let Some(markdown) = string_field(value, &["markdown_full", "markdown", "result.markdown"]) {
+        return markdown;
+    }
+    value
+        .pointer("/markdown/pages")
+        .and_then(Value::as_array)
+        .map(|pages| {
+            pages
+                .iter()
+                .filter_map(|page| string_field(page, &["markdown", "md"]))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
+}
+
+fn llamaparse_items(value: &Value) -> Vec<Value> {
+    if let Some(items) = value
+        .get("items")
+        .or_else(|| value.pointer("/result/items"))
+        .and_then(Value::as_array)
+    {
+        return items.clone();
+    }
+    value
+        .pointer("/items/pages")
+        .and_then(Value::as_array)
+        .map(|pages| {
+            pages
+                .iter()
+                .flat_map(|page| {
+                    let page_number = page.get("page_number").cloned();
+                    page.get("items")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(move |item| {
+                            let mut item = item.clone();
+                            if let (Some(object), Some(page_number)) =
+                                (item.as_object_mut(), page_number.clone())
+                            {
+                                object
+                                    .entry("page_number".to_string())
+                                    .or_insert(page_number);
+                            }
+                            item
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn map_kind(raw: &str) -> DocumentElementKind {
@@ -238,6 +326,38 @@ fn map_kind(raw: &str) -> DocumentElementKind {
         "page" => DocumentElementKind::Page,
         _ => DocumentElementKind::Paragraph,
     }
+}
+
+fn cost_optimizer_supported(tier: &str) -> bool {
+    matches!(tier, "agentic" | "agentic_plus")
+}
+
+fn ensure_llamaparse_not_failed(value: &Value) -> Result<()> {
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/job/status"))
+        .or_else(|| value.pointer("/job_metadata/status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(status.as_str(), "error" | "failed" | "failure") {
+        return Err(Error::parser("llamaparse", "parse job failed"));
+    }
+    Ok(())
+}
+
+fn is_pending_status(value: &Value) -> bool {
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/job/status"))
+        .or_else(|| value.pointer("/job_metadata/status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        status.as_str(),
+        "pending" | "queued" | "running" | "processing"
+    )
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {

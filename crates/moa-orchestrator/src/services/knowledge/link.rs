@@ -24,6 +24,7 @@ impl KnowledgeService {
                 tenant_id: request.tenant_id,
                 connector: request.connector,
                 external_account_id: request.external_account_id,
+                end_user_email_address: request.end_user_email_address,
                 redirect_url: None,
             })
             .await?;
@@ -67,8 +68,9 @@ impl KnowledgeService {
             last_synced_at: None,
         };
 
-        self.repository(request.tenant_id)
-            .upsert_connection(connection.clone())
+        let connection = self
+            .repository(request.tenant_id)
+            .upsert_connection(connection)
             .await?;
 
         Ok(KnowledgeExchangeTokenResponse {

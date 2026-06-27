@@ -251,16 +251,16 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     )
     .await;
 
-    let provider_failure = run_failure_case(
-        repository.clone(),
+    let provider_failure = run_failure_case(FailureCase {
+        repository: repository.clone(),
         tenant_id,
         connection_uid,
-        "provider",
-        ParserMode::Ok,
-        EmbedderMode::Ok,
-        GraphMode::Ok,
-        provider_failure_record(),
-    )
+        label: "provider",
+        parser_mode: ParserMode::Ok,
+        embedder_mode: EmbedderMode::Ok,
+        graph_mode: GraphMode::Ok,
+        record: provider_failure_record(),
+    })
     .await;
     assert_failed_steps(
         &repository,
@@ -287,16 +287,16 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     )
     .await;
 
-    let parser_failure = run_failure_case(
-        repository.clone(),
+    let parser_failure = run_failure_case(FailureCase {
+        repository: repository.clone(),
         tenant_id,
         connection_uid,
-        "parser",
-        ParserMode::UnsupportedFormat,
-        EmbedderMode::Ok,
-        GraphMode::Ok,
-        content_record("parser"),
-    )
+        label: "parser",
+        parser_mode: ParserMode::UnsupportedFormat,
+        embedder_mode: EmbedderMode::Ok,
+        graph_mode: GraphMode::Ok,
+        record: content_record("parser"),
+    })
     .await;
     assert_failed_steps(
         &repository,
@@ -325,16 +325,16 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     )
     .await;
 
-    let embedder_failure = run_failure_case(
-        repository.clone(),
+    let embedder_failure = run_failure_case(FailureCase {
+        repository: repository.clone(),
         tenant_id,
         connection_uid,
-        "embedder",
-        ParserMode::Ok,
-        EmbedderMode::Fail,
-        GraphMode::Ok,
-        content_record("embedder"),
-    )
+        label: "embedder",
+        parser_mode: ParserMode::Ok,
+        embedder_mode: EmbedderMode::Fail,
+        graph_mode: GraphMode::Ok,
+        record: content_record("embedder"),
+    })
     .await;
     assert_failed_steps(
         &repository,
@@ -367,16 +367,16 @@ async fn sync_failure_rows_status_error_codes_redaction_and_counter_order_db_kno
     )
     .await;
 
-    let graph_failure = run_failure_case(
-        repository.clone(),
+    let graph_failure = run_failure_case(FailureCase {
+        repository: repository.clone(),
         tenant_id,
         connection_uid,
-        "graph",
-        ParserMode::Ok,
-        EmbedderMode::Ok,
-        GraphMode::FailUpsert,
-        content_record("graph"),
-    )
+        label: "graph",
+        parser_mode: ParserMode::Ok,
+        embedder_mode: EmbedderMode::Ok,
+        graph_mode: GraphMode::FailUpsert,
+        record: content_record("graph"),
+    })
     .await;
     assert_failed_steps(
         &repository,
@@ -448,16 +448,28 @@ async fn create_counter_seed_run(
     sync_run_uid
 }
 
-async fn run_failure_case(
+struct FailureCase {
     repository: Arc<PostgresKnowledgeRepository>,
     tenant_id: TenantId,
     connection_uid: Uuid,
-    label: &str,
+    label: &'static str,
     parser_mode: ParserMode,
     embedder_mode: EmbedderMode,
     graph_mode: GraphMode,
     record: ProviderRecord,
-) -> Uuid {
+}
+
+async fn run_failure_case(case: FailureCase) -> Uuid {
+    let FailureCase {
+        repository,
+        tenant_id,
+        connection_uid,
+        label,
+        parser_mode,
+        embedder_mode,
+        graph_mode,
+        record,
+    } = case;
     let sync_run_uid = Uuid::now_v7();
     repository
         .create_sync_run(KnowledgeSyncRun {

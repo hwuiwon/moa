@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// HTTP client for Nango tenant knowledge connections.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NangoProvider {
     client: Client,
     base_url: String,
@@ -157,6 +157,7 @@ impl LinkedIntegrationProvider for NangoProvider {
             credential_ref: response
                 .credentials_reference
                 .unwrap_or_else(|| format!("nango:{provider_account_id}")),
+            credential_material: None,
             provider_account_id,
             metadata: redact_provider_metadata(response.metadata.unwrap_or(Value::Null)),
         })

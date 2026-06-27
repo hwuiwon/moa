@@ -40,6 +40,16 @@ struct RetrievalScopePlan {
     label_filter: Option<Vec<NodeLabel>>,
 }
 
+struct ScopeRetrievalInput<'a> {
+    ctx: &'a WorkingContext,
+    query: &'a str,
+    query_embedding: &'a [f32],
+    scope_plan: &'a RetrievalScopePlan,
+    emit_storage_lineage: bool,
+    result_limit: usize,
+    max_pii_class: PiiClass,
+}
+
 /// Injects graph-memory retrieval hits into the active turn context.
 pub struct GraphMemoryRetriever {
     pool: PgPool,
@@ -236,10 +246,23 @@ impl GraphMemoryRetriever {
         }
         let result_limit = effective_result_limit(&policy, self.result_limit);
         let max_pii_class = effective_max_pii_class(&policy)?;
+        let query_embedding = if let Some(embedder) = self.embedder.as_deref() {
+            embed_query(embedder, &query).await?
+        } else {
+            Vec::new()
+        };
         let mut hits = Vec::new();
         for scope_plan in &retrieval_plan {
             let scope_hits = self
-                .retrieve_hits_for_scope(ctx, &query, scope_plan, true, result_limit, max_pii_class)
+                .retrieve_hits_for_scope(ScopeRetrievalInput {
+                    ctx,
+                    query: &query,
+                    query_embedding: &query_embedding,
+                    scope_plan,
+                    emit_storage_lineage: true,
+                    result_limit,
+                    max_pii_class,
+                })
                 .await?;
             hits.extend(scope_hits.into_iter().filter_map(|mut hit| {
                 if !hit_matches_retrieval_plan(&hit, scope_plan)
@@ -256,27 +279,26 @@ impl GraphMemoryRetriever {
 
     async fn retrieve_hits_for_scope(
         &self,
-        ctx: &WorkingContext,
-        query: &str,
-        scope_plan: &RetrievalScopePlan,
-        emit_storage_lineage: bool,
-        result_limit: usize,
-        max_pii_class: PiiClass,
+        input: ScopeRetrievalInput<'_>,
     ) -> Result<Vec<crate::retrieval::RetrievalHit>> {
+        let ScopeRetrievalInput {
+            ctx,
+            query,
+            query_embedding,
+            scope_plan,
+            emit_storage_lineage,
+            result_limit,
+            max_pii_class,
+        } = input;
         let scope = &scope_plan.scope;
         let runtime = self.runtime_for_scope(scope)?;
         let planning = crate::planning::PlanningCtx::new(scope.clone(), runtime.graph.clone());
         let planned = self.planner.plan(query, &planning).await.map_err(|error| {
             moa_core::MoaError::StorageError(format!("graph memory planning failed: {error}"))
         })?;
-        let query_embedding = if let Some(embedder) = self.embedder.as_deref() {
-            embed_query(embedder, query).await?
-        } else {
-            Vec::new()
-        };
         let mut request = planned.clone().into_retrieval_request(
             query.to_string(),
-            query_embedding,
+            query_embedding.to_vec(),
             max_pii_class,
             result_limit,
             self.reranker_enabled(),
@@ -535,39 +557,22 @@ fn default_retrieval_plan(
 }
 
 fn tenant_knowledge_label_filter() -> Vec<NodeLabel> {
-    vec![NodeLabel::Chunk, NodeLabel::ContactGroup]
+    vec![
+        NodeLabel::Document,
+        NodeLabel::Chunk,
+        NodeLabel::ContactGroup,
+    ]
 }
 
 fn dedupe_and_rank_hits(
     hits: Vec<crate::retrieval::RetrievalHit>,
     result_limit: usize,
 ) -> Vec<crate::retrieval::RetrievalHit> {
-    let mut by_uid = HashMap::<Uuid, crate::retrieval::RetrievalHit>::new();
-    for hit in hits {
-        by_uid
-            .entry(hit.uid)
-            .and_modify(|existing| merge_duplicate_hit(existing, &hit))
-            .or_insert(hit);
-    }
-    let mut hits = by_uid.into_values().collect::<Vec<_>>();
+    let mut hits = hits;
     hits.sort_by(compare_retrieval_hits);
+    hits.dedup_by_key(|hit| hit.uid);
     hits.truncate(result_limit);
     hits
-}
-
-fn merge_duplicate_hit(
-    existing: &mut crate::retrieval::RetrievalHit,
-    candidate: &crate::retrieval::RetrievalHit,
-) {
-    let legs = crate::retrieval::LegSources {
-        graph: existing.legs.graph || candidate.legs.graph,
-        vector: existing.legs.vector || candidate.legs.vector,
-        lexical: existing.legs.lexical || candidate.legs.lexical,
-    };
-    if compare_retrieval_hits(candidate, existing).is_lt() {
-        *existing = candidate.clone();
-    }
-    existing.legs = legs;
 }
 
 fn compare_retrieval_hits(
@@ -1466,7 +1471,11 @@ mod tests {
                         tenant_id: session.tenant_id,
                     },
                     source_tier: crate::retrieval::SourceTier::TenantKnowledge,
-                    label_filter: Some(vec![NodeLabel::Chunk, NodeLabel::ContactGroup]),
+                    label_filter: Some(vec![
+                        NodeLabel::Document,
+                        NodeLabel::Chunk,
+                        NodeLabel::ContactGroup,
+                    ]),
                 },
                 super::RetrievalScopePlan {
                     scope: MemoryScope::Contact {
@@ -1501,7 +1510,11 @@ mod tests {
                     tenant_id: session.tenant_id,
                 },
                 source_tier: crate::retrieval::SourceTier::TenantKnowledge,
-                label_filter: Some(vec![NodeLabel::Chunk, NodeLabel::ContactGroup]),
+                label_filter: Some(vec![
+                    NodeLabel::Document,
+                    NodeLabel::Chunk,
+                    NodeLabel::ContactGroup,
+                ]),
             }]
         );
     }
@@ -1626,7 +1639,11 @@ mod tests {
             vec![
                 RecordedRetrievalRequest {
                     scope: tenant_scope,
-                    label_filter: Some(vec![NodeLabel::Chunk, NodeLabel::ContactGroup]),
+                    label_filter: Some(vec![
+                        NodeLabel::Document,
+                        NodeLabel::Chunk,
+                        NodeLabel::ContactGroup,
+                    ]),
                 },
                 RecordedRetrievalRequest {
                     scope: MemoryScope::Contact {

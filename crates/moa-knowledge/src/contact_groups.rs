@@ -121,8 +121,9 @@ fn derive_group(
         .unwrap_or(source_group_id)
         .to_string();
     let group_key = format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}",
         stable_key_part(source_provider),
+        object.connection_uid,
         group_kind,
         stable_key_part(source_group_id)
     );

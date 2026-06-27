@@ -556,6 +556,9 @@ pub struct CreateLinkTokenRequest {
     /// Optional caller-facing account reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_account_id: Option<String>,
+    /// Optional end-user email address required by some link-token providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_user_email_address: Option<String>,
     /// Optional redirect URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_url: Option<String>,
@@ -596,6 +599,9 @@ pub struct LinkedAccount {
     pub provider_account_id: String,
     /// Credential vault reference or provider token reference.
     pub credential_ref: String,
+    /// Raw credential material returned by the provider, kept in memory only until stored.
+    #[serde(skip)]
+    pub credential_material: Option<String>,
     /// Safe account metadata.
     #[serde(default)]
     pub metadata: Value,

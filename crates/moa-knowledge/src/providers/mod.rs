@@ -45,10 +45,14 @@ pub(crate) mod http {
 
     use crate::error::{Error, Result};
 
+    const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
     /// Builds the shared HTTP client used by knowledge adapters.
     pub(crate) fn build_http_client() -> Result<Client> {
         Client::builder()
             .user_agent(concat!("moa-knowledge/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
             .build()
             .map_err(|error| Error::Transport(format!("failed to build HTTP client: {error}")))
     }
@@ -58,10 +62,25 @@ pub(crate) mod http {
     where
         T: DeserializeOwned,
     {
-        ensure_success(response)
-            .await?
-            .json::<T>()
+        let response = ensure_success(response).await?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(Error::Decode(
+                "JSON response body was too large".to_string(),
+            ));
+        }
+        let body = response
+            .bytes()
             .await
+            .map_err(|error| Error::Transport(format!("failed to read response body: {error}")))?;
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(Error::Decode(
+                "JSON response body was too large".to_string(),
+            ));
+        }
+        serde_json::from_slice(&body)
             .map_err(|error| Error::Decode(format!("failed to decode JSON response: {error}")))
     }
 
@@ -73,14 +92,10 @@ pub(crate) mod http {
         }
 
         let retry_after = retry_after_delay(status, response.headers().get(RETRY_AFTER));
-        let message = response
-            .text()
-            .await
-            .unwrap_or_else(|error| format!("response body could not be read: {error}"));
         Err(Error::HttpStatus {
             status: status.as_u16(),
             retry_after,
-            message,
+            message: "upstream returned non-success status".to_string(),
         })
     }
 

@@ -150,7 +150,10 @@ async fn contact_group_sync_resolves_verified_members_and_deactivates_absent_mem
         .expect("load contact group targets")
         .expect("group should resolve through the repository targeting API");
     assert_eq!(target.group.group_uid, group.group_uid);
-    assert_eq!(target.group.group_key, "crm:account:acct1");
+    assert_eq!(
+        target.group.group_key,
+        format!("crm:{}:account:acct1", object.connection_uid)
+    );
     assert_eq!(target.group.display_name, "Acme");
     assert_eq!(
         target
@@ -239,13 +242,13 @@ async fn contact_group_sync_resolves_verified_members_and_deactivates_absent_mem
         "#,
     )
     .bind(tenant_id.0)
-    .bind("crm:account:acct1")
+    .bind(&group.group_key)
     .bind("Acme")
     .fetch_one(pool)
     .await
     .expect("group should be targetable by tenant, group key, and name");
     assert_eq!(group_row.0, group.group_uid, "group UID should be stable");
-    assert_eq!(group_row.1, "crm:account:acct1");
+    assert_eq!(group_row.1, group.group_key);
     assert_eq!(group_row.2, "Acme");
     assert!(
         !group_row.3.to_string().contains('@'),

@@ -1,6 +1,12 @@
 //! Offline Reducto parser coverage.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use base64::{Engine as _, engine::general_purpose};
+use chrono::Utc;
 use hmac::{Hmac, Mac};
 use moa_core::TenantId;
 use moa_knowledge::{
@@ -14,9 +20,40 @@ use serde_json::json;
 use sha2::Sha256;
 use uuid::Uuid;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{body_string_contains, method, path},
 };
+
+struct QueuedThenCompletedJobResponder {
+    lookups: Arc<AtomicUsize>,
+    result_url: String,
+}
+
+impl Respond for QueuedThenCompletedJobResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        if self.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
+            return ResponseTemplate::new(200).set_body_json(json!({
+                "job_id": "job-async",
+                "status": "queued"
+            }));
+        }
+        ResponseTemplate::new(200).set_body_json(json!({
+            "status": "completed",
+            "result": {
+                "response_type": "parse",
+                "job_id": "job-async",
+                "duration": 321,
+                "studio_link": "https://studio.reducto.test/job-async",
+                "usage": {"num_pages": 1, "credits": 1},
+                "result": {
+                    "type": "url",
+                    "url": self.result_url
+                },
+                "parse_mode": "standard"
+            }
+        }))
+    }
+}
 
 fn input(result_url: Option<String>) -> ParseInput {
     ParseInput {
@@ -68,14 +105,15 @@ async fn url_result_chunks_and_blocks_preserve_metadata_and_identity() {
     let result_url = format!("{}/large-result.json", server.uri());
     Mock::given(method("POST"))
         .and(path("/parse"))
-        .and(body_string_contains(
-            "\"document_url\":\"https://files.example/guide.pdf\"",
-        ))
-        .and(body_string_contains("\"file_id\":\"file-123\""))
-        .and(body_string_contains("\"mode\":\"standard\""))
+        .and(body_string_contains("\"input\":\"file-123\""))
+        .and(body_string_contains("\"chunk_mode\":\"variable\""))
+        .and(body_string_contains("\"force_url_result\":true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "job_id": "job-red",
-            "result_url": result_url
+            "result": {
+                "type": "url",
+                "url": result_url
+            }
         })))
         .mount(&server)
         .await;
@@ -174,7 +212,7 @@ fn svix_webhook_payload_maps_job_object_and_rejects_bad_signature() {
     // Pins: Reducto Svix webhook verification maps job/object metadata and rejects invalid signatures.
     let signing_key = "reducto-svix-secret";
     let message_id = "msg_reducto_1";
-    let timestamp = "1782499200";
+    let timestamp = Utc::now().timestamp().to_string();
     let object_uid = Uuid::from_u128(41).to_string();
     let body = serde_json::to_vec(&json!({
         "event": "parse.completed",
@@ -196,11 +234,11 @@ fn svix_webhook_payload_maps_job_object_and_rejects_bad_signature() {
     );
     headers.insert(
         "svix-timestamp",
-        HeaderValue::from_str(timestamp).expect("valid Svix timestamp header"),
+        HeaderValue::from_str(&timestamp).expect("valid Svix timestamp header"),
     );
     headers.insert(
         "svix-signature",
-        HeaderValue::from_str(&svix_signature(&body, signing_key, message_id, timestamp))
+        HeaderValue::from_str(&svix_signature(&body, signing_key, message_id, &timestamp))
             .expect("valid Svix signature header"),
     );
 
@@ -232,9 +270,11 @@ fn svix_webhook_payload_maps_job_object_and_rejects_bad_signature() {
 async fn async_job_retrieval_preserves_parser_status_and_metadata() {
     // Pins: Reducto async parse jobs retrieve job results and keep parser status metadata.
     let server = MockServer::start().await;
+    let job_lookups = Arc::new(AtomicUsize::new(0));
+    let result_url = format!("{}/async-result.json", server.uri());
     Mock::given(method("POST"))
         .and(path("/parse_async"))
-        .and(body_string_contains("\"mode\":\"standard\""))
+        .and(body_string_contains("\"input\":\"file-123\""))
         .and(body_string_contains("\"chunk_mode\":\"variable\""))
         .and(body_string_contains("\"force_url_result\":false"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -246,13 +286,16 @@ async fn async_job_retrieval_preserves_parser_status_and_metadata() {
         .await;
     Mock::given(method("GET"))
         .and(path("/job/job-async"))
+        .respond_with(QueuedThenCompletedJobResponder {
+            lookups: Arc::clone(&job_lookups),
+            result_url,
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/async-result.json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "job_id": "job-async",
-            "status": "completed",
-            "parse_mode": "standard",
-            "processing_duration": 321,
-            "studio_link": "https://studio.reducto.test/job-async",
-            "usage": {"pages": 1, "credits": 1},
             "chunks": [{
                 "id": "chunk-async",
                 "content": "Async chunk",
@@ -291,6 +334,11 @@ async fn async_job_retrieval_preserves_parser_status_and_metadata() {
     assert_eq!(parsed.metadata["usage_pages"], 1);
     assert_eq!(parsed.elements.len(), 2);
     assert_eq!(parsed.elements[1].text, "Async body");
+    assert_eq!(
+        job_lookups.load(Ordering::SeqCst),
+        2,
+        "parser should poll until Reducto reports a terminal async status"
+    );
 }
 
 #[tokio::test]

@@ -8,13 +8,16 @@ mod webhook_verifier;
 
 pub use webhook_verifier::{KnowledgeWebhookVerifier, ParserWebhookVerifier};
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use async_trait::async_trait;
 use moa_authz::require_authz_with_delegation;
 use moa_authz_schema::{ObjectType, Relation};
 use moa_core::{
-    MoaConfig, MoaError, TenantId,
+    Credential, CredentialVault, MoaConfig, MoaError, TenantId,
     wire::knowledge::{
         KnowledgeConnectionListRequest, KnowledgeConnectionListResponse,
         KnowledgeCreateLinkTokenRequest, KnowledgeCreateLinkTokenResponse,
@@ -27,7 +30,7 @@ use moa_core::{
     },
 };
 use moa_knowledge::{
-    domain::LinkedAccount,
+    domain::{KnowledgeConnection, LinkedAccount},
     providers::{LinkedIntegrationProvider, merge::MergeProvider, nango::NangoProvider},
     repository::{KnowledgeRepository, PostgresKnowledgeRepository},
 };
@@ -384,6 +387,18 @@ impl KnowledgeService {
         self.repository.repository(tenant_id)
     }
 
+    async fn connection_with_credential(
+        &self,
+        connection: &KnowledgeConnection,
+    ) -> Result<KnowledgeConnection, KnowledgeServiceError> {
+        let mut resolved = connection.clone();
+        resolved.credential_ref = self
+            .credentials
+            .resolve_linked_account(connection.tenant_id, connection)
+            .await?;
+        Ok(resolved)
+    }
+
     fn postgres_pool(&self) -> Option<sqlx::PgPool> {
         match &self.repository {
             KnowledgeRepositorySource::Fixed(_) => None,
@@ -502,9 +517,70 @@ pub trait KnowledgeCredentialStore: Send + Sync {
         tenant_id: TenantId,
         account: &LinkedAccount,
     ) -> Result<String, KnowledgeServiceError>;
+
+    /// Resolves a persisted credential reference to provider request material.
+    async fn resolve_linked_account(
+        &self,
+        tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<String, KnowledgeServiceError>;
 }
 
-/// Credential store that emits deterministic service-owned references without persisting secrets.
+/// Credential store backed by MOA's host-side credential vault.
+#[derive(Clone)]
+pub struct VaultKnowledgeCredentialStore {
+    vault: Arc<dyn CredentialVault>,
+}
+
+impl VaultKnowledgeCredentialStore {
+    /// Creates a knowledge credential store from a shared credential vault.
+    #[must_use]
+    pub fn new(vault: Arc<dyn CredentialVault>) -> Self {
+        Self { vault }
+    }
+}
+
+#[async_trait]
+impl KnowledgeCredentialStore for VaultKnowledgeCredentialStore {
+    async fn store_linked_account(
+        &self,
+        tenant_id: TenantId,
+        account: &LinkedAccount,
+    ) -> Result<String, KnowledgeServiceError> {
+        let Some(material) = account.credential_material.as_deref() else {
+            return Ok(account.credential_ref.clone());
+        };
+        let service = credential_service(&account.provider);
+        let scope = credential_scope(tenant_id, &account.provider_account_id);
+        self.vault
+            .set(&service, &scope, Credential::Bearer(material.to_string()))
+            .await
+            .map_err(|error| KnowledgeServiceError::Credential(error.to_string()))?;
+        Ok(credential_ref(&service, &scope))
+    }
+
+    async fn resolve_linked_account(
+        &self,
+        _tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<String, KnowledgeServiceError> {
+        let Some((service, scope)) = parse_credential_ref(&connection.credential_ref) else {
+            return Ok(connection.credential_ref.clone());
+        };
+        match self
+            .vault
+            .get(&service, &scope)
+            .await
+            .map_err(|error| KnowledgeServiceError::Credential(error.to_string()))?
+        {
+            Credential::Bearer(token) => Ok(token),
+            Credential::ApiKey { value, .. } => Ok(value),
+            Credential::OAuth { access_token, .. } => Ok(access_token),
+        }
+    }
+}
+
+/// Credential store used by tests that do not exercise provider credential resolution.
 #[derive(Debug, Clone, Default)]
 pub struct DeterministicKnowledgeCredentialStore;
 
@@ -516,10 +592,36 @@ impl KnowledgeCredentialStore for DeterministicKnowledgeCredentialStore {
         account: &LinkedAccount,
     ) -> Result<String, KnowledgeServiceError> {
         Ok(format!(
-            "vault://tenant/{tenant_id}/knowledge/{}/{}",
+            "vault://knowledge/{}/{tenant_id}/{}",
             account.provider, account.provider_account_id
         ))
     }
+
+    async fn resolve_linked_account(
+        &self,
+        _tenant_id: TenantId,
+        connection: &KnowledgeConnection,
+    ) -> Result<String, KnowledgeServiceError> {
+        Ok(connection.credential_ref.clone())
+    }
+}
+
+fn credential_service(provider: &str) -> String {
+    format!("knowledge:{provider}")
+}
+
+fn credential_scope(tenant_id: TenantId, provider_account_id: &str) -> String {
+    format!("{tenant_id}:{provider_account_id}")
+}
+
+fn credential_ref(service: &str, scope: &str) -> String {
+    format!("vault://{service}/{scope}")
+}
+
+fn parse_credential_ref(value: &str) -> Option<(String, String)> {
+    let rest = value.strip_prefix("vault://")?;
+    let (service, scope) = rest.split_once('/')?;
+    Some((service.to_string(), scope.to_string()))
 }
 
 #[derive(Clone)]
@@ -543,7 +645,9 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     NangoProvider::new(self.config.nango.api_base_url.clone(), api_key)?;
-                if let Some(signing_key) = self.config.nango.webhook_signing_key.clone() {
+                if let Some(signing_key) = moa_core::config::optional_env_secret(
+                    &self.config.nango.webhook_signing_key_env,
+                )? {
                     implementation = implementation.with_webhook_signing_key(signing_key);
                 }
                 Ok(Arc::new(implementation))
@@ -552,7 +656,9 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     MergeProvider::new(self.config.merge.api_base_url.clone(), api_key)?;
-                if let Some(signature_key) = self.config.merge.webhook_signature_key.clone() {
+                if let Some(signature_key) = moa_core::config::optional_env_secret(
+                    &self.config.merge.webhook_signature_key_env,
+                )? {
                     implementation = implementation.with_webhook_signature_key(signature_key);
                 }
                 Ok(Arc::new(implementation))
@@ -592,12 +698,16 @@ impl ConfigKnowledgeProviders {
         }
         let (signing_key, header_name, header_value) = match provider {
             "llamaparse" => (
-                self.config.llamaparse.webhook_signing_key.clone(),
+                moa_core::config::optional_env_secret(
+                    &self.config.llamaparse.webhook_signing_key_env,
+                )?,
                 self.config.llamaparse.webhook_header_name.clone(),
                 self.config.llamaparse.webhook_header_value.clone(),
             ),
             "reducto" => (
-                self.config.reducto.webhook_signing_key.clone(),
+                moa_core::config::optional_env_secret(
+                    &self.config.reducto.webhook_signing_key_env,
+                )?,
                 self.config.reducto.webhook_header_name.clone(),
                 self.config.reducto.webhook_header_value.clone(),
             ),
@@ -660,9 +770,23 @@ fn service_from_config(pool: sqlx::PgPool, config: &MoaConfig) -> KnowledgeServi
     KnowledgeService::from_postgres_pool(
         pool,
         Arc::new(ConfigKnowledgeProviders::new(config.knowledge.clone())),
-        Arc::new(DeterministicKnowledgeCredentialStore),
+        Arc::new(VaultKnowledgeCredentialStore::new(
+            knowledge_credential_vault(),
+        )),
         config.knowledge.observability.max_object_preview_chars,
     )
+}
+
+fn knowledge_credential_vault() -> Arc<dyn CredentialVault> {
+    static VAULT: OnceLock<Arc<dyn CredentialVault>> = OnceLock::new();
+    VAULT
+        .get_or_init(|| {
+            Arc::new(
+                moa_security::EnvironmentCredentialVault::from_mcp_servers(&[])
+                    .expect("empty knowledge credential vault should initialize"),
+            )
+        })
+        .clone()
 }
 
 async fn authorize_tenant(
@@ -682,6 +806,31 @@ async fn authorize_tenant(
     .map_err(translate_authz_error)
 }
 
-fn knowledge_handler_error(error: impl std::fmt::Display) -> HandlerError {
-    TerminalError::new(error.to_string()).into()
+fn knowledge_handler_error(error: KnowledgeServiceError) -> HandlerError {
+    match terminal_knowledge_error_code(&error) {
+        Some(code) => TerminalError::new_with_code(code, error.to_string()).into(),
+        None => HandlerError::from(error),
+    }
+}
+
+fn terminal_knowledge_error_code(error: &KnowledgeServiceError) -> Option<u16> {
+    match error {
+        KnowledgeServiceError::UnknownProvider(_) | KnowledgeServiceError::InvalidRequest(_) => {
+            Some(400)
+        }
+        KnowledgeServiceError::NotFound(_) => Some(404),
+        KnowledgeServiceError::Knowledge(moa_knowledge::Error::Config(_))
+        | KnowledgeServiceError::Knowledge(moa_knowledge::Error::UnsupportedFormat(_))
+        | KnowledgeServiceError::Moa(MoaError::MissingEnvironmentVariable(_))
+        | KnowledgeServiceError::Moa(MoaError::ConfigError(_))
+        | KnowledgeServiceError::Moa(MoaError::ValidationError(_))
+        | KnowledgeServiceError::Moa(MoaError::PermissionDenied(_))
+        | KnowledgeServiceError::Moa(MoaError::BudgetExhausted(_))
+        | KnowledgeServiceError::Moa(MoaError::Cancelled) => Some(400),
+        KnowledgeServiceError::Moa(MoaError::SessionNotFound(_))
+        | KnowledgeServiceError::Moa(MoaError::BlobNotFound(_)) => Some(404),
+        KnowledgeServiceError::Credential(_)
+        | KnowledgeServiceError::Knowledge(_)
+        | KnowledgeServiceError::Moa(_) => None,
+    }
 }

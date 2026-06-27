@@ -145,16 +145,33 @@ fn stable_object_uid(seed: &str, source_id: &str) -> Uuid {
 }
 
 fn is_secret_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key.contains("token")
-        || key.contains("secret")
-        || key.contains("password")
-        || key.contains("credential")
-        || key.contains("authorization")
-        || key == "auth"
-        || key.contains("bearer")
-        || key.contains("api_key")
-        || key.contains("apikey")
+    let normalized = key.to_ascii_lowercase().replace(['-', ' ', '.'], "_");
+    matches!(
+        normalized.as_str(),
+        "token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "secret"
+            | "client_secret"
+            | "password"
+            | "credential"
+            | "credential_ref"
+            | "credential_reference"
+            | "credentials"
+            | "authorization"
+            | "auth"
+            | "bearer"
+            | "api_key"
+            | "apikey"
+    ) || normalized.ends_with("_secret")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_credential")
+        || normalized.ends_with("_credentials")
+        || normalized.ends_with("_authorization")
+        || normalized.ends_with("_api_key")
+        || normalized.ends_with("_apikey")
+        || (normalized.ends_with("_token") && normalized != "token_count")
 }
 
 fn is_secret_value(value: &str) -> bool {

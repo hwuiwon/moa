@@ -46,6 +46,25 @@ impl KnowledgeService {
         if connection.tenant_id != request.tenant_id {
             return Err(KnowledgeServiceError::NotFound("knowledge connection"));
         }
+        if let Some(existing) = repository
+            .latest_sync_run_for_connection(
+                request.connection_uid,
+                &[
+                    SyncRunStatus::Queued,
+                    SyncRunStatus::ProviderSyncing,
+                    SyncRunStatus::ProviderSynced,
+                    SyncRunStatus::ParsePending,
+                    SyncRunStatus::Ingesting,
+                ],
+            )
+            .await?
+        {
+            return Ok(KnowledgeSyncResponse {
+                sync_run_uid: existing.sync_run_uid,
+                status: existing.status.as_str().to_string(),
+                started_at: existing.started_at,
+            });
+        }
 
         let now = Utc::now();
         let mut run = KnowledgeSyncRun {
@@ -77,6 +96,7 @@ impl KnowledgeService {
         record_knowledge_sync_run(&provider_label, run.status.as_str());
 
         let provider = self.provider(&connection.provider)?;
+        let provider_connection = self.connection_with_credential(&connection).await?;
         let provider_span = tracing::info_span!(
             "knowledge_provider_request",
             tenant_id = %request.tenant_id,
@@ -90,7 +110,7 @@ impl KnowledgeService {
         );
         let triggered = match provider
             .trigger_sync(TriggerSyncRequest {
-                connection,
+                connection: provider_connection,
                 model: None,
             })
             .instrument(provider_span.clone())

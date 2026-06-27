@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_sync_runs (
 CREATE INDEX IF NOT EXISTS knowledge_sync_runs_connection_started_idx
     ON moa.knowledge_sync_runs (tenant_id, connection_id, started_at DESC);
 
+CREATE INDEX IF NOT EXISTS knowledge_sync_runs_fk_connection_idx
+    ON moa.knowledge_sync_runs (connection_id, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS moa.knowledge_objects (
     object_uid UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -113,6 +116,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_objects_external_uniq
 
 CREATE INDEX IF NOT EXISTS knowledge_objects_connection_updated_idx
     ON moa.knowledge_objects (tenant_id, connection_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS knowledge_objects_fk_connection_idx
+    ON moa.knowledge_objects (connection_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS moa.knowledge_ingestion_steps (
     step_uid UUID PRIMARY KEY,
@@ -150,8 +156,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_ingestion_steps_attempt_uniq
 CREATE INDEX IF NOT EXISTS knowledge_ingestion_steps_run_started_idx
     ON moa.knowledge_ingestion_steps (tenant_id, sync_run_id, started_at ASC);
 
+CREATE INDEX IF NOT EXISTS knowledge_ingestion_steps_fk_run_idx
+    ON moa.knowledge_ingestion_steps (sync_run_id, started_at ASC);
+
 CREATE INDEX IF NOT EXISTS knowledge_ingestion_steps_object_started_idx
     ON moa.knowledge_ingestion_steps (tenant_id, object_id, started_at ASC)
+    WHERE object_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS knowledge_ingestion_steps_fk_object_idx
+    ON moa.knowledge_ingestion_steps (object_id, started_at ASC)
     WHERE object_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS moa.knowledge_provider_events (
@@ -175,6 +188,10 @@ CREATE TABLE IF NOT EXISTS moa.knowledge_provider_events (
 CREATE UNIQUE INDEX IF NOT EXISTS knowledge_provider_events_provider_event_uniq
     ON moa.knowledge_provider_events (tenant_id, provider, provider_event_id);
 
+CREATE INDEX IF NOT EXISTS knowledge_provider_events_fk_connection_idx
+    ON moa.knowledge_provider_events (connection_id, received_at DESC)
+    WHERE connection_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS moa.knowledge_document_versions (
     document_version_uid UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -195,6 +212,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_document_versions_content_uniq
 
 CREATE INDEX IF NOT EXISTS knowledge_document_versions_object_created_idx
     ON moa.knowledge_document_versions (tenant_id, object_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS knowledge_document_versions_fk_object_idx
+    ON moa.knowledge_document_versions (object_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS moa.knowledge_blocks (
     block_uid UUID PRIMARY KEY,
@@ -219,6 +239,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_blocks_ordinal_uniq
 
 CREATE INDEX IF NOT EXISTS knowledge_blocks_version_hash_idx
     ON moa.knowledge_blocks (tenant_id, document_version_id, block_hash);
+
+CREATE INDEX IF NOT EXISTS knowledge_blocks_fk_version_idx
+    ON moa.knowledge_blocks (document_version_id, ordinal);
 
 CREATE TABLE IF NOT EXISTS moa.knowledge_chunks (
     chunk_uid UUID PRIMARY KEY,
@@ -247,6 +270,13 @@ CREATE INDEX IF NOT EXISTS knowledge_chunks_graph_node_idx
     ON moa.knowledge_chunks (tenant_id, graph_node_uid)
     WHERE graph_node_uid IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS knowledge_chunks_fk_version_idx
+    ON moa.knowledge_chunks (document_version_id, ordinal);
+
+CREATE INDEX IF NOT EXISTS knowledge_chunks_graph_node_active_idx
+    ON moa.knowledge_chunks (graph_node_uid, created_at DESC)
+    WHERE graph_node_uid IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS moa.knowledge_contact_groups (
     group_uid UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
@@ -271,6 +301,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_contact_groups_name_uniq
         COALESCE(source_connection_id, '00000000-0000-0000-0000-000000000000'::UUID)
     );
 
+CREATE INDEX IF NOT EXISTS knowledge_contact_groups_fk_source_connection_idx
+    ON moa.knowledge_contact_groups (source_connection_id, updated_at DESC)
+    WHERE source_connection_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS moa.knowledge_contact_group_memberships (
     membership_uid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
@@ -291,6 +325,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS knowledge_contact_group_active_membership_uniq
 CREATE INDEX IF NOT EXISTS knowledge_contact_group_memberships_contact_idx
     ON moa.knowledge_contact_group_memberships (tenant_id, contact_id)
     WHERE active = TRUE;
+
+CREATE INDEX IF NOT EXISTS knowledge_contact_group_memberships_fk_group_idx
+    ON moa.knowledge_contact_group_memberships (group_id, contact_id);
 
 DROP TRIGGER IF EXISTS knowledge_connections_set_tenant_columns ON moa.knowledge_connections;
 CREATE TRIGGER knowledge_connections_set_tenant_columns

@@ -16,16 +16,23 @@ use crate::{
         KnowledgeChunk, KnowledgeConnection, KnowledgeConnectionProjection, KnowledgeIngestionStep,
         KnowledgeObject, KnowledgeObjectInspection, KnowledgeObjectProjection,
         KnowledgeProviderEventRecord, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus,
+        SyncRunStatus,
     },
     error::{Error, Result},
     normalize::redact_provider_metadata,
 };
 
+const LIST_CONNECTIONS_LIMIT: i64 = 100;
+const LIST_OBJECTS_LIMIT: u32 = 500;
+
 /// Persistence seam for tenant knowledge rows.
 #[async_trait]
 pub trait KnowledgeRepository: Send + Sync {
     /// Saves or updates a linked connection.
-    async fn upsert_connection(&self, connection: KnowledgeConnection) -> Result<()>;
+    async fn upsert_connection(
+        &self,
+        connection: KnowledgeConnection,
+    ) -> Result<KnowledgeConnection>;
 
     /// Gets a linked connection by identifier.
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>>;
@@ -42,6 +49,13 @@ pub trait KnowledgeRepository: Send + Sync {
 
     /// Gets one sync run by identifier.
     async fn get_sync_run(&self, sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>>;
+
+    /// Gets the latest sync run for a connection, optionally restricted by statuses.
+    async fn latest_sync_run_for_connection(
+        &self,
+        connection_uid: Uuid,
+        statuses: &[SyncRunStatus],
+    ) -> Result<Option<KnowledgeSyncRun>>;
 
     /// Updates a sync run.
     async fn update_sync_run(&self, run: KnowledgeSyncRun) -> Result<()>;
@@ -231,9 +245,12 @@ impl PostgresKnowledgeRepository {
 
 #[async_trait]
 impl KnowledgeRepository for PostgresKnowledgeRepository {
-    async fn upsert_connection(&self, connection: KnowledgeConnection) -> Result<()> {
+    async fn upsert_connection(
+        &self,
+        connection: KnowledgeConnection,
+    ) -> Result<KnowledgeConnection> {
         let mut conn = self.begin().await?;
-        sqlx::query(
+        let row = sqlx::query(
             r#"
             INSERT INTO moa.knowledge_connections (
                 connection_uid, tenant_id, storage_partition_id, provider, provider_config_key,
@@ -248,6 +265,8 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
                 metadata = EXCLUDED.metadata,
                 last_synced_at = EXCLUDED.last_synced_at,
                 updated_at = EXCLUDED.updated_at
+            RETURNING connection_uid, tenant_id, provider, connector, provider_connection_id,
+                      credential_ref, status, metadata, created_at, updated_at, last_synced_at
             "#,
         )
         .bind(connection.connection_uid)
@@ -262,10 +281,11 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(connection.created_at)
         .bind(connection.updated_at)
         .bind(connection.last_synced_at)
-        .execute(conn.as_mut())
+        .fetch_one(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
-        conn.commit().await.map_err(map_moa_error)
+        conn.commit().await.map_err(map_moa_error)?;
+        connection_from_row(&row)
     }
 
     async fn get_connection(&self, connection_uid: Uuid) -> Result<Option<KnowledgeConnection>> {
@@ -309,10 +329,12 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             WHERE c.tenant_id = $1
               AND ($2::TEXT IS NULL OR c.provider = $2)
             ORDER BY c.updated_at DESC, c.connection_uid DESC
+            LIMIT $3
             "#,
         )
         .bind(tenant_id.0)
         .bind(provider)
+        .bind(LIST_CONNECTIONS_LIMIT)
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -322,7 +344,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
 
     async fn create_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
         let mut conn = self.begin().await?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO moa.knowledge_sync_runs (
                 sync_run_uid, tenant_id, storage_partition_id, connection_id, status,
@@ -362,6 +384,10 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
+        ensure_rows_affected(
+            result.rows_affected(),
+            "record ingestion step parent sync run",
+        )?;
         conn.commit().await.map_err(map_moa_error)
     }
 
@@ -386,9 +412,42 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         row.as_ref().map(sync_run_from_row).transpose()
     }
 
+    async fn latest_sync_run_for_connection(
+        &self,
+        connection_uid: Uuid,
+        statuses: &[SyncRunStatus],
+    ) -> Result<Option<KnowledgeSyncRun>> {
+        let status_values = statuses
+            .iter()
+            .map(|status| status.as_str())
+            .collect::<Vec<_>>();
+        let mut conn = self.begin().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT sync_run_uid, tenant_id, connection_id, status, parser_provider,
+                   records_seen, records_changed, records_deleted, records_ingested,
+                   records_failed, objects_parsed, chunks_embedded,
+                   graph_nodes_upserted, graph_edges_upserted,
+                   error, started_at, finished_at
+            FROM moa.knowledge_sync_runs
+            WHERE connection_id = $1
+              AND (cardinality($2::TEXT[]) = 0 OR status = ANY($2::TEXT[]))
+            ORDER BY started_at DESC, sync_run_uid DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(connection_uid)
+        .bind(&status_values)
+        .fetch_optional(conn.as_mut())
+        .await
+        .map_err(map_sqlx_error)?;
+        conn.commit().await.map_err(map_moa_error)?;
+        row.as_ref().map(sync_run_from_row).transpose()
+    }
+
     async fn update_sync_run(&self, run: KnowledgeSyncRun) -> Result<()> {
         let mut conn = self.begin().await?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE moa.knowledge_sync_runs
             SET status = $2,
@@ -428,6 +487,10 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .execute(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
+        ensure_rows_affected(
+            result.rows_affected(),
+            "insert document version parent object",
+        )?;
         conn.commit().await.map_err(map_moa_error)
     }
 
@@ -629,7 +692,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(tenant_id.0)
         .bind(connection_uid)
         .bind(object_type)
-        .bind(i64::from(limit))
+        .bind(i64::from(limit.min(LIST_OBJECTS_LIMIT)))
         .fetch_all(conn.as_mut())
         .await
         .map_err(map_sqlx_error)?;
@@ -753,7 +816,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .await
             .map_err(map_sqlx_error)?;
         for block in blocks {
-            sqlx::query(
+            let result = sqlx::query(
                 r#"
                 INSERT INTO moa.knowledge_blocks (
                     block_uid, tenant_id, storage_partition_id, document_version_id,
@@ -776,6 +839,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
+            ensure_rows_affected(result.rows_affected(), "replace blocks parent version")?;
         }
         conn.commit().await.map_err(map_moa_error)
     }
@@ -788,7 +852,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .await
             .map_err(map_sqlx_error)?;
         for chunk in chunks {
-            sqlx::query(
+            let result = sqlx::query(
                 r#"
                 INSERT INTO moa.knowledge_chunks (
                     chunk_uid, tenant_id, storage_partition_id, document_version_id,
@@ -814,6 +878,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             .execute(conn.as_mut())
             .await
             .map_err(map_sqlx_error)?;
+            ensure_rows_affected(result.rows_affected(), "replace chunks parent version")?;
         }
         conn.commit().await.map_err(map_moa_error)
     }
@@ -907,17 +972,27 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
             r#"
             INSERT INTO moa.knowledge_contact_groups (
                 group_uid, tenant_id, storage_partition_id, group_kind,
-                normalized_name, display_name, metadata
+                normalized_name, display_name, source_connection_id, metadata
             )
-            VALUES ($1, $2, $3, 'derived', $4, $5, $6)
-            ON CONFLICT (
-                tenant_id,
-                group_kind,
-                normalized_name,
-                (COALESCE(source_connection_id, '00000000-0000-0000-0000-000000000000'::UUID))
+            VALUES (
+                $1,
+                $2,
+                $3,
+                'derived',
+                $4,
+                $5,
+                (
+                    SELECT connection_uid
+                    FROM moa.knowledge_connections
+                    WHERE connection_uid = $6
+                      AND tenant_id = $2
+                ),
+                $7
             )
+            ON CONFLICT (group_uid)
             DO UPDATE SET
                 display_name = EXCLUDED.display_name,
+                source_connection_id = EXCLUDED.source_connection_id,
                 metadata = EXCLUDED.metadata,
                 updated_at = now()
             "#,
@@ -927,6 +1002,7 @@ impl KnowledgeRepository for PostgresKnowledgeRepository {
         .bind(storage_partition_id(group.tenant_id))
         .bind(group.group_key)
         .bind(group.display_name)
+        .bind(source_connection_id(&group.metadata))
         .bind(group.metadata)
         .execute(conn.as_mut())
         .await
@@ -1117,8 +1193,11 @@ pub struct NoopKnowledgeRepository;
 
 #[async_trait]
 impl KnowledgeRepository for NoopKnowledgeRepository {
-    async fn upsert_connection(&self, _connection: KnowledgeConnection) -> Result<()> {
-        Ok(())
+    async fn upsert_connection(
+        &self,
+        connection: KnowledgeConnection,
+    ) -> Result<KnowledgeConnection> {
+        Ok(connection)
     }
 
     async fn get_connection(&self, _connection_uid: Uuid) -> Result<Option<KnowledgeConnection>> {
@@ -1138,6 +1217,14 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
     }
 
     async fn get_sync_run(&self, _sync_run_uid: Uuid) -> Result<Option<KnowledgeSyncRun>> {
+        Ok(None)
+    }
+
+    async fn latest_sync_run_for_connection(
+        &self,
+        _connection_uid: Uuid,
+        _statuses: &[SyncRunStatus],
+    ) -> Result<Option<KnowledgeSyncRun>> {
         Ok(None)
     }
 
@@ -1261,6 +1348,15 @@ impl KnowledgeRepository for NoopKnowledgeRepository {
 
 fn storage_partition_id(tenant_id: TenantId) -> String {
     StoragePartitionId::for_tenant(tenant_id).to_string()
+}
+
+fn ensure_rows_affected(rows: u64, operation: &str) -> Result<()> {
+    if rows > 0 {
+        return Ok(());
+    }
+    Err(Error::Repository(format!(
+        "{operation} wrote no rows because its parent was not visible"
+    )))
 }
 
 fn connection_from_row(row: &sqlx::postgres::PgRow) -> Result<KnowledgeConnection> {
@@ -1413,6 +1509,13 @@ fn contact_group_from_row(row: &sqlx::postgres::PgRow) -> Result<ContactGroup> {
         display_name: row.try_get("display_name").map_err(map_sqlx_error)?,
         metadata: row.try_get("metadata").map_err(map_sqlx_error)?,
     })
+}
+
+fn source_connection_id(metadata: &serde_json::Value) -> Option<Uuid> {
+    metadata
+        .get("source_connection_uid")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
 }
 
 fn contact_group_target_member_from_row(

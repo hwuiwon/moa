@@ -7,7 +7,7 @@ use moa_knowledge::{
     domain::{KnowledgeObject, ObjectStatus, ParseInput},
     parser::{DocumentParser, unstructured::UnstructuredParser},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -34,7 +34,7 @@ fn input() -> ParseInput {
         file_name: Some("guide.pdf".to_string()),
         mime_type: Some("application/pdf".to_string()),
         source_url: Some("https://files.example/guide.pdf".to_string()),
-        bytes: None,
+        bytes: Some(b"%PDF-1.4 test fixture".to_vec()),
         text: None,
         options: json!({"chunking_options": {"max_characters": 4000}}),
     }
@@ -46,18 +46,13 @@ async fn partition_elements_preserve_parent_filetype_source_coordinates_and_iden
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/general/v0/general"))
-        .and(body_string_contains("\"strategy\":\"hi_res\""))
-        .and(body_string_contains("\"chunking_strategy\":\"by_title\""))
-        .and(|request: &wiremock::Request| {
-            request
-                .body_json::<Value>()
-                .ok()
-                .and_then(|body| {
-                    body.pointer("/chunking_options/max_characters")
-                        .and_then(Value::as_u64)
-                })
-                == Some(4000)
-        })
+        .and(body_string_contains("name=\"files\""))
+        .and(body_string_contains("name=\"strategy\""))
+        .and(body_string_contains("auto"))
+        .and(body_string_contains("name=\"chunking_strategy\""))
+        .and(body_string_contains("by_title"))
+        .and(body_string_contains("name=\"max_characters\""))
+        .and(body_string_contains("4000"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {
                 "element_id": "title-1",
@@ -90,7 +85,7 @@ async fn partition_elements_preserve_parent_filetype_source_coordinates_and_iden
         reqwest::Client::new(),
         server.uri(),
         "test-key",
-        "hi_res",
+        "auto",
         "by_title",
     );
     let parsed = parser
@@ -138,7 +133,8 @@ async fn object_response_preserves_parser_status_and_warnings() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/general/v0/general"))
-        .and(body_string_contains("\"strategy\":\"hi_res\""))
+        .and(body_string_contains("name=\"strategy\""))
+        .and(body_string_contains("auto"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": "completed_with_warnings",
             "warnings": [{"code": "low_confidence"}],
@@ -159,7 +155,7 @@ async fn object_response_preserves_parser_status_and_warnings() {
         reqwest::Client::new(),
         server.uri(),
         "test-key",
-        "hi_res",
+        "auto",
         "by_title",
     );
     let parsed = parser
@@ -193,7 +189,7 @@ async fn parser_error_maps_to_typed_http_status() {
         reqwest::Client::new(),
         server.uri(),
         "test-key",
-        "hi_res",
+        "auto",
         "by_title",
     );
     let error = parser
@@ -210,7 +206,7 @@ async fn missing_credentials_fail_with_typed_config_error() {
         reqwest::Client::new(),
         "https://unstructured.invalid",
         "",
-        "hi_res",
+        "auto",
         "by_title",
     );
     let error = parser

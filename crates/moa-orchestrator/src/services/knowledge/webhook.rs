@@ -63,22 +63,27 @@ impl KnowledgeService {
                 return Err(error.into());
             }
         };
-        let tenant_id = tenant_id_from_metadata(&verified.metadata)
-            .or_else(|| tenant_id_from_metadata(&request.payload))
-            .ok_or_else(|| {
-                KnowledgeServiceError::InvalidRequest(
-                    "verified webhook did not include tenant_id".to_string(),
-                )
-            })?;
+        let tenant_id = tenant_id_from_metadata(&verified.metadata).ok_or_else(|| {
+            KnowledgeServiceError::InvalidRequest(
+                "verified webhook did not include tenant_id".to_string(),
+            )
+        })?;
         let connection_uid =
-            uuid_from_metadata(&verified.metadata, &["connection_uid", "connection_id"]).or_else(
-                || uuid_from_metadata(&request.payload, &["connection_uid", "connection_id"]),
-            );
+            uuid_from_metadata(&verified.metadata, &["connection_uid", "connection_id"]);
         verify_span.record("tenant_id", tracing::field::display(tenant_id));
         if let Some(connection_uid) = connection_uid {
             verify_span.record("connection_id", tracing::field::display(connection_uid));
         }
         let repository = self.repository(tenant_id);
+        if let Some(connection_uid) = connection_uid {
+            let connection = repository
+                .get_connection(connection_uid)
+                .await?
+                .ok_or(KnowledgeServiceError::NotFound("knowledge connection"))?;
+            if connection.tenant_id != tenant_id {
+                return Err(KnowledgeServiceError::NotFound("knowledge connection"));
+            }
+        }
         let recorded = repository
             .record_provider_event(KnowledgeProviderEventRecord {
                 provider_event_uid: Uuid::now_v7(),
@@ -99,26 +104,36 @@ impl KnowledgeService {
             && is_sync_completed_event(&recorded.event_type)
             && let Some(connection_uid) = recorded.connection_uid
         {
-            let run = KnowledgeSyncRun {
-                sync_run_uid: Uuid::now_v7(),
-                tenant_id,
-                connection_uid,
-                parser: None,
-                status: SyncRunStatus::Queued,
-                records_seen: 0,
-                records_changed: 0,
-                records_deleted: 0,
-                records_ingested: 0,
-                records_failed: 0,
-                objects_parsed: 0,
-                chunks_embedded: 0,
-                graph_nodes_upserted: 0,
-                graph_edges_upserted: 0,
-                error_code: None,
-                started_at: Utc::now(),
-                finished_at: None,
+            let run = if let Some(mut run) = repository
+                .latest_sync_run_for_connection(connection_uid, &[SyncRunStatus::ProviderSyncing])
+                .await?
+            {
+                run.status = SyncRunStatus::ProviderSynced;
+                repository.update_sync_run(run.clone()).await?;
+                run
+            } else {
+                let run = KnowledgeSyncRun {
+                    sync_run_uid: Uuid::now_v7(),
+                    tenant_id,
+                    connection_uid,
+                    parser: None,
+                    status: SyncRunStatus::ProviderSynced,
+                    records_seen: 0,
+                    records_changed: 0,
+                    records_deleted: 0,
+                    records_ingested: 0,
+                    records_failed: 0,
+                    objects_parsed: 0,
+                    chunks_embedded: 0,
+                    graph_nodes_upserted: 0,
+                    graph_edges_upserted: 0,
+                    error_code: None,
+                    started_at: Utc::now(),
+                    finished_at: None,
+                };
+                repository.create_sync_run(run.clone()).await?;
+                run
             };
-            repository.create_sync_run(run.clone()).await?;
             verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
             record_knowledge_sync_run(&recorded.provider, run.status.as_str());
             repository

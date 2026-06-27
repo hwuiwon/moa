@@ -118,6 +118,7 @@ serde_json.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
+subtle.workspace = true
 tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true

@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
+use chrono::Utc;
 use hmac::{Hmac, Mac};
 use reqwest::header::HeaderMap;
 use serde_json::{Map, Value};
@@ -94,6 +95,7 @@ fn verify_svix_signature(
         .ok_or_else(|| Error::parser(parser, "webhook missing svix-id header"))?;
     let timestamp = webhook_header(headers, &["svix-timestamp", "x-svix-timestamp"])
         .ok_or_else(|| Error::parser(parser, "webhook missing svix-timestamp header"))?;
+    verify_svix_timestamp(parser, &timestamp)?;
     let signature = webhook_header(headers, &["svix-signature", "x-svix-signature"])
         .ok_or_else(|| Error::parser(parser, "webhook missing svix-signature header"))?;
     let key = svix_signing_key(signing_key, parser)?;
@@ -114,6 +116,20 @@ fn verify_svix_signature(
     Err(Error::parser(
         parser,
         "webhook signature verification failed",
+    ))
+}
+
+fn verify_svix_timestamp(parser: &str, timestamp: &str) -> Result<()> {
+    let ts = timestamp
+        .parse::<i64>()
+        .map_err(|_| Error::parser(parser, "webhook svix-timestamp was not numeric"))?;
+    let now = Utc::now().timestamp();
+    if (now - ts).abs() <= 300 {
+        return Ok(());
+    }
+    Err(Error::parser(
+        parser,
+        "webhook svix-timestamp was outside the replay window",
     ))
 }
 

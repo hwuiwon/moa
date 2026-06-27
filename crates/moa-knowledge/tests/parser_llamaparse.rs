@@ -55,10 +55,15 @@ async fn parse_request_preserves_items_page_metadata_timing_and_identity() {
     // Pins: LlamaParse markdown plus structured items map to stable MOA blocks/chunks offline.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/parsing/job"))
-        .and(body_string_contains("\"tier\":\"premium\""))
+        .and(path("/api/v2/parse"))
+        .and(body_string_contains("\"tier\":\"agentic\""))
         .and(body_string_contains("\"version\":\"2026-06\""))
-        .and(body_string_contains("page_metadata"))
+        .and(body_string_contains(
+            "\"source_url\":\"https://files.example/guide.pdf\"",
+        ))
+        .and(body_string_contains(
+            "\"processing_options\":{\"cost_optimizer\":{\"enable\":true}}",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "job_id": "job-123",
             "markdown": "# Alpha\n\nBody one\n\n| A | B |",
@@ -79,7 +84,7 @@ async fn parse_request_preserves_items_page_metadata_timing_and_identity() {
         reqwest::Client::new(),
         server.uri(),
         "test-key",
-        "premium",
+        "agentic",
         "2026-06",
         Vec::new(),
     );
@@ -169,8 +174,11 @@ async fn partial_success_preserves_parser_status_and_errors() {
     // Pins: LlamaParse partial-success payloads keep provider status and safe error metadata.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/parsing/job"))
-        .and(body_string_contains("\"tier\":\"premium\""))
+        .and(path("/api/v2/parse"))
+        .and(body_string_contains("\"tier\":\"agentic\""))
+        .and(body_string_contains(
+            "\"processing_options\":{\"cost_optimizer\":{\"enable\":true}}",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "job_id": "job-partial",
             "status": "partial_success",
@@ -188,7 +196,7 @@ async fn partial_success_preserves_parser_status_and_errors() {
         reqwest::Client::new(),
         server.uri(),
         "test-key",
-        "premium",
+        "agentic",
         "2026-06",
         Vec::new(),
     );
@@ -209,7 +217,7 @@ async fn parse_error_maps_to_typed_http_status() {
     // Pins: LlamaParse parser failures surface as typed HTTP status errors.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/v1/parsing/job"))
+        .and(path("/api/v2/parse"))
         .respond_with(ResponseTemplate::new(422).set_body_json(json!({
             "detail": "parse failed"
         })))
@@ -221,7 +229,7 @@ async fn parse_error_maps_to_typed_http_status() {
         reqwest::Client::new(),
         server.uri(),
         "test-key",
-        "premium",
+        "agentic",
         "2026-06",
         Vec::new(),
     );
@@ -239,7 +247,7 @@ async fn missing_credentials_fail_with_typed_config_error() {
         reqwest::Client::new(),
         "https://llamaparse.invalid",
         "",
-        "premium",
+        "agentic",
         "2026-06",
         Vec::new(),
     );

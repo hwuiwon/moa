@@ -487,6 +487,10 @@ pub async fn hard_purge_with_audit(
 pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
     validate_edge_scope(&intent)?;
     let mut conn = store.begin_required().await?;
+    if edge_exists(conn.as_mut(), intent.label, intent.uid).await? {
+        conn.commit().await?;
+        return Ok(intent.uid);
+    }
     edge_create_template(intent.label)
         .execute(&edge_params(&intent))
         .execute(conn.as_mut())
@@ -519,6 +523,25 @@ pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Resu
 
     conn.commit().await?;
     Ok(intent.uid)
+}
+
+async fn edge_exists(conn: &mut PgConnection, label: EdgeLabel, uid: Uuid) -> Result<bool> {
+    let edge_table = age_edge_table(label);
+    let sql = format!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM {edge_table}
+            WHERE moa.age_property(properties, 'uid') =
+                  ('"' || $1 || '"')::ag_catalog.agtype
+        )
+        "#
+    );
+    sqlx::query_scalar::<_, bool>(&sql)
+        .bind(uid.to_string())
+        .fetch_one(conn)
+        .await
+        .map_err(GraphError::from)
 }
 
 fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {

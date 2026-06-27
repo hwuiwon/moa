@@ -23,6 +23,8 @@ pub struct StepOutcome {
     pub retry_count: u32,
     /// Error code.
     pub error_code: Option<String>,
+    /// Step duration in milliseconds.
+    pub duration_ms: Option<u64>,
 }
 
 impl StepOutcome {
@@ -35,6 +37,7 @@ impl StepOutcome {
             summary: None,
             retry_count: 0,
             error_code: None,
+            duration_ms: None,
         }
     }
 
@@ -47,6 +50,7 @@ impl StepOutcome {
             summary: None,
             retry_count: 0,
             error_code: Some(error_code.into()),
+            duration_ms: None,
         }
     }
 }
@@ -141,6 +145,7 @@ pub fn failed_outcome(classification: FailureClassification) -> StepOutcome {
         summary: Some(format!("{} failure", classification.retry_label())),
         retry_count: 0,
         error_code: Some(classification.error_code.to_string()),
+        duration_ms: None,
     }
 }
 
@@ -221,7 +226,9 @@ impl IngestionObserver for MetricsIngestionObserver {
 
 impl StepOutcome {
     fn duration_seconds(&self) -> f64 {
-        0.0
+        self.duration_ms
+            .map(|duration_ms| duration_ms as f64 / 1000.0)
+            .unwrap_or(0.0)
     }
 }
 
@@ -233,16 +240,19 @@ pub fn build_step_row(
     step: impl Into<String>,
     outcome: StepOutcome,
 ) -> KnowledgeIngestionStep {
-    let now = Utc::now();
+    let ended_at = Utc::now();
+    let duration_ms = outcome.duration_ms.unwrap_or(0);
+    let started_at =
+        ended_at - chrono::Duration::milliseconds(duration_ms.min(i64::MAX as u64) as i64);
     KnowledgeIngestionStep {
         step_uid: Uuid::now_v7(),
         sync_run_uid,
         object_uid,
         step: step.into(),
         status: outcome.status,
-        started_at: now,
-        ended_at: Some(now),
-        duration_ms: Some(0),
+        started_at,
+        ended_at: Some(ended_at),
+        duration_ms: Some(duration_ms),
         counters: sanitize_counters(outcome.counters),
         summary: outcome.summary,
         retry_count: outcome.retry_count,
@@ -277,6 +287,7 @@ fn sanitize_counters(counters: Value) -> Value {
                             | "embeddings_reused"
                             | "graph_nodes_upserted"
                             | "graph_edges_upserted"
+                            | "contact_groups"
                             | "vector_rows_upserted"
                             | "vector_rows_deleted"
                             | "contact_group_memberships_changed"

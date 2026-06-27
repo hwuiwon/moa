@@ -721,7 +721,7 @@ async fn hydrate_knowledge_chunks(
     }
     let rows = sqlx::query_as::<_, KnowledgeChunkRow>(
         r#"
-        SELECT
+        SELECT DISTINCT ON (c.graph_node_uid)
             c.graph_node_uid,
             c.chunk_uid,
             c.document_version_id AS document_version_uid,
@@ -743,6 +743,8 @@ async fn hydrate_knowledge_chunks(
         WHERE c.tenant_id = $1
           AND c.graph_node_uid = ANY($2)
           AND o.status = 'active'
+          AND c.metadata->>'active' IS DISTINCT FROM 'false'
+        ORDER BY c.graph_node_uid, v.created_at DESC, c.ordinal ASC
         "#,
     )
     .bind(scope.tenant_id().0)
@@ -829,7 +831,11 @@ fn apply_feature_ranking(
         .with_request_scope(&req.scope)
         .with_first_person_query(&req.query_text);
     for hit in hits.iter_mut() {
-        hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &hit.node);
+        let mut node = hit.node.clone();
+        if let Some(chunk) = &hit.knowledge_chunk {
+            node.name.clone_from(&chunk.text);
+        }
+        hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &node);
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
             hit.score += config.weights.overlap;
         }

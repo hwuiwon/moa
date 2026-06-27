@@ -194,22 +194,10 @@ pub struct MoaEnvOverlay {
     pub knowledge_external_parser_default: Option<String>,
     /// `MOA_NANGO_API_BASE_URL`.
     pub nango_api_base_url: Option<String>,
-    /// `MOA_NANGO_API_KEY`.
-    pub nango_api_key: Option<String>,
-    /// `MOA_NANGO_WEBHOOK_SIGNING_KEY`.
-    pub nango_webhook_signing_key: Option<String>,
     /// `MOA_MERGE_API_BASE_URL`.
     pub merge_api_base_url: Option<String>,
-    /// `MOA_MERGE_API_KEY`.
-    pub merge_api_key: Option<String>,
-    /// `MOA_MERGE_WEBHOOK_SIGNATURE_KEY`.
-    pub merge_webhook_signature_key: Option<String>,
     /// `MOA_LLAMAPARSE_API_URL`.
     pub llamaparse_api_url: Option<String>,
-    /// `MOA_LLAMAPARSE_API_KEY`.
-    pub llamaparse_api_key: Option<String>,
-    /// `MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY`.
-    pub llamaparse_webhook_signing_key: Option<String>,
     /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME`.
     pub llamaparse_webhook_header_name: Option<String>,
     /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE`.
@@ -218,18 +206,12 @@ pub struct MoaEnvOverlay {
     pub llamaparse_tier: Option<String>,
     /// `MOA_UNSTRUCTURED_API_URL`.
     pub unstructured_api_url: Option<String>,
-    /// `MOA_UNSTRUCTURED_API_KEY`.
-    pub unstructured_api_key: Option<String>,
     /// `MOA_UNSTRUCTURED_STRATEGY`.
     pub unstructured_strategy: Option<String>,
     /// `MOA_UNSTRUCTURED_CHUNKING_STRATEGY`.
     pub unstructured_chunking_strategy: Option<String>,
     /// `MOA_REDUCTO_API_URL`.
     pub reducto_api_url: Option<String>,
-    /// `MOA_REDUCTO_API_KEY`.
-    pub reducto_api_key: Option<String>,
-    /// `MOA_REDUCTO_WEBHOOK_SIGNING_KEY`.
-    pub reducto_webhook_signing_key: Option<String>,
     /// `MOA_REDUCTO_WEBHOOK_HEADER_NAME`.
     pub reducto_webhook_header_name: Option<String>,
     /// `MOA_REDUCTO_WEBHOOK_HEADER_VALUE`.
@@ -1056,31 +1038,13 @@ impl MoaEnvOverlay {
             &mut config.knowledge.nango.api_base_url,
             &self.nango_api_base_url,
         );
-        set_option_if_some(&mut config.knowledge.nango.api_key, &self.nango_api_key);
-        set_option_if_some(
-            &mut config.knowledge.nango.webhook_signing_key,
-            &self.nango_webhook_signing_key,
-        );
         set_if_some(
             &mut config.knowledge.merge.api_base_url,
             &self.merge_api_base_url,
         );
-        set_option_if_some(&mut config.knowledge.merge.api_key, &self.merge_api_key);
-        set_option_if_some(
-            &mut config.knowledge.merge.webhook_signature_key,
-            &self.merge_webhook_signature_key,
-        );
         set_if_some(
             &mut config.knowledge.llamaparse.api_base_url,
             &self.llamaparse_api_url,
-        );
-        set_option_if_some(
-            &mut config.knowledge.llamaparse.api_key,
-            &self.llamaparse_api_key,
-        );
-        set_option_if_some(
-            &mut config.knowledge.llamaparse.webhook_signing_key,
-            &self.llamaparse_webhook_signing_key,
         );
         set_option_if_some(
             &mut config.knowledge.llamaparse.webhook_header_name,
@@ -1095,10 +1059,6 @@ impl MoaEnvOverlay {
             &mut config.knowledge.unstructured.api_base_url,
             &self.unstructured_api_url,
         );
-        set_option_if_some(
-            &mut config.knowledge.unstructured.api_key,
-            &self.unstructured_api_key,
-        );
         set_if_some(
             &mut config.knowledge.unstructured.strategy,
             &self.unstructured_strategy,
@@ -1110,11 +1070,6 @@ impl MoaEnvOverlay {
         set_if_some(
             &mut config.knowledge.reducto.api_base_url,
             &self.reducto_api_url,
-        );
-        set_option_if_some(&mut config.knowledge.reducto.api_key, &self.reducto_api_key);
-        set_option_if_some(
-            &mut config.knowledge.reducto.webhook_signing_key,
-            &self.reducto_webhook_signing_key,
         );
         set_option_if_some(
             &mut config.knowledge.reducto.webhook_header_name,
@@ -1759,34 +1714,22 @@ mod tests {
 
     #[test]
     fn knowledge_overlay_applies_flat_provider_and_parser_settings() {
-        // Pins: tenant knowledge env names update the nested knowledge config without requiring secrets at load time.
+        // Pins: tenant knowledge overlay updates non-secret runtime config without adding secret indirection knobs.
         let overlay = MoaEnvOverlay::from_iter(env_pairs([
             ("MOA_KNOWLEDGE_PROVIDERS_ENABLED", "nango"),
             ("MOA_KNOWLEDGE_PARSERS_ENABLED", "native,llamaparse"),
             ("MOA_KNOWLEDGE_PARSER_DEFAULT", "native"),
             ("MOA_KNOWLEDGE_EXTERNAL_PARSER_DEFAULT", "llamaparse"),
             ("MOA_NANGO_API_BASE_URL", "https://nango.example"),
-            ("MOA_NANGO_API_KEY", "nango-secret"),
-            ("MOA_NANGO_WEBHOOK_SIGNING_KEY", "nango-webhook-secret"),
             ("MOA_MERGE_API_BASE_URL", "https://merge.example"),
-            ("MOA_MERGE_API_KEY", "merge-secret"),
-            ("MOA_MERGE_WEBHOOK_SIGNATURE_KEY", "merge-webhook-secret"),
             ("MOA_LLAMAPARSE_API_URL", "https://llamaparse.example"),
-            ("MOA_LLAMAPARSE_API_KEY", "llamaparse-secret"),
-            (
-                "MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY",
-                "llamaparse-webhook-secret",
-            ),
             ("MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME", "x-llama-secret"),
             ("MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE", "llama-header-secret"),
-            ("MOA_LLAMAPARSE_TIER", "premium"),
+            ("MOA_LLAMAPARSE_TIER", "agentic"),
             ("MOA_UNSTRUCTURED_API_URL", "https://unstructured.example"),
-            ("MOA_UNSTRUCTURED_API_KEY", "unstructured-secret"),
             ("MOA_UNSTRUCTURED_STRATEGY", "fast"),
             ("MOA_UNSTRUCTURED_CHUNKING_STRATEGY", "basic"),
             ("MOA_REDUCTO_API_URL", "https://reducto.example"),
-            ("MOA_REDUCTO_API_KEY", "reducto-secret"),
-            ("MOA_REDUCTO_WEBHOOK_SIGNING_KEY", "reducto-webhook-secret"),
             ("MOA_REDUCTO_WEBHOOK_HEADER_NAME", "x-reducto-secret"),
             ("MOA_REDUCTO_WEBHOOK_HEADER_VALUE", "reducto-header-secret"),
             ("MOA_REDUCTO_PARSE_MODE", "ocr"),
@@ -1806,34 +1749,28 @@ mod tests {
         assert_eq!(config.knowledge.parser.default, "native");
         assert_eq!(config.knowledge.parser.external_default, "llamaparse");
         assert_eq!(config.knowledge.nango.api_base_url, "https://nango.example");
+        assert_eq!(config.knowledge.nango.api_key_env, "NANGO_API_KEY");
         assert_eq!(
-            config.knowledge.nango.api_key.as_deref(),
-            Some("nango-secret")
-        );
-        assert_eq!(
-            config.knowledge.nango.webhook_signing_key.as_deref(),
-            Some("nango-webhook-secret")
+            config.knowledge.nango.webhook_signing_key_env,
+            "NANGO_WEBHOOK_SIGNING_KEY"
         );
         assert_eq!(config.knowledge.merge.api_base_url, "https://merge.example");
+        assert_eq!(config.knowledge.merge.api_key_env, "MERGE_API_KEY");
         assert_eq!(
-            config.knowledge.merge.api_key.as_deref(),
-            Some("merge-secret")
-        );
-        assert_eq!(
-            config.knowledge.merge.webhook_signature_key.as_deref(),
-            Some("merge-webhook-secret")
+            config.knowledge.merge.webhook_signature_key_env,
+            "MERGE_WEBHOOK_SIGNATURE_KEY"
         );
         assert_eq!(
             config.knowledge.llamaparse.api_base_url,
             "https://llamaparse.example"
         );
         assert_eq!(
-            config.knowledge.llamaparse.api_key.as_deref(),
-            Some("llamaparse-secret")
+            config.knowledge.llamaparse.api_key_env,
+            "LLAMAPARSE_API_KEY"
         );
         assert_eq!(
-            config.knowledge.llamaparse.webhook_signing_key.as_deref(),
-            Some("llamaparse-webhook-secret")
+            config.knowledge.llamaparse.webhook_signing_key_env,
+            "LLAMAPARSE_WEBHOOK_SIGNING_KEY"
         );
         assert_eq!(
             config.knowledge.llamaparse.webhook_header_name.as_deref(),
@@ -1843,14 +1780,14 @@ mod tests {
             config.knowledge.llamaparse.webhook_header_value.as_deref(),
             Some("llama-header-secret")
         );
-        assert_eq!(config.knowledge.llamaparse.tier, "premium");
+        assert_eq!(config.knowledge.llamaparse.tier, "agentic");
         assert_eq!(
             config.knowledge.unstructured.api_base_url,
             "https://unstructured.example"
         );
         assert_eq!(
-            config.knowledge.unstructured.api_key.as_deref(),
-            Some("unstructured-secret")
+            config.knowledge.unstructured.api_key_env,
+            "UNSTRUCTURED_API_KEY"
         );
         assert_eq!(config.knowledge.unstructured.strategy, "fast");
         assert_eq!(config.knowledge.unstructured.chunking_strategy, "basic");
@@ -1858,13 +1795,10 @@ mod tests {
             config.knowledge.reducto.api_base_url,
             "https://reducto.example"
         );
+        assert_eq!(config.knowledge.reducto.api_key_env, "REDUCTO_API_KEY");
         assert_eq!(
-            config.knowledge.reducto.api_key.as_deref(),
-            Some("reducto-secret")
-        );
-        assert_eq!(
-            config.knowledge.reducto.webhook_signing_key.as_deref(),
-            Some("reducto-webhook-secret")
+            config.knowledge.reducto.webhook_signing_key_env,
+            "REDUCTO_WEBHOOK_SIGNING_KEY"
         );
         assert_eq!(
             config.knowledge.reducto.webhook_header_name.as_deref(),

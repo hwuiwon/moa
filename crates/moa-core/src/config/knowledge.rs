@@ -1,5 +1,7 @@
 //! Tenant knowledge-base connector, parser, sync, and observability settings.
 
+use std::env;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MoaError, Result};
@@ -33,44 +35,46 @@ pub struct KnowledgeConfig {
 }
 
 impl KnowledgeConfig {
-    /// Returns the configured API key for a selected linked-account provider.
-    pub fn selected_provider_api_key(&self, provider: &str) -> Result<&str> {
+    /// Loads the configured API key for a selected linked-account provider.
+    pub fn selected_provider_api_key(&self, provider: &str) -> Result<String> {
         require_enabled("provider", provider, &self.providers.enabled)?;
-        let api_key = match provider {
-            "nango" => self.nango.api_key.as_deref(),
-            "merge" => self.merge.api_key.as_deref(),
+        let api_key_env = match provider {
+            "nango" => self.nango.api_key_env.as_str(),
+            "merge" => self.merge.api_key_env.as_str(),
             other => {
                 return Err(MoaError::ConfigError(format!(
                     "knowledge provider `{other}` is not configured"
                 )));
             }
         };
-        require_secret("knowledge provider", provider, api_key)
+        require_env_secret("knowledge provider", provider, api_key_env)
     }
 
-    /// Returns the configured API key for a selected document parser.
+    /// Loads the configured API key for a selected document parser.
     ///
     /// The native parser is local and does not require an API key.
-    pub fn selected_parser_api_key(&self, parser: &str) -> Result<Option<&str>> {
+    pub fn selected_parser_api_key(&self, parser: &str) -> Result<Option<String>> {
         require_enabled("parser", parser, &self.parsers.enabled)?;
         match parser {
             "native" => Ok(None),
-            "llamaparse" => require_secret(
+            "llamaparse" => require_env_secret(
                 "knowledge parser",
                 parser,
-                self.llamaparse.api_key.as_deref(),
+                self.llamaparse.api_key_env.as_str(),
             )
             .map(Some),
-            "unstructured" => require_secret(
+            "unstructured" => require_env_secret(
                 "knowledge parser",
                 parser,
-                self.unstructured.api_key.as_deref(),
+                self.unstructured.api_key_env.as_str(),
             )
             .map(Some),
-            "reducto" => {
-                require_secret("knowledge parser", parser, self.reducto.api_key.as_deref())
-                    .map(Some)
-            }
+            "reducto" => require_env_secret(
+                "knowledge parser",
+                parser,
+                self.reducto.api_key_env.as_str(),
+            )
+            .map(Some),
             other => Err(MoaError::ConfigError(format!(
                 "knowledge parser `{other}` is not configured"
             ))),
@@ -140,20 +144,18 @@ impl Default for KnowledgeParserDefaultsConfig {
 pub struct NangoKnowledgeProviderConfig {
     /// Nango API base URL.
     pub api_base_url: String,
-    /// Optional Nango API key loaded from `MOA_NANGO_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Optional Nango webhook signing key loaded from `MOA_NANGO_WEBHOOK_SIGNING_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhook_signing_key: Option<String>,
+    /// Environment variable containing the Nango API key.
+    pub api_key_env: String,
+    /// Environment variable containing the Nango webhook signing key.
+    pub webhook_signing_key_env: String,
 }
 
 impl Default for NangoKnowledgeProviderConfig {
     fn default() -> Self {
         Self {
             api_base_url: "https://api.nango.dev".to_string(),
-            api_key: None,
-            webhook_signing_key: None,
+            api_key_env: "NANGO_API_KEY".to_string(),
+            webhook_signing_key_env: "NANGO_WEBHOOK_SIGNING_KEY".to_string(),
         }
     }
 }
@@ -164,20 +166,18 @@ impl Default for NangoKnowledgeProviderConfig {
 pub struct MergeKnowledgeProviderConfig {
     /// Merge API base URL.
     pub api_base_url: String,
-    /// Optional Merge API key loaded from `MOA_MERGE_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Optional Merge webhook signature key loaded from `MOA_MERGE_WEBHOOK_SIGNATURE_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhook_signature_key: Option<String>,
+    /// Environment variable containing the Merge API key.
+    pub api_key_env: String,
+    /// Environment variable containing the Merge webhook signature key.
+    pub webhook_signature_key_env: String,
 }
 
 impl Default for MergeKnowledgeProviderConfig {
     fn default() -> Self {
         Self {
             api_base_url: "https://api.merge.dev".to_string(),
-            api_key: None,
-            webhook_signature_key: None,
+            api_key_env: "MERGE_API_KEY".to_string(),
+            webhook_signature_key_env: "MERGE_WEBHOOK_SIGNATURE_KEY".to_string(),
         }
     }
 }
@@ -188,12 +188,10 @@ impl Default for MergeKnowledgeProviderConfig {
 pub struct LlamaParseKnowledgeParserConfig {
     /// LlamaParse API base URL.
     pub api_base_url: String,
-    /// Optional LlamaParse API key loaded from `MOA_LLAMAPARSE_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Optional LlamaParse webhook signing key loaded from `MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhook_signing_key: Option<String>,
+    /// Environment variable containing the LlamaParse API key.
+    pub api_key_env: String,
+    /// Environment variable containing the LlamaParse webhook signing key.
+    pub webhook_signing_key_env: String,
     /// Optional custom header name required on LlamaParse webhooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_header_name: Option<String>,
@@ -210,13 +208,14 @@ impl Default for LlamaParseKnowledgeParserConfig {
     fn default() -> Self {
         Self {
             api_base_url: "https://api.cloud.llamaindex.ai".to_string(),
-            api_key: None,
-            webhook_signing_key: None,
+            api_key_env: "LLAMAPARSE_API_KEY".to_string(),
+            webhook_signing_key_env: "LLAMAPARSE_WEBHOOK_SIGNING_KEY".to_string(),
             webhook_header_name: None,
             webhook_header_value: None,
-            tier: "balanced".to_string(),
+            tier: "agentic".to_string(),
             expand: vec![
                 "markdown".to_string(),
+                "markdown_full".to_string(),
                 "items".to_string(),
                 "metadata".to_string(),
                 "job_metadata".to_string(),
@@ -231,9 +230,8 @@ impl Default for LlamaParseKnowledgeParserConfig {
 pub struct UnstructuredKnowledgeParserConfig {
     /// Unstructured API base URL.
     pub api_base_url: String,
-    /// Optional Unstructured API key loaded from `MOA_UNSTRUCTURED_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    /// Environment variable containing the Unstructured API key.
+    pub api_key_env: String,
     /// Unstructured partition strategy.
     pub strategy: String,
     /// Unstructured chunking strategy.
@@ -244,8 +242,8 @@ impl Default for UnstructuredKnowledgeParserConfig {
     fn default() -> Self {
         Self {
             api_base_url: "https://api.unstructuredapp.io".to_string(),
-            api_key: None,
-            strategy: "hi_res".to_string(),
+            api_key_env: "UNSTRUCTURED_API_KEY".to_string(),
+            strategy: "auto".to_string(),
             chunking_strategy: "by_title".to_string(),
         }
     }
@@ -257,12 +255,10 @@ impl Default for UnstructuredKnowledgeParserConfig {
 pub struct ReductoKnowledgeParserConfig {
     /// Reducto API base URL.
     pub api_base_url: String,
-    /// Optional Reducto API key loaded from `MOA_REDUCTO_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Optional Reducto webhook signing key loaded from `MOA_REDUCTO_WEBHOOK_SIGNING_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhook_signing_key: Option<String>,
+    /// Environment variable containing the Reducto API key.
+    pub api_key_env: String,
+    /// Environment variable containing the Reducto webhook signing key.
+    pub webhook_signing_key_env: String,
     /// Optional custom header name required on Reducto webhooks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_header_name: Option<String>,
@@ -283,8 +279,8 @@ impl Default for ReductoKnowledgeParserConfig {
     fn default() -> Self {
         Self {
             api_base_url: "https://platform.reducto.ai".to_string(),
-            api_key: None,
-            webhook_signing_key: None,
+            api_key_env: "REDUCTO_API_KEY".to_string(),
+            webhook_signing_key_env: "REDUCTO_WEBHOOK_SIGNING_KEY".to_string(),
             webhook_header_name: None,
             webhook_header_value: None,
             parse_mode: "standard".to_string(),
@@ -367,14 +363,30 @@ fn require_enabled(kind: &str, selected: &str, enabled: &[String]) -> Result<()>
     )))
 }
 
-fn require_secret<'a>(kind: &str, selected: &str, api_key: Option<&'a str>) -> Result<&'a str> {
-    api_key
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            MoaError::ConfigError(format!(
-                "{kind} `{selected}` requires an API key when selected"
-            ))
-        })
+fn require_env_secret(kind: &str, selected: &str, env_name: &str) -> Result<String> {
+    let env_name = env_name.trim();
+    if env_name.is_empty() {
+        return Err(MoaError::ConfigError(format!(
+            "{kind} `{selected}` requires an API key env var when selected"
+        )));
+    }
+    env::var(env_name).map_err(|_| MoaError::MissingEnvironmentVariable(env_name.to_string()))
+}
+
+/// Loads an optional secret from an env-var name.
+pub fn optional_env_secret(env_name: &str) -> Result<Option<String>> {
+    let env_name = env_name.trim();
+    if env_name.is_empty() {
+        return Ok(None);
+    }
+    match env::var(env_name) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) => Ok(None),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(MoaError::ConfigError(format!(
+            "environment variable `{env_name}` failed: {error}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -384,14 +396,15 @@ mod tests {
     #[test]
     fn knowledge_selected_provider_requires_key_only_when_selected() {
         // Pins: enabled providers do not require API keys until a sync/link request selects one.
-        let config = KnowledgeConfig::default();
+        let mut config = KnowledgeConfig::default();
+        config.nango.api_key_env = "MOA_TEST_MISSING_NANGO_KNOWLEDGE_KEY".to_string();
 
         assert_eq!(
             config
                 .selected_provider_api_key("nango")
                 .expect_err("selected provider without key should fail")
                 .to_string(),
-            "configuration error: knowledge provider `nango` requires an API key when selected"
+            "missing environment variable: MOA_TEST_MISSING_NANGO_KNOWLEDGE_KEY"
         );
     }
 
@@ -413,7 +426,8 @@ mod tests {
     #[test]
     fn knowledge_native_parser_needs_no_key_but_external_parser_does() {
         // Pins: native parsing is local while external parser credentials are request-time requirements.
-        let config = KnowledgeConfig::default();
+        let mut config = KnowledgeConfig::default();
+        config.llamaparse.api_key_env = "MOA_TEST_MISSING_LLAMAPARSE_KNOWLEDGE_KEY".to_string();
 
         assert_eq!(
             config
@@ -426,7 +440,16 @@ mod tests {
                 .selected_parser_api_key("llamaparse")
                 .expect_err("selected external parser without key should fail")
                 .to_string(),
-            "configuration error: knowledge parser `llamaparse` requires an API key when selected"
+            "missing environment variable: MOA_TEST_MISSING_LLAMAPARSE_KNOWLEDGE_KEY"
         );
+    }
+
+    #[test]
+    fn unstructured_defaults_use_auto_partitioning_and_section_chunks() {
+        // Pins: production Unstructured parsing defaults to automatic partitioning and section-preserving chunks.
+        let config = UnstructuredKnowledgeParserConfig::default();
+
+        assert_eq!(config.strategy, "auto");
+        assert_eq!(config.chunking_strategy, "by_title");
     }
 }
