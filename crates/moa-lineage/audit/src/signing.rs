@@ -97,18 +97,6 @@ impl SigningKey {
         self.verifying.to_bytes()
     }
 
-    /// Signs the legacy root-shaped message used by DSAR bundle metadata.
-    pub fn sign_root(&self, root: &[u8], storage_partition_id: &str) -> Result<Vec<u8>> {
-        let metadata = serde_json::json!({
-            "storage_partition_id": storage_partition_id,
-            "signing_key_label": self.label,
-        });
-        let mut message = Vec::with_capacity(root.len() + 128);
-        message.extend_from_slice(root);
-        message.extend_from_slice(&canonical_json_bytes(&metadata)?);
-        Ok(self.inner.sign(&message).to_bytes().to_vec())
-    }
-
     /// Signs a published audit-root metadata payload.
     pub fn sign_audit_root(&self, payload: &AuditRootSignaturePayload) -> Result<Vec<u8>> {
         Ok(self
@@ -128,26 +116,6 @@ impl SigningKey {
         let signature = Signature::try_from(signature).map_err(|_| AuditError::Signature)?;
         self.verifying
             .verify(message, &signature)
-            .map_err(|_| AuditError::Signature)
-    }
-
-    /// Verifies the legacy root-shaped message used by DSAR bundle metadata.
-    pub fn verify_root(
-        &self,
-        root: &[u8],
-        storage_partition_id: &str,
-        signature: &[u8],
-    ) -> Result<()> {
-        let metadata = serde_json::json!({
-            "storage_partition_id": storage_partition_id,
-            "signing_key_label": self.label,
-        });
-        let mut message = Vec::with_capacity(root.len() + 128);
-        message.extend_from_slice(root);
-        message.extend_from_slice(&canonical_json_bytes(&metadata)?);
-        let signature = Signature::try_from(signature).map_err(|_| AuditError::Signature)?;
-        self.verifying
-            .verify(&message, &signature)
             .map_err(|_| AuditError::Signature)
     }
 
@@ -258,16 +226,11 @@ mod tests {
     #[test]
     fn signing_roundtrip_rejects_tampering() {
         let key = SigningKey::from_seed("dev", [7_u8; 32]);
-        let root = [9_u8; 32];
-        let storage_partition = "tenant-storage-partition";
-        let signature = key.sign_root(&root, storage_partition).expect("sign");
+        let message = [9_u8; 32];
+        let signature = key.sign_message(&message);
 
-        key.verify_root(&root, storage_partition, &signature)
-            .expect("verify");
-        assert!(
-            key.verify_root(&[8_u8; 32], storage_partition, &signature)
-                .is_err()
-        );
+        key.verify_message(&message, &signature).expect("verify");
+        assert!(key.verify_message(&[8_u8; 32], &signature).is_err());
     }
 
     #[test]

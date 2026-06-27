@@ -91,9 +91,9 @@ pub enum AgentSkillPolicyMode {
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKnowledgeScopeMode {
-    /// Use tenant-visible knowledge for the current session context.
+    /// Retrieve tenant knowledge and admitted contact memory.
     #[default]
-    Tenant,
+    Enabled,
     /// Disable graph memory retrieval for this agent.
     Disabled,
 }
@@ -132,7 +132,7 @@ pub struct AgentKnowledgePolicy {
 impl Default for AgentKnowledgePolicy {
     fn default() -> Self {
         Self {
-            mode: AgentKnowledgeScopeMode::Tenant,
+            mode: AgentKnowledgeScopeMode::Enabled,
             filters: Value::Object(Default::default()),
             retrieval_budget: None,
             pii_floor: None,

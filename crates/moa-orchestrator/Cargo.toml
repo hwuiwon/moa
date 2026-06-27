@@ -74,6 +74,7 @@ croner = "2.2"
 ed25519-dalek.workspace = true
 flate2 = "1"
 hex.workspace = true
+hmac.workspace = true
 moa-authz.workspace = true
 moa-authz-schema.workspace = true
 moa-auth-providers.workspace = true
@@ -87,6 +88,7 @@ moa-eval-core = { workspace = true, optional = true }
 moa-eval = { workspace = true, optional = true }
 moa-experiments = { workspace = true, optional = true }
 moa-hands = { workspace = true }
+moa-knowledge = { workspace = true }
 moa-lineage-audit = { workspace = true }
 moa-lineage-citation = { workspace = true }
 moa-lineage-core = { workspace = true }
@@ -116,6 +118,7 @@ serde_json.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
 sqlx = { workspace = true, features = ["tls-rustls", "json", "uuid", "chrono"] }
+subtle.workspace = true
 tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true

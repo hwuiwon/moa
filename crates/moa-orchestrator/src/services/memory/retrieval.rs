@@ -6,22 +6,22 @@ use std::time::Instant;
 
 use chrono::Utc;
 use moa_brain::retrieval::{HybridRetriever, RetrievalHit, RetrievalRequest};
-use moa_core::traits::Identity;
+use moa_core::traits::{EmbeddingProvider, Identity};
 use moa_core::wire::memory::{
     MemoryRetrieveDebugRequest, MemoryRetrieveDebugResponse, MemorySearchRequest,
     MemorySearchResponse, MemoryShowRequest, MemoryShowResponse,
 };
 use moa_core::{SessionId, StoragePartitionId, UserId};
 use moa_lineage_core::{
-    BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
-    StageTimings, TurnId, VecHit,
+    BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage,
+    RetrievalSelectedHit, RetrievalStage, StageTimings, TurnId, VecHit,
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass};
 use moa_memory_types::{MemoryScope, ScopeContext};
-use moa_memory_vector::PgvectorStore;
+use moa_memory_vector::{EmbedderConstructionRole, PgvectorStore, build_embedder_from_config};
 use moa_observability::record_memory_operation;
 use restate_sdk::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
@@ -176,11 +176,12 @@ async fn retrieve_hits(
 ) -> Result<Vec<RetrievalHit>, HandlerError> {
     let label_filter = parse_label_filter(inputs.label_filter)?;
     let max_pii_class = parse_pii_class(inputs.max_pii_class)?;
+    let query_embedding = debug_query_embedding(&inputs.query).await?;
     retriever
         .retrieve(RetrievalRequest {
             seeds: inputs.seeds,
             query_text: inputs.query,
-            query_embedding: Vec::new(),
+            query_embedding,
             scope: inputs.scope,
             label_filter,
             max_pii_class,
@@ -195,6 +196,35 @@ async fn retrieve_hits(
         })
         .await
         .map_err(memory_handler_error)
+}
+
+async fn debug_query_embedding(query: &str) -> Result<Vec<f32>, HandlerError> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = OrchestratorCtx::current_config();
+    let embedder = match build_embedder_from_config(&config, EmbedderConstructionRole::Retrieval) {
+        Ok(embedder) => embedder,
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                "memory debug retrieval falling back without query embedding"
+            );
+            return Ok(Vec::new());
+        }
+    };
+    embed_one(embedder.as_ref(), query).await
+}
+
+async fn embed_one(
+    embedder: &dyn EmbeddingProvider,
+    query: &str,
+) -> Result<Vec<f32>, HandlerError> {
+    let mut embeddings = embedder
+        .embed(&[query.to_string()])
+        .await
+        .map_err(memory_handler_error)?;
+    Ok(embeddings.pop().unwrap_or_default())
 }
 
 async fn lookup_seed_uids(
@@ -308,6 +338,15 @@ fn record_debug_retrieval_lineage(
             })
             .collect(),
         top_k: hits.iter().map(|hit| hit.uid).collect(),
+        searched_scopes: vec![debug_scope_label(scope)],
+        selected_hits: hits
+            .iter()
+            .map(|hit| debug_selected_hit(hit, true))
+            .collect(),
+        filters: json!({
+            "scope": debug_scope_label(scope),
+            "max_pii_class": "restricted",
+        }),
         timings: StageTimings::default(),
         introspection: BackendIntrospection::default(),
         stage: RetrievalStage::Single,
@@ -316,4 +355,70 @@ fn record_debug_retrieval_lineage(
         .map_err(|error| TerminalError::new(format!("serialize debug lineage: {error}")))?;
     OrchestratorCtx::current_lineage().record(json);
     Ok(turn_id)
+}
+
+fn debug_scope_label(scope: &MemoryScope) -> String {
+    match scope {
+        MemoryScope::Tenant { tenant_id } => format!("tenant:{tenant_id}:tenant_knowledge"),
+        MemoryScope::Contact {
+            tenant_id,
+            contact_id,
+        } => format!("contact:{tenant_id}:{contact_id}:user_memory"),
+    }
+}
+
+fn debug_selected_hit(hit: &RetrievalHit, prompt_included: bool) -> RetrievalSelectedHit {
+    let chunk = hit.knowledge_chunk.as_ref();
+    RetrievalSelectedHit {
+        graph_node_uid: hit.uid,
+        chunk_uid: chunk.map(|chunk| chunk.chunk_uid),
+        fact_uid: (hit.node.label == NodeLabel::Fact).then_some(hit.uid),
+        source_tier: hit.source_tier.as_str().to_string(),
+        label: hit.node.label.as_str().to_string(),
+        title: chunk
+            .and_then(|chunk| chunk.source_title.clone())
+            .unwrap_or_else(|| hit.node.name.clone()),
+        snippet: chunk
+            .map(|chunk| chunk.text.clone())
+            .or_else(|| {
+                hit.node
+                    .properties_summary
+                    .as_ref()
+                    .and_then(|properties| properties.get("summary"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| hit.node.name.clone()),
+        score: hit.score,
+        legs: debug_retrieval_legs(hit),
+        prompt_included,
+        source_uri: chunk.and_then(|chunk| chunk.source_uri.clone()),
+        source_title: chunk.and_then(|chunk| chunk.source_title.clone()),
+        citation: chunk
+            .map(|chunk| {
+                json!({
+                    "document_version_uid": chunk.document_version_uid,
+                    "object_uid": chunk.object_uid,
+                    "chunk_hash": chunk.chunk_hash,
+                    "ordinal": chunk.ordinal,
+                    "heading_path": chunk.heading_path,
+                    "object_type": chunk.object_type,
+                })
+            })
+            .unwrap_or_else(|| json!({})),
+    }
+}
+
+fn debug_retrieval_legs(hit: &RetrievalHit) -> Vec<String> {
+    let mut legs = Vec::new();
+    if hit.legs.graph {
+        legs.push("graph".to_string());
+    }
+    if hit.legs.vector {
+        legs.push("vector".to_string());
+    }
+    if hit.legs.lexical {
+        legs.push("lexical".to_string());
+    }
+    legs
 }

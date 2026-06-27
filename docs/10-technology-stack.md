@@ -14,6 +14,7 @@ The root workspace currently contains:
 | `moa-workflows` | Artifact-backed workflow run lifecycle and future workflow node interpreter/improvement logic |
 | `moa-session` | Tenant-owned Postgres session store, event log, task segments, learning log, analytics |
 | `moa-migrations` | Central refinery migrations, schema-isolated test replay helpers, and database DDL guardrails |
+| `moa-knowledge` | Tenant knowledge linked connectors, provider sync, parsing, normalization, block/chunk derivation, sync-run inspection, and graph ingestion assembly |
 | `moa-memory/graph` (`moa-memory-graph`) | Graph-memory sidecar tables, RLS, changelog, and AGE projection helpers |
 | `moa-memory/ingest` (`moa-memory-ingest`) | Slow-path graph-memory ingestion DTOs and deterministic helpers |
 | `moa-memory/pii` (`moa-memory-pii`) | PII classification client and privacy-class aggregation helpers |
@@ -90,6 +91,8 @@ Docker is used by the dev stack and optionally by local hand providers.
 | HashiCorp Vault or similar | Cloud credential storage |
 | Grafana/Tempo/Prometheus stack | Metrics and traces |
 | Messaging platforms | Slack adapter |
+| Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
+| Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
 
 ## Build Targets
 
@@ -116,6 +119,7 @@ and deployment setup. Key groups:
 | `MOA_MODELS_*` and `MOA_PROVIDERS_*` | model routing and provider API key env names |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
+| `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, chunking limits, query trace enablement, and ingestion-step observability |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |

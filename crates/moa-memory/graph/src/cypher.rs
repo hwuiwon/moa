@@ -84,6 +84,13 @@ pub mod node {
     create_node_template!(CREATE_LESSON, "Lesson", "Create a `Lesson` node.");
     create_node_template!(CREATE_FACT, "Fact", "Create a `Fact` node.");
     create_node_template!(CREATE_SOURCE, "Source", "Create a `Source` node.");
+    create_node_template!(CREATE_DOCUMENT, "Document", "Create a `Document` node.");
+    create_node_template!(CREATE_CHUNK, "Chunk", "Create a `Chunk` node.");
+    create_node_template!(
+        CREATE_CONTACT_GROUP,
+        "ContactGroup",
+        "Create a `ContactGroup` node."
+    );
 
     /// Fetch an `Entity` node uid for AGE smoke coverage.
     pub const GET_ENTITY_UID: Cypher = Cypher::new(cypher_sql!(
@@ -173,11 +180,13 @@ pub mod edge {
         "DERIVED_FROM",
         "Create a `DERIVED_FROM` edge."
     );
+    create_edge_template!(CREATE_CONTAINS, "CONTAINS", "Create a `CONTAINS` edge.");
     create_edge_template!(
         CREATE_MENTIONED_IN,
         "MENTIONED_IN",
         "Create a `MENTIONED_IN` edge."
     );
+    create_edge_template!(CREATE_MEMBER_OF, "MEMBER_OF", "Create a `MEMBER_OF` edge.");
     create_edge_template!(CREATE_CAUSED, "CAUSED", "Create a `CAUSED` edge.");
     create_edge_template!(
         CREATE_LEARNED_FROM,

@@ -19,6 +19,7 @@ pub mod eval;
 pub mod experiments;
 pub mod graph_memory_maint;
 pub mod health;
+pub mod knowledge;
 pub mod learning_review;
 pub mod lineage_admin;
 pub mod llm_gateway;

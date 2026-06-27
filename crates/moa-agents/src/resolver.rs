@@ -377,7 +377,7 @@ fn model_policy_from_definition(definition: &ModelPolicy) -> AgentModelPolicy {
 fn knowledge_policy_from_definition(definition: &AgentDefinition) -> AgentKnowledgePolicy {
     AgentKnowledgePolicy {
         mode: match definition.knowledge_policy.mode {
-            KnowledgeScopeMode::Tenant => AgentKnowledgeScopeMode::Tenant,
+            KnowledgeScopeMode::Enabled => AgentKnowledgeScopeMode::Enabled,
             KnowledgeScopeMode::Disabled => AgentKnowledgeScopeMode::Disabled,
         },
         filters: definition.knowledge_policy.filters.clone(),

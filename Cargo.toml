@@ -31,6 +31,7 @@ members = [
     "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
+    "crates/moa-knowledge",
     "crates/moa-providers",
     "crates/moa-orchestrator",
     "crates/moa-messaging",
@@ -75,6 +76,7 @@ default-members = [
     "crates/moa-auth/fga-bootstrap",
     "crates/moa-edge",
     "crates/moa-hands",
+    "crates/moa-knowledge",
     "crates/moa-providers",
     "crates/moa-orchestrator",
     "crates/moa-messaging",
@@ -110,6 +112,7 @@ moa-experiments = { path = "crates/moa-experiments" }
 moa-fga-bootstrap = { path = "crates/moa-auth/fga-bootstrap" }
 moa-messaging = { path = "crates/moa-messaging", default-features = false }
 moa-hands = { path = "crates/moa-hands" }
+moa-knowledge = { path = "crates/moa-knowledge" }
 moa-lineage-audit = { path = "crates/moa-lineage/audit" }
 moa-lineage-citation = { path = "crates/moa-lineage/citation" }
 moa-lineage-core = { path = "crates/moa-lineage/core" }
@@ -160,6 +163,7 @@ hmac = "0.12"
 constant_time_eq = "0.3"
 insta = { version = "1", features = ["json", "redactions"] }
 jsonwebtoken = "9.3"
+liteparse = { version = "2.2.1", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 moka = { version = "0.12", features = ["future"] }
@@ -207,6 +211,7 @@ tracing-appender = "0.2"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = "0.6"
+unicode-normalization = "0.1"
 url = "2.5"
 uuid = { version = "1", features = ["serde", "v7"] }
 wiremock = "0.6"

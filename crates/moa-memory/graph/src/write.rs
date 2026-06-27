@@ -487,6 +487,10 @@ pub async fn hard_purge_with_audit(
 pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Result<Uuid> {
     validate_edge_scope(&intent)?;
     let mut conn = store.begin_required().await?;
+    if edge_exists(conn.as_mut(), intent.label, intent.uid).await? {
+        conn.commit().await?;
+        return Ok(intent.uid);
+    }
     edge_create_template(intent.label)
         .execute(&edge_params(&intent))
         .execute(conn.as_mut())
@@ -519,6 +523,25 @@ pub async fn create_edge(store: &AgeGraphStore, intent: EdgeWriteIntent) -> Resu
 
     conn.commit().await?;
     Ok(intent.uid)
+}
+
+async fn edge_exists(conn: &mut PgConnection, label: EdgeLabel, uid: Uuid) -> Result<bool> {
+    let edge_table = age_edge_table(label);
+    let sql = format!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM {edge_table}
+            WHERE moa.age_property(properties, 'uid') =
+                  ('"' || $1 || '"')::ag_catalog.agtype
+        )
+        "#
+    );
+    sqlx::query_scalar::<_, bool>(&sql)
+        .bind(uid.to_string())
+        .fetch_one(conn)
+        .await
+        .map_err(GraphError::from)
 }
 
 fn validate_node_scope(intent: &NodeWriteIntent) -> Result<()> {
@@ -595,6 +618,9 @@ fn node_create_template(label: NodeLabel) -> &'static Cypher {
         NodeLabel::Lesson => &cypher::node::CREATE_LESSON,
         NodeLabel::Fact => &cypher::node::CREATE_FACT,
         NodeLabel::Source => &cypher::node::CREATE_SOURCE,
+        NodeLabel::Document => &cypher::node::CREATE_DOCUMENT,
+        NodeLabel::Chunk => &cypher::node::CREATE_CHUNK,
+        NodeLabel::ContactGroup => &cypher::node::CREATE_CONTACT_GROUP,
     }
 }
 
@@ -606,7 +632,9 @@ fn edge_create_template(label: EdgeLabel) -> &'static Cypher {
         EdgeLabel::Supersedes => &cypher::edge::CREATE_SUPERSEDES,
         EdgeLabel::Contradicts => &cypher::edge::CREATE_CONTRADICTS,
         EdgeLabel::DerivedFrom => &cypher::edge::CREATE_DERIVED_FROM,
+        EdgeLabel::Contains => &cypher::edge::CREATE_CONTAINS,
         EdgeLabel::MentionedIn => &cypher::edge::CREATE_MENTIONED_IN,
+        EdgeLabel::MemberOf => &cypher::edge::CREATE_MEMBER_OF,
         EdgeLabel::Caused => &cypher::edge::CREATE_CAUSED,
         EdgeLabel::LearnedFrom => &cypher::edge::CREATE_LEARNED_FROM,
         EdgeLabel::AppliesTo => &cypher::edge::CREATE_APPLIES_TO,
@@ -907,6 +935,9 @@ fn age_vertex_table(label: NodeLabel) -> &'static str {
         NodeLabel::Lesson => r#"moa_graph."Lesson""#,
         NodeLabel::Fact => r#"moa_graph."Fact""#,
         NodeLabel::Source => r#"moa_graph."Source""#,
+        NodeLabel::Document => r#"moa_graph."Document""#,
+        NodeLabel::Chunk => r#"moa_graph."Chunk""#,
+        NodeLabel::ContactGroup => r#"moa_graph."ContactGroup""#,
     }
 }
 
@@ -918,7 +949,9 @@ fn age_edge_table(label: EdgeLabel) -> &'static str {
         EdgeLabel::Supersedes => r#"moa_graph."SUPERSEDES""#,
         EdgeLabel::Contradicts => r#"moa_graph."CONTRADICTS""#,
         EdgeLabel::DerivedFrom => r#"moa_graph."DERIVED_FROM""#,
+        EdgeLabel::Contains => r#"moa_graph."CONTAINS""#,
         EdgeLabel::MentionedIn => r#"moa_graph."MENTIONED_IN""#,
+        EdgeLabel::MemberOf => r#"moa_graph."MEMBER_OF""#,
         EdgeLabel::Caused => r#"moa_graph."CAUSED""#,
         EdgeLabel::LearnedFrom => r#"moa_graph."LEARNED_FROM""#,
         EdgeLabel::AppliesTo => r#"moa_graph."APPLIES_TO""#,

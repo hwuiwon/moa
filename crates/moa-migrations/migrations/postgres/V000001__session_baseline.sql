@@ -907,7 +907,10 @@ AS $$
         'Incident',
         'Lesson',
         'Fact',
-        'Source'
+        'Source',
+        'Document',
+        'Chunk',
+        'ContactGroup'
     ]::TEXT[];
 $$;
 
@@ -921,7 +924,9 @@ AS $$
         'SUPERSEDES',
         'CONTRADICTS',
         'DERIVED_FROM',
+        'CONTAINS',
         'MENTIONED_IN',
+        'MEMBER_OF',
         'CAUSED',
         'LEARNED_FROM',
         'APPLIES_TO'

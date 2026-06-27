@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use moa_core::config::optional_env_secret;
 use moa_edge::proxy::OrchestratorProxy;
-use moa_edge::routes::{self, AppState};
+use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
 
 /// Process arguments for `moa-edge`.
 #[derive(Debug, Parser)]
@@ -55,6 +56,8 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         auth: providers.auth.clone(),
         auth0_webhook_secret: moa_config.auth.auth0_webhook_secret.clone(),
+        knowledge_webhooks: knowledge_webhook_edge_config(&moa_config)
+            .context("load knowledge webhook verifier secrets")?,
         pool: pool.clone(),
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
     };
@@ -73,6 +76,38 @@ async fn main() -> anyhow::Result<()> {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("moa-edge shutdown signal received");
+}
+
+fn knowledge_webhook_edge_config(
+    config: &moa_core::MoaConfig,
+) -> anyhow::Result<KnowledgeWebhookEdgeConfig> {
+    Ok(KnowledgeWebhookEdgeConfig {
+        nango_signing_key: optional_env_secret(&config.knowledge.nango.webhook_signing_key_env)?,
+        merge_signature_key: optional_env_secret(
+            &config.knowledge.merge.webhook_signature_key_env,
+        )?,
+        llamaparse_signing_key: optional_env_secret(
+            &config.knowledge.llamaparse.webhook_signing_key_env,
+        )?,
+        llamaparse_custom_header: custom_header(
+            &config.knowledge.llamaparse.webhook_header_name,
+            &config.knowledge.llamaparse.webhook_header_value,
+        ),
+        reducto_signing_key: optional_env_secret(
+            &config.knowledge.reducto.webhook_signing_key_env,
+        )?,
+        reducto_custom_header: custom_header(
+            &config.knowledge.reducto.webhook_header_name,
+            &config.knowledge.reducto.webhook_header_value,
+        ),
+    })
+}
+
+fn custom_header(name: &Option<String>, value: &Option<String>) -> Option<(String, String)> {
+    match (name, value) {
+        (Some(name), Some(value)) => Some((name.clone(), value.clone())),
+        _ => None,
+    }
 }
 
 fn edge_upstream_url(config: &moa_core::MoaConfig, override_url: Option<String>) -> String {

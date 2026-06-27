@@ -15,6 +15,8 @@ use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass
 use moa_memory_types::{MemoryScope, ScopeContext};
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
 use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -112,6 +114,56 @@ pub struct LegSources {
     pub lexical: bool,
 }
 
+/// Source tier represented by a retrieval hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceTier {
+    /// Tenant-owned synced knowledge-base content.
+    TenantKnowledge,
+    /// Contact-owned runtime memory admitted for the current session.
+    UserMemory,
+}
+
+impl SourceTier {
+    /// Returns the stable wire string for this source tier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TenantKnowledge => "tenant_knowledge",
+            Self::UserMemory => "user_memory",
+        }
+    }
+}
+
+/// Full tenant knowledge chunk text and citation metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeChunkHydration {
+    /// Stable knowledge chunk identifier.
+    pub chunk_uid: Uuid,
+    /// Knowledge document version containing the chunk.
+    pub document_version_uid: Uuid,
+    /// Source object containing the document version.
+    pub object_uid: Uuid,
+    /// Stable chunk content hash.
+    pub chunk_hash: String,
+    /// Chunk ordinal within the document version.
+    pub ordinal: i32,
+    /// Parser-derived heading path.
+    pub heading_path: Vec<String>,
+    /// Full normalized chunk text from `moa.knowledge_chunks`.
+    pub text: String,
+    /// Estimated token count stored by ingestion.
+    pub token_count: i32,
+    /// Redacted chunk metadata.
+    pub metadata: Value,
+    /// Optional source URI for citations.
+    pub source_uri: Option<String>,
+    /// Optional renderer-safe source title.
+    pub source_title: Option<String>,
+    /// Source object type.
+    pub object_type: String,
+}
+
 /// One hydrated retrieval result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalHit {
@@ -121,6 +173,10 @@ pub struct RetrievalHit {
     pub score: f64,
     /// Source legs that contributed to the score.
     pub legs: LegSources,
+    /// Source tier used for context assembly and query tracing.
+    pub source_tier: SourceTier,
+    /// Full tenant knowledge chunk payload when the hit is a knowledge chunk.
+    pub knowledge_chunk: Option<KnowledgeChunkHydration>,
     /// Hydrated sidecar row.
     pub node: NodeIndexRow,
 }
@@ -300,6 +356,7 @@ impl HybridRetriever {
         )
         .await?;
         let mut hits = build_hits(fused, nodes);
+        hydrate_knowledge_chunks(&self.pool, &req.scope, &mut hits, self.assume_app_role).await?;
         rank_hydrated_hits(&mut hits, &self.ranking_config, &req);
         let final_hits = if req.use_reranker && hits.len() > req.k_final {
             self.rerank_hits(&req, &hits).await?
@@ -632,10 +689,130 @@ fn build_hits(fused: Vec<(Uuid, f64, LegSources)>, nodes: Vec<NodeIndexRow>) -> 
                 uid,
                 score,
                 legs,
+                source_tier: source_tier_for_node(&node),
+                knowledge_chunk: None,
                 node,
             })
         })
         .collect()
+}
+
+async fn hydrate_knowledge_chunks(
+    pool: &PgPool,
+    scope: &MemoryScope,
+    hits: &mut [RetrievalHit],
+    assume_app_role: bool,
+) -> Result<()> {
+    let chunk_uids = hits
+        .iter()
+        .filter(|hit| hit.source_tier == SourceTier::TenantKnowledge)
+        .filter(|hit| hit.node.label == NodeLabel::Chunk)
+        .map(|hit| hit.uid)
+        .collect::<Vec<_>>();
+    if chunk_uids.is_empty() {
+        return Ok(());
+    }
+
+    let mut conn = ScopedConn::begin(pool, &ScopeContext::tenant(scope.tenant_id())).await?;
+    if assume_app_role {
+        sqlx::query("SET LOCAL ROLE moa_app")
+            .execute(conn.as_mut())
+            .await?;
+    }
+    let rows = sqlx::query_as::<_, KnowledgeChunkRow>(
+        r#"
+        SELECT DISTINCT ON (c.graph_node_uid)
+            c.graph_node_uid,
+            c.chunk_uid,
+            c.document_version_id AS document_version_uid,
+            v.object_id AS object_uid,
+            c.chunk_hash,
+            c.ordinal,
+            c.heading_path,
+            c.text,
+            c.token_count,
+            c.metadata,
+            o.source_uri,
+            o.title AS source_title,
+            o.object_type
+        FROM moa.knowledge_chunks c
+        JOIN moa.knowledge_document_versions v
+          ON v.document_version_uid = c.document_version_id
+        JOIN moa.knowledge_objects o
+          ON o.object_uid = v.object_id
+        WHERE c.tenant_id = $1
+          AND c.graph_node_uid = ANY($2)
+          AND o.status = 'active'
+          AND c.metadata->>'active' IS DISTINCT FROM 'false'
+        ORDER BY c.graph_node_uid, v.created_at DESC, c.ordinal ASC
+        "#,
+    )
+    .bind(scope.tenant_id().0)
+    .bind(&chunk_uids)
+    .fetch_all(conn.as_mut())
+    .await?;
+    conn.commit().await?;
+
+    let mut chunks_by_graph_uid = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.graph_node_uid,
+                KnowledgeChunkHydration {
+                    chunk_uid: row.chunk_uid,
+                    document_version_uid: row.document_version_uid,
+                    object_uid: row.object_uid,
+                    chunk_hash: row.chunk_hash,
+                    ordinal: row.ordinal,
+                    heading_path: row.heading_path,
+                    text: row.text,
+                    token_count: row.token_count,
+                    metadata: row.metadata,
+                    source_uri: row.source_uri,
+                    source_title: row.source_title,
+                    object_type: row.object_type,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for hit in hits {
+        if let Some(chunk) = chunks_by_graph_uid.remove(&hit.uid) {
+            hit.knowledge_chunk = Some(chunk);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct KnowledgeChunkRow {
+    graph_node_uid: Uuid,
+    chunk_uid: Uuid,
+    document_version_uid: Uuid,
+    object_uid: Uuid,
+    chunk_hash: String,
+    ordinal: i32,
+    heading_path: Vec<String>,
+    text: String,
+    token_count: i32,
+    metadata: Value,
+    source_uri: Option<String>,
+    source_title: Option<String>,
+    object_type: String,
+}
+
+fn source_tier_for_node(node: &NodeIndexRow) -> SourceTier {
+    if node.scope == "tenant" && is_tenant_knowledge_label(node.label) {
+        SourceTier::TenantKnowledge
+    } else {
+        SourceTier::UserMemory
+    }
+}
+
+fn is_tenant_knowledge_label(label: NodeLabel) -> bool {
+    matches!(
+        label,
+        NodeLabel::Chunk | NodeLabel::Document | NodeLabel::ContactGroup
+    )
 }
 
 fn rank_hydrated_hits(hits: &mut [RetrievalHit], config: &RankingConfig, req: &RetrievalRequest) {
@@ -654,7 +831,11 @@ fn apply_feature_ranking(
         .with_request_scope(&req.scope)
         .with_first_person_query(&req.query_text);
     for hit in hits.iter_mut() {
-        hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &hit.node);
+        let mut node = hit.node.clone();
+        if let Some(chunk) = &hit.knowledge_chunk {
+            node.name.clone_from(&chunk.text);
+        }
+        hit.score = ranker.score(hit.score, max_fused_score, &query_tokens, &node);
         if hit.legs.lexical && !hit.legs.vector && !hit.legs.graph {
             hit.score += config.weights.overlap;
         }
@@ -988,6 +1169,8 @@ mod tests {
                 vector: true,
                 lexical: false,
             },
+            source_tier: SourceTier::UserMemory,
+            knowledge_chunk: None,
             node: NodeIndexRow {
                 uid,
                 label: NodeLabel::Fact,

@@ -182,6 +182,48 @@ pub struct MoaEnvOverlay {
     pub memory_vector_embedder_gemini_api_key_env: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_GEMINI_DEFAULT_ROLE`.
     pub memory_vector_embedder_gemini_default_role: Option<String>,
+    /// `MOA_KNOWLEDGE_PROVIDERS_ENABLED`.
+    #[serde(deserialize_with = "deserialize_optional_list")]
+    pub knowledge_providers_enabled: Option<Vec<String>>,
+    /// `MOA_KNOWLEDGE_PARSERS_ENABLED`.
+    #[serde(deserialize_with = "deserialize_optional_list")]
+    pub knowledge_parsers_enabled: Option<Vec<String>>,
+    /// `MOA_KNOWLEDGE_PARSER_DEFAULT`.
+    pub knowledge_parser_default: Option<String>,
+    /// `MOA_KNOWLEDGE_EXTERNAL_PARSER_DEFAULT`.
+    pub knowledge_external_parser_default: Option<String>,
+    /// `MOA_NANGO_API_BASE_URL`.
+    pub nango_api_base_url: Option<String>,
+    /// `MOA_MERGE_API_BASE_URL`.
+    pub merge_api_base_url: Option<String>,
+    /// `MOA_LLAMAPARSE_API_URL`.
+    pub llamaparse_api_url: Option<String>,
+    /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME`.
+    pub llamaparse_webhook_header_name: Option<String>,
+    /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE`.
+    pub llamaparse_webhook_header_value: Option<String>,
+    /// `MOA_LLAMAPARSE_TIER`.
+    pub llamaparse_tier: Option<String>,
+    /// `MOA_UNSTRUCTURED_API_URL`.
+    pub unstructured_api_url: Option<String>,
+    /// `MOA_UNSTRUCTURED_STRATEGY`.
+    pub unstructured_strategy: Option<String>,
+    /// `MOA_UNSTRUCTURED_CHUNKING_STRATEGY`.
+    pub unstructured_chunking_strategy: Option<String>,
+    /// `MOA_REDUCTO_API_URL`.
+    pub reducto_api_url: Option<String>,
+    /// `MOA_REDUCTO_WEBHOOK_HEADER_NAME`.
+    pub reducto_webhook_header_name: Option<String>,
+    /// `MOA_REDUCTO_WEBHOOK_HEADER_VALUE`.
+    pub reducto_webhook_header_value: Option<String>,
+    /// `MOA_REDUCTO_PARSE_MODE`.
+    pub reducto_parse_mode: Option<String>,
+    /// `MOA_REDUCTO_ASYNC_ENABLED`.
+    pub reducto_async_enabled: Option<bool>,
+    /// `MOA_REDUCTO_CHUNK_MODE`.
+    pub reducto_chunk_mode: Option<String>,
+    /// `MOA_KNOWLEDGE_QUERY_TRACE_ENABLED`.
+    pub knowledge_query_trace_enabled: Option<bool>,
     /// `MOA_PII_SERVICE_URL`.
     pub pii_service_url: Option<String>,
     /// `MOA_TURBOPUFFER_API_KEY_ENV`.
@@ -415,6 +457,11 @@ impl MoaEnvOverlay {
             ("MOA_AUTHZ_OPENFGA_URL", &self.authz_openfga_url),
             ("MOA_PII_SERVICE_URL", &self.pii_service_url),
             ("MOA_TURBOPUFFER_BASE_URL", &self.turbopuffer_base_url),
+            ("MOA_NANGO_API_BASE_URL", &self.nango_api_base_url),
+            ("MOA_MERGE_API_BASE_URL", &self.merge_api_base_url),
+            ("MOA_LLAMAPARSE_API_URL", &self.llamaparse_api_url),
+            ("MOA_UNSTRUCTURED_API_URL", &self.unstructured_api_url),
+            ("MOA_REDUCTO_API_URL", &self.reducto_api_url),
             (
                 "MOA_CLOUD_HANDS_DAYTONA_API_URL",
                 &self.cloud_hands_daytona_api_url,
@@ -633,6 +680,7 @@ impl MoaEnvOverlay {
             &mut config.memory.vector.embedder.gemini.default_role,
             &self.memory_vector_embedder_gemini_default_role,
         );
+        self.apply_knowledge(config);
         set_option_if_some(&mut config.memory.pii_service_url, &self.pii_service_url);
         set_if_some(
             &mut config.memory.vector.turbopuffer.api_key_env,
@@ -967,6 +1015,86 @@ impl MoaEnvOverlay {
             set_option_if_some(&mut hands.e2b_domain, &self.cloud_hands_e2b_domain);
             set_option_if_some(&mut hands.e2b_template, &self.cloud_hands_e2b_template);
         }
+    }
+
+    fn apply_knowledge(&self, config: &mut MoaConfig) {
+        set_vec_if_some(
+            &mut config.knowledge.providers.enabled,
+            &self.knowledge_providers_enabled,
+        );
+        set_vec_if_some(
+            &mut config.knowledge.parsers.enabled,
+            &self.knowledge_parsers_enabled,
+        );
+        set_if_some(
+            &mut config.knowledge.parser.default,
+            &self.knowledge_parser_default,
+        );
+        set_if_some(
+            &mut config.knowledge.parser.external_default,
+            &self.knowledge_external_parser_default,
+        );
+        set_if_some(
+            &mut config.knowledge.nango.api_base_url,
+            &self.nango_api_base_url,
+        );
+        set_if_some(
+            &mut config.knowledge.merge.api_base_url,
+            &self.merge_api_base_url,
+        );
+        set_if_some(
+            &mut config.knowledge.llamaparse.api_base_url,
+            &self.llamaparse_api_url,
+        );
+        set_option_if_some(
+            &mut config.knowledge.llamaparse.webhook_header_name,
+            &self.llamaparse_webhook_header_name,
+        );
+        set_option_if_some(
+            &mut config.knowledge.llamaparse.webhook_header_value,
+            &self.llamaparse_webhook_header_value,
+        );
+        set_if_some(&mut config.knowledge.llamaparse.tier, &self.llamaparse_tier);
+        set_if_some(
+            &mut config.knowledge.unstructured.api_base_url,
+            &self.unstructured_api_url,
+        );
+        set_if_some(
+            &mut config.knowledge.unstructured.strategy,
+            &self.unstructured_strategy,
+        );
+        set_if_some(
+            &mut config.knowledge.unstructured.chunking_strategy,
+            &self.unstructured_chunking_strategy,
+        );
+        set_if_some(
+            &mut config.knowledge.reducto.api_base_url,
+            &self.reducto_api_url,
+        );
+        set_option_if_some(
+            &mut config.knowledge.reducto.webhook_header_name,
+            &self.reducto_webhook_header_name,
+        );
+        set_option_if_some(
+            &mut config.knowledge.reducto.webhook_header_value,
+            &self.reducto_webhook_header_value,
+        );
+        set_if_some(
+            &mut config.knowledge.reducto.parse_mode,
+            &self.reducto_parse_mode,
+        );
+        set_copy_if_some(
+            &mut config.knowledge.reducto.async_enabled,
+            self.reducto_async_enabled,
+        );
+        set_if_some(
+            &mut config.knowledge.reducto.chunk_mode,
+            &self.reducto_chunk_mode,
+        );
+        set_copy_if_some(
+            &mut config.knowledge.observability.query_trace_enabled,
+            self.knowledge_query_trace_enabled,
+        );
     }
 
     fn apply_compaction(&self, config: &mut MoaConfig) {
@@ -1582,6 +1710,108 @@ mod tests {
             MoaEnvOverlay::from_iter(env_pairs([("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "auto")])),
             "auto",
         );
+    }
+
+    #[test]
+    fn knowledge_overlay_applies_flat_provider_and_parser_settings() {
+        // Pins: tenant knowledge overlay updates non-secret runtime config without adding secret indirection knobs.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_KNOWLEDGE_PROVIDERS_ENABLED", "nango"),
+            ("MOA_KNOWLEDGE_PARSERS_ENABLED", "native,llamaparse"),
+            ("MOA_KNOWLEDGE_PARSER_DEFAULT", "native"),
+            ("MOA_KNOWLEDGE_EXTERNAL_PARSER_DEFAULT", "llamaparse"),
+            ("MOA_NANGO_API_BASE_URL", "https://nango.example"),
+            ("MOA_MERGE_API_BASE_URL", "https://merge.example"),
+            ("MOA_LLAMAPARSE_API_URL", "https://llamaparse.example"),
+            ("MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME", "x-llama-secret"),
+            ("MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE", "llama-header-secret"),
+            ("MOA_LLAMAPARSE_TIER", "agentic"),
+            ("MOA_UNSTRUCTURED_API_URL", "https://unstructured.example"),
+            ("MOA_UNSTRUCTURED_STRATEGY", "fast"),
+            ("MOA_UNSTRUCTURED_CHUNKING_STRATEGY", "basic"),
+            ("MOA_REDUCTO_API_URL", "https://reducto.example"),
+            ("MOA_REDUCTO_WEBHOOK_HEADER_NAME", "x-reducto-secret"),
+            ("MOA_REDUCTO_WEBHOOK_HEADER_VALUE", "reducto-header-secret"),
+            ("MOA_REDUCTO_PARSE_MODE", "ocr"),
+            ("MOA_REDUCTO_ASYNC_ENABLED", "false"),
+            ("MOA_REDUCTO_CHUNK_MODE", "page"),
+            ("MOA_KNOWLEDGE_QUERY_TRACE_ENABLED", "true"),
+        ]))
+        .expect("knowledge overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("knowledge overlay should apply");
+
+        assert_eq!(config.knowledge.providers.enabled, ["nango"]);
+        assert_eq!(config.knowledge.parsers.enabled, ["native", "llamaparse"]);
+        assert_eq!(config.knowledge.parser.default, "native");
+        assert_eq!(config.knowledge.parser.external_default, "llamaparse");
+        assert_eq!(config.knowledge.nango.api_base_url, "https://nango.example");
+        assert_eq!(config.knowledge.nango.api_key_env, "NANGO_API_KEY");
+        assert_eq!(
+            config.knowledge.nango.webhook_signing_key_env,
+            "NANGO_WEBHOOK_SIGNING_KEY"
+        );
+        assert_eq!(config.knowledge.merge.api_base_url, "https://merge.example");
+        assert_eq!(config.knowledge.merge.api_key_env, "MERGE_API_KEY");
+        assert_eq!(
+            config.knowledge.merge.webhook_signature_key_env,
+            "MERGE_WEBHOOK_SIGNATURE_KEY"
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.api_base_url,
+            "https://llamaparse.example"
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.api_key_env,
+            "LLAMAPARSE_API_KEY"
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.webhook_signing_key_env,
+            "LLAMAPARSE_WEBHOOK_SIGNING_KEY"
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.webhook_header_name.as_deref(),
+            Some("x-llama-secret")
+        );
+        assert_eq!(
+            config.knowledge.llamaparse.webhook_header_value.as_deref(),
+            Some("llama-header-secret")
+        );
+        assert_eq!(config.knowledge.llamaparse.tier, "agentic");
+        assert_eq!(
+            config.knowledge.unstructured.api_base_url,
+            "https://unstructured.example"
+        );
+        assert_eq!(
+            config.knowledge.unstructured.api_key_env,
+            "UNSTRUCTURED_API_KEY"
+        );
+        assert_eq!(config.knowledge.unstructured.strategy, "fast");
+        assert_eq!(config.knowledge.unstructured.chunking_strategy, "basic");
+        assert_eq!(
+            config.knowledge.reducto.api_base_url,
+            "https://reducto.example"
+        );
+        assert_eq!(config.knowledge.reducto.api_key_env, "REDUCTO_API_KEY");
+        assert_eq!(
+            config.knowledge.reducto.webhook_signing_key_env,
+            "REDUCTO_WEBHOOK_SIGNING_KEY"
+        );
+        assert_eq!(
+            config.knowledge.reducto.webhook_header_name.as_deref(),
+            Some("x-reducto-secret")
+        );
+        assert_eq!(
+            config.knowledge.reducto.webhook_header_value.as_deref(),
+            Some("reducto-header-secret")
+        );
+        assert_eq!(config.knowledge.reducto.parse_mode, "ocr");
+        assert!(!config.knowledge.reducto.async_enabled);
+        assert_eq!(config.knowledge.reducto.chunk_mode, "page");
+        assert!(config.knowledge.observability.query_trace_enabled);
     }
 
     #[test]

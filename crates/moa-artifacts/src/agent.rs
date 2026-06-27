@@ -119,9 +119,9 @@ impl InstructionPolicy {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeScopeMode {
-    /// Use tenant-visible knowledge for the current session context.
+    /// Retrieve tenant knowledge and admitted contact memory.
     #[default]
-    Tenant,
+    Enabled,
     /// Disable graph memory retrieval for this agent.
     Disabled,
 }
@@ -146,7 +146,7 @@ pub struct KnowledgePolicy {
 impl Default for KnowledgePolicy {
     fn default() -> Self {
         Self {
-            mode: KnowledgeScopeMode::Tenant,
+            mode: KnowledgeScopeMode::Enabled,
             filters: empty_object(),
             retrieval_budget: None,
             pii_floor: None,

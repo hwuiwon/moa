@@ -168,7 +168,7 @@ async fn dsar_export_signed_manifest_accompanies_jsonl_with_valid_signature() {
                 .expect("signature should exist"),
         )
         .expect("signature should decode");
-    key.verify_root(&signed_root, "tenant-001", &signature)
+    key.verify_message(&signed_root, &signature)
         .expect("manifest signature should verify");
 }
 

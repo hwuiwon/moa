@@ -1,15 +1,22 @@
 //! HTTP routes exposed by the MOA edge service.
 
-use crate::proxy::OrchestratorProxy;
+use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{any, get, patch, post};
+use base64::{Engine as _, engine::general_purpose};
 use futures_util::stream;
 use moa_core::traits::{AuthProvider, Credential, Identity};
+use moa_core::wire::knowledge::{
+    KnowledgeConnectionListRequest, KnowledgeCreateLinkTokenRequest, KnowledgeExchangeTokenRequest,
+    KnowledgeObjectInspectRequest, KnowledgeObjectListRequest, KnowledgeProviderWebhookRequest,
+    KnowledgeQueryTraceRequest, KnowledgeSyncEventsRequest, KnowledgeSyncRequest,
+    KnowledgeSyncStatusRequest,
+};
 use moa_core::wire::turn::SessionProgress;
 use moa_core::{
     ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
@@ -17,19 +24,18 @@ use moa_core::{
 };
 #[cfg(feature = "auth0")]
 use serde::Deserialize;
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[cfg(feature = "auth0")]
 use hmac::{Hmac, Mac};
-#[cfg(feature = "auth0")]
 use sha2::Sha256;
-#[cfg(feature = "auth0")]
 use subtle::ConstantTimeEq;
+
+const KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES: usize = 256 * 1024;
 
 /// Shared edge application state.
 #[derive(Clone)]
@@ -38,10 +44,29 @@ pub struct AppState {
     pub auth: Arc<dyn AuthProvider>,
     /// Shared secret used to verify Auth0 connection-linked webhooks.
     pub auth0_webhook_secret: Option<String>,
+    /// Secrets used to verify public tenant-knowledge webhooks at the edge.
+    pub knowledge_webhooks: KnowledgeWebhookEdgeConfig,
     /// Postgres pool used by unauthenticated webhooks that update auth metadata.
     pub pool: Arc<sqlx::PgPool>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
+}
+
+/// Edge-local verification config for public tenant-knowledge webhooks.
+#[derive(Clone, Debug, Default)]
+pub struct KnowledgeWebhookEdgeConfig {
+    /// Nango HMAC signing key.
+    pub nango_signing_key: Option<String>,
+    /// Merge HMAC signature key.
+    pub merge_signature_key: Option<String>,
+    /// LlamaParse HMAC or Svix signing key.
+    pub llamaparse_signing_key: Option<String>,
+    /// Optional LlamaParse custom header gate.
+    pub llamaparse_custom_header: Option<(String, String)>,
+    /// Reducto HMAC or Svix signing key.
+    pub reducto_signing_key: Option<String>,
+    /// Optional Reducto custom header gate.
+    pub reducto_custom_header: Option<(String, String)>,
 }
 
 /// Build the edge router.
@@ -55,6 +80,26 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/webhooks/auth0/connection-linked",
             post(handle_auth0_connection_webhook),
+        )
+        .route(
+            "/v1/knowledge/webhooks/llamaparse",
+            post(handle_knowledge_llamaparse_webhook)
+                .layer(DefaultBodyLimit::max(KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/knowledge/webhooks/reducto",
+            post(handle_knowledge_reducto_webhook)
+                .layer(DefaultBodyLimit::max(KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/knowledge/webhooks/nango",
+            post(handle_knowledge_nango_webhook)
+                .layer(DefaultBodyLimit::max(KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/knowledge/webhooks/merge",
+            post(handle_knowledge_merge_webhook)
+                .layer(DefaultBodyLimit::max(KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES)),
         )
         .route(
             "/v1/contacts/verification/start",
@@ -335,6 +380,243 @@ async fn handle_public_agent_session_channel_change(
         [("session_id", serde_json::json!(session_id))],
     )
     .await
+}
+
+async fn handle_knowledge_llamaparse_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_knowledge_provider_webhook(state, headers, body, "llamaparse").await
+}
+
+async fn handle_knowledge_reducto_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_knowledge_provider_webhook(state, headers, body, "reducto").await
+}
+
+async fn handle_knowledge_nango_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_knowledge_provider_webhook(state, headers, body, "nango").await
+}
+
+async fn handle_knowledge_merge_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    forward_knowledge_provider_webhook(state, headers, body, "merge").await
+}
+
+async fn forward_knowledge_provider_webhook(
+    state: AppState,
+    headers: HeaderMap,
+    body: Bytes,
+    provider: &'static str,
+) -> axum::response::Response {
+    if let Err((status, message)) =
+        verify_knowledge_webhook_at_edge(provider, &headers, &body, &state.knowledge_webhooks)
+    {
+        tracing::warn!(
+            provider,
+            status = status.as_u16(),
+            message,
+            "knowledge webhook rejected"
+        );
+        return (status, message).into_response();
+    }
+
+    let RouteTranslation::Forward { method, path, body } =
+        translate_knowledge_provider_webhook(provider, &headers, &body)
+    else {
+        return (StatusCode::BAD_REQUEST, "bad knowledge webhook body").into_response();
+    };
+
+    match state
+        .proxy
+        .forward_public(method, &path, body, &headers)
+        .await
+    {
+        Ok(response) => response_to_axum(response).await,
+        Err(error) => {
+            tracing::error!(error = %error, provider, "knowledge webhook proxy forward failed");
+            (StatusCode::BAD_GATEWAY, "upstream unavailable").into_response()
+        }
+    }
+}
+
+fn verify_knowledge_webhook_at_edge(
+    provider: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    config: &KnowledgeWebhookEdgeConfig,
+) -> Result<(), (StatusCode, &'static str)> {
+    match provider {
+        "nango" => {
+            let signing_key = config
+                .nango_signing_key
+                .as_deref()
+                .ok_or((StatusCode::UNAUTHORIZED, "missing webhook verifier"))?;
+            verify_hmac_header(headers, body, signing_key, "x-nango-hmac-sha256")
+        }
+        "merge" => {
+            let signing_key = config
+                .merge_signature_key
+                .as_deref()
+                .ok_or((StatusCode::UNAUTHORIZED, "missing webhook verifier"))?;
+            verify_hmac_header(headers, body, signing_key, "x-merge-webhook-signature")
+        }
+        "llamaparse" => verify_parser_webhook_at_edge(
+            "llamaparse",
+            headers,
+            body,
+            config.llamaparse_signing_key.as_deref(),
+            config.llamaparse_custom_header.as_ref(),
+        ),
+        "reducto" => verify_parser_webhook_at_edge(
+            "reducto",
+            headers,
+            body,
+            config.reducto_signing_key.as_deref(),
+            config.reducto_custom_header.as_ref(),
+        ),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "unknown knowledge webhook provider",
+        )),
+    }
+}
+
+fn verify_parser_webhook_at_edge(
+    parser: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: Option<&str>,
+    custom_header: Option<&(String, String)>,
+) -> Result<(), (StatusCode, &'static str)> {
+    if let Some((name, expected)) = custom_header
+        && !verify_custom_header(headers, name, expected)
+    {
+        return Err((StatusCode::UNAUTHORIZED, "invalid webhook header"));
+    }
+    let signing_key = signing_key.ok_or((StatusCode::UNAUTHORIZED, "missing webhook verifier"))?;
+    if webhook_header_value(headers, &["svix-signature", "x-svix-signature"]).is_some() {
+        return verify_svix_signature_at_edge(headers, body, signing_key);
+    }
+    let parser_header = format!("x-{parser}-webhook-signature");
+    verify_hmac_header_candidates(
+        headers,
+        body,
+        signing_key,
+        &[parser_header.as_str(), "x-moa-knowledge-webhook-signature"],
+    )
+}
+
+fn verify_hmac_header(
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: &str,
+    header_name: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    verify_hmac_header_candidates(headers, body, signing_key, &[header_name])
+}
+
+fn verify_hmac_header_candidates(
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: &str,
+    header_names: &[&str],
+) -> Result<(), (StatusCode, &'static str)> {
+    let signature = webhook_header_value(headers, header_names)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let signature = decode_webhook_signature(&signature)
+        .ok_or((StatusCode::UNAUTHORIZED, "invalid webhook signature"))?;
+    verify_hmac_signature(signing_key.as_bytes(), body, &signature)
+}
+
+fn verify_svix_signature_at_edge(
+    headers: &HeaderMap,
+    body: &[u8],
+    signing_key: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    let message_id = webhook_header_value(headers, &["svix-id", "x-svix-id"])
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let timestamp = webhook_header_value(headers, &["svix-timestamp", "x-svix-timestamp"])
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let timestamp = timestamp
+        .parse::<i64>()
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid webhook signature"))?;
+    let now = chrono::Utc::now().timestamp();
+    if (now - timestamp).abs() > 300 {
+        return Err((StatusCode::UNAUTHORIZED, "stale webhook signature"));
+    }
+    let signature = webhook_header_value(headers, &["svix-signature", "x-svix-signature"])
+        .ok_or((StatusCode::UNAUTHORIZED, "missing webhook signature"))?;
+    let key = svix_signing_key(signing_key)
+        .ok_or((StatusCode::UNAUTHORIZED, "invalid webhook verifier"))?;
+    let body = std::str::from_utf8(body)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid webhook signature"))?;
+    let signed_payload = format!("{message_id}.{timestamp}.{body}");
+    for candidate in signature.split_whitespace() {
+        if let Some(encoded) = candidate.strip_prefix("v1,")
+            && let Some(signature) = decode_base64_signature(encoded)
+            && verify_hmac_signature(&key, signed_payload.as_bytes(), &signature).is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err((StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+}
+
+fn verify_hmac_signature(
+    signing_key: &[u8],
+    body: &[u8],
+    signature: &[u8],
+) -> Result<(), (StatusCode, &'static str)> {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(signing_key) else {
+        return Err((StatusCode::UNAUTHORIZED, "invalid webhook verifier"));
+    };
+    mac.update(body);
+    mac.verify_slice(signature)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid webhook signature"))
+}
+
+fn verify_custom_header(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|actual| actual.as_bytes().ct_eq(expected.as_bytes()).into())
+}
+
+fn decode_webhook_signature(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim().trim_start_matches("sha256=");
+    if let Ok(decoded) = hex::decode(value)
+        && decoded.len() == 32
+    {
+        return Some(decoded);
+    }
+    decode_base64_signature(value)
+}
+
+fn decode_base64_signature(value: &str) -> Option<Vec<u8>> {
+    general_purpose::STANDARD
+        .decode(value.trim())
+        .or_else(|_| general_purpose::URL_SAFE.decode(value.trim()))
+        .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(value.trim()))
+        .ok()
+}
+
+fn svix_signing_key(signing_key: &str) -> Option<Vec<u8>> {
+    let Some(encoded) = signing_key.trim().strip_prefix("whsec_") else {
+        return Some(signing_key.as_bytes().to_vec());
+    };
+    decode_base64_signature(encoded)
 }
 
 async fn forward_public_contact_route<const N: usize>(
@@ -1217,6 +1499,69 @@ fn translate_public_route(
                     tenant_id,
                 );
             }
+            "/v1/knowledge/link-token" => {
+                return translate_knowledge_json_body::<KnowledgeCreateLinkTokenRequest>(
+                    body,
+                    "/Knowledge/create_link_token",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/exchange-token" => {
+                return translate_knowledge_json_body::<KnowledgeExchangeTokenRequest>(
+                    body,
+                    "/Knowledge/exchange_public_token",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/sync" => {
+                return translate_knowledge_json_body::<KnowledgeSyncRequest>(
+                    body,
+                    "/Knowledge/sync_connection",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/sync-status" => {
+                return translate_knowledge_json_body::<KnowledgeSyncStatusRequest>(
+                    body,
+                    "/Knowledge/sync_status",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/sync-events" => {
+                return translate_knowledge_json_body::<KnowledgeSyncEventsRequest>(
+                    body,
+                    "/Knowledge/sync_events",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/connections" => {
+                return translate_knowledge_json_body::<KnowledgeConnectionListRequest>(
+                    body,
+                    "/Knowledge/list_connections",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/objects" => {
+                return translate_knowledge_json_body::<KnowledgeObjectListRequest>(
+                    body,
+                    "/Knowledge/list_objects",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/object" => {
+                return translate_knowledge_json_body::<KnowledgeObjectInspectRequest>(
+                    body,
+                    "/Knowledge/inspect_object",
+                    tenant_id,
+                );
+            }
+            "/v1/knowledge/query-trace" => {
+                return translate_knowledge_json_body::<KnowledgeQueryTraceRequest>(
+                    body,
+                    "/Knowledge/query_trace",
+                    tenant_id,
+                );
+            }
             "/v1/lineage/explain" => {
                 return translate_json_object_with_tenant_id(
                     body,
@@ -1540,6 +1885,229 @@ fn translate_json_object_with_tenant_scope(
     )
 }
 
+fn translate_knowledge_json_body<T>(
+    body: &Bytes,
+    target: &str,
+    tenant_id: TenantId,
+) -> RouteTranslation
+where
+    T: DeserializeOwned + Serialize,
+{
+    let mut value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad knowledge route body"),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return RouteTranslation::BadRequest("knowledge route body must be object");
+    };
+    object.insert("tenant_id".to_string(), serde_json::json!(tenant_id));
+
+    let request = match serde_json::from_value::<T>(value) {
+        Ok(request) => request,
+        Err(_) => return RouteTranslation::BadRequest("bad knowledge route body"),
+    };
+    let bytes = match serde_json::to_vec(&request) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "serialize knowledge route body failed");
+            return RouteTranslation::BadRequest("bad knowledge route body");
+        }
+    };
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: target.to_string(),
+        body: bytes,
+    }
+}
+
+fn translate_knowledge_provider_webhook(
+    provider: &'static str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> RouteTranslation {
+    if body.len() > KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES {
+        return RouteTranslation::BadRequest("knowledge webhook body too large");
+    }
+    if rejects_raw_webhook_content_type(headers) {
+        return RouteTranslation::BadRequest(
+            "knowledge webhook route does not accept raw document uploads",
+        );
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(_) => return RouteTranslation::BadRequest("bad knowledge webhook body"),
+    };
+    if !payload.is_object() {
+        return RouteTranslation::BadRequest("knowledge webhook body must be object");
+    }
+    let Some(event_id) = webhook_event_id(headers, &payload) else {
+        return RouteTranslation::BadRequest("knowledge webhook missing event id");
+    };
+    let Some(event_type) = webhook_event_type(headers, &payload) else {
+        return RouteTranslation::BadRequest("knowledge webhook missing event type");
+    };
+
+    let request = KnowledgeProviderWebhookRequest {
+        provider: provider.to_string(),
+        event_id,
+        event_type,
+        payload,
+        headers: forwarded_webhook_headers(headers),
+        body_base64: Some(general_purpose::STANDARD.encode(body)),
+    };
+    let bytes = match serde_json::to_vec(&request) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, provider, "serialize knowledge webhook body failed");
+            return RouteTranslation::BadRequest("bad knowledge webhook body");
+        }
+    };
+    RouteTranslation::Forward {
+        method: Method::POST,
+        path: "/Knowledge/provider_webhook".to_string(),
+        body: bytes,
+    }
+}
+
+fn rejects_raw_webhook_content_type(headers: &HeaderMap) -> bool {
+    let Some(content_type) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    media_type.starts_with("multipart/")
+        || media_type.starts_with("image/")
+        || media_type.starts_with("audio/")
+        || media_type.starts_with("video/")
+        || matches!(
+            media_type.as_str(),
+            "application/octet-stream"
+                | "application/pdf"
+                | "application/zip"
+                | "application/x-zip-compressed"
+                | "application/x-tar"
+                | "application/gzip"
+        )
+}
+
+fn forwarded_webhook_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let lowercase_name = name.as_str().to_ascii_lowercase();
+            if headers::is_moa_header(&lowercase_name)
+                || lowercase_name == "authorization"
+                || lowercase_name == "cookie"
+                || lowercase_name == "set-cookie"
+                || is_proxy_hop_by_hop_header(&lowercase_name)
+            {
+                return None;
+            }
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect()
+}
+
+fn is_proxy_hop_by_hop_header(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn webhook_event_id(headers: &HeaderMap, payload: &serde_json::Value) -> Option<String> {
+    webhook_header_value(
+        headers,
+        &["svix-id", "x-svix-id", "webhook-id", "x-webhook-id"],
+    )
+    .or_else(|| {
+        json_string_field(
+            payload,
+            &[
+                "event_id",
+                "id",
+                "webhook_id",
+                "hook.id",
+                "job_id",
+                "parse_id",
+                "data.id",
+                "data.job_id",
+                "data.parse_id",
+            ],
+        )
+    })
+}
+
+fn webhook_event_type(headers: &HeaderMap, payload: &serde_json::Value) -> Option<String> {
+    webhook_header_value(
+        headers,
+        &[
+            "svix-event-type",
+            "x-event-type",
+            "x-webhook-event",
+            "x-webhook-event-type",
+        ],
+    )
+    .or_else(|| {
+        json_string_field(
+            payload,
+            &[
+                "event_type",
+                "type",
+                "event",
+                "status",
+                "hook.event",
+                "data.event_type",
+                "data.type",
+                "data.status",
+            ],
+        )
+    })
+}
+
+fn webhook_header_value(headers: &HeaderMap, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_string())
+    })
+}
+
+fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let mut current = value;
+        for segment in key.split('.') {
+            current = current.get(segment)?;
+        }
+        match current {
+            serde_json::Value::String(value) if !value.trim().is_empty() => {
+                Some(value.trim().to_string())
+            }
+            serde_json::Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        }
+    })
+}
+
 fn translate_create_agent_session_route(body: &Bytes, tenant_id: TenantId) -> RouteTranslation {
     let mut value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(value) => value,
@@ -1662,6 +2230,7 @@ fn translate_json_object_with_fields<const N: usize>(
 mod tests {
     use async_trait::async_trait;
     use axum::http::header::AUTHORIZATION;
+    use base64::Engine as _;
     use chrono::Utc;
     use moa_core::traits::{AuthError, Identity, IdentityType};
     use moa_core::wire::turn::{SessionSnapshot, TurnOutcome, TurnOutcomeKind};
@@ -2587,6 +3156,295 @@ mod tests {
                     panic!("{public_path} should not fail translation: {message}")
                 }
             }
+        }
+    }
+
+    #[test]
+    fn knowledge_public_routes_translate_to_restate_handlers() {
+        // Pins: hosted knowledge routes forward typed DTOs with tenant id derived from auth.
+        let connection_uid = "11111111-1111-1111-1111-111111111111";
+        let sync_run_uid = "22222222-2222-2222-2222-222222222222";
+        let object_uid = "33333333-3333-3333-3333-333333333333";
+        let trace_uid = "44444444-4444-4444-4444-444444444444";
+        let caller_tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let cases = [
+            (
+                "/v1/knowledge/link-token",
+                "/Knowledge/create_link_token",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "provider": "nango",
+                    "connector": "google-drive",
+                    "external_account_id": "account-1"
+                }),
+            ),
+            (
+                "/v1/knowledge/exchange-token",
+                "/Knowledge/exchange_public_token",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "provider": "merge",
+                    "exchange_token": "public-token"
+                }),
+            ),
+            (
+                "/v1/knowledge/sync",
+                "/Knowledge/sync_connection",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "connection_uid": connection_uid,
+                    "parser": "native",
+                    "max_records": 25
+                }),
+            ),
+            (
+                "/v1/knowledge/sync-status",
+                "/Knowledge/sync_status",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "sync_run_uid": sync_run_uid
+                }),
+            ),
+            (
+                "/v1/knowledge/sync-events",
+                "/Knowledge/sync_events",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "sync_run_uid": sync_run_uid,
+                    "object_uid": object_uid,
+                    "cursor": "page-2",
+                    "limit": 50
+                }),
+            ),
+            (
+                "/v1/knowledge/connections",
+                "/Knowledge/list_connections",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "provider": "nango"
+                }),
+            ),
+            (
+                "/v1/knowledge/objects",
+                "/Knowledge/list_objects",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "connection_uid": connection_uid,
+                    "object_type": "document",
+                    "cursor": "page-2",
+                    "limit": 25
+                }),
+            ),
+            (
+                "/v1/knowledge/object",
+                "/Knowledge/inspect_object",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "object_uid": object_uid
+                }),
+            ),
+            (
+                "/v1/knowledge/query-trace",
+                "/Knowledge/query_trace",
+                serde_json::json!({
+                    "tenant_id": test_tenant_json(),
+                    "trace_uid": trace_uid
+                }),
+            ),
+        ];
+
+        for (public_path, internal_path, expected_body) in cases {
+            let uri = public_path.parse::<Uri>().expect("route path should parse");
+            let mut input_body = expected_body.clone();
+            let object = input_body.as_object_mut().expect("expected body is object");
+            object.insert("tenant_id".to_string(), serde_json::json!(caller_tenant));
+            let body = Bytes::from(input_body.to_string());
+
+            let translation = translate(&Method::POST, &uri, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{public_path} must remain POST");
+                    assert_eq!(path, internal_path, "{public_path} target changed");
+                    let forwarded: serde_json::Value =
+                        serde_json::from_slice(&forwarded_body).expect("forwarded body is JSON");
+                    assert_eq!(forwarded, expected_body, "{public_path} body changed");
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{public_path} should translate to {internal_path}")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{public_path} should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn knowledge_public_routes_reject_bad_typed_payloads() {
+        // Pins: knowledge route translation validates against the typed wire DTO before forwarding.
+        let uri = "/v1/knowledge/sync"
+            .parse::<Uri>()
+            .expect("route path should parse");
+        let missing_connection = Bytes::from_static(br#"{"parser":"native"}"#);
+        let non_object = Bytes::from_static(br#"[]"#);
+
+        match translate(&Method::POST, &uri, &missing_connection) {
+            RouteTranslation::BadRequest(message) => {
+                assert_eq!(message, "bad knowledge route body");
+            }
+            RouteTranslation::Forward { .. } => panic!("missing connection_uid must not forward"),
+            RouteTranslation::NoChange => panic!("knowledge sync route should not fall through"),
+        }
+
+        match translate(&Method::POST, &uri, &non_object) {
+            RouteTranslation::BadRequest(message) => {
+                assert_eq!(message, "knowledge route body must be object");
+            }
+            RouteTranslation::Forward { .. } => panic!("non-object payload must not forward"),
+            RouteTranslation::NoChange => panic!("knowledge sync route should not fall through"),
+        }
+    }
+
+    #[test]
+    fn knowledge_provider_webhooks_translate_without_tenant_injection() {
+        // Pins: provider webhooks bypass end-user auth and forward raw signed event material only.
+        let body = Bytes::from_static(br#"{"event_id":"evt-1","event_type":"sync.completed"}"#);
+        let providers = ["llamaparse", "reducto", "nango", "merge"];
+
+        for provider in providers {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                "application/json"
+                    .parse()
+                    .expect("content-type should parse"),
+            );
+            headers.insert(
+                AUTHORIZATION,
+                "Bearer should-not-forward"
+                    .parse()
+                    .expect("authorization header should parse"),
+            );
+            headers.insert(
+                "x-moa-tenant-id",
+                TEST_TENANT_ID.parse().expect("tenant header should parse"),
+            );
+            headers.insert(
+                "x-test-signature",
+                "valid".parse().expect("signature header should parse"),
+            );
+
+            let translation = translate_knowledge_provider_webhook(provider, &headers, &body);
+
+            match translation {
+                RouteTranslation::Forward {
+                    method,
+                    path,
+                    body: forwarded_body,
+                } => {
+                    assert_eq!(method, Method::POST, "{provider} must remain POST");
+                    assert_eq!(path, "/Knowledge/provider_webhook");
+                    let forwarded: KnowledgeProviderWebhookRequest =
+                        serde_json::from_slice(&forwarded_body)
+                            .expect("forwarded webhook body should decode");
+                    assert_eq!(forwarded.provider, provider);
+                    assert_eq!(forwarded.event_id, "evt-1");
+                    assert_eq!(forwarded.event_type, "sync.completed");
+                    assert_eq!(forwarded.payload.get("tenant_id"), None);
+                    assert!(
+                        forwarded.body_base64.is_some(),
+                        "raw body should be base64 encoded"
+                    );
+                    let raw_body = general_purpose::STANDARD
+                        .decode(forwarded.body_base64.as_deref().expect("body_base64"))
+                        .expect("body_base64 should decode");
+                    assert_eq!(raw_body, body.as_ref());
+                    assert!(
+                        !forwarded
+                            .headers
+                            .iter()
+                            .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
+                        "authorization must not be forwarded for webhook verification"
+                    );
+                    assert!(
+                        !forwarded
+                            .headers
+                            .iter()
+                            .any(|(name, _)| name.eq_ignore_ascii_case("x-moa-tenant-id")),
+                        "caller-supplied MOA headers must not be forwarded"
+                    );
+                    assert!(
+                        forwarded
+                            .headers
+                            .iter()
+                            .any(|(name, value)| name == "x-test-signature" && value == "valid"),
+                        "provider signature header should be forwarded"
+                    );
+                }
+                RouteTranslation::NoChange => {
+                    panic!("{provider} webhook should translate to Knowledge/provider_webhook")
+                }
+                RouteTranslation::BadRequest(message) => {
+                    panic!("{provider} webhook should not fail translation: {message}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn knowledge_provider_webhooks_reject_documents_and_malformed_events() {
+        // Pins: webhook routes accept provider event JSON, not direct document uploads.
+        let mut raw_document_headers = HeaderMap::new();
+        raw_document_headers.insert(
+            header::CONTENT_TYPE,
+            "application/pdf"
+                .parse()
+                .expect("content-type should parse"),
+        );
+        let document_body = Bytes::from_static(b"%PDF-raw-document");
+        match translate_knowledge_provider_webhook(
+            "llamaparse",
+            &raw_document_headers,
+            &document_body,
+        ) {
+            RouteTranslation::BadRequest(message) => {
+                assert_eq!(
+                    message,
+                    "knowledge webhook route does not accept raw document uploads"
+                );
+            }
+            RouteTranslation::Forward { .. } => panic!("raw document webhook must not forward"),
+            RouteTranslation::NoChange => panic!("webhook route should not fall through"),
+        }
+
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            header::CONTENT_TYPE,
+            "application/json"
+                .parse()
+                .expect("content-type should parse"),
+        );
+        let missing_event_type = Bytes::from_static(br#"{"event_id":"evt-1"}"#);
+        match translate_knowledge_provider_webhook("nango", &json_headers, &missing_event_type) {
+            RouteTranslation::BadRequest(message) => {
+                assert_eq!(message, "knowledge webhook missing event type");
+            }
+            RouteTranslation::Forward { .. } => panic!("malformed webhook must not forward"),
+            RouteTranslation::NoChange => panic!("webhook route should not fall through"),
+        }
+
+        let large_body = Bytes::from(vec![b' '; KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES + 1]);
+        match translate_knowledge_provider_webhook("merge", &json_headers, &large_body) {
+            RouteTranslation::BadRequest(message) => {
+                assert_eq!(message, "knowledge webhook body too large");
+            }
+            RouteTranslation::Forward { .. } => panic!("oversized webhook must not forward"),
+            RouteTranslation::NoChange => panic!("webhook route should not fall through"),
         }
     }
 

@@ -16,7 +16,7 @@ use crate::{
     node::{NodeIndexRow, NodeLabel, NodeWriteIntent},
 };
 
-const NODE_LABELS: [NodeLabel; 7] = [
+const NODE_LABELS: [NodeLabel; 10] = [
     NodeLabel::Entity,
     NodeLabel::Concept,
     NodeLabel::Decision,
@@ -24,6 +24,9 @@ const NODE_LABELS: [NodeLabel; 7] = [
     NodeLabel::Lesson,
     NodeLabel::Fact,
     NodeLabel::Source,
+    NodeLabel::Document,
+    NodeLabel::Chunk,
+    NodeLabel::ContactGroup,
 ];
 
 #[async_trait::async_trait]

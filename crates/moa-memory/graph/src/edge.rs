@@ -24,8 +24,12 @@ pub enum EdgeLabel {
     Contradicts,
     /// Derivation relationship.
     DerivedFrom,
+    /// Containment relationship for tenant knowledge source, document, and chunk chains.
+    Contains,
     /// Source mention relationship.
     MentionedIn,
+    /// Contact-group membership relationship.
+    MemberOf,
     /// Causal relationship.
     Caused,
     /// Lesson provenance relationship.
@@ -36,14 +40,16 @@ pub enum EdgeLabel {
 
 impl EdgeLabel {
     /// Every supported AGE edge label.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::RelatesTo,
         Self::DependsOn,
         Self::OwnedBy,
         Self::Supersedes,
         Self::Contradicts,
         Self::DerivedFrom,
+        Self::Contains,
         Self::MentionedIn,
+        Self::MemberOf,
         Self::Caused,
         Self::LearnedFrom,
         Self::AppliesTo,
@@ -58,7 +64,9 @@ impl EdgeLabel {
             Self::Supersedes => "SUPERSEDES",
             Self::Contradicts => "CONTRADICTS",
             Self::DerivedFrom => "DERIVED_FROM",
+            Self::Contains => "CONTAINS",
             Self::MentionedIn => "MENTIONED_IN",
+            Self::MemberOf => "MEMBER_OF",
             Self::Caused => "CAUSED",
             Self::LearnedFrom => "LEARNED_FROM",
             Self::AppliesTo => "APPLIES_TO",
@@ -77,7 +85,9 @@ impl FromStr for EdgeLabel {
             "SUPERSEDES" => Ok(Self::Supersedes),
             "CONTRADICTS" => Ok(Self::Contradicts),
             "DERIVED_FROM" => Ok(Self::DerivedFrom),
+            "CONTAINS" => Ok(Self::Contains),
             "MENTIONED_IN" => Ok(Self::MentionedIn),
+            "MEMBER_OF" => Ok(Self::MemberOf),
             "CAUSED" => Ok(Self::Caused),
             "LEARNED_FROM" => Ok(Self::LearnedFrom),
             "APPLIES_TO" => Ok(Self::AppliesTo),

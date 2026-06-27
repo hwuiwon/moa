@@ -41,6 +41,7 @@ use crate::{
         contacts::{Contacts, ContactsImpl},
         graph_memory_maint::{GraphMemoryMaint, GraphMemoryMaintImpl},
         health::{Health, HealthImpl},
+        knowledge::{Knowledge, KnowledgeImpl},
         learning_review::{LearningReview, LearningReviewImpl},
         lineage_admin::{LineageAdmin, LineageAdminImpl},
         llm_gateway::{LLMGateway, LLMGatewayImpl},
@@ -80,6 +81,7 @@ const DEFAULT_EXPECTED_SERVICE_NAMES: &[&str] = &[
     "GraphMemoryMaint",
     "Health",
     "IngestionVO",
+    "Knowledge",
     "LearningReview",
     "LineageAdmin",
     "LLMGateway",
@@ -159,6 +161,7 @@ pub fn build_endpoint(
         .bind(ToolExecutorImpl::new(tool_router.clone()).serve())
         .bind(ActionPolicyImpl::new(tool_router.clone()).serve())
         .bind(GraphMemoryMaintImpl.serve())
+        .bind(KnowledgeImpl.serve())
         .bind(LearningReviewImpl.serve())
         .bind(LineageAdminImpl.serve())
         .bind(MemoryImpl.serve())

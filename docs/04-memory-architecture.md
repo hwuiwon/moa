@@ -11,26 +11,29 @@ _Graph memory, privacy filtering, sidecar indexes, pgvector semantic retrieval, 
 4. Retrieval combines graph structure, sidecar filters, keyword search, and vector similarity.
 5. Memory is part of the learning pipeline, not a separate cache.
 
-The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only memory subsystem. See `crates/moa-memory/README.md` for crate-level details and `docs/15-architecture-policy.md` for ownership rules.
+The graph stack (`moa-memory-graph`, `moa-memory-vector`, `moa-memory-pii`, `moa-memory-ingest`) is the only durable memory substrate. Tenant knowledge-base ingestion is a product layer in `moa-knowledge` that feeds this substrate; it is not a separate graph store and does not make connector providers part of `moa-memory-*`. See `crates/moa-memory/README.md` for crate-level details and `docs/15-architecture-policy.md` for ownership rules.
 
 ## Runtime Scopes
 
 | Scope | Contents |
 |---|---|
-| Tenant | Tenant-owned operational facts and admin/operator memory for that tenant |
-| Contact | End-user preferences, facts, and corrections for one contact inside one tenant |
+| Tenant knowledge | Tenant-owned synced source knowledge from linked systems, stored as graph-backed documents, chunks, facts, and entities |
+| Tenant memory | Tenant-owned operational facts and admin/operator memory for that tenant |
+| Contact memory | End-user preferences, facts, and corrections for one contact inside one tenant |
 
 Graph writes set tenant context before touching Postgres. Contact-owned memory
 also sets contact context. Row-level security, changelog rows, sidecar
 projections, and vector records all use the same tenant boundary.
 
 Agent-facing contacts are end users, not admin/operator users. Contact-bound
-sessions store memory under the session tenant and contact. Anonymous,
-unverified, and verified contacts read and write only their current contact
-memory. A contact session does not inherit tenant memory or any other contact's
-memory. After contact-point verification, session promotion moves the session to
-the canonical verified contact; any historical merge or attribution repair must
-be an explicit admin operation, not default retrieval.
+sessions store contact memory under the session tenant and contact. Anonymous,
+unverified, and verified contacts write only their current contact memory. A
+contact session does not inherit tenant admin/operator memory or any other
+contact's memory. When graph memory is enabled, answer-time retrieval combines
+tenant knowledge with admitted memory for the current contact by default. After
+contact-point verification, session promotion moves the session to the canonical
+verified contact; any historical merge or attribution repair must be an
+explicit admin operation, not default retrieval.
 
 ## Graph Model
 
@@ -43,8 +46,20 @@ Memory is stored as typed graph nodes:
 - `Lesson`
 - `Fact`
 - `Source`
+- `Document`
+- `Chunk`
 
 Edges represent relationships, evidence, provenance, supersession, contradiction, and source attribution. Bitemporal validity lets new facts supersede older facts without erasing history.
+
+Tenant knowledge uses `Source`, `Document`, `Chunk`, `Fact`, and `Entity`
+labels. `moa-knowledge` derives graph deltas from parsed objects and calls
+`moa-memory-graph` to write them. Required relationships are `HAS_DOCUMENT`
+from source to document, `HAS_CHUNK` from document to chunk, `EVIDENCES` from
+chunk to fact, `MENTIONS` from chunk to entity, and `DERIVED_FROM` from derived
+contact groups or facts back to source evidence. Full chunk text is stored in
+`moa.knowledge_chunks`; graph properties stay compact and citation-friendly.
+Provider credentials, account tokens, raw credential material, and unbounded
+raw source payloads are never graph properties.
 
 ## Sidecar And Vector Indexes
 
@@ -91,10 +106,24 @@ Indexes are write-incremental. There is no user-facing rebuild-index command for
 
 ## Ingestion
 
-Memory enters the graph through two routes:
+Session and contact memory enter the graph through two routes:
 
 - **Slow path**: `moa-memory-ingest` processes longer source text or turns through the ingestion VO. It chunks content, extracts facts/entities, classifies privacy, writes nodes and edges, embeds retrievable records, and records contradictions.
 - **Fast path**: short observations use remember/forget/supersede APIs for direct graph writes with the same scope and privacy controls.
+
+Tenant knowledge ingestion is a third route owned by `moa-knowledge`, not by
+`Memory.ingest_documents`. It links external accounts through Nango or Merge,
+triggers provider sync, lists changed records, fetches content, parses records
+and files through `DocumentParser`, derives `KnowledgeBlock` and
+`KnowledgeChunk` identities, computes graph deltas, and writes tenant-scoped
+knowledge through `moa-memory-graph` and `moa-memory-vector`. The session
+memory slow path may continue to accept explicit documents, but connector sync
+must not synthesize session turns or overload `Memory.ingest_documents`.
+
+`KnowledgeBlock` identity is `block_hash = blake3(normalized_text)`.
+`KnowledgeChunk` identity is `chunk_hash = blake3(ordered block_hashes)`.
+These identities let ingestion diff changed documents, reuse embeddings,
+tombstone deleted source content, and keep citations stable across re-syncs.
 
 Slow-path fact extraction is behind the `FactExtractor` seam. The heuristic extractor remains the default and journal-safe fallback. Environments can opt into the Cohere-backed `LlmFactExtractor` with `memory.extraction.enabled` plus the configured API-key env var; eval replay uses recorded extraction fixtures so the natural transcript lane stays hermetic after live recording.
 
@@ -113,16 +142,26 @@ The memory processor runs after query rewriting and before history compilation. 
 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
-For verified contact sessions, retrieval queries only the canonical verified
-contact scope inside the tenant. Storage lineage is emitted for that contact
-scope; the retrieval path does not read linked, tenant, or other-contact memory
-as implicit ancestors.
+For verified contact sessions, retrieval queries tenant knowledge and the
+canonical verified contact memory scope inside the tenant. Storage lineage and
+query trace records preserve both source tiers. The retrieval path does not read
+tenant admin/operator memory or other-contact memory as implicit ancestors. If
+there is no admitted contact for the session, retrieval uses tenant knowledge
+only.
 
 When `memory.retrieval.lineage_enabled` is true, retrieval records best-effort
 lineage rows after ranking: tenant, contact, session, turn sequence, durable
 turn id when known, node UID, rank, and timestamp. The write is fire-and-forget
 and flag-dark by default, so normal retrieval does not wait on lineage
 persistence.
+
+Tenant knowledge query trace records are renderer-facing lineage views. They
+record the original query, rewritten retrieval query, searched scopes, graph,
+vector, lexical, and reranker legs, candidate counts, selected chunks/facts,
+source tier, citations, tenant/contact/PII/ACL/source/label/freshness filters,
+and per-stage latency. Query trace rows and lineage rows must redact provider
+tokens, credential references that reveal secret material, full raw documents,
+and contact points.
 
 ## Consolidation
 

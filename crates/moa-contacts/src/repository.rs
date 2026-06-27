@@ -131,6 +131,54 @@ pub async fn load_contact_ref(
     })
 }
 
+/// Resolves contact-point inputs to existing verified contacts in one tenant.
+///
+/// Plaintext contact-point values are normalized and hashed locally, then only
+/// the keyed hashes are sent to storage.
+pub async fn resolve_verified_contact_ids(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    contact_point_hash_key_env: &str,
+    contact_points: &[ContactPointInput],
+) -> Result<Vec<ContactId>> {
+    let mut contact_ids = Vec::new();
+    for point in contact_points {
+        let normalized = normalize_contact_point(point.kind, &point.value)?;
+        let normalized_hash = hash_contact_point_from_env(
+            tenant_id,
+            point.kind,
+            &normalized,
+            contact_point_hash_key_env,
+        )?;
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT contact_id
+            FROM contact_points
+            WHERE tenant_id = $1
+              AND storage_partition_id = $2
+              AND kind = $3
+              AND normalized_hash = $4
+              AND verified = TRUE
+            ORDER BY contact_id
+            "#,
+        )
+        .bind(tenant_id.0)
+        .bind(StoragePartitionId::for_tenant(tenant_id).as_str())
+        .bind(point.kind.as_str())
+        .bind(&normalized_hash)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| ContactError::database("resolve verified contact point", error))?;
+        for row in rows {
+            let contact_id = ContactId(row);
+            if !contact_ids.contains(&contact_id) {
+                contact_ids.push(contact_id);
+            }
+        }
+    }
+    Ok(contact_ids)
+}
+
 /// Persists a contact token grant for later revocation checks.
 pub async fn create_contact_token_grant(
     pool: sqlx::PgPool,
