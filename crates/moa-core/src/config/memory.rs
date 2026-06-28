@@ -67,8 +67,8 @@ impl Default for MemoryDigestConfig {
 pub struct MemoryExtractionConfig {
     /// Whether model-backed fact extraction is enabled.
     pub enabled: bool,
-    /// Environment variable containing the Cohere API key.
-    pub api_key_env: String,
+    /// Cohere API key value loaded from runtime configuration.
+    pub api_key: String,
     /// Cohere chat model used for extraction and memory-ingest chat judging.
     pub model: String,
     /// Maximum facts accepted from one chunk.
@@ -81,7 +81,7 @@ impl Default for MemoryExtractionConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            api_key_env: "COHERE_API_KEY".to_string(),
+            api_key: String::new(),
             model: "command-a-plus-05-2026".to_string(),
             max_facts_per_chunk: 12,
             timeout_ms: 10_000,
@@ -180,28 +180,17 @@ pub struct MemoryVectorConfig {
 }
 
 /// Turbopuffer graph-memory vector backend configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TurbopufferVectorConfig {
-    /// Environment variable containing the Turbopuffer API key.
-    pub api_key_env: String,
+    /// Turbopuffer API key value loaded from runtime configuration.
+    pub api_key: String,
     /// Optional Turbopuffer API base URL override.
     pub base_url: Option<String>,
     /// Optional namespace environment segment.
     pub environment: Option<String>,
     /// Whether the configured Turbopuffer account has a BAA for restricted data.
     pub baa_enabled: bool,
-}
-
-impl Default for TurbopufferVectorConfig {
-    fn default() -> Self {
-        Self {
-            api_key_env: "TURBOPUFFER_API_KEY".to_string(),
-            base_url: None,
-            environment: None,
-            baa_enabled: false,
-        }
-    }
 }
 
 /// Per-tenant embedder selection.
@@ -214,6 +203,8 @@ pub struct VectorEmbedderConfig {
     pub output_dim: usize,
     /// Cohere-specific settings.
     pub cohere: CohereEmbedderConfig,
+    /// ZeroEntropy-specific settings.
+    pub zeroentropy: ZeroEntropyEmbedderConfig,
     /// Gemini-specific settings.
     pub gemini: GeminiEmbedderConfig,
 }
@@ -224,33 +215,34 @@ impl Default for VectorEmbedderConfig {
             name: "gemini-embedding-2".to_string(),
             output_dim: 1024,
             cohere: CohereEmbedderConfig::default(),
+            zeroentropy: ZeroEntropyEmbedderConfig::default(),
             gemini: GeminiEmbedderConfig::default(),
         }
     }
 }
 
 /// Cohere embedder credentials.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CohereEmbedderConfig {
-    /// Environment variable containing the Cohere API key.
-    pub api_key_env: String,
+    /// Cohere API key value loaded from runtime configuration.
+    pub api_key: String,
 }
 
-impl Default for CohereEmbedderConfig {
-    fn default() -> Self {
-        Self {
-            api_key_env: "COHERE_API_KEY".to_string(),
-        }
-    }
+/// ZeroEntropy embedder credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZeroEntropyEmbedderConfig {
+    /// ZeroEntropy API key value loaded from runtime configuration.
+    pub api_key: String,
 }
 
 /// Gemini embedder credentials and task encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeminiEmbedderConfig {
-    /// Environment variable containing the Gemini API key.
-    pub api_key_env: String,
+    /// Gemini API key value loaded from runtime configuration.
+    pub api_key: String,
     /// Default Gemini v2 role for retrieval-side embedders.
     pub default_role: String,
 }
@@ -258,7 +250,7 @@ pub struct GeminiEmbedderConfig {
 impl Default for GeminiEmbedderConfig {
     fn default() -> Self {
         Self {
-            api_key_env: "GEMINI_API_KEY".to_string(),
+            api_key: String::new(),
             default_role: "search_query".to_string(),
         }
     }
@@ -306,10 +298,6 @@ impl super::MoaEnvOverlay {
             self.memory_extraction_enabled,
         );
         set_if_some(
-            &mut config.memory.extraction.api_key_env,
-            &self.memory_extraction_api_key_env,
-        );
-        set_if_some(
             &mut config.memory.extraction.model,
             &self.memory_extraction_model,
         );
@@ -330,21 +318,13 @@ impl super::MoaEnvOverlay {
             self.memory_vector_embedder_output_dim,
         );
         set_if_some(
-            &mut config.memory.vector.embedder.cohere.api_key_env,
-            &self.memory_vector_embedder_cohere_api_key_env,
-        );
-        set_if_some(
-            &mut config.memory.vector.embedder.gemini.api_key_env,
-            &self.memory_vector_embedder_gemini_api_key_env,
-        );
-        set_if_some(
             &mut config.memory.vector.embedder.gemini.default_role,
             &self.memory_vector_embedder_gemini_default_role,
         );
         set_option_if_some(&mut config.memory.pii_service_url, &self.pii_service_url);
         set_if_some(
-            &mut config.memory.vector.turbopuffer.api_key_env,
-            &self.turbopuffer_api_key_env,
+            &mut config.memory.vector.turbopuffer.api_key,
+            &self.turbopuffer_api_key,
         );
         set_option_if_some(
             &mut config.memory.vector.turbopuffer.base_url,

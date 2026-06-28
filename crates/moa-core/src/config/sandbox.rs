@@ -49,14 +49,14 @@ impl Default for CloudConfig {
 pub struct CloudHandsConfig {
     /// Default hand provider.
     pub default_provider: Option<String>,
-    /// Environment variable containing the Daytona API key.
-    pub daytona_api_key_env: Option<String>,
+    /// Daytona API key loaded from runtime configuration.
+    pub daytona_api_key: Option<String>,
     /// Optional Daytona API base URL override.
     pub daytona_api_url: Option<String>,
     /// Optional default image for Daytona sandboxes.
     pub daytona_default_image: Option<String>,
-    /// Environment variable containing the E2B API key.
-    pub e2b_api_key_env: Option<String>,
+    /// E2B API key loaded from runtime configuration.
+    pub e2b_api_key: Option<String>,
     /// Optional E2B API base URL override.
     pub e2b_api_url: Option<String>,
     /// Optional E2B domain override.
@@ -138,10 +138,10 @@ impl super::MoaEnvOverlay {
         set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
         if any_present(&[
             self.cloud_hands_default_provider.is_some(),
-            self.cloud_hands_daytona_api_key_env.is_some(),
+            self.cloud_hands_daytona_api_key.is_some(),
             self.cloud_hands_daytona_api_url.is_some(),
             self.cloud_hands_daytona_default_image.is_some(),
-            self.cloud_hands_e2b_api_key_env.is_some(),
+            self.cloud_hands_e2b_api_key.is_some(),
             self.cloud_hands_e2b_api_url.is_some(),
             self.cloud_hands_e2b_domain.is_some(),
             self.cloud_hands_e2b_template.is_some(),
@@ -155,8 +155,8 @@ impl super::MoaEnvOverlay {
                 &self.cloud_hands_default_provider,
             );
             set_option_if_some(
-                &mut hands.daytona_api_key_env,
-                &self.cloud_hands_daytona_api_key_env,
+                &mut hands.daytona_api_key,
+                &self.cloud_hands_daytona_api_key,
             );
             set_option_if_some(
                 &mut hands.daytona_api_url,
@@ -166,10 +166,7 @@ impl super::MoaEnvOverlay {
                 &mut hands.daytona_default_image,
                 &self.cloud_hands_daytona_default_image,
             );
-            set_option_if_some(
-                &mut hands.e2b_api_key_env,
-                &self.cloud_hands_e2b_api_key_env,
-            );
+            set_option_if_some(&mut hands.e2b_api_key, &self.cloud_hands_e2b_api_key);
             set_option_if_some(&mut hands.e2b_api_url, &self.cloud_hands_e2b_api_url);
             set_option_if_some(&mut hands.e2b_domain, &self.cloud_hands_e2b_domain);
             set_option_if_some(&mut hands.e2b_template, &self.cloud_hands_e2b_template);

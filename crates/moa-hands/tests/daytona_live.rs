@@ -52,7 +52,7 @@ fn live_config() -> MoaConfig {
     let mut config = MoaConfig::default();
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("daytona".to_string()),
-        daytona_api_key_env: Some("DAYTONA_API_KEY".to_string()),
+        daytona_api_key: Some(std::env::var("DAYTONA_API_KEY").expect("DAYTONA_API_KEY")),
         daytona_api_url: Some(
             std::env::var("DAYTONA_API_URL")
                 .unwrap_or_else(|_| "https://app.daytona.io/api".to_string()),

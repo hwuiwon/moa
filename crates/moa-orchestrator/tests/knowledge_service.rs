@@ -1389,7 +1389,7 @@ async fn mock_connector_end_to_end_db_memory() {
             chunk_id: trace_graph_uid,
             score: 0.91,
             source: "pgvector".to_string(),
-            embedder: "cohere-embed-v4".to_string(),
+            embedder: "embed-v4.0".to_string(),
             embed_dim: VECTOR_DIMENSION as u16,
         }],
         graph_paths: vec![GraphPath {
@@ -3634,7 +3634,7 @@ struct Task14Embedder;
 #[async_trait]
 impl EmbeddingProvider for Task14Embedder {
     fn model_id(&self) -> &str {
-        "cohere-embed-v4"
+        "embed-v4.0"
     }
 
     fn dimensions(&self) -> usize {

@@ -104,9 +104,10 @@ impl AnthropicProvider {
         config: &MoaConfig,
         default_model: impl Into<String>,
     ) -> Result<Self> {
-        let api_key_env = config.providers.anthropic.api_key_env.clone();
-        let api_key = env::var(&api_key_env)
-            .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.clone()))?;
+        let api_key = moa_core::config::required_config_secret(
+            "MOA_ANTHROPIC_API_KEY",
+            &config.providers.anthropic.api_key,
+        )?;
 
         Self::new(api_key, default_model)
             .map(|provider| provider.with_web_search_enabled(config.general.web_search_enabled))

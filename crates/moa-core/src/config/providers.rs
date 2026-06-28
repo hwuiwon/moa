@@ -49,19 +49,19 @@ impl Default for ModelsConfig {
     }
 }
 
-/// Provider credential environment mapping.
+/// Provider credential configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCredentialConfig {
-    /// Environment variable containing the API key.
-    pub api_key_env: String,
+    /// API key value loaded from runtime configuration.
+    pub api_key: String,
 }
 
 impl ProviderCredentialConfig {
-    /// Creates a provider credential config with a single environment variable name.
-    pub fn new(api_key_env: impl Into<String>) -> Self {
+    /// Creates a provider credential config with a direct API key value.
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            api_key_env: api_key_env.into(),
+            api_key: api_key.into(),
         }
     }
 }
@@ -73,7 +73,7 @@ impl Default for ProviderCredentialConfig {
 }
 
 /// Provider-specific configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
     /// Anthropic credentials.
@@ -82,16 +82,10 @@ pub struct ProvidersConfig {
     pub openai: ProviderCredentialConfig,
     /// Google Gemini credentials.
     pub google: ProviderCredentialConfig,
-}
-
-impl Default for ProvidersConfig {
-    fn default() -> Self {
-        Self {
-            anthropic: ProviderCredentialConfig::new("ANTHROPIC_API_KEY"),
-            openai: ProviderCredentialConfig::new("OPENAI_API_KEY"),
-            google: ProviderCredentialConfig::new("GOOGLE_API_KEY"),
-        }
-    }
+    /// Cohere credentials.
+    pub cohere: ProviderCredentialConfig,
+    /// ZeroEntropy credentials.
+    pub zeroentropy: ProviderCredentialConfig,
 }
 
 impl super::MoaEnvOverlay {
@@ -122,16 +116,29 @@ impl super::MoaEnvOverlay {
         set_if_some(&mut config.models.main, &self.models_main);
         set_option_if_some(&mut config.models.auxiliary, &self.models_auxiliary);
         set_if_some(
-            &mut config.providers.anthropic.api_key_env,
-            &self.providers_anthropic_api_key_env,
+            &mut config.providers.anthropic.api_key,
+            &self.anthropic_api_key,
+        );
+        set_if_some(&mut config.providers.openai.api_key, &self.openai_api_key);
+        set_if_some(&mut config.providers.google.api_key, &self.google_api_key);
+        set_if_some(&mut config.providers.cohere.api_key, &self.cohere_api_key);
+        set_if_some(
+            &mut config.providers.zeroentropy.api_key,
+            &self.zeroentropy_api_key,
+        );
+
+        set_if_some(&mut config.memory.extraction.api_key, &self.cohere_api_key);
+        set_if_some(
+            &mut config.memory.vector.embedder.cohere.api_key,
+            &self.cohere_api_key,
         );
         set_if_some(
-            &mut config.providers.openai.api_key_env,
-            &self.providers_openai_api_key_env,
+            &mut config.memory.vector.embedder.gemini.api_key,
+            &self.google_api_key,
         );
         set_if_some(
-            &mut config.providers.google.api_key_env,
-            &self.providers_google_api_key_env,
+            &mut config.memory.vector.embedder.zeroentropy.api_key,
+            &self.zeroentropy_api_key,
         );
     }
 }

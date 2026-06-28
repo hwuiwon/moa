@@ -239,8 +239,11 @@ services:
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
       RUST_LOG: "info,moa_orchestrator=debug"
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MOA_ANTHROPIC_API_KEY: ${MOA_ANTHROPIC_API_KEY:-}
+      MOA_OPENAI_API_KEY: ${MOA_OPENAI_API_KEY:-}
+      MOA_GOOGLE_API_KEY: ${MOA_GOOGLE_API_KEY:-}
+      MOA_COHERE_API_KEY: ${MOA_COHERE_API_KEY:-}
+      MOA_ZEROENTROPY_API_KEY: ${MOA_ZEROENTROPY_API_KEY:-}
     ports:
       # Restate handler port 9080 is internal-only. Use moa-edge on 8080.
       - "10021:9081"

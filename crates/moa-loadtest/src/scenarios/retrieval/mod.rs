@@ -28,10 +28,10 @@ use moa_core::{StoragePartitionId, TenantId, traits::EmbeddingProvider};
 use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, NodeWriteIntent, PiiClass};
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VECTOR_DIMENSION};
+use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
+use moa_providers::CohereV4Embedder;
 use moa_session::{PostgresSessionStore, testing::cleanup_test_schema};
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
-use secrecy::SecretString;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::sync::{Mutex, Semaphore};
@@ -101,7 +101,7 @@ async fn run_perf_gate_inner(cfg: &PerfGateConfig, metrics: &PrometheusHandle) -
         .context("MOA_DATABASE_URL is required for perf_gate Postgres/AGE/pgvector access")?;
     let api_key = std::env::var("COHERE_API_KEY")
         .context("COHERE_API_KEY is required for perf_gate embeddings")?;
-    let embedder = Arc::new(CohereV4Embedder::new(SecretString::from(api_key)));
+    let embedder = Arc::new(CohereV4Embedder::new(api_key)?);
 
     let mut stack = Stack::up(&database_url, embedder).await?;
     let run_result: Result<()> = async {

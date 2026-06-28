@@ -34,12 +34,16 @@ pub struct MoaEnvOverlay {
     pub models_main: Option<String>,
     /// `MOA_MODELS_AUXILIARY`.
     pub models_auxiliary: Option<String>,
-    /// `MOA_PROVIDERS_ANTHROPIC_API_KEY_ENV`.
-    pub providers_anthropic_api_key_env: Option<String>,
-    /// `MOA_PROVIDERS_OPENAI_API_KEY_ENV`.
-    pub providers_openai_api_key_env: Option<String>,
-    /// `MOA_PROVIDERS_GOOGLE_API_KEY_ENV`.
-    pub providers_google_api_key_env: Option<String>,
+    /// `MOA_ANTHROPIC_API_KEY`.
+    pub anthropic_api_key: Option<String>,
+    /// `MOA_OPENAI_API_KEY`.
+    pub openai_api_key: Option<String>,
+    /// `MOA_GOOGLE_API_KEY`.
+    pub google_api_key: Option<String>,
+    /// `MOA_COHERE_API_KEY`.
+    pub cohere_api_key: Option<String>,
+    /// `MOA_ZEROENTROPY_API_KEY`.
+    pub zeroentropy_api_key: Option<String>,
     /// `MOA_DATABASE_URL`.
     pub database_url: Option<String>,
     /// `MOA_DATABASE_ADMIN_URL`.
@@ -52,8 +56,8 @@ pub struct MoaEnvOverlay {
     pub database_connect_timeout_seconds: Option<u64>,
     /// `MOA_DATABASE_NEON_ENABLED`.
     pub database_neon_enabled: Option<bool>,
-    /// `MOA_DATABASE_NEON_API_KEY_ENV`.
-    pub database_neon_api_key_env: Option<String>,
+    /// `MOA_DATABASE_NEON_API_KEY`.
+    pub database_neon_api_key: Option<String>,
     /// `MOA_DATABASE_NEON_PROJECT_ID`.
     pub database_neon_project_id: Option<String>,
     /// `MOA_DATABASE_NEON_PARENT_BRANCH_ID`.
@@ -72,10 +76,10 @@ pub struct MoaEnvOverlay {
     pub auth_auth0_domain: Option<String>,
     /// `MOA_AUTH_AUTH0_AUDIENCE`.
     pub auth_auth0_audience: Option<String>,
-    /// `MOA_AUTH_AUTH0_CLIENT_ID_ENV`.
-    pub auth_auth0_client_id_env: Option<String>,
-    /// `MOA_AUTH_AUTH0_CLIENT_SECRET_ENV`.
-    pub auth_auth0_client_secret_env: Option<String>,
+    /// `MOA_AUTH_AUTH0_CLIENT_ID`.
+    pub auth_auth0_client_id: Option<String>,
+    /// `MOA_AUTH_AUTH0_CLIENT_SECRET`.
+    pub auth_auth0_client_secret: Option<String>,
     /// `MOA_AUTH_AUTH0_WEBHOOK_SECRET`.
     pub auth_auth0_webhook_secret: Option<String>,
     /// `MOA_AUTH_OIDC_ISSUER`.
@@ -90,12 +94,12 @@ pub struct MoaEnvOverlay {
     pub auth_contact_tokens_audience: Option<String>,
     /// `MOA_AUTH_CONTACT_TOKENS_KEY_ID`.
     pub auth_contact_tokens_key_id: Option<String>,
-    /// `MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM_ENV`.
-    pub auth_contact_tokens_private_key_pem_env: Option<String>,
-    /// `MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM_ENV`.
-    pub auth_contact_tokens_public_key_pem_env: Option<String>,
-    /// `MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_ENV`.
-    pub auth_contact_tokens_contact_point_hash_key_env: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM`.
+    pub auth_contact_tokens_private_key_pem: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM`.
+    pub auth_contact_tokens_public_key_pem: Option<String>,
+    /// `MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_HEX`.
+    pub auth_contact_tokens_contact_point_hash_key_hex: Option<String>,
     /// `MOA_AUTH_CONTACT_TOKENS_UNVERIFIED_TTL_SECONDS`.
     pub auth_contact_tokens_unverified_ttl_seconds: Option<i64>,
     /// `MOA_AUTH_CONTACT_TOKENS_VERIFIED_TTL_SECONDS`.
@@ -158,8 +162,6 @@ pub struct MoaEnvOverlay {
     pub memory_digest_rebuild_min_interval_hours: Option<i64>,
     /// `MOA_MEMORY_EXTRACTION_ENABLED`.
     pub memory_extraction_enabled: Option<bool>,
-    /// `MOA_MEMORY_EXTRACTION_API_KEY_ENV`.
-    pub memory_extraction_api_key_env: Option<String>,
     /// `MOA_MEMORY_EXTRACTION_MODEL`.
     pub memory_extraction_model: Option<String>,
     /// `MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK`.
@@ -170,10 +172,6 @@ pub struct MoaEnvOverlay {
     pub memory_vector_embedder_name: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM`.
     pub memory_vector_embedder_output_dim: Option<usize>,
-    /// `MOA_MEMORY_VECTOR_EMBEDDER_COHERE_API_KEY_ENV`.
-    pub memory_vector_embedder_cohere_api_key_env: Option<String>,
-    /// `MOA_MEMORY_VECTOR_EMBEDDER_GEMINI_API_KEY_ENV`.
-    pub memory_vector_embedder_gemini_api_key_env: Option<String>,
     /// `MOA_MEMORY_VECTOR_EMBEDDER_GEMINI_DEFAULT_ROLE`.
     pub memory_vector_embedder_gemini_default_role: Option<String>,
     /// `MOA_KNOWLEDGE_PROVIDERS_ENABLED`.
@@ -188,10 +186,22 @@ pub struct MoaEnvOverlay {
     pub knowledge_external_parser_default: Option<String>,
     /// `MOA_NANGO_API_BASE_URL`.
     pub nango_api_base_url: Option<String>,
+    /// `MOA_NANGO_API_KEY`.
+    pub nango_api_key: Option<String>,
+    /// `MOA_NANGO_WEBHOOK_SIGNING_KEY`.
+    pub nango_webhook_signing_key: Option<String>,
     /// `MOA_MERGE_API_BASE_URL`.
     pub merge_api_base_url: Option<String>,
+    /// `MOA_MERGE_API_KEY`.
+    pub merge_api_key: Option<String>,
+    /// `MOA_MERGE_WEBHOOK_SIGNATURE_KEY`.
+    pub merge_webhook_signature_key: Option<String>,
     /// `MOA_LLAMAPARSE_API_URL`.
     pub llamaparse_api_url: Option<String>,
+    /// `MOA_LLAMAPARSE_API_KEY`.
+    pub llamaparse_api_key: Option<String>,
+    /// `MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY`.
+    pub llamaparse_webhook_signing_key: Option<String>,
     /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME`.
     pub llamaparse_webhook_header_name: Option<String>,
     /// `MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE`.
@@ -200,12 +210,18 @@ pub struct MoaEnvOverlay {
     pub llamaparse_tier: Option<String>,
     /// `MOA_UNSTRUCTURED_API_URL`.
     pub unstructured_api_url: Option<String>,
+    /// `MOA_UNSTRUCTURED_API_KEY`.
+    pub unstructured_api_key: Option<String>,
     /// `MOA_UNSTRUCTURED_STRATEGY`.
     pub unstructured_strategy: Option<String>,
     /// `MOA_UNSTRUCTURED_CHUNKING_STRATEGY`.
     pub unstructured_chunking_strategy: Option<String>,
     /// `MOA_REDUCTO_API_URL`.
     pub reducto_api_url: Option<String>,
+    /// `MOA_REDUCTO_API_KEY`.
+    pub reducto_api_key: Option<String>,
+    /// `MOA_REDUCTO_WEBHOOK_SIGNING_KEY`.
+    pub reducto_webhook_signing_key: Option<String>,
     /// `MOA_REDUCTO_WEBHOOK_HEADER_NAME`.
     pub reducto_webhook_header_name: Option<String>,
     /// `MOA_REDUCTO_WEBHOOK_HEADER_VALUE`.
@@ -220,8 +236,8 @@ pub struct MoaEnvOverlay {
     pub knowledge_query_trace_enabled: Option<bool>,
     /// `MOA_PII_SERVICE_URL`.
     pub pii_service_url: Option<String>,
-    /// `MOA_TURBOPUFFER_API_KEY_ENV`.
-    pub turbopuffer_api_key_env: Option<String>,
+    /// `MOA_TURBOPUFFER_API_KEY`.
+    pub turbopuffer_api_key: Option<String>,
     /// `MOA_TURBOPUFFER_BASE_URL`.
     pub turbopuffer_base_url: Option<String>,
     /// `MOA_TURBOPUFFER_ENVIRONMENT`.
@@ -232,24 +248,24 @@ pub struct MoaEnvOverlay {
     pub cloud_memory_dir: Option<String>,
     /// `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`.
     pub cloud_hands_default_provider: Option<String>,
-    /// `MOA_CLOUD_HANDS_DAYTONA_API_KEY_ENV`.
-    pub cloud_hands_daytona_api_key_env: Option<String>,
+    /// `MOA_CLOUD_HANDS_DAYTONA_API_KEY`.
+    pub cloud_hands_daytona_api_key: Option<String>,
     /// `MOA_CLOUD_HANDS_DAYTONA_API_URL`.
     pub cloud_hands_daytona_api_url: Option<String>,
     /// `MOA_CLOUD_HANDS_DAYTONA_DEFAULT_IMAGE`.
     pub cloud_hands_daytona_default_image: Option<String>,
-    /// `MOA_CLOUD_HANDS_E2B_API_KEY_ENV`.
-    pub cloud_hands_e2b_api_key_env: Option<String>,
+    /// `MOA_CLOUD_HANDS_E2B_API_KEY`.
+    pub cloud_hands_e2b_api_key: Option<String>,
     /// `MOA_CLOUD_HANDS_E2B_API_URL`.
     pub cloud_hands_e2b_api_url: Option<String>,
     /// `MOA_CLOUD_HANDS_E2B_DOMAIN`.
     pub cloud_hands_e2b_domain: Option<String>,
     /// `MOA_CLOUD_HANDS_E2B_TEMPLATE`.
     pub cloud_hands_e2b_template: Option<String>,
-    /// `MOA_MESSAGING_SLACK_TOKEN_ENV`.
-    pub messaging_slack_token_env: Option<String>,
-    /// `MOA_MESSAGING_SLACK_APP_TOKEN_ENV`.
-    pub messaging_slack_app_token_env: Option<String>,
+    /// `MOA_MESSAGING_SLACK_TOKEN`.
+    pub messaging_slack_token: Option<String>,
+    /// `MOA_MESSAGING_SLACK_APP_TOKEN`.
+    pub messaging_slack_app_token: Option<String>,
     /// `MOA_MESSAGING_POSTMARK_BASE_URL`.
     pub messaging_postmark_base_url: Option<String>,
     /// `MOA_MESSAGING_POSTMARK_MESSAGE_STREAM`.
@@ -711,15 +727,15 @@ mod tests {
             ("MOA_MEMORY_DIGEST_MAX_TOKENS", "384"),
             ("MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS", "12"),
             ("MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM", "1536"),
-            ("MOA_TURBOPUFFER_API_KEY_ENV", "CUSTOM_TURBOPUFFER_KEY"),
+            ("MOA_COHERE_API_KEY", "CUSTOM_COHERE_KEY"),
+            ("MOA_GOOGLE_API_KEY", "CUSTOM_GOOGLE_KEY"),
+            ("MOA_ZEROENTROPY_API_KEY", "CUSTOM_ZEROENTROPY_KEY"),
+            ("MOA_TURBOPUFFER_API_KEY", "CUSTOM_TURBOPUFFER_KEY"),
             ("MOA_TURBOPUFFER_BASE_URL", "https://tpuf.example"),
             ("MOA_TURBOPUFFER_ENVIRONMENT", "prod"),
             ("MOA_TURBOPUFFER_BAA", "true"),
-            ("MOA_MESSAGING_SLACK_TOKEN_ENV", "CUSTOM_SLACK_BOT_TOKEN"),
-            (
-                "MOA_MESSAGING_SLACK_APP_TOKEN_ENV",
-                "CUSTOM_SLACK_APP_TOKEN",
-            ),
+            ("MOA_MESSAGING_SLACK_TOKEN", "CUSTOM_SLACK_BOT_TOKEN"),
+            ("MOA_MESSAGING_SLACK_APP_TOKEN", "CUSTOM_SLACK_APP_TOKEN"),
             (
                 "MOA_MESSAGING_POSTMARK_BASE_URL",
                 "https://postmark.example",
@@ -728,7 +744,7 @@ mod tests {
             ("MOA_MESSAGING_EMAIL_FROM", "MOA <moa@example.com>"),
             ("MOA_MESSAGING_EMAIL_REPLY_TO", "support@example.com"),
             ("MOA_MESSAGING_TWILIO_BASE_URL", "https://twilio.example"),
-            ("MOA_PROVIDERS_OPENAI_API_KEY_ENV", "CUSTOM_OPENAI_KEY"),
+            ("MOA_OPENAI_API_KEY", "CUSTOM_OPENAI_KEY"),
             ("MOA_RESTATE_INGRESS_URL", "http://restate.example:8080"),
             ("MOA_RESTATE_ADMIN_URL", "http://restate.example:9070"),
             (
@@ -812,10 +828,29 @@ mod tests {
         assert_eq!(config.memory.digest.max_tokens, 384);
         assert_eq!(config.memory.digest.rebuild_min_interval_hours, 12);
         assert_eq!(
-            config.memory.vector.turbopuffer.api_key_env,
+            config.memory.vector.turbopuffer.api_key,
             "CUSTOM_TURBOPUFFER_KEY"
         );
         assert_eq!(config.memory.vector.embedder.output_dim, 1536);
+        assert_eq!(config.providers.cohere.api_key, "CUSTOM_COHERE_KEY");
+        assert_eq!(config.memory.extraction.api_key, "CUSTOM_COHERE_KEY");
+        assert_eq!(
+            config.memory.vector.embedder.cohere.api_key,
+            "CUSTOM_COHERE_KEY"
+        );
+        assert_eq!(config.providers.google.api_key, "CUSTOM_GOOGLE_KEY");
+        assert_eq!(
+            config.memory.vector.embedder.gemini.api_key,
+            "CUSTOM_GOOGLE_KEY"
+        );
+        assert_eq!(
+            config.providers.zeroentropy.api_key,
+            "CUSTOM_ZEROENTROPY_KEY"
+        );
+        assert_eq!(
+            config.memory.vector.embedder.zeroentropy.api_key,
+            "CUSTOM_ZEROENTROPY_KEY"
+        );
         assert_eq!(
             config.memory.vector.turbopuffer.base_url.as_deref(),
             Some("https://tpuf.example")
@@ -825,11 +860,8 @@ mod tests {
             Some("prod")
         );
         assert!(config.memory.vector.turbopuffer.baa_enabled);
-        assert_eq!(config.messaging.slack_token_env, "CUSTOM_SLACK_BOT_TOKEN");
-        assert_eq!(
-            config.messaging.slack_app_token_env,
-            "CUSTOM_SLACK_APP_TOKEN"
-        );
+        assert_eq!(config.messaging.slack_token, "CUSTOM_SLACK_BOT_TOKEN");
+        assert_eq!(config.messaging.slack_app_token, "CUSTOM_SLACK_APP_TOKEN");
         assert_eq!(
             config.messaging.postmark_base_url,
             "https://postmark.example"
@@ -841,7 +873,7 @@ mod tests {
             Some("support@example.com")
         );
         assert_eq!(config.messaging.twilio_base_url, "https://twilio.example");
-        assert_eq!(config.providers.openai.api_key_env, "CUSTOM_OPENAI_KEY");
+        assert_eq!(config.providers.openai.api_key, "CUSTOM_OPENAI_KEY");
         assert_eq!(
             config.orchestrator.endpoint.as_deref(),
             Some("http://restate.example:8080")
@@ -949,15 +981,27 @@ mod tests {
             ("MOA_KNOWLEDGE_PARSER_DEFAULT", "native"),
             ("MOA_KNOWLEDGE_EXTERNAL_PARSER_DEFAULT", "llamaparse"),
             ("MOA_NANGO_API_BASE_URL", "https://nango.example"),
+            ("MOA_NANGO_API_KEY", "nango-key"),
+            ("MOA_NANGO_WEBHOOK_SIGNING_KEY", "nango-signing-key"),
             ("MOA_MERGE_API_BASE_URL", "https://merge.example"),
+            ("MOA_MERGE_API_KEY", "merge-key"),
+            ("MOA_MERGE_WEBHOOK_SIGNATURE_KEY", "merge-signature-key"),
             ("MOA_LLAMAPARSE_API_URL", "https://llamaparse.example"),
+            ("MOA_LLAMAPARSE_API_KEY", "llamaparse-key"),
+            (
+                "MOA_LLAMAPARSE_WEBHOOK_SIGNING_KEY",
+                "llamaparse-signing-key",
+            ),
             ("MOA_LLAMAPARSE_WEBHOOK_HEADER_NAME", "x-llama-secret"),
             ("MOA_LLAMAPARSE_WEBHOOK_HEADER_VALUE", "llama-header-secret"),
             ("MOA_LLAMAPARSE_TIER", "agentic"),
             ("MOA_UNSTRUCTURED_API_URL", "https://unstructured.example"),
+            ("MOA_UNSTRUCTURED_API_KEY", "unstructured-key"),
             ("MOA_UNSTRUCTURED_STRATEGY", "fast"),
             ("MOA_UNSTRUCTURED_CHUNKING_STRATEGY", "basic"),
             ("MOA_REDUCTO_API_URL", "https://reducto.example"),
+            ("MOA_REDUCTO_API_KEY", "reducto-key"),
+            ("MOA_REDUCTO_WEBHOOK_SIGNING_KEY", "reducto-signing-key"),
             ("MOA_REDUCTO_WEBHOOK_HEADER_NAME", "x-reducto-secret"),
             ("MOA_REDUCTO_WEBHOOK_HEADER_VALUE", "reducto-header-secret"),
             ("MOA_REDUCTO_PARSE_MODE", "ocr"),
@@ -977,28 +1021,25 @@ mod tests {
         assert_eq!(config.knowledge.parser.default, "native");
         assert_eq!(config.knowledge.parser.external_default, "llamaparse");
         assert_eq!(config.knowledge.nango.api_base_url, "https://nango.example");
-        assert_eq!(config.knowledge.nango.api_key_env, "NANGO_API_KEY");
+        assert_eq!(config.knowledge.nango.api_key, "nango-key");
         assert_eq!(
-            config.knowledge.nango.webhook_signing_key_env,
-            "NANGO_WEBHOOK_SIGNING_KEY"
+            config.knowledge.nango.webhook_signing_key,
+            "nango-signing-key"
         );
         assert_eq!(config.knowledge.merge.api_base_url, "https://merge.example");
-        assert_eq!(config.knowledge.merge.api_key_env, "MERGE_API_KEY");
+        assert_eq!(config.knowledge.merge.api_key, "merge-key");
         assert_eq!(
-            config.knowledge.merge.webhook_signature_key_env,
-            "MERGE_WEBHOOK_SIGNATURE_KEY"
+            config.knowledge.merge.webhook_signature_key,
+            "merge-signature-key"
         );
         assert_eq!(
             config.knowledge.llamaparse.api_base_url,
             "https://llamaparse.example"
         );
+        assert_eq!(config.knowledge.llamaparse.api_key, "llamaparse-key");
         assert_eq!(
-            config.knowledge.llamaparse.api_key_env,
-            "LLAMAPARSE_API_KEY"
-        );
-        assert_eq!(
-            config.knowledge.llamaparse.webhook_signing_key_env,
-            "LLAMAPARSE_WEBHOOK_SIGNING_KEY"
+            config.knowledge.llamaparse.webhook_signing_key,
+            "llamaparse-signing-key"
         );
         assert_eq!(
             config.knowledge.llamaparse.webhook_header_name.as_deref(),
@@ -1013,20 +1054,17 @@ mod tests {
             config.knowledge.unstructured.api_base_url,
             "https://unstructured.example"
         );
-        assert_eq!(
-            config.knowledge.unstructured.api_key_env,
-            "UNSTRUCTURED_API_KEY"
-        );
+        assert_eq!(config.knowledge.unstructured.api_key, "unstructured-key");
         assert_eq!(config.knowledge.unstructured.strategy, "fast");
         assert_eq!(config.knowledge.unstructured.chunking_strategy, "basic");
         assert_eq!(
             config.knowledge.reducto.api_base_url,
             "https://reducto.example"
         );
-        assert_eq!(config.knowledge.reducto.api_key_env, "REDUCTO_API_KEY");
+        assert_eq!(config.knowledge.reducto.api_key, "reducto-key");
         assert_eq!(
-            config.knowledge.reducto.webhook_signing_key_env,
-            "REDUCTO_WEBHOOK_SIGNING_KEY"
+            config.knowledge.reducto.webhook_signing_key,
+            "reducto-signing-key"
         );
         assert_eq!(
             config.knowledge.reducto.webhook_header_name.as_deref(),

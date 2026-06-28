@@ -106,16 +106,16 @@ impl Contacts for ContactsImpl {
         let tenant_id = request.tenant_id;
         let token_issuer = contact_token_issuer()?;
         let pool = OrchestratorCtx::current_graph_pool();
-        let contact_point_hash_key_env = OrchestratorCtx::current_config()
+        let contact_point_hash_key_hex = OrchestratorCtx::current_config()
             .auth
             .contact_tokens
-            .contact_point_hash_key_env
+            .contact_point_hash_key_hex
             .clone();
         let requested_scopes = request.requested_scopes.clone();
 
         let (contact, contact_points) = ctx
             .run(|| async move {
-                issue_contact(pool, &contact_point_hash_key_env, tenant_id, request)
+                issue_contact(pool, &contact_point_hash_key_hex, tenant_id, request)
                     .await
                     .map_err(contact_error_handler_error)
                     .map(Json::from)
@@ -181,10 +181,10 @@ impl Contacts for ContactsImpl {
         let store = OrchestratorCtx::current_session_store();
         let config = OrchestratorCtx::current_config();
         let ttl_seconds = config.auth.contact_tokens.verification_ttl_seconds;
-        let contact_point_hash_key_env = config
+        let contact_point_hash_key_hex = config
             .auth
             .contact_tokens
-            .contact_point_hash_key_env
+            .contact_point_hash_key_hex
             .clone();
         let messaging_config = config.messaging.clone();
         let delivery_channel = request.delivery_channel;
@@ -213,7 +213,7 @@ impl Contacts for ContactsImpl {
                         contact_point,
                         requested_channel: delivery_channel,
                         ttl_seconds,
-                        contact_point_hash_key_env,
+                        contact_point_hash_key_hex,
                         messaging_config,
                     },
                 )

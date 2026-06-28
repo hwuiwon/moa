@@ -361,11 +361,11 @@ impl RrfPlusJudgeDetector {
         Self::from_cohere_api_key_env_or_heuristic("COHERE_API_KEY")
     }
 
-    /// Creates a detector using the Cohere env-var name from shared MOA config.
+    /// Creates a detector using the Cohere API key from shared MOA config.
     #[must_use]
     pub fn from_config_or_heuristic(config: &MoaConfig) -> Self {
-        Self::from_cohere_api_key_env_model_or_heuristic(
-            &config.memory.vector.embedder.cohere.api_key_env,
+        Self::from_cohere_api_key_model_or_heuristic(
+            &config.providers.cohere.api_key,
             &config.memory.extraction.model,
             config.memory.extraction.timeout_ms,
         )
@@ -404,6 +404,27 @@ impl RrfPlusJudgeDetector {
                     );
                     Arc::new(HeuristicJudge)
                 });
+        Self::new(reranker, judge)
+    }
+
+    /// Creates a detector using a direct Cohere API key and judge model.
+    #[must_use]
+    pub fn from_cohere_api_key_model_or_heuristic(
+        api_key: &str,
+        judge_model: &str,
+        timeout_ms: u64,
+    ) -> Self {
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Self::new(Arc::new(NoopReranker), Arc::new(HeuristicJudge));
+        }
+        let reranker: Arc<dyn Reranker> =
+            Arc::new(CohereReranker::new(SecretString::from(api_key.to_string())));
+        let judge: Arc<dyn JudgeModel> = Arc::new(CohereJudge::new(LlmChatClient::from_api_key(
+            SecretString::from(api_key.to_string()),
+            judge_model,
+            timeout_ms,
+        )));
         Self::new(reranker, judge)
     }
 

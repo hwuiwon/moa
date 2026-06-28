@@ -826,19 +826,25 @@ fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaCo
 
     let mut configs = Vec::new();
 
-    if env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if let Ok(api_key) = env::var("ANTHROPIC_API_KEY")
+        && !api_key.trim().is_empty()
+    {
         let mut config = live_cache_config("anthropic", "claude-sonnet-4-6", repo_root);
-        config.providers.anthropic.api_key_env = "ANTHROPIC_API_KEY".to_string();
+        config.providers.anthropic.api_key = api_key;
         configs.push(("anthropic".to_string(), config));
     }
-    if env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if let Ok(api_key) = env::var("OPENAI_API_KEY")
+        && !api_key.trim().is_empty()
+    {
         let mut config = live_cache_config("openai", "gpt-5.4", repo_root);
-        config.providers.openai.api_key_env = "OPENAI_API_KEY".to_string();
+        config.providers.openai.api_key = api_key;
         configs.push(("openai".to_string(), config));
     }
-    if env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if let Ok(api_key) = env::var("GOOGLE_API_KEY")
+        && !api_key.trim().is_empty()
+    {
         let mut config = live_cache_config("google", "gemini-3-flash-preview", repo_root);
-        config.providers.google.api_key_env = "GOOGLE_API_KEY".to_string();
+        config.providers.google.api_key = api_key;
         configs.push(("google".to_string(), config));
     }
     assert!(

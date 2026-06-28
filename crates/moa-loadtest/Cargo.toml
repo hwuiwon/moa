@@ -21,6 +21,7 @@ moa-memory-graph = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
 moa-observability = { workspace = true }
+moa-providers = { workspace = true }
 moa-session = { workspace = true }
 rand = "0.8"
 reqwest.workspace = true

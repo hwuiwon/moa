@@ -1,6 +1,7 @@
 //! Live extraction fixture recording for memory retrieval eval corpora.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,12 +31,25 @@ use moa_eval_core::{EvalError, Result};
 const CHUNK_TARGET_TOKENS: usize = 700;
 const CHUNK_OVERLAP_TOKENS: usize = 100;
 
+fn load_api_key(api_key_env: &str) -> Result<String> {
+    let api_key = env::var(api_key_env).map_err(|_| {
+        EvalError::InvalidConfig(format!("live recording requires {api_key_env} to be set"))
+    })?;
+    if api_key.trim().is_empty() {
+        return Err(EvalError::InvalidConfig(format!(
+            "live recording requires {api_key_env} to be non-empty"
+        )));
+    }
+    Ok(api_key)
+}
+
 /// Options for recording live extraction fixtures for one corpus.
 #[derive(Debug, Clone)]
 pub struct MemoryExtractionRecordingOptions {
     corpus_dir: PathBuf,
     output_path: Option<PathBuf>,
     extraction_config: MemoryExtractionConfig,
+    api_key_env: String,
     request_delay_ms: u64,
 }
 
@@ -46,6 +60,7 @@ pub struct MemoryMergeRecordingOptions {
     output_path: Option<PathBuf>,
     extraction_path: Option<PathBuf>,
     extraction_config: MemoryExtractionConfig,
+    api_key_env: String,
 }
 
 impl MemoryMergeRecordingOptions {
@@ -57,6 +72,7 @@ impl MemoryMergeRecordingOptions {
             output_path: None,
             extraction_path: None,
             extraction_config: MemoryExtractionConfig::default(),
+            api_key_env: "COHERE_API_KEY".to_string(),
         }
     }
 
@@ -77,7 +93,7 @@ impl MemoryMergeRecordingOptions {
     /// Overrides the Cohere API-key environment variable used for live merge verification.
     #[must_use]
     pub fn with_api_key_env(mut self, api_key_env: impl Into<String>) -> Self {
-        self.extraction_config.api_key_env = api_key_env.into();
+        self.api_key_env = api_key_env.into();
         self
     }
 
@@ -104,6 +120,7 @@ impl MemoryExtractionRecordingOptions {
             corpus_dir: corpus_dir.into(),
             output_path: None,
             extraction_config: MemoryExtractionConfig::default(),
+            api_key_env: "COHERE_API_KEY".to_string(),
             request_delay_ms: 0,
         }
     }
@@ -118,7 +135,7 @@ impl MemoryExtractionRecordingOptions {
     /// Overrides the Cohere API-key environment variable.
     #[must_use]
     pub fn with_api_key_env(mut self, api_key_env: impl Into<String>) -> Self {
-        self.extraction_config.api_key_env = api_key_env.into();
+        self.api_key_env = api_key_env.into();
         self
     }
 
@@ -200,7 +217,9 @@ pub async fn record_memory_extractions(
     let output_path = options
         .output_path
         .unwrap_or_else(|| default_extractions_path(&manifest.corpus_id));
-    let extractor = LlmFactExtractor::from_config(&options.extraction_config).map_err(|error| {
+    let mut extraction_config = options.extraction_config.clone();
+    extraction_config.api_key = load_api_key(&options.api_key_env)?;
+    let extractor = LlmFactExtractor::from_config(&extraction_config).map_err(|error| {
         EvalError::InvalidConfig(format!("failed to initialize LLM fact extractor: {error}"))
     })?;
     let facts = super::gold::facts_by_id(&ledger)?;
@@ -244,7 +263,7 @@ pub async fn record_memory_extractions(
                     .sum::<usize>();
                 let record = ExtractionFixtureRecord {
                     chunk_hash,
-                    model: options.extraction_config.model.clone(),
+                    model: extraction_config.model.clone(),
                     prompt_version: EXTRACTION_PROMPT_VERSION.to_string(),
                     facts,
                 };
@@ -299,14 +318,13 @@ pub async fn record_memory_merges(
         extraction_store,
         extraction_remediation,
     ));
-    let live = LlmEntityMergeVerifier::from_env(
-        &options.extraction_config.api_key_env,
-        &options.extraction_config.model,
-        options.extraction_config.timeout_ms,
-    )
-    .map_err(|error| {
-        EvalError::InvalidConfig(format!("failed to initialize LLM merge verifier: {error}"))
-    })?;
+    let mut extraction_config = options.extraction_config.clone();
+    extraction_config.api_key = load_api_key(&options.api_key_env)?;
+    let live = LlmEntityMergeVerifier::from_api_key(
+        extraction_config.api_key.clone(),
+        &extraction_config.model,
+        extraction_config.timeout_ms,
+    );
     let recorder = Arc::new(RecordingEntityMergeVerifier::new(
         live,
         existing_merge_records(&output_path)?,

@@ -7,13 +7,16 @@ pub(super) struct Stack {
     pub(super) database_url: String,
     pub(super) schema_name: String,
     pub(super) pool: PgPool,
-    pub(super) embedder: Arc<CohereV4Embedder>,
+    pub(super) embedder: Arc<dyn EmbeddingProvider>,
     pub(super) tenants: Vec<TenantFixture>,
     pub(super) retrievers: Vec<Arc<TenantRetriever>>,
 }
 
 impl Stack {
-    pub(super) async fn up(database_url: &str, embedder: Arc<CohereV4Embedder>) -> Result<Self> {
+    pub(super) async fn up(
+        database_url: &str,
+        embedder: Arc<dyn EmbeddingProvider>,
+    ) -> Result<Self> {
         let schema_name = format!("perf_gate_{}", Uuid::now_v7().simple());
         let store = PostgresSessionStore::new_in_schema(database_url, &schema_name)
             .await

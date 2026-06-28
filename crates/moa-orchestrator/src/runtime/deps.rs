@@ -15,9 +15,11 @@ use moa_core::{
     traits::{ChannelAdapter, EmbeddingProvider, RuntimeCacheStore},
 };
 use moa_hands::{ToolRouter, core::leases::PostgresHandLeaseStore};
-use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 use moa_observability::record_retrieval_embedder_construction;
-use moa_providers::{ProviderRegistry, build_embedding_provider_from_config};
+use moa_providers::{
+    EmbedderConstructionRole, ProviderRegistry, build_embedder_from_config,
+    build_embedding_provider_from_config,
+};
 use moa_session::PostgresSessionStore;
 use serde_json::Value;
 use sqlx::PgPool;

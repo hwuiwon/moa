@@ -93,7 +93,7 @@ sidecar vertex-id column on `moa.node_index` would let expansion drive from
 the RLS-filtered sidecar instead; until then the 250ms graph budget bounds the
 latency and silently trims as-of expansion on large shared databases.
 
-Embedder selection is per tenant. `cohere-embed-v4` and
+Embedder selection is per tenant. `embed-v4.0` and
 `gemini-embedding-2` use incompatible vector spaces, so switching a tenant
 requires re-embedding its graph nodes before retrieval can safely use the new
 model. Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API

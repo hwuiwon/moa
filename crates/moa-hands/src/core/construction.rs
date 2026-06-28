@@ -91,7 +91,10 @@ impl ToolRouter {
                 .default_provider
                 .as_deref()
                 .is_some_and(|provider| provider == "daytona")
-                || hands.daytona_api_key_env.is_some())
+                || hands
+                    .daytona_api_key
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()))
         {
             providers.insert(
                 "daytona".to_string(),
@@ -105,7 +108,10 @@ impl ToolRouter {
                 .default_provider
                 .as_deref()
                 .is_some_and(|provider| provider == "e2b")
-                || hands.e2b_api_key_env.is_some())
+                || hands
+                    .e2b_api_key
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()))
         {
             providers.insert(
                 "e2b".to_string(),

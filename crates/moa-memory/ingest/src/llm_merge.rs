@@ -40,6 +40,16 @@ impl LlmEntityMergeVerifier {
             timeout_ms,
         )?))
     }
+
+    /// Creates a merge verifier from a direct API key and model settings.
+    #[must_use]
+    pub fn from_api_key(api_key: String, model: &str, timeout_ms: u64) -> Self {
+        Self::new(LlmChatClient::from_api_key(
+            secrecy::SecretString::from(api_key),
+            model,
+            timeout_ms,
+        ))
+    }
 }
 
 #[async_trait]

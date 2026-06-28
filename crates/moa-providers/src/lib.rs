@@ -26,7 +26,11 @@ pub use core::models::{
 pub use core::router::ModelRouter;
 #[cfg(any(test, feature = "mock-embedding"))]
 pub use embedding::MockEmbedding;
-pub use embedding::{OpenAIEmbedding, build_embedding_provider_from_config};
+pub use embedding::{
+    CohereEmbedding, CohereV4Embedder, EmbedRole, EmbedderConstructionRole,
+    GeminiEmbeddingEmbedder, OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
+    build_embedding_provider_from_config,
+};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use routing::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, PROVIDER_DESCRIPTORS,

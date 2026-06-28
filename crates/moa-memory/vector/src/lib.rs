@@ -6,17 +6,11 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 pub mod backend;
-pub mod embedder;
-pub mod gemini;
 pub mod pgvector_store;
 pub mod promotion;
 pub mod turbopuffer;
 
 pub use backend::vector_store_for_storage_partition;
-pub use embedder::CohereV4Embedder;
-pub use gemini::{
-    EmbedRole, EmbedderConstructionRole, GeminiEmbeddingEmbedder, build_embedder_from_config,
-};
 pub use pgvector_store::PgvectorStore;
 pub use promotion::{
     PROMOTION_BATCH_SIZE, PROMOTION_OVERLAP_THRESHOLD, PromotionOptions, PromotionReport,

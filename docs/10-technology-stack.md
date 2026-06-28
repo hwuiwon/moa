@@ -122,7 +122,7 @@ and deployment setup. Key groups:
 
 | Env group | Controls |
 |---|---|
-| `MOA_MODELS_*` and `MOA_PROVIDERS_*` | model routing and provider API key env names |
+| `MOA_MODELS_*` and `MOA_<PROVIDER>_API_KEY` | model routing and provider API keys |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
 | `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
@@ -218,7 +218,7 @@ TWILIO_FROM_NUMBER=...
 The orchestrator exposes the Restate handler endpoint and a health/readiness endpoint. Readiness checks Postgres and can optionally require registered Restate services.
 
 Provider registration is deployment-static. `ProviderRegistry` is built at
-startup from `MoaConfig` and provider API-key env names; changing provider
+startup from `MoaConfig` and directly injected provider API keys; changing provider
 availability requires a rollout unless a future shared provider store is added.
 
 Kubernetes routing is non-sticky. Correctness-sensitive state must be stored in

@@ -16,14 +16,12 @@ Postgres; it does not persist provider access tokens.
 MOA_AUTH_PROVIDER=auth0
 MOA_AUTH_AUTH0_DOMAIN=your-tenant.auth0.com
 MOA_AUTH_AUTH0_AUDIENCE=https://api.moa.example.com
-MOA_AUTH_AUTH0_CLIENT_ID_ENV=MOA_AUTH0_CLIENT_ID
-MOA_AUTH_AUTH0_CLIENT_SECRET_ENV=MOA_AUTH0_CLIENT_SECRET
+MOA_AUTH_AUTH0_CLIENT_ID=...
+MOA_AUTH_AUTH0_CLIENT_SECRET=...
 MOA_TOKEN_VAULT_PROVIDER=auth0
-MOA_AUTH0_CLIENT_ID=...
-MOA_AUTH0_CLIENT_SECRET=...
 ```
 
-4. Set `MOA_AUTH0_CLIENT_ID` and `MOA_AUTH0_CLIENT_SECRET` in the orchestrator
+4. Set `MOA_AUTH_AUTH0_CLIENT_ID` and `MOA_AUTH_AUTH0_CLIENT_SECRET` in the orchestrator
    environment.
 
 ## Linked-connection webhook

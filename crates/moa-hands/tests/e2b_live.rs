@@ -54,7 +54,7 @@ fn live_config() -> MoaConfig {
     let mut config = MoaConfig::default();
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("e2b".to_string()),
-        e2b_api_key_env: Some("E2B_API_KEY".to_string()),
+        e2b_api_key: Some(std::env::var("E2B_API_KEY").expect("E2B_API_KEY")),
         e2b_api_url: Some(
             std::env::var("E2B_API_URL").unwrap_or_else(|_| "https://api.e2b.dev".to_string()),
         ),

@@ -151,7 +151,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
-| `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, Gemini embedding, and test/mock adapters |
+| `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, ZeroEntropy zembed-1, Gemini embedding, and test/mock adapters |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |

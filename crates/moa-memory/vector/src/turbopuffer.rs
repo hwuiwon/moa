@@ -38,14 +38,14 @@ pub struct TurbopufferStore {
 }
 
 impl TurbopufferStore {
-    /// Creates a Turbopuffer store from shared MOA config and the secret API key environment.
+    /// Creates a Turbopuffer store from shared MOA config.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
         let turbopuffer = &config.memory.vector.turbopuffer;
-        let api_key_env = turbopuffer.api_key_env.as_str();
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| Error::TurbopufferConfig(format!("{api_key_env} is required")))?;
-        if api_key.trim().is_empty() {
-            return Err(Error::TurbopufferConfig(format!("{api_key_env} is empty")));
+        let api_key = turbopuffer.api_key.trim();
+        if api_key.is_empty() {
+            return Err(Error::TurbopufferConfig(
+                "MOA_TURBOPUFFER_API_KEY is required".to_string(),
+            ));
         }
 
         let base_url = turbopuffer
@@ -60,7 +60,7 @@ impl TurbopufferStore {
 
         Self::new(
             base_url,
-            SecretString::from(api_key),
+            SecretString::from(api_key.to_string()),
             env,
             turbopuffer.baa_enabled,
         )
@@ -68,10 +68,8 @@ impl TurbopufferStore {
 
     /// Creates a Turbopuffer store from process environment.
     ///
-    /// Required: the API key environment named by `MOA_TURBOPUFFER_API_KEY_ENV`,
-    /// defaulting to `TURBOPUFFER_API_KEY`.
-    /// Optional settings use the canonical `MOA_TURBOPUFFER_*` and
-    /// `MOA_OBSERVABILITY_ENVIRONMENT` variables.
+    /// Required settings use canonical `MOA_TURBOPUFFER_*` variables.
+    /// `MOA_OBSERVABILITY_ENVIRONMENT` supplies the namespace when unset.
     pub fn from_env() -> Result<Self> {
         let config = MoaConfig::load_from_env()?;
         Self::from_config(&config)

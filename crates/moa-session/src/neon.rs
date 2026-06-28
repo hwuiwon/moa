@@ -66,15 +66,10 @@ impl NeonBranchManager {
                     .to_string(),
             ));
         }
-        let api_key_env = config.database.neon.api_key_env.trim();
-        if api_key_env.is_empty() {
-            return Err(MoaError::ConfigError(
-                "database.neon.api_key_env is required when Neon checkpointing is enabled"
-                    .to_string(),
-            ));
-        }
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.to_string()))?;
+        let api_key = moa_core::config::required_config_secret(
+            "MOA_DATABASE_NEON_API_KEY",
+            &config.database.neon.api_key,
+        )?;
         let base_url = Url::parse("https://console.neon.tech/api/v2/")
             .map_err(|error| MoaError::ConfigError(error.to_string()))?;
 

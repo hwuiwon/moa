@@ -18,10 +18,8 @@ use moa_memory_graph::{
 use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiError, PiiResult, redact_text,
 };
-use moa_memory_vector::{
-    CohereV4Embedder, Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore,
-};
-use secrecy::SecretString;
+use moa_memory_vector::{Error as VectorError, PgvectorStore, VECTOR_DIMENSION, VectorStore};
+use moa_providers::CohereV4Embedder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -655,9 +653,10 @@ fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     let graph = Arc::new(
         AgeGraphStore::scoped(pool.clone(), scope.clone()).with_vector_store(vector.clone()),
     );
-    let embedder = Arc::new(CohereV4Embedder::new(SecretString::from(cohere_api_key(
-        runtime.cohere_api_key_env(),
-    )?)));
+    let embedder = Arc::new(
+        CohereV4Embedder::new(cohere_api_key(runtime.cohere_api_key())?)
+            .map_err(FastError::from)?,
+    );
     let pii: Arc<dyn PiiClassifier> = match runtime.pii_service_url() {
         Some(url) => Arc::new(OpenAiPrivacyFilterClassifier::new(url)?),
         None => Arc::new(FailClosedClassifier),
@@ -669,12 +668,14 @@ fn runtime_fast_ctx(scope: RlsContext) -> Result<FastPathCtx, FastError> {
     ))
 }
 
-fn cohere_api_key(api_key_env: &str) -> Result<String, FastError> {
-    std::env::var(api_key_env).map_err(|_| {
-        FastError::Invalid(format!(
-            "{api_key_env} is required for fast memory embedding"
-        ))
-    })
+fn cohere_api_key(api_key: &str) -> Result<String, FastError> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err(FastError::Invalid(
+            "MOA_COHERE_API_KEY is required for fast memory embedding".to_string(),
+        ));
+    }
+    Ok(api_key.to_string())
 }
 
 fn parse_node_label(value: Option<&str>) -> Result<NodeLabel, FastError> {

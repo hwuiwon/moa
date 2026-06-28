@@ -51,8 +51,8 @@ impl DatabaseConfig {
 pub struct DatabaseNeonConfig {
     /// Whether Neon checkpoint management is enabled.
     pub enabled: bool,
-    /// Environment variable containing the Neon API key.
-    pub api_key_env: String,
+    /// Neon API key value loaded from runtime configuration.
+    pub api_key: String,
     /// Neon project identifier used for branch management.
     pub project_id: String,
     /// Parent branch name or id used for checkpoint creation.
@@ -71,7 +71,7 @@ impl Default for DatabaseNeonConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            api_key_env: "NEON_API_KEY".to_string(),
+            api_key: String::new(),
             project_id: String::new(),
             parent_branch_id: "main".to_string(),
             max_checkpoints: 5,
@@ -103,8 +103,8 @@ impl super::MoaEnvOverlay {
             self.database_neon_enabled,
         );
         set_if_some(
-            &mut config.database.neon.api_key_env,
-            &self.database_neon_api_key_env,
+            &mut config.database.neon.api_key,
+            &self.database_neon_api_key,
         );
         set_if_some(
             &mut config.database.neon.project_id,

@@ -127,8 +127,8 @@ fn base_perf_gate_command() -> Command {
     for key in [
         "MOA_AUTH_AUTH0_DOMAIN",
         "MOA_AUTH_AUTH0_AUDIENCE",
-        "MOA_AUTH_AUTH0_CLIENT_ID_ENV",
-        "MOA_AUTH_AUTH0_CLIENT_SECRET_ENV",
+        "MOA_AUTH_AUTH0_CLIENT_ID",
+        "MOA_AUTH_AUTH0_CLIENT_SECRET",
         "MOA_AUTH_OIDC_ISSUER",
         "MOA_AUTH_OIDC_AUDIENCE",
         "MOA_AUTH_OIDC_JWKS_URL",

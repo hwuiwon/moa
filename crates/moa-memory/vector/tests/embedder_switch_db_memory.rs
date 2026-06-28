@@ -159,7 +159,7 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
     set_embedder_state(
         test_db.store().pool(),
         &storage_partition_id,
-        "cohere-embed-v4",
+        "embed-v4.0",
         1024,
         "steady",
     )
@@ -170,7 +170,7 @@ async fn switching_embedder_dimensions_blocks_knn_until_reembedded() {
             uid,
             &storage_partition_id,
             basis_vector(0),
-            "cohere-embed-v4",
+            "embed-v4.0",
             1,
         )])
         .await
@@ -212,7 +212,7 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
     set_embedder_state(
         test_db.store().pool(),
         &storage_partition_id,
-        "cohere-embed-v4",
+        "embed-v4.0",
         1024,
         "steady",
     )
@@ -223,7 +223,7 @@ async fn reembed_workspace_with_new_embedder_overwrites_existing_vectors_atomica
             uid,
             &storage_partition_id,
             basis_vector(0),
-            "cohere-embed-v4",
+            "embed-v4.0",
             1,
         )])
         .await
@@ -288,7 +288,7 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
     set_embedder_state(
         test_db.store().pool(),
         &storage_partition_id,
-        "cohere-embed-v4",
+        "embed-v4.0",
         1024,
         "steady",
     )
@@ -299,7 +299,7 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
             uid,
             &storage_partition_id,
             basis_vector(0),
-            "cohere-embed-v4",
+            "embed-v4.0",
             1,
         )])
         .await
@@ -307,7 +307,7 @@ async fn reembed_in_progress_state_blocks_concurrent_knn_queries_until_complete(
     set_embedder_state(
         test_db.store().pool(),
         &storage_partition_id,
-        "cohere-embed-v4",
+        "embed-v4.0",
         1024,
         "in_progress",
     )
@@ -333,7 +333,7 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
     set_embedder_state(
         test_db.store().pool(),
         &storage_partition_id,
-        "cohere-embed-v4",
+        "embed-v4.0",
         1024,
         "steady",
     )
@@ -345,7 +345,7 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
             uid,
             &storage_partition_id,
             basis_vector(0),
-            "cohere-embed-v4",
+            "embed-v4.0",
             1,
         )])
         .await
@@ -364,7 +364,7 @@ async fn configured_workspace_embedder_allows_same_model_vector_write() {
     assert_eq!(
         row.try_get::<String, _>("embedding_model")
             .expect("decode embedding model"),
-        "cohere-embed-v4"
+        "embed-v4.0"
     );
     assert_eq!(
         row.try_get::<i32, _>("embedding_model_version")
@@ -390,7 +390,7 @@ async fn missing_storage_partition_embedder_state_rejects_vector_write() {
             uid,
             &storage_partition_id,
             basis_vector(0),
-            "cohere-embed-v4",
+            "embed-v4.0",
             1,
         )])
         .await
@@ -426,7 +426,7 @@ async fn configured_workspace_embedder_rejects_mixed_model_vector_write() {
     set_embedder_state(
         test_db.store().pool(),
         &storage_partition_id,
-        "cohere-embed-v4",
+        "embed-v4.0",
         1024,
         "steady",
     )
@@ -449,6 +449,6 @@ async fn configured_workspace_embedder_rejects_mixed_model_vector_write() {
             configured_model,
             requested_model,
             ..
-        } if configured_model == "cohere-embed-v4" && requested_model == "replacement-embedder"
+        } if configured_model == "embed-v4.0" && requested_model == "replacement-embedder"
     ));
 }

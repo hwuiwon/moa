@@ -746,9 +746,9 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     NangoProvider::new(self.config.nango.api_base_url.clone(), api_key)?;
-                if let Some(signing_key) = moa_core::config::optional_env_secret(
-                    &self.config.nango.webhook_signing_key_env,
-                )? {
+                if let Some(signing_key) =
+                    moa_core::config::optional_config_secret(&self.config.nango.webhook_signing_key)
+                {
                     implementation = implementation.with_webhook_signing_key(signing_key);
                 }
                 Ok(Arc::new(implementation))
@@ -757,9 +757,9 @@ impl KnowledgeProviderResolver for ConfigKnowledgeProviders {
                 let api_key = self.config.selected_provider_api_key(provider)?;
                 let mut implementation =
                     MergeProvider::new(self.config.merge.api_base_url.clone(), api_key)?;
-                if let Some(signature_key) = moa_core::config::optional_env_secret(
-                    &self.config.merge.webhook_signature_key_env,
-                )? {
+                if let Some(signature_key) = moa_core::config::optional_config_secret(
+                    &self.config.merge.webhook_signature_key,
+                ) {
                     implementation = implementation.with_webhook_signature_key(signature_key);
                 }
                 Ok(Arc::new(implementation))
@@ -799,16 +799,14 @@ impl ConfigKnowledgeProviders {
         }
         let (signing_key, header_name, header_value) = match provider {
             "llamaparse" => (
-                moa_core::config::optional_env_secret(
-                    &self.config.llamaparse.webhook_signing_key_env,
-                )?,
+                moa_core::config::optional_config_secret(
+                    &self.config.llamaparse.webhook_signing_key,
+                ),
                 self.config.llamaparse.webhook_header_name.clone(),
                 self.config.llamaparse.webhook_header_value.clone(),
             ),
             "reducto" => (
-                moa_core::config::optional_env_secret(
-                    &self.config.reducto.webhook_signing_key_env,
-                )?,
+                moa_core::config::optional_config_secret(&self.config.reducto.webhook_signing_key),
                 self.config.reducto.webhook_header_name.clone(),
                 self.config.reducto.webhook_header_value.clone(),
             ),

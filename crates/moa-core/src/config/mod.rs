@@ -44,7 +44,6 @@ pub use knowledge::{
     KnowledgeParserDefaultsConfig, KnowledgeParsersConfig, KnowledgeProvidersConfig,
     KnowledgeSyncConfig, LlamaParseKnowledgeParserConfig, MergeKnowledgeProviderConfig,
     NangoKnowledgeProviderConfig, ReductoKnowledgeParserConfig, UnstructuredKnowledgeParserConfig,
-    optional_env_secret,
 };
 pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
@@ -52,6 +51,7 @@ pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
     MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRerankerMode,
     MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
+    ZeroEntropyEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
@@ -142,6 +142,25 @@ pub struct MoaConfig {
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
+/// Returns a trimmed required secret value loaded from direct runtime config.
+pub fn required_config_secret(env_name: &'static str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(MoaError::MissingEnvironmentVariable(env_name.to_string()));
+    }
+    Ok(value.to_string())
+}
+
+/// Returns a trimmed optional secret value loaded from direct runtime config.
+#[must_use]
+pub fn optional_config_secret(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 impl MoaConfig {
     fn validate(&self) -> Result<()> {
         if self.database.url.trim().is_empty() {
@@ -205,6 +224,11 @@ mod tests {
         "MOA_LINEAGE_AUDIT_SIGNING_KEY_HEX",
         "MOA_LINEAGE_AUDIT_SIGNING_KEY_ID",
         "MOA_PII_VAULT_SECRET_HEX",
+        "MOA_ANTHROPIC_API_KEY",
+        "MOA_OPENAI_API_KEY",
+        "MOA_GOOGLE_API_KEY",
+        "MOA_COHERE_API_KEY",
+        "MOA_ZEROENTROPY_API_KEY",
         "MOA_DATABASE_NEON_ENABLED",
         "MOA_DATABASE_NEON_PROJECT_ID",
         "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
@@ -214,7 +238,6 @@ mod tests {
         "MOA_MEMORY_DIGEST_MAX_TOKENS",
         "MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS",
         "MOA_MEMORY_EXTRACTION_ENABLED",
-        "MOA_MEMORY_EXTRACTION_API_KEY_ENV",
         "MOA_MEMORY_EXTRACTION_MODEL",
         "MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK",
         "MOA_MEMORY_EXTRACTION_TIMEOUT_MS",
@@ -324,25 +347,35 @@ mod tests {
     }
 
     #[test]
-    fn env_only_loads_memory_extraction_config() {
-        // Pins: model-backed memory extraction uses flat MOA env names.
+    fn env_only_loads_memory_extraction_and_embedder_config() {
+        // Pins: model-backed memory extraction and vector embedder keys use flat MOA env names.
         let _guard = ENV_LOCK.lock().expect("env test lock");
         let _env = EnvRestore::clear(CONFIG_ENV_KEYS);
         unsafe {
             std::env::set_var("MOA_MEMORY_EXTRACTION_ENABLED", "true");
-            std::env::set_var("MOA_MEMORY_EXTRACTION_API_KEY_ENV", "MOA_TEST_COHERE_KEY");
+            std::env::set_var("MOA_COHERE_API_KEY", "MOA_TEST_COHERE_KEY");
             std::env::set_var("MOA_MEMORY_EXTRACTION_MODEL", "command-test");
             std::env::set_var("MOA_MEMORY_EXTRACTION_MAX_FACTS_PER_CHUNK", "5");
             std::env::set_var("MOA_MEMORY_EXTRACTION_TIMEOUT_MS", "2500");
+            std::env::set_var("MOA_ZEROENTROPY_API_KEY", "MOA_TEST_ZEROENTROPY_KEY");
         }
 
         let config = MoaConfig::load_from_env().expect("load config from env");
 
         assert!(config.memory.extraction.enabled);
-        assert_eq!(config.memory.extraction.api_key_env, "MOA_TEST_COHERE_KEY");
+        assert_eq!(config.providers.cohere.api_key, "MOA_TEST_COHERE_KEY");
+        assert_eq!(config.memory.extraction.api_key, "MOA_TEST_COHERE_KEY");
         assert_eq!(config.memory.extraction.model, "command-test");
         assert_eq!(config.memory.extraction.max_facts_per_chunk, 5);
         assert_eq!(config.memory.extraction.timeout_ms, 2500);
+        assert_eq!(
+            config.providers.zeroentropy.api_key,
+            "MOA_TEST_ZEROENTROPY_KEY"
+        );
+        assert_eq!(
+            config.memory.vector.embedder.zeroentropy.api_key,
+            "MOA_TEST_ZEROENTROPY_KEY"
+        );
     }
 
     #[test]

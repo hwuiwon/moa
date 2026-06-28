@@ -45,9 +45,12 @@ pub struct ContactTokenVerifier {
 }
 
 impl ContactTokenVerifier {
-    /// Builds a verifier from configured environment-variable backed key material.
+    /// Builds a verifier from configured key material.
     pub fn from_env(config: &ContactTokenConfig) -> Result<Self, ContactTokenError> {
-        let public_key = env_value(&config.public_key_pem_env)?;
+        let public_key = config_secret(
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM",
+            &config.public_key_pem,
+        )?;
         Self::from_public_key_pem(config, public_key.as_bytes())
     }
 
@@ -109,10 +112,16 @@ pub struct IssuedContactToken {
 }
 
 impl ContactTokenIssuer {
-    /// Builds an issuer from configured environment-variable backed key material.
+    /// Builds an issuer from configured key material.
     pub fn from_env(config: &ContactTokenConfig) -> Result<Self, ContactTokenError> {
-        let private_key = env_value(&config.private_key_pem_env)?;
-        let public_key = env_value(&config.public_key_pem_env)?;
+        let private_key = config_secret(
+            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM",
+            &config.private_key_pem,
+        )?;
+        let public_key = config_secret(
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM",
+            &config.public_key_pem,
+        )?;
         Self::from_key_pems(config, private_key.as_bytes(), public_key.as_bytes())
     }
 
@@ -191,6 +200,7 @@ fn token_ttl(config: &ContactTokenConfig, state: ContactVerificationState) -> i6
     }
 }
 
-fn env_value(name: &str) -> Result<String, ContactTokenError> {
-    std::env::var(name).map_err(|_| ContactTokenError::MissingEnv(name.to_string()))
+fn config_secret(env_name: &'static str, value: &str) -> Result<String, ContactTokenError> {
+    moa_core::config::required_config_secret(env_name, value)
+        .map_err(|_| ContactTokenError::MissingEnv(env_name.to_string()))
 }

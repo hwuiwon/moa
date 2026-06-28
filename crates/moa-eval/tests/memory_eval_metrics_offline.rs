@@ -461,7 +461,7 @@ fn report_serializes_cost_and_providers_sections() -> TestResult {
     report.cost = Some(CostLedger::new(5.0));
     report.providers = Some(ProviderProvenance {
         lane: "live".to_string(),
-        embedding_model: "cohere-embed-v4".to_string(),
+        embedding_model: "embed-v4.0".to_string(),
         embedding_model_version: 1,
         extractor_model: "command-a-plus-05-2026".to_string(),
         extraction_prompt_version: Some("v2".to_string()),
@@ -474,7 +474,7 @@ fn report_serializes_cost_and_providers_sections() -> TestResult {
 
     assert_eq!(value["cost"]["budget_usd"], 5.0);
     assert_eq!(value["providers"]["lane"], "live");
-    assert_eq!(value["providers"]["embedding_model"], "cohere-embed-v4");
+    assert_eq!(value["providers"]["embedding_model"], "embed-v4.0");
     let old_report = serde_json::json!({
         "manifest": report.manifest,
         "candidate_k": report.candidate_k,

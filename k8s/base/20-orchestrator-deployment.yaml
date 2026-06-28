@@ -60,17 +60,35 @@ spec:
                 secretKeyRef:
                   name: moa-postgres
                   key: url
-            - name: ANTHROPIC_API_KEY
+            - name: MOA_ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: moa-llm-keys
                   key: anthropic
                   optional: true
-            - name: OPENAI_API_KEY
+            - name: MOA_OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: moa-llm-keys
                   key: openai
+                  optional: true
+            - name: MOA_GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moa-llm-keys
+                  key: google
+                  optional: true
+            - name: MOA_COHERE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moa-llm-keys
+                  key: cohere
+                  optional: true
+            - name: MOA_ZEROENTROPY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moa-llm-keys
+                  key: zeroentropy
                   optional: true
             - name: OPENROUTER_API_KEY
               valueFrom:

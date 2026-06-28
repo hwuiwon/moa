@@ -18,6 +18,7 @@ moa-memory-graph = { workspace = true }
 moa-memory-pii = { workspace = true }
 moa-memory-types = { workspace = true }
 moa-memory-vector = { workspace = true }
+moa-providers = { workspace = true }
 moka.workspace = true
 metrics.workspace = true
 reqwest.workspace = true

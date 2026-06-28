@@ -7,10 +7,10 @@ use moa_core::{
     ContextProcessor, LLMProvider, LineageHandle, MoaConfig, SegmentStore, SessionStore,
     traits::EmbeddingProvider,
 };
-use moa_memory_vector::{EmbedderConstructionRole, build_embedder_from_config};
 use moa_observability::{
     record_context_pipeline_construction, record_retrieval_embedder_construction,
 };
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::agent_instructions::AgentInstructionProcessor;
 use super::compactor::Compactor;

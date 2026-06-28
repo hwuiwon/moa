@@ -123,9 +123,10 @@ impl GeminiProvider {
         config: &MoaConfig,
         default_model: impl Into<String>,
     ) -> Result<Self> {
-        let api_key_env = config.providers.google.api_key_env.clone();
-        let api_key = env::var(&api_key_env)
-            .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.clone()))?;
+        let api_key = moa_core::config::required_config_secret(
+            "MOA_GOOGLE_API_KEY",
+            &config.providers.google.api_key,
+        )?;
 
         Self::new_with_reasoning_effort(
             api_key,

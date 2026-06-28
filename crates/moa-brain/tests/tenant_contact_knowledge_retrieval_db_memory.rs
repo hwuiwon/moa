@@ -293,7 +293,7 @@ async fn seed_storage_partition_embedder_state(
             embedding_dimension,
             reembed_state
         )
-        VALUES ($1, 'cohere-embed-v4', 1, $2, 'steady')
+        VALUES ($1, 'embed-v4.0', 1, $2, 'steady')
         ON CONFLICT (storage_partition_id) DO UPDATE
         SET embedding_model = EXCLUDED.embedding_model,
             embedding_model_version = EXCLUDED.embedding_model_version,
@@ -331,7 +331,7 @@ fn node_intent(
         confidence: Some(0.95),
         valid_from: Utc::now(),
         embedding: Some(test_embedding(name)),
-        embedding_model: Some("cohere-embed-v4".to_string()),
+        embedding_model: Some("embed-v4.0".to_string()),
         embedding_model_version: Some(1),
         actor_id: Uuid::now_v7().to_string(),
         actor_kind: "system".to_string(),
@@ -344,7 +344,7 @@ struct TestEmbedder;
 #[async_trait]
 impl EmbeddingProvider for TestEmbedder {
     fn model_id(&self) -> &str {
-        "cohere-embed-v4"
+        "embed-v4.0"
     }
 
     fn dimensions(&self) -> usize {

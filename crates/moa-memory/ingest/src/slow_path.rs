@@ -21,9 +21,9 @@ use moa_memory_pii::{
     OpenAiPrivacyFilterClassifier, PiiClassifier, PiiResult, PiiSpan, classify_heuristic,
     redact_text,
 };
-use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
+use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_providers::CohereV4Embedder;
 use restate_sdk::prelude::*;
-use secrecy::SecretString;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -63,7 +63,7 @@ impl IngestionVO for IngestionVOImpl {
         let runtime = current_runtime().map_err(HandlerError::from)?;
         let pool = runtime.pool().clone();
         let pii_service_url = runtime.pii_service_url().map(str::to_string);
-        let cohere_api_key_env = runtime.cohere_api_key_env().to_string();
+        let cohere_api_key = runtime.cohere_api_key().to_string();
         let contradiction_detector = runtime.contradiction_detector();
         let degraded = storage_partition_degraded(&pool, &turn).await?;
         if degraded && !should_ingest_degraded(&turn) {
@@ -118,10 +118,10 @@ impl IngestionVO for IngestionVOImpl {
             .into_inner();
 
         let embed_input = classified.clone();
-        let embed_cohere_api_key_env = cohere_api_key_env.clone();
+        let embed_cohere_api_key = cohere_api_key.clone();
         let embedded = ctx
             .run(|| async move {
-                embed_batch(&embed_input, &embed_cohere_api_key_env)
+                embed_batch(&embed_input, &embed_cohere_api_key)
                     .await
                     .map(Json::from)
             })
@@ -189,7 +189,7 @@ pub async fn ingest_turn_direct(turn: SessionTurn) -> Result<IngestApplyReport, 
         DirectIngestDeps {
             pool: runtime.pool().clone(),
             pii_service_url: runtime.pii_service_url().map(str::to_string),
-            cohere_api_key_env: runtime.cohere_api_key_env().to_string(),
+            cohere_api_key: runtime.cohere_api_key().to_string(),
             extractor: runtime.extractor(),
             entity_resolver: runtime.entity_resolver(),
             entity_blocking_embedder: runtime.entity_blocking_embedder(),
@@ -214,11 +214,12 @@ pub async fn ingest_turn_direct_with_pool(
     let config = MoaConfig::load_from_env().map_err(HandlerError::from)?;
     let contradiction_detector = Arc::new(RrfPlusJudgeDetector::from_config_or_heuristic(&config));
     let memory = config.memory;
+    let cohere_api_key = config.providers.cohere.api_key;
     ingest_turn_direct_with_pool_and_pii(
         DirectIngestDeps {
             pool,
             pii_service_url: memory.pii_service_url,
-            cohere_api_key_env: memory.vector.embedder.cohere.api_key_env,
+            cohere_api_key,
             extractor: Arc::new(HeuristicFactExtractor),
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
             entity_blocking_embedder: None,
@@ -232,7 +233,7 @@ pub async fn ingest_turn_direct_with_pool(
 struct DirectIngestDeps {
     pool: PgPool,
     pii_service_url: Option<String>,
-    cohere_api_key_env: String,
+    cohere_api_key: String,
     extractor: Arc<dyn FactExtractor>,
     entity_resolver: Arc<EntityResolver>,
     entity_blocking_embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -246,7 +247,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
     let DirectIngestDeps {
         pool,
         pii_service_url,
-        cohere_api_key_env,
+        cohere_api_key,
         extractor,
         entity_resolver,
         entity_blocking_embedder,
@@ -270,7 +271,7 @@ async fn ingest_turn_direct_with_pool_and_pii(
         .await
         .map_err(HandlerError::from)?;
     let classified = classify_facts(&extracted, pii_service_url.as_deref()).await?;
-    let embedded = embed_batch(&classified, &cohere_api_key_env).await?;
+    let embedded = embed_batch(&classified, &cohere_api_key).await?;
     let decisions = detect_contradictions_with(
         contradiction_detector.as_ref(),
         pool.clone(),
@@ -474,9 +475,10 @@ fn redaction_replacement(source_text: &str, span: &PiiSpan) -> String {
 
 async fn embed_batch(
     facts: &[ClassifiedFact],
-    cohere_api_key_env: &str,
+    cohere_api_key: &str,
 ) -> Result<Vec<EmbeddedFact>, HandlerError> {
-    let Some(api_key) = std::env::var(cohere_api_key_env).ok() else {
+    let api_key = cohere_api_key.trim();
+    if api_key.is_empty() {
         return Ok(facts
             .iter()
             .cloned()
@@ -487,9 +489,9 @@ async fn embed_batch(
                 embedding_model_version: None,
             })
             .collect());
-    };
+    }
 
-    let embedder = CohereV4Embedder::new(SecretString::from(api_key));
+    let embedder = CohereV4Embedder::new(api_key.to_string()).map_err(HandlerError::from)?;
     embed_batch_with(&embedder, facts).await
 }
 

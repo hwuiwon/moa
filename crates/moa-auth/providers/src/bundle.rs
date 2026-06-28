@@ -121,8 +121,10 @@ pub fn build_providers_with_resolver(
                 let auth0 = cfg.auth.auth0.as_ref().ok_or(BuildError::MissingConfig(
                     "auth.auth0 (required for token vault)",
                 ))?;
-                let client_id = env_value(&auth0.client_id_env)?;
-                let client_secret = env_value(&auth0.client_secret_env)?;
+                let client_id =
+                    required_config_secret("MOA_AUTH_AUTH0_CLIENT_ID", &auth0.client_id)?;
+                let client_secret =
+                    required_config_secret("MOA_AUTH_AUTH0_CLIENT_SECRET", &auth0.client_secret)?;
                 Arc::new(
                     moa_auth_providers_auth0::Auth0TokenVaultProvider::new(
                         auth0.domain.clone(),
@@ -151,8 +153,10 @@ pub fn build_providers_with_resolver(
                 ))?;
                 let resolver =
                     awakeable_resolver.ok_or(BuildError::MissingConfig("awakeable resolver"))?;
-                let client_id = env_value(&auth0.client_id_env)?;
-                let client_secret = env_value(&auth0.client_secret_env)?;
+                let client_id =
+                    required_config_secret("MOA_AUTH_AUTH0_CLIENT_ID", &auth0.client_id)?;
+                let client_secret =
+                    required_config_secret("MOA_AUTH_AUTH0_CLIENT_SECRET", &auth0.client_secret)?;
                 Arc::new(
                     moa_auth_providers_auth0::Auth0AsyncAuthzProvider::new(
                         auth0.domain.clone(),
@@ -191,8 +195,10 @@ pub fn build_providers_with_resolver(
 fn build_optional_contact_issuer(
     cfg: &MoaConfig,
 ) -> Result<Option<Arc<crate::ContactTokenIssuer>>, BuildError> {
-    let private_key = optional_env_value(&cfg.auth.contact_tokens.private_key_pem_env);
-    let public_key = optional_env_value(&cfg.auth.contact_tokens.public_key_pem_env);
+    let private_key =
+        moa_core::config::optional_config_secret(&cfg.auth.contact_tokens.private_key_pem);
+    let public_key =
+        moa_core::config::optional_config_secret(&cfg.auth.contact_tokens.public_key_pem);
     match (private_key, public_key) {
         (None, None) => Ok(None),
         (Some(private_key), Some(public_key)) => crate::ContactTokenIssuer::from_key_pems(
@@ -204,24 +210,18 @@ fn build_optional_contact_issuer(
         .map(Some)
         .map_err(|error| BuildError::Provider(error.to_string())),
         (None, Some(_)) => Err(BuildError::MissingEnv(
-            cfg.auth.contact_tokens.private_key_pem_env.clone(),
+            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM".to_string(),
         )),
         (Some(_), None) => Err(BuildError::MissingEnv(
-            cfg.auth.contact_tokens.public_key_pem_env.clone(),
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM".to_string(),
         )),
     }
 }
 
-fn optional_env_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 #[cfg(feature = "auth0")]
-fn env_value(name: &str) -> Result<String, BuildError> {
-    std::env::var(name).map_err(|_| BuildError::MissingEnv(name.to_string()))
+fn required_config_secret(env_name: &'static str, value: &str) -> Result<String, BuildError> {
+    moa_core::config::required_config_secret(env_name, value)
+        .map_err(|_| BuildError::MissingEnv(env_name.to_string()))
 }
 
 #[cfg(feature = "auth0")]

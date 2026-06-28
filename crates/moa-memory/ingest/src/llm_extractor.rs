@@ -48,8 +48,11 @@ pub struct LlmFactExtractor {
 impl LlmFactExtractor {
     /// Creates an LLM extractor from memory extraction config.
     pub fn from_config(config: &MemoryExtractionConfig) -> Result<Self> {
-        let client =
-            LlmChatClient::from_env(&config.api_key_env, &config.model, config.timeout_ms)?;
+        let client = LlmChatClient::from_api_key(
+            secrecy::SecretString::from(config.api_key.clone()),
+            &config.model,
+            config.timeout_ms,
+        );
         Ok(Self::new(client, config.max_facts_per_chunk))
     }
 

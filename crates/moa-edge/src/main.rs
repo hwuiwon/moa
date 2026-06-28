@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use moa_authz::{FgaClient, FgaConfig};
-use moa_core::config::{AuthzEngine, optional_env_secret};
+use moa_core::config::{AuthzEngine, optional_config_secret};
 use moa_edge::proxy::OrchestratorProxy;
 use moa_edge::routes::{self, AppState, KnowledgeWebhookEdgeConfig};
 
@@ -111,20 +111,16 @@ fn knowledge_webhook_edge_config(
     config: &moa_core::MoaConfig,
 ) -> anyhow::Result<KnowledgeWebhookEdgeConfig> {
     Ok(KnowledgeWebhookEdgeConfig {
-        nango_signing_key: optional_env_secret(&config.knowledge.nango.webhook_signing_key_env)?,
-        merge_signature_key: optional_env_secret(
-            &config.knowledge.merge.webhook_signature_key_env,
-        )?,
-        llamaparse_signing_key: optional_env_secret(
-            &config.knowledge.llamaparse.webhook_signing_key_env,
-        )?,
+        nango_signing_key: optional_config_secret(&config.knowledge.nango.webhook_signing_key),
+        merge_signature_key: optional_config_secret(&config.knowledge.merge.webhook_signature_key),
+        llamaparse_signing_key: optional_config_secret(
+            &config.knowledge.llamaparse.webhook_signing_key,
+        ),
         llamaparse_custom_header: custom_header(
             &config.knowledge.llamaparse.webhook_header_name,
             &config.knowledge.llamaparse.webhook_header_value,
         ),
-        reducto_signing_key: optional_env_secret(
-            &config.knowledge.reducto.webhook_signing_key_env,
-        )?,
+        reducto_signing_key: optional_config_secret(&config.knowledge.reducto.webhook_signing_key),
         reducto_custom_header: custom_header(
             &config.knowledge.reducto.webhook_header_name,
             &config.knowledge.reducto.webhook_header_value,

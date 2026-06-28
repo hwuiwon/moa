@@ -229,7 +229,7 @@ impl HybridRetriever {
             .with_reranker(reranker)
     }
 
-    /// Creates a hybrid retriever from shared config and secret-bearing environment variables.
+    /// Creates a hybrid retriever from shared config.
     #[must_use]
     pub fn from_config(
         config: &MoaConfig,
@@ -237,11 +237,12 @@ impl HybridRetriever {
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
     ) -> Self {
-        let reranker = std::env::var(&config.memory.vector.embedder.cohere.api_key_env)
-            .map(|api_key| {
-                Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
-            })
-            .unwrap_or_else(|_| Arc::new(NoopReranker));
+        let reranker = if config.providers.cohere.api_key.trim().is_empty() {
+            Arc::new(NoopReranker) as Arc<dyn Reranker>
+        } else {
+            let api_key = config.providers.cohere.api_key.clone();
+            Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
+        };
         let turbopuffer = TurbopufferStore::from_config(config).ok().map(Arc::new);
         Self::new(pool, graph, vector)
             .with_turbopuffer(turbopuffer)

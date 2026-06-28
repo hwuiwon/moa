@@ -62,10 +62,10 @@ pub struct Auth0AuthConfig {
     pub domain: String,
     /// Expected API audience.
     pub audience: String,
-    /// Environment variable holding the Auth0 client id.
-    pub client_id_env: String,
-    /// Environment variable holding the Auth0 client secret.
-    pub client_secret_env: String,
+    /// Auth0 client id loaded from runtime configuration.
+    pub client_id: String,
+    /// Auth0 client secret loaded from runtime configuration.
+    pub client_secret: String,
 }
 
 /// Generic OIDC authentication settings.
@@ -88,12 +88,12 @@ pub struct ContactTokenConfig {
     pub audience: String,
     /// JWT key id placed in the token header.
     pub key_id: String,
-    /// Environment variable containing the RSA private key PEM for issuance.
-    pub private_key_pem_env: String,
-    /// Environment variable containing the RSA public key PEM for verification.
-    pub public_key_pem_env: String,
-    /// Environment variable containing the 32-byte hex key used for contact point lookup hashes.
-    pub contact_point_hash_key_env: String,
+    /// RSA private key PEM for issuance.
+    pub private_key_pem: String,
+    /// RSA public key PEM for verification.
+    pub public_key_pem: String,
+    /// 32-byte hex key used for contact point lookup hashes.
+    pub contact_point_hash_key_hex: String,
     /// TTL for unverified contact tokens.
     pub unverified_ttl_seconds: i64,
     /// TTL for verified contact tokens.
@@ -108,9 +108,9 @@ impl Default for ContactTokenConfig {
             issuer: "https://moa.local/contacts".to_string(),
             audience: "moa-agent-contact".to_string(),
             key_id: "moa-contact-rs256".to_string(),
-            private_key_pem_env: "MOA_CONTACT_JWT_PRIVATE_KEY_PEM".to_string(),
-            public_key_pem_env: "MOA_CONTACT_JWT_PUBLIC_KEY_PEM".to_string(),
-            contact_point_hash_key_env: "MOA_CONTACT_POINT_HASH_KEY_HEX".to_string(),
+            private_key_pem: String::new(),
+            public_key_pem: String::new(),
+            contact_point_hash_key_hex: String::new(),
             unverified_ttl_seconds: 3600,
             verified_ttl_seconds: 86_400,
             verification_ttl_seconds: 600,
@@ -144,8 +144,8 @@ impl super::MoaEnvOverlay {
         if !any_present(&[
             self.auth_auth0_domain.is_some(),
             self.auth_auth0_audience.is_some(),
-            self.auth_auth0_client_id_env.is_some(),
-            self.auth_auth0_client_secret_env.is_some(),
+            self.auth_auth0_client_id.is_some(),
+            self.auth_auth0_client_secret.is_some(),
         ]) {
             return Ok(());
         }
@@ -157,20 +157,17 @@ impl super::MoaEnvOverlay {
             .unwrap_or_else(|| Auth0AuthConfig {
                 domain: String::new(),
                 audience: String::new(),
-                client_id_env: String::new(),
-                client_secret_env: String::new(),
+                client_id: String::new(),
+                client_secret: String::new(),
             });
         set_if_some(&mut auth0.domain, &self.auth_auth0_domain);
         set_if_some(&mut auth0.audience, &self.auth_auth0_audience);
-        set_if_some(&mut auth0.client_id_env, &self.auth_auth0_client_id_env);
-        set_if_some(
-            &mut auth0.client_secret_env,
-            &self.auth_auth0_client_secret_env,
-        );
+        set_if_some(&mut auth0.client_id, &self.auth_auth0_client_id);
+        set_if_some(&mut auth0.client_secret, &self.auth_auth0_client_secret);
         require_non_empty("MOA_AUTH_AUTH0_DOMAIN", &auth0.domain)?;
         require_non_empty("MOA_AUTH_AUTH0_AUDIENCE", &auth0.audience)?;
-        require_non_empty("MOA_AUTH_AUTH0_CLIENT_ID_ENV", &auth0.client_id_env)?;
-        require_non_empty("MOA_AUTH_AUTH0_CLIENT_SECRET_ENV", &auth0.client_secret_env)?;
+        require_non_empty("MOA_AUTH_AUTH0_CLIENT_ID", &auth0.client_id)?;
+        require_non_empty("MOA_AUTH_AUTH0_CLIENT_SECRET", &auth0.client_secret)?;
         config.auth.auth0 = Some(auth0);
         Ok(())
     }
@@ -208,9 +205,9 @@ impl super::MoaEnvOverlay {
             self.auth_contact_tokens_issuer.is_some(),
             self.auth_contact_tokens_audience.is_some(),
             self.auth_contact_tokens_key_id.is_some(),
-            self.auth_contact_tokens_private_key_pem_env.is_some(),
-            self.auth_contact_tokens_public_key_pem_env.is_some(),
-            self.auth_contact_tokens_contact_point_hash_key_env
+            self.auth_contact_tokens_private_key_pem.is_some(),
+            self.auth_contact_tokens_public_key_pem.is_some(),
+            self.auth_contact_tokens_contact_point_hash_key_hex
                 .is_some(),
             self.auth_contact_tokens_unverified_ttl_seconds.is_some(),
             self.auth_contact_tokens_verified_ttl_seconds.is_some(),
@@ -227,16 +224,16 @@ impl super::MoaEnvOverlay {
         );
         set_if_some(&mut contact_tokens.key_id, &self.auth_contact_tokens_key_id);
         set_if_some(
-            &mut contact_tokens.private_key_pem_env,
-            &self.auth_contact_tokens_private_key_pem_env,
+            &mut contact_tokens.private_key_pem,
+            &self.auth_contact_tokens_private_key_pem,
         );
         set_if_some(
-            &mut contact_tokens.public_key_pem_env,
-            &self.auth_contact_tokens_public_key_pem_env,
+            &mut contact_tokens.public_key_pem,
+            &self.auth_contact_tokens_public_key_pem,
         );
         set_if_some(
-            &mut contact_tokens.contact_point_hash_key_env,
-            &self.auth_contact_tokens_contact_point_hash_key_env,
+            &mut contact_tokens.contact_point_hash_key_hex,
+            &self.auth_contact_tokens_contact_point_hash_key_hex,
         );
         set_copy_if_some(
             &mut contact_tokens.unverified_ttl_seconds,
@@ -254,16 +251,16 @@ impl super::MoaEnvOverlay {
         require_non_empty("MOA_AUTH_CONTACT_TOKENS_AUDIENCE", &contact_tokens.audience)?;
         require_non_empty("MOA_AUTH_CONTACT_TOKENS_KEY_ID", &contact_tokens.key_id)?;
         require_non_empty(
-            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM_ENV",
-            &contact_tokens.private_key_pem_env,
+            "MOA_AUTH_CONTACT_TOKENS_PRIVATE_KEY_PEM",
+            &contact_tokens.private_key_pem,
         )?;
         require_non_empty(
-            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM_ENV",
-            &contact_tokens.public_key_pem_env,
+            "MOA_AUTH_CONTACT_TOKENS_PUBLIC_KEY_PEM",
+            &contact_tokens.public_key_pem,
         )?;
         require_non_empty(
-            "MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_ENV",
-            &contact_tokens.contact_point_hash_key_env,
+            "MOA_AUTH_CONTACT_TOKENS_CONTACT_POINT_HASH_KEY_HEX",
+            &contact_tokens.contact_point_hash_key_hex,
         )?;
         config.auth.contact_tokens = contact_tokens;
         Ok(())

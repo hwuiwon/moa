@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MessagingConfig {
-    /// Environment variable containing the Slack bot token.
-    pub slack_token_env: String,
-    /// Environment variable containing the Slack app token.
-    pub slack_app_token_env: String,
+    /// Slack bot token loaded from runtime configuration.
+    pub slack_token: String,
+    /// Slack app token loaded from runtime configuration.
+    pub slack_app_token: String,
     /// Base URL for the Postmark email API.
     pub postmark_base_url: String,
     /// Default Postmark message stream.
@@ -25,8 +25,8 @@ pub struct MessagingConfig {
 impl Default for MessagingConfig {
     fn default() -> Self {
         Self {
-            slack_token_env: "SLACK_BOT_TOKEN".to_string(),
-            slack_app_token_env: "SLACK_APP_TOKEN".to_string(),
+            slack_token: String::new(),
+            slack_app_token: String::new(),
             postmark_base_url: "https://api.postmarkapp.com".to_string(),
             postmark_message_stream: "outbound".to_string(),
             email_from: String::new(),
@@ -42,12 +42,12 @@ impl super::MoaEnvOverlay {
         use super::env_overlay::{set_if_some, set_option_if_some};
 
         set_if_some(
-            &mut config.messaging.slack_token_env,
-            &self.messaging_slack_token_env,
+            &mut config.messaging.slack_token,
+            &self.messaging_slack_token,
         );
         set_if_some(
-            &mut config.messaging.slack_app_token_env,
-            &self.messaging_slack_app_token_env,
+            &mut config.messaging.slack_app_token,
+            &self.messaging_slack_app_token,
         );
         set_if_some(
             &mut config.messaging.postmark_base_url,

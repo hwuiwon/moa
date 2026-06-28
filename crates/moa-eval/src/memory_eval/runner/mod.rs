@@ -32,7 +32,8 @@ use moa_memory_ingest::{
 use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoothed_quality};
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_types::{MemoryScope, ScopeTier};
-use moa_memory_vector::{CohereV4Embedder, PgvectorStore, VectorStore};
+use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_providers::CohereV4Embedder;
 use moa_session::PostgresSessionStore;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -312,17 +313,15 @@ impl MemoryRetrievalEvalOptions {
                     .to_string(),
             ));
         }
-        let extraction = MemoryExtractionConfig::default();
-        let api_key = env_lookup(&extraction.api_key_env).ok_or_else(|| {
+        const LIVE_COHERE_API_KEY_ENV: &str = "COHERE_API_KEY";
+        let api_key = env_lookup(LIVE_COHERE_API_KEY_ENV).ok_or_else(|| {
             EvalError::InvalidConfig(format!(
-                "live lane requires {} to be set",
-                extraction.api_key_env
+                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be set"
             ))
         })?;
         if api_key.trim().is_empty() {
             return Err(EvalError::InvalidConfig(format!(
-                "live lane requires {} to be non-empty",
-                extraction.api_key_env
+                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be non-empty"
             )));
         }
         Ok(())
@@ -710,22 +709,22 @@ impl MemoryRetrievalEvalOptions {
         &self,
         corpus: &LoadedMemoryEvalCorpus,
     ) -> Result<RunProviders> {
-        let extraction = MemoryExtractionConfig {
-            enabled: true,
-            ..MemoryExtractionConfig::default()
-        };
-        let api_key = env::var(&extraction.api_key_env).map_err(|_| {
+        const LIVE_COHERE_API_KEY_ENV: &str = "COHERE_API_KEY";
+        let api_key = env::var(LIVE_COHERE_API_KEY_ENV).map_err(|_| {
             EvalError::InvalidConfig(format!(
-                "live lane requires {} to be set",
-                extraction.api_key_env
+                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be set"
             ))
         })?;
         if api_key.trim().is_empty() {
             return Err(EvalError::InvalidConfig(format!(
-                "live lane requires {} to be non-empty",
-                extraction.api_key_env
+                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be non-empty"
             )));
         }
+        let extraction = MemoryExtractionConfig {
+            enabled: true,
+            api_key: api_key.clone(),
+            ..MemoryExtractionConfig::default()
+        };
         let budget = self
             .budget_usd
             .unwrap_or_else(|| default_live_budget_usd(corpus.manifest.profile));
@@ -733,8 +732,10 @@ impl MemoryRetrievalEvalOptions {
         let chat_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(3_200)));
         let embed_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(700)));
         let rerank_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(6_500)));
-        let secret = SecretString::from(api_key);
-        let raw_embedder = CohereV4Embedder::new(secret.clone());
+        let secret = SecretString::from(api_key.clone());
+        let raw_embedder = CohereV4Embedder::new(api_key).map_err(|error| {
+            EvalError::InvalidConfig(format!("failed to initialize live embedder: {error}"))
+        })?;
         let embedding_model = raw_embedder.model_id().to_string();
         let embedding_model_version = raw_embedder.model_version();
         let embedder = Arc::new(ThrottledEmbedder::new(
@@ -748,14 +749,11 @@ impl MemoryRetrievalEvalOptions {
             CountingExtractor::new(live_extractor, ledger.clone()),
             chat_throttle.clone(),
         )) as Arc<dyn FactExtractor>;
-        let live_merge_verifier = LlmEntityMergeVerifier::from_env(
-            &extraction.api_key_env,
+        let live_merge_verifier = LlmEntityMergeVerifier::from_api_key(
+            extraction.api_key.clone(),
             &extraction.model,
             extraction.timeout_ms,
-        )
-        .map_err(|error| {
-            EvalError::InvalidConfig(format!("failed to initialize live merge verifier: {error}"))
-        })?;
+        );
         let entity_merge_verifier = Arc::new(ThrottledMergeVerifier::new(
             CountingMergeVerifier::new(live_merge_verifier, ledger.clone()),
             chat_throttle,

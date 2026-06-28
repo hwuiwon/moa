@@ -59,7 +59,7 @@ Supported patterns:
 | Bundled resource access | Git clone/push and tenant setup | Host prepares access without exposing raw token to the model. |
 | MCP credential proxy | External tools and SaaS APIs | Host enriches MCP calls with real credentials. |
 | Token Vault provider | User OAuth tokens | Provider retrieves user-approved tokens for trusted host-side calls. |
-| Environment-backed provider keys | LLMs, embeddings, hand providers | Runtime constructs providers from env var names, not prompt-visible values. |
+| Environment-backed provider keys | LLMs, embeddings, hand providers | Runtime loads directly injected secrets into typed host-side config, not prompt-visible values. |
 
 Local encrypted vault storage is no longer part of the active runtime. New
 credential sources should implement `CredentialVault` or a typed provider vault

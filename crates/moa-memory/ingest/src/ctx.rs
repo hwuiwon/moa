@@ -9,9 +9,8 @@ use std::{
 use moa_core::{MoaConfig, traits::EmbeddingProvider};
 use moa_memory_graph::GraphStore;
 use moa_memory_pii::PiiClassifier;
-use moa_memory_vector::CohereV4Embedder;
 use moa_memory_vector::VectorStore;
-use secrecy::SecretString;
+use moa_providers::CohereV4Embedder;
 use sqlx::PgPool;
 
 use crate::{
@@ -41,7 +40,8 @@ pub enum IngestRuntimeInstallError {
 struct IngestRuntimeFingerprint {
     pool_options_hash: u64,
     pii_service_url: Option<String>,
-    cohere_api_key_env: String,
+    cohere_api_key_configured: bool,
+    cohere_api_key_hash: u64,
     extractor_name: &'static str,
     entity_resolver_name: &'static str,
     entity_blocking_enabled: bool,
@@ -61,7 +61,8 @@ impl IngestRuntimeFingerprint {
         Self {
             pool_options_hash: hash_debug(pool.connect_options().as_ref()),
             pii_service_url: config.memory.pii_service_url.clone(),
-            cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
+            cohere_api_key_configured: !config.providers.cohere.api_key.trim().is_empty(),
+            cohere_api_key_hash: hash_debug(&config.providers.cohere.api_key),
             extractor_name,
             entity_resolver_name,
             entity_blocking_enabled,
@@ -72,10 +73,11 @@ impl IngestRuntimeFingerprint {
 
     fn summary(&self) -> String {
         format!(
-            "pool={}, pii={}, cohere_env={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}",
+            "pool={}, pii={}, cohere_api_key_configured={}, cohere_api_key_hash={}, extractor={}, entity_resolver={}, entity_blocking={}, contradiction={}, memory_config={}",
             self.pool_options_hash,
             self.pii_service_url.as_deref().unwrap_or("<none>"),
-            self.cohere_api_key_env,
+            self.cohere_api_key_configured,
+            self.cohere_api_key_hash,
             self.extractor_name,
             self.entity_resolver_name,
             self.entity_blocking_enabled,
@@ -187,7 +189,7 @@ impl IngestCtx {
 pub struct IngestRuntime {
     pool: PgPool,
     pii_service_url: Option<String>,
-    cohere_api_key_env: String,
+    cohere_api_key: String,
     extractor: Arc<dyn FactExtractor>,
     extractor_name: &'static str,
     entity_resolver: Arc<EntityResolver>,
@@ -221,7 +223,7 @@ impl IngestRuntime {
         Self {
             pool,
             pii_service_url: None,
-            cohere_api_key_env: default_config.memory.vector.embedder.cohere.api_key_env,
+            cohere_api_key: default_config.providers.cohere.api_key,
             extractor: Arc::new(HeuristicFactExtractor),
             extractor_name,
             entity_resolver: Arc::new(EntityResolver::deterministic_for_app_role()),
@@ -251,7 +253,7 @@ impl IngestRuntime {
         Self {
             pool,
             pii_service_url: config.memory.pii_service_url.clone(),
-            cohere_api_key_env: config.memory.vector.embedder.cohere.api_key_env.clone(),
+            cohere_api_key: config.providers.cohere.api_key.clone(),
             extractor,
             extractor_name,
             entity_resolver,
@@ -318,10 +320,10 @@ impl IngestRuntime {
         self.pii_service_url.as_deref()
     }
 
-    /// Returns the configured Cohere API-key environment variable name.
+    /// Returns the configured Cohere API key.
     #[must_use]
-    pub fn cohere_api_key_env(&self) -> &str {
-        &self.cohere_api_key_env
+    pub fn cohere_api_key(&self) -> &str {
+        &self.cohere_api_key
     }
 
     /// Returns the configured fact extractor.
@@ -348,11 +350,13 @@ impl IngestRuntime {
         if !self.entity_blocking_enabled {
             return None;
         }
-        let api_key = std::env::var(&self.cohere_api_key_env).ok()?;
-        if api_key.trim().is_empty() {
+        let api_key = self.cohere_api_key.trim();
+        if api_key.is_empty() {
             return None;
         }
-        Some(Arc::new(CohereV4Embedder::new(SecretString::from(api_key))))
+        CohereV4Embedder::new(api_key.to_string())
+            .ok()
+            .map(|embedder| Arc::new(embedder) as Arc<dyn EmbeddingProvider>)
     }
 
     /// Returns the configured contradiction detector.
@@ -372,14 +376,12 @@ impl IngestRuntime {
 
 fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'static str) {
     let extraction = &config.memory.extraction;
-    if extraction.enabled
-        && std::env::var(&extraction.api_key_env).is_ok()
-        && let Ok(verifier) = LlmEntityMergeVerifier::from_env(
-            &extraction.api_key_env,
+    if extraction.enabled && !config.providers.cohere.api_key.trim().is_empty() {
+        let verifier = LlmEntityMergeVerifier::from_api_key(
+            config.providers.cohere.api_key.clone(),
             &extraction.model,
             extraction.timeout_ms,
-        )
-    {
+        );
         tracing::info!(
             model = %extraction.model,
             "memory entity merge verifier installed: llm"
@@ -397,17 +399,11 @@ fn entity_resolver_from_config(config: &MoaConfig) -> (Arc<EntityResolver>, &'st
 }
 
 fn entity_blocking_enabled_from_config(config: &MoaConfig) -> bool {
-    let api_key_env = &config.memory.vector.embedder.cohere.api_key_env;
-    let enabled = std::env::var(api_key_env)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
+    let enabled = !config.providers.cohere.api_key.trim().is_empty();
     if enabled {
         tracing::info!("memory entity embedding block installed: cohere");
     } else {
-        tracing::info!(
-            api_key_env = %api_key_env,
-            "memory entity embedding block disabled; credential env var is absent"
-        );
+        tracing::info!("memory entity embedding block disabled; credential is absent");
     }
     enabled
 }
@@ -418,14 +414,17 @@ fn extractor_from_config(config: &MoaConfig) -> (Arc<dyn FactExtractor>, &'stati
         tracing::info!("memory fact extractor installed: heuristic");
         return (Arc::new(HeuristicFactExtractor), "heuristic");
     }
-    if std::env::var(&extraction.api_key_env).is_err() {
+    let mut extraction = extraction.clone();
+    if extraction.api_key.trim().is_empty() {
+        extraction.api_key = config.providers.cohere.api_key.clone();
+    }
+    if extraction.api_key.trim().is_empty() {
         tracing::warn!(
-            api_key_env = %extraction.api_key_env,
-            "memory extraction enabled but credential env var is absent; installing heuristic extractor"
+            "memory extraction enabled but credential is absent; installing heuristic extractor"
         );
         return (Arc::new(HeuristicFactExtractor), "heuristic");
     }
-    match LlmFactExtractor::from_config(extraction) {
+    match LlmFactExtractor::from_config(&extraction) {
         Ok(extractor) => {
             tracing::info!(
                 model = %extraction.model,
@@ -534,34 +533,23 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_installs_llm_extractor_only_when_enabled_and_credentialed() {
-        // Pins: model-backed extraction is gated by both config and the configured credential env.
-        let _guard = ENV_LOCK.lock().expect("env test lock");
+        // Pins: model-backed extraction is gated by both config and a direct configured credential.
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://localhost/moa_test")
             .expect("lazy test pool should not connect");
         let mut config = MoaConfig::default();
         config.memory.extraction.enabled = true;
-        config.memory.extraction.api_key_env = "MOA_TEST_EXTRACTION_KEY".to_string();
-        unsafe {
-            std::env::remove_var("MOA_TEST_EXTRACTION_KEY");
-        }
 
         let missing = IngestRuntime::from_config(pool.clone(), &config);
         assert_eq!(missing.extractor_name(), "heuristic");
 
-        unsafe {
-            std::env::set_var("MOA_TEST_EXTRACTION_KEY", "test-key");
-        }
+        config.providers.cohere.api_key = "test-key".to_string();
         let credentialed = IngestRuntime::from_config(pool.clone(), &config);
         assert_eq!(credentialed.extractor_name(), "llm");
 
         config.memory.extraction.enabled = false;
         let disabled = IngestRuntime::from_config(pool, &config);
         assert_eq!(disabled.extractor_name(), "heuristic");
-
-        unsafe {
-            std::env::remove_var("MOA_TEST_EXTRACTION_KEY");
-        }
     }
 
     #[tokio::test]

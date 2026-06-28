@@ -97,13 +97,12 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Builds a registry from the provider API keys available in the environment.
+    /// Builds a registry from the provider API keys available in standard provider env vars.
     #[must_use]
     pub fn from_env() -> Self {
-        let config = MoaConfig::default();
         let mut registry = Self::default();
         for descriptor in PROVIDER_DESCRIPTORS {
-            if configured_env((descriptor.api_key_env)(&config)) {
+            if configured_env(descriptor.default_api_key_env) {
                 registry.register_factory(
                     descriptor,
                     Arc::new(move |model| (descriptor.build_from_env)(model)),
@@ -113,13 +112,13 @@ impl ProviderRegistry {
         registry
     }
 
-    /// Builds a registry from configured provider API key environment names.
+    /// Builds a registry from configured provider API keys.
     #[must_use]
     pub fn from_config(config: &MoaConfig) -> Self {
         let config = Arc::new(config.clone());
         let mut registry = Self::default();
         for descriptor in PROVIDER_DESCRIPTORS {
-            if configured_env((descriptor.api_key_env)(&config)) {
+            if configured_secret((descriptor.api_key)(&config)) {
                 let config = config.clone();
                 registry.register_factory(
                     descriptor,
@@ -413,6 +412,10 @@ fn configured_env(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn configured_secret(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
 #[cfg(feature = "scripted-provider")]
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -576,8 +579,8 @@ fn scripted_capabilities(model_id: &str) -> ModelCapabilities {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use moa_core::{
@@ -586,38 +589,6 @@ mod tests {
     };
 
     use super::{ProviderFactory, ProviderId, ProviderRegistry};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvRestore {
-        key: &'static str,
-        value: Option<String>,
-    }
-
-    impl EnvRestore {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self {
-                key,
-                value: original,
-            }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            unsafe {
-                if let Some(value) = &self.value {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
 
     struct CacheTestProvider {
         model: String,
@@ -673,12 +644,10 @@ mod tests {
     }
 
     #[test]
-    fn from_config_uses_configured_api_key_env_name() {
-        // Pins: provider registry availability follows MoaConfig provider env-var names.
-        let _guard = ENV_LOCK.lock().expect("env test lock");
-        let _env = EnvRestore::set("MOA_TEST_OPENAI_API_KEY", "test-key");
+    fn from_config_uses_configured_api_key() {
+        // Pins: provider registry availability follows direct MoaConfig provider API keys.
         let mut config = moa_core::MoaConfig::default();
-        config.providers.openai.api_key_env = "MOA_TEST_OPENAI_API_KEY".to_string();
+        config.providers.openai.api_key = "test-key".to_string();
 
         let registry = ProviderRegistry::from_config(&config);
         let (id, model) = registry

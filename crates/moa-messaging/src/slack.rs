@@ -1,6 +1,6 @@
 //! Slack channel adapter built on top of `slack-morphism` Socket Mode.
 
-use std::{collections::HashMap, env, sync::Arc, time::Duration, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -154,18 +154,17 @@ impl SlackOutboundMessageRefs {
 
     async fn remove_after_external_side_effect(&self, msg_id: &MessageId, operation: &'static str) {
         self.hot_refs.write().await.remove(msg_id.as_str());
-        if let Some(runtime_cache) = &self.runtime_cache {
-            if let Err(error) = runtime_cache
+        if let Some(runtime_cache) = &self.runtime_cache
+            && let Err(error) = runtime_cache
                 .delete(&slack_outbound_refs_cache_key(msg_id))
                 .await
-            {
-                warn!(
-                    message_id = %msg_id,
-                    operation,
-                    error = %error,
-                    "Slack accepted external side effect but shared outbound ref cleanup failed"
-                );
-            }
+        {
+            warn!(
+                message_id = %msg_id,
+                operation,
+                error = %error,
+                "Slack accepted external side effect but shared outbound ref cleanup failed"
+            );
         }
     }
 
@@ -307,12 +306,14 @@ impl SlackAdapter {
 
     /// Creates a Slack adapter using the configured token environment variables.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        let bot_env = &config.messaging.slack_token_env;
-        let app_env = &config.messaging.slack_app_token_env;
-        let bot_token =
-            env::var(bot_env).map_err(|_| MoaError::MissingEnvironmentVariable(bot_env.clone()))?;
-        let app_token =
-            env::var(app_env).map_err(|_| MoaError::MissingEnvironmentVariable(app_env.clone()))?;
+        let bot_token = moa_core::config::required_config_secret(
+            "MOA_MESSAGING_SLACK_TOKEN",
+            &config.messaging.slack_token,
+        )?;
+        let app_token = moa_core::config::required_config_secret(
+            "MOA_MESSAGING_SLACK_APP_TOKEN",
+            &config.messaging.slack_app_token,
+        )?;
         Self::new(bot_token, app_token)
     }
 

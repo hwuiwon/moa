@@ -13,11 +13,10 @@ use moa_memory_graph::{AgeGraphStore, PiiClass};
 use moa_memory_ingest::{SessionTurn, ingest_turn_direct_with_pool};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{
-    CohereV4Embedder, PgvectorStore, PromotionOptions, TurbopufferStore, VectorPartitionPromotion,
-    finalize_promotion,
+    PgvectorStore, PromotionOptions, TurbopufferStore, VectorPartitionPromotion, finalize_promotion,
 };
+use moa_providers::CohereV4Embedder;
 use moa_session::testing;
-use secrecy::SecretString;
 use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -82,7 +81,7 @@ async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     let workspace_text = storage_partition_id.to_string();
     let tenant_scope = RlsContext::tenant(tenant_id);
     let contact_scope = RlsContext::contact(tenant_id, contact_id);
-    let embedder = CohereV4Embedder::new(SecretString::from(cohere_api_key()?));
+    let embedder = CohereV4Embedder::new(cohere_api_key()?)?;
     seed_workspace_embedder_state(&pool, &tenant_scope, &workspace_text, &embedder).await?;
     let transcript = news_transcript().await?;
     let turn = SessionTurn {

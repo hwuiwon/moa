@@ -18,8 +18,9 @@ use moa_lineage_core::{
 };
 use moa_memory_graph::{AgeGraphStore, GraphStore, NodeLabel, PiiClass};
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{EmbedderConstructionRole, PgvectorStore, build_embedder_from_config};
+use moa_memory_vector::PgvectorStore;
 use moa_observability::record_memory_operation;
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 use restate_sdk::prelude::*;
 use serde_json::{Value, json};
 use uuid::Uuid;

@@ -29,7 +29,7 @@ pub use config::{
     OrchestratorConfig, OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig,
     QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SessionAttachmentBackend,
     SessionAttachmentStorageConfig, SessionBlobBackend, SkillBudgetConfig, ToolBudgetConfig,
-    ToolOutputConfig, VectorEmbedderConfig,
+    ToolOutputConfig, VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
 };
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};

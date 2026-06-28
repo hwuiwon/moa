@@ -82,8 +82,8 @@ These caveats relate to the gap between "cloud build succeeds" and "cloud deploy
   only extends `ExtractedFact` with an optional `confidence` field that defaults
   during deserialization. Old journal entries without confidence still replay.
 - `memory.extraction.enabled` defaults to `false`. The orchestrator installs
-  the LLM extractor only when that flag is enabled and the configured
-  `memory.extraction.api_key_env` exists; otherwise it logs that the heuristic
+  the LLM extractor only when that flag is enabled and
+  `MOA_COHERE_API_KEY` is configured; otherwise it logs that the heuristic
   extractor is active.
 - Production rollout order should be: deploy with extraction disabled, verify
   normal ingestion and contradiction behavior, then enable per environment.

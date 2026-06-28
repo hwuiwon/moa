@@ -21,9 +21,8 @@ use moa_knowledge::{
 };
 use moa_memory_graph::AgeGraphStore;
 use moa_memory_types::MemoryScope;
-use moa_memory_vector::{
-    EmbedderConstructionRole, PgvectorStore, VectorStore, build_embedder_from_config,
-};
+use moa_memory_vector::{PgvectorStore, VectorStore};
+use moa_providers::{EmbedderConstructionRole, build_embedder_from_config};
 
 use super::KnowledgeServiceError;
 
@@ -133,7 +132,7 @@ fn build_ingestion_pipeline(
     let parser = Arc::new(build_document_parser(config, &parser_label)?);
     let embedder = Arc::new(SharedEmbeddingProvider::new(
         build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)
-            .map_err(vector_config_error)?,
+            .map_err(embedder_config_error)?,
     ));
     let vector_store: Arc<dyn VectorStore> =
         Arc::new(PgvectorStore::new(pool.clone(), scope.clone()));
@@ -298,6 +297,6 @@ fn required_parser_api_key(
     })
 }
 
-fn vector_config_error(error: moa_memory_vector::Error) -> KnowledgeServiceError {
+fn embedder_config_error(error: moa_core::MoaError) -> KnowledgeServiceError {
     KnowledgeServiceError::Moa(moa_core::MoaError::ConfigError(error.to_string()))
 }

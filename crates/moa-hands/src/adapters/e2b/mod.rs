@@ -75,12 +75,15 @@ impl E2BHandProvider {
             .hands
             .as_ref()
             .ok_or_else(|| MoaError::ConfigError("missing [cloud.hands] config".to_string()))?;
-        let api_key_env = hands
-            .e2b_api_key_env
+        let api_key = hands
+            .e2b_api_key
             .as_deref()
-            .ok_or_else(|| MoaError::ConfigError("missing E2B API key env".to_string()))?;
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| MoaError::MissingEnvironmentVariable(api_key_env.to_string()))?;
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                MoaError::MissingEnvironmentVariable("MOA_CLOUD_HANDS_E2B_API_KEY".to_string())
+            })?
+            .to_string();
         Self::with_api_url(
             api_key,
             hands.e2b_api_url.as_deref().unwrap_or(DEFAULT_E2B_API_URL),

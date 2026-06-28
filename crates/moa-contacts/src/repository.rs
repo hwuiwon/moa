@@ -12,7 +12,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::domain::{
-    contact_allows_channel_contact, contact_point_delivery, hash_contact_point_from_env,
+    contact_allows_channel_contact, contact_point_delivery, hash_contact_point_with_key_hex,
     hash_verification_code, normalize_contact_point, parse_contact_point_kind, parse_contact_state,
 };
 use crate::{ContactError, Result};
@@ -22,7 +22,7 @@ const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 /// Issues a contact row and any unverified contact points in one transaction.
 pub async fn issue_contact(
     pool: sqlx::PgPool,
-    contact_point_hash_key_env: &str,
+    contact_point_hash_key_hex: &str,
     tenant_id: TenantId,
     request: ContactTokenIssueRequest,
 ) -> Result<(ContactRef, Vec<ContactPointRef>)> {
@@ -60,7 +60,7 @@ pub async fn issue_contact(
     for point in request.contact_points {
         let contact_point = insert_contact_point(
             &mut transaction,
-            contact_point_hash_key_env,
+            contact_point_hash_key_hex,
             tenant_id,
             contact_id,
             point,
@@ -138,17 +138,17 @@ pub async fn load_contact_ref(
 pub async fn resolve_verified_contact_ids(
     pool: &sqlx::PgPool,
     tenant_id: TenantId,
-    contact_point_hash_key_env: &str,
+    contact_point_hash_key_hex: &str,
     contact_points: &[ContactPointInput],
 ) -> Result<Vec<ContactId>> {
     let mut contact_ids = Vec::new();
     for point in contact_points {
         let normalized = normalize_contact_point(point.kind, &point.value)?;
-        let normalized_hash = hash_contact_point_from_env(
+        let normalized_hash = hash_contact_point_with_key_hex(
             tenant_id,
             point.kind,
             &normalized,
-            contact_point_hash_key_env,
+            contact_point_hash_key_hex,
         )?;
         let rows = sqlx::query_scalar::<_, Uuid>(
             r#"
@@ -271,8 +271,8 @@ pub struct ContactVerificationStartCommand {
     pub requested_channel: Option<Channel>,
     /// Challenge time-to-live in seconds.
     pub ttl_seconds: i64,
-    /// Environment variable that stores the contact-point hash key.
-    pub contact_point_hash_key_env: String,
+    /// Hex-encoded contact-point hash key.
+    pub contact_point_hash_key_hex: String,
     /// Messaging provider configuration used for OTP delivery.
     pub messaging_config: MessagingConfig,
 }
@@ -305,7 +305,7 @@ pub async fn start_contact_verification(
     ensure_contact_in_tenant(&mut transaction, command.tenant_id, command.contact_id).await?;
     let contact_point = insert_contact_point(
         &mut transaction,
-        &command.contact_point_hash_key_env,
+        &command.contact_point_hash_key_hex,
         command.tenant_id,
         command.contact_id,
         command.contact_point,
@@ -1126,18 +1126,18 @@ fn contact_delivery_error(error: MoaError) -> ContactError {
 
 async fn insert_contact_point(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    contact_point_hash_key_env: &str,
+    contact_point_hash_key_hex: &str,
     tenant_id: TenantId,
     contact_id: ContactId,
     point: ContactPointInput,
     verified: bool,
 ) -> Result<ContactPointRef> {
     let normalized = normalize_contact_point(point.kind, &point.value)?;
-    let normalized_hash = hash_contact_point_from_env(
+    let normalized_hash = hash_contact_point_with_key_hex(
         tenant_id,
         point.kind,
         &normalized,
-        contact_point_hash_key_env,
+        contact_point_hash_key_hex,
     )?;
     let point_id = ContactPointId::new();
     let verified_at = verified.then(Utc::now);
