@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ../../observability
+
+images:
+  - name: ghcr.io/hwuiwon/moa-orchestrator
+    newTag: latest
+  - name: ghcr.io/hwuiwon/moa-edge
+    newTag: latest
+
+patches:
+  - target:
+      group: restate.dev
+      version: v1
+      kind: RestateCluster
+      name: moa-restate
+    path: patches/restate-observability.yaml
+  - target:
+      group: restate.dev
+      version: v1beta1
+      kind: RestateDeployment
+      name: moa-orchestrator
+    path: patches/orchestrator-observability.yaml
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: moa-edge
+    path: patches/edge-observability.yaml

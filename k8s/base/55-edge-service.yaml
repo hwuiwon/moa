@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: moa-edge
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-edge
+    app.kubernetes.io/part-of: moa
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: moa-edge
+    app.kubernetes.io/part-of: moa
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

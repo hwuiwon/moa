@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moa-edge
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: moa-edge
+    app.kubernetes.io/part-of: moa
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: moa-edge
+      app.kubernetes.io/part-of: moa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: moa-edge
+        app.kubernetes.io/part-of: moa
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: edge
+          image: ghcr.io/hwuiwon/moa-edge:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 10
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: MOA_EDGE_BIND
+              value: 0.0.0.0:8080
+            - name: MOA_EDGE_UPSTREAM
+              value: http://restate.moa-restate.svc.cluster.local:8080
+            - name: MOA_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moa-postgres
+                  key: url
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

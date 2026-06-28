@@ -1,0 +1,12 @@
+- op: add
+  path: /spec/storage/storageClassName
+  value: fast-ssd
+- op: replace
+  path: /spec/config
+  value: |
+    auto-provision = false
+    shutdown-timeout = "10m"
+    default-num-partitions = 128
+    default-replication = 2
+    tracing-endpoint = "http://alloy.observability.svc.cluster.local:4317"
+    tracing-filter = "info"

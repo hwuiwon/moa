@@ -1,0 +1,42 @@
+apiVersion: restate.dev/v1
+kind: RestateCluster
+metadata:
+  name: moa-restate
+  namespace: moa-restate
+spec:
+  cluster:
+    autoProvision: true
+  compute:
+    replicas: 3
+    image: docker.restate.dev/restatedev/restate:1.6.2
+    resources:
+      requests:
+        cpu: "2"
+        memory: 8Gi
+      limits:
+        cpu: "4"
+        memory: 16Gi
+  storage:
+    storageRequestBytes: 214748364800
+  security:
+    allowOperatorAccessToAdmin: true
+    networkPeers:
+      ingress:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-edge
+      admin:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: moa-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: moa-orchestrator
+  config: |
+    auto-provision = false
+    shutdown-timeout = "10m"
+    default-num-partitions = 128
+    default-replication = 2

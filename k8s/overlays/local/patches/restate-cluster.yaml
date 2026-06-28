@@ -1,0 +1,37 @@
+- op: replace
+  path: /spec/compute/replicas
+  value: 1
+- op: replace
+  path: /spec/compute/resources
+  value:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+- op: add
+  path: /spec/compute/env
+  value:
+    - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
+      value: 512 MiB
+    - name: RESTATE_ADMIN__QUERY_ENGINE__MEMORY_SIZE
+      value: 128 MiB
+    - name: RESTATE_BIFROST__RECORD_CACHE_MEMORY_SIZE
+      value: 128 MiB
+    - name: DO_NOT_TRACK
+      value: "1"
+- op: add
+  path: /spec/storage/storageClassName
+  value: standard
+- op: replace
+  path: /spec/storage/storageRequestBytes
+  value: 2147483648
+- op: replace
+  path: /spec/config
+  value: |
+    auto-provision = false
+    shutdown-timeout = "2m"
+    default-num-partitions = 16
+    default-replication = 1
+    tracing-filter = "info"

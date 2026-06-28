@@ -1,0 +1,118 @@
+- op: replace
+  path: /spec/replicas
+  value: 1
+- op: add
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: Never
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+- op: add
+  path: /spec/template/spec/initContainers
+  value:
+    - name: wait-for-local-dependencies
+      image: busybox:1.36
+      command:
+        - sh
+        - -ec
+        - |
+          for target in postgres:5432 valkey:6379 rustfs:9000; do
+            until nc -z "${target%:*}" "${target#*:}"; do
+              sleep 1
+            done
+          done
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: HOME
+    value: /var/lib/moa
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SKIP_FGA
+    value: "true"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_PROVIDERS_OVERRIDE
+    value: scripted:/loadtest-scripts/perf-gate.json
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_OBSERVABILITY_ENABLED
+    value: "false"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_OBSERVABILITY_ENVIRONMENT
+    value: local
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_ENDPOINT
+    value: http://rustfs:9000
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_BUCKET
+    valueFrom:
+      secretKeyRef:
+        name: moa-session-attachments
+        key: bucket
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_REGION
+    valueFrom:
+      secretKeyRef:
+        name: moa-session-attachments
+        key: region
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: moa-session-attachments
+        key: access-key-id
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: moa-session-attachments
+        key: secret-access-key
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_ALLOW_HTTP
+    value: "true"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE
+    value: "false"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MOA_DEREGISTER_ON_SHUTDOWN
+    value: "false"
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts
+  value:
+    - name: loadtest-scripts
+      mountPath: /loadtest-scripts
+      readOnly: true
+- op: add
+  path: /spec/template/spec/volumes
+  value:
+    - name: loadtest-scripts
+      configMap:
+        name: moa-loadtest-scripts

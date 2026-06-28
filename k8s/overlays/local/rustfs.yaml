@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: moa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs
+      app.kubernetes.io/part-of: moa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs
+        app.kubernetes.io/part-of: moa
+    spec:
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:latest
+          args:
+            - /data
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          env:
+            - name: RUSTFS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: access-key-id
+            - name: RUSTFS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: secret-access-key
+            - name: RUSTFS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: region
+            - name: RUSTFS_ADDRESS
+              value: 0.0.0.0:9000
+            - name: RUSTFS_CONSOLE_ADDRESS
+              value: 0.0.0.0:9001
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: moa
+spec:
+  selector:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/part-of: moa
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rustfs-init
+  namespace: moa-system
+  labels:
+    app.kubernetes.io/name: rustfs-init
+    app.kubernetes.io/part-of: moa
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs-init
+        app.kubernetes.io/part-of: moa
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: rustfs-init
+          image: rustfs/rc:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              until rc alias set --quiet --bucket-lookup path --region "${MOA_SESSION_ATTACHMENT_REGION}" rustfs http://rustfs:9000 "${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID}" "${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY}"; do
+                sleep 1
+              done
+              rc bucket create --ignore-existing --region "${MOA_SESSION_ATTACHMENT_REGION}" "rustfs/${MOA_SESSION_ATTACHMENT_BUCKET}"
+          env:
+            - name: MOA_SESSION_ATTACHMENT_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: bucket
+            - name: MOA_SESSION_ATTACHMENT_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: region
+            - name: MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: access-key-id
+            - name: MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moa-session-attachments
+                  key: secret-access-key

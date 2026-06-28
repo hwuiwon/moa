@@ -7,10 +7,7 @@ spec:
   replicas: 6
   restate:
     register:
-      service:
-        name: restate
-        namespace: moa-restate
-        port: 9070
+      cluster: moa-restate
   selector:
     matchLabels:
       app.kubernetes.io/name: moa-orchestrator
@@ -58,8 +55,6 @@ spec:
           env:
             - name: RUST_LOG
               value: info
-            - name: MOA_CLOUD_ENABLED
-              value: "true"
             - name: MOA_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -94,14 +89,6 @@ spec:
                 secretKeyRef:
                   name: moa-runtime-cache
                   key: redis-url
-            - name: MOA_OBSERVABILITY_ENABLED
-              value: "true"
-            - name: MOA_OBSERVABILITY_OTLP_ENDPOINT
-              value: http://alloy.observability.svc.cluster.local:4317
-            - name: MOA_OBSERVABILITY_OTLP_PROTOCOL
-              value: grpc
-            - name: MOA_OBSERVABILITY_ENVIRONMENT
-              value: production
             - name: MOA_METRICS_ENABLED
               value: "true"
             - name: MOA_METRICS_LISTEN

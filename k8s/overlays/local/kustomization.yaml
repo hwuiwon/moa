@@ -1,0 +1,68 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - postgres.yaml
+  - valkey.yaml
+  - rustfs.yaml
+  - local-config.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: moa-postgres
+    namespace: moa-system
+    literals:
+      - url=postgres://moa_owner:dev@postgres.moa-system.svc.cluster.local:5432/moa?sslmode=disable
+  - name: moa-runtime-cache
+    namespace: moa-system
+    literals:
+      - redis-url=redis://valkey.moa-system.svc.cluster.local:6379/0
+  - name: moa-session-attachments
+    namespace: moa-system
+    literals:
+      - bucket=moa-session-attachments
+      - region=us-east-1
+      - access-key-id=moaadmin
+      - secret-access-key=moa-local-dev-secret
+
+images:
+  - name: ghcr.io/hwuiwon/moa-orchestrator
+    newName: moa/orchestrator
+    newTag: kind
+  - name: ghcr.io/hwuiwon/moa-edge
+    newName: moa/edge
+    newTag: kind
+
+patches:
+  - target:
+      group: restate.dev
+      version: v1
+      kind: RestateCluster
+      name: moa-restate
+    path: patches/restate-cluster.yaml
+  - target:
+      group: restate.dev
+      version: v1beta1
+      kind: RestateDeployment
+      name: moa-orchestrator
+    path: patches/orchestrator.yaml
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: moa-edge
+    path: patches/edge.yaml
+  - target:
+      group: autoscaling
+      version: v2
+      kind: HorizontalPodAutoscaler
+      name: moa-orchestrator
+    path: patches/orchestrator-hpa.yaml
+  - target:
+      group: policy
+      version: v1
+      kind: PodDisruptionBudget
+      name: moa-orchestrator
+    path: patches/orchestrator-pdb.yaml
