@@ -52,7 +52,6 @@ fn require_e2b_credentials() {
 
 fn live_config() -> MoaConfig {
     let mut config = MoaConfig::default();
-    config.cloud.enabled = true;
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("e2b".to_string()),
         e2b_api_key_env: Some("E2B_API_KEY".to_string()),

@@ -19,7 +19,7 @@ pub(crate) struct AttachmentObjectStore {
 impl AttachmentObjectStore {
     /// Builds an attachment object store from typed MOA config.
     pub(crate) fn from_config(config: &MoaConfig) -> Result<Self> {
-        config.session.attachments.validate(config.cloud.enabled)?;
+        config.session.attachments.validate()?;
         let attachments = &config.session.attachments;
         let store: Arc<dyn ObjectStore> = match attachments.backend {
             SessionAttachmentBackend::S3 => {

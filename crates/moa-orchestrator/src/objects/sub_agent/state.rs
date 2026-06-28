@@ -81,45 +81,32 @@ pub struct SubAgentVoState {
 impl SubAgentVoState {
     /// Bootstraps state from the initial child-task payload.
     pub fn initialize(&mut self, msg: &SubAgentMessage) -> moa_core::Result<()> {
-        let SubAgentMessage::InitialTask {
-            task,
-            tool_subset,
-            budget_tokens,
-            max_turns,
-            parent_session,
-            parent_sub_agent,
-            depth,
-            tenant_id,
-            user_id,
-            model,
-            trusted_sandbox_manifest,
-        } = msg
-        else {
+        let SubAgentMessage::InitialTask(initial) = msg else {
             return Err(MoaError::ValidationError(
                 "sub-agent initialization requires an InitialTask message".to_string(),
             ));
         };
-        if matches!(max_turns, Some(0)) {
+        if matches!(initial.max_turns, Some(0)) {
             return Err(MoaError::ValidationError(
                 "sub-agent max_turns must be at least 1".to_string(),
             ));
         }
 
         self.status = Some(SubAgentState::Running);
-        self.parent_session = Some(*parent_session);
-        self.parent_sub_agent = parent_sub_agent.clone();
-        self.depth = *depth;
-        self.budget_remaining = *budget_tokens;
+        self.parent_session = Some(initial.parent_session);
+        self.parent_sub_agent = initial.parent_sub_agent.clone();
+        self.depth = initial.depth;
+        self.budget_remaining = initial.budget_tokens;
         self.tokens_used = 0;
-        self.task = Some(task.clone());
-        self.tool_subset = tool_subset.clone();
-        self.tenant_id = Some(*tenant_id);
-        self.user_id = Some(user_id.clone());
-        self.model = Some(model.clone());
-        self.max_turns = *max_turns;
-        self.trusted_sandbox_manifest = trusted_sandbox_manifest.clone();
+        self.task = Some(initial.task.clone());
+        self.tool_subset = initial.tool_subset.clone();
+        self.tenant_id = Some(initial.tenant_id);
+        self.user_id = Some(initial.user_id.clone());
+        self.model = Some(initial.model.clone());
+        self.max_turns = initial.max_turns;
+        self.trusted_sandbox_manifest = initial.trusted_sandbox_manifest.clone();
         self.pending = vec![UserMessage {
-            text: task.clone(),
+            text: initial.task.clone(),
             attachments: Vec::new(),
         }];
         self.history.clear();
@@ -428,13 +415,15 @@ impl SubAgentVoState {
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{ModelId, SessionId, SubAgentMessage, TenantId, TurnOutcome, UserId};
+    use moa_core::{
+        ModelId, SessionId, SubAgentInitialTask, SubAgentMessage, TenantId, TurnOutcome, UserId,
+    };
 
     use super::SubAgentVoState;
     use moa_core::SubAgentState;
 
     fn initial_task() -> SubAgentMessage {
-        SubAgentMessage::InitialTask {
+        SubAgentMessage::InitialTask(Box::new(SubAgentInitialTask {
             task: "summarize repo status".to_string(),
             tool_subset: vec!["web_fetch".to_string()],
             budget_tokens: 512,
@@ -446,7 +435,7 @@ mod tests {
             user_id: UserId::new("user-1"),
             model: ModelId::new("test-model"),
             trusted_sandbox_manifest: None,
-        }
+        }))
     }
 
     #[test]
@@ -467,10 +456,10 @@ mod tests {
     fn initial_task_rejects_zero_max_turns() {
         // Pins: max_turns is a real execution cap and zero is never treated as unlimited.
         let mut message = initial_task();
-        let SubAgentMessage::InitialTask { max_turns, .. } = &mut message else {
+        let SubAgentMessage::InitialTask(initial) = &mut message else {
             panic!("helper should build initial task");
         };
-        *max_turns = Some(0);
+        initial.max_turns = Some(0);
 
         let error = SubAgentVoState::default()
             .initialize(&message)

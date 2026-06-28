@@ -6,18 +6,16 @@ or the Redis-backed runtime cache.
 
 ## Required Runtime State
 
-Set cloud mode and Redis runtime cache explicitly:
+Set the Redis runtime cache explicitly:
 
 ```bash
-MOA_CLOUD_ENABLED=true
 MOA_RUNTIME_CACHE_BACKEND=redis
 MOA_RUNTIME_CACHE_REDIS_URL=redis://<managed-redis-host>:6379
 ```
 
-If `MOA_CLOUD_ENABLED=true` and the runtime cache resolves to memory, the
-orchestrator fails startup. The memory backend is local-dev and per-pod
-best-effort only; it must not be used for Slack edit/delete refs, send pacing,
-or future cross-replica coordination.
+If the runtime cache resolves to memory, the orchestrator fails startup. The
+memory backend is per-pod best-effort only; it must not be used for Slack
+edit/delete refs, send pacing, or future cross-replica coordination.
 
 Postgres remains the source of truth for durable session state:
 
@@ -46,7 +44,8 @@ MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
 MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH=/var/run/secrets/gcp/application-default.json
 ```
 
-Cloud startup fails if attachment storage points at a local RustFS endpoint.
+Managed cloud deployments should point attachment storage at AWS S3 or GCS.
+Local compose uses RustFS with an explicit local HTTP endpoint.
 
 ## Lineage And Audit Metrics
 

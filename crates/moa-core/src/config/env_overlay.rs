@@ -228,8 +228,6 @@ pub struct MoaEnvOverlay {
     pub turbopuffer_environment: Option<String>,
     /// `MOA_TURBOPUFFER_BAA`.
     pub turbopuffer_baa: Option<bool>,
-    /// `MOA_CLOUD_ENABLED`.
-    pub cloud_enabled: Option<bool>,
     /// `MOA_CLOUD_MEMORY_DIR`.
     pub cloud_memory_dir: Option<String>,
     /// `MOA_CLOUD_HANDS_DEFAULT_PROVIDER`.

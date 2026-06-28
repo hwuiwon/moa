@@ -413,15 +413,11 @@ fn validate_named_tools(available_tools: &[String], requested_tools: &[String]) 
 }
 
 fn configured_default_memory_root(base_config: &MoaConfig) -> Result<Option<PathBuf>> {
-    let configured_memory_dir = if base_config.cloud.enabled {
-        base_config
-            .cloud
-            .memory_dir
-            .as_deref()
-            .unwrap_or(&base_config.local.memory_dir)
-    } else {
-        &base_config.local.memory_dir
-    };
+    let configured_memory_dir = base_config
+        .cloud
+        .memory_dir
+        .as_deref()
+        .unwrap_or(&base_config.local.memory_dir);
     let memory_dir = expand_local_path(configured_memory_dir)?;
     Ok(memory_dir.parent().map(Path::to_path_buf))
 }

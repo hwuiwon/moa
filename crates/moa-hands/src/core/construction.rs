@@ -86,8 +86,7 @@ impl ToolRouter {
         providers.insert(DEFAULT_PROVIDER_NAME.to_string(), local_provider_trait);
 
         #[cfg(feature = "daytona")]
-        if config.cloud.enabled
-            && let Some(hands) = &config.cloud.hands
+        if let Some(hands) = &config.cloud.hands
             && (hands
                 .default_provider
                 .as_deref()
@@ -101,8 +100,7 @@ impl ToolRouter {
         }
 
         #[cfg(feature = "e2b")]
-        if config.cloud.enabled
-            && let Some(hands) = &config.cloud.hands
+        if let Some(hands) = &config.cloud.hands
             && (hands
                 .default_provider
                 .as_deref()
@@ -278,10 +276,6 @@ impl ToolRouter {
 }
 
 fn validate_mcp_transports_for_deployment(config: &MoaConfig) -> Result<()> {
-    if !config.cloud.enabled {
-        return Ok(());
-    }
-
     if let Some(server) = config
         .mcp_servers
         .iter()
@@ -297,9 +291,6 @@ fn validate_mcp_transports_for_deployment(config: &MoaConfig) -> Result<()> {
 }
 
 fn default_cloud_provider(config: &MoaConfig) -> Result<Option<(String, SandboxTier)>> {
-    if !config.cloud.enabled {
-        return Ok(None);
-    }
     let provider = config
         .cloud
         .hands
@@ -342,7 +333,7 @@ fn default_cloud_provider(config: &MoaConfig) -> Result<Option<(String, SandboxT
 
 #[cfg(test)]
 mod tests {
-    use moa_core::{CloudHandsConfig, McpServerConfig, McpTransportConfig};
+    use moa_core::{McpServerConfig, McpTransportConfig};
 
     use super::*;
 
@@ -360,26 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn local_development_allows_stdio_mcp_transport() {
-        // Pins: local development may still launch stdio MCP child processes.
+    fn deployment_rejects_stdio_mcp_transport() {
+        // Pins: Kubernetes startup must not depend on a pod-local MCP child process.
         let config = config_with_mcp_transport(McpTransportConfig::Stdio);
 
-        validate_mcp_transports_for_deployment(&config)
-            .expect("stdio MCP should remain available outside cloud mode");
-    }
-
-    #[test]
-    fn cloud_deployment_rejects_stdio_mcp_transport() {
-        // Pins: Kubernetes startup must not depend on a pod-local MCP child process.
-        let mut config = config_with_mcp_transport(McpTransportConfig::Stdio);
-        config.cloud.enabled = true;
-        config.cloud.hands = Some(CloudHandsConfig {
-            default_provider: Some(DEFAULT_PROVIDER_NAME.to_string()),
-            ..CloudHandsConfig::default()
-        });
-
         let error = validate_mcp_transports_for_deployment(&config)
-            .expect_err("cloud stdio MCP should fail before client startup");
+            .expect_err("stdio MCP should fail before client startup");
 
         assert!(
             matches!(error, MoaError::ConfigError(message) if message.contains("stdio transport") && message.contains("local development"))
@@ -387,18 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn cloud_deployment_allows_remote_mcp_transports() {
+    fn deployment_allows_remote_mcp_transports() {
         // Pins: remote MCP transports do not require same-pod child processes.
         for transport in [McpTransportConfig::Http, McpTransportConfig::Sse] {
-            let mut config = config_with_mcp_transport(transport);
-            config.cloud.enabled = true;
-            config.cloud.hands = Some(CloudHandsConfig {
-                default_provider: Some(DEFAULT_PROVIDER_NAME.to_string()),
-                ..CloudHandsConfig::default()
-            });
+            let config = config_with_mcp_transport(transport);
 
             validate_mcp_transports_for_deployment(&config)
-                .expect("remote MCP transport should be accepted in cloud mode");
+                .expect("remote MCP transport should be accepted");
         }
     }
 }

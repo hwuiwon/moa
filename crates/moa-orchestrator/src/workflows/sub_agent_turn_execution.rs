@@ -489,12 +489,14 @@ async fn handle_tool_call(
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
             handle_delegation_tool(
                 ctx,
-                tool_context.turn_id,
-                sub_agent_id,
-                session_id,
-                tool_id,
-                tool_call,
-                tool_context.trusted_sandbox_manifest,
+                SubAgentDelegationToolRequest {
+                    turn_id: tool_context.turn_id,
+                    parent_sub_agent_id: sub_agent_id,
+                    session_id,
+                    tool_id,
+                    tool_call,
+                    trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
+                },
                 turn_evidence,
             )
             .await?;
@@ -503,16 +505,28 @@ async fn handle_tool_call(
     Ok(())
 }
 
-async fn handle_delegation_tool(
-    ctx: &WorkflowContext<'_>,
-    turn_id: &str,
-    parent_sub_agent_id: &str,
+struct SubAgentDelegationToolRequest<'a> {
+    turn_id: &'a str,
+    parent_sub_agent_id: &'a str,
     session_id: SessionId,
     tool_id: ToolCallId,
-    tool_call: &ToolCallContent,
-    trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
+    tool_call: &'a ToolCallContent,
+    trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
+}
+
+async fn handle_delegation_tool(
+    ctx: &WorkflowContext<'_>,
+    request: SubAgentDelegationToolRequest<'_>,
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
+    let SubAgentDelegationToolRequest {
+        turn_id,
+        parent_sub_agent_id,
+        session_id,
+        tool_id,
+        tool_call,
+        trusted_sandbox_manifest,
+    } = request;
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
     let Some(tool) = moa_core::DelegationTool::from_invocation(&invocation)
@@ -698,7 +712,7 @@ fn parent_session_from_initial_message(
     message: &moa_core::SubAgentMessage,
 ) -> Result<SessionId, HandlerError> {
     match message {
-        moa_core::SubAgentMessage::InitialTask { parent_session, .. } => Ok(*parent_session),
+        moa_core::SubAgentMessage::InitialTask(initial) => Ok(initial.parent_session),
         moa_core::SubAgentMessage::FollowUp { .. } => {
             Err(TerminalError::new("reserved child did not include an initial task message").into())
         }
@@ -876,19 +890,20 @@ mod tests {
     fn reserved_child_parent_session_requires_initial_message() {
         // Pins: nested spawn events derive their root session only from validated initial child messages.
         let session_id = SessionId::new();
-        let message = moa_core::SubAgentMessage::InitialTask {
-            task: "inspect".to_string(),
-            tool_subset: Vec::new(),
-            budget_tokens: 100,
-            max_turns: Some(2),
-            parent_session: session_id,
-            parent_sub_agent: Some("parent".to_string()),
-            depth: 2,
-            tenant_id: moa_core::TenantId::new(),
-            user_id: moa_core::UserId::new("user"),
-            model: moa_core::ModelId::new("model"),
-            trusted_sandbox_manifest: None,
-        };
+        let message =
+            moa_core::SubAgentMessage::InitialTask(Box::new(moa_core::SubAgentInitialTask {
+                task: "inspect".to_string(),
+                tool_subset: Vec::new(),
+                budget_tokens: 100,
+                max_turns: Some(2),
+                parent_session: session_id,
+                parent_sub_agent: Some("parent".to_string()),
+                depth: 2,
+                tenant_id: moa_core::TenantId::new(),
+                user_id: moa_core::UserId::new("user"),
+                model: moa_core::ModelId::new("model"),
+                trusted_sandbox_manifest: None,
+            }));
 
         assert_eq!(
             parent_session_from_initial_message(&message)

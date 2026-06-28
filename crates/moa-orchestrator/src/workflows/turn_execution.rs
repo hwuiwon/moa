@@ -1024,12 +1024,14 @@ async fn handle_tool_call(
         GovernedInvocationOutcome::Delegation { tool_id, .. } => {
             handle_delegation_tool(
                 ctx,
-                turn_id,
-                meta,
-                session_id,
-                tool_id,
-                tool_call,
-                tool_context.trusted_sandbox_manifest,
+                DelegationToolRequest {
+                    turn_id,
+                    meta,
+                    session_id,
+                    tool_id,
+                    tool_call,
+                    trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
+                },
                 turn_evidence,
             )
             .await?;
@@ -1038,16 +1040,28 @@ async fn handle_tool_call(
     Ok(())
 }
 
-async fn handle_delegation_tool(
-    ctx: &WorkflowContext<'_>,
-    turn_id: &str,
-    meta: &SessionMeta,
+struct DelegationToolRequest<'a> {
+    turn_id: &'a str,
+    meta: &'a SessionMeta,
     session_id: SessionId,
     tool_id: ToolCallId,
-    tool_call: &ToolCallContent,
-    trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
+    tool_call: &'a ToolCallContent,
+    trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
+}
+
+async fn handle_delegation_tool(
+    ctx: &WorkflowContext<'_>,
+    request: DelegationToolRequest<'_>,
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
+    let DelegationToolRequest {
+        turn_id,
+        meta,
+        session_id,
+        tool_id,
+        tool_call,
+        trusted_sandbox_manifest,
+    } = request;
     let invocation = tool_call.invocation.clone();
     append_tool_call_event(ctx, session_id, tool_id, tool_call).await?;
     let Some(tool) =

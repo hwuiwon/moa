@@ -240,13 +240,12 @@ impl ToolRouter {
         let key = session_provider_key(session, provider);
         if self.hand_leases.is_some() {
             let cached_handle = self.active_hands.read().await.get(&key).cloned();
-            if let Some(handle) = cached_handle {
-                if let Some(validated) = self
+            if let Some(handle) = cached_handle
+                && let Some(validated) = self
                     .validate_cached_durable_hand(provider, session, &key, &handle)
                     .await?
-                {
-                    return Ok(validated);
-                }
+            {
+                return Ok(validated);
             }
             return self
                 .get_or_provision_durable_hand(provider, tier, session, key)

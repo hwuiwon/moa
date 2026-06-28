@@ -158,7 +158,7 @@ impl MoaConfig {
             ));
         }
 
-        self.session.validate(self.cloud.enabled)?;
+        self.session.validate()?;
 
         Ok(())
     }

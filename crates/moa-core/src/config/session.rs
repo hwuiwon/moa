@@ -88,32 +88,22 @@ impl SessionAttachmentStorageConfig {
         }
     }
 
-    /// Validates attachment object storage for the current runtime mode.
-    pub fn validate(&self, cloud_enabled: bool) -> Result<()> {
+    /// Validates attachment object storage.
+    pub fn validate(&self) -> Result<()> {
         if self.bucket.trim().is_empty() {
             return Err(MoaError::ConfigError(
                 "session.attachments.bucket is required".to_string(),
             ));
         }
 
-        if !cloud_enabled {
-            return Ok(());
-        }
-
-        if self.allow_http {
-            return Err(MoaError::ConfigError(
-                "session.attachments.allow_http must be false when cloud.enabled = true"
-                    .to_string(),
-            ));
-        }
-
-        if self
-            .endpoint
-            .as_deref()
-            .is_some_and(is_local_attachment_endpoint)
+        if self.allow_http
+            && !self
+                .endpoint
+                .as_deref()
+                .is_some_and(is_local_attachment_endpoint)
         {
             return Err(MoaError::ConfigError(
-                "session.attachments.endpoint must not point at localhost when cloud.enabled = true"
+                "session.attachments.allow_http is only allowed for local attachment endpoints"
                     .to_string(),
             ));
         }
@@ -148,9 +138,9 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
-    /// Validates whether the configured claim-check blob backend is allowed for the runtime mode.
-    pub fn validate_blob_backend(&self, cloud_enabled: bool) -> Result<()> {
-        if !matches!(self.blob_backend, SessionBlobBackend::Local) || !cloud_enabled {
+    /// Validates whether the configured claim-check blob backend is durable enough.
+    pub fn validate_blob_backend(&self) -> Result<()> {
+        if !matches!(self.blob_backend, SessionBlobBackend::Local) {
             return Ok(());
         }
 
@@ -164,14 +154,14 @@ impl SessionConfig {
         }
 
         Err(MoaError::ConfigError(
-            "session.blob_backend = local requires session.blob_dir to be an explicit persistent path when cloud.enabled = true; use session.blob_backend = postgres for durable cloud claim-check payloads".to_string(),
+            "session.blob_backend = local requires session.blob_dir to be an explicit persistent path; use session.blob_backend = postgres for durable claim-check payloads".to_string(),
         ))
     }
 
-    /// Validates session storage configuration for the current runtime mode.
-    pub fn validate(&self, cloud_enabled: bool) -> Result<()> {
-        self.validate_blob_backend(cloud_enabled)?;
-        self.attachments.validate(cloud_enabled)
+    /// Validates session storage configuration.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_blob_backend()?;
+        self.attachments.validate()
     }
 }
 
@@ -241,7 +231,12 @@ fn is_local_attachment_endpoint(endpoint: &str) -> bool {
     url::Url::parse(endpoint)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
-        .is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "0.0.0.0" | "::1"))
+        .is_some_and(|host| {
+            matches!(
+                host.as_str(),
+                "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "rustfs"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -249,8 +244,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cloud_local_blob_backend_without_path_fails_clearly() {
-        // Pins: cloud startup cannot silently claim-check events to pod-local files.
+    fn local_blob_backend_without_path_fails_clearly() {
+        // Pins: startup cannot silently claim-check events to pod-local default files.
         let config = SessionConfig {
             blob_backend: SessionBlobBackend::Local,
             blob_dir: None,
@@ -258,17 +253,17 @@ mod tests {
         };
 
         let error = config
-            .validate_blob_backend(true)
-            .expect_err("cloud local blob storage without a path should fail");
+            .validate_blob_backend()
+            .expect_err("local blob storage without a path should fail");
 
         assert_eq!(
             error.to_string(),
-            "configuration error: session.blob_backend = local requires session.blob_dir to be an explicit persistent path when cloud.enabled = true; use session.blob_backend = postgres for durable cloud claim-check payloads"
+            "configuration error: session.blob_backend = local requires session.blob_dir to be an explicit persistent path; use session.blob_backend = postgres for durable claim-check payloads"
         );
     }
 
     #[test]
-    fn cloud_local_blob_backend_with_explicit_path_is_allowed() {
+    fn local_blob_backend_with_explicit_path_is_allowed() {
         // Pins: explicit persistent paths keep the local backend available for controlled deployments.
         let config = SessionConfig {
             blob_backend: SessionBlobBackend::Local,
@@ -277,22 +272,8 @@ mod tests {
         };
 
         config
-            .validate_blob_backend(true)
-            .expect("cloud local blob storage with an explicit path should be allowed");
-    }
-
-    #[test]
-    fn local_development_local_blob_backend_can_use_default_path() {
-        // Pins: local development can still opt into the filesystem blob backend.
-        let config = SessionConfig {
-            blob_backend: SessionBlobBackend::Local,
-            blob_dir: None,
-            ..SessionConfig::default()
-        };
-
-        config
-            .validate_blob_backend(false)
-            .expect("local filesystem blob storage should remain available outside cloud mode");
+            .validate_blob_backend()
+            .expect("local blob storage with an explicit path should be allowed");
     }
 
     #[test]
@@ -305,8 +286,8 @@ mod tests {
         assert_eq!(config.attachments.endpoint, None);
         assert!(!config.attachments.allow_http);
         config
-            .validate(true)
-            .expect("default cloud S3 attachment settings should be valid");
+            .validate()
+            .expect("default S3 attachment settings should be valid");
     }
 
     #[test]
@@ -317,24 +298,25 @@ mod tests {
         assert_eq!(config.endpoint.as_deref(), Some("http://127.0.0.1:9000"));
         assert!(config.allow_http);
         config
-            .validate(false)
-            .expect("local RustFS attachment config should be valid outside cloud mode");
+            .validate()
+            .expect("local RustFS attachment config should be valid");
     }
 
     #[test]
-    fn cloud_attachment_storage_rejects_local_rustfs() {
-        // Pins: Kubernetes cloud deployments cannot silently store attachment bytes in a local endpoint.
-        let config = SessionConfig {
-            attachments: SessionAttachmentStorageConfig::local_rustfs(),
-            ..SessionConfig::default()
+    fn attachment_storage_rejects_remote_http_endpoint() {
+        // Pins: plaintext attachment endpoints are only acceptable for local RustFS.
+        let config = SessionAttachmentStorageConfig {
+            endpoint: Some("http://object-store.internal:9000".to_string()),
+            allow_http: true,
+            ..SessionAttachmentStorageConfig::default()
         };
         let error = config
-            .validate(true)
-            .expect_err("cloud mode should reject local RustFS attachment config");
+            .validate()
+            .expect_err("remote HTTP attachment endpoint should fail");
 
         assert_eq!(
             error.to_string(),
-            "configuration error: session.attachments.allow_http must be false when cloud.enabled = true"
+            "configuration error: session.attachments.allow_http is only allowed for local attachment endpoints"
         );
     }
 }

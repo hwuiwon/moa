@@ -56,7 +56,7 @@ The root workspace currently contains:
 | Database | `sqlx` with Postgres for runtime queries; `refinery` for all Postgres schema migrations |
 | Orchestration | `restate-sdk` |
 | Scheduling | Restate `CronJob` virtual object |
-| Runtime cache | in-process memory for local development; Redis client behind the `redis` feature for cloud coordination |
+| Runtime cache | Redis-backed coordination for the orchestrator; in-process memory exists only for isolated local/test code |
 | Security | `secrecy`, `shell-words` |
 | Containers/tools | Docker integration, Daytona/E2B HTTP clients, MCP transports |
 | Lineage and audit | OTel/OpenInference bridge, Parquet/Arrow cold export, Object Lock audit storage |
@@ -69,6 +69,7 @@ The root workspace currently contains:
 |---|---|
 | Postgres 17.6+ with Apache AGE, pgvector, and pgaudit | Session store, graph memory, event search, sidecar indexes, embeddings, learning tables |
 | OpenFGA v1.8 | Authorization engine. Postgres-backed. Self-hosted by default; Auth0 FGA is a future managed swap-in. |
+| Redis or Valkey | Shared runtime cache for pacing and cross-replica transient references |
 | `moa-pii-service` | Out-of-process `openai/privacy-filter` inference for memory privacy classification |
 | LLM provider | Anthropic, OpenAI, or Google Gemini |
 
@@ -80,7 +81,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 |---|---|
 | Restate | Durable orchestration engine |
 | Postgres/Neon | Product data store |
-| Redis | Shared runtime cache required when `MOA_CLOUD_ENABLED=true` |
+| Redis or Valkey | Shared runtime cache for orchestrator replicas |
 | AWS S3 or GCS | Session attachment byte storage in cloud |
 | LLM provider | Model calls and optional embeddings |
 | Hand provider | Daytona, E2B, or configured local/container execution |
@@ -97,7 +98,6 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Messaging platforms | Slack adapter |
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
 | Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
-| Redis | Optional for local development; required for cloud replicas that set `MOA_CLOUD_ENABLED=true` |
 | RustFS | Local S3-compatible attachment storage for docker-compose development |
 
 ## Build Targets
@@ -130,7 +130,7 @@ and deployment setup. Key groups:
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
 | `MOA_SKILL_BUDGET_*` | skill manifest budget controls |
-| `MOA_CLOUD_*` | cloud mode and hand provider settings |
+| `MOA_CLOUD_*` | remote hand provider settings |
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
@@ -148,7 +148,7 @@ Implemented architectural pillars:
 - One `moa-orchestrator` production binary for local development and cloud execution, with domain logic kept behind in-process application and repository boundaries.
 - Postgres session store with tenant-isolated event log, analytics, task segments, and learning log.
 - Postgres hand leases and Postgres-backed claim-check blobs for cross-pod sandbox and replay correctness.
-- Optional Redis-backed runtime cache with in-memory fallback for local and non-authoritative transient behavior.
+- Redis-backed runtime cache for the production orchestrator; the in-memory implementation is limited to isolated non-orchestrator tests and embeddings.
 - Graph memory with Postgres sidecar search, AGE projection helpers, pgvector semantic search, and privacy filtering.
 - Query rewriting, segment creation, automated segment assessment, and tenant-level skill resolution-rate ranking.
 - Draft-only tenant skill distillation/improvement proposals with explicit review acceptance before learning-log emission; tenant learning remains tenant-local.
@@ -176,14 +176,13 @@ OPENAI_API_KEY=... # or another configured provider key
 Configure Redis when runtime cache state should coordinate across replicas:
 
 ```bash
-MOA_CLOUD_ENABLED=true
 MOA_RUNTIME_CACHE_BACKEND=redis
 MOA_RUNTIME_CACHE_REDIS_URL=redis://...
 ```
 
-When `MOA_CLOUD_ENABLED=true`, startup fails if runtime cache resolution lands
-on the in-memory backend. Memory remains the local-development fallback and is
-per-process best effort only.
+`moa-orchestrator` fails startup if runtime cache resolution lands on the
+in-memory backend. Memory is per-process best effort only and must not be used
+for request handling in a distributed deployment.
 
 Configure session attachment object storage for cloud:
 

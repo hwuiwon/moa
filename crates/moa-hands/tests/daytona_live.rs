@@ -50,7 +50,6 @@ fn require_daytona_credentials() {
 
 fn live_config() -> MoaConfig {
     let mut config = MoaConfig::default();
-    config.cloud.enabled = true;
     config.cloud.hands = Some(CloudHandsConfig {
         default_provider: Some("daytona".to_string()),
         daytona_api_key_env: Some("DAYTONA_API_KEY".to_string()),

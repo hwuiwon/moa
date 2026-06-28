@@ -198,10 +198,7 @@ impl RuntimeDeps {
 
 fn validate_lineage_journal_startup(config: &MoaConfig) -> Result<()> {
     if config.observability.lineage.enabled || lineage_sink_env_uses_journal() {
-        config
-            .observability
-            .lineage
-            .validate_journal_path(config.cloud.enabled)?;
+        config.observability.lineage.validate_journal_path()?;
     }
     Ok(())
 }
@@ -218,16 +215,9 @@ async fn build_runtime_cache_store(config: &MoaConfig) -> Result<Arc<dyn Runtime
     let selected_backend = moa_runtime_store::select_runtime_cache_backend(&config.runtime_cache);
     match selected_backend {
         moa_runtime_store::ResolvedRuntimeCacheBackend::Memory => {
-            if config.cloud.enabled {
-                bail!(
-                    "cloud.enabled requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
-                );
-            }
-            tracing::info!(
-                backend = "memory",
-                "runtime cache backend selected; memory backend is process-local and must not be used for correctness-sensitive distributed coordination"
+            bail!(
+                "moa-orchestrator requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
             );
-            Ok(Arc::new(moa_runtime_store::MemoryRuntimeCacheStore::new()))
         }
         moa_runtime_store::ResolvedRuntimeCacheBackend::Redis => {
             let Some(redis_url) = config
@@ -353,40 +343,30 @@ mod tests {
 
     use moa_core::{
         MoaConfig,
-        config::{CloudConfig, RuntimeCacheBackend, RuntimeCacheConfig},
+        config::{RuntimeCacheBackend, RuntimeCacheConfig},
+        traits::RuntimeCacheStore,
     };
 
     use super::build_runtime_cache_store;
 
     #[tokio::test]
-    async fn runtime_cache_auto_without_redis_url_builds_memory_store() {
-        // Pins: backend auto falls back to process-local memory when no Redis URL is configured.
+    async fn runtime_cache_auto_without_redis_url_rejects_memory_fallback() {
+        // Pins: orchestrator startup cannot use process-local runtime coordination.
         let config = MoaConfig::default();
-        let store = build_runtime_cache_store(&config)
-            .await
-            .expect("auto cache should build");
-
-        store
-            .set(
-                "runtime-cache:auto",
-                b"memory".to_vec(),
-                Duration::from_secs(60),
-            )
-            .await
-            .expect("memory runtime cache should accept writes");
+        let error = match build_runtime_cache_store(&config).await {
+            Ok(_) => panic!("auto memory runtime cache should fail startup"),
+            Err(error) => error,
+        };
 
         assert_eq!(
-            store
-                .get("runtime-cache:auto")
-                .await
-                .expect("memory runtime cache should accept reads"),
-            Some(b"memory".to_vec())
+            error.to_string(),
+            "moa-orchestrator requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
         );
     }
 
     #[tokio::test]
-    async fn runtime_cache_memory_backend_builds_memory_store() {
-        // Pins: explicit memory backend constructs the runtime cache used by local/test wiring.
+    async fn runtime_cache_memory_backend_rejects_process_local_memory() {
+        // Pins: explicit memory backend is not valid for the distributed orchestrator.
         let config = MoaConfig {
             runtime_cache: RuntimeCacheConfig {
                 backend: RuntimeCacheBackend::Memory,
@@ -395,25 +375,14 @@ mod tests {
             ..MoaConfig::default()
         };
 
-        let store = build_runtime_cache_store(&config)
-            .await
-            .expect("memory cache should build");
-
-        store
-            .set(
-                "runtime-cache:memory",
-                b"configured".to_vec(),
-                Duration::from_secs(60),
-            )
-            .await
-            .expect("memory runtime cache should accept writes");
+        let error = match build_runtime_cache_store(&config).await {
+            Ok(_) => panic!("memory runtime cache should fail startup"),
+            Err(error) => error,
+        };
 
         assert_eq!(
-            store
-                .get("runtime-cache:memory")
-                .await
-                .expect("memory runtime cache should accept reads"),
-            Some(b"configured".to_vec())
+            error.to_string(),
+            "moa-orchestrator requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
         );
     }
 
@@ -440,54 +409,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_cache_cloud_mode_rejects_process_local_memory() {
-        // Pins: cloud startup cannot silently select process-local runtime coordination.
-        let config = MoaConfig {
-            cloud: CloudConfig {
-                enabled: true,
-                ..CloudConfig::default()
-            },
-            runtime_cache: RuntimeCacheConfig {
-                backend: RuntimeCacheBackend::Memory,
-                redis_url: Some("redis://cache.example:6379/0".to_string()),
-            },
-            ..MoaConfig::default()
-        };
-
-        let error = match build_runtime_cache_store(&config).await {
-            Ok(_) => panic!("cloud memory runtime cache should fail startup"),
-            Err(error) => error,
-        };
+    async fn runtime_cache_memory_store_remains_available_for_non_orchestrator_tests() {
+        // Pins: the process-local implementation still exists for isolated unit tests.
+        let store = moa_runtime_store::MemoryRuntimeCacheStore::new();
+        store
+            .set(
+                "runtime-cache:unit",
+                b"memory".to_vec(),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("memory runtime cache should accept writes");
 
         assert_eq!(
-            error.to_string(),
-            "cloud.enabled requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
-        );
-    }
-
-    #[tokio::test]
-    async fn runtime_cache_cloud_mode_rejects_auto_memory_fallback() {
-        // Pins: cloud startup cannot use auto when auto resolves to memory.
-        let config = MoaConfig {
-            cloud: CloudConfig {
-                enabled: true,
-                ..CloudConfig::default()
-            },
-            runtime_cache: RuntimeCacheConfig {
-                backend: RuntimeCacheBackend::Auto,
-                redis_url: None,
-            },
-            ..MoaConfig::default()
-        };
-
-        let error = match build_runtime_cache_store(&config).await {
-            Ok(_) => panic!("cloud auto memory runtime cache should fail startup"),
-            Err(error) => error,
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "cloud.enabled requires runtime_cache.backend = redis with runtime_cache.redis_url; memory runtime cache is process-local"
+            store
+                .get("runtime-cache:unit")
+                .await
+                .expect("memory runtime cache should accept reads"),
+            Some(b"memory".to_vec())
         );
     }
 }

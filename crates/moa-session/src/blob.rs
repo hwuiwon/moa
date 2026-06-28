@@ -35,7 +35,7 @@ impl FileBlobStore {
 
     /// Creates a blob store using the configured blob directory.
     pub fn from_config(config: &MoaConfig) -> Result<Self> {
-        config.session.validate_blob_backend(config.cloud.enabled)?;
+        config.session.validate_blob_backend()?;
         let blob_dir = match config.session.blob_dir.as_deref() {
             Some(path) if !path.trim().is_empty() => expand_local_path(Path::new(path))?,
             _ => Self::default_dir()?,

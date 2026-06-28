@@ -17,7 +17,7 @@ impl SubAgent for SubAgentImpl {
         let message = msg.into_inner();
         let mut state = SubAgentVoState::load_from(&ctx).await?;
         match &message {
-            SubAgentMessage::InitialTask { .. } => {
+            SubAgentMessage::InitialTask(_) => {
                 state.initialize(&message).map_err(to_handler_error)?;
             }
             SubAgentMessage::FollowUp { text } => {

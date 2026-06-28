@@ -28,8 +28,6 @@ impl Default for LocalConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CloudConfig {
-    /// Whether cloud mode is enabled.
-    pub enabled: bool,
     /// Optional alternate memory root for cloud deployments.
     pub memory_dir: Option<String>,
     /// Optional hands configuration.
@@ -39,7 +37,6 @@ pub struct CloudConfig {
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             memory_dir: None,
             hands: Some(CloudHandsConfig::default()),
         }
@@ -47,7 +44,7 @@ impl Default for CloudConfig {
 }
 
 /// Cloud hand provider configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CloudHandsConfig {
     /// Default hand provider.
@@ -66,21 +63,6 @@ pub struct CloudHandsConfig {
     pub e2b_domain: Option<String>,
     /// Optional default E2B template identifier.
     pub e2b_template: Option<String>,
-}
-
-impl Default for CloudHandsConfig {
-    fn default() -> Self {
-        Self {
-            default_provider: Some("daytona".to_string()),
-            daytona_api_key_env: Some("DAYTONA_API_KEY".to_string()),
-            daytona_api_url: Some("https://app.daytona.io/api".to_string()),
-            daytona_default_image: Some("daytonaio/workspace:latest".to_string()),
-            e2b_api_key_env: Some("E2B_API_KEY".to_string()),
-            e2b_api_url: Some("https://api.e2b.dev".to_string()),
-            e2b_domain: Some("e2b.app".to_string()),
-            e2b_template: Some("base".to_string()),
-        }
-    }
 }
 
 /// Supported MCP transport configurations.
@@ -151,9 +133,8 @@ impl super::MoaEnvOverlay {
 
     /// Applies cloud runtime and cloud hands environment overrides.
     pub(in crate::config) fn apply_cloud_overlay(&self, config: &mut super::MoaConfig) {
-        use super::env_overlay::{any_present, set_copy_if_some, set_option_if_some};
+        use super::env_overlay::{any_present, set_option_if_some};
 
-        set_copy_if_some(&mut config.cloud.enabled, self.cloud_enabled);
         set_option_if_some(&mut config.cloud.memory_dir, &self.cloud_memory_dir);
         if any_present(&[
             self.cloud_hands_default_provider.is_some(),

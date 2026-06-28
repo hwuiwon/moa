@@ -63,6 +63,19 @@ services:
       retries: 10
       start_period: 10s
 
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: moa-valkey
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "10051:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   openfga-db-init:
     image: postgres:17-alpine
     depends_on:
@@ -186,12 +199,14 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        MOA_ORCHESTRATOR_FEATURES: provider-overrides
+        MOA_ORCHESTRATOR_FEATURES: redis,provider-overrides
     image: moa/orchestrator:dev
     container_name: moa-orchestrator
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      valkey:
         condition: service_healthy
       restate:
         condition: service_healthy
@@ -202,6 +217,8 @@ services:
       MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
       MOA_RESTATE_ADMIN_URL: http://restate:9070
       MOA_RESTATE_INGRESS_URL: http://restate:8080
+      MOA_RUNTIME_CACHE_BACKEND: redis
+      MOA_RUNTIME_CACHE_REDIS_URL: redis://valkey:6379/0
       MOA_LOCAL_SANDBOX_DIR: /var/lib/moa/sandbox
       MOA_LOCAL_MEMORY_DIR: /var/lib/moa/memory
       MOA_OBSERVABILITY_LINEAGE_JOURNAL_PATH: /var/lib/moa/lineage-journal

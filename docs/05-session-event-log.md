@@ -144,7 +144,7 @@ joined back to the durable event rows without parsing rendered prompt text.
 Large event payloads use claim-check storage before the event is committed.
 The default cloud backend is Postgres (`session_blobs`) so a replay on another
 pod can resolve the blob reference. The local filesystem backend is explicit
-and, in cloud mode, requires a persistent mounted path.
+and requires a persistent mounted path.
 
 User-visible uploads are separate from claim-check blobs. Contact message
 uploads store metadata and object keys in `session_attachments`, while bytes

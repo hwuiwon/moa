@@ -15,37 +15,41 @@ pub type SubAgentId = String;
 /// Stable path-like name for a sub-agent inside one root session tree.
 pub type AgentPath = String;
 
+/// Initial task payload used to bootstrap one sub-agent state object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubAgentInitialTask {
+    /// Primary task the child should work on.
+    pub task: String,
+    /// Tool names the child is allowed to invoke.
+    pub tool_subset: Vec<String>,
+    /// Token budget allocated to the child.
+    pub budget_tokens: u64,
+    /// Optional maximum autonomous turns for the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// Root session that owns the child.
+    pub parent_session: SessionId,
+    /// Optional parent sub-agent when dispatch is nested.
+    pub parent_sub_agent: Option<SubAgentId>,
+    /// Current depth in the sub-agent tree.
+    pub depth: u32,
+    /// Tenant scope inherited from the parent.
+    pub tenant_id: TenantId,
+    /// User scope inherited from the parent.
+    pub user_id: UserId,
+    /// Model inherited from the parent.
+    pub model: ModelId,
+    /// Trusted sandbox file manifest inherited from the parent turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
+}
+
 /// One message delivered to a running sub-agent virtual object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubAgentMessage {
     /// Initial task payload used to bootstrap the sub-agent state.
-    InitialTask {
-        /// Primary task the child should work on.
-        task: String,
-        /// Tool names the child is allowed to invoke.
-        tool_subset: Vec<String>,
-        /// Token budget allocated to the child.
-        budget_tokens: u64,
-        /// Optional maximum autonomous turns for the child.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_turns: Option<u32>,
-        /// Root session that owns the child.
-        parent_session: SessionId,
-        /// Optional parent sub-agent when dispatch is nested.
-        parent_sub_agent: Option<SubAgentId>,
-        /// Current depth in the sub-agent tree.
-        depth: u32,
-        /// Tenant scope inherited from the parent.
-        tenant_id: TenantId,
-        /// User scope inherited from the parent.
-        user_id: UserId,
-        /// Model inherited from the parent.
-        model: ModelId,
-        /// Trusted sandbox file manifest inherited from the parent turn.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
-    },
+    InitialTask(Box<SubAgentInitialTask>),
     /// Follow-up user-style text delivered from the parent actor.
     FollowUp {
         /// Follow-up text.
@@ -494,7 +498,7 @@ impl SubAgentChildRequest {
         user_id: UserId,
         model: ModelId,
     ) -> SubAgentMessage {
-        SubAgentMessage::InitialTask {
+        SubAgentMessage::InitialTask(Box::new(SubAgentInitialTask {
             task: self.task,
             tool_subset: self.tool_subset,
             budget_tokens: self.budget_tokens,
@@ -506,7 +510,7 @@ impl SubAgentChildRequest {
             user_id,
             model,
             trusted_sandbox_manifest: self.trusted_sandbox_manifest,
-        }
+        }))
     }
 }
 
