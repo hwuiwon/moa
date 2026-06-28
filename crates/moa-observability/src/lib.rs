@@ -6,6 +6,9 @@ pub mod telemetry;
 pub mod trace_context;
 pub mod turn_latency;
 
+#[cfg(test)]
+mod test_capture;
+
 pub use restate_observability::{current_trace_id, trace_id_for_span};
 pub use runtime_metrics::{
     TURN_LATENCY_REPORT_STEPS, TURN_STEP_DURATION_METRIC, TurnLatencyStep, init_metrics,

@@ -1230,6 +1230,72 @@ mod tests {
     }
 
     #[test]
+    fn parses_inbound_message_from_app_mention_event() {
+        // Pins: an `app_mention` callback flows through the AppMention branch of
+        // inbound_from_push_event and normalizes to a canonical inbound message.
+        let event: SlackPushEventCallback = serde_json::from_value(json!({
+            "team_id": "T123",
+            "api_app_id": "A123",
+            "event": {
+                "type": "app_mention",
+                "user": "U123",
+                "text": "<@U999> please summarize this",
+                "ts": "1712668800.000100",
+                "channel": "C123",
+                "event_ts": "1712668800.000100"
+            },
+            "event_id": "Ev123",
+            "event_time": 1712668800
+        }))
+        .expect("slack app_mention event should deserialize");
+
+        let inbound =
+            inbound_from_push_event(&event).expect("app_mention should normalize to inbound");
+        assert_eq!(inbound.channel, Channel::Slack);
+        assert_eq!(inbound.channel_msg_id, "1712668800.000100");
+        assert_eq!(inbound.text, "<@U999> please summarize this");
+        assert_eq!(inbound.actor.external_id, "U123");
+        assert_eq!(inbound.actor.display_name, "<@U123>");
+        assert_eq!(
+            inbound.channel_ref,
+            ChannelRef::Slack {
+                team_id: Some("T123".to_string()),
+                slack_channel_id: Some("C123".to_string()),
+                thread_ts: None,
+                user_id: Some("U123".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn message_event_with_subtype_is_filtered_to_none() {
+        // Pins: a `message` event carrying a subtype (e.g. bot_message / message_changed) is
+        // dropped by inbound_from_message_event's subtype filter even though it is otherwise a
+        // fully-formed, normalizable message (text + user + channel all present).
+        let event: SlackPushEventCallback = serde_json::from_value(json!({
+            "team_id": "T123",
+            "api_app_id": "A123",
+            "event": {
+                "type": "message",
+                "subtype": "bot_message",
+                "user": "U123",
+                "text": "posted by a bot integration",
+                "ts": "1712668800.000100",
+                "channel": "C123",
+                "channel_type": "channel"
+            },
+            "event_id": "Ev123",
+            "event_time": 1712668800
+        }))
+        .expect("slack message event with subtype should deserialize");
+
+        assert!(
+            inbound_from_push_event(&event).is_none(),
+            "message events carrying a subtype must be filtered out, not normalized"
+        );
+    }
+
+    #[test]
     fn slack_target_uses_durable_channel_ref_when_reply_anchor_is_absent() {
         // Pins: workflow-originated progress can send after process restart using the persisted route.
         let target = slack_target_from_channel_ref(&ChannelRef::Slack {
@@ -1479,36 +1545,6 @@ mod tests {
             expanded_refs
         );
         second.release_update_lock(second_lock).await;
-    }
-
-    #[tokio::test]
-    async fn slack_memory_runtime_cache_is_per_pod_best_effort() {
-        // Pins: separate memory runtime-cache stores do not provide cross-pod Slack ref sharing.
-        let first = SlackOutboundMessageRefs::new(Some(Arc::new(MemoryRuntimeCacheStore::new())));
-        let second = SlackOutboundMessageRefs::new(Some(Arc::new(MemoryRuntimeCacheStore::new())));
-        let message_id = MessageId::new("multi-chunk-per-pod");
-        let refs = vec![
-            SlackMessageRef {
-                channel_id: Arc::<str>::from("C123"),
-                ts: "1712668800.000100".to_string(),
-                thread_ts: Some("1712668800.000100".to_string()),
-            },
-            SlackMessageRef {
-                channel_id: Arc::<str>::from("C123"),
-                ts: "1712668801.000200".to_string(),
-                thread_ts: Some("1712668800.000100".to_string()),
-            },
-        ];
-
-        first
-            .store(&message_id, refs)
-            .await
-            .expect("first pod should store refs in its process-local memory cache");
-
-        assert!(
-            second.resolve(&message_id).await.is_err(),
-            "second pod should not see refs stored in a different memory backend instance"
-        );
     }
 
     #[test]

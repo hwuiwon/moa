@@ -32,43 +32,6 @@ use uuid::Uuid;
 mod skill_learning {
     use super::*;
 
-    #[test]
-    fn turn_execution_dispatches_skill_learning_after_experience_persistence() {
-        // Pins: TurnExecution dispatches the detached workflow only after experience persistence succeeds; there is no runtime enabled gate.
-        let source = include_str!("../src/workflows/turn_execution.rs");
-        let emit_start = source
-            .find("async fn emit_experience_for_assessment")
-            .expect("experience emission helper exists");
-        let emit_source = &source[emit_start..];
-        let error_branch = emit_source
-            .find("if let Some(error) = learning_error")
-            .expect("learning storage error branch exists");
-        let early_return = emit_source[error_branch..]
-            .find("return Ok(());")
-            .expect("storage error branch returns before dispatch")
-            + error_branch;
-        let dispatch = emit_source
-            .find("dispatch_skill_learning_after_experience(ctx, meta.id, experience_id).await?;")
-            .expect("skill learning dispatch call exists");
-        assert!(
-            early_return < dispatch,
-            "skill learning must dispatch only after experience emission succeeds"
-        );
-
-        let dispatch_start = source
-            .find("async fn dispatch_skill_learning_after_experience")
-            .expect("dispatch helper exists");
-        let dispatch_source = &source[dispatch_start..];
-        assert!(
-            !dispatch_source.contains("config.learning.skills.enabled"),
-            "compiled skill learning must not be runtime-gated by config"
-        );
-        let workflow_client = dispatch_source
-            .find("workflow_client::<SkillLearningClient>(experience_id.to_string())")
-            .expect("dispatch uses experience id as workflow key");
-        assert!(workflow_client > 0, "workflow dispatch should be reachable");
-    }
-
     #[tokio::test]
     async fn skill_learning_workflow_creates_proposed_candidate_and_draft_only() {
         // Pins: the detached skill-learning body creates a proposed candidate and draft artifact without activating the skill.
@@ -166,30 +129,6 @@ mod skill_learning {
             .await
             .expect("load session after warning");
         assert_eq!(session.status, SessionStatus::Completed);
-
-        let source = include_str!("../src/workflows/skill_learning.rs");
-        let error_arm = source
-            .find("Err(error) =>")
-            .expect("workflow catches proposal failure");
-        let failed_report_call = source[error_arm..]
-            .find("failed_workflow_report")
-            .expect("workflow maps proposal failure to a warning report")
-            + error_arm;
-        let failed_report_fn = source
-            .find("async fn failed_workflow_report")
-            .expect("failure report helper exists");
-        let warning_call = source[failed_report_fn..]
-            .find("record_skill_learning_failure_from_workflow")
-            .expect("failure report records warning")
-            + failed_report_fn;
-        let ok_report = source[error_arm..]
-            .find("Json::from(SkillLearningReport")
-            .expect("workflow builds a report after failure")
-            + error_arm;
-        assert!(
-            failed_report_call < warning_call && warning_call < ok_report,
-            "workflow should record a warning before returning a non-failing report"
-        );
     }
 }
 

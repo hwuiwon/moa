@@ -380,12 +380,8 @@ impl EmbeddingRow {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-
     use super::*;
-    use crate::{VECTOR_DIMENSION, VectorMatch};
+    use crate::VectorMatch;
 
     #[test]
     fn dual_read_overlap_is_average_intersection_ratio() {
@@ -404,99 +400,10 @@ mod tests {
         assert_eq!(top_k_overlap(&source, &target, 2), 0.5);
     }
 
-    #[tokio::test]
-    async fn validation_rejects_low_overlap() {
-        let source = Arc::new(StaticVectorStore::new(vec![Uuid::now_v7()]));
-        let target = Arc::new(StaticVectorStore::new(vec![Uuid::now_v7()]));
-        let promotion = VectorPartitionPromotion::new(
-            PgPool::connect_lazy("postgres://localhost/moa").expect("lazy pool"),
-            source,
-            target,
-        );
-        let overlap = VectorPartitionPromotion::validate_matches(
-            promotion.source.as_ref(),
-            promotion.target.as_ref(),
-            &[VectorQuery {
-                embedding: basis_vector(0),
-                k: 1,
-                label_filter: None,
-                max_pii_class: "restricted".to_string(),
-                include_global: false,
-                as_of: None,
-            }],
-        )
-        .await
-        .expect("validate matches");
-        assert_eq!(overlap, 0.0);
-    }
-
-    impl VectorPartitionPromotion {
-        async fn validate_matches(
-            source: &dyn VectorStore,
-            target: &dyn VectorStore,
-            queries: &[VectorQuery],
-        ) -> Result<f64> {
-            let mut total = 0.0;
-            for query in queries {
-                let source_hits = source.knn(query).await?;
-                let target_hits = target.knn(query).await?;
-                total += top_k_overlap(&source_hits, &target_hits, query.k);
-            }
-            Ok(total / queries.len().max(1) as f64)
-        }
-    }
-
-    struct StaticVectorStore {
-        uids: Vec<Uuid>,
-        upserts: Mutex<Vec<VectorItem>>,
-    }
-
-    impl StaticVectorStore {
-        fn new(uids: Vec<Uuid>) -> Self {
-            Self {
-                uids,
-                upserts: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl VectorStore for StaticVectorStore {
-        fn backend(&self) -> &'static str {
-            "static"
-        }
-
-        fn dimension(&self) -> usize {
-            VECTOR_DIMENSION
-        }
-
-        async fn upsert(&self, items: &[VectorItem]) -> Result<()> {
-            self.upserts
-                .lock()
-                .expect("upserts lock")
-                .extend_from_slice(items);
-            Ok(())
-        }
-
-        async fn knn(&self, _query: &VectorQuery) -> Result<Vec<VectorMatch>> {
-            Ok(self
-                .uids
-                .iter()
-                .map(|uid| VectorMatch {
-                    uid: *uid,
-                    score: 1.0,
-                })
-                .collect())
-        }
-
-        async fn delete(&self, _uids: &[Uuid]) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn basis_vector(index: usize) -> Vec<f32> {
-        let mut embedding = vec![0.0; VECTOR_DIMENSION];
-        embedding[index % VECTOR_DIMENSION] = 1.0;
-        embedding
-    }
+    // The end-to-end `validate_storage_partition` overlap path (which samples
+    // real `moa.embeddings` rows via `fetch_validation_sample` and contrasts the
+    // pgvector source backend against the promotion target) is exercised by
+    // `promotion_validate_storage_partition_scores_real_backend_overlap_db_memory`
+    // in `tests/pgvector_store_db_memory.rs`, which drives the production method
+    // against a seeded Postgres partition rather than a fixed-return stub.
 }

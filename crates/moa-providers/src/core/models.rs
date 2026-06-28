@@ -436,6 +436,49 @@ mod tests {
     }
 
     #[test]
+    fn find_model_resolves_dated_snapshot_to_base_via_longest_prefix() {
+        // Pins: a dated provider snapshot id resolves to its base catalog entry,
+        // and the longest matching prefix wins over a shorter sibling prefix.
+        let dated = find_model("claude-sonnet-4-6-20260101")
+            .expect("dated Sonnet snapshot should resolve to the base model");
+        assert_eq!(dated.id, "claude-sonnet-4-6");
+
+        // `gpt-5-mini-2026-01-01` shares the `gpt-5-` stem with `gpt-5-nano`, but
+        // only `gpt-5-mini` is an actual prefix, so the more specific id wins.
+        let mini = find_model("gpt-5-mini-2026-01-01").expect("dated GPT-5 mini should resolve");
+        assert_eq!(mini.id, "gpt-5-mini");
+
+        // An id with no catalog prefix resolves to nothing rather than a partial match.
+        assert!(find_model("claude-imaginary-9").is_none());
+    }
+
+    #[test]
+    fn embedding_and_rerank_model_ids_are_uncosted_via_catalog() {
+        // Pins (intentional gap): the chat CATALOG/TokenPricing models token-billed
+        // completion models only. Embedding and rerank ids are deliberately absent,
+        // so `find_model`/`pricing_for_model` return `None` for them and their cost
+        // is accounted elsewhere. This guards against a half-wired entry that would
+        // expose chat token pricing for a non-chat model.
+        for id in [
+            "embed-v4.0",
+            "zembed-1",
+            "gemini-embedding-2",
+            "text-embedding-3-small",
+            "zerank-2",
+            "rerank-v4.0-fast",
+        ] {
+            assert!(
+                find_model(id).is_none(),
+                "{id} should not be in the chat catalog"
+            );
+            assert!(
+                pricing_for_model(id).is_none(),
+                "{id} should be uncosted via the chat catalog"
+            );
+        }
+    }
+
+    #[test]
     fn pricing_lookup_uses_catalog_entry() {
         // Pins: model pricing is read from catalog metadata, including cache-write rates.
         let pricing = pricing_for_model("claude-sonnet-4-6").expect("sonnet pricing");

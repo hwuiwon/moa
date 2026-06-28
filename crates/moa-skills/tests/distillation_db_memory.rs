@@ -10,16 +10,14 @@ use moa_skills::distiller::{
     DistillationOutcome, DistillationSkipReason, distill_skill_with_learning,
 };
 use support::{
-    SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_5_TOOL_CALLS, configured_test_db, failed_session,
-    learning_store, load_optional_active_skill, load_session_fixture, scripted_router, seed_skill,
-    session_storage_partition_id, skill_markdown, tenant_scope, test_config,
+    SESSION_WITH_4_TOOL_CALLS, SESSION_WITH_5_TOOL_CALLS, failed_session, learning_store,
+    load_optional_active_skill, load_session_fixture, scripted_router, seed_skill,
+    session_storage_partition_id, setup_test_db, skill_markdown, tenant_scope, test_config,
 };
 
 #[tokio::test]
 async fn session_with_5_tool_calls_and_success_outcome_triggers_distillation() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
@@ -98,9 +96,7 @@ async fn session_with_failure_outcome_does_not_trigger_distillation_even_above_t
 
 #[tokio::test]
 async fn distillation_above_similarity_threshold_routes_to_improver() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -145,9 +141,7 @@ async fn distillation_above_similarity_threshold_routes_to_improver() {
 
 #[tokio::test]
 async fn distillation_below_similarity_threshold_creates_new_skill() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -184,9 +178,7 @@ async fn distillation_below_similarity_threshold_creates_new_skill() {
 
 #[tokio::test]
 async fn distillation_candidate_includes_lineage_pointer_to_originating_session() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(

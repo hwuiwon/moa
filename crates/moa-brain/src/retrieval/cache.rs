@@ -411,7 +411,10 @@ mod tests {
     use super::*;
     use crate::planning::Strategy;
     use crate::retrieval::LegSources;
-    use crate::retrieval::ranking::{RANKING_PIPELINE_VERSION, RankingConfig, ranking_fingerprint};
+    use crate::retrieval::ranking::{
+        RANKING_PIPELINE_VERSION, RankingConfig, ranking_fingerprint,
+        ranking_fingerprint_for_version,
+    };
 
     #[tokio::test]
     async fn cache_hit_reuses_successful_tenant_retrieval() {
@@ -492,11 +495,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_eviction_at_capacity_does_not_crash() {
+    async fn cache_eviction_at_capacity_forces_backend_re_miss() {
+        // Pins: a per-tenant cache capped at one entry cannot serve two distinct
+        // plans from cache at once; the evicted plan re-misses and re-calls the
+        // backend instead of returning a stale hit.
         let backend = Arc::new(CountingBackend::new());
         let version = Arc::new(MockVersionReader::new(1));
         let cache = CachedHybridRetriever::with_parts(
-            backend,
+            backend.clone(),
             version,
             CachedHybridRetrieverConfig {
                 tenant_capacity: 1,
@@ -506,14 +512,48 @@ mod tests {
         let planned_a = planned_query(tenant_scope(), "auth service");
         let planned_b = planned_query(tenant_scope(), "deploy service");
 
+        // Warm plan A and confirm it is genuinely cached (a second read is free).
         cache
             .retrieve(&planned_a, request(&planned_a, "what owns auth?"))
             .await
-            .expect("first retrieval should succeed");
+            .expect("cold A retrieval should succeed");
+        cache
+            .retrieve(&planned_a, request(&planned_a, "what owns auth?"))
+            .await
+            .expect("warm A retrieval should hit cache");
+        assert_eq!(backend.calls(), 1, "plan A should be cached after warming");
+
+        // Insert plan B; capacity 1 means A and B cannot both remain cached.
         cache
             .retrieve(&planned_b, request(&planned_b, "what owns deploy?"))
             .await
-            .expect("second retrieval should succeed");
+            .expect("cold B retrieval should succeed");
+        assert_eq!(backend.calls(), 2);
+
+        // Force the per-tenant cache to apply capacity-based eviction.
+        let tenant_cache = cache.tenant_cache(&tenant_cache_id(&tenant_scope())).await;
+        tenant_cache.run_pending_tasks().await;
+        assert!(
+            tenant_cache.entry_count() <= 1,
+            "a capacity-1 cache must retain at most one entry"
+        );
+
+        // Re-reading both distinct plans cannot be served entirely from a
+        // single-entry cache, so at least one must re-miss and re-call the
+        // backend (a non-evicting cache would keep both and add zero calls).
+        cache
+            .retrieve(&planned_a, request(&planned_a, "what owns auth?"))
+            .await
+            .expect("A re-read should succeed");
+        cache
+            .retrieve(&planned_b, request(&planned_b, "what owns deploy?"))
+            .await
+            .expect("B re-read should succeed");
+        assert!(
+            backend.calls() >= 3,
+            "capacity eviction must force at least one backend re-call, got {}",
+            backend.calls()
+        );
     }
 
     #[test]
@@ -584,8 +624,28 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_pipeline_version_bump() {
-        // Pins: single-mode ranking config shape requires version 7.
-        assert_eq!(RANKING_PIPELINE_VERSION, 7);
+        // Pins: the ranking pipeline version participates in the cache key, so
+        // bumping it invalidates every cached entry instead of silently serving
+        // hits ranked by an older pipeline. Holds the config constant and varies
+        // only the version to isolate the version's effect.
+        let planned = planned_query(tenant_scope(), "auth service");
+        let req = request(&planned, "what owns auth?");
+        let config = RankingConfig::default();
+
+        let current = ranking_fingerprint_for_version(RANKING_PIPELINE_VERSION, &config);
+        let bumped = ranking_fingerprint_for_version(RANKING_PIPELINE_VERSION + 1, &config);
+        assert_ne!(
+            current, bumped,
+            "ranking fingerprint must change when the pipeline version bumps"
+        );
+
+        assert_ne!(
+            fingerprint(&planned, &req, current),
+            fingerprint(&planned, &req, bumped),
+            "cache key must diverge across a pipeline version bump"
+        );
+        // The production fingerprint is the current-version one.
+        assert_eq!(ranking_fingerprint(&config), current);
     }
 
     #[derive(Default)]

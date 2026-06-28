@@ -26,6 +26,18 @@ async fn admin_review_router(sandbox_root: impl AsRef<Path>) -> ToolRouter {
         )
 }
 
+async fn deny_router(sandbox_root: impl AsRef<Path>, denied_tools: &[&str]) -> ToolRouter {
+    let mut config = moa_core::MoaConfig::default();
+    config.permissions.always_deny = denied_tools.iter().map(|tool| tool.to_string()).collect();
+    ToolRouter::new_local(sandbox_root)
+        .await
+        .unwrap()
+        .with_policies(
+            moa_security::ActionPolicies::from_config(&config)
+                .expect("deny test policy config should be valid"),
+        )
+}
+
 fn approximate_tokens(text: &str) -> u32 {
     let chars = text.chars().count() as u32;
     if chars == 0 { 0 } else { chars.div_ceil(4) }

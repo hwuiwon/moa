@@ -320,3 +320,29 @@ impl DeterministicRng {
         (self.next_u64() as usize) % upper_bound
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_mcnemar_p_value_with_no_discordant_pairs_is_one() {
+        // Pins: when both arms always agree (b + c == 0) the exact test reports p = 1.0,
+        // not a NaN from 2^-0 bookkeeping.
+        let p_value = exact_mcnemar_p_value(0, 0);
+        assert_eq!(p_value, 1.0);
+        assert!(p_value.is_finite(), "no-discordant p-value must be finite");
+    }
+
+    #[test]
+    fn exact_mcnemar_p_value_matches_two_sided_binomial() {
+        // Pins: the exact two-sided p-value equals 2 * sum_{i<=min} C(n,i) * 0.5^n, capped at 1,
+        // so the zero guard is anchored against real discordant-pair math.
+        // n = 4, min tail = 1: 2 * (C(4,0) + C(4,1)) / 16 = 2 * 5/16 = 0.625.
+        assert!((exact_mcnemar_p_value(3, 1) - 0.625).abs() < 1e-12);
+        // n = 5, min tail = 0: 2 * C(5,0) / 32 = 2/32 = 0.0625.
+        assert!((exact_mcnemar_p_value(5, 0) - 0.0625).abs() < 1e-12);
+        // A near-even split saturates at the 1.0 cap rather than exceeding a probability.
+        assert_eq!(exact_mcnemar_p_value(2, 2), 1.0);
+    }
+}

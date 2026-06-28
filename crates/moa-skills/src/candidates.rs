@@ -99,3 +99,77 @@ fn hash_part(hasher: &mut Sha256, part: &str) {
     hasher.update(part.len().to_le_bytes());
     hasher.update(part.as_bytes());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tenant() -> TenantId {
+        TenantId::from(Uuid::from_u128(7))
+    }
+
+    #[test]
+    fn deterministic_candidate_id_is_stable_for_identical_inputs() {
+        // Pins: the candidate id is a pure function of its inputs, so retries of the same
+        // proposal dedupe to one learning candidate instead of creating duplicates.
+        let session = SessionId(Uuid::from_u128(9));
+        let first =
+            deterministic_skill_candidate_id(tenant(), session, &[], "skill_created", "auth-flow");
+        let second =
+            deterministic_skill_candidate_id(tenant(), session, &[], "skill_created", "auth-flow");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn deterministic_candidate_id_differs_on_operation_name_or_session() {
+        // Pins: changing the operation, target name, or source session yields a distinct id.
+        let session = SessionId(Uuid::from_u128(9));
+        let base =
+            deterministic_skill_candidate_id(tenant(), session, &[], "skill_created", "auth-flow");
+        let other_operation =
+            deterministic_skill_candidate_id(tenant(), session, &[], "skill_improved", "auth-flow");
+        let other_name = deterministic_skill_candidate_id(
+            tenant(),
+            session,
+            &[],
+            "skill_created",
+            "deploy-flow",
+        );
+        let other_session = deterministic_skill_candidate_id(
+            tenant(),
+            SessionId(Uuid::from_u128(10)),
+            &[],
+            "skill_created",
+            "auth-flow",
+        );
+
+        assert_ne!(base, other_operation);
+        assert_ne!(base, other_name);
+        assert_ne!(base, other_session);
+    }
+
+    #[test]
+    fn deterministic_candidate_id_keys_on_sorted_experience_ids_when_present() {
+        // Pins: when source experience ids exist they key the id order-independently and
+        // supersede the session, so the same evidence dedupes across sessions and orderings.
+        let exp1 = Uuid::from_u128(100);
+        let exp2 = Uuid::from_u128(200);
+        let from_session_a = deterministic_skill_candidate_id(
+            tenant(),
+            SessionId(Uuid::from_u128(1)),
+            &[exp1, exp2],
+            "skill_created",
+            "auth-flow",
+        );
+        let from_session_b_reordered = deterministic_skill_candidate_id(
+            tenant(),
+            SessionId(Uuid::from_u128(2)),
+            &[exp2, exp1],
+            "skill_created",
+            "auth-flow",
+        );
+
+        assert_eq!(from_session_a, from_session_b_reordered);
+    }
+}

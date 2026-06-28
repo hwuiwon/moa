@@ -4,6 +4,77 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use uuid::Uuid;
+
+/// Prefix used when a privacy subject id identifies an agent-facing contact.
+pub const CONTACT_PRIVACY_SUBJECT_PREFIX: &str = "contact:";
+
+/// Effective kind encoded by a privacy subject id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacySubjectIdKind {
+    /// The subject id is an ordinary UUID-backed user id.
+    User,
+    /// The subject id is a contact id encoded with the contact prefix.
+    Contact,
+}
+
+/// Parsed privacy subject id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedPrivacySubjectId {
+    /// Parsed UUID value.
+    pub uuid: Uuid,
+    /// Subject kind encoded by the original id.
+    pub kind: PrivacySubjectIdKind,
+}
+
+impl ParsedPrivacySubjectId {
+    /// Parses a privacy subject id.
+    pub fn parse(
+        subject_user_id: &UserId,
+    ) -> std::result::Result<Self, PrivacySubjectIdParseError> {
+        Self::parse_str(subject_user_id.as_str())
+    }
+
+    /// Parses a privacy subject id from a string slice.
+    pub fn parse_str(raw: &str) -> std::result::Result<Self, PrivacySubjectIdParseError> {
+        let (value, kind) = raw
+            .strip_prefix(CONTACT_PRIVACY_SUBJECT_PREFIX)
+            .map_or((raw, PrivacySubjectIdKind::User), |value| {
+                (value, PrivacySubjectIdKind::Contact)
+            });
+        let uuid = Uuid::parse_str(value)?;
+        Ok(Self { uuid, kind })
+    }
+
+    /// Returns true when the original subject id used the contact prefix.
+    #[must_use]
+    pub fn is_contact(self) -> bool {
+        self.kind == PrivacySubjectIdKind::Contact
+    }
+
+    /// Interprets the parsed UUID as a contact id.
+    #[must_use]
+    pub fn contact_id(self) -> ContactId {
+        ContactId(self.uuid)
+    }
+}
+
+/// Formats a contact id as a privacy subject id string.
+#[must_use]
+pub fn contact_privacy_subject_string(contact_id: ContactId) -> String {
+    format!("{CONTACT_PRIVACY_SUBJECT_PREFIX}{}", contact_id.0)
+}
+
+/// Formats a contact id as a privacy subject user id.
+#[must_use]
+pub fn contact_privacy_subject_user_id(contact_id: ContactId) -> UserId {
+    UserId::new(contact_privacy_subject_string(contact_id))
+}
+
+/// Error returned when a privacy subject id cannot be parsed.
+#[derive(Debug, thiserror::Error)]
+#[error("subject_user_id must be a UUID-backed user id: {0}")]
+pub struct PrivacySubjectIdParseError(#[from] uuid::Error);
 
 /// Request payload for exporting privacy data for one subject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

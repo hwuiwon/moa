@@ -33,6 +33,8 @@ pub const BASELINE_SKILL: &str = include_str!("fixtures/baseline_skill.md");
 pub const IMPROVED_SKILL: &str = include_str!("fixtures/improved_skill_diff.md");
 /// Known-bad improvement fixture returned by the scripted LLM.
 pub const REGRESSED_SKILL: &str = include_str!("fixtures/regressed_skill_diff.md");
+/// Improvement fixture that renames the target skill; the improver must reject it.
+pub const RENAMED_SKILL: &str = include_str!("fixtures/renamed_skill_diff.md");
 
 #[derive(Debug, Deserialize)]
 struct SessionFixture {
@@ -59,13 +61,14 @@ pub struct LoadedSession {
     pub events: Vec<EventRecord>,
 }
 
-/// Returns a configured Postgres test database when the opt-in URL is set.
-pub async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_DATABASE_URL")?;
-    Some(
-        bootstrap_test_db()
-            .await
-            .expect("bootstrap skills Postgres test database"),
+/// Bootstraps an isolated Postgres test database, failing loudly when Postgres is unavailable.
+///
+/// These tests run only in the `db-memory` nextest lane. A missing database is a hard error
+/// (panic) rather than a silent skip so the suite can never report a vacuous green without
+/// exercising the real distillation/improvement path.
+pub async fn setup_test_db() -> TestDb {
+    bootstrap_test_db().await.expect(
+        "bootstrap skills Postgres test database; start the compose Postgres or set MOA_DATABASE_URL",
     )
 }
 

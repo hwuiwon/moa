@@ -43,13 +43,13 @@ moa-test-support = { workspace = true }
 tempfile.workspace = true
 
 [[test]]
-name = "distillation"
-path = "tests/distillation.rs"
+name = "distillation_db_memory"
+path = "tests/distillation_db_memory.rs"
 required-features = ["skill-learning"]
 
 [[test]]
-name = "improver"
-path = "tests/improver.rs"
+name = "improver_db_memory"
+path = "tests/improver_db_memory.rs"
 required-features = ["skill-learning"]
 
 [[test]]
@@ -58,6 +58,6 @@ path = "tests/regression.rs"
 required-features = ["regression"]
 
 [[test]]
-name = "draft_proposals"
-path = "tests/draft_proposals.rs"
+name = "draft_proposals_db_memory"
+path = "tests/draft_proposals_db_memory.rs"
 required-features = ["skill-learning"]

@@ -284,3 +284,27 @@ fn check_min_u32(
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compaction_reduction_ratio_with_zero_trigger_tokens_is_zero_not_nan() {
+        // Pins: a zero trigger budget returns a finite 0.0 instead of dividing by zero.
+        let ratio = compaction_reduction_ratio(0, 120);
+        assert_eq!(ratio, 0.0);
+        assert!(
+            ratio.is_finite(),
+            "zero-trigger reduction ratio must be finite"
+        );
+    }
+
+    #[test]
+    fn compaction_reduction_ratio_reports_reclaimed_fraction() {
+        // Pins: the ratio reclaims (trigger - post) / trigger so the guard is not masking real math.
+        assert_eq!(compaction_reduction_ratio(300, 120), 0.6);
+        // Post-compaction larger than the trigger saturates at zero reclaimed tokens.
+        assert_eq!(compaction_reduction_ratio(100, 250), 0.0);
+    }
+}

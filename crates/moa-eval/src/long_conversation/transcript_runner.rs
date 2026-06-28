@@ -19,7 +19,7 @@ use moa_core::{
     AssessmentPhase, AttributionSubjectType, CompletionRequest, CompletionStream, Event,
     EventRange, EventRecord, LLMProvider, LearningCandidateStatus, MoaConfig, MoaError,
     ModelCapabilities, RuntimeEvent, SegmentAssessment, SegmentEvidence, SegmentEvidenceKind,
-    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, TaskSegment,
+    SegmentEvidencePolarity, SegmentOutcome, SessionId, SessionMeta, SessionStore, TaskSegment,
     deterministic_segment_id,
 };
 use moa_eval_core::{
@@ -32,7 +32,9 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::memory_metrics::{count_consolidation_outcomes, count_pages_written};
+use super::memory_metrics::{
+    MemoryScenario, compute_planted_fact_recall, count_consolidation_outcomes, count_pages_written,
+};
 use super::provider_recorded::RecordedScriptedProvider;
 use super::score_card::{
     CacheScores, ContextScores, CostScores, FunctionalScores, LatencyScores, MemoryScores,
@@ -43,6 +45,9 @@ use crate::collector::{CollectedExecution, TrajectoryCollector};
 use crate::setup::build_agent_environment_with_provider;
 
 const MAX_LONG_CONVERSATION_AGENT_TURNS: usize = 32;
+
+/// Default recall@K depth used for planted-fact recall when a case omits `recall_k`.
+const DEFAULT_PLANTED_FACT_RECALL_K: usize = 25;
 
 /// Result of running a recorded long-conversation scenario.
 #[derive(Debug, Clone)]
@@ -297,7 +302,8 @@ async fn drive_transcript(
         user_turn_count: primary.user_turn_count,
         started_at,
         completed_at,
-    });
+    })
+    .await;
     report.learning = learning;
     Ok(report)
 }
@@ -367,7 +373,8 @@ async fn drive_multi_session_transcripts(
         user_turn_count: primary.user_turn_count + secondary.user_turn_count,
         started_at,
         completed_at,
-    });
+    })
+    .await;
     report.learning = learning;
     report.skill_manifest_observations = secondary_observer.observations();
     report.phase_comparison = Some(phase_comparison(
@@ -406,7 +413,8 @@ async fn drive_scripted_user(
         user_turn_count: primary.user_turn_count,
         started_at,
         completed_at,
-    });
+    })
+    .await;
     report.learning = learning;
     validate_scripted_final_answer(&script, &report)?;
     Ok(report)
@@ -445,7 +453,7 @@ struct FinishReportInput<'a> {
     completed_at: chrono::DateTime<Utc>,
 }
 
-fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
+async fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
     let event_payloads = input
         .events
         .iter()
@@ -473,7 +481,10 @@ fn finish_report(input: FinishReportInput<'_>) -> LongRunReport {
         &input.events,
         &execution,
         input.started_at,
-    );
+        input.environment.session_id,
+        input.environment.session_store.as_ref(),
+    )
+    .await;
     let lineage_events = input.environment.lineage.events();
     let mut score_records = score_card.to_score_records(
         input.environment.storage_partition_id.clone(),
@@ -1151,18 +1162,38 @@ fn latest_non_manifest_user_message(request: &CompletionRequest) -> Option<Strin
         .map(|message| message.content.clone())
 }
 
-fn build_score_card(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "score-card assembly threads the run's identity, events, execution, and \
+              session store; bundling them would only add an internal-only struct"
+)]
+async fn build_score_card(
     case: &TestCase,
     provider: &str,
     turn_count: usize,
     event_records: &[EventRecord],
     execution: &CollectedExecution,
     timestamp: chrono::DateTime<Utc>,
+    session_id: SessionId,
+    session_store: &dyn SessionStore,
 ) -> ScoreCard {
     let events = event_records
         .iter()
         .map(|record| record.event.clone())
         .collect::<Vec<_>>();
+    let memory_scenario = memory_scenario_from_case(case);
+    let planted_fact_recall =
+        match compute_planted_fact_recall(&memory_scenario, session_id, session_store).await {
+            Ok(recall) => recall,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    scenario = %case.name,
+                    "failed to compute planted-fact recall; defaulting to 0.0"
+                );
+                0.0
+            }
+        };
     let cache_observations = cache_observations_from_event_records(event_records);
     let error_count = events
         .iter()
@@ -1256,7 +1287,7 @@ fn build_score_card(
             errors_preserved_strict,
         },
         memory: MemoryScores {
-            planted_fact_recall: 0.0,
+            planted_fact_recall,
             pages_written: count_pages_written(&events),
             consolidation_successes: consolidation.successes,
             consolidation_failures: consolidation.failures,
@@ -1341,6 +1372,30 @@ fn cache_observations_from_event_records(records: &[EventRecord]) -> CacheObserv
         cached_input_tokens,
         prefix_stable: report_count > 0 && prefix_stable,
         stable_prefix_bytes: stable_prefix_bytes.unwrap_or(0),
+    }
+}
+
+fn memory_scenario_from_case(case: &TestCase) -> MemoryScenario {
+    let planted_facts = case
+        .metadata
+        .get("planted_facts")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|fact| !fact.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let recall_k = metadata_u32(case, "recall_k")
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_PLANTED_FACT_RECALL_K);
+    MemoryScenario {
+        planted_facts,
+        recall_k,
     }
 }
 
@@ -1430,6 +1485,7 @@ mod tests {
     use chrono::Utc;
     use moa_core::{CacheReport, EventType, ModelId, ModelTier};
 
+    use super::super::memory_metrics::test_session_store::RecordingSessionStore;
     use super::*;
     use moa_eval_core::EvalMetrics;
 
@@ -1476,8 +1532,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn score_card_uses_cache_reports_to_detect_long_conversation_prefix_drift() {
+    #[tokio::test]
+    async fn score_card_uses_cache_reports_to_detect_long_conversation_prefix_drift() {
         let session_id = SessionId::new();
         let records = vec![
             cache_report_record(session_id, 1, false, 512, 100, 0),
@@ -1495,8 +1551,19 @@ mod tests {
             },
             ..CollectedExecution::default()
         };
+        let session_store = RecordingSessionStore::default();
 
-        let score_card = build_score_card(&case, "recorded", 2, &records, &execution, Utc::now());
+        let score_card = build_score_card(
+            &case,
+            "recorded",
+            2,
+            &records,
+            &execution,
+            Utc::now(),
+            session_id,
+            &session_store,
+        )
+        .await;
 
         assert!(
             !score_card.cache.prefix_stable,
@@ -1522,8 +1589,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn score_card_reports_functional_error_preservation_from_context_signal() {
+    #[tokio::test]
+    async fn score_card_reports_functional_error_preservation_from_context_signal() {
         let session_id = SessionId::new();
         let records = vec![
             event_record(
@@ -1555,13 +1622,63 @@ mod tests {
             ..TestCase::default()
         };
         let execution = CollectedExecution::default();
+        let session_store = RecordingSessionStore::default();
 
-        let score_card = build_score_card(&case, "recorded", 1, &records, &execution, Utc::now());
+        let score_card = build_score_card(
+            &case,
+            "recorded",
+            1,
+            &records,
+            &execution,
+            Utc::now(),
+            session_id,
+            &session_store,
+        )
+        .await;
 
         assert_eq!(score_card.context.errors_total_pre_compaction, 1);
         assert_eq!(score_card.context.errors_preserved, 0);
         assert!(!score_card.context.errors_preserved_strict);
         assert!(!score_card.functional.errors_preserved);
+    }
+
+    #[tokio::test]
+    async fn score_card_wires_planted_fact_recall_from_session_store() {
+        // Pins: the score card's planted-fact recall comes from compute_planted_fact_recall against
+        // the live session store (using case metadata), not the legacy hardcoded 0.0.
+        let session_id = SessionId::new();
+        let case = TestCase {
+            name: "planted-recall".to_string(),
+            metadata: HashMap::from([
+                (
+                    "planted_facts".to_string(),
+                    serde_json::json!(["fact alpha", "fact beta"]),
+                ),
+                ("recall_k".to_string(), serde_json::json!(5)),
+            ]),
+            ..TestCase::default()
+        };
+        let execution = CollectedExecution::default();
+        let session_store = RecordingSessionStore::with_recalled_facts(["fact alpha"]);
+
+        let score_card = build_score_card(
+            &case,
+            "recorded",
+            1,
+            &[],
+            &execution,
+            Utc::now(),
+            session_id,
+            &session_store,
+        )
+        .await;
+
+        assert_eq!(score_card.memory.planted_fact_recall, 0.5);
+        assert_eq!(
+            session_store.observed_limits(),
+            vec![Some(5), Some(5)],
+            "each planted fact should be searched once at the configured recall_k"
+        );
     }
 
     #[test]

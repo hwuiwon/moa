@@ -259,9 +259,9 @@ mod tests {
     use moa_core::{
         Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
         ContextProcessor, Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier,
-        QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason, RewriteSource, SessionId,
-        SessionMeta, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat,
-        WorkingContext,
+        ProcessorOutput, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
+        RewriteSource, SessionId, SessionMeta, StopReason, TenantId, TokenPricing, TokenUsage,
+        ToolCallFormat, WorkingContext,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -394,13 +394,37 @@ mod tests {
         .expect("rewrite metadata should deserialize")
     }
 
+    fn assert_decision_metadata(
+        output: &ProcessorOutput,
+        decision: &str,
+        reason: &str,
+        llm_called: bool,
+    ) {
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.decision"),
+            Some(&json!(decision))
+        );
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.reason"),
+            Some(&json!(reason))
+        );
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.llm_called"),
+            Some(&json!(llm_called))
+        );
+        assert_eq!(
+            output.metadata.get("rewrite_source"),
+            Some(&json!(decision))
+        );
+    }
+
     #[tokio::test]
     async fn skips_single_turn_short_query() {
         // Pins: skipped first-turn queries store the original text and do not call the LLM.
         let (rewriter, calls) = rewriter_with_response(response_json("hello there"));
         let mut ctx = context_with_messages(vec![ContextMessage::user("hello")]);
 
-        rewriter
+        let output = rewriter
             .process(&mut ctx)
             .await
             .expect("query rewrite should process");
@@ -409,6 +433,7 @@ mod tests {
         assert_eq!(result.source, RewriteSource::Original);
         assert_eq!(result.retrieval_query, "hello");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_decision_metadata(&output, "skip", "no_rewrite_signal", false);
     }
 
     #[tokio::test]
@@ -521,6 +546,14 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
+            output.metadata.get("moa.query_rewrite.decision"),
+            Some(&json!("cached"))
+        );
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.llm_called"),
+            Some(&json!(false))
+        );
+        assert_eq!(
             output.metadata.get("rewrite_source"),
             Some(&json!("cached"))
         );
@@ -529,7 +562,13 @@ mod tests {
 
     #[tokio::test]
     async fn default_timeout_allows_segment_transition_rewrite_latency() {
-        // Pins: the default timeout allows a live-like rewriter call that reports a segment transition.
+        // Pins: the default timeout is generous enough to admit a live-like
+        // rewriter call (historically ~600ms) and the rewrite completes within
+        // it. The config bound is asserted directly so the test stays fast.
+        assert!(
+            QueryRewriteConfig::default().timeout_ms >= 600,
+            "default timeout must tolerate live-like rewrite latency"
+        );
         let calls = Arc::new(AtomicUsize::new(0));
         let provider = MockProvider {
             response: Arc::new(std::sync::Mutex::new(
@@ -540,7 +579,7 @@ mod tests {
                 })
                 .to_string(),
             )),
-            delay: Duration::from_millis(600),
+            delay: Duration::from_millis(5),
             calls: calls.clone(),
         };
         let rewriter = QueryRewriter::new(QueryRewriteConfig::default(), Arc::new(provider))
@@ -588,10 +627,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(result.source, RewriteSource::Original);
         assert_eq!(result.retrieval_query, "fix that and add tests");
-        assert_eq!(
-            output.metadata.get("moa.query_rewrite.reason"),
-            Some(&json!("no_vector_retrieval"))
-        );
+        assert_decision_metadata(&output, "skip", "no_vector_retrieval", false);
     }
 
     #[tokio::test]
@@ -614,7 +650,7 @@ mod tests {
             ContextMessage::user("fix that"),
         ]);
 
-        rewriter
+        let output = rewriter
             .process(&mut ctx)
             .await
             .expect("timeout should fail open");
@@ -623,6 +659,7 @@ mod tests {
         assert_eq!(result.source, RewriteSource::Original);
         assert_eq!(result.retrieval_query, "fix that");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_decision_metadata(&output, "fallback", "timeout", true);
     }
 
     #[tokio::test]
@@ -635,17 +672,19 @@ mod tests {
         ]);
         let mut second = first.clone();
 
-        rewriter
+        let first_output = rewriter
             .process(&mut first)
             .await
             .expect("first failure should fail open");
-        rewriter
+        let second_output = rewriter
             .process(&mut second)
             .await
             .expect("open circuit should skip");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(metadata_result(&second).source, RewriteSource::Original);
+        assert_decision_metadata(&first_output, "fallback", "llm_error", true);
+        assert_decision_metadata(&second_output, "skip", "circuit_open", false);
     }
 
     #[tokio::test]
@@ -699,11 +738,20 @@ mod tests {
 
     #[test]
     fn circuit_breaker_resets_after_cooldown() {
-        let breaker = CircuitBreaker::new(0.05, 60, 1);
+        // Pins: the breaker fails open once the cooldown elapses. Driven by an
+        // injected clock so the reset is deterministic and instant (no sleep).
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+        let clock_for_breaker = clock.clone();
+        let breaker = CircuitBreaker::with_clock(
+            0.05,
+            60,
+            1,
+            Arc::new(move || clock_for_breaker.load(Ordering::Relaxed)),
+        );
         breaker.record_failure();
         assert!(breaker.is_open());
 
-        std::thread::sleep(Duration::from_millis(1_100));
+        clock.fetch_add(1_100, Ordering::Relaxed);
 
         assert!(!breaker.is_open());
     }

@@ -15,14 +15,20 @@ pub fn fixture_text(name: &str) -> String {
         .join("\n")
 }
 
-/// Asserts a normalizer returned a typed messaging/core error rather than panicking.
-pub fn assert_typed_messaging_error(result: moa_core::Result<InboundMessage>) {
+/// Asserts a normalizer rejected an unparseable payload with the `SerdeJson` variant.
+pub fn assert_serde_json_error(result: moa_core::Result<InboundMessage>) {
     assert!(
-        matches!(
-            result,
-            Err(MoaError::SerdeJson(_)) | Err(MoaError::ValidationError(_))
-        ),
-        "expected typed messaging error, got {result:?}"
+        matches!(result, Err(MoaError::SerdeJson(_))),
+        "expected a SerdeJson deserialization error, got {result:?}"
+    );
+}
+
+/// Asserts a normalizer rejected a well-formed but unsupported event with the
+/// `ValidationError` variant (not a deserialization failure).
+pub fn assert_validation_error(result: moa_core::Result<InboundMessage>) {
+    assert!(
+        matches!(result, Err(MoaError::ValidationError(_))),
+        "expected a ValidationError, got {result:?}"
     );
 }
 

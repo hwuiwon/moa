@@ -113,7 +113,20 @@ impl EmbeddingProvider for OpenAIEmbedding {
 
         let mut data = payload.data;
         data.sort_by_key(|item| item.index);
-        Ok(data.into_iter().map(|item| item.embedding).collect())
+        let embeddings: Vec<Vec<f32>> = data.into_iter().map(|item| item.embedding).collect();
+        // Reject vectors whose width does not match the model's fixed
+        // dimensionality, mirroring the Cohere/Gemini/ZeroEntropy embedders so a
+        // truncated or malformed response cannot silently poison the vector store.
+        for embedding in &embeddings {
+            if embedding.len() != OPENAI_DIMENSIONS {
+                return Err(MoaError::ProviderError(format!(
+                    "embedding dimension mismatch: expected {}, got {}",
+                    OPENAI_DIMENSIONS,
+                    embedding.len()
+                )));
+            }
+        }
+        Ok(embeddings)
     }
 }
 

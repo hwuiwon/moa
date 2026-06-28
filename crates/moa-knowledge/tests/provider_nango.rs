@@ -183,10 +183,58 @@ async fn source_selection_updates_nango_metadata_and_sync_variants() {
         "variant": "selected-sources"
     });
 
-    provider
+    let outcome = provider
+        .apply_source_selection(ApplySourceSelectionRequest { connection })
+        .await;
+    // Pins the concrete 409 outcome: Nango returns 409 Conflict when the
+    // selected-sources variant already exists, and the provider treats that
+    // conflict as idempotent success rather than surfacing it as an error.
+    assert!(
+        outcome.is_ok(),
+        "409 Conflict on variant creation must be treated as idempotent success, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn source_selection_surfaces_non_conflict_variant_error() {
+    // Pins: a non-409 variant-creation failure (500) is surfaced as an HttpStatus
+    // error rather than swallowed like the idempotent 409 conflict path.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/connections/metadata"))
+        .and(bearer_token("nango-test-key"))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/sync/documents/variant/selected-sources"))
+        .and(bearer_token("nango-test-key"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        NangoProvider::with_client(reqwest::Client::new(), server.uri(), "nango-test-key");
+    let mut connection = connection();
+    connection.source_selection = json!({
+        "metadata": {
+            "selected_folder_ids": ["folder-1"],
+            "selected_file_ids": ["file-1"]
+        },
+        "sync_name": "documents",
+        "variant": "selected-sources"
+    });
+
+    let error = provider
         .apply_source_selection(ApplySourceSelectionRequest { connection })
         .await
-        .expect("apply Nango source selection through native primitives");
+        .expect_err("non-409 variant creation failure must surface as an error");
+    assert!(
+        matches!(error, Error::HttpStatus { status: 500, .. }),
+        "500 from variant creation should surface as an HttpStatus error, got {error:?}"
+    );
 }
 
 #[tokio::test]

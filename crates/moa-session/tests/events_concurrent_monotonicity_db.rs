@@ -17,12 +17,9 @@ use uuid::Uuid;
 static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 const MAX_IN_FLIGHT_EMITS: usize = 64;
 
-async fn configured_test_db() -> Option<TestDb> {
-    std::env::var_os("MOA_DATABASE_URL")?;
-    Some(
-        bootstrap_test_db()
-            .await
-            .expect("bootstrap Postgres test database"),
+async fn test_db() -> TestDb {
+    bootstrap_test_db().await.expect(
+        "bootstrap Postgres test database; start the compose Postgres or set MOA_DATABASE_URL",
     )
 }
 
@@ -157,9 +154,7 @@ async fn run_dense_sequence_case(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sequence_num_is_monotonic_under_500_concurrent_emits_in_one_session() {
     let _guard = TEST_LOCK.lock().await;
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     run_dense_sequence_case(&test_db, 1, 500, 0)
         .await
         .expect("single-session sequence invariant should hold");
@@ -168,9 +163,7 @@ async fn sequence_num_is_monotonic_under_500_concurrent_emits_in_one_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sequence_num_is_monotonic_per_session_across_10_concurrent_sessions_with_50_emits_each() {
     let _guard = TEST_LOCK.lock().await;
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     run_dense_sequence_case(&test_db, 10, 50, 1)
         .await
         .expect("multi-session sequence invariant should hold");
@@ -179,9 +172,7 @@ async fn sequence_num_is_monotonic_per_session_across_10_concurrent_sessions_wit
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proptest_arbitrary_emit_orderings_yield_dense_per_session_sequences() {
     let _guard = TEST_LOCK.lock().await;
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let mut config = ProptestConfig::with_cases(20);
     config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(
         "crates/moa-session/proptest-regressions/events.txt",

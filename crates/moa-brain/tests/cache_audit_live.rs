@@ -856,7 +856,16 @@ fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaCo
 }
 
 fn live_provider_tests_enabled() -> bool {
-    env::var("MOA_RUN_LIVE_PROVIDER_TESTS").as_deref() == Ok("1")
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the live lane regardless of casing/spacing.
+    env::var("MOA_RUN_LIVE_PROVIDER_TESTS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn require_live_env(name: &str, test_name: &str) {

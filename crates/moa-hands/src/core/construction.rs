@@ -266,7 +266,7 @@ impl ToolRouter {
         for server in &config.mcp_servers {
             let client = Arc::new(MCPClient::connect(server).await?);
             for tool in client.list_tools().await? {
-                registry.register_mcp_tool(&server.name, tool);
+                registry.register_mcp_tool(&server.name, tool)?;
             }
             self.mcp_servers.insert(server.name.clone(), server.clone());
             self.mcp_clients

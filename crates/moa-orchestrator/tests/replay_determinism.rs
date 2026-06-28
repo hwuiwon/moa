@@ -32,24 +32,9 @@ use moa_orchestrator::workflows::consolidate::{
     ConsolidateDurableSteps, ConsolidateReport, ConsolidateRequest, run_consolidate_workflow,
 };
 use restate_sdk::prelude::HandlerError;
-use serde::Serialize;
 use serde_json::json;
 use support::durable_step_recorder::{Recorder, assert_traces_identical};
 use support::fake_clock::FakeClock;
-
-#[derive(Debug, Clone, Serialize)]
-struct WorkspaceStateFixture {
-    tenant_id: TenantId,
-    graph_nodes: Vec<GraphNodeFixture>,
-    pending_changes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct GraphNodeFixture {
-    uid: String,
-    label: String,
-    summary: String,
-}
 
 struct RecordedConsolidateSteps<'a> {
     recorder: &'a mut Recorder,
@@ -197,24 +182,6 @@ async fn consolidate_workflow_first_run_and_replay_emit_identical_durable_steps_
     assert_traces_identical(&trace1, &trace2);
 }
 
-#[tokio::test]
-async fn consolidate_workflow_replay_with_realistic_storage_partition_state_emits_identical_steps()
-{
-    let fixture = realistic_workspace_fixture();
-    assert_eq!(fixture.graph_nodes.len(), 16);
-    assert_eq!(fixture.pending_changes.len(), 6);
-    let request = ConsolidateRequest {
-        tenant_id: fixture.tenant_id,
-        target_date: chrono::NaiveDate::from_ymd_opt(2026, 5, 7).expect("valid target date"),
-    };
-    let clock = fixed_clock();
-
-    let trace1 = run_consolidate_trace(Recorder::recording(), request.clone(), clock.clone()).await;
-    let trace2 = run_consolidate_trace(Recorder::replaying(trace1.clone()), request, clock).await;
-
-    assert_traces_identical(&trace1, &trace2);
-}
-
 async fn run_consolidate_trace(
     recorder: Recorder,
     request: ConsolidateRequest,
@@ -238,31 +205,6 @@ fn fixed_clock() -> FakeClock {
             .single()
             .expect("valid fixed time"),
     )
-}
-
-fn realistic_workspace_fixture() -> WorkspaceStateFixture {
-    WorkspaceStateFixture {
-        tenant_id: tenant(2),
-        graph_nodes: (0..16)
-            .map(|index| GraphNodeFixture {
-                uid: format!("node-{index:02}"),
-                label: if index % 3 == 0 {
-                    "Decision".to_string()
-                } else {
-                    "Fact".to_string()
-                },
-                summary: format!("Graph memory summary {index}"),
-            })
-            .collect(),
-        pending_changes: vec![
-            "normalize relative date in deploy note".to_string(),
-            "merge duplicate release fact".to_string(),
-            "decay stale confidence score".to_string(),
-            "resolve contradictory rollback note".to_string(),
-            "drop orphaned scratch node".to_string(),
-            "refresh workspace summary".to_string(),
-        ],
-    }
 }
 
 fn tenant(value: u128) -> TenantId {

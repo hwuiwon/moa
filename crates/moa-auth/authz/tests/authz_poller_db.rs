@@ -1,6 +1,8 @@
 //! DB-backed authz outbox poller recovery tests.
 
+use httpmock::{Method::POST, MockServer};
 use moa_authz::{FgaClient, FgaConfig, OutboxPoller, PollerConfig};
+use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 use uuid::Uuid;
@@ -74,6 +76,39 @@ async fn concurrent_pollers_claim_pending_row_once_db() {
     assert_eq!(lease_token, None, "failed attempt should release the lease");
 }
 
+#[tokio::test]
+async fn poller_drains_pending_row_to_succeeded_db() {
+    // Pins: when OpenFGA accepts the write (200), the poller counts the row as
+    // drained and transitions it to 'succeeded' with the lease released — the
+    // happy path that previously only existed against live OpenFGA.
+    let pool = test_pool().await;
+    let server = MockServer::start();
+    let write = server.mock(|when, then| {
+        when.method(POST).path("/stores/store/write");
+        then.status(200).json_body(json!({}));
+    });
+    let row_id = Uuid::new_v4();
+    insert_outbox_row(&pool, row_id, "pending", None, "NULL").await;
+    let poller = poller_with_url(pool.clone(), 1, server.base_url());
+
+    let drained = poller.tick().await.expect("poller tick should complete");
+
+    assert_eq!(
+        drained, 1,
+        "an accepted FGA write counts as one drained row"
+    );
+    write.assert_hits(1);
+    let (status, lease_token, last_error): (String, Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT status, lease_token, last_error FROM authz_outbox WHERE id = $1")
+            .bind(row_id)
+            .fetch_one(&pool)
+            .await
+            .expect("drained row should remain readable");
+    assert_eq!(status, "succeeded");
+    assert_eq!(lease_token, None, "a succeeded row releases its lease");
+    assert_eq!(last_error, None, "a succeeded row has no retry diagnostics");
+}
+
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("MOA_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://moa_owner:dev@localhost:10040/moa".to_string());
@@ -95,53 +130,24 @@ async fn test_pool() -> PgPool {
         .connect(&database_url)
         .await
         .expect("test Postgres should be reachable");
-    sqlx::query(&format!(
-        "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_identifier(&schema_name)
-    ))
-    .execute(&pool)
-    .await
-    .expect("test schema should be created");
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE authz_outbox (
-            id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-            idempotency_key TEXT        NOT NULL UNIQUE,
-            op              TEXT        NOT NULL CHECK (op IN ('write', 'delete')),
-            tuple_user      TEXT        NOT NULL,
-            tuple_relation  TEXT        NOT NULL,
-            tuple_object    TEXT        NOT NULL,
-            model_version   INTEGER     NOT NULL,
-            status          TEXT        NOT NULL DEFAULT 'pending'
-                                          CHECK (status IN ('pending', 'in_flight', 'succeeded', 'dead_letter')),
-            attempts        INTEGER     NOT NULL DEFAULT 0,
-            last_error      TEXT,
-            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            tenant_id       UUID,
-            lease_token     UUID,
-            lease_expires_at TIMESTAMPTZ
-        );
-
-        CREATE INDEX idx_authz_outbox_claimable
-            ON authz_outbox(status, next_attempt_at, lease_expires_at)
-            WHERE status IN ('pending', 'in_flight');
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .expect("authz outbox test schema should apply");
+    moa_migrations::run_auth_schema(&pool, &schema_name)
+        .await
+        .expect("auth baseline should apply");
     pool
 }
 
 fn poller(pool: PgPool, batch_size: usize) -> OutboxPoller {
+    // 127.0.0.1:9 (discard) makes every FGA write fail; failure-path tests rely on it.
+    poller_with_url(pool, batch_size, "http://127.0.0.1:9".to_string())
+}
+
+fn poller_with_url(pool: PgPool, batch_size: usize, url: String) -> OutboxPoller {
     let client = FgaClient::new(FgaConfig {
-        url: "http://127.0.0.1:9".to_string(),
+        url,
         preshared_key: "test".to_string(),
         store_id: "store".to_string(),
         model_id: "model".to_string(),
-        timeout_ms: 100,
+        timeout_ms: 5_000,
     })
     .expect("test FGA config should be valid");
     OutboxPoller::new(

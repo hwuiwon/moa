@@ -21,8 +21,22 @@ use uuid::Uuid;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn require_live_turbopuffer() -> TestResult<()> {
-    if std::env::var("MOA_RUN_LIVE_TURBOPUFFER_TESTS").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LIVE_TURBOPUFFER_TESTS") {
         return Err("set MOA_RUN_LIVE_TURBOPUFFER_TESTS=1 to run live Turbopuffer tests".into());
     }
     required_env("TURBOPUFFER_API_KEY")?;

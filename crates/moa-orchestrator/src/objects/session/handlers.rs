@@ -76,6 +76,8 @@ impl Session for SessionImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<SessionStatus>, HandlerError> {
         annotate_restate_handler_span("Session", "status");
+        let session_id = parse_session_key(ctx.key())?;
+        require_session_participant(&ctx, session_id).await?;
         Ok(Json::from(
             SessionVoState::load_from(&ctx).await?.current_status(),
         ))
@@ -218,6 +220,8 @@ impl Session for SessionImpl {
         reason: Json<String>,
     ) -> Result<Json<CancelResponse>, HandlerError> {
         annotate_restate_handler_span("Session", "request_cancel");
+        let session_id = parse_session_key(ctx.key())?;
+        require_session_participant(&ctx, session_id).await?;
         let pending_state = load_pending_state(&ctx).await?;
         let Some(turn_id) = pending_state.active_turn_id else {
             return Ok(Json::from(CancelResponse {
@@ -391,6 +395,8 @@ impl Session for SessionImpl {
     #[tracing::instrument(skip(self, ctx))]
     async fn destroy(&self, ctx: ObjectContext<'_>) -> Result<(), HandlerError> {
         annotate_restate_handler_span("Session", "destroy");
+        let session_id = parse_session_key(ctx.key())?;
+        require_session_participant(&ctx, session_id).await?;
         ctx.clear_all();
         tracing::info!(key = %ctx.key(), "session VO state cleared");
         Ok(())

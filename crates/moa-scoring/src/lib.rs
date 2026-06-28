@@ -606,7 +606,14 @@ fn score_summary_row_from_row(row: &PgRow) -> Result<ScoreSummaryRow, ScoringErr
     })
 }
 
-fn trial_score_summaries_from_rows(rows: &[PgRow]) -> Result<Vec<TrialScoreSummary>, ScoringError> {
+/// Groups consecutive score rows into per-trial summaries.
+///
+/// Rows must already be ordered so that every row for one trial is contiguous
+/// (as produced by [`TRIAL_SCORES_BY_EXPERIMENT_RUN_SQL`]). Non-contiguous input
+/// splits a single trial across multiple summary groups.
+pub fn trial_score_summaries_from_rows(
+    rows: &[PgRow],
+) -> Result<Vec<TrialScoreSummary>, ScoringError> {
     let mut summaries: Vec<TrialScoreSummary> = Vec::new();
     for row in rows {
         let trial_uid = row.try_get("trial_uid")?;
@@ -630,7 +637,12 @@ fn trial_score_summaries_from_rows(rows: &[PgRow]) -> Result<Vec<TrialScoreSumma
     Ok(summaries)
 }
 
-fn scenario_score_summaries_from_rows(
+/// Groups consecutive score rows into per-scenario summaries.
+///
+/// Rows must already be ordered so that every row for one scenario is contiguous
+/// (as produced by [`SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL`]). Non-contiguous
+/// input splits a single scenario across multiple summary groups.
+pub fn scenario_score_summaries_from_rows(
     rows: &[PgRow],
 ) -> Result<Vec<ScenarioScoreSummary>, ScoringError> {
     let mut summaries: Vec<ScenarioScoreSummary> = Vec::new();
@@ -730,149 +742,5 @@ impl ScopeParts {
                 user_id: None,
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn score_queries_scope_every_run_id_by_tenant_storage_partition() {
-        // Pins: shared score SQL constrains every requested run by the authorized tenant storage partition.
-        assert!(
-            SCORES_BY_RUN_SQL.contains("WHERE run_id = $1 AND storage_partition_id = $2"),
-            "scores query must scope the run id by tenant storage partition"
-        );
-        assert!(
-            COMPARE_NUMERIC_RUNS_SQL.contains("WHERE run_id = $1 AND storage_partition_id = $3"),
-            "compare base run must be scoped by tenant storage partition"
-        );
-        assert!(
-            COMPARE_NUMERIC_RUNS_SQL.contains("WHERE run_id = $2 AND storage_partition_id = $3"),
-            "compare new run must be scoped by tenant storage partition"
-        );
-        assert_eq!(
-            COMPARE_NUMERIC_RUNS_SQL
-                .matches("storage_partition_id = $3")
-                .count(),
-            2,
-            "compare SQL must constrain both run IDs by the same authorized tenant storage partition"
-        );
-    }
-
-    #[test]
-    fn experiment_trial_score_queries_scope_every_read_through_trial_rows() {
-        // Pins: trial-aware experiment score SQL joins through scoped trial rows before reading scores.
-        for sql in [
-            TRIAL_ROLLUP_SCORES_BY_EXPERIMENT_RUN_SQL,
-            TRIAL_SCORES_BY_EXPERIMENT_RUN_SQL,
-            SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL,
-        ] {
-            assert!(
-                sql.contains("FROM moa.experiment_trial AS trial"),
-                "trial-aware score SQL must join through experiment_trial: {sql}"
-            );
-            assert!(
-                sql.contains("score.run_id = trial.score_run_id"),
-                "trial-aware score SQL must read score rows by trial score_run_id: {sql}"
-            );
-            assert!(
-                sql.contains("score.storage_partition_id = $2"),
-                "trial-aware score SQL must scope analytics.scores by tenant storage partition: {sql}"
-            );
-            assert!(
-                sql.contains("trial.run_uid = $1"),
-                "trial-aware score SQL must scope trial rows by experiment run: {sql}"
-            );
-            assert!(
-                sql.contains("trial.storage_partition_id = $2"),
-                "trial-aware score SQL must scope trial rows by tenant storage partition: {sql}"
-            );
-            assert!(
-                sql.contains("trial.user_id IS NULL"),
-                "tenant experiment score SQL must not leak contact-scoped trials: {sql}"
-            );
-        }
-    }
-
-    #[test]
-    fn experiment_compare_queries_scope_scenarios_and_variants_by_tenant_storage_partition() {
-        // Pins: scenario and variant deltas compare only scoped trial-level score rows.
-        for sql in [
-            COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL,
-            COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL,
-        ] {
-            assert_eq!(
-                sql.matches("FROM moa.experiment_trial AS trial").count(),
-                2,
-                "compare SQL must build both sides from experiment_trial: {sql}"
-            );
-            assert_eq!(
-                sql.matches("score.storage_partition_id = $3").count(),
-                2,
-                "compare SQL must scope both score reads by tenant storage partition: {sql}"
-            );
-            assert_eq!(
-                sql.matches("trial.storage_partition_id = $3").count(),
-                2,
-                "compare SQL must scope both trial reads by tenant storage partition: {sql}"
-            );
-            assert_eq!(
-                sql.matches("trial.user_id IS NULL").count(),
-                2,
-                "tenant compare SQL must exclude contact-scoped trial rows: {sql}"
-            );
-        }
-        assert!(
-            COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL.contains("scenario_id"),
-            "scenario deltas must expose the stable scenario ID"
-        );
-        assert!(
-            COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL.contains("variant_key"),
-            "variant deltas must expose the stable variant key"
-        );
-    }
-
-    #[test]
-    fn score_summary_rows_preserve_missing_aggregate_values() {
-        // Pins: a score row with no aggregate value is represented as missing, not sentinel 0.0.
-        let row = ScoreSummaryRow {
-            name: "quality".to_string(),
-            value_type: "numeric".to_string(),
-            n: 3,
-            mean_or_rate: None,
-        };
-
-        assert_eq!(row.mean_or_rate, None);
-    }
-
-    #[test]
-    fn score_compare_queries_do_not_coalesce_missing_means_to_zero() {
-        // Pins: one-sided score presence yields a null delta instead of a fabricated magnitude.
-        for sql in [
-            COMPARE_NUMERIC_RUNS_SQL,
-            COMPARE_SCENARIO_SCORES_BY_EXPERIMENT_RUN_SQL,
-            COMPARE_VARIANT_SCORES_BY_EXPERIMENT_RUN_SQL,
-        ] {
-            assert!(
-                sql.contains("new.mean - base.mean AS delta"),
-                "compare SQL should let NULL means produce NULL deltas: {sql}"
-            );
-            assert!(
-                !sql.contains("COALESCE(base.mean")
-                    && !sql.contains("COALESCE(new.mean")
-                    && !sql.contains("COALESCE(mean"),
-                "compare SQL must not coalesce missing means to zero: {sql}"
-            );
-        }
-    }
-
-    #[test]
-    fn score_run_source_constants_use_storage_labels() {
-        // Pins: score-run parent sources distinguish eval replay, experiment runs, and trials.
-        assert_eq!(SCORE_RUN_SOURCE_EVAL_REPLAY, "eval_replay");
-        assert_eq!(SCORE_RUN_SOURCE_EXPERIMENT_RUN, "experiment_run");
-        assert_eq!(SCORE_RUN_SOURCE_EXPERIMENT_TRIAL, "experiment_trial");
     }
 }

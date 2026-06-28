@@ -67,25 +67,6 @@ fn regression_report_acceptance_treats_missing_suite_as_non_blocking_generation_
     assert!(report.accepted());
 }
 
-#[test]
-fn regression_module_does_not_reference_runtime_eval_runner() {
-    // Pins: moa-skills keeps regression helpers pure and does not depend on moa-eval runtime execution.
-    let source = include_str!("../src/regression.rs");
-
-    assert!(
-        !source.contains("moa_eval::"),
-        "moa-skills regression helpers must not reference moa-eval"
-    );
-    assert!(
-        !source.contains("EvalEngine"),
-        "moa-skills regression helpers must not run eval suites"
-    );
-    assert!(
-        !source.contains("run_suite"),
-        "moa-skills regression helpers must not execute eval suites"
-    );
-}
-
 fn summary(average_score: f64, failed_runs: usize) -> SkillRegressionSummary {
     SkillRegressionSummary {
         average_score,

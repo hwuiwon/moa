@@ -23,6 +23,9 @@ const TEXT_SPLIT: &str = include_str!("support/fixtures/sse/gemini_text_split.ss
 const TOOL_CALL: &str = include_str!("support/fixtures/sse/gemini_tool_call.sse");
 const MALFORMED: &str = include_str!("support/fixtures/sse/gemini_malformed.sse");
 const DISCONNECT: &str = include_str!("support/fixtures/sse/gemini_disconnect.sse");
+const MAX_TOKENS: &str = include_str!("support/fixtures/sse/gemini_max_tokens.sse");
+const UNKNOWN_STOP: &str = include_str!("support/fixtures/sse/gemini_unknown_stop.sse");
+const EMPTY: &str = include_str!("support/fixtures/sse/gemini_empty.sse");
 
 #[tokio::test]
 async fn gemini_offline_completion_returns_text_for_minimal_request() {
@@ -202,6 +205,101 @@ async fn gemini_offline_streaming_disconnect_mid_response_surfaces_typed_error_w
         matches!(error, MoaError::StreamError(_)),
         "expected StreamError, got {error:?}"
     );
+}
+
+#[tokio::test]
+async fn gemini_offline_max_tokens_finish_reason_maps_to_max_tokens() {
+    // Pins: a MAX_TOKENS finishReason surfaces as StopReason::MaxTokens with usage intact.
+    let server = MockServer::start().await;
+    mount_gemini_sse(&server, MAX_TOKENS, "truncate me").await;
+    let provider = provider(&server, 0);
+
+    let response = provider
+        .complete(minimal_request("truncate me"))
+        .await
+        .expect("request should start")
+        .collect()
+        .await
+        .expect("stream should complete");
+
+    assert_eq!(response.text, "Partial");
+    assert_eq!(response.stop_reason, StopReason::MaxTokens);
+    assert_eq!(response.usage.output_tokens, 64);
+    assert_eq!(response.usage.input_tokens_cache_read, 4);
+}
+
+#[tokio::test]
+async fn gemini_offline_unknown_finish_reason_maps_to_other() {
+    // Pins: an unmodeled finishReason is preserved verbatim as StopReason::Other.
+    let server = MockServer::start().await;
+    mount_gemini_sse(&server, UNKNOWN_STOP, "stop oddly").await;
+    let provider = provider(&server, 0);
+
+    let response = provider
+        .complete(minimal_request("stop oddly"))
+        .await
+        .expect("request should start")
+        .collect()
+        .await
+        .expect("stream should complete");
+
+    assert_eq!(
+        response.stop_reason,
+        StopReason::Other("SAFETY".to_string())
+    );
+}
+
+#[tokio::test]
+async fn gemini_offline_empty_candidate_yields_empty_text_with_usage() {
+    // Pins: a terminal candidate with no parts returns empty text but real usage/stop.
+    let server = MockServer::start().await;
+    mount_gemini_sse(&server, EMPTY, "say nothing").await;
+    let provider = provider(&server, 0);
+
+    let response = provider
+        .complete(minimal_request("say nothing"))
+        .await
+        .expect("request should start")
+        .collect()
+        .await
+        .expect("stream should complete");
+
+    assert_eq!(response.text, "");
+    assert!(response.content.is_empty());
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+    assert_eq!(response.usage.input_tokens_uncached, 4);
+    assert_eq!(response.usage.input_tokens_cache_read, 3);
+    assert_eq!(response.usage.output_tokens, 0);
+}
+
+#[tokio::test]
+async fn gemini_offline_exhausted_429_surfaces_rate_limited_error() {
+    // Pins: a 429 that survives every retry surfaces typed RateLimited, not HttpStatus{429}.
+    tokio::time::pause();
+    let server = MockServer::start().await;
+    mount_always_status(&server, 429, r#"{"error":{"message":"rate limit"}}"#).await;
+    let provider = provider(&server, 1);
+
+    let task = tokio::spawn(async move {
+        provider
+            .complete(minimal_request("retry until exhausted"))
+            .await
+            .expect("request should start")
+            .collect()
+            .await
+    });
+    tokio::task::yield_now().await;
+    advance(Duration::from_secs(5)).await;
+    let error = task
+        .await
+        .expect("task should join")
+        .expect_err("exhausted 429 should fail");
+
+    assert!(
+        matches!(error, MoaError::RateLimited { .. }),
+        "expected typed RateLimited, got {error:?}"
+    );
+    assert_eq!(request_count(&server).await, 2);
 }
 
 fn provider(server: &MockServer, max_retries: usize) -> GeminiProvider {

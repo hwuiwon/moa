@@ -11,7 +11,8 @@ use moa_db::ScopedConn;
 use moa_memory_graph::{AgeGraphStore, NodeLabel, PiiClass, cypher};
 use moa_memory_ingest::{
     Conflict, ContradictionContext, ContradictionDetector, EmbeddedFact, FastError, FastPathCtx,
-    FastRememberRequest, ForgetPattern, IngestError, fast_forget, fast_remember,
+    FastRememberRequest, ForgetPattern, IngestError, RrfPlusJudgeDetector, fast_forget,
+    fast_remember,
 };
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan};
 use moa_memory_vector::{PgvectorStore, VECTOR_DIMENSION};
@@ -754,6 +755,81 @@ async fn fast_forget_soft_all_respects_contact_scope() {
         node_valid_to_for_contact(session_store.pool(), tenant_id, contact_b, b_one)
             .await
             .is_none()
+    );
+
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn fast_remember_real_detector_flags_restated_fact_as_duplicate_db_memory() {
+    // Pins: the production RrfPlusJudgeDetector (NoopReranker + HeuristicJudge, no
+    // network/credentials) drives the real fast-path candidate pipeline — vector
+    // KNN + lexical FTS + RRF + hydrate against seeded Postgres rows — and the
+    // heuristic judge flags a re-stated fact as a duplicate of the existing node.
+    // Every other fast-path test injects a scripted detector, so this is the only
+    // coverage exercising the real detector's `check_one_fast` against real rows.
+    // The detector is given generous budgets so first-call (cold-schema) query
+    // compilation does not trip the latency guard; the production 250ms budget is
+    // already pinned by `fast_remember_judge_timeout_commits_indeterminate`.
+    let _guard = TEST_LOCK.lock().await;
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let tenant_id = Uuid::now_v7();
+    seed_tenant_embedder_state(session_store.pool(), tenant_id).await;
+
+    let fact = "the primary datastore is postgres";
+
+    // Seed an existing node through the real fast write path (scripted Insert) so
+    // the detector has a node_index row + embedding to retrieve.
+    let seed_ctx = test_ctx(
+        session_store.pool(),
+        tenant_id,
+        Conflict::Insert,
+        Duration::ZERO,
+        PiiClass::None,
+    );
+    let seeded_uid = fast_remember(tenant_remember_request(tenant_id, fact), &seed_ctx)
+        .await
+        .expect("seed first fact");
+
+    // Drive the real detector's fast-path detection method directly against the
+    // seeded rows. The embedding matches the seeded node's stored vector (same
+    // deterministic embedder over identical, unredacted text), so vector KNN and
+    // lexical FTS both surface the candidate and the heuristic judge restates it.
+    let detector =
+        RrfPlusJudgeDetector::from_cohere_api_key_model_or_heuristic("", "heuristic-judge", 1_000)
+            .with_budgets(
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            );
+    let scope = RlsContext::tenant(TenantId::from(tenant_id));
+    let vector = Arc::new(PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        scope.clone(),
+    ));
+    let contradiction_ctx =
+        ContradictionContext::for_app_role(session_store.pool().clone(), scope, vector);
+
+    let verdict = detector
+        .check_one_fast(
+            fact,
+            &deterministic_vector(fact),
+            NodeLabel::Fact,
+            PiiClass::None,
+            &contradiction_ctx,
+        )
+        .await
+        .expect("real detector fast check");
+
+    assert_eq!(
+        verdict,
+        Conflict::Duplicate(seeded_uid),
+        "real detector must flag the restated fact as a duplicate of the seeded node"
     );
 
     drop(session_store);

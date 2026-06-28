@@ -516,6 +516,72 @@ async fn privacy_erase_idempotent() {
 }
 
 #[tokio::test]
+async fn approval_jti_replay_blocked_through_erase_db_memory() {
+    // Pins: the DB-backed single-use guard rejects a second erase that reuses the same approval
+    // token JTI, even though the first erase already consumed it from moa.audit_jti_used.
+    let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;
+    let (store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated test store");
+    let (tenant_id, storage_partition_id) = tenant_workspace();
+    let subject = Uuid::now_v7();
+    create_erase_test_node(
+        store.pool(),
+        tenant_id,
+        subject,
+        &storage_partition_id,
+        &subject.to_string(),
+        "replay-guarded erasure fact",
+    )
+    .await;
+    // A single signed approval token (one JTI) reused across two erase invocations.
+    let claims = valid_claims_for(subject, tenant_id, "erase");
+    let first = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "first erase consumes the token".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims: claims.clone(),
+        pii_vault_secret: None,
+    };
+    let first_response = run_privacy_erase(first)
+        .await
+        .expect("first erase succeeds");
+    assert_eq!(first_response.candidate_count, 1);
+
+    let replay = PrivacyEraseContext {
+        pool: store.pool().clone(),
+        tenant_id: TenantId::from(tenant_id),
+        storage_partition_id: storage_partition_id.clone(),
+        subject_user: subject,
+        subject_user_id: subject.to_string(),
+        reason: "replayed token must be rejected".to_string(),
+        dry_run: false,
+        contact_erasure_scope: None,
+        claims,
+        pii_vault_secret: None,
+    };
+
+    let error = run_privacy_erase(replay)
+        .await
+        .expect_err("reusing a consumed approval JTI must be rejected");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("replayed"),
+        "replayed approval token should be rejected, got: {rendered}"
+    );
+
+    drop(store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
 async fn privacy_erase_cross_workspace_is_noop_for_graph_data() {
     // Pins: erase candidate enumeration stays scoped to the requested workspace.
     let _guard = PRIVACY_ERASE_TEST_LOCK.lock().await;

@@ -58,6 +58,38 @@ fn object(tenant_id: TenantId, connection_uid: Uuid) -> KnowledgeObject {
     }
 }
 
+/// Builds a CRM-account object whose derived group carries a single member.
+///
+/// The `connection_uid` drives the derived `group_key`, so reusing the same
+/// value across tenants yields an identical group_key (only the tenant-scoped
+/// group_uid differs).
+fn object_with_member(
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    member_email: &str,
+) -> KnowledgeObject {
+    KnowledgeObject {
+        object_uid: Uuid::now_v7(),
+        tenant_id,
+        connection_uid,
+        object_type: "crm_account".to_string(),
+        source_id: "crm-account-acct1".to_string(),
+        parent_source_id: None,
+        source_uri: None,
+        title: Some("Acme".to_string()),
+        change_token: Some("etag-acct1".to_string()),
+        metadata: json!({
+            "crm": {
+                "account": { "id": "acct1", "name": "Acme" },
+                "members": [ { "email": member_email } ]
+            }
+        }),
+        status: ObjectStatus::Active,
+        source_updated_at: Some(Utc::now()),
+        deleted_at: None,
+    }
+}
+
 #[tokio::test]
 async fn contact_group_sync_resolves_verified_members_and_deactivates_absent_members_db_knowledge()
 {
@@ -105,8 +137,10 @@ async fn contact_group_sync_resolves_verified_members_and_deactivates_absent_mem
         2,
         "setup should derive both source member identities"
     );
+    // `insert_contact_with_point` hashes via the env-named key; the resolver takes
+    // the hex key directly, so pass the same key material explicitly here.
     let resolved_contact_ids =
-        resolve_verified_contact_ids(pool, tenant_id, &hash_key_env, &member_points)
+        resolve_verified_contact_ids(pool, tenant_id, TEST_HASH_KEY_HEX, &member_points)
             .await
             .expect("resolver should return verified contacts");
     assert_eq!(
@@ -254,6 +288,180 @@ async fn contact_group_sync_resolves_verified_members_and_deactivates_absent_mem
         !group_row.3.to_string().contains('@'),
         "persisted group metadata should not expose member contact points"
     );
+}
+
+#[tokio::test]
+async fn contact_group_targets_isolate_members_across_tenants_for_same_group_key_db_knowledge() {
+    // Pins: two tenants whose derived groups share an identical group_key cannot
+    // read each other's group members through contact_group_targets; RLS scopes
+    // the targeting API to the connection's own tenant.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let pool = db.store().pool();
+    let tenant_a = TenantId::from(Uuid::now_v7());
+    let tenant_b = TenantId::from(Uuid::now_v7());
+    let repo_a = repository(&db, tenant_a);
+    let repo_b = repository(&db, tenant_b);
+    // A shared connection_uid makes the derived group_key identical across
+    // tenants, so only tenant_id distinguishes the two groups and their members.
+    let shared_connection_uid = Uuid::now_v7();
+    let hash_key_env = format!(
+        "MOA_TEST_CONTACT_POINT_HASH_KEY_{}",
+        Uuid::now_v7().simple()
+    );
+    // SAFETY: this test writes a unique process env key that no other test reads.
+    unsafe {
+        std::env::set_var(&hash_key_env, TEST_HASH_KEY_HEX);
+    }
+
+    let member_a_email = "tenant-a-member@example.invalid";
+    let member_b_email = "tenant-b-member@example.invalid";
+    let (group_uid_a, group_key_a, contact_a) = persist_tenant_group(
+        pool,
+        &repo_a,
+        tenant_a,
+        shared_connection_uid,
+        &hash_key_env,
+        member_a_email,
+    )
+    .await;
+    let (group_uid_b, group_key_b, contact_b) = persist_tenant_group(
+        pool,
+        &repo_b,
+        tenant_b,
+        shared_connection_uid,
+        &hash_key_env,
+        member_b_email,
+    )
+    .await;
+
+    assert_eq!(
+        group_key_a, group_key_b,
+        "both tenants should derive an identical group_key from the shared connection + account"
+    );
+    assert_ne!(
+        group_uid_a, group_uid_b,
+        "group_uid must remain tenant-scoped even when the group_key matches"
+    );
+
+    // Each tenant sees only its own verified member through the targeting API.
+    let target_a = repo_a
+        .contact_group_targets(tenant_a, &group_key_a)
+        .await
+        .expect("load tenant A targets")
+        .expect("tenant A group should resolve");
+    assert_eq!(
+        target_a
+            .members
+            .iter()
+            .map(|member| member.contact_id)
+            .collect::<Vec<_>>(),
+        vec![contact_a],
+        "tenant A should see only its own member"
+    );
+    assert!(
+        !target_a
+            .members
+            .iter()
+            .any(|member| member.contact_id == contact_b),
+        "tenant A must not see tenant B's member"
+    );
+
+    let target_b = repo_b
+        .contact_group_targets(tenant_b, &group_key_b)
+        .await
+        .expect("load tenant B targets")
+        .expect("tenant B group should resolve");
+    assert_eq!(
+        target_b
+            .members
+            .iter()
+            .map(|member| member.contact_id)
+            .collect::<Vec<_>>(),
+        vec![contact_b],
+        "tenant B should see only its own member"
+    );
+    assert!(
+        !target_b
+            .members
+            .iter()
+            .any(|member| member.contact_id == contact_a),
+        "tenant B must not see tenant A's member"
+    );
+
+    // Crux of the RLS proof: querying the OTHER tenant's group (correct tenant_id
+    // and group_key) from this scope must resolve to nothing, because RLS hides
+    // the other tenant's rows from this connection.
+    assert!(
+        repo_b
+            .contact_group_targets(tenant_a, &group_key_a)
+            .await
+            .expect("tenant B scope query for tenant A group")
+            .is_none(),
+        "tenant B scope must not resolve tenant A's derived group even with its tenant_id + group_key"
+    );
+    assert!(
+        repo_a
+            .contact_group_targets(tenant_b, &group_key_b)
+            .await
+            .expect("tenant A scope query for tenant B group")
+            .is_none(),
+        "tenant A scope must not resolve tenant B's derived group even with its tenant_id + group_key"
+    );
+}
+
+/// Persists a single-member derived contact group for one tenant.
+///
+/// Inserts a verified contact for `member_email`, derives the CRM-account group
+/// from a shared-connection object, and writes the group plus its memberships
+/// through the tenant-scoped repository. Returns the derived
+/// `(group_uid, group_key, verified_contact_id)`.
+async fn persist_tenant_group(
+    pool: &PgPool,
+    repo: &PostgresKnowledgeRepository,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+    hash_key_env: &str,
+    member_email: &str,
+) -> (Uuid, String, ContactId) {
+    let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let contact_id = insert_contact_with_point(
+        pool,
+        tenant_id,
+        &storage_partition_id,
+        hash_key_env,
+        ContactPointKind::Email,
+        member_email,
+        true,
+    )
+    .await;
+    let object = object_with_member(tenant_id, connection_uid, member_email);
+    let member_points = contact_group_member_contact_points(&object);
+    // `insert_contact_with_point` hashes via the env-named key; the resolver takes
+    // the hex key directly, so pass the same key material explicitly here.
+    let resolved = resolve_verified_contact_ids(pool, tenant_id, TEST_HASH_KEY_HEX, &member_points)
+        .await
+        .expect("resolve verified contacts");
+    assert_eq!(
+        resolved,
+        vec![contact_id],
+        "only the tenant's own verified member should resolve"
+    );
+    let delta = derive_contact_groups_from_object_with_resolved_members(&object, &resolved);
+    let group = delta
+        .groups
+        .first()
+        .expect("derived delta should include a group")
+        .clone();
+    let group_key = group.group_key.clone();
+    repo.upsert_contact_group(group.clone())
+        .await
+        .expect("upsert derived contact group");
+    repo.replace_contact_group_memberships(group.group_uid, delta.memberships)
+        .await
+        .expect("persist derived memberships");
+    (group.group_uid, group_key, contact_id)
 }
 
 async fn insert_contact_with_point(

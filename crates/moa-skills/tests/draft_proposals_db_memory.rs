@@ -12,17 +12,15 @@ use moa_skills::distiller::{DistillationOutcome, distill_skill_with_learning};
 use moa_skills::improver::{ImprovementResult, improve_skill_with_learning};
 use support::{
     BASELINE_SKILL, IMPROVED_SKILL, SESSION_WITH_5_TOOL_CALLS, active_semantic_version,
-    artifact_revision_count, configured_test_db, learning_store, load_optional_active_skill,
-    load_session_fixture, scripted_router, seed_skill, session_storage_partition_id,
-    skill_markdown, skill_row_count, tenant_scope, test_config,
+    artifact_revision_count, learning_store, load_optional_active_skill, load_session_fixture,
+    scripted_router, seed_skill, session_storage_partition_id, setup_test_db, skill_markdown,
+    skill_row_count, tenant_scope, test_config,
 };
 
 #[tokio::test]
 async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db() {
     // Pins: generated skill creation remains a draft artifact and review candidate until accepted.
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
@@ -96,9 +94,7 @@ async fn skill_creation_proposal_stores_draft_artifact_without_active_skill_db()
 #[tokio::test]
 async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_active_skill_db() {
     // Pins: generated skill improvement stores a draft and leaves the active skill unchanged.
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let storage_partition_id = session_storage_partition_id(&loaded.session);
@@ -158,9 +154,7 @@ async fn skill_improvement_proposal_stores_draft_artifact_without_replacing_acti
 #[tokio::test]
 async fn skill_proposal_retry_reuses_candidate_id() {
     // Pins: retrying the same proposal reuses the candidate and draft artifact revision.
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(
@@ -211,9 +205,7 @@ async fn skill_proposal_retry_reuses_candidate_id() {
 #[tokio::test]
 async fn concurrent_skill_proposal_attempts_share_one_draft_artifact_db() {
     // Pins: duplicate workers proposing the same skill share one candidate and one draft revision.
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = setup_test_db().await;
     let loaded = load_session_fixture(SESSION_WITH_5_TOOL_CALLS);
     let (config, _temp_dir) = test_config(&test_db);
     let proposed = skill_markdown(

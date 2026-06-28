@@ -100,28 +100,6 @@ fn write_string(out: &mut Vec<u8>, string: &str) {
     out.push(b'"');
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn canonicalize_sorts_keys() {
-        // Pins: object keys are sorted deterministically before signing.
-        let value = json!({ "b": 1, "a": 2 });
-
-        let canonical = canonicalize(&value).expect("canonicalize");
-
-        assert_eq!(canonical, br#"{"a":2,"b":1}"#);
-    }
-
-    #[test]
-    fn canonicalize_rejects_floats() {
-        // Pins: MOA audit payloads cannot silently sign non-canonical floats.
-        let value = json!({ "amount": 1.25 });
-
-        let error = canonicalize(&value).expect_err("float should be rejected");
-
-        assert!(matches!(error, JcsError::FloatUnsupported));
-    }
-}
+// Canonicalization behavior is pinned by the RFC 8785 known-answer tests in
+// `tests/jcs_known_answers.rs`, which strictly subsume the earlier inline
+// sort-keys / reject-floats unit tests.

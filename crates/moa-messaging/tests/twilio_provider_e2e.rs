@@ -210,10 +210,16 @@ impl CredentialVault for LocalTwilioVault {
 }
 
 fn local_env_bool(name: &str) -> bool {
-    matches!(
-        optional_local_env(name).as_deref(),
-        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-    )
+    // Accept the common truthy spellings (`1`, `true`, `yes`, `on`) so a
+    // developer's `.env` enables the live lane regardless of casing/spacing.
+    optional_local_env(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn required_local_env(name: &str) -> String {

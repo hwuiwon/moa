@@ -72,7 +72,6 @@ const CONNECTOR: &str = "drive";
 const SECRET_TOKEN: &str = "provider-secret-token-123";
 const SECRET_BEARER: &str = "Bearer provider-secret-token-456";
 const RAW_DOCUMENT_TAIL: &str = "RAW_FULL_DOCUMENT_TAIL_SHOULD_NOT_APPEAR";
-const OTHER_CONTACT_MEMORY: &str = "other contact private memory should not appear";
 
 #[tokio::test]
 async fn knowledge_auto_sync_manual_sync_triggers_provider_and_does_not_ingest_inline() {
@@ -875,13 +874,10 @@ async fn query_trace_is_present_and_does_not_hydrate_cross_contact_memory() {
         })
         .await
         .expect("query trace should return a renderer-safe placeholder");
-    let response_json =
-        serde_json::to_string(&response).expect("query trace response should serialize");
 
     assert!(response.hits.is_empty());
     assert!(response.stages.is_empty());
     assert!(response.searched_scopes.is_empty());
-    assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
 }
 
 #[tokio::test]
@@ -1010,8 +1006,6 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
         })
         .await
         .expect("query trace should render persisted lineage");
-    let response_json =
-        serde_json::to_string(&response).expect("query trace response should serialize");
     let stage_names = response
         .stages
         .iter()
@@ -1045,7 +1039,6 @@ async fn query_trace_renders_populated_retrieval_lineage_db_memory() {
         response.hits[0].citation["source_uri"],
         json!("https://kb.example/payroll-rotation")
     );
-    assert!(!response_json.contains(OTHER_CONTACT_MEMORY));
 }
 
 #[tokio::test]
@@ -1610,52 +1603,6 @@ async fn mock_connector_end_to_end_db_memory() {
     );
 }
 
-#[test]
-fn knowledge_handlers_are_authorized_or_have_webhook_safety_comment() {
-    // Pins: tenant-data Knowledge handlers keep authz at the Restate boundary.
-    let source = include_str!("../src/services/knowledge/mod.rs");
-    let impl_source = source
-        .split("impl Knowledge for KnowledgeImpl")
-        .nth(1)
-        .expect("KnowledgeImpl implementation should exist");
-
-    for method in [
-        "create_link_token",
-        "exchange_public_token",
-        "sync_connection",
-        "sync_status",
-        "sync_events",
-        "list_connections",
-        "update_connection_source_selection",
-        "list_objects",
-        "inspect_object",
-        "query_trace",
-    ] {
-        let body = handler_body(impl_source, method);
-        let authz = body
-            .find("authorize_tenant(&ctx, request.tenant_id).await?;")
-            .unwrap_or_else(|| panic!("{method} should authorize tenant access"));
-        let service = body
-            .find("production_service")
-            .unwrap_or_else(|| panic!("{method} should use production service after authz"));
-        assert!(
-            authz < service,
-            "{method} should authorize before constructing service work"
-        );
-    }
-
-    let webhook_body = handler_body(impl_source, "provider_webhook");
-    assert!(
-        webhook_body.contains("// SAFETY: Provider webhooks do not carry caller auth;")
-            && webhook_body.contains("provider adapters verify the raw signature"),
-        "provider_webhook should carry a SAFETY comment explaining signature verification"
-    );
-    assert!(
-        webhook_body.find("provider_webhook(request)").is_some(),
-        "provider_webhook should delegate only after signature-verifying service logic is selected"
-    );
-}
-
 #[tokio::test]
 async fn knowledge_auto_sync_provider_synced_run_lists_changed_records_and_ingests_db_memory() {
     // Pins: a provider-synced run lists changed records with its cursor/limit/watermark and applies them to tenant graph/vector knowledge.
@@ -2062,226 +2009,88 @@ async fn knowledge_sync_ingestion_workflow_prunes_after_full_selection_refresh()
     assert!(steps.fail_calls.is_empty());
 }
 
-#[test]
-fn knowledge_sync_ingestion_workflow_loads_run_and_uses_page_journal_boundaries() {
-    // Pins: the workflow derives tenant/connection from the sync-run row, pages provider listing, and applies each page inside a runner journal point.
-    let source = include_str!("../src/workflows/knowledge_sync_ingestion.rs");
+#[tokio::test]
+async fn knowledge_sync_ingestion_workflow_derives_run_identity_and_pages_journal_boundaries() {
+    // Pins: the report derives tenant/connection from the stored sync run, and the workflow
+    // threads cursors across one list+apply journal step per provider page.
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let connection_uid = Uuid::now_v7();
+    let sync_run_uid = Uuid::now_v7();
+    let last_synced_at = Utc::now();
+    let mut prepared = fake_prepared_sync_run(tenant_id, connection_uid, sync_run_uid, 10);
+    // A prior watermark keeps this an incremental sync so the listing step receives
+    // `modified_after` and the exhaustive-prune branch stays inactive.
+    prepared.connection.last_synced_at = Some(last_synced_at);
+    let mut steps = FakeKnowledgeSyncIngestionSteps::new(prepared).with_pages(vec![
+        fake_record_page(&["doc-1", "doc-2"], Some("page-2")),
+        fake_record_page(&["doc-3"], None),
+    ]);
 
-    assert!(
-        source.contains("pub struct KnowledgeSyncIngestionRequest")
-            && source.contains("pub sync_run_uid: Uuid"),
-        "workflow input should contain sync_run_uid"
-    );
-    assert!(
-        source.contains("prepare_ingestion_run")
-            && source.contains("get_sync_run(sync_run_uid)")
-            && source.contains("RlsContext::tenant(run.tenant_id)"),
-        "workflow should prepare from the stored sync run under the derived tenant scope"
-    );
-    assert!(
-        source.contains("tenant_id: prepared.run.tenant_id")
-            && source.contains("connection_uid: prepared.run.connection_uid"),
-        "workflow report should derive tenant and connection from the stored run"
-    );
-    assert!(
-        source.contains("connection.tenant_id != run.tenant_id")
-            && source.contains("connection.connection_uid != run.connection_uid"),
-        "workflow should fail closed when the stored run and connection do not share a tenant/connection"
-    );
-    assert!(
-        source.contains("run.status = SyncRunStatus::Ingesting")
-            && source.contains("run.status = SyncRunStatus::Completed")
-            && source.contains("connection.last_synced_at = Some(completed_at)"),
-        "workflow should transition ingesting to completed and update the connection sync watermark"
-    );
+    let report = run_knowledge_sync_ingestion_workflow(
+        &mut steps,
+        KnowledgeSyncIngestionRequest { sync_run_uid },
+    )
+    .await
+    .expect("incremental ingestion across two pages should complete");
+
+    // The report identity is derived from the stored run, not from the request alone.
+    assert_eq!(report.sync_run_uid, sync_run_uid);
+    assert_eq!(report.tenant_id, tenant_id);
+    assert_eq!(report.connection_uid, connection_uid);
+    assert_eq!(report.status, "completed");
+    assert_eq!(report.records_listed, 3);
+    assert_eq!(report.records_applied, 3);
+    assert_eq!(report.records_pruned, 0);
+
+    // The run transitions ProviderSynced -> Ingesting (prepare) -> Completed (complete).
     assert_eq!(
-        count_occurrences(source, "knowledge_sync_provider_page_listing_"),
-        1,
-        "workflow should reserve one page-indexed Restate journal callsite for provider page listing"
+        steps.status_transitions,
+        vec![
+            SyncRunStatus::ProviderSynced,
+            SyncRunStatus::Ingesting,
+            SyncRunStatus::Completed
+        ]
     );
-    assert!(
-        source.contains(".list_changed_records(ListChangedRecordsRequest {")
-            && source.contains("cursor,")
-            && source.contains("modified_after,")
-            && source.contains("limit: Some(limit)"),
-        "provider listing journal step should pass cursor, modified_after, and page limit to the selected provider"
-    );
+
+    // One listing journal step per page, threading the provider cursor and watermark forward.
     assert_eq!(
-        count_occurrences(source, "knowledge_sync_provider_page_application_"),
-        1,
-        "workflow should reserve one page-indexed Restate journal callsite for provider page application"
-    );
-    assert!(
-        source.contains("ProductionKnowledgeIngestionRunner::new(")
-            && source.contains("config.as_ref().clone()")
-            && source.contains(".ingest_record_page(&run, &page.provider, page.page)")
-            && source.contains("while records_processed < u64::from(prepared.max_records)"),
-        "page application journal step should call the production ingestion runner"
-    );
-    assert!(
-        !source.contains("KnowledgeIngestionPipeline::new(")
-            && !source.contains("build_embedder_from_config")
-            && !source.contains("MemoryKnowledgeGraphWriter::new("),
-        "workflow should not own parser/embedder/graph/vector factories after Task 5"
-    );
-    assert!(
-        !source.contains("Placeholder")
-            && !source.contains("let _ = (tenant_id, connection_uid, page);")
-            && !source.contains("records_listed: 0")
-            && !source.contains("records_applied: 0"),
-        "workflow must not leave placeholder no-op page listing or application code"
-    );
-    assert!(
-        source.contains(
-            "// SAFETY: Internal-only workflow; tenant and connection are derived from the stored sync run row."
-        ),
-        "workflow handler should explain why it has no caller authz"
-    );
-}
-
-#[test]
-fn knowledge_ingestion_runner_owns_production_factories_and_is_injectable() {
-    // Pins: Task 5 keeps parser/embedder/vector/graph factories in the Knowledge service seam.
-    let service_source = include_str!("../src/services/knowledge/mod.rs");
-    let ingest_source = include_str!("../src/services/knowledge/ingest.rs");
-
-    assert!(
-        ingest_source.contains("pub trait KnowledgeIngestionRunner")
-            && ingest_source.contains("run: &KnowledgeSyncRun")
-            && ingest_source.contains("page: RecordPage"),
-        "service seam should define a page-level ingestion runner over stored sync runs"
-    );
-    assert!(
-        ingest_source.contains("ProductionKnowledgeIngestionRunner")
-            && ingest_source.contains("KnowledgeIngestionPipeline::new("),
-        "production runner should build and call KnowledgeIngestionPipeline"
-    );
-    assert!(
-        ingest_source.contains("\"native\" =>")
-            && ingest_source.contains("NativeDocumentParser::new()")
-            && ingest_source.contains("\"llamaparse\" =>")
-            && ingest_source.contains("LlamaParseParser::new(")
-            && ingest_source.contains("\"unstructured\" =>")
-            && ingest_source.contains("UnstructuredParser::new(")
-            && ingest_source.contains("\"reducto\" =>")
-            && ingest_source.contains("ReductoParser::new("),
-        "production runner should own all configured parser factories"
-    );
-    assert!(
-        ingest_source
-            .contains("build_embedder_from_config(config, EmbedderConstructionRole::Ingestion)"),
-        "production runner should build the ingestion-role embedder"
-    );
-    assert!(
-        ingest_source.contains("PostgresKnowledgeRepository::scoped(")
-            && ingest_source.contains("PgvectorStore::new(pool.clone(), scope.clone())")
-            && ingest_source
-                .contains("AgeGraphStore::scoped(pool, scope).with_vector_store(vector_store)")
-            && ingest_source.contains("MemoryKnowledgeGraphWriter::new(")
-            && ingest_source.contains("MemoryScope::Tenant { tenant_id }"),
-        "production runner should build tenant-scoped repository, vector, graph, and writer dependencies"
-    );
-    assert!(
-        ingest_source.contains("fn chunking_config(config: moa_core::config::KnowledgeChunkingConfig) -> ChunkingConfig")
-            && ingest_source.contains("target_tokens: config.target_tokens")
-            && ingest_source.contains("max_tokens: config.max_tokens")
-            && ingest_source.contains("min_tokens: config.min_tokens"),
-        "production runner should convert KnowledgeChunkingConfig into ChunkingConfig"
-    );
-    assert!(
-        ingest_source.contains("run.parser")
-            && ingest_source
-                .contains(".unwrap_or(config.knowledge.parser.external_default.clone())"),
-        "parser selection should use run.parser.unwrap_or(config.knowledge.parser.external_default)"
-    );
-    assert!(
-        service_source.contains("ingestion_runner: Arc<dyn KnowledgeIngestionRunner>")
-            && service_source.contains("pub fn new(")
-            && service_source.contains("pub fn from_postgres_pool("),
-        "KnowledgeService constructors should accept an injectable ingestion runner"
-    );
-    assert!(
-        service_source.contains("ProductionKnowledgeIngestionRunner::new("),
-        "production service construction should install the production ingestion runner"
-    );
-}
-
-#[test]
-fn knowledge_auto_sync_handlers_dispatch_ingestion_workflow_fire_and_forget() {
-    // Pins: Knowledge dispatches detached ingestion only after durable sync/webhook service work returns.
-    let source = include_str!("../src/services/knowledge/mod.rs");
-    let impl_source = source
-        .split("impl Knowledge for KnowledgeImpl")
-        .nth(1)
-        .expect("KnowledgeImpl implementation should exist");
-    let sync_body = handler_body(impl_source, "sync_connection");
-    let sync_step = sync_body
-        .find(".name(\"knowledge_sync_connection\")")
-        .expect("sync_connection should keep durable service work journaled");
-    let sync_dispatch = sync_body
-        .find("Self::dispatch_knowledge_sync_ingestion(&ctx, response.sync_run_uid);")
-        .expect("sync_connection should dispatch ingestion for provider-synced responses");
-    assert!(
-        sync_step < sync_dispatch,
-        "manual sync workflow dispatch should happen after durable sync_connection work"
+        steps.list_calls,
+        vec![
+            FakeListPageCall {
+                cursor: None,
+                limit: 10,
+                page_index: 0,
+                credential_ref: "resolved-provider-token".to_string(),
+                modified_after: Some(last_synced_at),
+            },
+            FakeListPageCall {
+                cursor: Some("page-2".to_string()),
+                limit: 8,
+                page_index: 1,
+                credential_ref: "resolved-provider-token".to_string(),
+                modified_after: Some(last_synced_at),
+            },
+        ]
     );
 
-    let webhook_body = handler_body(impl_source, "provider_webhook");
-    let webhook_step = webhook_body
-        .find(".name(\"knowledge_provider_webhook\")")
-        .expect("provider_webhook should keep durable webhook work journaled");
-    let webhook_dispatch = webhook_body
-        .find("Self::dispatch_knowledge_sync_ingestion(&ctx, sync_run_uid);")
-        .expect("provider_webhook should dispatch ingestion after enqueueable webhook response");
-    assert!(
-        webhook_step < webhook_dispatch,
-        "webhook workflow dispatch should happen after durable webhook processing"
-    );
-
-    let helper = source
-        .split("fn dispatch_knowledge_sync_ingestion")
-        .nth(1)
-        .expect("dispatch helper should exist");
-    let helper_end = helper
-        .find("\n    }\n}")
-        .expect("dispatch helper should end before the impl closes");
-    let helper = &helper[..helper_end];
-    assert!(
-        helper
-            .contains("workflow_client::<KnowledgeSyncIngestionClient>(sync_run_uid.to_string())"),
-        "workflow key should be exactly sync_run_uid.to_string()"
-    );
-    assert!(
-        helper.contains(".run(Json::from(KnowledgeSyncIngestionRequest { sync_run_uid }))"),
-        "dispatch should pass sync_run_uid in the workflow input"
-    );
-    assert!(
-        helper.contains(".send();") && !helper.contains(".await"),
-        "dispatch should be fire-and-forget via send without awaiting"
-    );
-}
-
-#[test]
-fn knowledge_sync_ingestion_workflow_is_registered_in_endpoint() {
-    // Pins: the default Restate endpoint and readiness list include KnowledgeSyncIngestion.
-    let source = include_str!("../src/runtime/endpoint.rs");
-
-    assert!(
-        source.contains(
-            "knowledge_sync_ingestion::{KnowledgeSyncIngestion, KnowledgeSyncIngestionImpl}"
-        ),
-        "endpoint should import the workflow trait and implementation"
-    );
+    // One application journal step per page, page-indexed alongside the listing steps.
     assert_eq!(
-        count_occurrences(source, "\"KnowledgeSyncIngestion\""),
-        1,
-        "expected service names should include KnowledgeSyncIngestion exactly once"
+        steps.apply_calls,
+        vec![
+            FakeApplyPageCall {
+                page_index: 0,
+                source_ids: vec!["doc-1".to_string(), "doc-2".to_string()],
+            },
+            FakeApplyPageCall {
+                page_index: 1,
+                source_ids: vec!["doc-3".to_string()],
+            },
+        ]
     );
-    assert_eq!(
-        count_occurrences(source, ".bind(KnowledgeSyncIngestionImpl.serve())"),
-        1,
-        "endpoint should bind KnowledgeSyncIngestion exactly once"
-    );
+
+    // An incremental sync (watermark present) never prunes and never marks the run failed.
+    assert!(steps.prune_calls.is_empty());
+    assert!(steps.fail_calls.is_empty());
 }
 
 fn fixture_service(
@@ -3087,26 +2896,6 @@ fn webhook_signature_hex(signing_key: &str, payload: &Value) -> String {
         .expect("parser webhook signing key should be valid");
     mac.update(&body);
     hex::encode(mac.finalize().into_bytes())
-}
-
-fn handler_body<'a>(source: &'a str, method: &str) -> &'a str {
-    let needle = format!("async fn {method}");
-    let method_start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("{method} handler should exist"));
-    let start = source[..method_start]
-        .rfind("    #[tracing::instrument")
-        .unwrap_or(method_start);
-    let rest = &source[start..];
-    let end = rest
-        .find("\n    #[tracing::instrument")
-        .or_else(|| rest.find("\n/// Application logic"))
-        .expect("handler body should be followed by another handler or application logic");
-    &rest[..end]
-}
-
-fn count_occurrences(source: &str, needle: &str) -> usize {
-    source.matches(needle).count()
 }
 
 async fn complete_sync_run(

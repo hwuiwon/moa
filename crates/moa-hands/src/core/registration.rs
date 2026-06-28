@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::adapters::mcp::McpDiscoveredTool;
 use crate::tools::{memory, session_search, tool_result};
 use moa_core::{
-    ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, SandboxTier, ToolBudgetConfig,
-    ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
+    ActionClass, ActionPolicyEffect, BuiltInTool, IdempotencyClass, Result, SandboxTier,
+    ToolBudgetConfig, ToolDefinition, ToolDiffStrategy, ToolInputShape, ToolPolicySpec,
 };
 use serde_json::Value;
 
@@ -171,8 +171,13 @@ impl ToolRegistry {
     }
 
     /// Registers a discovered MCP tool and adds it to the default loadout.
-    pub fn register_mcp_tool(&mut self, server_name: &str, tool: McpDiscoveredTool) {
+    pub fn register_mcp_tool(&mut self, server_name: &str, tool: McpDiscoveredTool) -> Result<()> {
         let name = tool.name.clone();
+        if self.tools.contains_key(&name) {
+            return Err(moa_core::MoaError::ConfigError(format!(
+                "MCP server {server_name} discovered tool {name}, which conflicts with an existing local tool name"
+            )));
+        }
         self.tools
             .insert(name.clone(), RegisteredTool::mcp(server_name, tool));
         if !self
@@ -182,6 +187,7 @@ impl ToolRegistry {
         {
             self.default_loadout.push(name);
         }
+        Ok(())
     }
 
     /// Retargets all hand-based tools to a different provider and sandbox tier.

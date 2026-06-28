@@ -118,7 +118,8 @@ impl ContextPipeline {
                 let instrument_stage_span = stage_span.clone();
                 let mut output = async { stage.process(ctx).await }
                     .instrument(instrument_stage_span)
-                    .await?;
+                    .await
+                    .map_err(|error| stage_error(&stage_name, error))?;
                 output.duration = started_at.elapsed();
                 let tokens_after = ctx.token_count;
 
@@ -199,6 +200,42 @@ fn record_query_rewrite_stage_metadata(span: &tracing::Span, output: &ProcessorO
 
 fn metadata_str<'a>(output: &'a ProcessorOutput, key: &str) -> Option<&'a str> {
     output.metadata.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn stage_error(stage_name: &str, error: moa_core::MoaError) -> moa_core::MoaError {
+    let message = format!("context pipeline stage '{stage_name}' failed: {error}");
+    match error {
+        moa_core::MoaError::ProviderError(_) => moa_core::MoaError::ProviderError(message),
+        moa_core::MoaError::MissingEnvironmentVariable(_) => {
+            moa_core::MoaError::MissingEnvironmentVariable(message)
+        }
+        moa_core::MoaError::ConfigError(_) => moa_core::MoaError::ConfigError(message),
+        moa_core::MoaError::StorageError(_) => moa_core::MoaError::StorageError(message),
+        moa_core::MoaError::ToolError(_) => moa_core::MoaError::ToolError(message),
+        moa_core::MoaError::ValidationError(_) => moa_core::MoaError::ValidationError(message),
+        moa_core::MoaError::ProviderQuirk(_) => moa_core::MoaError::ProviderQuirk(message),
+        moa_core::MoaError::SerializationError(_) => {
+            moa_core::MoaError::SerializationError(message)
+        }
+        moa_core::MoaError::StreamError(_) => moa_core::MoaError::StreamError(message),
+        moa_core::MoaError::PermissionDenied(_) => moa_core::MoaError::PermissionDenied(message),
+        moa_core::MoaError::BudgetExhausted(_) => moa_core::MoaError::BudgetExhausted(message),
+        moa_core::MoaError::Unsupported(_) => moa_core::MoaError::Unsupported(message),
+        moa_core::MoaError::NotImplemented(_) => moa_core::MoaError::NotImplemented(message),
+        moa_core::MoaError::HttpStatus {
+            status,
+            retry_after,
+            ..
+        } => moa_core::MoaError::HttpStatus {
+            status,
+            retry_after,
+            message,
+        },
+        moa_core::MoaError::RateLimited { retries, .. } => {
+            moa_core::MoaError::RateLimited { retries, message }
+        }
+        _other => moa_core::MoaError::ValidationError(message),
+    }
 }
 
 fn cache_prefix_ratio(ctx: &WorkingContext) -> f64 {
@@ -314,6 +351,52 @@ mod tests {
             ctx.metadata().get("stage_order"),
             Some(&json!(["identity", "instructions", "tools"]))
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_runner_error_names_the_failing_stage() {
+        // Pins: callers can identify which context processor failed without
+        // scraping tracing spans or test-only assertion wrappers.
+        let session = SessionMeta {
+            id: SessionId::new(),
+            channel: Channel::Chat,
+            model: ModelId::new("claude-sonnet-4-6"),
+            ..SessionMeta::default()
+        };
+        let pipeline = ContextPipeline::new(vec![Box::new(FailingStage)]);
+        let mut ctx = WorkingContext::new(&session, capabilities());
+
+        let error = pipeline
+            .run(&mut ctx)
+            .await
+            .expect_err("failing stage should abort the pipeline");
+
+        match error {
+            MoaError::ValidationError(message) => {
+                assert!(message.contains("context pipeline stage 'graph_memory' failed"));
+                assert!(message.contains("fixture validation failed"));
+            }
+            other => panic!("expected validation error with stage name, got {other:?}"),
+        }
+    }
+
+    struct FailingStage;
+
+    #[async_trait]
+    impl ContextProcessor for FailingStage {
+        fn name(&self) -> &str {
+            "graph_memory"
+        }
+
+        fn stage(&self) -> u8 {
+            7
+        }
+
+        async fn process(&self, _ctx: &mut WorkingContext) -> Result<ProcessorOutput> {
+            Err(MoaError::ValidationError(
+                "fixture validation failed".to_string(),
+            ))
+        }
     }
 
     #[test]

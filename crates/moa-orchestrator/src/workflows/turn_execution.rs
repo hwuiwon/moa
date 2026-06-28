@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use moa_brain::lineage::emit_generation_lineage;
-use moa_brain::pipeline::segments::SegmentTracker;
+use moa_brain::pipeline::segments::{SegmentCompleted, SegmentTracker};
 use moa_brain::segment_assessment::AssessmentOverride;
 use moa_brain::turn_learning::build_segment_learning_bundle;
 use moa_brain::turn_segments::{
@@ -116,6 +116,59 @@ enum ToolDispatchOutcome {
     Completed,
     Cancelled,
     ToolBudgetExceeded(ToolBudgetExhausted),
+}
+
+enum SegmentAssessmentTarget<'a> {
+    Completed(&'a SegmentCompleted),
+    Active(&'a ActiveSegment),
+}
+
+struct SegmentAssessmentInput<'a> {
+    target: SegmentAssessmentTarget<'a>,
+    events: &'a [EventRecord],
+    next_user_message: Option<&'a str>,
+    rewrite: Option<&'a QueryRewriteResult>,
+    phase: AssessmentPhase,
+    overrides: &'a [AssessmentOverride],
+    duration_ms: u64,
+    resolution_config: &'a moa_core::ResolutionConfig,
+}
+
+impl SegmentAssessmentTarget<'_> {
+    fn segment_id(&self) -> SegmentId {
+        match self {
+            Self::Completed(segment) => segment.segment_id,
+            Self::Active(segment) => segment.id,
+        }
+    }
+
+    fn turn_count(&self) -> u32 {
+        match self {
+            Self::Completed(segment) => segment.turn_count,
+            Self::Active(segment) => segment.turn_count,
+        }
+    }
+
+    fn token_cost(&self) -> u64 {
+        match self {
+            Self::Completed(segment) => segment.token_cost,
+            Self::Active(segment) => segment.token_cost,
+        }
+    }
+
+    fn task_segment(
+        &self,
+        meta: &SessionMeta,
+        assessment: &moa_core::SegmentAssessment,
+        events: &[EventRecord],
+    ) -> TaskSegment {
+        match self {
+            Self::Completed(segment) => {
+                task_segment_from_completed(meta, segment, events, assessment)
+            }
+            Self::Active(segment) => task_segment_from_active(meta, segment, assessment, None),
+        }
+    }
 }
 
 /// Restate workflow surface for durable turn execution.
@@ -1184,7 +1237,7 @@ async fn assess_completed_segment_at_transition(
     ctx: &WorkflowContext<'_>,
     session_id: SessionId,
     meta: &SessionMeta,
-    completed: &moa_brain::pipeline::segments::SegmentCompleted,
+    completed: &SegmentCompleted,
     metadata: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), HandlerError> {
     if !OrchestratorCtx::current_config().resolution.enabled {
@@ -1227,44 +1280,25 @@ async fn assess_completed_segment_at_transition(
         (segment_events, next_user_message)
     };
     let rewrite = driver_segments::query_rewrite_from_metadata(metadata);
-    let baseline = load_segment_baseline(ctx, meta.tenant_id).await?;
     let phase = if next_user_message.is_some() {
         AssessmentPhase::Deferred
     } else {
         AssessmentPhase::Immediate
     };
     let resolution_config = OrchestratorCtx::current_config().resolution.clone();
-    let assessment = assess_segment_events(
-        &segment_events,
-        completed.turn_count,
-        completed.token_cost,
-        completed.duration_ms,
-        baseline.as_ref(),
-        next_user_message.as_deref(),
-        rewrite.as_ref().is_some_and(|rewrite| rewrite.is_new_task),
-        phase,
-        &[],
-        &resolution_config,
-    );
-
-    record_segment_assessment_learning(ctx, meta.tenant_id, completed.segment_id, &assessment)
-        .await?;
-    ctx.service_client::<RestateSessionStoreClient>()
-        .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
-            segment_id: completed.segment_id,
-            assessment: assessment.clone(),
-        }))
-        .call()
-        .await?;
-    let segment = task_segment_from_completed(meta, completed, &segment_events, &assessment);
-    emit_experience_for_assessment(
+    assess_and_persist_segment(
         ctx,
         meta,
-        &segment,
-        &assessment,
-        &segment_events,
-        rewrite.as_ref(),
-        Some(completed.duration_ms),
+        SegmentAssessmentInput {
+            target: SegmentAssessmentTarget::Completed(completed),
+            events: &segment_events,
+            next_user_message: next_user_message.as_deref(),
+            rewrite: rewrite.as_ref(),
+            phase,
+            overrides: &[],
+            duration_ms: completed.duration_ms,
+            resolution_config: &resolution_config,
+        },
     )
     .await?;
     Ok(())
@@ -1309,45 +1343,67 @@ async fn assess_current_active_segment(
         let events = load_session_events_fallback(ctx, session_id).await?;
         segment_events_for_assessment(&events, segment.id, None)
     };
-    let baseline = load_segment_baseline(ctx, meta.tenant_id).await?;
     let duration_ms = durable_utc_now(ctx)
         .await?
         .signed_duration_since(segment.started_at)
         .num_milliseconds()
         .max(0) as u64;
-    let assessment = assess_segment_events(
-        &segment_events,
-        segment.turn_count,
-        segment.token_cost,
-        duration_ms,
-        baseline.as_ref(),
-        None,
-        false,
-        phase,
-        overrides,
-        &runtime.config().resolution,
-    );
+    assess_and_persist_segment(
+        ctx,
+        &meta,
+        SegmentAssessmentInput {
+            target: SegmentAssessmentTarget::Active(&segment),
+            events: &segment_events,
+            next_user_message: None,
+            rewrite: None,
+            phase,
+            overrides,
+            duration_ms,
+            resolution_config: &runtime.config().resolution,
+        },
+    )
+    .await?;
+    Ok(())
+}
 
-    record_segment_assessment_learning(ctx, meta.tenant_id, segment.id, &assessment).await?;
+async fn assess_and_persist_segment(
+    ctx: &WorkflowContext<'_>,
+    meta: &SessionMeta,
+    input: SegmentAssessmentInput<'_>,
+) -> Result<(), HandlerError> {
+    let baseline = load_segment_baseline(ctx, meta.tenant_id).await?;
+    let assessment = assess_segment_events(
+        input.events,
+        input.target.turn_count(),
+        input.target.token_cost(),
+        input.duration_ms,
+        baseline.as_ref(),
+        input.next_user_message,
+        input.rewrite.is_some_and(|rewrite| rewrite.is_new_task),
+        input.phase,
+        input.overrides,
+        input.resolution_config,
+    );
+    let segment_id = input.target.segment_id();
+    record_segment_assessment_learning(ctx, meta.tenant_id, segment_id, &assessment).await?;
     ctx.service_client::<RestateSessionStoreClient>()
         .update_segment_assessment(Json(UpdateSegmentAssessmentRequest {
-            segment_id: segment.id,
+            segment_id,
             assessment: assessment.clone(),
         }))
         .call()
         .await?;
-    let task_segment = task_segment_from_active(&meta, &segment, &assessment, None);
+    let task_segment = input.target.task_segment(meta, &assessment, input.events);
     emit_experience_for_assessment(
         ctx,
-        &meta,
+        meta,
         &task_segment,
         &assessment,
-        &segment_events,
-        None,
-        Some(duration_ms),
+        input.events,
+        input.rewrite,
+        Some(input.duration_ms),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 fn tenant_key(meta: &SessionMeta) -> String {

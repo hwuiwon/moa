@@ -1427,6 +1427,81 @@ mod tests {
     }
 
     #[test]
+    fn check_eval_budgets_min_metric_treats_absent_metric_as_violation() {
+        // Pins: a --min-metric floor on a metric absent from the report fails the gate
+        // (surfacing the resolution error) rather than silently passing.
+        let report = serde_json::json!({
+            "metrics": {
+                "ingestion_coverage": { "value": 0.95 }
+            }
+        });
+        let floors = vec![parse_min_metric("multi_hop_recall=0.80").expect("parse floor")];
+
+        let violations = min_metric_violations(&report, &floors);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].metric, "multi_hop_recall");
+        assert_eq!(violations[0].expected, ">= 0.8000");
+        assert!(
+            violations[0]
+                .actual
+                .contains("missing path segment `multi_hop_recall`"),
+            "absent metric should surface the resolution error, got {:?}",
+            violations[0].actual
+        );
+    }
+
+    #[test]
+    fn run_memory_retrieval_gate_errors_on_missing_report_file() {
+        // Pins: the gate fails loudly when the requested memory report file does not exist.
+        let missing = std::env::temp_dir().join(format!(
+            "moa-xtask-budget-missing-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&missing);
+        let args = [
+            "--suite".to_string(),
+            "memory_retrieval".to_string(),
+            "--memory-eval-report".to_string(),
+            missing.display().to_string(),
+        ];
+
+        let error = run(args.into_iter()).expect_err("missing report file should fail the gate");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("read memory retrieval report"),
+            "expected a read error, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn run_memory_retrieval_gate_errors_on_malformed_report_json() {
+        // Pins: the gate fails with a parse error when the memory report file is not valid JSON.
+        let path = std::env::temp_dir().join(format!(
+            "moa-xtask-budget-garbage-{}.json",
+            std::process::id()
+        ));
+        fs::write(&path, b"{ this is not valid json ]").expect("write garbage report");
+        let args = [
+            "--suite".to_string(),
+            "memory_retrieval".to_string(),
+            "--memory-eval-report".to_string(),
+            path.display().to_string(),
+        ];
+
+        let result = run(args.into_iter());
+        let _ = fs::remove_file(&path);
+        let error = result.expect_err("malformed report JSON should fail the gate");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("parse memory retrieval report"),
+            "expected a parse error, got {message:?}"
+        );
+    }
+
+    #[test]
     fn memory_regression_checks_recall25_and_rewrite_budget() {
         // Pins: gated-vs-always comparison enforces recall@25, call reduction, and rewrite p95.
         let previous = memory_report(QueryRewritePolicy::Always, 147, 0, 2_100, 0, 0, 0.96);

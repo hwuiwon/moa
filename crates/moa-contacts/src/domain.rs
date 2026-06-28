@@ -283,9 +283,23 @@ mod tests {
     };
 
     use super::{
-        contact_allows_channel_contact, contact_point_delivery, low_assurance_scopes,
-        require_contact_agent_permission, verified_scopes,
+        contact_allows_channel_contact, contact_point_delivery, hash_contact_point_with_key_hex,
+        low_assurance_scopes, normalize_contact_point, normalize_phone,
+        require_contact_agent_permission,
     };
+    use crate::ContactError;
+
+    fn assert_terminal(error: &ContactError, code: u16, needle: &str) {
+        assert_eq!(
+            error.terminal_code(),
+            Some(code),
+            "unexpected terminal code: {error:?}"
+        );
+        assert!(
+            format!("{error}").contains(needle),
+            "unexpected message {error:?}, wanted substring {needle:?}"
+        );
+    }
 
     #[test]
     fn contact_agent_permission_allows_unbounded_token_with_single_selector() {
@@ -322,16 +336,111 @@ mod tests {
     }
 
     #[test]
-    fn contact_message_send_scope_is_grantable_for_browser_sessions() {
-        // Pins: end-user browser sessions can receive the narrow scope required by Contacts/send_message.
-        let requested = vec!["contact:session:message:send".to_string()];
+    fn contact_message_send_scope_is_grantable_only_within_low_assurance_allowlist() {
+        // Pins: low-assurance contact tokens can hold the send scope but cannot smuggle a verified-only scope.
+        let requested = vec![
+            "contact:session:message:send".to_string(),
+            // `memory:self:write` is a verified-only scope, absent from LOW_ASSURANCE_SCOPES.
+            "memory:self:write".to_string(),
+        ];
 
-        assert_eq!(low_assurance_scopes(&requested), requested);
-        assert!(
-            verified_scopes()
-                .iter()
-                .any(|scope| scope == "contact:session:message:send")
+        let granted = low_assurance_scopes(&requested);
+
+        assert_eq!(granted, vec!["contact:session:message:send".to_string()]);
+    }
+
+    #[test]
+    fn normalize_contact_point_rejects_invalid_email_and_empty_value() {
+        // Pins: email contact points require an '@' and a non-empty value before hashing or delivery.
+        let no_at = normalize_contact_point(ContactPointKind::Email, "foo")
+            .expect_err("email without @ must reject");
+        assert_terminal(&no_at, 400, "invalid email contact point");
+
+        let empty = normalize_contact_point(ContactPointKind::Email, "   ")
+            .expect_err("empty contact point value must reject");
+        assert_terminal(&empty, 400, "contact point value is required");
+
+        // The happy path still trims and lowercases.
+        let normalized = normalize_contact_point(ContactPointKind::Email, "  User@Example.COM ")
+            .expect("valid email should normalize");
+        assert_eq!(normalized, "user@example.com");
+    }
+
+    #[test]
+    fn normalize_phone_enforces_eight_to_fifteen_digit_bounds() {
+        // Pins: phone normalization accepts 8-15 digit E.164-like numbers and rejects out-of-range lengths.
+        let too_short =
+            normalize_phone("1234567").expect_err("7-digit phone must reject as too short");
+        assert_terminal(&too_short, 400, "invalid phone contact point");
+
+        let too_long = normalize_phone("1234567890123456")
+            .expect_err("16-digit phone must reject as too long");
+        assert_terminal(&too_long, 400, "invalid phone contact point");
+
+        assert_eq!(
+            normalize_phone("12345678").expect("8-digit lower bound is valid"),
+            "+12345678"
         );
+        assert_eq!(
+            normalize_phone("(123) 456-789-012-345").expect("15-digit upper bound is valid"),
+            "+123456789012345"
+        );
+    }
+
+    #[test]
+    fn hash_contact_point_with_key_hex_is_stable_and_validates_key() {
+        // Pins: contact-point hashing is a deterministic keyed BLAKE3 over `tenant:kind:value` and rejects malformed keys.
+        let tenant_id = TenantId::from(uuid::Uuid::from_u128(1));
+        let key_bytes = [7u8; 32];
+        let key_hex = hex::encode(key_bytes);
+
+        let hashed = hash_contact_point_with_key_hex(
+            tenant_id,
+            ContactPointKind::Email,
+            "user@example.com",
+            &key_hex,
+        )
+        .expect("a valid 32-byte hex key should hash");
+
+        // Independently recompute the keyed hash over the documented message layout.
+        let expected = blake3::keyed_hash(
+            &key_bytes,
+            format!("{tenant_id}:email:user@example.com").as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        assert_eq!(hashed, expected);
+        assert_eq!(hashed.len(), 64, "BLAKE3-256 hex digest is 64 chars");
+
+        // A different normalized value yields a different digest.
+        let other = hash_contact_point_with_key_hex(
+            tenant_id,
+            ContactPointKind::Email,
+            "other@example.com",
+            &key_hex,
+        )
+        .expect("hash should succeed");
+        assert_ne!(hashed, other);
+
+        // Non-hex keys are rejected as terminal configuration errors.
+        let bad_hex = hash_contact_point_with_key_hex(
+            tenant_id,
+            ContactPointKind::Email,
+            "user@example.com",
+            "zzzz",
+        )
+        .expect_err("non-hex key must reject");
+        assert_terminal(&bad_hex, 503, "hex-encoded");
+
+        // Hex keys that decode to the wrong length are rejected.
+        let short_key = hash_contact_point_with_key_hex(
+            tenant_id,
+            ContactPointKind::Email,
+            "user@example.com",
+            &hex::encode([7u8; 31]),
+        )
+        .expect_err("31-byte key must reject");
+        assert_terminal(&short_key, 503, "must be 32 bytes");
     }
 
     fn contact_claims(agent_ids: Vec<String>) -> ContactTokenClaims {

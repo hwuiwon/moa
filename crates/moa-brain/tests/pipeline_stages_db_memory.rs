@@ -3,7 +3,6 @@
 mod support;
 
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -499,34 +498,6 @@ fn stable_prefix_fingerprint_uses_tools_and_leading_system_sections_only() {
     );
 }
 
-#[test]
-fn pipeline_stage_failure_message_names_the_stage_clearly() {
-    for stage_name in [
-        "IdentityProcessor",
-        "InstructionProcessor",
-        "ToolDefinitionProcessor",
-        "QueryRewriter",
-        "GraphMemoryRetriever",
-        "RuntimeContextProcessor",
-    ] {
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            assert_stage_contract(stage_name, || {
-                assert_eq!("actual", "expected", "deliberate contract mismatch");
-            });
-        }))
-        .expect_err("stage contract harness should re-panic with the stage name");
-        let message = panic_message(panic);
-        assert!(
-            message.contains(stage_name),
-            "stage failure harness did not include {stage_name}: {message}"
-        );
-        assert!(
-            message.contains("deliberate contract mismatch"),
-            "stage failure harness dropped the original assertion message: {message}"
-        );
-    }
-}
-
 #[derive(Debug)]
 struct FixedClock {
     now: DateTime<Utc>,
@@ -759,24 +730,4 @@ fn invalidated_uids_in_content(content: &str, hits: &[MemoryHit]) -> Vec<String>
         .map(|hit| hit.uid.to_string())
         .filter(|uid| content.contains(uid))
         .collect()
-}
-
-fn assert_stage_contract(stage_name: &str, assertion: impl FnOnce()) {
-    match catch_unwind(AssertUnwindSafe(assertion)) {
-        Ok(()) => {}
-        Err(payload) => {
-            let message = panic_message(payload);
-            panic!("{stage_name}: {message}");
-        }
-    }
-}
-
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-    "non-string panic payload".to_string()
 }

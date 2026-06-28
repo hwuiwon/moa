@@ -179,7 +179,7 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
         let events =
             wait_for_brain_response_text(&client, ingress, &identity, session_id, final_text)
                 .await?;
-        wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
+        wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Paused).await?;
         assert!(
             saw_successful_skill_file_read(&events),
             "expected the agent loop to read the selected refund skill package; observed events: {}",
@@ -343,7 +343,7 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
         let events =
             wait_for_brain_response_text(&client, ingress, &identity, session_id, final_text)
                 .await?;
-        wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
+        wait_for_status(&client, ingress, &identity, session_id, SessionStatus::Paused).await?;
         assert!(
             saw_successful_skill_file_read(&events),
             "mixed session should still materialize and read the selected refund skill; observed events: {}",
@@ -644,12 +644,13 @@ async fn post_user_message(
 async fn wait_for_status(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &Identity,
     session_id: SessionId,
     expected: SessionStatus,
 ) -> Result<SessionStatus> {
     for _attempt in 0..60 {
-        let status = client
-            .post(object_url(ingress, "Session", session_id, "status"))
+        let request = client.post(object_url(ingress, "Session", session_id, "status"));
+        let status = with_identity(request, identity)
             .send()
             .await
             .context("call Session/status")?

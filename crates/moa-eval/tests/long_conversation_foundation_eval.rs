@@ -229,19 +229,68 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     assert_eq!(round_tripped, card);
 
     let rows = card.metric_rows();
-    assert_eq!(rows.len(), 36);
-    assert!(
-        rows.iter()
-            .any(|row| row.name == "latency_ms.completion_p95_ms")
+    // Independently derived expectation: every dashboard metric, with the exact value the
+    // `score_card()` fixture sets, mapped through `number`/`float_number`/`Value::Bool`.
+    let expected: std::collections::HashMap<&str, serde_json::Value> =
+        std::collections::HashMap::from([
+            ("functional.task_completed", serde_json::json!(true)),
+            ("functional.turn_count", serde_json::json!(2)),
+            ("functional.error_count", serde_json::json!(0)),
+            ("functional.errors_preserved", serde_json::json!(true)),
+            ("latency_ms.first_token_p50_ms", serde_json::json!(10)),
+            ("latency_ms.first_token_p95_ms", serde_json::json!(15)),
+            ("latency_ms.completion_p50_ms", serde_json::json!(40)),
+            ("latency_ms.completion_p95_ms", serde_json::json!(50)),
+            ("cost.input_tokens", serde_json::json!(100)),
+            ("cost.output_tokens", serde_json::json!(20)),
+            ("cost.cached_input_tokens", serde_json::json!(60)),
+            ("cost.cost_cents", serde_json::json!(3)),
+            ("cache.input_cached_ratio", serde_json::json!(0.6)),
+            ("cache.prefix_stable", serde_json::json!(true)),
+            ("cache.stable_prefix_bytes", serde_json::json!(128)),
+            ("context.max_context_tokens", serde_json::json!(300)),
+            ("context.compaction_count", serde_json::json!(1)),
+            ("context.compaction_events", serde_json::json!(1)),
+            ("context.tokens_at_first_trigger", serde_json::json!(300)),
+            ("context.post_compaction_tokens", serde_json::json!(120)),
+            ("context.errors_preserved", serde_json::json!(2)),
+            ("context.errors_total_pre_compaction", serde_json::json!(2)),
+            ("context.errors_preserved_strict", serde_json::json!(true)),
+            ("memory.planted_fact_recall", serde_json::json!(0.75)),
+            ("memory.pages_written", serde_json::json!(2)),
+            ("memory.consolidation_successes", serde_json::json!(1)),
+            ("memory.consolidation_failures", serde_json::json!(0)),
+            ("tools.tool_call_count", serde_json::json!(4)),
+            ("tools.tool_success_count", serde_json::json!(4)),
+            ("tools.tool_error_count", serde_json::json!(0)),
+            ("tools.success_rate", serde_json::json!(1.0)),
+            ("safety.approval_violations", serde_json::json!(0)),
+            ("safety.canary_leaks", serde_json::json!(0)),
+            ("safety.credential_exposures", serde_json::json!(0)),
+            (
+                "safety.prompt_injection_attempts_blocked",
+                serde_json::json!(0),
+            ),
+            ("safety.shell_bypass_attempts_blocked", serde_json::json!(0)),
+        ]);
+
+    assert_eq!(
+        rows.len(),
+        expected.len(),
+        "score card must emit exactly one flat row per dashboard metric"
     );
-    assert!(rows.iter().any(|row| row.name == "cost.cost_cents"));
-    assert!(
-        rows.iter()
-            .any(|row| row.name == "safety.prompt_injection_attempts_blocked")
+    let actual: std::collections::HashMap<&str, serde_json::Value> = rows
+        .iter()
+        .map(|row| (row.name.as_str(), row.value.clone()))
+        .collect();
+    assert_eq!(
+        actual.len(),
+        rows.len(),
+        "score-card metric names must be unique with no duplicate rows"
     );
-    assert!(
-        rows.iter()
-            .any(|row| row.name == "safety.shell_bypass_attempts_blocked")
+    assert_eq!(
+        actual, expected,
+        "each score-card metric must serialize to its independently computed name and value"
     );
 
     let records = card.to_score_records(
@@ -282,13 +331,6 @@ fn score_card_serializes_to_flat_metric_rows_for_analytics_scores() {
     );
     assert_eq!(emitted, rows.len());
     assert_eq!(sink.0.lock().expect("recorded events").len(), rows.len());
-
-    for row in rows
-        .iter()
-        .filter(|row| row.name.contains("latency_ms") || row.name.contains("cost_cents"))
-    {
-        println!("scenario={} {}={}", card.scenario, row.name, row.value);
-    }
 }
 
 #[test]

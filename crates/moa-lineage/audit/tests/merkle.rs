@@ -24,18 +24,22 @@ struct Blake3Case {
     expected_root_hex: String,
 }
 
+// These fixtures pin MOA's own domain-separated construction (0x00 leaf / 0x01
+// node prefixes) rather than an external KAT, so they are regression vectors:
+// they fail loudly if the construction changes, but they are self-generated.
+
 #[test]
-fn merkle_root_matches_blake3_known_vector_for_single_leaf() {
+fn merkle_root_matches_blake3_regression_vector_for_single_leaf() {
     assert_merkle_root_matches_fixture("single_empty");
 }
 
 #[test]
-fn merkle_root_matches_blake3_known_vector_for_balanced_tree_of_4_leaves() {
+fn merkle_root_matches_blake3_regression_vector_for_balanced_tree_of_4_leaves() {
     assert_merkle_root_matches_fixture("balanced_4");
 }
 
 #[test]
-fn merkle_root_matches_blake3_known_vector_for_unbalanced_tree_of_5_leaves() {
+fn merkle_root_matches_blake3_regression_vector_for_unbalanced_tree_of_5_leaves() {
     assert_merkle_root_matches_fixture("unbalanced_5");
 }
 
@@ -64,6 +68,71 @@ fn merkle_proof_fails_when_leaf_is_swapped_for_a_different_leaf() {
 
     let error = verify_blake3_inclusion(&leaves[4], 3, &proof, root)
         .expect_err("swapped leaf should fail inclusion proof verification");
+
+    assert!(
+        matches!(error, AuditError::Invalid(ref message) if message.contains("inclusion proof")),
+        "expected inclusion-proof invalid error, got {error:?}"
+    );
+}
+
+/// Tampering: a single flipped byte in a proof sibling must break verification.
+#[test]
+fn merkle_proof_fails_when_a_sibling_hash_is_mutated() {
+    let leaves = (0..8)
+        .map(|idx| format!("record-{idx}").into_bytes())
+        .collect::<Vec<_>>();
+    let root = blake3_merkle_root(&leaves).expect("root should compute");
+    let mut proof = blake3_inclusion_proof(&leaves, 3).expect("proof should compute");
+
+    // Flip one bit in the first sibling hash; the recomputed root must diverge.
+    proof[0][0] ^= 0x01;
+
+    let error = verify_blake3_inclusion(&leaves[3], 3, &proof, root)
+        .expect_err("a mutated proof sibling should fail inclusion verification");
+
+    assert!(
+        matches!(error, AuditError::Invalid(ref message) if message.contains("inclusion proof")),
+        "expected inclusion-proof invalid error, got {error:?}"
+    );
+}
+
+/// Tampering: a correct leaf and proof verified at the wrong index must fail,
+/// because the left/right combination order at each level flips with parity.
+#[test]
+fn merkle_proof_fails_when_verified_at_the_wrong_index() {
+    let leaves = (0..8)
+        .map(|idx| format!("record-{idx}").into_bytes())
+        .collect::<Vec<_>>();
+    let root = blake3_merkle_root(&leaves).expect("root should compute");
+    let proof = blake3_inclusion_proof(&leaves, 3).expect("proof should compute");
+
+    // Leaf 3 sits at an odd index; verifying it as the even index 2 reverses the
+    // first node-hash combination order and cannot reproduce the root.
+    let error = verify_blake3_inclusion(&leaves[3], 2, &proof, root)
+        .expect_err("verifying a leaf at the wrong index should fail");
+
+    assert!(
+        matches!(error, AuditError::Invalid(ref message) if message.contains("inclusion proof")),
+        "expected inclusion-proof invalid error, got {error:?}"
+    );
+}
+
+/// Tampering: a valid leaf and proof checked against a different tree's root
+/// must fail, so a substituted root cannot launder an inclusion claim.
+#[test]
+fn merkle_proof_fails_against_a_different_trees_root() {
+    let leaves = (0..8)
+        .map(|idx| format!("record-{idx}").into_bytes())
+        .collect::<Vec<_>>();
+    let proof = blake3_inclusion_proof(&leaves, 3).expect("proof should compute");
+
+    let other_leaves = (0..8)
+        .map(|idx| format!("forged-{idx}").into_bytes())
+        .collect::<Vec<_>>();
+    let wrong_root = blake3_merkle_root(&other_leaves).expect("wrong root should compute");
+
+    let error = verify_blake3_inclusion(&leaves[3], 3, &proof, wrong_root)
+        .expect_err("a proof checked against the wrong root should fail");
 
     assert!(
         matches!(error, AuditError::Invalid(ref message) if message.contains("inclusion proof")),

@@ -3,10 +3,24 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[test]
 #[ignore = "requires a running Restate orchestrator with MOA_PROVIDERS_OVERRIDE=scripted:<fixture>"]
 fn mock_short_profile_completes_within_budget_with_zero_errors() {
-    if std::env::var("MOA_RUN_LOADTEST_REMOTE_SMOKE").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LOADTEST_REMOTE_SMOKE") {
         panic!("set MOA_RUN_LOADTEST_REMOTE_SMOKE=1 and MOA_RESTATE_INGRESS_URL to run this test");
     }
     let endpoint = std::env::var("MOA_RESTATE_INGRESS_URL")
@@ -54,7 +68,7 @@ fn mock_short_profile_completes_within_budget_with_zero_errors() {
 #[ignore = "requires a running Restate orchestrator with metrics enabled and MOA_PROVIDERS_OVERRIDE=scripted:<fixture>"]
 fn mock_short_profile_reports_runtime_step_latency() {
     // Pins: ignored remote loadtest reports p50/p95/p99 for each documented turn step from runtime metrics.
-    if std::env::var("MOA_RUN_LOADTEST_REMOTE_SMOKE").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LOADTEST_REMOTE_SMOKE") {
         panic!("set MOA_RUN_LOADTEST_REMOTE_SMOKE=1 and MOA_RESTATE_INGRESS_URL to run this test");
     }
     let metrics_endpoint = std::env::var("MOA_LOADTEST_METRICS_ENDPOINT")

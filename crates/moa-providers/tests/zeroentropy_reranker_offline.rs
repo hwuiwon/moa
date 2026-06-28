@@ -9,21 +9,27 @@ use wiremock::matchers::{body_partial_json, header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
-async fn zeroentropy_reranker_offline_prioritizes_relevant_retrieval_candidate() {
-    // Pins: ZeroEntropy rerank calls the v1 rerank endpoint with model, query, documents, and top_n.
+async fn zeroentropy_reranker_offline_maps_out_of_order_hits_back_to_documents_and_drops_oob() {
+    // Pins: ZeroEntropy rerank returns hits in relevance order (not input order)
+    // and may include an out-of-range index; the provider maps each hit index
+    // back to the supplied document and filters indices >= documents.len().
     let server = MockServer::start().await;
+    let query = "Where does MOA deploy the local validation service?";
     Mock::given(method("POST"))
         .and(header("authorization", "Bearer test-key"))
         .and(body_partial_json(json!({
             "model": ZEROENTROPY_DEFAULT_RERANK_MODEL,
-            "query": "Where does MOA deploy the local validation service?",
-            "top_n": 2,
+            "query": query,
+            "top_n": 3,
             "latency": "fast"
         })))
+        // Non-natural order: index 2 first, then index 0, plus an out-of-range
+        // index 7 that must be filtered out (only 3 documents were supplied).
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
-                { "index": 0, "relevance_score": 0.98 },
-                { "index": 1, "relevance_score": 0.21 }
+                { "index": 2, "relevance_score": 0.95 },
+                { "index": 0, "relevance_score": 0.60 },
+                { "index": 7, "relevance_score": 0.33 }
             ],
             "total_bytes": 123,
             "total_tokens": 17,
@@ -45,18 +51,25 @@ async fn zeroentropy_reranker_offline_prioritizes_relevant_retrieval_candidate()
     ];
 
     let hits = reranker
-        .rerank(
-            ZEROENTROPY_DEFAULT_RERANK_MODEL,
-            "Where does MOA deploy the local validation service?",
-            &documents,
-            2,
-        )
+        .rerank(ZEROENTROPY_DEFAULT_RERANK_MODEL, query, &documents, 3)
         .await
         .expect("wiremock ZeroEntropy rerank request should succeed");
 
+    // The out-of-range hit is dropped; the remaining two keep relevance order.
     assert_eq!(hits.len(), 2);
-    assert_eq!(hits[0].index, 0);
+    assert_eq!(hits[0].index, 2);
+    assert_eq!(hits[1].index, 0);
+    assert!(hits.iter().all(|hit| hit.index < documents.len()));
     assert!(hits[0].relevance_score >= hits[1].relevance_score);
+    // Each surviving hit maps back to the right document text.
+    assert_eq!(
+        documents[hits[0].index],
+        "The hosted API surfaces status output and approval prompts."
+    );
+    assert_eq!(
+        documents[hits[1].index],
+        "MOA deploys its local validation service to fly.io."
+    );
 }
 
 #[tokio::test]

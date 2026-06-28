@@ -30,7 +30,6 @@ fn node_intent(tenant_id: TenantId, name: &str) -> NodeWriteIntent {
 }
 
 #[tokio::test]
-#[ignore]
 async fn contact_scoped_graph_write_sets_contact_and_blocks_other_contact_db_memory() {
     // Pins: graph writes project tenant/contact IDs and contact RLS blocks forged contact rows.
     let (store, database_url, schema_name) = testing::create_isolated_test_store()

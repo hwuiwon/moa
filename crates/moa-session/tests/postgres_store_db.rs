@@ -581,6 +581,201 @@ async fn postgres_session_owned_writes_fail_when_session_is_missing() {
 
 #[tokio::test]
 #[ignore]
+async fn postgres_context_snapshot_upserts_overwrites_and_deletes() {
+    // Pins the compaction snapshot lifecycle: a fresh session has no snapshot;
+    // put_snapshot inserts and round-trips through JSONB; a second put with a new
+    // last_sequence_num overwrites the single row in place (ON CONFLICT DO UPDATE,
+    // not a duplicate insert); delete_snapshot removes it; get then returns None.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-snapshot", "test-model"))
+        .await
+        .expect("create session");
+    let now = Utc::now();
+
+    assert!(
+        store
+            .get_snapshot(session_id)
+            .await
+            .expect("get missing snapshot")
+            .is_none(),
+        "a fresh session must have no snapshot"
+    );
+
+    let snapshot = ContextSnapshot {
+        format_version: moa_core::CONTEXT_SNAPSHOT_FORMAT_VERSION,
+        session_id,
+        last_sequence_num: 3,
+        created_at: now,
+        messages: Vec::new(),
+        file_read_dedup_state: FileReadDedupState::default(),
+        token_count: 11,
+        stage_inputs_hash: 7,
+    };
+    store
+        .put_snapshot(session_id, snapshot.clone())
+        .await
+        .expect("put snapshot");
+
+    let loaded = store
+        .get_snapshot(session_id)
+        .await
+        .expect("get snapshot")
+        .expect("snapshot present after put");
+    assert_eq!(loaded, snapshot, "snapshot must round-trip through JSONB");
+
+    let updated = ContextSnapshot {
+        last_sequence_num: 9,
+        token_count: 42,
+        stage_inputs_hash: 21,
+        ..snapshot.clone()
+    };
+    store
+        .put_snapshot(session_id, updated.clone())
+        .await
+        .expect("overwrite snapshot");
+
+    let reloaded = store
+        .get_snapshot(session_id)
+        .await
+        .expect("get overwritten snapshot")
+        .expect("snapshot present after overwrite");
+    assert_eq!(
+        reloaded, updated,
+        "second put must overwrite the snapshot in place"
+    );
+
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("postgres inspection pool");
+    let snapshot_rows: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {} WHERE session_id = $1",
+        qualified(&schema_name, "context_snapshots")
+    ))
+    .bind(session_id.0)
+    .fetch_one(&pool)
+    .await
+    .expect("count snapshot rows");
+    assert_eq!(
+        snapshot_rows, 1,
+        "overwrite must keep exactly one snapshot row, not duplicate it"
+    );
+    pool.close().await;
+
+    store
+        .delete_snapshot(session_id)
+        .await
+        .expect("delete snapshot");
+    assert!(
+        store
+            .get_snapshot(session_id)
+            .await
+            .expect("get after delete")
+            .is_none(),
+        "snapshot must be gone after delete"
+    );
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn postgres_snapshot_checkpoint_bounds_event_replay() {
+    // Pins checkpoint-bounded replay: after a snapshot is taken at sequence K, the
+    // resume path reads only events strictly after K (from_seq = K + 1), so
+    // pre-checkpoint events are excluded from replay and only post-checkpoint events
+    // remain to be reapplied on top of the compacted snapshot.
+    let (store, database_url, schema_name) = create_test_store().await;
+    let session_id = store
+        .create_session(test_session_meta("pg-checkpoint", "test-model"))
+        .await
+        .expect("create session");
+
+    let mut emitted_seqs = Vec::new();
+    for index in 0..6 {
+        let seq = store
+            .emit_event(
+                session_id,
+                Event::UserMessage {
+                    text: format!("message-{index}"),
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+            .expect("emit user message");
+        emitted_seqs.push(seq);
+    }
+
+    // Checkpoint mid-stream at the third emitted event.
+    let checkpoint_seq = emitted_seqs[2];
+    store
+        .put_snapshot(
+            session_id,
+            ContextSnapshot {
+                format_version: moa_core::CONTEXT_SNAPSHOT_FORMAT_VERSION,
+                session_id,
+                last_sequence_num: checkpoint_seq,
+                created_at: Utc::now(),
+                messages: Vec::new(),
+                file_read_dedup_state: FileReadDedupState::default(),
+                token_count: 0,
+                stage_inputs_hash: 0,
+            },
+        )
+        .await
+        .expect("put checkpoint snapshot");
+
+    let loaded = store
+        .get_snapshot(session_id)
+        .await
+        .expect("get checkpoint snapshot")
+        .expect("checkpoint snapshot present");
+    assert_eq!(
+        loaded.last_sequence_num, checkpoint_seq,
+        "snapshot must bound replay at the checkpoint sequence"
+    );
+
+    let resume = store
+        .get_events(
+            session_id,
+            moa_core::EventRange {
+                from_seq: Some(loaded.last_sequence_num + 1),
+                ..moa_core::EventRange::all()
+            },
+        )
+        .await
+        .expect("read resume events");
+
+    let resumed_seqs: Vec<u64> = resume.iter().map(|record| record.sequence_num).collect();
+    let expected_seqs: Vec<u64> = emitted_seqs
+        .iter()
+        .copied()
+        .filter(|seq| *seq > checkpoint_seq)
+        .collect();
+    assert_eq!(
+        resumed_seqs, expected_seqs,
+        "resume must read exactly the post-checkpoint events"
+    );
+    assert!(
+        resume
+            .iter()
+            .all(|record| record.sequence_num > checkpoint_seq),
+        "no event at or before the checkpoint may be replayed: {resumed_seqs:?}"
+    );
+    assert!(
+        emitted_seqs[..=2]
+            .iter()
+            .all(|seq| !resumed_seqs.contains(seq)),
+        "pre-checkpoint events must be excluded from replay"
+    );
+
+    drop(store);
+    cleanup_schema(&database_url, &schema_name).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn postgres_task_segment_assessments_and_views_refresh() {
     let (store, database_url, schema_name) = create_test_store().await;
     let session_id = store

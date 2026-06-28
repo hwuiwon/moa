@@ -8,35 +8,24 @@ use moa_core::{
 use moa_test_support::postgres::{TestDb, bootstrap_test_db};
 use uuid::Uuid;
 
-const WORKSPACE_ID: &str = "events-append-only";
-const USER_ID: &str = "append-only-user";
+const TENANT_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const USER_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
-async fn configured_test_db() -> Option<TestDb> {
-    if !shared::postgres_url_is_configured() {
-        return None;
-    }
-    Some(
-        bootstrap_test_db()
-            .await
-            .expect("bootstrap Postgres test database"),
+async fn test_db() -> TestDb {
+    bootstrap_test_db().await.expect(
+        "bootstrap Postgres test database; start the compose Postgres or set MOA_DATABASE_URL",
     )
 }
 
-fn tenant_id(label: &str) -> TenantId {
-    let mut bytes = [0_u8; 16];
-    for (index, byte) in label.bytes().enumerate() {
-        bytes[index % 16] = bytes[index % 16].wrapping_mul(31).wrapping_add(byte);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    TenantId::from(Uuid::from_bytes(bytes))
+fn tenant_id() -> TenantId {
+    TenantId::from(Uuid::parse_str(TENANT_ID).expect("test tenant id should be a valid UUID"))
 }
 
 async fn seeded_event(test_db: &TestDb) -> Uuid {
     let session_id = test_db
         .store()
         .create_session(SessionMeta {
-            tenant_id: tenant_id(WORKSPACE_ID),
+            tenant_id: tenant_id(),
             created_by: Some(SessionActorRef::Identity {
                 id: Uuid::from_u128(42),
             }),
@@ -69,13 +58,11 @@ async fn seeded_event(test_db: &TestDb) -> Uuid {
 
 #[tokio::test]
 async fn delete_empty_session_removes_session_without_touching_events_table() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let session_id = test_db
         .store()
         .create_session(SessionMeta {
-            tenant_id: tenant_id(WORKSPACE_ID),
+            tenant_id: tenant_id(),
             created_by: Some(SessionActorRef::Identity {
                 id: Uuid::from_u128(42),
             }),
@@ -101,13 +88,11 @@ async fn delete_empty_session_removes_session_without_touching_events_table() {
 
 #[tokio::test]
 async fn delete_empty_session_rejects_session_with_append_only_events() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let session_id = test_db
         .store()
         .create_session(SessionMeta {
-            tenant_id: tenant_id(WORKSPACE_ID),
+            tenant_id: tenant_id(),
             created_by: Some(SessionActorRef::Identity {
                 id: Uuid::from_u128(42),
             }),
@@ -147,14 +132,12 @@ async fn delete_empty_session_rejects_session_with_append_only_events() {
 
 #[tokio::test]
 async fn update_on_events_is_blocked_for_app_role() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let event_id = seeded_event(&test_db).await;
     let events = shared::qualified(test_db.schema_name(), "events");
     let error = shared::execute_app_role_event_mutation(
         &test_db,
-        WORKSPACE_ID,
+        TENANT_ID,
         USER_ID,
         &format!(
             "UPDATE {events} SET payload = jsonb_set(payload, '{{blocked}}', 'true'::jsonb) WHERE id = $1"
@@ -168,14 +151,12 @@ async fn update_on_events_is_blocked_for_app_role() {
 
 #[tokio::test]
 async fn delete_on_events_is_blocked_for_app_role() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let event_id = seeded_event(&test_db).await;
     let events = shared::qualified(test_db.schema_name(), "events");
     let error = shared::execute_app_role_event_mutation(
         &test_db,
-        WORKSPACE_ID,
+        TENANT_ID,
         USER_ID,
         &format!("DELETE FROM {events} WHERE id = $1"),
         event_id,
@@ -187,13 +168,11 @@ async fn delete_on_events_is_blocked_for_app_role() {
 
 #[tokio::test]
 async fn truncate_on_events_is_blocked_for_app_role() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let events = shared::qualified(test_db.schema_name(), "events");
     let error = shared::execute_app_role_statement(
         &test_db,
-        WORKSPACE_ID,
+        TENANT_ID,
         USER_ID,
         &format!("TRUNCATE TABLE {events}"),
     )
@@ -204,9 +183,7 @@ async fn truncate_on_events_is_blocked_for_app_role() {
 
 #[tokio::test]
 async fn update_on_events_is_blocked_even_if_privilege_is_regranted() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
+    let test_db = test_db().await;
     let event_id = seeded_event(&test_db).await;
     let events = shared::qualified(test_db.schema_name(), "events");
     sqlx::query(&format!("GRANT UPDATE ON TABLE {events} TO moa_app"))
@@ -216,7 +193,7 @@ async fn update_on_events_is_blocked_even_if_privilege_is_regranted() {
 
     let error = shared::execute_app_role_event_mutation(
         &test_db,
-        WORKSPACE_ID,
+        TENANT_ID,
         USER_ID,
         &format!(
             "UPDATE {events} SET payload = jsonb_set(payload, '{{blocked}}', 'true'::jsonb) WHERE id = $1"
@@ -239,16 +216,8 @@ async fn update_on_events_is_blocked_even_if_privilege_is_regranted() {
 }
 
 #[tokio::test]
-async fn migration_applied_idempotently_does_not_break_invariant() {
-    let Some(test_db) = configured_test_db().await else {
-        return;
-    };
-    moa_migrations::run_session_schema(test_db.store().pool(), test_db.schema_name())
-        .await
-        .expect("first explicit migration replay");
-    moa_migrations::run_session_schema(test_db.store().pool(), test_db.schema_name())
-        .await
-        .expect("second explicit migration replay");
+async fn append_only_triggers_exist_and_block_app_role_after_schema_bootstrap() {
+    let test_db = test_db().await;
 
     let trigger_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) \
@@ -266,5 +235,5 @@ async fn migration_applied_idempotently_does_not_break_invariant() {
     assert_eq!(trigger_count, 2);
 
     let event_id = seeded_event(&test_db).await;
-    shared::assert_events_append_only_for_app_role(&test_db, event_id, WORKSPACE_ID, USER_ID).await;
+    shared::assert_events_append_only_for_app_role(&test_db, event_id, TENANT_ID, USER_ID).await;
 }

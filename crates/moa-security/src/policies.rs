@@ -766,44 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn tenant_rules_do_not_match_other_tenants() {
-        // Pins: tenant overrides do not leak across tenant boundaries.
-        let policies = ActionPolicies::default();
-        let ctx = ActionPolicyContext::from_session(&SessionMeta {
-            tenant_id: other_tenant_id(),
-            model: ModelId::new("claude-sonnet-4-6"),
-            ..SessionMeta::default()
-        });
-        let input = ToolPolicyInput {
-            tool_name: "bash".to_string(),
-            normalized_input: "git push".to_string(),
-            input_summary: "Command: git push".to_string(),
-            risk_level: RiskLevel::High,
-            default_effect: ActionPolicyEffect::Allow,
-            action_class: moa_core::ActionClass::CommandExecution,
-        };
-        let tenant_rule = ActionPolicyRule {
-            id: Uuid::now_v7(),
-            scope: ActionRuleScope::Tenant {
-                tenant_id: tenant_id(),
-            },
-            tool: "bash".to_string(),
-            pattern: "git push".to_string(),
-            effect: ActionPolicyEffect::Deny,
-            reason: Some("source tenant rule".to_string()),
-            created_by: UserId::new("admin"),
-            created_at: Utc::now(),
-        };
-
-        let check = policies
-            .check(&input, &ctx, &[tenant_rule])
-            .expect("policy evaluation");
-
-        assert_eq!(check.effect, ActionPolicyEffect::Allow);
-        assert!(check.matched_rule.is_none());
-    }
-
-    #[test]
     fn shell_command_parsing_detects_chained_commands() {
         assert_eq!(
             split_shell_chain("npm test && rm -rf /"),

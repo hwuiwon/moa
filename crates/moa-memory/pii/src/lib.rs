@@ -240,7 +240,7 @@ pub fn classify_heuristic(text: &str) -> PiiResult {
     for (index, token) in tokens.iter().enumerate() {
         if token.text.contains('@') {
             push_heuristic_span(token, PiiCategory::Email, 0.80, &mut spans);
-        } else if token.text.contains("sk-") || token.text.to_ascii_lowercase().contains("secret") {
+        } else if token.text.contains("sk-") || contains_secret_keyword(token.text) {
             push_heuristic_span(token, PiiCategory::Secret, 0.80, &mut spans);
         } else if looks_like_ssn(token.text) {
             push_heuristic_span(token, PiiCategory::Ssn, 0.90, &mut spans);
@@ -346,10 +346,39 @@ fn looks_like_card(token: &str) -> bool {
 
 fn looks_like_phone(token: &str) -> bool {
     let digits = token.chars().filter(|ch| ch.is_ascii_digit()).count();
+    // Require at least one phone-style separator (`+ - ( ) .`) so that a bare run
+    // of digits such as an order or tracking number is not misread as a phone
+    // number. Real phone tokens carry a country prefix or grouping punctuation.
+    let has_separator = token.chars().any(|ch| "+-().".contains(ch));
     digits >= 10
+        && has_separator
         && token
             .chars()
             .all(|ch| ch.is_ascii_digit() || "+-().".contains(ch))
+}
+
+/// Reports whether `token` contains the keyword `secret` as a standalone word.
+///
+/// Plain substring matching also flags ordinary English words such as
+/// "secretary", so the match must be bounded by non-alphabetic characters. A
+/// secret value (`secret`, `secret:abc123`, `client_secret`) is still detected
+/// while a word that merely embeds the letters is not.
+fn contains_secret_keyword(token: &str) -> bool {
+    const NEEDLE: &str = "secret";
+    let lower = token.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = lower[from..].find(NEEDLE) {
+        let start = from + offset;
+        let end = start + NEEDLE.len();
+        let preceded_by_letter = start > 0 && bytes[start - 1].is_ascii_alphabetic();
+        let followed_by_letter = bytes.get(end).is_some_and(u8::is_ascii_alphabetic);
+        if !preceded_by_letter && !followed_by_letter {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 /// Async PII classification abstraction used by ingestion and privacy workflows.

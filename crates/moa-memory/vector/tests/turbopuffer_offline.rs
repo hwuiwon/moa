@@ -109,6 +109,61 @@ async fn turbopuffer_as_of_query_returns_unsupported_without_http_request() {
     assert_eq!(requests.len(), 0);
 }
 
+#[tokio::test]
+async fn turbopuffer_offline_query_enforces_pii_ceiling_and_excludes_global_scope() {
+    // Pins the Turbopuffer-side privacy boundary: the knn request body must carry
+    // the `pii_rank <= ceiling` term and, with include_global=false, the
+    // `scope != global` term. Without these, the backend would return rows above
+    // the caller's PII ceiling or leak global-scope rows. `max_pii_class: "phi"`
+    // (rank 2) makes the ceiling meaningful (it excludes restricted=3).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("rank_by"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "rows": [] })))
+        .mount(&server)
+        .await;
+
+    let store = TurbopufferStore::new(server.uri(), SecretString::from("test-key"), "test", false)
+        .expect("store")
+        .with_storage_partition_id(Uuid::now_v7().to_string());
+
+    store
+        .knn(&VectorQuery {
+            embedding: basis_vector(0),
+            k: 10,
+            label_filter: Some(vec!["Fact".to_string()]),
+            max_pii_class: "phi".to_string(),
+            include_global: false,
+            as_of: None,
+        })
+        .await
+        .expect("query");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured requests");
+    let query_request = requests
+        .iter()
+        .find(|request| String::from_utf8_lossy(&request.body).contains("rank_by"))
+        .expect("a knn query request was sent");
+    let body: serde_json::Value =
+        serde_json::from_slice(&query_request.body).expect("query body is JSON");
+    let filters = body
+        .get("filters")
+        .expect("knn body carries a filters clause")
+        .to_string();
+
+    assert!(
+        filters.contains(r#"["pii_rank","Lte",2]"#),
+        "filters must cap pii_rank at the requested ceiling: {filters}"
+    );
+    assert!(
+        filters.contains(r#"["scope","NotEq","global"]"#),
+        "filters must exclude global scope when include_global=false: {filters}"
+    );
+}
+
 fn test_item(uid: Uuid, storage_partition_id: &str) -> VectorItem {
     let _ = storage_partition_id;
     VectorItem {

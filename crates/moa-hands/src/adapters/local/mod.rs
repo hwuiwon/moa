@@ -113,10 +113,13 @@ impl LocalHandProvider {
             .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCKER_WORKSPACE));
         let mount = format!("{}:{}", sandbox_dir.display(), workspace_mount.display());
+        let user = docker_user_spec().await;
         let mut args = vec![
             "run".to_string(),
             "-d".to_string(),
             "--rm".to_string(),
+            "--user".to_string(),
+            user,
             "--read-only".to_string(),
             "--workdir".to_string(),
             workspace_mount.display().to_string(),
@@ -749,6 +752,27 @@ async fn detect_docker() -> bool {
         "checked docker availability for local hand provider"
     );
     available
+}
+
+async fn docker_user_spec() -> String {
+    let uid = command_output_trimmed("id", &["-u"])
+        .await
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|uid| *uid != 0)
+        .unwrap_or(1000);
+    let gid = command_output_trimmed("id", &["-g"])
+        .await
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(1000);
+    format!("{uid}:{gid}")
+}
+
+async fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 async fn docker_status(container_id: &str) -> Result<HandStatus> {

@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
-use moa_core::{StoragePartitionId, UserId};
+use moa_core::wire::privacy::{ParsedPrivacySubjectId, contact_privacy_subject_string};
+use moa_core::{ContactId, StoragePartitionId, UserId};
 use restate_sdk::prelude::{HandlerError, TerminalError};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -12,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use super::approval::{ApprovalClaims, ensure_jti_inserted};
-use super::context::{CONTACT_SUBJECT_PREFIX, PrivacyExportContext, PrivacySubject};
+use super::context::{PrivacyExportContext, PrivacySubject};
 
 /// Contact-link expansion policy for privacy subject resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +85,7 @@ pub(super) async fn resolve_privacy_subjects(
     let contact_row =
         load_privacy_contact_row(pool, tenant_id, storage_partition_id, parsed.uuid).await?;
     let Some(contact_row) = contact_row else {
-        if parsed.is_contact_prefixed {
+        if parsed.is_contact() {
             return Err(TerminalError::new_with_code(404, "contact not found").into());
         }
         return Ok(ResolvedPrivacySubjects {
@@ -98,7 +99,7 @@ pub(super) async fn resolve_privacy_subjects(
     };
 
     let mut subjects = vec![PrivacySubject::primary(
-        format!("{CONTACT_SUBJECT_PREFIX}{}", contact_row.id),
+        contact_privacy_subject_string(ContactId(contact_row.id)),
         contact_row.id,
     )];
     if contact_row.state == "verified"
@@ -121,31 +122,11 @@ pub(super) async fn resolve_privacy_subjects(
     })
 }
 
-/// Parsed privacy subject id with contact-prefix metadata.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ParsedPrivacySubjectId {
-    /// Parsed UUID value.
-    pub(super) uuid: Uuid,
-    is_contact_prefixed: bool,
-}
-
 pub(super) fn parse_privacy_subject_id(
     subject_user_id: &UserId,
 ) -> Result<ParsedPrivacySubjectId, HandlerError> {
-    let raw = subject_user_id.as_str();
-    let (value, is_contact_prefixed) = raw
-        .strip_prefix(CONTACT_SUBJECT_PREFIX)
-        .map_or((raw, false), |value| (value, true));
-    let uuid = Uuid::parse_str(value).map_err(|error| {
-        TerminalError::new_with_code(
-            400,
-            format!("subject_user_id must be a UUID-backed user id: {error}"),
-        )
-    })?;
-    Ok(ParsedPrivacySubjectId {
-        uuid,
-        is_contact_prefixed,
-    })
+    ParsedPrivacySubjectId::parse(subject_user_id)
+        .map_err(|error| TerminalError::new_with_code(400, error.to_string()).into())
 }
 
 #[derive(Debug, Clone)]

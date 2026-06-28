@@ -98,18 +98,19 @@ fn tool_names_by_use_id(messages: &[ContextMessage]) -> HashMap<String, String> 
 fn referenced_tool_use_ids(messages: &[ContextMessage]) -> HashSet<String> {
     let candidate_ids = messages
         .iter()
-        .filter_map(|message| message.tool_use_id.clone())
+        .enumerate()
+        .filter_map(|(index, message)| message.tool_use_id.clone().map(|id| (index, id)))
         .collect::<Vec<_>>();
 
     let mut referenced = HashSet::new();
-    for (index, tool_use_id) in candidate_ids.iter().enumerate() {
-        if messages.iter().skip(index + 1).any(|message| {
-            message.content.contains(tool_use_id)
+    for (message_index, tool_use_id) in candidate_ids {
+        if messages.iter().skip(message_index + 1).any(|message| {
+            message.content.contains(&tool_use_id)
                 || message
                     .tool_invocation
                     .as_ref()
                     .and_then(|invocation| invocation.id.as_ref())
-                    .map(|id| id == tool_use_id)
+                    .map(|id| id == &tool_use_id)
                     .unwrap_or(false)
         }) {
             referenced.insert(tool_use_id.clone());
@@ -137,7 +138,7 @@ fn compacted_tool_result(message: &ContextMessage, placeholder: &str) -> Context
 mod tests {
     use std::collections::HashSet;
 
-    use moa_core::ContextMessage;
+    use moa_core::{ContextMessage, ToolInvocation};
     use serde_json::json;
 
     use super::{apply_tier1, apply_tier2};
@@ -146,7 +147,7 @@ mod tests {
     fn tier1_is_idempotent_for_compacted_messages() {
         let mut messages = vec![
             ContextMessage::assistant_tool_call(
-                moa_core::ToolInvocation {
+                ToolInvocation {
                     id: Some("toolu_1".to_string()),
                     name: "bash".to_string(),
                     input: json!({"cmd": "pwd"}),
@@ -164,6 +165,50 @@ mod tests {
         assert_eq!(once, 1);
         assert_eq!(twice, 0);
         assert_eq!(messages, snapshot);
+    }
+
+    #[test]
+    fn tier1_preserves_referenced_and_current_file_outputs_while_eliding_stale_results() {
+        // Pins: deterministic compaction keeps old tool output when later
+        // context still references it, and keeps current file-read bodies that
+        // history budgeting already deduplicated down to the latest read.
+        let mut messages = vec![
+            ContextMessage::assistant_tool_call(
+                ToolInvocation {
+                    id: Some("toolu_keep".to_string()),
+                    name: "bash".to_string(),
+                    input: json!({"cmd": "cargo test -p moa-brain"}),
+                },
+                "running focused tests",
+            ),
+            ContextMessage::tool_result("toolu_keep", "important failure output", None),
+            ContextMessage::assistant("The next fix depends on toolu_keep."),
+            ContextMessage::assistant_tool_call(
+                ToolInvocation {
+                    id: Some("toolu_drop".to_string()),
+                    name: "bash".to_string(),
+                    input: json!({"cmd": "pwd"}),
+                },
+                "checking cwd",
+            ),
+            ContextMessage::tool_result("toolu_drop", "stale cwd output", None),
+            ContextMessage::tool_result(
+                "toolu_file",
+                "[showing lines 1-20]\nlatest source content",
+                None,
+            ),
+            ContextMessage::user("current turn"),
+        ];
+
+        let elided = apply_tier1(&mut messages, 1, &HashSet::new());
+
+        assert_eq!(elided, 1);
+        assert_eq!(messages[1].content, "important failure output");
+        assert_eq!(messages[4].content, "[tool result elided by compaction]");
+        assert_eq!(
+            messages[5].content,
+            "[showing lines 1-20]\nlatest source content"
+        );
     }
 
     #[test]

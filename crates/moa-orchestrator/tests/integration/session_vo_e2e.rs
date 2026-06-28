@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use moa_core::{CancelMode, Event, EventRange, ModelId, SessionId, SessionStatus};
+use reqwest::StatusCode;
 use sqlx::PgPool;
 use tempfile::TempDir;
 use tokio::time::sleep;
@@ -116,6 +117,26 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .context("deserialize create_session response")?;
         grant_session_participant(&identity, session_id).await?;
 
+        let unauthorized_calls = [
+            ("status", None),
+            ("request_cancel", Some(serde_json::json!("unauthorized"))),
+            ("destroy", None),
+        ];
+        for (handler, body) in unauthorized_calls {
+            let request = client.post(object_url(ingress, session_id, handler));
+            let response = if let Some(body) = body {
+                request.json(&body).send().await
+            } else {
+                request.send().await
+            }
+            .with_context(|| format!("call unauthorized Session/{handler}"))?;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "Session/{handler} must reject direct calls without caller identity"
+            );
+        }
+
         client
             .post(format!(
                 "{}/SessionStore/init_session_vo",
@@ -137,7 +158,14 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("post_message should succeed")?;
 
-        let status = wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
+        let status = wait_for_status(
+            &client,
+            ingress,
+            &identity,
+            session_id,
+            SessionStatus::Paused,
+        )
+        .await?;
         assert_eq!(
             status,
             SessionStatus::Paused,
@@ -159,8 +187,8 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
         orchestrator = spawn_orchestrator(ports, &memory_dir, &sandbox_dir)?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
 
-        let status_after_restart = client
-            .post(object_url(ingress, session_id, "status"))
+        let status_after_restart_request = client.post(object_url(ingress, session_id, "status"));
+        let status_after_restart = with_identity(status_after_restart_request, &identity)
             .send()
             .await
             .context("call Session/status after orchestrator restart")?
@@ -189,24 +217,30 @@ async fn session_vo_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("post_message after cancel should succeed")?;
 
-        let resumed_status =
-            wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
+        let resumed_status = wait_for_status(
+            &client,
+            ingress,
+            &identity,
+            session_id,
+            SessionStatus::Paused,
+        )
+        .await?;
         assert_eq!(
             resumed_status,
             SessionStatus::Paused,
             "a stale cancel without an active turn must not prevent a later message from completing"
         );
 
-        client
-            .post(object_url(ingress, session_id, "destroy"))
+        let destroy_request = client.post(object_url(ingress, session_id, "destroy"));
+        with_identity(destroy_request, &identity)
             .send()
             .await
             .context("call Session/destroy")?
             .error_for_status()
             .context("destroy should succeed")?;
 
-        let reset_status = client
-            .post(object_url(ingress, session_id, "status"))
+        let reset_status_request = client.post(object_url(ingress, session_id, "status"));
+        let reset_status = with_identity(reset_status_request, &identity)
             .send()
             .await
             .context("call Session/status after destroy")?
@@ -264,12 +298,13 @@ async fn wait_for_brain_response(
 async fn wait_for_status(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: SessionId,
     expected: SessionStatus,
 ) -> Result<SessionStatus> {
     for _attempt in 0..60 {
-        let status = client
-            .post(object_url(ingress, session_id, "status"))
+        let request = client.post(object_url(ingress, session_id, "status"));
+        let status = with_identity(request, identity)
             .send()
             .await
             .context("call Session/status")?

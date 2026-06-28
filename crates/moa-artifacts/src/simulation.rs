@@ -530,3 +530,171 @@ pub fn experiment_plan_response_schema() -> Value {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        ExperimentPlanDefinition, ExperimentSimulationDefinition, ExperimentTargetKind,
+        ExperimentTargetVariant, MAX_SCENARIO_TURNS, SimulationDataBundleDefinition,
+        SimulationDataSource, SimulationDataSourceKind,
+    };
+    use crate::document::{ArtifactDocument, ArtifactStatus};
+    use crate::reference::ArtifactRef;
+    use crate::validation::validate_for_status;
+
+    fn data_source(
+        id: &str,
+        kind: SimulationDataSourceKind,
+        connector_ref: Option<ArtifactRef>,
+    ) -> SimulationDataSource {
+        SimulationDataSource {
+            id: id.to_string(),
+            kind,
+            connector_ref,
+            fixture: json!({}),
+            scope: None,
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn simulation_reference_paths_expand_with_nested_index_prefixes() {
+        // Pins: bundle -> simulation -> plan reference expansion prefixes each ref path with its container index.
+        let connector_ref = ArtifactRef::connector("orders");
+
+        // Only the source carrying a connector_ref contributes, and it keeps its own source index.
+        let bundle = SimulationDataBundleDefinition {
+            id: "fixtures".to_string(),
+            sources: vec![
+                data_source("mock", SimulationDataSourceKind::MockData, None),
+                data_source(
+                    "live",
+                    SimulationDataSourceKind::ConnectorFixture,
+                    Some(connector_ref.clone()),
+                ),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            bundle.reference_paths(),
+            vec![(
+                "sources[1].connector_ref".to_string(),
+                connector_ref.clone()
+            )]
+        );
+
+        // The simulation level prefixes the bundle index and the `definition.spec` root.
+        let simulation = ExperimentSimulationDefinition {
+            data_bundles: vec![bundle],
+            ..Default::default()
+        };
+        assert_eq!(
+            simulation.reference_paths(),
+            vec![(
+                "definition.spec.simulation.data_bundles[0].sources[1].connector_ref".to_string(),
+                connector_ref.clone(),
+            )]
+        );
+
+        // The plan level merges embedded-simulation refs with target-variant workflow refs in order.
+        let workflow_ref = ArtifactRef::workflow("escalation");
+        let plan = ExperimentPlanDefinition {
+            simulation,
+            target_variants: vec![ExperimentTargetVariant {
+                key: "workflow".to_string(),
+                kind: ExperimentTargetKind::Workflow,
+                workflow_ref: Some(workflow_ref.clone()),
+                config: json!({}),
+                ui: json!({}),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            plan.reference_paths(),
+            vec![
+                (
+                    "definition.spec.simulation.data_bundles[0].sources[1].connector_ref"
+                        .to_string(),
+                    connector_ref,
+                ),
+                (
+                    "definition.spec.target_variants[0].workflow_ref".to_string(),
+                    workflow_ref,
+                ),
+            ]
+        );
+    }
+
+    fn plan_doc_with_max_turns(max_turns: u32) -> ArtifactDocument {
+        ArtifactDocument::from_json(
+            &json!({
+                "api_version": "moa.artifact/v1",
+                "kind": "experiment_plan",
+                "metadata": { "name": "bound-plan" },
+                "definition": {
+                    "type": "experiment_plan",
+                    "spec": {
+                        "simulation": {
+                            "scenarios": [{
+                                "id": "scenario",
+                                "initial_situation": "A user has a question.",
+                                "goals": ["Resolve the question."],
+                                "success_criteria": ["The agent answers."],
+                                "max_turns": max_turns
+                            }],
+                            "personas": [{
+                                "id": "persona",
+                                "voice": "Direct.",
+                                "goals": ["Get an answer."],
+                                "stop_behavior": "Stop once answered."
+                            }],
+                            "profiles": [{ "id": "profile", "facts": { "tier": "standard" } }]
+                        },
+                        "target_variants": [{ "key": "agent", "kind": "agent_loop" }],
+                        "simulator_model": "gpt-4.1-mini",
+                        "parallelism": 1,
+                        "trials_per_combination": 1,
+                        "budget": { "max_total_cents": 100 }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("experiment plan document parses")
+    }
+
+    #[test]
+    fn scenario_max_turns_bound_is_enforced_at_the_constant() {
+        // Pins: scenario max_turns accepts exactly MAX_SCENARIO_TURNS and rejects one above it.
+        let max_turns_path = "definition.spec.simulation.scenarios[0].max_turns";
+
+        let at_limit = validate_for_status(
+            &plan_doc_with_max_turns(MAX_SCENARIO_TURNS),
+            ArtifactStatus::Draft,
+        );
+        assert!(
+            at_limit
+                .errors
+                .iter()
+                .all(|error| error.path != max_turns_path),
+            "max_turns at the limit should be accepted: {:?}",
+            at_limit.errors
+        );
+
+        let over_limit = validate_for_status(
+            &plan_doc_with_max_turns(MAX_SCENARIO_TURNS + 1),
+            ArtifactStatus::Draft,
+        );
+        assert!(
+            over_limit.errors.iter().any(|error| {
+                error.path == max_turns_path
+                    && error.message
+                        == format!("scenario max_turns must be between 1 and {MAX_SCENARIO_TURNS}")
+            }),
+            "max_turns above the limit must reject with the bound message: {:?}",
+            over_limit.errors
+        );
+    }
+}

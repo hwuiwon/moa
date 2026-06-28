@@ -10,3 +10,11 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 workspace-hack = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+moa-core = { workspace = true }
+moa-memory-types = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

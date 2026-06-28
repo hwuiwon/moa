@@ -295,56 +295,9 @@ async fn test_pool() -> PgPool {
         .connect(&database_url)
         .await
         .expect("test Postgres should be reachable");
-    sqlx::query(&format!(
-        "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_identifier(&schema_name)
-    ))
-    .execute(&pool)
-    .await
-    .expect("test schema should be created");
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE auth0_user_map (
-            sub        TEXT NOT NULL,
-            tenant_id  UUID NOT NULL,
-            user_id    UUID NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (sub, tenant_id)
-        );
-
-        CREATE INDEX idx_auth0_user_map_user ON auth0_user_map(user_id);
-
-        CREATE TABLE auth0_ciba_approvals (
-            id                  UUID        PRIMARY KEY,
-            session_id          UUID        NOT NULL,
-            deciding_user_id    UUID        NOT NULL,
-            awakeable_id        TEXT        NOT NULL UNIQUE,
-            auth_req_id         TEXT        NOT NULL UNIQUE,
-            status              TEXT        NOT NULL DEFAULT 'pending'
-                                                  CHECK (status IN ('pending', 'approved', 'denied', 'timeout')),
-            deny_reason         TEXT,
-            poll_interval_ms    INTEGER     NOT NULL,
-            next_poll_at        TIMESTAMPTZ NOT NULL,
-            expires_at          TIMESTAMPTZ NOT NULL,
-            resolved_at         TIMESTAMPTZ,
-            lease_token         UUID,
-            lease_expires_at    TIMESTAMPTZ,
-            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE INDEX idx_auth0_ciba_claimable
-            ON auth0_ciba_approvals(status, next_poll_at, lease_expires_at)
-            WHERE status = 'pending';
-
-        CREATE INDEX idx_auth0_ciba_unresolved_terminal
-            ON auth0_ciba_approvals(lease_expires_at, updated_at)
-            WHERE status IN ('approved', 'denied', 'timeout') AND resolved_at IS NULL;
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .expect("auth0 CIBA test schema should apply");
+    moa_migrations::run_auth_schema(&pool, &schema_name)
+        .await
+        .expect("auth baseline should apply");
     pool
 }
 

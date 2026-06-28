@@ -1,6 +1,9 @@
 //! Tests for skill package validation invariants.
 
-use moa_skills::package::{MAX_SKILL_PACKAGE_FILES, SkillPackage, SkillPackageFile};
+use moa_skills::package::{
+    MAX_SKILL_FILE_BYTES, MAX_SKILL_PACKAGE_BYTES, MAX_SKILL_PACKAGE_FILES, SkillPackage,
+    SkillPackageFile,
+};
 
 const VALID_SKILL: &str = r#"---
 name: package-skill
@@ -116,6 +119,80 @@ fn rejects_non_utf8_skill_md() {
         .expect_err("non-UTF-8 SKILL.md should fail");
 
     assert!(error.to_string().contains("UTF-8"));
+}
+
+#[test]
+fn rejects_empty_package() {
+    // Pins: an empty package is rejected before any file processing or hashing.
+    let error = SkillPackage::new(Vec::new())
+        .validate()
+        .expect_err("empty package should fail");
+
+    assert!(
+        error.to_string().contains("SKILL.md"),
+        "empty package error should mention the required SKILL.md: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_package_paths() {
+    // Pins: two files at the same normalized path are rejected so manifest hashing stays unambiguous.
+    let error = SkillPackage::new(vec![
+        SkillPackageFile::new("SKILL.md", VALID_SKILL.as_bytes().to_vec()),
+        SkillPackageFile::new("scripts/run.py", b"print('a')".to_vec()),
+        SkillPackageFile::new("scripts/run.py", b"print('b')".to_vec()),
+    ])
+    .validate()
+    .expect_err("duplicate package path should fail");
+
+    assert!(
+        error.to_string().contains("duplicate"),
+        "duplicate-path error should name the conflict: {error}"
+    );
+}
+
+#[test]
+fn rejects_package_file_over_per_file_byte_cap() {
+    // Pins: a single file above MAX_SKILL_FILE_BYTES is rejected to bound per-file write cost.
+    let oversized = vec![b'x'; usize::try_from(MAX_SKILL_FILE_BYTES).expect("cap fits usize") + 1];
+    let error = SkillPackage::new(vec![
+        SkillPackageFile::new("SKILL.md", VALID_SKILL.as_bytes().to_vec()),
+        SkillPackageFile::new("assets/big.bin", oversized),
+    ])
+    .validate()
+    .expect_err("file over the per-file cap should fail");
+
+    assert!(
+        error.to_string().contains("bytes"),
+        "per-file-cap error should mention the byte limit: {error}"
+    );
+}
+
+#[test]
+fn rejects_package_over_total_byte_cap() {
+    // Pins: the summed package size cannot exceed MAX_SKILL_PACKAGE_BYTES across many under-cap files.
+    let chunk = vec![b'y'; usize::try_from(MAX_SKILL_FILE_BYTES).expect("cap fits usize")];
+    let chunk_count = usize::try_from(MAX_SKILL_PACKAGE_BYTES / MAX_SKILL_FILE_BYTES)
+        .expect("chunk count fits usize")
+        + 1;
+    let mut files = vec![SkillPackageFile::new(
+        "SKILL.md",
+        VALID_SKILL.as_bytes().to_vec(),
+    )];
+    files.extend(
+        (0..chunk_count)
+            .map(|index| SkillPackageFile::new(format!("blobs/{index}.bin"), chunk.clone())),
+    );
+
+    let error = SkillPackage::new(files)
+        .validate()
+        .expect_err("package over the total byte cap should fail");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("exceeds") && message.contains("bytes"),
+        "total-cap error should report the package byte limit: {error}"
+    );
 }
 
 #[test]

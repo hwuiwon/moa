@@ -55,6 +55,20 @@ pub(crate) async fn stream_responses_with_retry(
                     }
                     Err(error) => {
                         span_recorder.fail_at_stage("stream", &error.error);
+                        if error.rate_limited {
+                            // Match the shared RetryPolicy: an exhausted rate
+                            // limit is a typed RateLimited, never a generic
+                            // ProviderError or HttpStatus{429}.
+                            let message = match error.error {
+                                MoaError::RateLimited { message, .. }
+                                | MoaError::ProviderError(message) => message,
+                                other => other.to_string(),
+                            };
+                            return Err(MoaError::RateLimited {
+                                retries: retry_policy.max_retries,
+                                message,
+                            });
+                        }
                         return Err(error.error);
                     }
                 }
@@ -127,10 +141,12 @@ async fn consume_responses_stream_once(
             Err(error) if is_ignorable_openai_stream_error(&error) => continue,
             Err(error) => {
                 let retryable = is_retryable_openai_error(&error);
+                let rate_limited = is_rate_limit_error(&error);
                 return Err(ResponsesStreamError {
                     error: map_openai_error(error),
                     retryable,
                     emitted_content,
+                    rate_limited,
                 });
             }
         };
@@ -183,6 +199,7 @@ async fn consume_responses_stream_once(
                         )),
                         retryable: false,
                         emitted_content,
+                        rate_limited: false,
                     })?;
                 let call = CompletionContent::ToolCall(ToolCallContent {
                     invocation: ToolInvocation {
@@ -229,9 +246,11 @@ async fn consume_responses_stream_once(
                 response = Some(event.response);
             }
             ResponseStreamEvent::ResponseError(event) => {
+                let rate_limited = is_rate_limit_message(&event.message);
                 return Err(ResponsesStreamError {
-                    retryable: is_rate_limit_message(&event.message),
+                    retryable: rate_limited,
                     emitted_content,
+                    rate_limited,
                     error: MoaError::ProviderError(event.message),
                 });
             }
@@ -242,6 +261,7 @@ async fn consume_responses_stream_once(
     let response = response.ok_or_else(|| ResponsesStreamError {
         retryable: false,
         emitted_content,
+        rate_limited: false,
         error: MoaError::ProviderError(
             "Responses stream ended before the provider returned a completed response".to_string(),
         ),
@@ -256,6 +276,7 @@ async fn consume_responses_stream_once(
             ResponsesStreamError {
                 retryable: false,
                 emitted_content,
+                rate_limited: false,
                 error,
             }
         })?;

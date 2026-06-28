@@ -794,3 +794,201 @@ async fn local_provider_installs_skill_package_files() {
 
     provider.destroy(&handle).await.unwrap();
 }
+
+// Pins: ToolRouter::execute is the runtime enforcement gate. A Deny action policy
+// must turn into a PermissionDenied refusal AND the tool body must never run. This
+// drives execute() directly (not execute_authorized, which bypasses the gate) and
+// proves non-execution by reading back the file the denied write would have created.
+#[tokio::test]
+async fn execute_refuses_tool_denied_by_action_policy_and_skips_tool_body() {
+    let dir = tempdir().unwrap();
+    let router = deny_router(dir.path(), &["file_write"]).await;
+    let session = session();
+
+    let error = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "denied.txt", "content": "must-not-be-written" }),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::PermissionDenied(message) => {
+            assert!(
+                message.contains("denied by action policy"),
+                "unexpected refusal message: {message}"
+            );
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+
+    // The write body must not have executed: reading the would-be target fails
+    // because the file was never created. file_read is allowed by this policy.
+    let read_result = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "denied.txt" }),
+            },
+        )
+        .await;
+    assert!(
+        read_result.is_err(),
+        "denied file_write must not have created the file, but it was readable"
+    );
+}
+
+// Pins: execute_with_recovery carries the same Deny enforcement arm as execute and
+// must refuse + skip the tool body identically.
+#[tokio::test]
+async fn execute_with_recovery_refuses_tool_denied_by_action_policy_and_skips_tool_body() {
+    let dir = tempdir().unwrap();
+    let router = deny_router(dir.path(), &["file_write"]).await;
+    let session = session();
+
+    let error = router
+        .execute_with_recovery(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_write".to_string(),
+                input: json!({ "path": "recovery-denied.txt", "content": "must-not-be-written" }),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::PermissionDenied(message) => {
+            assert!(
+                message.contains("denied by action policy"),
+                "unexpected refusal message: {message}"
+            );
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+
+    let read_result = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "recovery-denied.txt" }),
+            },
+        )
+        .await;
+    assert!(
+        read_result.is_err(),
+        "denied file_write must not have created the file, but it was readable"
+    );
+}
+
+// Pins: an AdminReview action policy refuses the invocation at execute() time rather
+// than running the tool. Reuses the admin_review_router fixture but drives execute()
+// (the fixture was previously only exercised via prepare_invocation/review_preview).
+#[tokio::test]
+async fn execute_refuses_admin_review_tool_instead_of_running_it() {
+    let dir = tempdir().unwrap();
+    let router = admin_review_router(dir.path()).await;
+    let session = session();
+
+    let error = router
+        .execute(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "echo should-not-run" }),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::PermissionDenied(message) => {
+            assert!(
+                message.contains("requires tenant admin review"),
+                "unexpected refusal message: {message}"
+            );
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+}
+
+// Pins: check_policy is the router's public policy-evaluation API. It must report
+// Deny for a configured-denied tool and Allow for any other tool.
+#[tokio::test]
+async fn check_policy_denies_configured_tool_and_allows_others() {
+    let dir = tempdir().unwrap();
+    let router = deny_router(dir.path(), &["bash"]).await;
+    let session = session();
+
+    let denied = router
+        .check_policy(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "bash".to_string(),
+                input: json!({ "cmd": "echo hi" }),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(denied.effect, moa_core::ActionPolicyEffect::Deny),
+        "expected Deny for bash, got {:?}",
+        denied.effect
+    );
+
+    let allowed = router
+        .check_policy(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "file_read".to_string(),
+                input: json!({ "path": "notes.txt" }),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(allowed.effect, moa_core::ActionPolicyEffect::Allow),
+        "expected Allow for file_read, got {:?}",
+        allowed.effect
+    );
+}
+
+// Pins: dispatch rejects an unregistered tool name with ToolError("unknown tool: ...")
+// rather than silently succeeding or panicking.
+#[tokio::test]
+async fn execute_authorized_rejects_unregistered_tool_name() {
+    let dir = tempdir().unwrap();
+    let router = ToolRouter::new_local(dir.path()).await.unwrap();
+    let session = session();
+
+    let error = router
+        .execute_authorized(
+            &session,
+            &ToolInvocation {
+                id: None,
+                name: "does_not_exist".to_string(),
+                input: json!({}),
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        moa_core::MoaError::ToolError(message) => {
+            assert!(
+                message.contains("unknown tool"),
+                "unexpected error message: {message}"
+            );
+        }
+        other => panic!("expected ToolError, got {other:?}"),
+    }
+}

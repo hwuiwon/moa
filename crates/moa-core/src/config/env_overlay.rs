@@ -1186,6 +1186,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_default_provider_env_is_rejected_not_clobbered() {
+        // Pins: an empty MOA_GENERAL_DEFAULT_PROVIDER must not silently clobber the
+        // populated "openai" default (the known mock/empty gotcha); apply_to fails
+        // closed naming the offending field rather than yielding an empty provider.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_GENERAL_DEFAULT_PROVIDER", ""),
+        ]))
+        .expect("overlay should deserialize");
+
+        let mut config = MoaConfig::default();
+        assert_eq!(config.general.default_provider, "openai");
+
+        assert_config_error_contains(overlay.apply_to(&mut config), "general.default_provider");
+    }
+
+    #[test]
+    fn empty_models_main_env_is_rejected_not_clobbered() {
+        // Pins: an empty MOA_MODELS_MAIN must not clobber the populated main-model
+        // default; validation fails closed naming models.main.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_DATABASE_URL", "postgres://moa:test@db.example/moa"),
+            ("MOA_MODELS_MAIN", ""),
+        ]))
+        .expect("overlay should deserialize");
+
+        let mut config = MoaConfig::default();
+        assert_ne!(config.models.main, "");
+
+        assert_config_error_contains(overlay.apply_to(&mut config), "models.main");
+    }
+
     fn env_pairs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<(String, String)> {
         pairs
             .into_iter()

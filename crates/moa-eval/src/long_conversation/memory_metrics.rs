@@ -180,6 +180,128 @@ fn is_memory_path(path: &str) -> bool {
     path == "memory" || path.starts_with("memory/") || path.contains("/memory/")
 }
 
+/// In-memory `SessionStore` doubles for hermetic long-conversation unit tests.
+#[cfg(test)]
+pub(crate) mod test_session_store {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use moa_core::{
+        Event, EventFilter, EventRange, EventRecord, Result, SequenceNum, SessionFilter, SessionId,
+        SessionMeta, SessionStatus, SessionStore, SessionSummary, TenantId,
+    };
+
+    /// Session store that returns a synthetic hit for configured planted facts and
+    /// records the search limits it was queried with.
+    ///
+    /// `search_events` is the only method memory-recall scoring exercises; every
+    /// other trait method is a benign no-op so the double stays small.
+    #[derive(Clone, Default)]
+    pub(crate) struct RecordingSessionStore {
+        recalled_facts: HashSet<String>,
+        observed_limits: Arc<Mutex<Vec<Option<usize>>>>,
+    }
+
+    impl RecordingSessionStore {
+        /// Builds a store whose `search_events` returns one hit for each listed fact.
+        pub(crate) fn with_recalled_facts<I, S>(recalled_facts: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            Self {
+                recalled_facts: recalled_facts.into_iter().map(Into::into).collect(),
+                observed_limits: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Returns the `limit` passed to every observed `search_events` call, in order.
+        pub(crate) fn observed_limits(&self) -> Vec<Option<usize>> {
+            self.observed_limits
+                .lock()
+                .expect("observed-limits lock should not be poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for RecordingSessionStore {
+        async fn create_session(&self, meta: SessionMeta) -> Result<SessionId> {
+            Ok(meta.id)
+        }
+
+        async fn emit_event(&self, _session_id: SessionId, _event: Event) -> Result<SequenceNum> {
+            Ok(0)
+        }
+
+        async fn get_events(
+            &self,
+            _session_id: SessionId,
+            _range: EventRange,
+        ) -> Result<Vec<EventRecord>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_session(&self, _session_id: SessionId) -> Result<SessionMeta> {
+            Ok(SessionMeta::default())
+        }
+
+        async fn update_status(
+            &self,
+            _session_id: SessionId,
+            _status: SessionStatus,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn search_events(
+            &self,
+            query: &str,
+            filter: EventFilter,
+        ) -> Result<Vec<EventRecord>> {
+            self.observed_limits
+                .lock()
+                .expect("observed-limits lock should not be poisoned")
+                .push(filter.limit);
+            if !self.recalled_facts.contains(query) {
+                return Ok(Vec::new());
+            }
+            let event = Event::Warning {
+                message: query.to_string(),
+            };
+            Ok(vec![EventRecord {
+                id: uuid::Uuid::now_v7(),
+                session_id: filter.session_id.unwrap_or_default(),
+                sequence_num: 0,
+                event_type: event.event_type(),
+                event,
+                timestamp: Utc::now(),
+                brain_id: None,
+                hand_id: None,
+                token_count: None,
+            }])
+        }
+
+        async fn list_sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>> {
+            Ok(Vec::new())
+        }
+
+        async fn tenant_cost_since(
+            &self,
+            _tenant_id: &TenantId,
+            _since: DateTime<Utc>,
+        ) -> Result<u32> {
+            Ok(0)
+        }
+
+        async fn delete_empty_session(&self, _session_id: SessionId) -> Result<()> {
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -187,6 +309,7 @@ mod tests {
     use moa_core::ToolOutput;
     use serde_json::json;
 
+    use super::test_session_store::RecordingSessionStore;
     use super::*;
 
     fn tool_id(value: u128) -> ToolCallId {
@@ -269,6 +392,73 @@ mod tests {
                 failures: 1,
                 skipped: 0
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn planted_fact_recall_is_zero_without_searching_for_an_empty_planted_set() {
+        // Pins: an empty planted-fact set short-circuits to 0.0 and never queries the store.
+        let store = RecordingSessionStore::with_recalled_facts(["unused fact"]);
+        let scenario = MemoryScenario {
+            planted_facts: Vec::new(),
+            recall_k: 25,
+        };
+
+        let recall = compute_planted_fact_recall(&scenario, SessionId::new(), &store)
+            .await
+            .expect("empty planted set is infallible");
+
+        assert_eq!(recall, 0.0);
+        assert!(
+            store.observed_limits().is_empty(),
+            "empty planted set must not issue any session search"
+        );
+    }
+
+    #[tokio::test]
+    async fn planted_fact_recall_clamps_zero_recall_k_to_search_limit_one() {
+        // Pins: recall_k=0 is clamped to a search limit of 1 instead of issuing a zero-limit query.
+        let store = RecordingSessionStore::with_recalled_facts(["fact one", "fact two"]);
+        let scenario = MemoryScenario {
+            planted_facts: vec!["fact one".to_string(), "fact two".to_string()],
+            recall_k: 0,
+        };
+
+        let recall = compute_planted_fact_recall(&scenario, SessionId::new(), &store)
+            .await
+            .expect("recall scoring is infallible against the in-memory store");
+
+        assert_eq!(recall, 1.0);
+        assert_eq!(
+            store.observed_limits(),
+            vec![Some(1), Some(1)],
+            "recall_k=0 must clamp the per-fact search limit to 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn planted_fact_recall_returns_the_exact_recalled_fraction() {
+        // Pins: recall is recalled_facts / planted_facts using the configured recall_k as the search limit.
+        let store = RecordingSessionStore::with_recalled_facts(["alpha", "gamma"]);
+        let scenario = MemoryScenario {
+            planted_facts: vec![
+                "alpha".to_string(),
+                "beta".to_string(),
+                "gamma".to_string(),
+                "delta".to_string(),
+            ],
+            recall_k: 10,
+        };
+
+        let recall = compute_planted_fact_recall(&scenario, SessionId::new(), &store)
+            .await
+            .expect("recall scoring is infallible against the in-memory store");
+
+        assert_eq!(recall, 0.5);
+        assert_eq!(
+            store.observed_limits(),
+            vec![Some(10), Some(10), Some(10), Some(10)],
+            "each planted fact must be searched once at the configured recall_k"
         );
     }
 }

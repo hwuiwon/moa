@@ -1,16 +1,52 @@
 //! Integration tests for the pgvector `halfvec(1024)` graph-memory store.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
 use moa_core::{ContactId, TenantId};
 use moa_db::ScopedConn;
-use moa_memory_vector::{PgvectorStore, VectorItem, VectorQuery, VectorStore};
+use moa_memory_vector::{
+    PROMOTION_OVERLAP_THRESHOLD, PgvectorStore, VectorItem, VectorMatch, VectorPartitionPromotion,
+    VectorQuery, VectorStore,
+};
 use moa_session::testing;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-static TEST_LOCK: Mutex<()> = Mutex::const_new(());
+/// Test-only target backend whose KNN never overlaps the source, so promotion
+/// validation overlap is forced to zero regardless of the source's results.
+struct DisjointVectorStore;
+
+#[async_trait::async_trait]
+impl VectorStore for DisjointVectorStore {
+    fn backend(&self) -> &'static str {
+        "disjoint-test"
+    }
+
+    fn dimension(&self) -> usize {
+        1024
+    }
+
+    async fn upsert(&self, _items: &[VectorItem]) -> Result<(), moa_memory_vector::Error> {
+        Ok(())
+    }
+
+    async fn knn(
+        &self,
+        _query: &VectorQuery,
+    ) -> Result<Vec<VectorMatch>, moa_memory_vector::Error> {
+        Ok(vec![VectorMatch {
+            uid: Uuid::now_v7(),
+            score: 1.0,
+        }])
+    }
+
+    async fn delete(&self, _uids: &[Uuid]) -> Result<(), moa_memory_vector::Error> {
+        Ok(())
+    }
+}
 
 fn tenant_scope(storage_partition_id: impl AsRef<str>) -> RlsContext {
     let storage_partition_id = storage_partition_id.as_ref();
@@ -203,7 +239,6 @@ async fn delete_node_index_rows(pool: &PgPool, uids: &[Uuid]) {
 
 #[tokio::test]
 async fn pgvector_round_trip_returns_identical_seed_first() {
-    let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -254,7 +289,6 @@ async fn pgvector_round_trip_returns_identical_seed_first() {
 
 #[tokio::test]
 async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
-    let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -306,7 +340,6 @@ async fn cross_tenant_knn_cannot_see_other_workspace_vectors() {
 #[tokio::test]
 async fn control_plane_knn_can_validate_contact_workspace_vectors() {
     // Pins: storage-partition vector promotion validates contact-owned embeddings through control-plane RLS.
-    let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -387,7 +420,6 @@ async fn control_plane_knn_can_validate_contact_workspace_vectors() {
 #[tokio::test]
 async fn pgvector_as_of_filters_by_node_index_validity_window() {
     // Pins: pgvector historical queries use node_index valid_from/valid_to, not active rows only.
-    let _guard = TEST_LOCK.lock().await;
     let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
         .await
         .expect("create isolated Postgres store");
@@ -456,6 +488,184 @@ async fn pgvector_as_of_filters_by_node_index_validity_window() {
         .await
         .expect("delete historical vectors");
     delete_node_index_rows(session_store.pool(), &[old.uid, new.uid]).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn pgvector_knn_excludes_vectors_above_max_pii_class_ceiling() {
+    // Pins the privacy ceiling at pgvector_store.rs:169-179: a query with a lower
+    // `max_pii_class` must exclude higher-PII embeddings even when they are the
+    // nearest neighbors. The three rows share one embedding so neighbor distance
+    // is identical and only the pii_class rank gate decides membership. Without
+    // the CASE/<= filter, a "phi"-ceiling query would leak the "restricted" row.
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+
+    let none_item = VectorItem {
+        pii_class: "none".to_string(),
+        ..vector_item(
+            Uuid::now_v7(),
+            &storage_partition_id,
+            "Fact",
+            basis_vector(0),
+        )
+    };
+    let phi_item = VectorItem {
+        pii_class: "phi".to_string(),
+        ..vector_item(
+            Uuid::now_v7(),
+            &storage_partition_id,
+            "Fact",
+            basis_vector(0),
+        )
+    };
+    let restricted_item = VectorItem {
+        pii_class: "restricted".to_string(),
+        ..vector_item(
+            Uuid::now_v7(),
+            &storage_partition_id,
+            "Fact",
+            basis_vector(0),
+        )
+    };
+    let items = vec![none_item.clone(), phi_item.clone(), restricted_item.clone()];
+    let uids: Vec<_> = items.iter().map(|item| item.uid).collect();
+
+    insert_node_index_rows(session_store.pool(), &storage_partition_id, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    let store = PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    );
+    store
+        .upsert(&items)
+        .await
+        .expect("upsert mixed-pii vectors");
+
+    let query_at = |ceiling: &str| VectorQuery {
+        embedding: basis_vector(0),
+        k: 10,
+        label_filter: Some(vec!["Fact".to_string()]),
+        max_pii_class: ceiling.to_string(),
+        include_global: false,
+        as_of: None,
+    };
+
+    let phi_ceiling: HashSet<Uuid> = store
+        .knn(&query_at("phi"))
+        .await
+        .expect("phi-ceiling query")
+        .into_iter()
+        .map(|row| row.uid)
+        .collect();
+    assert!(
+        phi_ceiling.contains(&none_item.uid),
+        "none-class vector must pass a phi ceiling: {phi_ceiling:?}"
+    );
+    assert!(
+        phi_ceiling.contains(&phi_item.uid),
+        "phi-class vector must pass a phi ceiling: {phi_ceiling:?}"
+    );
+    assert!(
+        !phi_ceiling.contains(&restricted_item.uid),
+        "restricted-class vector must be excluded under a phi ceiling: {phi_ceiling:?}"
+    );
+
+    let none_ceiling: HashSet<Uuid> = store
+        .knn(&query_at("none"))
+        .await
+        .expect("none-ceiling query")
+        .into_iter()
+        .map(|row| row.uid)
+        .collect();
+    assert_eq!(
+        none_ceiling,
+        HashSet::from([none_item.uid]),
+        "only the non-PII vector survives a none ceiling"
+    );
+
+    store.delete(&uids).await.expect("delete vectors");
+    delete_node_index_rows(session_store.pool(), &uids).await;
+    drop(session_store);
+    testing::cleanup_test_schema(&database_url, &schema_name)
+        .await
+        .expect("drop isolated schema");
+}
+
+#[tokio::test]
+async fn promotion_validate_storage_partition_scores_real_backend_overlap_db_memory() {
+    // Pins the production `validate_storage_partition` overlap path against real
+    // Postgres: `fetch_validation_sample` reads the seeded `moa.embeddings` rows
+    // and the method contrasts the pgvector source KNN with the promotion target
+    // KNN per sampled row. Identical backends must validate (overlap 1.0 >=
+    // threshold); a disjoint target must be rejected (overlap 0.0 < threshold).
+    let (session_store, database_url, schema_name) = testing::create_isolated_test_store()
+        .await
+        .expect("create isolated Postgres store");
+    let storage_partition_id = Uuid::now_v7().to_string();
+    let items: Vec<_> = (0..5)
+        .map(|index| {
+            vector_item(
+                Uuid::now_v7(),
+                &storage_partition_id,
+                "Fact",
+                basis_vector(index),
+            )
+        })
+        .collect();
+    let uids: Vec<_> = items.iter().map(|item| item.uid).collect();
+    insert_node_index_rows(session_store.pool(), &storage_partition_id, &items).await;
+    set_workspace_embedder_state(session_store.pool(), &storage_partition_id, "test-model").await;
+
+    let source: Arc<dyn VectorStore> = Arc::new(PgvectorStore::new_for_app_role(
+        session_store.pool().clone(),
+        tenant_scope(storage_partition_id.clone()),
+    ));
+    source.upsert(&items).await.expect("upsert source vectors");
+
+    // Identical source/target backends: every sampled query returns the same
+    // top-K from both sides, so the average overlap is 1.0 and validation passes.
+    let identical =
+        VectorPartitionPromotion::new(session_store.pool().clone(), source.clone(), source.clone());
+    let high_overlap = identical
+        .validate_storage_partition(&storage_partition_id, 100)
+        .await
+        .expect("validate identical backends");
+    assert!(
+        (high_overlap - 1.0).abs() < f64::EPSILON,
+        "identical pgvector backends must report full overlap, got {high_overlap}"
+    );
+    assert!(
+        high_overlap >= PROMOTION_OVERLAP_THRESHOLD,
+        "full overlap must clear the promotion threshold"
+    );
+
+    // Disjoint target backend: no sampled query overlaps, so validation reports
+    // zero overlap and would reject the promotion.
+    let target: Arc<dyn VectorStore> = Arc::new(DisjointVectorStore);
+    let mismatched =
+        VectorPartitionPromotion::new(session_store.pool().clone(), source.clone(), target);
+    let low_overlap = mismatched
+        .validate_storage_partition(&storage_partition_id, 100)
+        .await
+        .expect("validate disjoint backends");
+    assert_eq!(
+        low_overlap, 0.0,
+        "a disjoint target backend must report zero overlap"
+    );
+    assert!(
+        low_overlap < PROMOTION_OVERLAP_THRESHOLD,
+        "zero overlap must fail the promotion threshold"
+    );
+
+    source.delete(&uids).await.expect("delete source vectors");
+    delete_node_index_rows(session_store.pool(), &uids).await;
     drop(session_store);
     testing::cleanup_test_schema(&database_url, &schema_name)
         .await

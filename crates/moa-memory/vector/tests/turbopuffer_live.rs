@@ -5,15 +5,29 @@
 use moa_memory_vector::{TurbopufferStore, VECTOR_DIMENSION, VectorItem, VectorQuery, VectorStore};
 use uuid::Uuid;
 
+/// Returns `true` when `name` is set to a common truthy value (`1`, `true`,
+/// `yes`, or `on`, case-insensitively after trimming), matching how live-test
+/// flags are written in a developer's `.env`.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn live_store() -> TurbopufferStore {
-    if std::env::var("MOA_RUN_LIVE_TURBOPUFFER_TESTS").as_deref() != Ok("1") {
+    if !env_flag_enabled("MOA_RUN_LIVE_TURBOPUFFER_TESTS") {
         panic!("set MOA_RUN_LIVE_TURBOPUFFER_TESTS=1 to run live Turbopuffer tests");
     }
-    TurbopufferStore::from_env().expect("TURBOPUFFER_API_KEY and Turbopuffer config")
+    TurbopufferStore::from_env().expect("MOA_TURBOPUFFER_API_KEY and Turbopuffer config")
 }
 
 #[tokio::test]
-#[ignore = "live Turbopuffer test; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1 and TURBOPUFFER_API_KEY"]
+#[ignore = "live Turbopuffer test; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1 and MOA_TURBOPUFFER_API_KEY"]
 async fn turbopuffer_live_round_trip() {
     let storage_partition_id = format!("live-{}", Uuid::now_v7());
     let store = live_store().with_storage_partition_id(storage_partition_id.clone());
