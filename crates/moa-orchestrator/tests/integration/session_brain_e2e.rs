@@ -38,7 +38,7 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env("RUST_LOG", "info")
-        .env_remove("COHERE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -52,13 +52,13 @@ fn configured_env(key: &str) -> bool {
 }
 
 fn live_model() -> Option<&'static str> {
-    if configured_env("ANTHROPIC_API_KEY") {
+    if configured_env("MOA_ANTHROPIC_API_KEY") {
         return Some("claude-sonnet-4-6");
     }
-    if configured_env("OPENAI_API_KEY") {
+    if configured_env("MOA_OPENAI_API_KEY") {
         return Some("gpt-5.4-mini");
     }
-    if configured_env("GOOGLE_API_KEY") {
+    if configured_env("MOA_GOOGLE_API_KEY") {
         return Some("gemini-3-flash-preview");
     }
 

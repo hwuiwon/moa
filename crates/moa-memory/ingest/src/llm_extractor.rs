@@ -2,47 +2,22 @@
 
 use async_trait::async_trait;
 use moa_core::config::MemoryExtractionConfig;
-use serde::Deserialize;
+use moa_providers::{
+    LlmChatClient, LlmExtractedFact, LlmFactExtractionChunk, LlmFactExtractionClient,
+};
 use uuid::Uuid;
 
 use crate::{
     ExtractedFact, ExtractedFactScopeHint, FactExtractor, IngestError, Result, TurnChunk,
-    fact_hash, fact_uid_from_hash, llm_client::LlmChatClient,
+    fact_hash, fact_uid_from_hash,
 };
 
-/// Version for the LLM extraction prompt and recorded extraction fixtures.
-pub const EXTRACTION_PROMPT_VERSION: &str = "v2";
-
-const EXTRACTION_SYSTEM_PROMPT: &str = r#"You extract durable, declarative facts from transcripts.
-Skip questions, requests, speculation, small talk, transient scheduling commentary, and provenance-only details like "last sprint" or "per the platform decision".
-Do not split one durable preference/value into multiple facts only because the object contains punctuation.
-For each fact return one JSON object with keys:
-- subject: concise noun phrase
-- predicate: concise relation phrase
-- object: concise noun phrase or value
-- summary: one sentence restating the fact
-- scope: "contact" or "tenant" using the rubric below
-- confidence: number from 0.0 to 1.0
-Use this scope rubric:
-scope = "contact" when the fact is about the speaker personally: preferences ("I prefer", "my setup", "for my work"), personal state, individual habits, or anything phrased in first person about themselves.
-scope = "tenant" when the fact is about shared systems or team agreements: "we decided", "the team", "our service", infrastructure, ownership, processes that apply to everyone inside the tenant.
-When genuinely ambiguous, choose "contact".
-Few-shot scope examples:
-Transcript: user: I prefer Linear for bug triage.
-Fact: {"subject":"contact","predicate":"prefers","object":"Linear for bug triage","summary":"The contact prefers Linear for bug triage.","scope":"contact","confidence":0.95}
-Transcript: user: For my work, repo/control-plane is my default repo.
-Fact: {"subject":"contact","predicate":"uses as default repository","object":"repo/control-plane","summary":"The contact uses repo/control-plane as their default repository.","scope":"contact","confidence":0.92}
-Transcript: user: We decided the API gateway runs on port 8443.
-Fact: {"subject":"API gateway","predicate":"runs on port","object":"8443","summary":"The API gateway runs on port 8443.","scope":"tenant","confidence":0.94}
-Transcript: user: Our team owns the billing reconciler service.
-Fact: {"subject":"team","predicate":"owns","object":"billing reconciler service","summary":"The team owns the billing reconciler service.","scope":"tenant","confidence":0.93}
-Return a JSON array and nothing else."#;
+pub use moa_providers::EXTRACTION_PROMPT_VERSION;
 
 /// Fact extractor backed by a Cohere chat model.
 #[derive(Clone)]
 pub struct LlmFactExtractor {
-    client: LlmChatClient,
-    max_facts_per_chunk: usize,
+    client: LlmFactExtractionClient,
 }
 
 impl LlmFactExtractor {
@@ -60,16 +35,8 @@ impl LlmFactExtractor {
     #[must_use]
     pub fn new(client: LlmChatClient, max_facts_per_chunk: usize) -> Self {
         Self {
-            client,
-            max_facts_per_chunk,
+            client: LlmFactExtractionClient::new(client, max_facts_per_chunk),
         }
-    }
-
-    fn user_prompt(&self, chunk: &TurnChunk) -> String {
-        format!(
-            "prompt_version: {EXTRACTION_PROMPT_VERSION}\nmax_facts_per_chunk: {}\nchunk_index: {}\n\nTRANSCRIPT:\n{}",
-            self.max_facts_per_chunk, chunk.index, chunk.text
-        )
     }
 }
 
@@ -77,28 +44,24 @@ impl LlmFactExtractor {
 impl FactExtractor for LlmFactExtractor {
     async fn extract(&self, chunks: &[TurnChunk]) -> Result<Vec<ExtractedFact>> {
         validate_chunks(chunks)?;
-        let mut facts = Vec::new();
-        for chunk in chunks {
-            let response = self
-                .client
-                .chat(EXTRACTION_SYSTEM_PROMPT, &self.user_prompt(chunk))
-                .await?;
-            let parsed = parse_extraction_response(&response)?;
-            let extracted = parsed
-                .into_iter()
-                .map(|fact| {
-                    fact.into_extracted(chunk.index)
-                        .map(normalize_extracted_fact)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            facts.extend(
-                extracted
-                    .into_iter()
-                    .filter(should_keep_extracted_fact)
-                    .take(self.max_facts_per_chunk),
-            );
-        }
-        Ok(facts)
+        let provider_chunks = chunks
+            .iter()
+            .map(|chunk| LlmFactExtractionChunk {
+                index: chunk.index,
+                text: chunk.text.clone(),
+            })
+            .collect::<Vec<_>>();
+        let extracted = self
+            .client
+            .extract(&provider_chunks)
+            .await?
+            .into_iter()
+            .map(|fact| provider_fact_into_extracted(fact).map(normalize_extracted_fact))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(extracted
+            .into_iter()
+            .filter(should_keep_extracted_fact)
+            .collect())
     }
 }
 
@@ -116,58 +79,25 @@ fn validate_chunks(chunks: &[TurnChunk]) -> Result<()> {
     Ok(())
 }
 
-fn parse_extraction_response(response: &str) -> Result<Vec<LlmExtractedFact>> {
-    let stripped = strip_json_code_fence(response);
-    serde_json::from_str::<Vec<LlmExtractedFact>>(stripped).map_err(|error| {
-        IngestError::Extraction(format!(
-            "failed to parse LLM extraction JSON array: {error}"
-        ))
-    })
-}
-
-fn strip_json_code_fence(response: &str) -> &str {
-    let trimmed = response.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return trimmed;
+fn provider_fact_into_extracted(fact: LlmExtractedFact) -> Result<ExtractedFact> {
+    let scope_hint = match fact.scope.trim().to_ascii_lowercase().as_str() {
+        "tenant" => ExtractedFactScopeHint::Tenant,
+        _ => ExtractedFactScopeHint::Contact,
     };
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix("json").unwrap_or(rest).trim_start();
-    rest.strip_suffix("```").unwrap_or(rest).trim()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct LlmExtractedFact {
-    subject: String,
-    predicate: String,
-    object: String,
-    summary: String,
-    #[serde(default)]
-    scope: String,
-    #[serde(default)]
-    confidence: Option<f64>,
-}
-
-impl LlmExtractedFact {
-    fn into_extracted(self, source_chunk: usize) -> Result<ExtractedFact> {
-        let scope_hint = match self.scope.trim().to_ascii_lowercase().as_str() {
-            "tenant" => ExtractedFactScopeHint::Tenant,
-            _ => ExtractedFactScopeHint::Contact,
-        };
-        let confidence = self.confidence.map(clamp_confidence);
-        let mut fact = ExtractedFact {
-            uid: Uuid::nil(),
-            subject: self.subject.trim().to_string(),
-            predicate: self.predicate.trim().to_string(),
-            object: self.object.trim().to_string(),
-            summary: self.summary.trim().to_string(),
-            source_chunk,
-            scope_hint,
-            confidence,
-        };
-        let hash = fact_hash(&fact)?;
-        fact.uid = fact_uid_from_hash(&hash);
-        Ok(fact)
-    }
+    let confidence = fact.confidence.map(clamp_confidence);
+    let mut extracted = ExtractedFact {
+        uid: Uuid::nil(),
+        subject: fact.subject.trim().to_string(),
+        predicate: fact.predicate.trim().to_string(),
+        object: fact.object.trim().to_string(),
+        summary: fact.summary.trim().to_string(),
+        source_chunk: fact.source_chunk,
+        scope_hint,
+        confidence,
+    };
+    let hash = fact_hash(&extracted)?;
+    extracted.uid = fact_uid_from_hash(&hash);
+    Ok(extracted)
 }
 
 fn clamp_confidence(confidence: f64) -> f64 {
@@ -341,17 +271,6 @@ mod tests {
 
         assert_eq!(facts[0].scope_hint, ExtractedFactScopeHint::Contact);
         assert_eq!(facts[0].confidence, Some(1.0));
-    }
-
-    #[test]
-    fn scope_rubric_v2_prompt_contains_few_shot_pairs_and_contact_default() {
-        // Pins: v2 extraction prompt makes ambiguous scope privacy-preserving and examples explicit.
-        assert_eq!(EXTRACTION_PROMPT_VERSION, "v2");
-        assert!(EXTRACTION_SYSTEM_PROMPT.contains("When genuinely ambiguous, choose \"contact\"."));
-        assert!(EXTRACTION_SYSTEM_PROMPT.contains("I prefer Linear for bug triage"));
-        assert!(EXTRACTION_SYSTEM_PROMPT.contains("For my work, repo/control-plane"));
-        assert!(EXTRACTION_SYSTEM_PROMPT.contains("We decided the API gateway runs on port 8443"));
-        assert!(EXTRACTION_SYSTEM_PROMPT.contains("Our team owns the billing reconciler service"));
     }
 
     #[tokio::test]

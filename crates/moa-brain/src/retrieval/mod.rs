@@ -4,7 +4,6 @@ pub mod cache;
 pub mod hybrid;
 pub mod legs;
 pub mod ranking;
-pub mod reranker;
 
 pub use cache::{
     CacheKey, CachedEntry, CachedHybridRetriever, CachedHybridRetrieverConfig, PlannedRetriever,
@@ -19,4 +18,3 @@ pub use ranking::{
     FeatureRanker, RANKING_PIPELINE_VERSION, RankingConfig, RankingWeights, normalize_tokens,
     ranking_fingerprint,
 };
-pub use reranker::{CohereReranker, NoopReranker, RerankHit, Reranker};

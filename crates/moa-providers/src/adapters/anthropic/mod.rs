@@ -113,10 +113,11 @@ impl AnthropicProvider {
             .map(|provider| provider.with_web_search_enabled(config.general.web_search_enabled))
     }
 
-    /// Creates a provider from the `ANTHROPIC_API_KEY` environment variable.
+    /// Creates a provider from the `MOA_ANTHROPIC_API_KEY` environment variable.
     pub fn from_env(default_model: impl Into<String>) -> Result<Self> {
-        let api_key = env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| MoaError::MissingEnvironmentVariable("ANTHROPIC_API_KEY".to_string()))?;
+        let api_key = env::var("MOA_ANTHROPIC_API_KEY").map_err(|_| {
+            MoaError::MissingEnvironmentVariable("MOA_ANTHROPIC_API_KEY".to_string())
+        })?;
 
         Self::new(api_key, default_model)
     }

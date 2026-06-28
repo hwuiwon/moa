@@ -11,10 +11,7 @@ use chrono::{DateTime, Utc};
 use moa_brain::planning::{
     PlanningCtx, QueryPlanner, QueryRetrievalCtx, parse_temporal, retrieve_for_query,
 };
-use moa_brain::retrieval::{
-    CachedHybridRetriever, CohereReranker, HybridRetriever, NoopReranker, RankingConfig, Reranker,
-    RetrievalHit,
-};
+use moa_brain::retrieval::{CachedHybridRetriever, HybridRetriever, RankingConfig, RetrievalHit};
 use moa_core::RlsContext;
 use moa_core::{
     ContactId, MemoryDigestConfig, UserId, config::MemoryExtractionConfig,
@@ -33,9 +30,11 @@ use moa_memory_lifecycle::{ConsolidationOptions, ConsolidationOutcome, beta_smoo
 use moa_memory_pii::{PiiCategory, PiiClassifier, PiiError, PiiResult, PiiSpan, redact_text};
 use moa_memory_types::{MemoryScope, ScopeTier};
 use moa_memory_vector::{PgvectorStore, VectorStore};
-use moa_providers::CohereV4Embedder;
+use moa_providers::{
+    COHERE_DEFAULT_RERANK_MODEL, CohereReranker, CohereV4Embedder, NoopReranker, RerankHit,
+    Reranker,
+};
 use moa_session::PostgresSessionStore;
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use tokio::time::{Instant as TokioInstant, sleep_until};
@@ -313,15 +312,15 @@ impl MemoryRetrievalEvalOptions {
                     .to_string(),
             ));
         }
-        const LIVE_COHERE_API_KEY_ENV: &str = "COHERE_API_KEY";
-        let api_key = env_lookup(LIVE_COHERE_API_KEY_ENV).ok_or_else(|| {
+        const LIVE_MOA_COHERE_API_KEY_ENV: &str = "MOA_COHERE_API_KEY";
+        let api_key = env_lookup(LIVE_MOA_COHERE_API_KEY_ENV).ok_or_else(|| {
             EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be set"
+                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be set"
             ))
         })?;
         if api_key.trim().is_empty() {
             return Err(EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be non-empty"
+                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be non-empty"
             )));
         }
         Ok(())
@@ -709,15 +708,15 @@ impl MemoryRetrievalEvalOptions {
         &self,
         corpus: &LoadedMemoryEvalCorpus,
     ) -> Result<RunProviders> {
-        const LIVE_COHERE_API_KEY_ENV: &str = "COHERE_API_KEY";
-        let api_key = env::var(LIVE_COHERE_API_KEY_ENV).map_err(|_| {
+        const LIVE_MOA_COHERE_API_KEY_ENV: &str = "MOA_COHERE_API_KEY";
+        let api_key = env::var(LIVE_MOA_COHERE_API_KEY_ENV).map_err(|_| {
             EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be set"
+                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be set"
             ))
         })?;
         if api_key.trim().is_empty() {
             return Err(EvalError::InvalidConfig(format!(
-                "live lane requires {LIVE_COHERE_API_KEY_ENV} to be non-empty"
+                "live lane requires {LIVE_MOA_COHERE_API_KEY_ENV} to be non-empty"
             )));
         }
         let extraction = MemoryExtractionConfig {
@@ -732,7 +731,6 @@ impl MemoryRetrievalEvalOptions {
         let chat_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(3_200)));
         let embed_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(700)));
         let rerank_throttle = Arc::new(LiveChatThrottle::new(Duration::from_millis(6_500)));
-        let secret = SecretString::from(api_key.clone());
         let raw_embedder = CohereV4Embedder::new(api_key).map_err(|error| {
             EvalError::InvalidConfig(format!("failed to initialize live embedder: {error}"))
         })?;
@@ -759,13 +757,17 @@ impl MemoryRetrievalEvalOptions {
             chat_throttle,
         )) as Arc<dyn EntityMergeVerifier>;
         let reranker_model = if self.reranker_enabled {
-            "rerank-v4.0-fast"
+            COHERE_DEFAULT_RERANK_MODEL
         } else {
             "noop"
         };
         let reranker: Arc<dyn Reranker> = if self.reranker_enabled {
+            let cohere_reranker =
+                CohereReranker::new(extraction.api_key.clone()).map_err(|error| {
+                    EvalError::InvalidConfig(format!("failed to initialize live reranker: {error}"))
+                })?;
             Arc::new(ThrottledReranker::new(
-                CountingReranker::new(CohereReranker::new(secret), ledger.clone()),
+                CountingReranker::new(cohere_reranker, ledger.clone()),
                 rerank_throttle,
             ))
         } else {
@@ -952,7 +954,7 @@ where
         query: &str,
         documents: &[String],
         top_n: usize,
-    ) -> moa_brain::retrieval::hybrid::Result<Vec<moa_brain::retrieval::RerankHit>> {
+    ) -> moa_core::Result<Vec<RerankHit>> {
         self.throttle.wait().await;
         self.inner.rerank(model, query, documents, top_n).await
     }
@@ -2302,7 +2304,7 @@ mod tests {
             .validate_with_env(|_| None)
             .expect_err("live lane without credentials should fail");
 
-        assert!(error.to_string().contains("COHERE_API_KEY"));
+        assert!(error.to_string().contains("MOA_COHERE_API_KEY"));
     }
 
     #[test]

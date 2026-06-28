@@ -9,13 +9,14 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
+use moa_core::config::MoaEnvOverlay;
 use moa_core::{MoaConfig, SessionId};
 use moa_db::ScopedConn;
 use moa_lineage_core::TurnId;
 use moa_memory_graph::{GraphError, GraphStore, NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_types::MemoryScope;
 use moa_memory_vector::{Error as VectorError, TurbopufferStore, VectorStore};
-use secrecy::SecretString;
+use moa_providers::{ConfiguredReranker, Reranker, build_reranker_from_config};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -30,9 +31,7 @@ use crate::retrieval::legs::{
 use crate::retrieval::ranking::{
     FeatureRanker, RankingConfig, normalize_tokens, ranking_fingerprint,
 };
-use crate::retrieval::reranker::{CohereReranker, NoopReranker, Reranker};
 
-const RERANK_MODEL: &str = "rerank-v4.0-fast";
 const FUSED_CANDIDATE_LIMIT: usize = 26;
 const PHASE_ONE_GRAPH_SEED_LIMIT: usize = FUSED_CANDIDATE_LIMIT;
 const PHASE_ONE_SEED_DECAY: f64 = 0.85;
@@ -190,6 +189,7 @@ pub struct HybridRetriever {
     vector: Arc<dyn VectorStore>,
     turbopuffer: Option<Arc<TurbopufferStore>>,
     reranker: Arc<dyn Reranker>,
+    rerank_model: String,
     ranking_config: RankingConfig,
     assume_app_role: bool,
     lineage_enabled: bool,
@@ -199,12 +199,14 @@ impl HybridRetriever {
     /// Creates a hybrid retriever with deterministic no-op reranking.
     #[must_use]
     pub fn new(pool: PgPool, graph: Arc<dyn GraphStore>, vector: Arc<dyn VectorStore>) -> Self {
+        let configured_reranker = ConfiguredReranker::noop();
         Self {
             pool,
             graph,
             vector,
             turbopuffer: None,
-            reranker: Arc::new(NoopReranker),
+            reranker: configured_reranker.reranker,
+            rerank_model: configured_reranker.model,
             ranking_config: RankingConfig::default(),
             assume_app_role: false,
             lineage_enabled: false,
@@ -218,15 +220,18 @@ impl HybridRetriever {
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
     ) -> Self {
-        let reranker = std::env::var("COHERE_API_KEY")
-            .map(|api_key| {
-                Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
-            })
-            .unwrap_or_else(|_| Arc::new(NoopReranker));
+        let mut config = MoaConfig::default();
+        if let Err(error) = apply_reranker_env_overlay(&mut config) {
+            tracing::warn!(
+                error = %error,
+                "failed to load reranker environment overlay; using no-op reranker"
+            );
+        }
+        let configured = configured_reranker_or_noop(&config);
         let turbopuffer = TurbopufferStore::from_env().ok().map(Arc::new);
         Self::new(pool, graph, vector)
             .with_turbopuffer(turbopuffer)
-            .with_reranker(reranker)
+            .with_configured_reranker(configured)
     }
 
     /// Creates a hybrid retriever from shared config.
@@ -237,16 +242,11 @@ impl HybridRetriever {
         graph: Arc<dyn GraphStore>,
         vector: Arc<dyn VectorStore>,
     ) -> Self {
-        let reranker = if config.providers.cohere.api_key.trim().is_empty() {
-            Arc::new(NoopReranker) as Arc<dyn Reranker>
-        } else {
-            let api_key = config.providers.cohere.api_key.clone();
-            Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
-        };
+        let configured = configured_reranker_or_noop(config);
         let turbopuffer = TurbopufferStore::from_config(config).ok().map(Arc::new);
         Self::new(pool, graph, vector)
             .with_turbopuffer(turbopuffer)
-            .with_reranker(reranker)
+            .with_configured_reranker(configured)
             .with_ranking_config(RankingConfig::from(&config.memory.retrieval.ranking))
             .with_lineage_enabled(config.memory.retrieval.lineage_enabled)
     }
@@ -262,6 +262,21 @@ impl HybridRetriever {
     #[must_use]
     pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
         self.reranker = reranker;
+        self
+    }
+
+    /// Overrides the reranker backend and model from provider configuration.
+    #[must_use]
+    pub fn with_configured_reranker(mut self, configured: ConfiguredReranker) -> Self {
+        self.reranker = configured.reranker;
+        self.rerank_model = configured.model;
+        self
+    }
+
+    /// Overrides the reranker model while preserving the configured backend.
+    #[must_use]
+    pub fn with_rerank_model(mut self, model: impl Into<String>) -> Self {
+        self.rerank_model = model.into();
         self
     }
 
@@ -511,8 +526,9 @@ impl HybridRetriever {
             .collect::<Vec<_>>();
         let reranked = self
             .reranker
-            .rerank(RERANK_MODEL, &req.query_text, &documents, req.k_final)
-            .await?;
+            .rerank(&self.rerank_model, &req.query_text, &documents, req.k_final)
+            .await
+            .map_err(|error| RetrievalError::Rerank(error.to_string()))?;
         let mut out = Vec::with_capacity(req.k_final.min(reranked.len()));
         for hit in reranked {
             if let Some(candidate) = hits.get(hit.index) {
@@ -525,6 +541,36 @@ impl HybridRetriever {
             Ok(out)
         }
     }
+}
+
+fn apply_reranker_env_overlay(config: &mut MoaConfig) -> moa_core::Result<()> {
+    let overlay = MoaEnvOverlay::from_env()?;
+    if let Some(api_key) = overlay.cohere_api_key {
+        config.providers.cohere.api_key = api_key;
+    }
+    if let Some(api_key) = overlay.zeroentropy_api_key {
+        config.providers.zeroentropy.api_key = api_key;
+    }
+    if let Some(provider) = overlay.memory_retrieval_reranker_provider {
+        config.memory.retrieval.reranker_provider = provider;
+    }
+    if let Some(model) = overlay.memory_retrieval_reranker_model {
+        config.memory.retrieval.reranker_model = model;
+    }
+    if let Some(latency) = overlay.memory_retrieval_reranker_latency {
+        config.memory.retrieval.reranker_latency = Some(latency);
+    }
+    Ok(())
+}
+
+fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
+    build_reranker_from_config(config).unwrap_or_else(|error| {
+        tracing::warn!(
+            error = %error,
+            "graph-memory reranking disabled because reranker configuration is invalid"
+        );
+        ConfiguredReranker::noop()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -861,10 +907,10 @@ mod tests {
     use chrono::Utc;
     use moa_core::TenantId;
     use moa_memory_graph::PiiClass;
+    use moa_providers::{RerankHit, Reranker};
     use uuid::Uuid;
 
     use super::*;
-    use crate::retrieval::reranker::{RerankHit, Reranker};
 
     fn tenant_scope() -> MemoryScope {
         MemoryScope::Tenant {
@@ -1217,7 +1263,7 @@ mod tests {
             _query: &str,
             documents: &[String],
             top_n: usize,
-        ) -> Result<Vec<RerankHit>> {
+        ) -> moa_core::Result<Vec<RerankHit>> {
             Ok((0..documents.len())
                 .rev()
                 .take(top_n)

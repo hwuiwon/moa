@@ -122,7 +122,7 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_MEMORY_DIR", memory_dir.path())
         .env("MOA_LOCAL_SANDBOX_DIR", sandbox_dir.path())
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
-        .env_remove("COHERE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::null());

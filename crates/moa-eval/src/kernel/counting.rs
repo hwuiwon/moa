@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use moa_brain::retrieval::{RerankHit, Reranker};
 use moa_core::traits::EmbeddingProvider;
 use moa_memory_graph::NodeIndexRow;
 use moa_memory_ingest::{EntityMergeVerifier, ExtractedFact, FactExtractor, Result, TurnChunk};
+use moa_providers::{RerankHit, Reranker};
 use tokio::sync::Mutex;
 
 use super::cost::{CostLedger, estimate_tokens_from_chars};
@@ -159,7 +159,7 @@ where
         query: &str,
         documents: &[String],
         top_n: usize,
-    ) -> moa_brain::retrieval::hybrid::Result<Vec<RerankHit>> {
+    ) -> moa_core::Result<Vec<RerankHit>> {
         let hits = self.inner.rerank(model, query, documents, top_n).await?;
         self.ledger.lock().await.record_rerank(1);
         Ok(hits)
@@ -168,9 +168,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use moa_brain::retrieval::NoopReranker;
     use moa_core::MoaError;
     use moa_memory_ingest::{ScriptedFactExtractor, TurnChunk};
+    use moa_providers::NoopReranker;
 
     use super::*;
 

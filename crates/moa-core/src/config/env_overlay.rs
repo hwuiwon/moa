@@ -7,8 +7,8 @@ use serde::Deserialize;
 use crate::error::{MoaError, Result};
 
 use super::{
-    AsyncAuthzKind, AuthProviderKind, AuthzEngine, MemoryRerankerMode, MoaConfig, OtlpProtocol,
-    RuntimeCacheBackend, SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
+    AsyncAuthzKind, AuthProviderKind, AuthzEngine, MoaConfig, OtlpProtocol, RuntimeCacheBackend,
+    SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -150,8 +150,12 @@ pub struct MoaEnvOverlay {
     pub memory_embedding_provider: Option<String>,
     /// `MOA_MEMORY_EMBEDDING_MODEL`.
     pub memory_embedding_model: Option<String>,
-    /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODE`.
-    pub memory_retrieval_reranker_mode: Option<MemoryRerankerMode>,
+    /// `MOA_MEMORY_RETRIEVAL_RERANKER_PROVIDER`.
+    pub memory_retrieval_reranker_provider: Option<String>,
+    /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODEL`.
+    pub memory_retrieval_reranker_model: Option<String>,
+    /// `MOA_MEMORY_RETRIEVAL_RERANKER_LATENCY`.
+    pub memory_retrieval_reranker_latency: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_LINEAGE_ENABLED`.
     pub memory_retrieval_lineage_enabled: Option<bool>,
     /// `MOA_MEMORY_DIGEST_ENABLED`.
@@ -721,7 +725,9 @@ mod tests {
             ("MOA_LOCAL_DOCKER_ENABLED", "false"),
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
             ("MOA_PII_SERVICE_URL", "http://pii.example:8080"),
-            ("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "eval_only"),
+            ("MOA_MEMORY_RETRIEVAL_RERANKER_PROVIDER", "zeroentropy"),
+            ("MOA_MEMORY_RETRIEVAL_RERANKER_MODEL", "zerank-2"),
+            ("MOA_MEMORY_RETRIEVAL_RERANKER_LATENCY", "fast"),
             ("MOA_MEMORY_RETRIEVAL_LINEAGE_ENABLED", "true"),
             ("MOA_MEMORY_DIGEST_ENABLED", "true"),
             ("MOA_MEMORY_DIGEST_MAX_TOKENS", "384"),
@@ -819,9 +825,11 @@ mod tests {
             config.memory.pii_service_url.as_deref(),
             Some("http://pii.example:8080")
         );
+        assert_eq!(config.memory.retrieval.reranker_provider, "zeroentropy");
+        assert_eq!(config.memory.retrieval.reranker_model, "zerank-2");
         assert_eq!(
-            config.memory.retrieval.reranker_mode,
-            MemoryRerankerMode::EvalOnly
+            config.memory.retrieval.reranker_latency.as_deref(),
+            Some("fast")
         );
         assert!(config.memory.retrieval.lineage_enabled);
         assert!(config.memory.digest.enabled);
@@ -947,28 +955,6 @@ mod tests {
         assert_config_error_contains(
             MoaEnvOverlay::from_iter(env_pairs([("MOA_AUTH_PROVIDER", "saml")])),
             "saml",
-        );
-    }
-
-    #[test]
-    fn memory_retrieval_reranker_mode_overlay_applies_and_rejects_unknown_values() {
-        // Pins: MOA_MEMORY_RETRIEVAL_RERANKER_MODE accepts off/eval_only/on and rejects unsupported modes.
-        let overlay =
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "on")]))
-                .expect("reranker mode overlay should parse");
-        let mut config = MoaConfig::default();
-
-        overlay
-            .apply_to(&mut config)
-            .expect("reranker mode overlay should apply");
-
-        assert_eq!(
-            config.memory.retrieval.reranker_mode,
-            MemoryRerankerMode::On
-        );
-        assert_config_error_contains(
-            MoaEnvOverlay::from_iter(env_pairs([("MOA_MEMORY_RETRIEVAL_RERANKER_MODE", "auto")])),
-            "auto",
         );
     }
 

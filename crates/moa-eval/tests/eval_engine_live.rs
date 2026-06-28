@@ -11,13 +11,13 @@ use moa_test_support::postgres::test_database_url;
 use tempfile::tempdir;
 
 fn live_model() -> Option<&'static str> {
-    if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if std::env::var("MOA_ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         return Some("claude-sonnet-4-6");
     }
-    if std::env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if std::env::var("MOA_OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         return Some("gpt-5.4-mini");
     }
-    if std::env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if std::env::var("MOA_GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         return Some("gemini-3-flash-preview");
     }
     None
@@ -34,7 +34,7 @@ async fn live_eval_engine_runs_single_case() {
         return;
     }
     let model = live_model().expect(
-        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY",
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY",
     );
 
     let temp = tempdir().unwrap();

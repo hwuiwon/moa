@@ -24,12 +24,12 @@ pub use config::{
     CompactionConfig, ContextSnapshotConfig, DatabaseConfig, DatabaseNeonConfig,
     GeminiEmbedderConfig, GeneralConfig, LineageConfig, LocalConfig, McpCredentialConfig,
     McpServerConfig, McpTransportConfig, MemoryConfig, MemoryDigestConfig, MemoryRankingConfig,
-    MemoryRankingWeights, MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig,
-    MessagingConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OpenFgaConfig,
-    OrchestratorConfig, OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig,
-    QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SessionAttachmentBackend,
-    SessionAttachmentStorageConfig, SessionBlobBackend, SkillBudgetConfig, ToolBudgetConfig,
-    ToolOutputConfig, VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
+    MemoryRankingWeights, MemoryRetrievalConfig, MemoryVectorConfig, MessagingConfig,
+    MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OpenFgaConfig, OrchestratorConfig,
+    OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig, QueryRewriteConfig,
+    ResolutionConfig, ResolutionWeights, SessionAttachmentBackend, SessionAttachmentStorageConfig,
+    SessionBlobBackend, SkillBudgetConfig, ToolBudgetConfig, ToolOutputConfig,
+    VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
 };
 pub use diff::compute_unified_diff;
 pub use error::{MoaError, Result, ToolFailureClass, classify_tool_error};

@@ -7,19 +7,23 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moa_core::MoaConfig;
 use moa_core::RlsContext;
+use moa_core::config::MoaEnvOverlay;
 use moa_db::ScopedConn;
 use moa_memory_graph::{NodeIndexRow, NodeLabel, PiiClass};
 use moa_memory_vector::{Error as VectorError, VECTOR_DIMENSION, VectorQuery, VectorStore};
+use moa_providers::{
+    COHERE_DEFAULT_RERANK_MODEL, CohereReranker, ConfiguredReranker, LlmChatClient, NoopReranker,
+    Reranker, build_reranker_from_config,
+};
 use moka::future::Cache;
-use reqwest::Client;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::{EmbeddedFact, IngestError, LlmChatClient, Result};
+use crate::{EmbeddedFact, IngestError, Result};
 
 const VECTOR_K: usize = 10;
 const LEXICAL_K: i64 = 10;
@@ -28,8 +32,6 @@ const RRF_K: f64 = 60.0;
 const DEFAULT_FAST_BUDGET: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_BUDGET: Duration = Duration::from_secs(5);
 const DEFAULT_JUDGE_BUDGET: Duration = Duration::from_millis(200);
-const COHERE_RERANK_URL: &str = "https://api.cohere.com/v2/rerank";
-const COHERE_RERANK_MODEL: &str = "rerank-v4.0-fast";
 const DEFAULT_JUDGE_MODEL: &str = "command-a-plus-05-2026";
 const CACHE_CAPACITY: u64 = 10_000;
 const JUDGE_PROMPT: &str = include_str!("../prompts/judge.txt");
@@ -133,125 +135,6 @@ pub trait ContradictionDetector: Send + Sync {
     ) -> Result<Conflict>;
 }
 
-/// One rerank hit returned by a reranker backend.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct RerankHit {
-    /// Candidate index inside the document list supplied to the reranker.
-    pub index: usize,
-    /// Backend-specific relevance score.
-    pub relevance_score: f32,
-}
-
-/// Reranker abstraction used between RRF retrieval and the judge.
-#[async_trait]
-trait Reranker: Send + Sync {
-    /// Reranks candidate names for one new fact and returns candidate indices.
-    async fn rerank(
-        &self,
-        model: &str,
-        query: &str,
-        documents: &[String],
-        top_n: usize,
-    ) -> Result<Vec<RerankHit>>;
-}
-
-/// Deterministic reranker that preserves retrieval order.
-#[derive(Debug, Clone, Default)]
-struct NoopReranker;
-
-#[async_trait]
-impl Reranker for NoopReranker {
-    async fn rerank(
-        &self,
-        _model: &str,
-        _query: &str,
-        documents: &[String],
-        top_n: usize,
-    ) -> Result<Vec<RerankHit>> {
-        Ok((0..documents.len().min(top_n))
-            .map(|index| RerankHit {
-                index,
-                relevance_score: 1.0,
-            })
-            .collect())
-    }
-}
-
-/// Cohere Rerank v4 client used for top-N selection.
-#[derive(Clone)]
-struct CohereReranker {
-    client: Client,
-    api_key: SecretString,
-    endpoint: String,
-}
-
-impl CohereReranker {
-    /// Creates a Cohere reranker from an API key.
-    #[must_use]
-    fn new(api_key: SecretString) -> Self {
-        Self {
-            client: Client::new(),
-            api_key,
-            endpoint: COHERE_RERANK_URL.to_string(),
-        }
-    }
-}
-
-#[async_trait]
-impl Reranker for CohereReranker {
-    async fn rerank(
-        &self,
-        model: &str,
-        query: &str,
-        documents: &[String],
-        top_n: usize,
-    ) -> Result<Vec<RerankHit>> {
-        if documents.is_empty() || top_n == 0 {
-            return Ok(Vec::new());
-        }
-
-        let request = CohereRerankRequest {
-            model,
-            query,
-            documents,
-            top_n,
-        };
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(self.api_key.expose_secret())
-            .json(&request)
-            .send()
-            .await
-            .map_err(|error| IngestError::Rerank(error.to_string()))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("failed to read error body: {error}"));
-            return Err(IngestError::Rerank(format!(
-                "Cohere rerank returned HTTP {}: {body}",
-                status.as_u16()
-            )));
-        }
-
-        let body = response
-            .json::<CohereRerankResponse>()
-            .await
-            .map_err(|error| IngestError::Rerank(error.to_string()))?;
-        Ok(body
-            .results
-            .into_iter()
-            .filter(|hit| hit.index < documents.len())
-            .map(|hit| RerankHit {
-                index: hit.index,
-                relevance_score: hit.relevance_score,
-            })
-            .collect())
-    }
-}
-
 /// Verdict returned by the final fact-comparison judge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -305,20 +188,20 @@ impl JudgeModel for HeuristicJudge {
     }
 }
 
-/// Cohere chat-backed judge using the shared LLM transport.
+/// Chat-backed judge using the provider-owned LLM transport.
 #[derive(Clone)]
-struct CohereJudge {
+struct LlmJudge {
     client: LlmChatClient,
 }
 
-impl CohereJudge {
+impl LlmJudge {
     fn new(client: LlmChatClient) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
-impl JudgeModel for CohereJudge {
+impl JudgeModel for LlmJudge {
     async fn judge(
         &self,
         prompt: &str,
@@ -334,6 +217,7 @@ impl JudgeModel for CohereJudge {
 #[derive(Clone)]
 pub struct RrfPlusJudgeDetector {
     reranker: Arc<dyn Reranker>,
+    rerank_model: String,
     judge: Arc<dyn JudgeModel>,
     judge_cache: Cache<[u8; 32], Conflict>,
     fast_budget: Duration,
@@ -345,8 +229,17 @@ impl RrfPlusJudgeDetector {
     /// Creates a detector from explicit reranker and judge backends.
     #[must_use]
     fn new(reranker: Arc<dyn Reranker>, judge: Arc<dyn JudgeModel>) -> Self {
+        Self::new_with_model(reranker, COHERE_DEFAULT_RERANK_MODEL.to_string(), judge)
+    }
+
+    fn new_with_model(
+        reranker: Arc<dyn Reranker>,
+        rerank_model: String,
+        judge: Arc<dyn JudgeModel>,
+    ) -> Self {
         Self {
             reranker,
+            rerank_model,
             judge,
             judge_cache: Cache::builder().max_capacity(CACHE_CAPACITY).build(),
             fast_budget: DEFAULT_FAST_BUDGET,
@@ -355,20 +248,30 @@ impl RrfPlusJudgeDetector {
         }
     }
 
-    /// Creates a local detector, using Cohere Rerank when an API key is present.
+    /// Creates a local detector, using the configured reranker when credentials are present.
     #[must_use]
     pub fn from_env_or_heuristic() -> Self {
-        Self::from_cohere_api_key_env_or_heuristic("COHERE_API_KEY")
+        let mut config = MoaConfig::default();
+        if let Err(error) = apply_detector_env_overlay(&mut config) {
+            tracing::warn!(
+                error = %error,
+                "failed to load contradiction-detector environment overlay"
+            );
+        }
+        Self::from_config_or_heuristic(&config)
     }
 
-    /// Creates a detector using the Cohere API key from shared MOA config.
+    /// Creates a detector using shared MOA config.
     #[must_use]
     pub fn from_config_or_heuristic(config: &MoaConfig) -> Self {
-        Self::from_cohere_api_key_model_or_heuristic(
-            &config.providers.cohere.api_key,
+        let configured = configured_reranker_or_noop(config);
+        let api_key = cohere_judge_api_key(config);
+        let judge = llm_judge_or_heuristic(
+            api_key,
             &config.memory.extraction.model,
             config.memory.extraction.timeout_ms,
-        )
+        );
+        Self::new_with_model(configured.reranker, configured.model, judge)
     }
 
     /// Creates a detector using a configured Cohere API-key env-var name.
@@ -389,21 +292,39 @@ impl RrfPlusJudgeDetector {
         timeout_ms: u64,
     ) -> Self {
         let reranker: Arc<dyn Reranker> = std::env::var(api_key_env)
-            .map(|api_key| {
-                Arc::new(CohereReranker::new(SecretString::from(api_key))) as Arc<dyn Reranker>
-            })
-            .unwrap_or_else(|_| Arc::new(NoopReranker));
-        let judge: Arc<dyn JudgeModel> =
-            LlmChatClient::from_env(api_key_env, judge_model, timeout_ms)
-                .map(|client| Arc::new(CohereJudge::new(client)) as Arc<dyn JudgeModel>)
-                .unwrap_or_else(|error| {
+            .ok()
+            .and_then(|api_key| match CohereReranker::new(api_key) {
+                Ok(reranker) => Some(Arc::new(reranker) as Arc<dyn Reranker>),
+                Err(error) => {
                     tracing::warn!(
                         error = %error,
                         api_key_env,
-                        "falling back to heuristic contradiction judge"
+                        "falling back to no-op contradiction reranker"
                     );
-                    Arc::new(HeuristicJudge)
-                });
+                    None
+                }
+            })
+            .unwrap_or_else(NoopReranker::shared);
+        let judge: Arc<dyn JudgeModel> = match std::env::var(api_key_env) {
+            Ok(api_key) if !api_key.trim().is_empty() => Arc::new(LlmJudge::new(
+                LlmChatClient::from_api_key(SecretString::from(api_key), judge_model, timeout_ms),
+            )),
+            Ok(_) => {
+                tracing::warn!(
+                    api_key_env,
+                    "falling back to heuristic contradiction judge because API key env var is empty"
+                );
+                Arc::new(HeuristicJudge)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    api_key_env,
+                    "falling back to heuristic contradiction judge because API key env var is missing"
+                );
+                Arc::new(HeuristicJudge)
+            }
+        };
         Self::new(reranker, judge)
     }
 
@@ -416,11 +337,19 @@ impl RrfPlusJudgeDetector {
     ) -> Self {
         let api_key = api_key.trim();
         if api_key.is_empty() {
-            return Self::new(Arc::new(NoopReranker), Arc::new(HeuristicJudge));
+            return Self::new(NoopReranker::shared(), Arc::new(HeuristicJudge));
         }
-        let reranker: Arc<dyn Reranker> =
-            Arc::new(CohereReranker::new(SecretString::from(api_key.to_string())));
-        let judge: Arc<dyn JudgeModel> = Arc::new(CohereJudge::new(LlmChatClient::from_api_key(
+        let reranker: Arc<dyn Reranker> = match CohereReranker::new(api_key.to_string()) {
+            Ok(reranker) => Arc::new(reranker),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "falling back to no-op contradiction reranker"
+                );
+                NoopReranker::shared()
+            }
+        };
+        let judge: Arc<dyn JudgeModel> = Arc::new(LlmJudge::new(LlmChatClient::from_api_key(
             SecretString::from(api_key.to_string()),
             judge_model,
             timeout_ms,
@@ -483,8 +412,9 @@ impl RrfPlusJudgeDetector {
             .collect::<Vec<_>>();
         let hits = self
             .reranker
-            .rerank(COHERE_RERANK_MODEL, fact_text, &documents, RERANK_TOP_N)
-            .await?;
+            .rerank(&self.rerank_model, fact_text, &documents, RERANK_TOP_N)
+            .await
+            .map_err(|error| IngestError::Rerank(error.to_string()))?;
         let mut reranked = Vec::with_capacity(hits.len());
         for hit in hits {
             if let Some(candidate) = candidates.get(hit.index) {
@@ -544,9 +474,75 @@ impl RrfPlusJudgeDetector {
     }
 }
 
+fn apply_detector_env_overlay(config: &mut MoaConfig) -> moa_core::Result<()> {
+    let overlay = MoaEnvOverlay::from_env()?;
+    if let Some(api_key) = overlay.cohere_api_key {
+        config.providers.cohere.api_key = api_key.clone();
+        config.memory.extraction.api_key = api_key;
+    }
+    if let Some(api_key) = overlay.zeroentropy_api_key {
+        config.providers.zeroentropy.api_key = api_key;
+    }
+    if let Some(provider) = overlay.memory_retrieval_reranker_provider {
+        config.memory.retrieval.reranker_provider = provider;
+    }
+    if let Some(model) = overlay.memory_retrieval_reranker_model {
+        config.memory.retrieval.reranker_model = model;
+    }
+    if let Some(latency) = overlay.memory_retrieval_reranker_latency {
+        config.memory.retrieval.reranker_latency = Some(latency);
+    }
+    if let Some(model) = overlay.memory_extraction_model {
+        config.memory.extraction.model = model;
+    }
+    if let Some(timeout_ms) = overlay.memory_extraction_timeout_ms {
+        config.memory.extraction.timeout_ms = timeout_ms;
+    }
+    Ok(())
+}
+
+fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {
+    build_reranker_from_config(config).unwrap_or_else(|error| {
+        tracing::warn!(
+            error = %error,
+            "contradiction reranking disabled because reranker configuration is invalid"
+        );
+        ConfiguredReranker::noop()
+    })
+}
+
+fn cohere_judge_api_key(config: &MoaConfig) -> &str {
+    if config.providers.cohere.api_key.trim().is_empty() {
+        &config.memory.extraction.api_key
+    } else {
+        &config.providers.cohere.api_key
+    }
+}
+
+fn llm_judge_or_heuristic(
+    api_key: &str,
+    judge_model: &str,
+    timeout_ms: u64,
+) -> Arc<dyn JudgeModel> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Arc::new(HeuristicJudge);
+    }
+    Arc::new(LlmJudge::new(LlmChatClient::from_api_key(
+        SecretString::from(api_key.to_string()),
+        judge_model,
+        timeout_ms,
+    )))
+}
+
 impl Default for RrfPlusJudgeDetector {
     fn default() -> Self {
-        Self::new(Arc::new(NoopReranker), Arc::new(HeuristicJudge))
+        let configured = ConfiguredReranker::noop();
+        Self::new_with_model(
+            configured.reranker,
+            configured.model,
+            Arc::new(HeuristicJudge),
+        )
     }
 }
 
@@ -934,25 +930,6 @@ fn normalize_fact_text(text: &str) -> String {
         .to_ascii_lowercase()
 }
 
-#[derive(Serialize)]
-struct CohereRerankRequest<'a> {
-    model: &'a str,
-    query: &'a str,
-    documents: &'a [String],
-    top_n: usize,
-}
-
-#[derive(Deserialize)]
-struct CohereRerankResponse {
-    results: Vec<CohereRerankHit>,
-}
-
-#[derive(Deserialize)]
-struct CohereRerankHit {
-    index: usize,
-    relevance_score: f32,
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1058,7 +1035,7 @@ mod tests {
             LlmChatClient::from_api_key(SecretString::from("test-key"), "command-test", 1_000)
                 .with_endpoint(format!("{}/v2/chat", server.uri()));
         let detector =
-            RrfPlusJudgeDetector::new(Arc::new(NoopReranker), Arc::new(CohereJudge::new(client)));
+            RrfPlusJudgeDetector::new(Arc::new(NoopReranker), Arc::new(LlmJudge::new(client)));
 
         let conflict = detector
             .judge_candidates("we deploy to AWS", std::slice::from_ref(&candidate))

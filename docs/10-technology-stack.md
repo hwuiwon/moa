@@ -32,7 +32,7 @@ The root workspace currently contains:
 | `moa-auth/fga-bootstrap` (`moa-fga-bootstrap`) | OpenFGA store and authorization-model bootstrap binary |
 | `moa-ocsf` | OCSF v1.3 security-event types, emit helpers, signing, and persistence |
 | `moa-hands` | Tool router, local/Docker hands, Daytona, E2B, MCP |
-| `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring |
+| `moa-providers` | Anthropic, OpenAI, Gemini, embedding provider wiring, reranker provider wiring |
 | `moa-orchestrator` | One production binary with Restate services, virtual objects, workflows, and in-process application/repository boundaries |
 | `moa-messaging` | Slack adapter, renderer, Postmark email connector, and Twilio SMS connector |
 | `moa-security` | Action policies, MCP credential proxy, prompt-injection controls |
@@ -125,7 +125,7 @@ and deployment setup. Key groups:
 | `MOA_MODELS_*` and `MOA_<PROVIDER>_API_KEY` | model routing and provider API keys |
 | `MOA_DATABASE_*` | Postgres URL, admin URL, pool settings, Neon branching |
 | `MOA_RUNTIME_CACHE_*` | runtime cache backend selection and Redis URL for shared transient coordination |
-| `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, PII service, and vector backend |
+| `MOA_MEMORY_*`, `MOA_PII_SERVICE_URL`, and `MOA_TURBOPUFFER_*` | memory directory, embedding provider/model, reranker provider/model, PII service, and vector backend |
 | `MOA_KNOWLEDGE_*` | tenant knowledge provider enablement, parser selection, sync limits, chunking limits, query trace enablement, and ingestion-step observability |
 | `MOA_QUERY_REWRITE_*` | fail-open, retrieval-scoped query rewrite gating and timeout behavior |
 | `MOA_RESOLUTION_*` | automated segment assessment weights and thresholds |
@@ -170,7 +170,7 @@ Cloud deployments need:
 MOA_DATABASE_URL=postgres://...
 MOA_RESTATE_ADMIN_URL=http://...
 MOA_RESTATE_INGRESS_URL=http://...
-OPENAI_API_KEY=... # or another configured provider key
+MOA_OPENAI_API_KEY=... # or another configured provider key
 ```
 
 Configure Redis when runtime cache state should coordinate across replicas:

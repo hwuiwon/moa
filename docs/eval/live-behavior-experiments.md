@@ -146,8 +146,8 @@ MOA_RUN_LIVE_SIMULATION_TESTS=1 cargo nextest run -p moa-orchestrator \
   live_behavior_lab_simulation_gate_requires_flag_and_provider_credentials
 ```
 
-If `MOA_RUN_LIVE_SIMULATION_TESTS=1` is set but no `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, or `GOOGLE_API_KEY` is present, the test fails before any
+If `MOA_RUN_LIVE_SIMULATION_TESTS=1` is set but no `MOA_ANTHROPIC_API_KEY`,
+`MOA_OPENAI_API_KEY`, or `MOA_GOOGLE_API_KEY` is present, the test fails before any
 provider call. Do not put live or billed experiment checks in the default test
 lane.
 

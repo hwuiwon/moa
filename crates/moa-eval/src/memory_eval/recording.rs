@@ -72,7 +72,7 @@ impl MemoryMergeRecordingOptions {
             output_path: None,
             extraction_path: None,
             extraction_config: MemoryExtractionConfig::default(),
-            api_key_env: "COHERE_API_KEY".to_string(),
+            api_key_env: "MOA_COHERE_API_KEY".to_string(),
         }
     }
 
@@ -120,7 +120,7 @@ impl MemoryExtractionRecordingOptions {
             corpus_dir: corpus_dir.into(),
             output_path: None,
             extraction_config: MemoryExtractionConfig::default(),
-            api_key_env: "COHERE_API_KEY".to_string(),
+            api_key_env: "MOA_COHERE_API_KEY".to_string(),
             request_delay_ms: 0,
         }
     }

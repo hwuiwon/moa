@@ -6,6 +6,8 @@ mod registry;
 mod routing;
 
 pub mod embedding;
+pub mod memory_llm;
+pub mod rerank;
 
 pub use adapters::anthropic::AnthropicProvider;
 pub use adapters::anthropic::debug_build_anthropic_request_body;
@@ -31,7 +33,16 @@ pub use embedding::{
     GeminiEmbeddingEmbedder, OpenAIEmbedding, ZeroEntropyEmbedding, build_embedder_from_config,
     build_embedding_provider_from_config,
 };
+pub use memory_llm::{
+    EXTRACTION_PROMPT_VERSION, LlmChatClient, LlmChatError, LlmEntityMergeClient, LlmExtractedFact,
+    LlmFactExtractionChunk, LlmFactExtractionClient, MERGE_PROMPT_VERSION,
+};
 pub use registry::{ProviderRegistry, ResolvedProvider};
+pub use rerank::{
+    COHERE_DEFAULT_RERANK_MODEL, CohereReranker, ConfiguredReranker, NOOP_RERANK_MODEL,
+    NoopReranker, RerankHit, Reranker, ZEROENTROPY_DEFAULT_RERANK_MODEL, ZeroEntropyRerankLatency,
+    ZeroEntropyReranker, build_reranker_from_config,
+};
 pub use routing::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_GOOGLE_MODEL, DEFAULT_OPENAI_MODEL, PROVIDER_DESCRIPTORS,
     ProviderDescriptor, ProviderId, infer_provider_id, provider_descriptor_by_name,

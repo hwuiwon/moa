@@ -142,6 +142,11 @@ The memory processor runs after query rewriting and before history compilation. 
 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
+The post-fusion reranker stage is always present in runtime retrieval. Its
+default provider/model is `noop`, which preserves fused candidate order. Setting
+`memory.retrieval.reranker_provider` and `memory.retrieval.reranker_model`
+switches the stage to a provider-backed reranker such as Cohere or ZeroEntropy.
+
 For verified contact sessions, retrieval queries tenant knowledge and the
 canonical verified contact memory scope inside the tenant. Storage lineage and
 query trace records preserve both source tiers. The retrieval path does not read

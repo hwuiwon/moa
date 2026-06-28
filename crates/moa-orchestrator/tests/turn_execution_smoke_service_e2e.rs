@@ -49,13 +49,13 @@ fn session_store_url(handler: &str) -> String {
 }
 
 fn live_model() -> &'static str {
-    if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if std::env::var("MOA_ANTHROPIC_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         return "claude-sonnet-4-6";
     }
-    if std::env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if std::env::var("MOA_OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         return "gpt-5.4-mini";
     }
-    if std::env::var("GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+    if std::env::var("MOA_GOOGLE_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
         return "gemini-3-flash-preview";
     }
     "gpt-5.4-mini"

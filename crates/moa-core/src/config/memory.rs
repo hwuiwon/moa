@@ -90,15 +90,31 @@ impl Default for MemoryExtractionConfig {
 }
 
 /// Graph-memory retrieval configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryRetrievalConfig {
-    /// Runtime/eval mode for post-fusion memory reranking.
-    pub reranker_mode: MemoryRerankerMode,
+    /// Reranker provider used after retrieval fusion. `noop` preserves the fused order.
+    pub reranker_provider: String,
+    /// Reranker model identifier. `noop` preserves the fused order.
+    pub reranker_model: String,
+    /// Optional provider-specific reranker latency mode.
+    pub reranker_latency: Option<String>,
     /// Whether retrieval writes narrow quality-scoring lineage rows.
     pub lineage_enabled: bool,
     /// Deterministic post-hydration ranking behavior.
     pub ranking: MemoryRankingConfig,
+}
+
+impl Default for MemoryRetrievalConfig {
+    fn default() -> Self {
+        Self {
+            reranker_provider: "noop".to_string(),
+            reranker_model: "noop".to_string(),
+            reranker_latency: None,
+            lineage_enabled: false,
+            ranking: MemoryRankingConfig::default(),
+        }
+    }
 }
 
 /// Deterministic ranking configuration for graph-memory retrieval.
@@ -153,20 +169,6 @@ impl Default for MemoryRankingWeights {
             access_half_life_days: 14.0,
         }
     }
-}
-
-/// Reranker enablement mode for graph-memory retrieval.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum MemoryRerankerMode {
-    /// Do not apply reranking.
-    #[default]
-    Off,
-    /// Keep runtime reranking disabled while allowing eval jobs to opt in.
-    EvalOnly,
-    /// Apply reranking in the normal runtime retrieval pipeline.
-    On,
 }
 
 /// Graph-memory vector configuration.
@@ -273,9 +275,17 @@ impl super::MoaEnvOverlay {
             &mut config.memory.embedding_model,
             &self.memory_embedding_model,
         );
-        set_copy_if_some(
-            &mut config.memory.retrieval.reranker_mode,
-            self.memory_retrieval_reranker_mode,
+        set_if_some(
+            &mut config.memory.retrieval.reranker_provider,
+            &self.memory_retrieval_reranker_provider,
+        );
+        set_if_some(
+            &mut config.memory.retrieval.reranker_model,
+            &self.memory_retrieval_reranker_model,
+        );
+        set_option_if_some(
+            &mut config.memory.retrieval.reranker_latency,
+            &self.memory_retrieval_reranker_latency,
         );
         set_copy_if_some(
             &mut config.memory.retrieval.lineage_enabled,

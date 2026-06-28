@@ -102,10 +102,10 @@ fn spawn_orchestrator(
             format!("scripted:{}", provider_override_fixture.display()),
         )
         .env("RUST_LOG", "info")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("GOOGLE_API_KEY")
-        .env_remove("COHERE_API_KEY")
+        .env_remove("MOA_ANTHROPIC_API_KEY")
+        .env_remove("MOA_OPENAI_API_KEY")
+        .env_remove("MOA_GOOGLE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -491,12 +491,16 @@ async fn live_behavior_lab_simulation_gate_requires_flag_and_provider_credential
         return Ok(());
     }
 
-    let has_credentials = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"]
-        .iter()
-        .any(|key| std::env::var_os(key).is_some());
+    let has_credentials = [
+        "MOA_ANTHROPIC_API_KEY",
+        "MOA_OPENAI_API_KEY",
+        "MOA_GOOGLE_API_KEY",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some());
     if !has_credentials {
         bail!(
-            "MOA_RUN_LIVE_SIMULATION_TESTS=1 requires one of ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY"
+            "MOA_RUN_LIVE_SIMULATION_TESTS=1 requires one of MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
         );
     }
 

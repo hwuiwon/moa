@@ -29,7 +29,7 @@ pub enum IngestError {
     Extraction(String),
     /// LLM chat transport failed.
     #[error(transparent)]
-    LlmChat(#[from] crate::llm_client::LlmChatError),
+    LlmChat(#[from] moa_providers::LlmChatError),
     /// The process-local ingestion runtime was not installed.
     #[error("ingestion runtime has not been installed")]
     RuntimeNotInstalled,

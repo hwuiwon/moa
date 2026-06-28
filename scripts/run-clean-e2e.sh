@@ -89,15 +89,15 @@ run() {
 
 run_without_provider_keys() {
   echo
-  echo ">> env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GOOGLE_API_KEY -u COHERE_API_KEY $*"
+  echo ">> env -u MOA_ANTHROPIC_API_KEY -u MOA_OPENAI_API_KEY -u MOA_GOOGLE_API_KEY -u MOA_COHERE_API_KEY $*"
   local start=$SECONDS
   local status=0
   set +e
   env \
-    -u ANTHROPIC_API_KEY \
-    -u OPENAI_API_KEY \
-    -u GOOGLE_API_KEY \
-    -u COHERE_API_KEY \
+    -u MOA_ANTHROPIC_API_KEY \
+    -u MOA_OPENAI_API_KEY \
+    -u MOA_GOOGLE_API_KEY \
+    -u MOA_COHERE_API_KEY \
     "$@"
   status=$?
   set -e
@@ -320,10 +320,10 @@ if [[ "${LIVE}" -eq 1 ]]; then
 
   echo
   echo ">> starting shared orchestrator for lifecycle smoke tests"
-  env -u COHERE_API_KEY \
-    -u ANTHROPIC_API_KEY \
-    -u OPENAI_API_KEY \
-    -u GOOGLE_API_KEY \
+  env -u MOA_COHERE_API_KEY \
+    -u MOA_ANTHROPIC_API_KEY \
+    -u MOA_OPENAI_API_KEY \
+    -u MOA_GOOGLE_API_KEY \
     RUST_LOG="${RUST_LOG:-warn}" \
     MOA_PROVIDERS_OVERRIDE="mock:${RUN_SAFE_ID}" \
     MOA_LOCAL_MEMORY_DIR="${TMP_ROOT}/memory" \

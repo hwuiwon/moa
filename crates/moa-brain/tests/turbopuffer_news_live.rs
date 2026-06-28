@@ -39,8 +39,8 @@ fn required_env(name: &str) -> TestResult<String> {
 }
 
 fn cohere_api_key() -> TestResult<String> {
-    std::env::var("COHERE_API_KEY")
-        .map_err(|_| "COHERE_API_KEY is required".into())
+    std::env::var("MOA_COHERE_API_KEY")
+        .map_err(|_| "MOA_COHERE_API_KEY is required".into())
         .and_then(|value| {
             if value.trim().is_empty() {
                 Err("Cohere API key must not be empty".into())
@@ -69,7 +69,7 @@ Fact: NASA Artemis III core stage supports a 2027 crewed lunar mission using the
 }
 
 #[tokio::test]
-#[ignore = "live Turbopuffer plus Cohere e2e; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1, TURBOPUFFER_API_KEY, and COHERE_API_KEY"]
+#[ignore = "live Turbopuffer plus Cohere e2e; requires MOA_RUN_LIVE_TURBOPUFFER_TESTS=1, TURBOPUFFER_API_KEY, and MOA_COHERE_API_KEY"]
 async fn turbopuffer_live_news_ingest_promote_and_retrieve() -> TestResult {
     require_live_turbopuffer()?;
 

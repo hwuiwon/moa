@@ -128,7 +128,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- record-memory-extractions --corpus <path> [--output <path>] [--api-key-env COHERE_API_KEY] [--model command-a-plus-05-2026] [--max-facts-per-chunk N] [--timeout-ms N] [--delay-ms N]"
+    "usage: cargo run -p xtask -- record-memory-extractions --corpus <path> [--output <path>] [--api-key-env MOA_COHERE_API_KEY] [--model command-a-plus-05-2026] [--max-facts-per-chunk N] [--timeout-ms N] [--delay-ms N]"
 }
 
 fn parse_usize(value: &str, flag: &str) -> Result<usize> {

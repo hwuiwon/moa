@@ -398,12 +398,12 @@ fn is_query_rewrite_request(request: &CompletionRequest) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, ANTHROPIC_API_KEY, and performs live cache audits"]
+#[ignore = "requires MOA_RUN_LIVE_PROVIDER_TESTS=1, MOA_ANTHROPIC_API_KEY, and performs live cache audits"]
 async fn live_cache_audit_tracks_same_session_cross_session_and_model_switch() -> Result<()> {
     if !live_provider_tests_enabled() {
         return Ok(());
     }
-    require_live_env("ANTHROPIC_API_KEY", "Anthropic cache audit");
+    require_live_env("MOA_ANTHROPIC_API_KEY", "Anthropic cache audit");
 
     let repo_root = repo_root()?;
 
@@ -826,21 +826,21 @@ fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaCo
 
     let mut configs = Vec::new();
 
-    if let Ok(api_key) = env::var("ANTHROPIC_API_KEY")
+    if let Ok(api_key) = env::var("MOA_ANTHROPIC_API_KEY")
         && !api_key.trim().is_empty()
     {
         let mut config = live_cache_config("anthropic", "claude-sonnet-4-6", repo_root);
         config.providers.anthropic.api_key = api_key;
         configs.push(("anthropic".to_string(), config));
     }
-    if let Ok(api_key) = env::var("OPENAI_API_KEY")
+    if let Ok(api_key) = env::var("MOA_OPENAI_API_KEY")
         && !api_key.trim().is_empty()
     {
         let mut config = live_cache_config("openai", "gpt-5.4", repo_root);
         config.providers.openai.api_key = api_key;
         configs.push(("openai".to_string(), config));
     }
-    if let Ok(api_key) = env::var("GOOGLE_API_KEY")
+    if let Ok(api_key) = env::var("MOA_GOOGLE_API_KEY")
         && !api_key.trim().is_empty()
     {
         let mut config = live_cache_config("google", "gemini-3-flash-preview", repo_root);
@@ -849,7 +849,7 @@ fn available_live_cache_provider_configs(repo_root: &Path) -> Vec<(String, MoaCo
     }
     assert!(
         !configs.is_empty(),
-        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires at least one provider credential for cache audits: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY"
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires at least one provider credential for cache audits: MOA_ANTHROPIC_API_KEY, MOA_OPENAI_API_KEY, or MOA_GOOGLE_API_KEY"
     );
 
     configs

@@ -11,9 +11,9 @@ use chrono::Utc;
 use moa_core::RlsContext;
 use moa_core::{
     AgentKnowledgePolicy, AgentKnowledgeScopeMode, ContextMessage, ContextProcessor,
-    ContextSourceRef, ExcludedItem, LineageHandle, MemoryRerankerMode, MoaError, NullLineageHandle,
-    ProcessorOutput, QueryRewriteResult, Result, RewriteSource, StoragePartitionId, UserId,
-    WorkingContext, traits::EmbeddingProvider,
+    ContextSourceRef, ExcludedItem, LineageHandle, MoaError, NullLineageHandle, ProcessorOutput,
+    QueryRewriteResult, Result, RewriteSource, StoragePartitionId, UserId, WorkingContext,
+    traits::EmbeddingProvider,
 };
 use moa_lineage_core::{
     BackendIntrospection, FusedHit, LineageEvent, RerankHit, RetrievalLineage, RetrievalStage,
@@ -302,7 +302,7 @@ impl GraphMemoryRetriever {
             query_embedding.to_vec(),
             max_pii_class,
             result_limit,
-            self.reranker_enabled(),
+            true,
         );
         if let Some(label_filter) = &scope_plan.label_filter {
             request.label_filter = Some(label_filter.clone());
@@ -317,10 +317,6 @@ impl GraphMemoryRetriever {
             .map_err(|error| {
                 moa_core::MoaError::StorageError(format!("graph memory retrieval failed: {error}"))
             })
-    }
-
-    fn reranker_enabled(&self) -> bool {
-        self.config.memory.retrieval.reranker_mode == MemoryRerankerMode::On
     }
 
     fn runtime_for_scope(&self, scope: &MemoryScope) -> Result<Arc<ScopedRetrievalRuntime>> {

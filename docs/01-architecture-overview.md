@@ -152,6 +152,7 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
 | `EmbeddingProvider` | Shared embedding interface | OpenAI embedding, Cohere v4, ZeroEntropy zembed-1, Gemini embedding, and test/mock adapters |
+| `Reranker` | Shared reranking interface | Noop, Cohere Rerank, and ZeroEntropy rerank through `moa-providers` |
 | `ChannelAdapter` | Channel inbound/outbound normalization | Slack |
 | `BuiltInTool` | Built-in tool execution | memory/search/web and other built-ins |
 | `ContextProcessor` | One stage in context compilation | identity, instructions, tools, query rewrite, skills, memory, history, runtime context, compactor |
@@ -476,7 +477,7 @@ and replay resistance on the verify path.
 | `moa-auth/auth0` (`moa-auth-providers-auth0`) | Optional Auth0 and generic OIDC implementations gated by the `auth0` Cargo feature |
 | `moa-ocsf` | OCSF v1.3 security-event types, emission helpers, and per-tenant signing |
 | `moa-hands` | Tool routing and hand providers |
-| `moa-providers` | LLM and embedding providers |
+| `moa-providers` | LLM, embedding, and reranker providers |
 | `moa-orchestrator` | Restate handlers and cloud orchestration binary |
 | `moa-messaging` | Messaging adapters, renderers, and notification connectors |
 | `moa-security` | Vault, policies, MCP credential proxy, injection controls |

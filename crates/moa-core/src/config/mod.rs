@@ -49,9 +49,8 @@ pub use learning::{LearningConfig, SkillLearningConfig};
 pub use lineage::LineageConfig;
 pub use memory::{
     CohereEmbedderConfig, GeminiEmbedderConfig, MemoryConfig, MemoryDigestConfig,
-    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRerankerMode,
-    MemoryRetrievalConfig, MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig,
-    ZeroEntropyEmbedderConfig,
+    MemoryExtractionConfig, MemoryRankingConfig, MemoryRankingWeights, MemoryRetrievalConfig,
+    MemoryVectorConfig, TurbopufferVectorConfig, VectorEmbedderConfig, ZeroEntropyEmbedderConfig,
 };
 pub use messaging::MessagingConfig;
 pub use orchestrator::OrchestratorConfig;
@@ -232,7 +231,9 @@ mod tests {
         "MOA_DATABASE_NEON_ENABLED",
         "MOA_DATABASE_NEON_PROJECT_ID",
         "MOA_DATABASE_NEON_MAX_CHECKPOINTS",
-        "MOA_MEMORY_RETRIEVAL_RERANKER_MODE",
+        "MOA_MEMORY_RETRIEVAL_RERANKER_PROVIDER",
+        "MOA_MEMORY_RETRIEVAL_RERANKER_MODEL",
+        "MOA_MEMORY_RETRIEVAL_RERANKER_LATENCY",
         "MOA_MEMORY_RETRIEVAL_LINEAGE_ENABLED",
         "MOA_MEMORY_DIGEST_ENABLED",
         "MOA_MEMORY_DIGEST_MAX_TOKENS",

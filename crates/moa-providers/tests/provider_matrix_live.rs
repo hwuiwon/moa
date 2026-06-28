@@ -61,7 +61,7 @@ fn available_live_providers() -> Vec<LiveProvider> {
     }
     assert!(
         !providers.is_empty(),
-        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires at least one provider credential: OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY"
+        "MOA_RUN_LIVE_PROVIDER_TESTS=1 requires at least one provider credential: MOA_OPENAI_API_KEY, MOA_ANTHROPIC_API_KEY, or MOA_GOOGLE_API_KEY"
     );
     providers
 }

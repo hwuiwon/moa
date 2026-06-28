@@ -217,7 +217,7 @@ crates/moa-eval/fixtures/memory/extractions-<corpus_id>-v2.jsonl
 Replay with no credentials required:
 
 ```bash
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --output target/memory-eval/natural-recorded.json
@@ -227,7 +227,7 @@ To exercise lifecycle consolidation in the same hermetic lane, add
 `--consolidate` after gold resolution and before probes:
 
 ```bash
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --consolidate \
@@ -248,7 +248,7 @@ consolidation digest step. Without `--consolidate`, the eval calls
 `moa_memory_lifecycle::rebuild_digests` directly after gold resolution:
 
 ```bash
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --consolidate \
@@ -263,12 +263,12 @@ corpus seeds expected facts with high synthetic priors and same-subject lexical
 colliders with low synthetic priors:
 
 ```bash
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --quality-weight 0.0 \
   --output target/memory-eval/q0.json
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --output target/memory-eval/q.json
@@ -282,7 +282,7 @@ confidence interval excluding zero, proving the quality term has enough weight
 to matter rather than acting as a no-op:
 
 ```bash
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --extractor recorded \
   --invert-quality-priors \
@@ -324,7 +324,7 @@ The natural CI lane runs:
 
 ```bash
 cargo run -p xtask -- generate-memory-eval-corpus --profile pr --transcript-style natural --seed 1 --seed 2 --seed 3 --output target/memory-eval/pr-natural
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval --corpus target/memory-eval/pr-natural --extractor recorded --output target/memory-eval/natural-recorded.json
 cargo run -p xtask -- check-eval-budgets --suite memory_retrieval \
   --memory-eval-report target/memory-eval/natural-recorded.json \
   --min-metric ingestion_coverage=0.85 \
@@ -383,7 +383,7 @@ Cohere reranking.
 Run the PR preset with no live providers:
 
 ```bash
-env -u COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
+env -u MOA_COHERE_API_KEY cargo run -p xtask -- run-memory-retrieval-eval \
   --corpus target/memory-eval/pr-natural \
   --lane pr \
   --extractor recorded \
@@ -408,7 +408,7 @@ cargo run -p xtask -- run-memory-retrieval-eval \
   --output target/memory-eval/live-rerank.json
 ```
 
-`--lane live` requires `COHERE_API_KEY`. It ignores hermetic embedding fixtures
+`--lane live` requires `MOA_COHERE_API_KEY`. It ignores hermetic embedding fixtures
 entirely and refuses fixture flags such as `--extractor`, `--extractions`, and
 `--merges`. `--budget-usd` is live-only; PR runs reject it so accidental billing
 flags do not become inert configuration.

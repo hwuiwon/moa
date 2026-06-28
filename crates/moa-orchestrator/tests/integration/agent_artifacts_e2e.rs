@@ -107,7 +107,7 @@ fn spawn_orchestrator(
         .env("MOA_LOCAL_DOCKER_ENABLED", "false")
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("RUST_LOG", "info")
-        .env_remove("COHERE_API_KEY")
+        .env_remove("MOA_COHERE_API_KEY")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(path) = provider_override_fixture {
@@ -116,9 +116,9 @@ fn spawn_orchestrator(
                 "MOA_PROVIDERS_OVERRIDE",
                 format!("scripted:{}", path.display()),
             )
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("GOOGLE_API_KEY");
+            .env_remove("MOA_ANTHROPIC_API_KEY")
+            .env_remove("MOA_OPENAI_API_KEY")
+            .env_remove("MOA_GOOGLE_API_KEY");
     }
 
     command

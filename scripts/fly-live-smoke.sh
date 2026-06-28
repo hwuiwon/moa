@@ -10,7 +10,7 @@ LOCAL_ONLY="${MOA_FLY_LOCAL_ONLY:-1}"
 CONFIG_HOME="$(mktemp -d)"
 
 : "${FLY_API_TOKEN:?set FLY_API_TOKEN}"
-: "${OPENAI_API_KEY:?set OPENAI_API_KEY}"
+: "${MOA_OPENAI_API_KEY:?set MOA_OPENAI_API_KEY}"
 
 fly() {
   HOME="$CONFIG_HOME" NO_COLOR=1 FLY_API_TOKEN="$FLY_API_TOKEN" "$FLYCTL_BIN" "$@"
@@ -82,7 +82,7 @@ if ! volume_ids | grep -q .; then
   fly volumes create moa_data --region "$REGION" --size 1 -a "$APP_NAME" --yes >/dev/null
 fi
 
-secret_args=("OPENAI_API_KEY=$OPENAI_API_KEY")
+secret_args=("MOA_OPENAI_API_KEY=$MOA_OPENAI_API_KEY")
 if [[ -n "${MOA_DATABASE_URL:-}" ]]; then
   secret_args+=("MOA__DATABASE__URL=$MOA_DATABASE_URL")
 fi

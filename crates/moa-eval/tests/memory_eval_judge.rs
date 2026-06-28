@@ -252,9 +252,9 @@ async fn pairwise_llm_judge_rejects_closed_form_probes_without_provider_calls() 
 fn live_judge_credential_helper_fails_clearly_when_opted_in_without_key() {
     // Pins: live memory judge opt-in requires a non-empty OpenAI key with a clear failure.
     let error = live_judge_credentials_enabled(Some("1"), None)
-        .expect_err("opted-in live judge should require OPENAI_API_KEY");
+        .expect_err("opted-in live judge should require MOA_OPENAI_API_KEY");
     assert!(
-        error.contains("MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1") && error.contains("OPENAI_API_KEY"),
+        error.contains("MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1") && error.contains("MOA_OPENAI_API_KEY"),
         "credential error should name both the flag and missing key: {error}"
     );
 
@@ -269,11 +269,11 @@ fn live_judge_credential_helper_fails_clearly_when_opted_in_without_key() {
 }
 
 #[tokio::test]
-#[ignore = "requires MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1 and OPENAI_API_KEY"]
+#[ignore = "requires MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1 and MOA_OPENAI_API_KEY"]
 async fn live_memory_eval_judge_validates_openai_credentials() {
     // Pins: ignored live judge scaffold fails clearly when explicitly opted in without credentials.
     let run_flag = std::env::var("MOA_RUN_LIVE_MEMORY_EVAL_JUDGE").ok();
-    let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+    let openai_api_key = std::env::var("MOA_OPENAI_API_KEY").ok();
     match live_judge_credentials_enabled(run_flag.as_deref(), openai_api_key.as_deref()) {
         Ok(true) => {}
         Ok(false) => return,
@@ -367,7 +367,7 @@ fn live_judge_credentials_enabled(
         .filter(|api_key| !api_key.is_empty())
     else {
         return Err(
-            "MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1 requires non-empty OPENAI_API_KEY".to_string(),
+            "MOA_RUN_LIVE_MEMORY_EVAL_JUDGE=1 requires non-empty MOA_OPENAI_API_KEY".to_string(),
         );
     };
 

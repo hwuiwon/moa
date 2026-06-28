@@ -2,43 +2,45 @@
 
 use async_trait::async_trait;
 use moa_memory_graph::NodeIndexRow;
+use moa_providers::{LlmChatClient, LlmChatError, LlmEntityMergeClient};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{
-    EntityMergeVerifier, IngestError, LlmChatClient, Result,
-    entity_resolution::normalize_entity_name,
-};
+use crate::{EntityMergeVerifier, IngestError, Result, entity_resolution::normalize_entity_name};
 
-/// Merge-verifier prompt version used for recorded fixtures.
-pub const MERGE_PROMPT_VERSION: &str = "v1";
-
-const MERGE_SYSTEM_PROMPT: &str = r#"You decide whether two extracted entity mentions refer to the same real entity in graph memory.
-Answer with exactly one lowercase word: yes or no.
-Say yes only when the mention is a paraphrase, abbreviation, casing variant, or punctuation variant of the candidate.
-Say no when the terms could name different services, repositories, people, teams, credentials, or documents.
-When ambiguous, answer no."#;
+pub use moa_providers::MERGE_PROMPT_VERSION;
 
 /// LLM-backed entity merge verifier that uses the shared memory chat client.
 #[derive(Clone)]
 pub struct LlmEntityMergeVerifier {
-    client: LlmChatClient,
+    client: LlmEntityMergeClient,
 }
 
 impl LlmEntityMergeVerifier {
     /// Creates a merge verifier from the shared chat transport.
     #[must_use]
     pub fn new(client: LlmChatClient) -> Self {
-        Self { client }
+        Self {
+            client: LlmEntityMergeClient::new(client),
+        }
     }
 
     /// Creates a merge verifier from an API-key environment variable and model settings.
     pub fn from_env(api_key_env: &str, model: &str, timeout_ms: u64) -> Result<Self> {
-        Ok(Self::new(LlmChatClient::from_env(
-            api_key_env,
+        let api_key = std::env::var(api_key_env).map_err(|_| LlmChatError::Auth {
+            message: format!("missing Cohere API key env var {api_key_env}"),
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(LlmChatError::Auth {
+                message: format!("empty Cohere API key env var {api_key_env}"),
+            }
+            .into());
+        }
+        Ok(Self::new(LlmChatClient::from_api_key(
+            secrecy::SecretString::from(api_key),
             model,
             timeout_ms,
-        )?))
+        )))
     }
 
     /// Creates a merge verifier from a direct API key and model settings.
@@ -55,14 +57,14 @@ impl LlmEntityMergeVerifier {
 #[async_trait]
 impl EntityMergeVerifier for LlmEntityMergeVerifier {
     async fn should_merge(&self, mention: &str, candidate: &NodeIndexRow) -> Result<bool> {
-        let user = format!(
-            "Mention: {}\nCandidate: {}\nCandidate normalized name: {}\n",
-            mention.trim(),
-            candidate.name.trim(),
-            normalize_entity_name(&candidate.name)
-        );
-        let answer = self.client.chat(MERGE_SYSTEM_PROMPT, &user).await?;
-        Ok(parse_merge_answer(&answer))
+        Ok(self
+            .client
+            .should_merge(
+                mention,
+                &candidate.name,
+                &normalize_entity_name(&candidate.name),
+            )
+            .await?)
     }
 }
 
@@ -153,14 +155,6 @@ pub fn merge_fixture_key(mention: &str, candidate: &str) -> String {
     format!("{digest:x}")
 }
 
-fn parse_merge_answer(answer: &str) -> bool {
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "yes" => true,
-        "no" => false,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -176,15 +170,6 @@ mod tests {
         fn get_optional(&self, key: &str) -> Option<&EntityMergeFixtureRecord> {
             self.records.get(key)
         }
-    }
-
-    #[test]
-    fn verifier_false_or_malformed_means_no_merge() {
-        // Pins: ambiguous merge-verifier output is fail-closed to avoid corrupting entity links.
-        assert!(parse_merge_answer("yes"));
-        assert!(!parse_merge_answer("no"));
-        assert!(!parse_merge_answer("maybe"));
-        assert!(!parse_merge_answer("yes, probably"));
     }
 
     #[test]

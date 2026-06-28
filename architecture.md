@@ -201,7 +201,7 @@ The orchestrator binary reads cloud process settings from environment variables:
 ```bash
 POSTGRES_URL=postgres://...
 RESTATE_ADMIN_URL=http://localhost:10011
-OPENAI_API_KEY=... # or ANTHROPIC_API_KEY / GOOGLE_API_KEY
+MOA_OPENAI_API_KEY=... # or MOA_ANTHROPIC_API_KEY / MOA_GOOGLE_API_KEY
 cargo run -p moa-orchestrator --bin moa-orchestrator-bin -- --port 10020 --health-port 10021
 ```
 

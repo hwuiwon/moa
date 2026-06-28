@@ -110,7 +110,7 @@ impl Options {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p xtask -- record-memory-merges --corpus <path> [--output <path>] [--extractions <path>] [--api-key-env COHERE_API_KEY] [--model command-a-plus-05-2026] [--timeout-ms N]"
+    "usage: cargo run -p xtask -- record-memory-merges --corpus <path> [--output <path>] [--extractions <path>] [--api-key-env MOA_COHERE_API_KEY] [--model command-a-plus-05-2026] [--timeout-ms N]"
 }
 
 fn parse_u64(value: &str, flag: &str) -> Result<u64> {
