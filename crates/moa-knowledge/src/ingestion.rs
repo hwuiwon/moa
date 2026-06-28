@@ -285,14 +285,7 @@ where
             sync_run_uid,
             None,
             "provider_records_listed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "records_listed": records_listed }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(json!({ "records_listed": records_listed })),
         )
         .await?;
 
@@ -361,14 +354,10 @@ where
             sync_run_uid,
             None,
             "source_selection_pruned",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "records_pruned": report.records_deleted }),
-                summary: Some("removed objects absent from selected provider sources".to_string()),
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters_and_summary(
+                json!({ "records_pruned": report.records_deleted }),
+                "removed objects absent from selected provider sources",
+            ),
             KnowledgeSyncCounters::default(),
         )
         .await?;
@@ -442,14 +431,7 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "parse_completed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "objects_parsed": 1 }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(json!({ "objects_parsed": 1 })),
             KnowledgeSyncCounters {
                 objects_parsed: 1,
                 ..KnowledgeSyncCounters::default()
@@ -504,14 +486,9 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "object_change_checked",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "records_seen": 1, "records_changed": 1 }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(
+                json!({ "records_seen": 1, "records_changed": 1 }),
+            ),
             KnowledgeSyncCounters {
                 records_seen: 1,
                 records_changed: 1,
@@ -541,14 +518,7 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "content_fetched",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "bytes_fetched": bytes_fetched }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(json!({ "bytes_fetched": bytes_fetched })),
         )
         .await?;
         self.record_step(
@@ -596,14 +566,9 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "parse_completed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "parser_items": parsed.elements.len(), "objects_parsed": 1 }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(
+                json!({ "parser_items": parsed.elements.len(), "objects_parsed": 1 }),
+            ),
             KnowledgeSyncCounters {
                 objects_parsed: 1,
                 ..KnowledgeSyncCounters::default()
@@ -790,17 +755,10 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "blocks_diffed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({
+            StepOutcome::completed_with_counters(json!({
                     "blocks_total": blocks.len(),
                     "blocks_new": blocks_new,
-                }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            })),
         )
         .await?;
 
@@ -829,18 +787,11 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "chunks_diffed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({
+            StepOutcome::completed_with_counters(json!({
                     "chunks_total": chunks.len(),
                     "chunks_new": chunks_new,
                     "chunks_deleted": orphan_chunks.len() + deleted_chunk_uids.len(),
-                }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            })),
         )
         .await?;
 
@@ -883,18 +834,11 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "embedded",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({
+            StepOutcome::completed_with_counters(json!({
                     "embeddings_created": embeddings.len(),
                     "embeddings_reused": chunks.len().saturating_sub(embeddings.len()),
                     "chunks_embedded": embeddings.len(),
-                }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            })),
             KnowledgeSyncCounters {
                 chunks_embedded: embeddings.len() as u64,
                 ..KnowledgeSyncCounters::default()
@@ -948,17 +892,10 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "graph_upserted",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({
+            StepOutcome::completed_with_counters(json!({
                     "graph_nodes_upserted": graph_report.nodes_upserted,
                     "graph_edges_upserted": graph_report.edges_upserted,
-                }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            })),
             KnowledgeSyncCounters {
                 graph_nodes_upserted: graph_report.nodes_upserted,
                 graph_edges_upserted: graph_report.edges_upserted,
@@ -1023,17 +960,10 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "vector_indexed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({
+            StepOutcome::completed_with_counters(json!({
                     "vector_rows_upserted": embeddings.len(),
                     "vector_rows_deleted": invalidation_report.vector_rows_deleted,
-                }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            })),
         )
         .await?;
         let contact_delta = derive_contact_groups_from_object(&object);
@@ -1057,18 +987,11 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "contact_groups_derived",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({
+            StepOutcome::completed_with_counters(json!({
                     "contact_groups": contact_group_count,
                     "contact_group_memberships_changed": contact_memberships,
                     "records_ingested": 1,
-                }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            })),
             KnowledgeSyncCounters {
                 records_ingested: 1,
                 ..KnowledgeSyncCounters::default()
@@ -1133,13 +1056,11 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "object_change_checked",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters,
-                summary,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
+            match summary {
+                Some(summary) => {
+                    StepOutcome::completed_with_counters_and_summary(counters, summary)
+                }
+                None => StepOutcome::completed_with_counters(counters),
             },
             counter_delta,
         )
@@ -1212,28 +1133,16 @@ where
             sync_run_uid,
             Some(object.object_uid),
             "chunks_diffed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "chunks_deleted": chunk_uids.len() }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(json!({ "chunks_deleted": chunk_uids.len() })),
         )
         .await?;
         self.record_step(
             sync_run_uid,
             Some(object.object_uid),
             "vector_indexed",
-            StepOutcome {
-                status: IngestionStepStatus::Completed,
-                counters: json!({ "vector_rows_deleted": invalidation_report.vector_rows_deleted }),
-                summary: None,
-                retry_count: 0,
-                error_code: None,
-                duration_ms: None,
-            },
+            StepOutcome::completed_with_counters(json!({
+                "vector_rows_deleted": invalidation_report.vector_rows_deleted
+            })),
         )
         .await?;
         Ok(1)

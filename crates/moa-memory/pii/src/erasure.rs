@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const CONTACT_SUBJECT_PREFIX: &str = "contact:";
 const ERASE_CHUNK_SIZE: usize = 1000;
 
 /// Result type returned by memory erasure helpers.
@@ -153,11 +152,8 @@ fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Res
 }
 
 fn contact_id_from_subject(subject_user_id: &str) -> Result<ContactId> {
-    let contact_subject = subject_user_id
-        .strip_prefix(CONTACT_SUBJECT_PREFIX)
-        .unwrap_or(subject_user_id);
-    Uuid::parse_str(contact_subject)
-        .map(ContactId)
+    moa_core::wire::privacy::ParsedPrivacySubjectId::parse_str(subject_user_id)
+        .map(moa_core::wire::privacy::ParsedPrivacySubjectId::contact_id)
         .map_err(|error| {
             ErasureError::Scope(moa_core::MoaError::ValidationError(format!(
                 "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"

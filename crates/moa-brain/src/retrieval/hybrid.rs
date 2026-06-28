@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use moa_core::RlsContext;
-use moa_core::config::MoaEnvOverlay;
 use moa_core::{MoaConfig, SessionId};
 use moa_db::ScopedConn;
 use moa_lineage_core::TurnId;
@@ -211,27 +210,6 @@ impl HybridRetriever {
             assume_app_role: false,
             lineage_enabled: false,
         }
-    }
-
-    /// Creates a hybrid retriever using Cohere Rerank when an API key is present.
-    #[must_use]
-    pub fn from_env(
-        pool: PgPool,
-        graph: Arc<dyn GraphStore>,
-        vector: Arc<dyn VectorStore>,
-    ) -> Self {
-        let mut config = MoaConfig::default();
-        if let Err(error) = apply_reranker_env_overlay(&mut config) {
-            tracing::warn!(
-                error = %error,
-                "failed to load reranker environment overlay; using no-op reranker"
-            );
-        }
-        let configured = configured_reranker_or_noop(&config);
-        let turbopuffer = TurbopufferStore::from_env().ok().map(Arc::new);
-        Self::new(pool, graph, vector)
-            .with_turbopuffer(turbopuffer)
-            .with_configured_reranker(configured)
     }
 
     /// Creates a hybrid retriever from shared config.
@@ -541,23 +519,6 @@ impl HybridRetriever {
             Ok(out)
         }
     }
-}
-
-fn apply_reranker_env_overlay(config: &mut MoaConfig) -> moa_core::Result<()> {
-    let overlay = MoaEnvOverlay::from_env()?;
-    if let Some(api_key) = overlay.cohere_api_key {
-        config.providers.cohere.api_key = api_key;
-    }
-    if let Some(api_key) = overlay.zeroentropy_api_key {
-        config.providers.zeroentropy.api_key = api_key;
-    }
-    if let Some(model) = overlay.memory_retrieval_reranker_model {
-        config.memory.retrieval.reranker_model = model;
-    }
-    if let Some(latency) = overlay.memory_retrieval_reranker_latency {
-        config.memory.retrieval.reranker_latency = Some(latency);
-    }
-    Ok(())
 }
 
 fn configured_reranker_or_noop(config: &MoaConfig) -> ConfiguredReranker {

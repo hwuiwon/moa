@@ -182,6 +182,60 @@ struct ArtifactWorkflowNodeActionResult {
     outcome: WorkflowNodeActionOutcome,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionResultMode {
+    Single,
+    Parallel,
+}
+
+impl ActionResultMode {
+    fn records_failed_node(self) -> bool {
+        matches!(self, Self::Parallel)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockedNodeKind {
+    Review,
+    Signal,
+}
+
+impl BlockedNodeKind {
+    fn from_request(request: &WorkflowNodeRequest) -> Option<Self> {
+        match request {
+            WorkflowNodeRequest::Review { .. } => Some(Self::Review),
+            WorkflowNodeRequest::WaitSignal { .. } => Some(Self::Signal),
+            _ => None,
+        }
+    }
+
+    fn promise_key(self, node_id: &str) -> String {
+        match self {
+            Self::Review => review_promise_key(node_id),
+            Self::Signal => signal_promise_key(node_id),
+        }
+    }
+
+    fn cancel_step_name(self, step_index: usize) -> String {
+        match self {
+            Self::Review => format!("artifact_workflow_cancel_while_review_{step_index}"),
+            Self::Signal => format!("artifact_workflow_cancel_while_signal_{step_index}"),
+        }
+    }
+
+    fn resolution_step_name(self, step_index: usize) -> String {
+        match self {
+            Self::Review => format!("artifact_workflow_review_resolution_{step_index}"),
+            Self::Signal => format!("artifact_workflow_signal_resolution_{step_index}"),
+        }
+    }
+}
+
+enum WorkflowBlockedNodeResolution {
+    Review(WorkflowReviewResolution),
+    Signal(WorkflowSignalResolution),
+}
+
 /// Restate workflow surface for artifact-backed workflow execution.
 #[restate_sdk::workflow]
 pub trait ArtifactWorkflowExecution {
@@ -253,41 +307,32 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                     request: node_request,
                     ..
                 } => {
-                    if let Some(reason) = cancel_requested(&ctx).await? {
-                        let cancel_request = request.clone();
-                        step = ctx
-                            .run(|| async move {
-                                persist_workflow_cancel(cancel_request, reason)
-                                    .await
-                                    .map(Json::from)
-                            })
-                            .name(format!("artifact_workflow_cancel_before_node_{step_index}"))
-                            .await?
-                            .into_inner();
+                    if let Some(cancel_step) = cancel_step_if_requested(
+                        &ctx,
+                        &request,
+                        format!("artifact_workflow_cancel_before_node_{step_index}"),
+                    )
+                    .await?
+                    {
+                        step = cancel_step;
                         continue;
                     }
-                    let node_id = blocked_node_id(&node_request);
-                    let action_outcome = execute_workflow_node_action(
+                    let action_outcomes = execute_node_actions(
                         &ctx,
-                        WorkflowNodeActionContext {
-                            tenant_id: request.tenant_id,
-                            run_uid: request.run_uid,
-                            node_id,
-                            session_id: request.session_id,
-                            identity: request.identity.clone(),
-                            cancel_promise_key: Some(K_CANCEL_REASON_PROMISE.to_string()),
-                        },
-                        node_request.clone(),
+                        &request,
+                        vec![ArtifactWorkflowNodeExecution {
+                            node_run_uid,
+                            request: node_request,
+                        }],
                     )
                     .await?;
                     let persist_request = request.clone();
                     step = ctx
                         .run(|| async move {
-                            persist_workflow_node_action_outcome(
+                            persist_workflow_node_action_outcomes(
                                 persist_request,
-                                node_run_uid,
-                                node_request,
-                                action_outcome,
+                                action_outcomes,
+                                ActionResultMode::Single,
                             )
                             .await
                             .map(Json::from)
@@ -297,49 +342,27 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
                         .into_inner();
                 }
                 ArtifactWorkflowStep::ExecuteNodes { executions, .. } => {
-                    if let Some(reason) = cancel_requested(&ctx).await? {
-                        let cancel_request = request.clone();
-                        step = ctx
-                            .run(|| async move {
-                                persist_workflow_cancel(cancel_request, reason)
-                                    .await
-                                    .map(Json::from)
-                            })
-                            .name(format!(
-                                "artifact_workflow_cancel_before_parallel_nodes_{step_index}"
-                            ))
-                            .await?
-                            .into_inner();
+                    if let Some(cancel_step) = cancel_step_if_requested(
+                        &ctx,
+                        &request,
+                        format!("artifact_workflow_cancel_before_parallel_nodes_{step_index}"),
+                    )
+                    .await?
+                    {
+                        step = cancel_step;
                         continue;
                     }
-                    let mut action_outcomes = Vec::with_capacity(executions.len());
-                    for execution in executions {
-                        let node_id = blocked_node_id(&execution.request);
-                        let action_outcome = execute_workflow_node_action(
-                            &ctx,
-                            WorkflowNodeActionContext {
-                                tenant_id: request.tenant_id,
-                                run_uid: request.run_uid,
-                                node_id,
-                                session_id: request.session_id,
-                                identity: request.identity.clone(),
-                                cancel_promise_key: Some(K_CANCEL_REASON_PROMISE.to_string()),
-                            },
-                            execution.request.clone(),
-                        )
-                        .await?;
-                        action_outcomes.push(ArtifactWorkflowNodeActionResult {
-                            node_run_uid: execution.node_run_uid,
-                            request: execution.request,
-                            outcome: action_outcome,
-                        });
-                    }
+                    let action_outcomes = execute_node_actions(&ctx, &request, executions).await?;
                     let persist_request = request.clone();
                     step = ctx
                         .run(|| async move {
-                            persist_workflow_node_action_outcomes(persist_request, action_outcomes)
-                                .await
-                                .map(Json::from)
+                            persist_workflow_node_action_outcomes(
+                                persist_request,
+                                action_outcomes,
+                                ActionResultMode::Parallel,
+                            )
+                            .await
+                            .map(Json::from)
                         })
                         .name(format!(
                             "artifact_workflow_parallel_node_actions_{step_index}"
@@ -453,6 +476,65 @@ impl ArtifactWorkflowExecution for ArtifactWorkflowExecutionImpl {
     }
 }
 
+async fn cancel_step_if_requested(
+    ctx: &WorkflowContext<'_>,
+    request: &RunArtifactWorkflowRequest,
+    run_step_name: String,
+) -> Result<Option<ArtifactWorkflowStep>, HandlerError> {
+    let Some(reason) = cancel_requested(ctx).await? else {
+        return Ok(None);
+    };
+    persist_cancel_step(ctx, request.clone(), reason, run_step_name)
+        .await
+        .map(Some)
+}
+
+async fn persist_cancel_step(
+    ctx: &WorkflowContext<'_>,
+    request: RunArtifactWorkflowRequest,
+    reason: String,
+    run_step_name: String,
+) -> Result<ArtifactWorkflowStep, HandlerError> {
+    Ok(ctx
+        .run(|| async move {
+            persist_workflow_cancel(request, reason)
+                .await
+                .map(Json::from)
+        })
+        .name(run_step_name)
+        .await?
+        .into_inner())
+}
+
+async fn execute_node_actions(
+    ctx: &WorkflowContext<'_>,
+    request: &RunArtifactWorkflowRequest,
+    executions: Vec<ArtifactWorkflowNodeExecution>,
+) -> Result<Vec<ArtifactWorkflowNodeActionResult>, HandlerError> {
+    let mut action_results = Vec::with_capacity(executions.len());
+    for execution in executions {
+        let action_outcome = execute_workflow_node_action(
+            ctx,
+            WorkflowNodeActionContext {
+                tenant_id: request.tenant_id,
+                run_uid: request.run_uid,
+                node_id: blocked_node_id(&execution.request),
+                session_id: request.session_id,
+                identity: request.identity.clone(),
+                cancel_promise_key: Some(K_CANCEL_REASON_PROMISE.to_string()),
+            },
+            execution.request.clone(),
+        )
+        .await?;
+        action_results.push(ArtifactWorkflowNodeActionResult {
+            node_run_uid: execution.node_run_uid,
+            request: execution.request,
+            outcome: action_outcome,
+        });
+    }
+    Ok(action_results)
+}
+
 async fn await_blocked_node_resolution(
     ctx: &WorkflowContext<'_>,
     request: RunArtifactWorkflowRequest,
@@ -461,76 +543,79 @@ async fn await_blocked_node_resolution(
     step_index: usize,
 ) -> Result<ArtifactWorkflowStep, HandlerError> {
     let node_id = blocked_node_id(&node_request);
-    if is_review_request(&node_request) {
-        let review_key = review_promise_key(&node_id);
-        let step = restate_sdk::select! {
-            reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
-                let reason = reason?;
-                let cancel_request = request.clone();
-                ctx.run(|| async move {
-                    persist_workflow_cancel(cancel_request, reason)
-                        .await
-                        .map(Json::from)
-                })
-                .name(format!("artifact_workflow_cancel_while_review_{step_index}"))
-                .await?
-                .into_inner()
-            },
-            resolution = ctx.promise::<Json<WorkflowReviewResolution>>(review_key.as_str()) => {
-                let resolution = resolution?.into_inner();
-                let persist_request = request.clone();
-                ctx.run(|| async move {
-                    persist_workflow_review_resolution(persist_request, node_run_uid, resolution)
-                        .await
-                        .map(Json::from)
-                })
-                .name(format!("artifact_workflow_review_resolution_{step_index}"))
-                .await?
-                .into_inner()
-            }
-        };
-        return Ok(step);
-    }
+    let kind = BlockedNodeKind::from_request(&node_request).ok_or_else(|| {
+        TerminalError::new_with_code(
+            400,
+            format!("workflow node `{node_id}` is not a resumable blocked node"),
+        )
+    })?;
+    let cancel_step_name = kind.cancel_step_name(step_index);
+    let resolution_step_name = kind.resolution_step_name(step_index);
 
-    if is_signal_request(&node_request) {
-        let signal_key = signal_promise_key(&node_id);
-        let step = restate_sdk::select! {
-            reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
-                let reason = reason?;
-                let cancel_request = request.clone();
-                ctx.run(|| async move {
-                    persist_workflow_cancel(cancel_request, reason)
-                        .await
-                        .map(Json::from)
-                })
-                .name(format!("artifact_workflow_cancel_while_signal_{step_index}"))
-                .await?
-                .into_inner()
-            },
-            resolution = ctx.promise::<Json<WorkflowSignalResolution>>(signal_key.as_str()) => {
-                let resolution = resolution?.into_inner();
-                let persist_request = request.clone();
-                ctx.run(|| async move {
-                    persist_workflow_signal_resolution(persist_request, node_run_uid, resolution)
-                        .await
-                        .map(Json::from)
-                })
-                .name(format!("artifact_workflow_signal_resolution_{step_index}"))
-                .await?
-                .into_inner()
-            }
-        };
-        return Ok(step);
+    match kind {
+        BlockedNodeKind::Review => {
+            let review_key = kind.promise_key(&node_id);
+            let step = restate_sdk::select! {
+                reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
+                    persist_cancel_step(ctx, request.clone(), reason?, cancel_step_name).await?
+                },
+                resolution = ctx.promise::<Json<WorkflowReviewResolution>>(review_key.as_str()) => {
+                    persist_blocked_node_resolution_step(
+                        ctx,
+                        request.clone(),
+                        node_run_uid,
+                        WorkflowBlockedNodeResolution::Review(resolution?.into_inner()),
+                        resolution_step_name,
+                    )
+                    .await?
+                }
+            };
+            Ok(step)
+        }
+        BlockedNodeKind::Signal => {
+            let signal_key = kind.promise_key(&node_id);
+            let step = restate_sdk::select! {
+                reason = ctx.promise::<String>(K_CANCEL_REASON_PROMISE) => {
+                    persist_cancel_step(ctx, request.clone(), reason?, cancel_step_name).await?
+                },
+                resolution = ctx.promise::<Json<WorkflowSignalResolution>>(signal_key.as_str()) => {
+                    persist_blocked_node_resolution_step(
+                        ctx,
+                        request.clone(),
+                        node_run_uid,
+                        WorkflowBlockedNodeResolution::Signal(resolution?.into_inner()),
+                        resolution_step_name,
+                    )
+                    .await?
+                }
+            };
+            Ok(step)
+        }
     }
+}
 
-    Err(TerminalError::new_with_code(
-        400,
-        format!(
-            "workflow node `{}` is not a resumable blocked node",
-            blocked_node_id(&node_request)
-        ),
-    )
-    .into())
+async fn persist_blocked_node_resolution_step(
+    ctx: &WorkflowContext<'_>,
+    request: RunArtifactWorkflowRequest,
+    node_run_uid: Uuid,
+    resolution: WorkflowBlockedNodeResolution,
+    run_step_name: String,
+) -> Result<ArtifactWorkflowStep, HandlerError> {
+    Ok(ctx
+        .run(|| async move {
+            match resolution {
+                WorkflowBlockedNodeResolution::Review(resolution) => {
+                    persist_workflow_review_resolution(request, node_run_uid, resolution).await
+                }
+                WorkflowBlockedNodeResolution::Signal(resolution) => {
+                    persist_workflow_signal_resolution(request, node_run_uid, resolution).await
+                }
+            }
+            .map(Json::from)
+        })
+        .name(run_step_name)
+        .await?
+        .into_inner())
 }
 
 async fn cancel_requested(ctx: &WorkflowContext<'_>) -> Result<Option<String>, HandlerError> {
@@ -642,109 +727,10 @@ async fn advance_artifact_workflow(
     advance_and_persist(&registry, &scope, &run, &definition, execution_state).await
 }
 
-async fn persist_workflow_node_action_outcome(
-    request: RunArtifactWorkflowRequest,
-    node_run_uid: Uuid,
-    node_request: WorkflowNodeRequest,
-    action_outcome: WorkflowNodeActionOutcome,
-) -> Result<ArtifactWorkflowStep, HandlerError> {
-    let scope = ActionRuleScope::Tenant {
-        tenant_id: request.tenant_id,
-    };
-    let registry = ArtifactRegistry::new(OrchestratorCtx::current_graph_pool());
-    let run = registry
-        .load_run(&scope, request.run_uid)
-        .await
-        .map_err(artifact_handler_error)?
-        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-    if matches!(
-        run.status,
-        ArtifactRunStatus::Completed | ArtifactRunStatus::Failed | ArtifactRunStatus::Cancelled
-    ) {
-        return Ok(ArtifactWorkflowStep::Outcome {
-            outcome: outcome_from_run(&run),
-        });
-    }
-    let definition = load_workflow_definition(&registry, &scope, &run).await?;
-    let state = workflow_state_from_run(&run)?;
-    let node_id = blocked_node_id(&node_request);
-
-    match action_outcome {
-        WorkflowNodeActionOutcome::Completed { output } => {
-            registry
-                .update_node_run(
-                    &scope,
-                    node_run_uid,
-                    ArtifactNodeRunUpdate {
-                        status: Some(ArtifactNodeRunStatus::Completed),
-                        output: Some(Some(output.clone())),
-                        error: Some(None),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?;
-            let resumed_state = WorkflowInterpreter::new(&definition)
-                .complete_blocked_node(state, &node_id, output)
-                .map_err(workflow_handler_error)?;
-            advance_and_persist(&registry, &scope, &run, &definition, resumed_state).await
-        }
-        WorkflowNodeActionOutcome::Failed { error } => {
-            registry
-                .update_node_run(
-                    &scope,
-                    node_run_uid,
-                    ArtifactNodeRunUpdate {
-                        status: Some(ArtifactNodeRunStatus::Failed),
-                        output: None,
-                        error: Some(Some(error.clone())),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?;
-            let updated = registry
-                .update_run(
-                    &scope,
-                    run.run_uid,
-                    ArtifactRunUpdate {
-                        status: Some(ArtifactRunStatus::Failed),
-                        current_node_id: Some(Some(node_id)),
-                        state: Some(workflow_state_json(&state)),
-                        output: None,
-                        error: Some(Some(error)),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?
-                .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-            Ok(ArtifactWorkflowStep::Outcome {
-                outcome: outcome_from_run(&updated),
-            })
-        }
-        WorkflowNodeActionOutcome::Cancelled { reason } => {
-            registry
-                .update_node_run(
-                    &scope,
-                    node_run_uid,
-                    ArtifactNodeRunUpdate {
-                        status: Some(ArtifactNodeRunStatus::Cancelled),
-                        output: None,
-                        error: Some(Some(reason.clone())),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?;
-            persist_workflow_cancel(request, reason).await
-        }
-    }
-}
-
 async fn persist_workflow_node_action_outcomes(
     request: RunArtifactWorkflowRequest,
     action_results: Vec<ArtifactWorkflowNodeActionResult>,
+    mode: ActionResultMode,
 ) -> Result<ArtifactWorkflowStep, HandlerError> {
     let scope = ActionRuleScope::Tenant {
         tenant_id: request.tenant_id,
@@ -771,78 +757,133 @@ async fn persist_workflow_node_action_outcomes(
         let node_id = blocked_node_id(&action_result.request);
         match action_result.outcome {
             WorkflowNodeActionOutcome::Completed { output } => {
-                registry
-                    .update_node_run(
-                        &scope,
-                        action_result.node_run_uid,
-                        ArtifactNodeRunUpdate {
-                            status: Some(ArtifactNodeRunStatus::Completed),
-                            output: Some(Some(output.clone())),
-                            error: Some(None),
-                            completed_at: Some(Some(Utc::now())),
-                        },
-                    )
-                    .await
-                    .map_err(artifact_handler_error)?;
+                complete_node_run(
+                    &registry,
+                    &scope,
+                    action_result.node_run_uid,
+                    output.clone(),
+                )
+                .await?;
                 state = interpreter
                     .complete_blocked_node(state, &node_id, output)
                     .map_err(workflow_handler_error)?;
             }
             WorkflowNodeActionOutcome::Failed { error } => {
-                registry
-                    .update_node_run(
-                        &scope,
-                        action_result.node_run_uid,
-                        ArtifactNodeRunUpdate {
-                            status: Some(ArtifactNodeRunStatus::Failed),
-                            output: None,
-                            error: Some(Some(error.clone())),
-                            completed_at: Some(Some(Utc::now())),
-                        },
-                    )
-                    .await
-                    .map_err(artifact_handler_error)?;
-                state.failed_nodes.insert(node_id.clone());
-                let updated = registry
-                    .update_run(
-                        &scope,
-                        run.run_uid,
-                        ArtifactRunUpdate {
-                            status: Some(ArtifactRunStatus::Failed),
-                            current_node_id: Some(Some(node_id)),
-                            state: Some(workflow_state_json(&state)),
-                            output: None,
-                            error: Some(Some(error)),
-                            completed_at: Some(Some(Utc::now())),
-                        },
-                    )
-                    .await
-                    .map_err(artifact_handler_error)?
-                    .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-                return Ok(ArtifactWorkflowStep::Outcome {
-                    outcome: outcome_from_run(&updated),
-                });
+                fail_node_run(&registry, &scope, action_result.node_run_uid, error.clone()).await?;
+                if mode.records_failed_node() {
+                    state.failed_nodes.insert(node_id.clone());
+                }
+                return fail_workflow_run(&registry, &scope, &run, node_id, &state, error).await;
             }
             WorkflowNodeActionOutcome::Cancelled { reason } => {
-                registry
-                    .update_node_run(
-                        &scope,
-                        action_result.node_run_uid,
-                        ArtifactNodeRunUpdate {
-                            status: Some(ArtifactNodeRunStatus::Cancelled),
-                            output: None,
-                            error: Some(Some(reason.clone())),
-                            completed_at: Some(Some(Utc::now())),
-                        },
-                    )
-                    .await
-                    .map_err(artifact_handler_error)?;
+                cancel_node_run(
+                    &registry,
+                    &scope,
+                    action_result.node_run_uid,
+                    reason.clone(),
+                )
+                .await?;
                 return persist_workflow_cancel(request, reason).await;
             }
         }
     }
 
     advance_and_persist(&registry, &scope, &run, &definition, state).await
+}
+
+async fn complete_node_run(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    node_run_uid: Uuid,
+    output: Value,
+) -> Result<(), HandlerError> {
+    registry
+        .update_node_run(
+            scope,
+            node_run_uid,
+            ArtifactNodeRunUpdate {
+                status: Some(ArtifactNodeRunStatus::Completed),
+                output: Some(Some(output)),
+                error: Some(None),
+                completed_at: Some(Some(Utc::now())),
+            },
+        )
+        .await
+        .map_err(artifact_handler_error)?;
+    Ok(())
+}
+
+async fn fail_node_run(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    node_run_uid: Uuid,
+    error: String,
+) -> Result<(), HandlerError> {
+    registry
+        .update_node_run(
+            scope,
+            node_run_uid,
+            ArtifactNodeRunUpdate {
+                status: Some(ArtifactNodeRunStatus::Failed),
+                output: None,
+                error: Some(Some(error)),
+                completed_at: Some(Some(Utc::now())),
+            },
+        )
+        .await
+        .map_err(artifact_handler_error)?;
+    Ok(())
+}
+
+async fn cancel_node_run(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    node_run_uid: Uuid,
+    reason: String,
+) -> Result<(), HandlerError> {
+    registry
+        .update_node_run(
+            scope,
+            node_run_uid,
+            ArtifactNodeRunUpdate {
+                status: Some(ArtifactNodeRunStatus::Cancelled),
+                output: None,
+                error: Some(Some(reason)),
+                completed_at: Some(Some(Utc::now())),
+            },
+        )
+        .await
+        .map_err(artifact_handler_error)?;
+    Ok(())
+}
+
+async fn fail_workflow_run(
+    registry: &ArtifactRegistry,
+    scope: &ActionRuleScope,
+    run: &ArtifactRun,
+    node_id: String,
+    state: &WorkflowExecutionState,
+    error: String,
+) -> Result<ArtifactWorkflowStep, HandlerError> {
+    let updated = registry
+        .update_run(
+            scope,
+            run.run_uid,
+            ArtifactRunUpdate {
+                status: Some(ArtifactRunStatus::Failed),
+                current_node_id: Some(Some(node_id)),
+                state: Some(workflow_state_json(state)),
+                output: None,
+                error: Some(Some(error)),
+                completed_at: Some(Some(Utc::now())),
+            },
+        )
+        .await
+        .map_err(artifact_handler_error)?
+        .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
+    Ok(ArtifactWorkflowStep::Outcome {
+        outcome: outcome_from_run(&updated),
+    })
 }
 
 /// Validates an explicit workflow review-node decision before resolving the workflow promise.
@@ -1017,19 +1058,7 @@ async fn persist_workflow_review_resolution(
                     "reason": resolution.reason,
                 })
             });
-            registry
-                .update_node_run(
-                    &scope,
-                    node_run_uid,
-                    ArtifactNodeRunUpdate {
-                        status: Some(ArtifactNodeRunStatus::Completed),
-                        output: Some(Some(output.clone())),
-                        error: Some(None),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?;
+            complete_node_run(&registry, &scope, node_run_uid, output.clone()).await?;
             let resumed_state = WorkflowInterpreter::new(&definition)
                 .complete_blocked_node(state, &resolution.node_id, output)
                 .map_err(workflow_handler_error)?;
@@ -1039,38 +1068,8 @@ async fn persist_workflow_review_resolution(
             let reason = resolution
                 .reason
                 .unwrap_or_else(|| "workflow review rejected".to_string());
-            registry
-                .update_node_run(
-                    &scope,
-                    node_run_uid,
-                    ArtifactNodeRunUpdate {
-                        status: Some(ArtifactNodeRunStatus::Failed),
-                        output: None,
-                        error: Some(Some(reason.clone())),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?;
-            let updated = registry
-                .update_run(
-                    &scope,
-                    run.run_uid,
-                    ArtifactRunUpdate {
-                        status: Some(ArtifactRunStatus::Failed),
-                        current_node_id: Some(Some(resolution.node_id)),
-                        state: Some(workflow_state_json(&state)),
-                        output: None,
-                        error: Some(Some(reason)),
-                        completed_at: Some(Some(Utc::now())),
-                    },
-                )
-                .await
-                .map_err(artifact_handler_error)?
-                .ok_or_else(|| TerminalError::new_with_code(404, "workflow run not found"))?;
-            Ok(ArtifactWorkflowStep::Outcome {
-                outcome: outcome_from_run(&updated),
-            })
+            fail_node_run(&registry, &scope, node_run_uid, reason.clone()).await?;
+            fail_workflow_run(&registry, &scope, &run, resolution.node_id, &state, reason).await
         }
     }
 }
@@ -1117,19 +1116,7 @@ async fn persist_workflow_signal_resolution(
         "signal_name": resolution.signal_name,
         "payload": resolution.payload,
     });
-    registry
-        .update_node_run(
-            &scope,
-            node_run_uid,
-            ArtifactNodeRunUpdate {
-                status: Some(ArtifactNodeRunStatus::Completed),
-                output: Some(Some(output.clone())),
-                error: Some(None),
-                completed_at: Some(Some(Utc::now())),
-            },
-        )
-        .await
-        .map_err(artifact_handler_error)?;
+    complete_node_run(&registry, &scope, node_run_uid, output.clone()).await?;
     let resumed_state = WorkflowInterpreter::new(&definition)
         .complete_blocked_node(state, &resolution.node_id, output)
         .map_err(workflow_handler_error)?;

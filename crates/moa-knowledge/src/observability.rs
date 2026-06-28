@@ -41,6 +41,28 @@ impl StepOutcome {
         }
     }
 
+    /// Creates a completed step outcome with safe counters.
+    #[must_use]
+    pub fn completed_with_counters(counters: Value) -> Self {
+        Self {
+            counters,
+            ..Self::completed()
+        }
+    }
+
+    /// Creates a completed step outcome with safe counters and summary.
+    #[must_use]
+    pub fn completed_with_counters_and_summary(
+        counters: Value,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            counters,
+            summary: Some(summary.into()),
+            ..Self::completed()
+        }
+    }
+
     /// Creates a failed step outcome.
     #[must_use]
     pub fn failed(error_code: impl Into<String>) -> Self {

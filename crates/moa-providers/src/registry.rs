@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::ModelRouter;
 use crate::routing::{
     PROVIDER_DESCRIPTORS, ProviderDescriptor, ProviderId, infer_provider_id,
-    split_explicit_provider,
+    provider_descriptor_by_name, split_explicit_provider,
 };
 #[cfg(feature = "scripted-provider")]
 use crate::{ScriptedBlock, ScriptedProvider, ScriptedResponse};
@@ -199,6 +199,34 @@ impl ProviderRegistry {
             );
             Ok(Self::all_kinds_from_static(provider))
         }
+    }
+
+    /// Resolves the configured provider/model selection without constructing a provider.
+    pub fn resolve_selection_from_config(
+        config: &MoaConfig,
+        model_override: Option<&str>,
+    ) -> moa_core::Result<(ProviderId, ModelId)> {
+        let requested = model_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(config.models.main.as_str());
+
+        if requested.contains('/') {
+            return Err(MoaError::ConfigError(
+                "vendor-prefixed model ids are not supported; use direct model ids for anthropic, openai, or google".to_string(),
+            ));
+        }
+
+        if let Some((provider_id, model_id)) = split_explicit_provider(requested) {
+            return Ok((provider_id, ModelId::new(model_id)));
+        }
+
+        let provider_id = match infer_provider_id(requested) {
+            Some(provider_id) => provider_id,
+            None => default_provider_id(config.general.default_provider.trim())?,
+        };
+
+        Ok((provider_id, ModelId::new(requested.trim())))
     }
 
     #[cfg(feature = "scripted-provider")]
@@ -414,6 +442,12 @@ fn configured_env(key: &str) -> bool {
 
 fn configured_secret(value: &str) -> bool {
     !value.trim().is_empty()
+}
+
+fn default_provider_id(provider_name: &str) -> moa_core::Result<ProviderId> {
+    provider_descriptor_by_name(provider_name)
+        .map(|descriptor| descriptor.id)
+        .ok_or_else(|| MoaError::ConfigError(format!("unsupported provider '{provider_name}'")))
 }
 
 #[cfg(feature = "scripted-provider")]

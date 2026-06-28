@@ -1,18 +1,16 @@
 //! Privacy operation context and subject-scope helpers.
 
 use moa_core::config::ComplianceConfig;
-use moa_core::wire::privacy::{ContactErasureScope, PrivacyEraseRequest};
-use moa_core::{StoragePartitionId, TenantId, UserId};
+use moa_core::wire::privacy::{
+    ContactErasureScope, ParsedPrivacySubjectId, PrivacyEraseRequest,
+    contact_privacy_subject_string,
+};
+use moa_core::{ContactId, StoragePartitionId, TenantId, UserId};
 use restate_sdk::prelude::*;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::approval::ApprovalClaims;
-use super::repository::parse_privacy_subject_id;
-
-/// Prefix that identifies privacy subjects backed by contacts.
-pub(super) const CONTACT_SUBJECT_PREFIX: &str = "contact:";
-
 /// Context for one server-side privacy export.
 #[derive(Debug)]
 pub struct PrivacyExportContext {
@@ -109,7 +107,7 @@ impl PrivacySubject {
     /// Builds a linked-contact subject included through contact promotion.
     pub(super) fn linked_contact(contact_id: Uuid) -> Self {
         Self {
-            user_id: format!("{CONTACT_SUBJECT_PREFIX}{contact_id}"),
+            user_id: contact_privacy_subject_string(ContactId(contact_id)),
             target_uid: contact_id,
             provenance: PrivacySubjectProvenance::LinkedContact,
         }
@@ -159,5 +157,7 @@ fn pii_vault_secret_from_config(
 }
 
 fn parse_subject_uuid(subject_user_id: &UserId) -> Result<Uuid, HandlerError> {
-    parse_privacy_subject_id(subject_user_id).map(|parsed| parsed.uuid)
+    ParsedPrivacySubjectId::parse(subject_user_id)
+        .map(|parsed| parsed.uuid)
+        .map_err(|error| TerminalError::new_with_code(400, error.to_string()).into())
 }
