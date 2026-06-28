@@ -20,7 +20,8 @@ use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::session_store::{AppendEventRequest, GetEventsRequest, InitSessionVoRequest};
 use moa_core::wire::turn::{SessionSnapshot, StartTurnRequest, StartTurnResponse, TurnOutcome};
 use moa_core::{
-    Channel, Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionMeta,
+    AgentContext, AgentKnowledgePolicy, AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel,
+    Event, EventRange, EventRecord, ModelId, SessionActorRef, SessionId, SessionMeta,
     SessionStatus, StoragePartitionId, TenantId, UserId,
 };
 use reqwest::StatusCode;
@@ -360,6 +361,19 @@ fn identity_subject(identity: &Identity) -> String {
     }
 }
 
+fn fixture_agent_context() -> AgentContext {
+    let snapshot = AgentPolicySnapshot {
+        knowledge_policy: AgentKnowledgePolicy {
+            mode: AgentKnowledgeScopeMode::Disabled,
+            ..AgentKnowledgePolicy::default()
+        },
+        ..AgentPolicySnapshot::default()
+    };
+    let mut context = AgentContext::system_default();
+    context.policy_snapshot = json!(snapshot);
+    context
+}
+
 /// Isolated namespace within a shared orchestrator fixture.
 pub struct IsolatedTest<'a> {
     /// Parent fixture.
@@ -415,7 +429,7 @@ impl IsolatedTest<'_> {
             contact: None,
             created_by: Some(SessionActorRef::Identity { id: identity.id }),
             contact_promoted_from_id: None,
-            agent_context: Some(moa_core::AgentContext::system_default()),
+            agent_context: Some(fixture_agent_context()),
             total_input_tokens: 0,
             total_input_tokens_uncached: 0,
             total_input_tokens_cache_write: 0,

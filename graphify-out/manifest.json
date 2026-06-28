@@ -420,8 +420,8 @@
     "semantic_hash": "e5d73ffcfcccd99a51cc1475130a9e0a"
   },
   "crates/moa-brain/src/retrieval/hybrid.rs": {
-    "mtime": 1782627253.755874,
-    "ast_hash": "9c66a196f54eb8099bb921483cb1f734",
+    "mtime": 1782649638.952106,
+    "ast_hash": "f0b1b857d88f4be5cc5fc7a2279943b3",
     "semantic_hash": ""
   },
   "crates/moa-brain/src/retrieval/legs.rs": {
@@ -545,8 +545,8 @@
     "semantic_hash": "591c773ffc719446e0adbce57ab77e61"
   },
   "crates/moa-core/src/config/env_overlay.rs": {
-    "mtime": 1782626748.6039157,
-    "ast_hash": "4e00814a7df824d7d6f7c1fc84cd82f8",
+    "mtime": 1782650338.2328038,
+    "ast_hash": "a6dfed65db05848f3287c27eabc6a497",
     "semantic_hash": ""
   },
   "crates/moa-core/src/config/lineage.rs": {
@@ -560,13 +560,13 @@
     "semantic_hash": "e9ab07a55f857fa284521c7e498926a0"
   },
   "crates/moa-core/src/config/memory.rs": {
-    "mtime": 1782626738.0541425,
-    "ast_hash": "1670c70f76a45c40829262cd508b51fd",
+    "mtime": 1782649840.9427295,
+    "ast_hash": "b3a8afb2a4e27e4e138df7ea4bafe14f",
     "semantic_hash": ""
   },
   "crates/moa-core/src/config/mod.rs": {
-    "mtime": 1782626755.2017145,
-    "ast_hash": "a2ad485b087904ca8b751efbc8b61018",
+    "mtime": 1782649632.595025,
+    "ast_hash": "aa89fd7960c5671bd9c6764711823ac2",
     "semantic_hash": ""
   },
   "crates/moa-core/src/config/orchestrator.rs": {
@@ -2060,8 +2060,8 @@
     "semantic_hash": "c011e09ce22df0e091ec7c4d804ae051"
   },
   "crates/moa-memory/ingest/src/contradiction.rs": {
-    "mtime": 1782647866.6289427,
-    "ast_hash": "0fb3009291bfc3ac9c8a806da7f28cdc",
+    "mtime": 1782649643.5498924,
+    "ast_hash": "bc3f5071ea9d660d833a8fd8d96cbfce",
     "semantic_hash": ""
   },
   "crates/moa-memory/ingest/src/ctx.rs": {
@@ -2770,8 +2770,8 @@
     "semantic_hash": "2b19a3899b3679aa5fa844e8e6aa197b"
   },
   "crates/moa-providers/src/lib.rs": {
-    "mtime": 1782647867.0600693,
-    "ast_hash": "da05c0cb78cc40832e3493a3d4f3a9a0",
+    "mtime": 1782649472.2340987,
+    "ast_hash": "11b9a04d4445ba14af9a0e4348fa9c15",
     "semantic_hash": ""
   },
   "crates/moa-providers/tests/anthropic_offline.rs": {
@@ -5605,9 +5605,9 @@
     "semantic_hash": "e2d46ec96d065b0ca92c6940ac1cb565"
   },
   "crates/moa-providers/src/embedding/factory.rs": {
-    "mtime": 1782625450.5822058,
-    "ast_hash": "4e275ecc0e8c296070f2a625c977295a",
-    "semantic_hash": "4e275ecc0e8c296070f2a625c977295a"
+    "mtime": 1782650308.7160497,
+    "ast_hash": "cbb5bfb37ae33d015f06c5a5b9c93dfc",
+    "semantic_hash": ""
   },
   "crates/moa-providers/src/embedding/gemini.rs": {
     "mtime": 1782620813.5743709,
@@ -5620,14 +5620,14 @@
     "semantic_hash": "db6992dc8b53a8538157180e298c3495"
   },
   "crates/moa-providers/src/embedding/mod.rs": {
-    "mtime": 1782621146.232178,
-    "ast_hash": "1f80199e1cc3874237e46187179ec6cc",
-    "semantic_hash": "1f80199e1cc3874237e46187179ec6cc"
+    "mtime": 1782649853.3695319,
+    "ast_hash": "22f653b01dff42558e3e3a907cb5fb14",
+    "semantic_hash": ""
   },
   "crates/moa-providers/src/embedding/openai.rs": {
-    "mtime": 1782624661.2717993,
-    "ast_hash": "bfc42353a59be354d234b87f56d0346f",
-    "semantic_hash": "bfc42353a59be354d234b87f56d0346f"
+    "mtime": 1782649558.0357013,
+    "ast_hash": "7d7aa13b35885891db1c667344c698ce",
+    "semantic_hash": ""
   },
   "crates/moa-providers/src/embedding/zeroentropy.rs": {
     "mtime": 1782624674.313185,
@@ -5695,8 +5695,8 @@
     "semantic_hash": ""
   },
   "crates/moa-providers/src/rerank/factory.rs": {
-    "mtime": 1782626885.4248297,
-    "ast_hash": "9d07eeb64cb4fe7c736bc57ec989c0e2",
+    "mtime": 1782650314.6875231,
+    "ast_hash": "08817f2a31e05bd7922c7a081a4f79b1",
     "semantic_hash": ""
   },
   "crates/moa-providers/src/rerank/mod.rs": {
@@ -5727,6 +5727,11 @@
   "crates/moa-providers/tests/zeroentropy_reranker_offline.rs": {
     "mtime": 1782626885.4473166,
     "ast_hash": "235c4e5b2e8887f281841fd96f81c11a",
+    "semantic_hash": ""
+  },
+  "crates/moa-providers/src/model_selection.rs": {
+    "mtime": 1782649467.6328313,
+    "ast_hash": "2da1526a3ae79fa230a1fb3e9eae2238",
     "semantic_hash": ""
   }
 }

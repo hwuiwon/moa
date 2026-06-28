@@ -156,6 +156,17 @@ wait_for_postgres() {
   return 1
 }
 
+wait_for_valkey() {
+  for _ in $(seq 1 60); do
+    if docker compose exec -T valkey valkey-cli ping >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timed out waiting for compose Valkey" >&2
+  return 1
+}
+
 wait_for_restate_ports() {
   local log_file="$1"
   local ingress_port=""
@@ -211,6 +222,8 @@ RUNNER_STARTED_AT=$SECONDS
 RUN_ID="${MOA_CLEAN_E2E_RUN_ID:-$(date +%Y%m%d%H%M%S)-$$}"
 RUN_SAFE_ID="$(printf '%s' "${RUN_ID}" | tr -c 'A-Za-z0-9_' '_')"
 RUN_SHORT_ID="$(printf '%s' "${RUN_SAFE_ID}" | cut -c1-20)"
+ORCH_FEATURES="provider-overrides,skill-learning,redis"
+ORCH_E2E_FEATURES="${ORCH_FEATURES},integration"
 TMP_PARENT="${MOA_CLEAN_E2E_TMPDIR:-/tmp}"
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/me2e.XXXXXX")"
 RESTATE_DIR="${TMP_ROOT}/restate"
@@ -259,8 +272,9 @@ if [[ -z "$(docker compose ps -q 2>/dev/null)" ]]; then
   STARTED_COMPOSE=1
 fi
 
-run docker compose up -d --build postgres openfga moa-pii-service
+run docker compose up -d --build postgres valkey openfga moa-pii-service
 wait_for_postgres
+wait_for_valkey
 run "${REPO_ROOT}/scripts/wait-for-fga.sh"
 wait_for_http "http://127.0.0.1:10050/healthz" "PII sidecar"
 
@@ -299,19 +313,21 @@ export MOA_RESTATE_INGRESS_URL="${RESTATE_INGRESS_URL}"
 export MOA_RESTATE_ADMIN_URL="${RESTATE_ADMIN_URL}"
 export MOA_RESTATE_DEPLOYMENT_HOST="127.0.0.1"
 export MOA_PII_SERVICE_URL="${MOA_PII_SERVICE_URL:-http://127.0.0.1:10050}"
+export MOA_RUNTIME_CACHE_BACKEND="redis"
+export MOA_RUNTIME_CACHE_REDIS_URL="redis://127.0.0.1:10051/0"
 
 run cargo test -p moa-orchestrator --tests --locked -- --test-threads=1
-run cargo test -p moa-orchestrator --lib --locked --features provider-overrides,skill-learning runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
-run cargo test -p moa-orchestrator --test skill_learning_review_db --locked --features provider-overrides,skill-learning -- --test-threads=1
-run cargo test -p moa-orchestrator --test skill_learning_workflow --locked --features provider-overrides,skill-learning -- --test-threads=1
+run cargo test -p moa-orchestrator --lib --locked --features "${ORCH_FEATURES}" runtime::endpoint::tests::skill_learning_feature_adds_skill_learning_workflow
+run cargo test -p moa-orchestrator --test skill_learning_review_db --locked --features "${ORCH_FEATURES}" -- --test-threads=1
+run cargo test -p moa-orchestrator --test skill_learning_workflow --locked --features "${ORCH_FEATURES}" -- --test-threads=1
 run cargo test -p moa-brain --features eval-harness --test brain_turn_cache_replay_db_memory --locked
 run cargo test -p moa-eval --test golden_eval --locked
 
 if [[ "${LIVE}" -eq 1 ]]; then
-  run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile restate-service-e2e --run-ignored ignored-only
-  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile fixture-service-e2e --run-ignored ignored-only
+  run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile restate-service-e2e --run-ignored ignored-only
+  run_without_external_orchestrator cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile fixture-service-e2e --run-ignored ignored-only
 
-  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides,skill-learning --locked
+  run cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features "${ORCH_FEATURES}" --locked
 
   ORCH_PORT="${MOA_CLEAN_E2E_ORCH_PORT:-19180}"
   ORCH_HEALTH_PORT="${MOA_CLEAN_E2E_ORCH_HEALTH_PORT:-19181}"
@@ -342,14 +358,14 @@ if [[ "${LIVE}" -eq 1 ]]; then
     -H "content-type: application/json" \
     --data "{\"uri\":\"http://127.0.0.1:${ORCH_PORT}\"}"
 
-  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile orchestrator-service-e2e --run-ignored ignored-only
+  run_without_provider_keys cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile orchestrator-service-e2e --run-ignored ignored-only
 
   if [[ "${RUN_PROVIDERS}" -eq 1 ]]; then
     if ! truthy "${MOA_RUN_LIVE_PROVIDER_TESTS:-}"; then
       echo "refusing provider live checks without MOA_RUN_LIVE_PROVIDER_TESTS=1" >&2
       exit 2
     fi
-    run cargo nextest run -p moa-orchestrator --locked --features provider-overrides,integration,skill-learning --profile provider-e2e --run-ignored ignored-only
+    run cargo nextest run -p moa-orchestrator --locked --features "${ORCH_E2E_FEATURES}" --profile provider-e2e --run-ignored ignored-only
     run cargo nextest run -p moa-providers --locked --profile provider-e2e --run-ignored ignored-only
     run cargo nextest run -p moa-brain --locked --profile provider-e2e --run-ignored ignored-only
   fi

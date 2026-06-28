@@ -9,6 +9,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::core::http::build_http_client;
+use crate::model_selection::model_without_provider_prefix;
 
 const OPENAI_EMBEDDINGS_URL: &str = "https://api.openai.com/v1/embeddings";
 pub(super) const OPENAI_DEFAULT_MODEL: &str = "text-embedding-3-small";
@@ -117,7 +118,7 @@ impl EmbeddingProvider for OpenAIEmbedding {
 }
 
 fn openai_model_from_config(config: &MoaConfig) -> String {
-    let model = config.memory.embedding_model.trim();
+    let model = model_without_provider_prefix(&config.memory.embedding_model);
     if model.is_empty() {
         OPENAI_DEFAULT_MODEL.to_string()
     } else {

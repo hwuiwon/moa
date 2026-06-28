@@ -2,6 +2,7 @@
 
 mod adapters;
 mod core;
+mod model_selection;
 mod registry;
 mod routing;
 

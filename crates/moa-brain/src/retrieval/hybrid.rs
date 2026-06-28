@@ -551,9 +551,6 @@ fn apply_reranker_env_overlay(config: &mut MoaConfig) -> moa_core::Result<()> {
     if let Some(api_key) = overlay.zeroentropy_api_key {
         config.providers.zeroentropy.api_key = api_key;
     }
-    if let Some(provider) = overlay.memory_retrieval_reranker_provider {
-        config.memory.retrieval.reranker_provider = provider;
-    }
     if let Some(model) = overlay.memory_retrieval_reranker_model {
         config.memory.retrieval.reranker_model = model;
     }

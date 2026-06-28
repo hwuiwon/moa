@@ -5,8 +5,11 @@ use std::sync::Arc;
 use moa_core::{MoaConfig, MoaError, Result};
 
 use super::cohere::COHERE_DEFAULT_RERANK_MODEL;
-use super::zeroentropy::{ZEROENTROPY_DEFAULT_RERANK_MODEL, ZeroEntropyRerankLatency};
+#[cfg(test)]
+use super::zeroentropy::ZEROENTROPY_DEFAULT_RERANK_MODEL;
+use super::zeroentropy::ZeroEntropyRerankLatency;
 use super::{CohereReranker, NOOP_RERANK_MODEL, NoopReranker, Reranker, ZeroEntropyReranker};
+use crate::model_selection::split_explicit_provider_model;
 
 const COHERE_PROVIDER_NAME: &str = "cohere";
 const ZEROENTROPY_PROVIDER_NAME: &str = "zeroentropy";
@@ -40,37 +43,20 @@ enum RerankerProviderKind {
     ZeroEntropy,
 }
 
-impl RerankerProviderKind {
-    fn from_config(provider: &str, model: &str) -> Result<Option<Self>> {
-        if let Some(provider) = Self::from_provider_name(provider)? {
-            return Ok(Some(provider));
-        }
-        Self::from_model_name(model)
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRerankerProvider {
+    provider: RerankerProviderKind,
+    model: String,
+}
 
+impl RerankerProviderKind {
     fn from_provider_name(name: &str) -> Result<Option<Self>> {
         match normalize_provider_name(name).as_str() {
             "" | "disabled" | "noop" => Ok(None),
             COHERE_PROVIDER_NAME => Ok(Some(Self::Cohere)),
-            ZEROENTROPY_PROVIDER_NAME
-            | ZEROENTROPY_DEFAULT_RERANK_MODEL
-            | "zerank-1"
-            | "zerank-1-small" => Ok(Some(Self::ZeroEntropy)),
+            ZEROENTROPY_PROVIDER_NAME => Ok(Some(Self::ZeroEntropy)),
             unsupported => Err(MoaError::ConfigError(format!(
-                "unsupported memory.retrieval.reranker_provider '{unsupported}'"
-            ))),
-        }
-    }
-
-    fn from_model_name(name: &str) -> Result<Option<Self>> {
-        match normalize_provider_name(name).as_str() {
-            "" | "disabled" | "noop" => Ok(None),
-            "rerank-v4.0-fast" | "rerank-v4.0-pro" | "rerank-v3.5" => Ok(Some(Self::Cohere)),
-            ZEROENTROPY_DEFAULT_RERANK_MODEL | "zerank-1" | "zerank-1-small" => {
-                Ok(Some(Self::ZeroEntropy))
-            }
-            unsupported => Err(MoaError::ConfigError(format!(
-                "unsupported memory.retrieval.reranker_model '{unsupported}' without an explicit reranker_provider"
+                "unsupported memory.retrieval.reranker_model provider '{unsupported}'"
             ))),
         }
     }
@@ -81,45 +67,52 @@ impl RerankerProviderKind {
             Self::ZeroEntropy => ZEROENTROPY_PROVIDER_NAME,
         }
     }
-
-    fn default_model(self) -> &'static str {
-        match self {
-            Self::Cohere => COHERE_DEFAULT_RERANK_MODEL,
-            Self::ZeroEntropy => ZEROENTROPY_DEFAULT_RERANK_MODEL,
-        }
-    }
 }
 
 /// Builds the configured reranker for graph-memory retrieval.
 pub fn build_reranker_from_config(config: &MoaConfig) -> Result<ConfiguredReranker> {
-    let Some(provider) = RerankerProviderKind::from_config(
-        &config.memory.retrieval.reranker_provider,
-        &config.memory.retrieval.reranker_model,
-    )?
-    else {
+    let Some(resolved) = resolve_reranker_model(&config.memory.retrieval.reranker_model)? else {
         return Ok(ConfiguredReranker::noop());
     };
 
-    let model = model_from_config_with_provider_default(
-        &config.memory.retrieval.reranker_model,
-        provider.default_model(),
-    );
-    match build_provider(provider, config) {
+    match build_provider(resolved.provider, config) {
         Ok(reranker) => Ok(ConfiguredReranker {
             reranker,
-            model,
-            provider: provider.provider_name().to_string(),
+            model: resolved.model,
+            provider: resolved.provider.provider_name().to_string(),
         }),
         Err(MoaError::MissingEnvironmentVariable(env_name)) => {
             tracing::warn!(
                 env = %env_name,
-                provider = provider.provider_name(),
+                provider = resolved.provider.provider_name(),
                 "graph-memory reranking disabled because the provider API key is missing"
             );
             Ok(ConfiguredReranker::noop())
         }
         Err(error) => Err(error),
     }
+}
+
+fn resolve_reranker_model(model_name: &str) -> Result<Option<ResolvedRerankerProvider>> {
+    let normalized = normalize_provider_name(model_name);
+    if normalized.is_empty() || normalized == "disabled" || normalized == NOOP_RERANK_MODEL {
+        return Ok(None);
+    }
+    if let Some(explicit) =
+        split_explicit_provider_model(model_name, "memory.retrieval.reranker_model")?
+    {
+        let Some(provider) = RerankerProviderKind::from_provider_name(explicit.provider)? else {
+            return Ok(None);
+        };
+        return Ok(Some(ResolvedRerankerProvider {
+            provider,
+            model: explicit.model.to_string(),
+        }));
+    }
+
+    Err(MoaError::ConfigError(format!(
+        "memory.retrieval.reranker_model must use provider:model, such as cohere:{COHERE_DEFAULT_RERANK_MODEL}"
+    )))
 }
 
 fn build_provider(provider: RerankerProviderKind, config: &MoaConfig) -> Result<Arc<dyn Reranker>> {
@@ -168,15 +161,6 @@ fn ensure_no_zeroentropy_latency(config: &MoaConfig, provider: RerankerProviderK
     Ok(())
 }
 
-fn model_from_config_with_provider_default(model: &str, provider_default: &str) -> String {
-    let model = model.trim();
-    if model.is_empty() || model.eq_ignore_ascii_case(NOOP_RERANK_MODEL) {
-        provider_default.to_string()
-    } else {
-        model.to_string()
-    }
-}
-
 fn normalize_provider_name(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
 }
@@ -187,38 +171,29 @@ mod tests {
 
     use super::{
         COHERE_DEFAULT_RERANK_MODEL, RerankerProviderKind, ZEROENTROPY_DEFAULT_RERANK_MODEL,
-        build_reranker_from_config, normalize_provider_name,
+        build_reranker_from_config, normalize_provider_name, resolve_reranker_model,
     };
 
     #[test]
-    fn reranker_provider_kind_accepts_zeroentropy_aliases() {
-        // Pins: provider selection stays table-driven as more rerankers are added.
+    fn reranker_provider_kind_accepts_supported_provider_prefixes() {
+        // Pins: provider:model parsing accepts provider ids, not model aliases in provider position.
         assert_eq!(
-            RerankerProviderKind::from_config("zeroentropy", "").expect("zeroentropy should parse"),
+            RerankerProviderKind::from_provider_name("zeroentropy")
+                .expect("zeroentropy should parse"),
             Some(RerankerProviderKind::ZeroEntropy)
         );
         assert_eq!(
-            RerankerProviderKind::from_config("", "zerank-2").expect("model alias should parse"),
-            Some(RerankerProviderKind::ZeroEntropy)
+            RerankerProviderKind::from_provider_name("cohere").expect("cohere should parse"),
+            Some(RerankerProviderKind::Cohere)
         );
         assert_eq!(normalize_provider_name("ZeroEntropy"), "zeroentropy");
     }
 
     #[test]
-    fn reranker_provider_kind_accepts_cohere_model_aliases() {
-        // Pins: setting only a Cohere rerank model is enough to select the Cohere provider.
-        assert_eq!(
-            RerankerProviderKind::from_config("noop", "rerank-v4.0-fast")
-                .expect("cohere model should parse"),
-            Some(RerankerProviderKind::Cohere)
-        );
-    }
-
-    #[test]
-    fn cohere_reranker_from_config_uses_default_model() {
-        // Pins: selecting Cohere with the noop default model uses the configured Cohere Rerank v4 default.
+    fn cohere_reranker_from_config_uses_selector_model() {
+        // Pins: selecting Cohere through provider:model avoids a separate provider env.
         let mut config = MoaConfig::default();
-        config.memory.retrieval.reranker_provider = "cohere".to_string();
+        config.memory.retrieval.reranker_model = "cohere:rerank-v4.0-fast".to_string();
         config.providers.cohere.api_key = "test-key".to_string();
 
         let configured =
@@ -229,10 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn zeroentropy_reranker_from_config_uses_default_model_and_latency() {
-        // Pins: selecting ZeroEntropy with the noop default model uses zerank-2 and accepts latency.
+    fn zeroentropy_reranker_from_config_uses_selector_model_and_latency() {
+        // Pins: selecting ZeroEntropy through provider:model uses zerank-2 and accepts latency.
         let mut config = MoaConfig::default();
-        config.memory.retrieval.reranker_provider = "zeroentropy".to_string();
+        config.memory.retrieval.reranker_model = "zeroentropy:zerank-2".to_string();
         config.memory.retrieval.reranker_latency = Some("fast".to_string());
         config.providers.zeroentropy.api_key = "test-key".to_string();
 
@@ -247,7 +222,7 @@ mod tests {
     fn missing_reranker_key_disables_provider() {
         // Pins: missing reranker credentials disable reranking instead of failing startup.
         let mut config = MoaConfig::default();
-        config.memory.retrieval.reranker_provider = "zeroentropy".to_string();
+        config.memory.retrieval.reranker_model = "zeroentropy:zerank-2".to_string();
 
         let configured = build_reranker_from_config(&config)
             .expect("missing credential should not fail startup");
@@ -271,7 +246,7 @@ mod tests {
     fn zeroentropy_latency_is_provider_specific() {
         // Pins: provider-specific options do not silently affect other reranker backends.
         let mut config = MoaConfig::default();
-        config.memory.retrieval.reranker_provider = "cohere".to_string();
+        config.memory.retrieval.reranker_model = "cohere:rerank-v4.0".to_string();
         config.memory.retrieval.reranker_latency = Some("fast".to_string());
         config.providers.cohere.api_key = "test-key".to_string();
 
@@ -281,5 +256,25 @@ mod tests {
         };
 
         assert!(error.to_string().contains("reranker_latency"));
+    }
+
+    #[test]
+    fn provider_model_reranker_selector_strips_prefix() {
+        // Pins: a single provider:model value drives reranker provider selection.
+        let resolved = resolve_reranker_model("zeroentropy:zerank-2")
+            .expect("selector should parse")
+            .expect("provider should resolve");
+
+        assert_eq!(resolved.provider, RerankerProviderKind::ZeroEntropy);
+        assert_eq!(resolved.model, ZEROENTROPY_DEFAULT_RERANK_MODEL);
+    }
+
+    #[test]
+    fn reranker_selector_rejects_bare_model_names() {
+        // Pins: reranker provider is encoded in the model selector, so bare model names fail fast.
+        let error = resolve_reranker_model(ZEROENTROPY_DEFAULT_RERANK_MODEL)
+            .expect_err("bare reranker model should be rejected");
+
+        assert!(error.to_string().contains("provider:model"));
     }
 }

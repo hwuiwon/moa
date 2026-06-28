@@ -146,12 +146,8 @@ pub struct MoaEnvOverlay {
     pub local_memory_dir: Option<String>,
     /// `MOA_MEMORY_AUTO_BOOTSTRAP`.
     pub memory_auto_bootstrap: Option<bool>,
-    /// `MOA_MEMORY_EMBEDDING_PROVIDER`.
-    pub memory_embedding_provider: Option<String>,
     /// `MOA_MEMORY_EMBEDDING_MODEL`.
     pub memory_embedding_model: Option<String>,
-    /// `MOA_MEMORY_RETRIEVAL_RERANKER_PROVIDER`.
-    pub memory_retrieval_reranker_provider: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_MODEL`.
     pub memory_retrieval_reranker_model: Option<String>,
     /// `MOA_MEMORY_RETRIEVAL_RERANKER_LATENCY`.
@@ -725,13 +721,20 @@ mod tests {
             ("MOA_LOCAL_DOCKER_ENABLED", "false"),
             ("MOA_LOCAL_SANDBOX_DIR", "/tmp/moa-sandbox"),
             ("MOA_PII_SERVICE_URL", "http://pii.example:8080"),
-            ("MOA_MEMORY_RETRIEVAL_RERANKER_PROVIDER", "zeroentropy"),
-            ("MOA_MEMORY_RETRIEVAL_RERANKER_MODEL", "zerank-2"),
+            ("MOA_MEMORY_EMBEDDING_MODEL", "cohere:embed-v4.0"),
+            (
+                "MOA_MEMORY_RETRIEVAL_RERANKER_MODEL",
+                "zeroentropy:zerank-2",
+            ),
             ("MOA_MEMORY_RETRIEVAL_RERANKER_LATENCY", "fast"),
             ("MOA_MEMORY_RETRIEVAL_LINEAGE_ENABLED", "true"),
             ("MOA_MEMORY_DIGEST_ENABLED", "true"),
             ("MOA_MEMORY_DIGEST_MAX_TOKENS", "384"),
             ("MOA_MEMORY_DIGEST_REBUILD_MIN_INTERVAL_HOURS", "12"),
+            (
+                "MOA_MEMORY_VECTOR_EMBEDDER_NAME",
+                "gemini:gemini-embedding-2",
+            ),
             ("MOA_MEMORY_VECTOR_EMBEDDER_OUTPUT_DIM", "1536"),
             ("MOA_COHERE_API_KEY", "CUSTOM_COHERE_KEY"),
             ("MOA_GOOGLE_API_KEY", "CUSTOM_GOOGLE_KEY"),
@@ -825,8 +828,11 @@ mod tests {
             config.memory.pii_service_url.as_deref(),
             Some("http://pii.example:8080")
         );
-        assert_eq!(config.memory.retrieval.reranker_provider, "zeroentropy");
-        assert_eq!(config.memory.retrieval.reranker_model, "zerank-2");
+        assert_eq!(config.memory.embedding_model, "cohere:embed-v4.0");
+        assert_eq!(
+            config.memory.retrieval.reranker_model,
+            "zeroentropy:zerank-2"
+        );
         assert_eq!(
             config.memory.retrieval.reranker_latency.as_deref(),
             Some("fast")
@@ -835,6 +841,10 @@ mod tests {
         assert!(config.memory.digest.enabled);
         assert_eq!(config.memory.digest.max_tokens, 384);
         assert_eq!(config.memory.digest.rebuild_min_interval_hours, 12);
+        assert_eq!(
+            config.memory.vector.embedder.name,
+            "gemini:gemini-embedding-2"
+        );
         assert_eq!(
             config.memory.vector.turbopuffer.api_key,
             "CUSTOM_TURBOPUFFER_KEY"

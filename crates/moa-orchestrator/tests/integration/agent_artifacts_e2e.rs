@@ -92,7 +92,12 @@ fn spawn_orchestrator(
     memory_dir: &TempDir,
     sandbox_dir: &TempDir,
     provider_override_fixture: Option<&Path>,
+    log_path: &Path,
 ) -> Result<Child> {
+    let log_file = fs::File::create(log_path).context("create orchestrator e2e log")?;
+    let log_file_for_stderr = log_file
+        .try_clone()
+        .context("clone orchestrator e2e log handle")?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_moa-orchestrator-bin"));
     command
         .arg("--port")
@@ -108,8 +113,8 @@ fn spawn_orchestrator(
         .env("MOA_OBSERVABILITY_ENVIRONMENT", "test")
         .env("RUST_LOG", "info")
         .env_remove("MOA_COHERE_API_KEY")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_for_stderr));
     if let Some(path) = provider_override_fixture {
         command
             .env(
@@ -151,10 +156,18 @@ async fn support_agent_selects_refund_skill_from_customer_message() -> Result<()
     let storage_partition_id = storage_partition_id_from_meta(&meta);
     identity.tenant_id = meta.tenant_id;
     grant_tenant_admin(&identity, &storage_partition_id).await?;
-    let mut orchestrator =
-        spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
+    let orchestrator_log = memory_dir.path().join("orchestrator.log");
+    let mut orchestrator = spawn_orchestrator(
+        ports,
+        &memory_dir,
+        &sandbox_dir,
+        Some(&fixture_path),
+        &orchestrator_log,
+    )?;
 
     let result = async {
+        wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
+            .await?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_refund_skill(&client, ingress, &identity, &storage_partition_id).await?;
         let session_id = create_session(&client, ingress, &identity, &meta).await?;
@@ -211,10 +224,18 @@ async fn damaged_food_workflow_run_starts_from_published_artifact() -> Result<()
     let storage_partition_id = storage_partition_id_from_meta(&meta);
     identity.tenant_id = meta.tenant_id;
     grant_tenant_admin(&identity, &storage_partition_id).await?;
-    let mut orchestrator =
-        spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
+    let orchestrator_log = memory_dir.path().join("orchestrator.log");
+    let mut orchestrator = spawn_orchestrator(
+        ports,
+        &memory_dir,
+        &sandbox_dir,
+        Some(&fixture_path),
+        &orchestrator_log,
+    )?;
 
     let result = async {
+        wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
+            .await?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_and_publish_damaged_food_workflow(
             &client,
@@ -297,10 +318,18 @@ async fn workflow_association_and_skill_selection_share_one_support_session() ->
     let storage_partition_id = storage_partition_id_from_meta(&meta);
     identity.tenant_id = meta.tenant_id;
     grant_tenant_admin(&identity, &storage_partition_id).await?;
-    let mut orchestrator =
-        spawn_orchestrator(ports, &memory_dir, &sandbox_dir, Some(&fixture_path))?;
+    let orchestrator_log = memory_dir.path().join("orchestrator.log");
+    let mut orchestrator = spawn_orchestrator(
+        ports,
+        &memory_dir,
+        &sandbox_dir,
+        Some(&fixture_path),
+        &orchestrator_log,
+    )?;
 
     let result = async {
+        wait_for_orchestrator_live(&client, ports.health, &mut orchestrator, &orchestrator_log)
+            .await?;
         register_deployment(&restate_admin_url(), endpoint_url.as_str()).await?;
         import_refund_skill(&client, ingress, &identity, &storage_partition_id).await?;
         import_and_publish_damaged_food_workflow(&client, ingress, &identity, &storage_partition_id)
@@ -505,6 +534,61 @@ async fn wait_for_workflow_status(
 
     bail!(
         "timed out waiting for workflow run {run_id} to reach {expected}; last status: {last_status:?}"
+    )
+}
+
+async fn wait_for_orchestrator_live(
+    client: &reqwest::Client,
+    health_port: u16,
+    child: &mut Child,
+    log_path: &Path,
+) -> Result<()> {
+    let url = format!("http://127.0.0.1:{health_port}/_health/live");
+    let mut last_observation = String::from("not probed");
+    for _attempt in 0..60 {
+        if let Some(status) = child.try_wait().context("poll spawned orchestrator")? {
+            bail!(
+                "spawned orchestrator exited before health check passed: {status}\n{}",
+                orchestrator_log_tail(log_path)
+            );
+        }
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last_observation = format!("HTTP {}", response.status());
+            }
+            Err(error) => {
+                last_observation = error.to_string();
+            }
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    bail!(
+        "timed out waiting for spawned orchestrator health at {url}: {last_observation}\n{}",
+        orchestrator_log_tail(log_path)
+    )
+}
+
+fn orchestrator_log_tail(log_path: &Path) -> String {
+    let contents = match fs::read_to_string(log_path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            return format!(
+                "failed to read orchestrator log {}: {error}",
+                log_path.display()
+            );
+        }
+    };
+    if contents.trim().is_empty() {
+        return format!("orchestrator log {} was empty", log_path.display());
+    }
+    let mut lines = contents.lines().rev().take(80).collect::<Vec<_>>();
+    lines.reverse();
+    format!(
+        "orchestrator log tail from {}:\n{}",
+        log_path.display(),
+        lines.join("\n")
     )
 }
 

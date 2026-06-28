@@ -93,12 +93,13 @@ sidecar vertex-id column on `moa.node_index` would let expansion drive from
 the RLS-filtered sidecar instead; until then the 250ms graph budget bounds the
 latency and silently trims as-of expansion on large shared databases.
 
-Embedder selection is per tenant. `embed-v4.0` and
-`gemini-embedding-2` use incompatible vector spaces, so switching a tenant
-requires re-embedding its graph nodes before retrieval can safely use the new
-model. Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API
-supports multimodal inputs, but MOA needs a separate multimodal chunker and
-embedder trait before image, audio, video, or PDF chunks are indexed.
+Embedder selection is per tenant and uses a single `provider:model` selector,
+for example `cohere:embed-v4.0` or `gemini:gemini-embedding-2`.
+Those models use incompatible vector spaces, so switching a tenant requires
+re-embedding its graph nodes before retrieval can safely use the new model.
+Gemini Embedding 2 is exposed as a text-only `Embedder` today; its API supports
+multimodal inputs, but MOA needs a separate multimodal chunker and embedder
+trait before image, audio, video, or PDF chunks are indexed.
 
 Gemini Embedding 2 does not use a `task_type` request field. MOA encodes asymmetric retrieval through role-specific prompt prefixes inside the embedder: ingestion-side embedders use the document prefix and retrieval-side embedders use a search-query prefix.
 
@@ -143,9 +144,10 @@ The memory processor runs after query rewriting and before history compilation. 
 It inserts ranked graph hits with labels, names, properties, provenance, and concise snippets. Memory content is inserted near the active turn so static prompt prefix caching remains stable.
 
 The post-fusion reranker stage is always present in runtime retrieval. Its
-default provider/model is `noop`, which preserves fused candidate order. Setting
-`memory.retrieval.reranker_provider` and `memory.retrieval.reranker_model`
-switches the stage to a provider-backed reranker such as Cohere or ZeroEntropy.
+default model selector is `noop`, which preserves fused candidate order. Setting
+`memory.retrieval.reranker_model` to `provider:model`, such as
+`cohere:rerank-v4.0-fast` or `zeroentropy:zerank-2`, switches the stage to a
+provider-backed reranker.
 
 For verified contact sessions, retrieval queries tenant knowledge and the
 canonical verified contact memory scope inside the tenant. Storage lineage and

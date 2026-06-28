@@ -2,6 +2,8 @@
 
 use super::*;
 
+const ORCHESTRATOR_FIXTURE_FEATURES: &str = "provider-overrides,redis";
+
 pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("MOA_ORCHESTRATOR_BIN") {
         let path = PathBuf::from(path);
@@ -32,14 +34,14 @@ pub(super) async fn locate_orchestrator_binary(repo_root: &Path) -> Result<PathB
         "--bin",
         "moa-orchestrator-bin",
         "--features",
-        "provider-overrides",
+        ORCHESTRATOR_FIXTURE_FEATURES,
     ])
     .status()
     .await
     .context("build moa-orchestrator-bin for test fixture")?;
     if !status.success() {
         bail!(
-            "cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features provider-overrides failed"
+            "cargo build -p moa-orchestrator --bin moa-orchestrator-bin --features {ORCHESTRATOR_FIXTURE_FEATURES} failed"
         );
     }
     if candidate.exists() {

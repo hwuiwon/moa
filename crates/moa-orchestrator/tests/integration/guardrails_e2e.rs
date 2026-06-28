@@ -7,9 +7,10 @@ use chrono::Utc;
 use moa_core::traits::{Identity, IdentityType};
 use moa_core::wire::turn::{StartTurnRequest, TurnOutcomeKind};
 use moa_core::{
-    AgentContext, AgentGuardrailPolicy, AgentGuardrailStagePolicy, AgentPolicySnapshot, Channel,
-    Event, EventRange, EventRecord, GuardrailDirection, GuardrailMode, ModelId, ModelTier,
-    SessionActorRef, SessionId, SessionMeta, SessionStatus, TenantId,
+    AgentContext, AgentGuardrailPolicy, AgentGuardrailStagePolicy, AgentKnowledgePolicy,
+    AgentKnowledgeScopeMode, AgentPolicySnapshot, Channel, Event, EventRange, EventRecord,
+    GuardrailDirection, GuardrailMode, ModelId, ModelTier, SessionActorRef, SessionId, SessionMeta,
+    SessionStatus, TenantId,
 };
 use moa_test_support::{OrchestratorTestFixture, TestApiClient};
 use serde_json::json;
@@ -220,6 +221,7 @@ fn agent_context_with_input_guardrail(mode: GuardrailMode, block_message: &str) 
             }),
             output: None,
         },
+        knowledge_policy: disabled_knowledge_policy(),
         ..AgentPolicySnapshot::default()
     })
     .expect("serialize guardrail policy snapshot");
@@ -240,10 +242,18 @@ fn agent_context_with_output_guardrail(mode: GuardrailMode, block_message: &str)
                 block_message: Some(block_message.to_string()),
             }),
         },
+        knowledge_policy: disabled_knowledge_policy(),
         ..AgentPolicySnapshot::default()
     })
     .expect("serialize output guardrail policy snapshot");
     context
+}
+
+fn disabled_knowledge_policy() -> AgentKnowledgePolicy {
+    AgentKnowledgePolicy {
+        mode: AgentKnowledgeScopeMode::Disabled,
+        ..AgentKnowledgePolicy::default()
+    }
 }
 
 async fn run_turn(

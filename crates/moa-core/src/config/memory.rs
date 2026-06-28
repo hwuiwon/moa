@@ -10,9 +10,7 @@ pub struct MemoryConfig {
     pub auto_bootstrap: bool,
     /// Optional HTTP base URL for the PII classification sidecar.
     pub pii_service_url: Option<String>,
-    /// Embedding provider used for graph memory retrieval. Set to `disabled` to turn it off.
-    pub embedding_provider: String,
-    /// Embedding model identifier used for graph memory embedding backfills and queries.
+    /// Embedding model selector used for graph memory embedding backfills and queries.
     pub embedding_model: String,
     /// Graph-memory retrieval behavior.
     pub retrieval: MemoryRetrievalConfig,
@@ -29,8 +27,7 @@ impl Default for MemoryConfig {
         Self {
             auto_bootstrap: true,
             pii_service_url: None,
-            embedding_provider: "openai".to_string(),
-            embedding_model: "text-embedding-3-small".to_string(),
+            embedding_model: "openai:text-embedding-3-small".to_string(),
             retrieval: MemoryRetrievalConfig::default(),
             extraction: MemoryExtractionConfig::default(),
             vector: MemoryVectorConfig::default(),
@@ -93,9 +90,7 @@ impl Default for MemoryExtractionConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryRetrievalConfig {
-    /// Reranker provider used after retrieval fusion. `noop` preserves the fused order.
-    pub reranker_provider: String,
-    /// Reranker model identifier. `noop` preserves the fused order.
+    /// Reranker model selector. `noop` preserves the fused order.
     pub reranker_model: String,
     /// Optional provider-specific reranker latency mode.
     pub reranker_latency: Option<String>,
@@ -108,7 +103,6 @@ pub struct MemoryRetrievalConfig {
 impl Default for MemoryRetrievalConfig {
     fn default() -> Self {
         Self {
-            reranker_provider: "noop".to_string(),
             reranker_model: "noop".to_string(),
             reranker_latency: None,
             lineage_enabled: false,
@@ -214,7 +208,7 @@ pub struct VectorEmbedderConfig {
 impl Default for VectorEmbedderConfig {
     fn default() -> Self {
         Self {
-            name: "gemini-embedding-2".to_string(),
+            name: "gemini:gemini-embedding-2".to_string(),
             output_dim: 1024,
             cohere: CohereEmbedderConfig::default(),
             zeroentropy: ZeroEntropyEmbedderConfig::default(),
@@ -268,16 +262,8 @@ impl super::MoaEnvOverlay {
             self.memory_auto_bootstrap,
         );
         set_if_some(
-            &mut config.memory.embedding_provider,
-            &self.memory_embedding_provider,
-        );
-        set_if_some(
             &mut config.memory.embedding_model,
             &self.memory_embedding_model,
-        );
-        set_if_some(
-            &mut config.memory.retrieval.reranker_provider,
-            &self.memory_retrieval_reranker_provider,
         );
         set_if_some(
             &mut config.memory.retrieval.reranker_model,
