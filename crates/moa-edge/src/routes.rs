@@ -4,8 +4,8 @@
 use crate::{headers, proxy::OrchestratorProxy};
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -17,13 +17,19 @@ use moa_authz_schema::{ObjectType, Relation};
 use moa_core::traits::{AuthProvider, Credential, Identity};
 use moa_core::wire::turn::SessionProgress;
 use moa_core::{
+    Attachment, ContactSessionAuthorizationRequest, ContactSessionAuthorizationResponse,
     ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
-    Event, EventRange, EventRecord, MoaConfig, MoaError, SequenceNum, SessionId, TenantId,
+    Event, EventRange, EventRecord, MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
+    MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES, MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES,
+    MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE, MoaConfig, MoaError, SequenceNum,
+    SessionAttachmentId, SessionAttachmentStore, SessionId, SessionStore, TenantId,
+    normalize_contact_session_photo_mime, validate_contact_session_message_text,
 };
+use moa_session::PostgresSessionStore;
 #[cfg(feature = "auth0")]
 use serde::Deserialize;
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +40,9 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 const KNOWLEDGE_WEBHOOK_BODY_LIMIT_BYTES: usize = 256 * 1024;
+const SESSION_MESSAGE_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+const MAX_SESSION_PHOTO_DIMENSION: u32 = 12_000;
+const MAX_SESSION_PHOTO_PIXELS: u64 = 25_000_000;
 
 mod agents;
 mod analytics;
@@ -63,6 +72,8 @@ pub struct AppState {
     pub knowledge_webhooks: KnowledgeWebhookEdgeConfig,
     /// Postgres pool used by unauthenticated webhooks that update auth metadata.
     pub pool: Arc<sqlx::PgPool>,
+    /// Postgres-backed session store used by direct edge media reads and writes.
+    pub session_store: Arc<PostgresSessionStore>,
     /// Internal orchestrator proxy.
     pub proxy: Arc<OrchestratorProxy>,
 }
@@ -160,25 +171,30 @@ pub fn router(state: AppState) -> Router {
             post(handle_public_contact_verification_complete),
         )
         .route(
-            "/v1/agent-sessions/{session_id}/contacts/verification/start",
+            "/v1/sessions/{session_id}/contacts/verification/start",
             post(handle_public_session_contact_verification_start),
         )
         .route(
-            "/v1/agent-sessions/{session_id}/contacts/verification/complete",
+            "/v1/sessions/{session_id}/contacts/verification/complete",
             post(handle_public_session_contact_verification_complete),
         )
-        .route("/v1/agent-sessions", post(handle_public_agent_session_init))
+        .route("/v1/sessions", post(handle_public_agent_session_init))
         .route(
-            "/v1/agent-sessions/{session_id}/promote",
+            "/v1/sessions/{session_id}/promote",
             post(handle_public_agent_session_promote),
         )
         .route(
-            "/v1/agent-sessions/{session_id}/channel",
+            "/v1/sessions/{session_id}/channel",
             patch(handle_public_agent_session_channel_change),
         )
         .route(
             "/v1/sessions/{session_id}/messages",
-            post(handle_session_message_stream),
+            post(handle_session_message_stream)
+                .layer(DefaultBodyLimit::max(SESSION_MESSAGE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/sessions/{session_id}/attachments/{attachment_id}",
+            get(handle_session_attachment),
         )
         .route("/v1/{*rest}", any(handle_proxy))
         .with_state(state)
@@ -794,7 +810,7 @@ async fn forward_public_contact_route<const N: usize>(
 }
 
 #[tracing::instrument(
-    skip(state, body),
+    skip(state, headers, request),
     fields(
         http.route = "/v1/sessions/{session_id}/messages",
         http.status_code = tracing::field::Empty,
@@ -803,18 +819,19 @@ async fn forward_public_contact_route<const N: usize>(
 async fn handle_session_message_stream(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-    body: Bytes,
+    headers: HeaderMap,
+    request: Request,
 ) -> axum::response::Response {
     let span = tracing::Span::current();
-    let message = match contact_session_message_request(session_id, &body) {
-        Ok(message) => message,
-        Err(message) => {
-            span.record("http.status_code", 400_i64);
-            return (StatusCode::BAD_REQUEST, message).into_response();
+    let mut input = match session_message_input(session_id, &headers, request, &state).await {
+        Ok(input) => input,
+        Err(error) => {
+            span.record("http.status_code", error.status.as_u16() as i64);
+            return (error.status, error.message).into_response();
         }
     };
 
-    let next_sequence_num = match initial_stream_sequence(&state, &message).await {
+    let next_sequence_num = match initial_stream_sequence(&state, &input.message).await {
         Ok(next_sequence_num) => next_sequence_num,
         Err(error) => {
             tracing::warn!(error = %error.summary(), "session stream preflight failed");
@@ -822,16 +839,41 @@ async fn handle_session_message_stream(
             return error.into_response();
         }
     };
+    let mut stored_attachments = Vec::new();
+    if !input.uploads.is_empty() {
+        match persist_session_attachments(&state, &input.message, input.uploads).await {
+            Ok(attachments) => {
+                stored_attachments = attachments.clone();
+                input.message.attachments.extend(attachments);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "session media persistence failed");
+                span.record("http.status_code", 500_i64);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to store session media",
+                )
+                    .into_response();
+            }
+        }
+    }
     let accepted = match call_contacts_handler::<_, ContactSessionMessageResponse>(
         &state,
         "send_message",
-        &message,
+        &input.message,
     )
     .await
     {
         Ok(accepted) => accepted,
         Err(error) => {
             tracing::warn!(error = %error.summary(), "session message admission failed");
+            cleanup_session_attachments(
+                &state,
+                input.message.tenant_id,
+                input.message.session_id,
+                &stored_attachments,
+            )
+            .await;
             span.record("http.status_code", error.status_code().as_u16() as i64);
             return error.into_response();
         }
@@ -850,9 +892,9 @@ async fn handle_session_message_stream(
 
     let stream_state = SessionMessageStreamState {
         app: state,
-        tenant_id: message.tenant_id,
+        tenant_id: input.message.tenant_id,
         session_id: accepted.session_id,
-        contact_token: message.contact_token,
+        contact_token: input.message.contact_token,
         next_sequence_num,
         terminal_turn_id,
         pending_events,
@@ -861,6 +903,98 @@ async fn handle_session_message_stream(
     Sse::new(stream::unfold(stream_state, next_session_message_event))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+#[tracing::instrument(
+    skip(state, headers),
+    fields(
+        http.route = "/v1/sessions/{session_id}/attachments/{attachment_id}",
+        http.status_code = tracing::field::Empty,
+    )
+)]
+async fn handle_session_attachment(
+    State(state): State<AppState>,
+    Path((session_id, attachment_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let span = tracing::Span::current();
+    let Some(tenant_id) = query
+        .get("tenant_id")
+        .and_then(|value| Uuid::parse_str(value).ok().map(TenantId::from))
+    else {
+        span.record("http.status_code", 400_i64);
+        return (StatusCode::BAD_REQUEST, "tenant_id is required").into_response();
+    };
+    let Some(contact_token) = authorization_bearer_token(&headers) else {
+        span.record("http.status_code", 401_i64);
+        return (StatusCode::UNAUTHORIZED, "contact token is required").into_response();
+    };
+    let session_id = SessionId(session_id);
+    let attachment_id = SessionAttachmentId(attachment_id);
+
+    if let Err(error) = call_contacts_handler::<_, ContactSessionAuthorizationResponse>(
+        &state,
+        "authorize_session",
+        &ContactSessionAuthorizationRequest {
+            tenant_id,
+            session_id,
+            contact_token,
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = %error.summary(), "session attachment authorization failed");
+        span.record("http.status_code", error.status_code().as_u16() as i64);
+        return error.into_response();
+    }
+
+    let (attachment, content) = match state
+        .session_store
+        .get(tenant_id, session_id, attachment_id)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(MoaError::SessionAttachmentNotFound(_))
+        | Err(MoaError::SessionAttachmentObjectNotFound(_)) => {
+            span.record("http.status_code", 404_i64);
+            return (StatusCode::NOT_FOUND, "attachment not found").into_response();
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "session attachment read failed");
+            span.record("http.status_code", 502_i64);
+            return (StatusCode::BAD_GATEWAY, "attachment storage is unavailable").into_response();
+        }
+    };
+
+    span.record("http.status_code", 200_i64);
+    attachment_response(&attachment, content)
+}
+
+fn authorization_bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+fn attachment_response(attachment: &Attachment, content: Vec<u8>) -> axum::response::Response {
+    let content_len = content.len();
+    let mut builder = Response::builder().status(StatusCode::OK);
+    if let Some(mime_type) = attachment.mime_type.as_deref()
+        && let Ok(value) = HeaderValue::from_str(mime_type)
+    {
+        builder = builder.header(header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&content_len.to_string()) {
+        builder = builder.header(header::CONTENT_LENGTH, value);
+    }
+    match builder.body(Body::from(content)) {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(error = %error, "build attachment response failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -915,7 +1049,492 @@ fn contact_session_message_request(
         return Err("session message body must be object");
     };
     object.insert("session_id".to_string(), serde_json::json!(session_id));
-    serde_json::from_value(value).map_err(|_| "bad session message body")
+    let message: ContactSessionMessageRequest =
+        serde_json::from_value(value).map_err(|_| "bad session message body")?;
+    if !message.attachments.is_empty() {
+        return Err("session message attachments must be uploaded as multipart");
+    }
+    message.validate_admitted_payload()?;
+    Ok(message)
+}
+
+struct SessionMessageInput {
+    message: ContactSessionMessageRequest,
+    uploads: Vec<SessionAttachmentUpload>,
+}
+
+struct SessionAttachmentUpload {
+    name: String,
+    mime_type: String,
+    content: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct SessionMessageRequestError {
+    status: StatusCode,
+    message: &'static str,
+}
+
+impl SessionMessageRequestError {
+    fn bad_request(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message,
+        }
+    }
+}
+
+async fn session_message_input(
+    session_id: Uuid,
+    headers: &HeaderMap,
+    request: Request,
+    state: &AppState,
+) -> Result<SessionMessageInput, SessionMessageRequestError> {
+    if is_multipart_content_type(headers) {
+        return multipart_session_message_request(session_id, request, state).await;
+    }
+
+    let body = Bytes::from_request(request, state)
+        .await
+        .map_err(|_| SessionMessageRequestError::bad_request("bad session message body"))?;
+    contact_session_message_request(session_id, &body)
+        .map(|message| SessionMessageInput {
+            message,
+            uploads: Vec::new(),
+        })
+        .map_err(SessionMessageRequestError::bad_request)
+}
+
+async fn multipart_session_message_request(
+    session_id: Uuid,
+    request: Request,
+    state: &AppState,
+) -> Result<SessionMessageInput, SessionMessageRequestError> {
+    let mut multipart = Multipart::from_request(request, state)
+        .await
+        .map_err(|_| SessionMessageRequestError::bad_request("bad multipart session message"))?;
+    let mut tenant_id = None;
+    let mut contact_token = None;
+    let mut user_message = String::new();
+    let mut model = None;
+    let mut max_turns = None;
+    let mut uploads = Vec::new();
+    let mut total_upload_bytes = 0_usize;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| SessionMessageRequestError::bad_request("bad multipart session message"))?
+    {
+        let field_name = field.name().unwrap_or_default().to_string();
+        let file_name = field.file_name().map(ToOwned::to_owned);
+        let declared_mime = field.content_type().map(ToString::to_string);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|_| SessionMessageRequestError::bad_request("bad multipart session part"))?;
+
+        if file_name.is_some() || is_upload_field(&field_name) {
+            if bytes.is_empty() {
+                return Err(SessionMessageRequestError::bad_request(
+                    "photo upload was empty",
+                ));
+            }
+            if uploads.len() >= MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE {
+                return Err(SessionMessageRequestError::bad_request(
+                    "too many photo uploads",
+                ));
+            }
+            if bytes.len() > MAX_CONTACT_SESSION_ATTACHMENT_BYTES {
+                return Err(SessionMessageRequestError::bad_request(
+                    "photo upload is too large",
+                ));
+            }
+            total_upload_bytes = total_upload_bytes.saturating_add(bytes.len());
+            if total_upload_bytes > MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES {
+                return Err(SessionMessageRequestError::bad_request(
+                    "photo uploads are too large",
+                ));
+            }
+            let mime_type = canonical_photo_mime(declared_mime.as_deref(), &bytes)?;
+            let name = validated_upload_name(file_name.as_deref())?;
+            uploads.push(SessionAttachmentUpload {
+                name,
+                mime_type: mime_type.to_string(),
+                content: bytes.to_vec(),
+            });
+            continue;
+        }
+
+        let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
+            SessionMessageRequestError::bad_request("multipart text field was not utf-8")
+        })?;
+        match field_name.as_str() {
+            "tenant_id" => {
+                let parsed = Uuid::parse_str(value.trim())
+                    .map_err(|_| SessionMessageRequestError::bad_request("bad tenant_id"))?;
+                tenant_id = Some(TenantId::from(parsed));
+            }
+            "contact_token" => contact_token = Some(value),
+            "user_message" | "text" | "message" => {
+                validate_contact_session_message_text(&value)
+                    .map_err(SessionMessageRequestError::bad_request)?;
+                user_message = value;
+            }
+            "model" if !value.trim().is_empty() => model = Some(value),
+            "max_turns" if !value.trim().is_empty() => {
+                max_turns = Some(
+                    value
+                        .trim()
+                        .parse::<u32>()
+                        .map_err(|_| SessionMessageRequestError::bad_request("bad max_turns"))?,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    if user_message.trim().is_empty() && uploads.is_empty() {
+        return Err(SessionMessageRequestError::bad_request(
+            "session message requires text or a photo",
+        ));
+    }
+
+    Ok(SessionMessageInput {
+        message: ContactSessionMessageRequest {
+            tenant_id: tenant_id
+                .ok_or_else(|| SessionMessageRequestError::bad_request("tenant_id is required"))?,
+            session_id: SessionId(session_id),
+            contact_token: contact_token.ok_or_else(|| {
+                SessionMessageRequestError::bad_request("contact_token is required")
+            })?,
+            user_message,
+            attachments: Vec::new(),
+            model,
+            max_turns,
+        },
+        uploads,
+    })
+}
+
+fn is_multipart_content_type(headers: &HeaderMap) -> bool {
+    header_media_type(headers, header::CONTENT_TYPE)
+        .is_some_and(|media_type| media_type.eq_ignore_ascii_case("multipart/form-data"))
+}
+
+fn is_upload_field(name: &str) -> bool {
+    matches!(
+        name,
+        "file" | "files" | "attachment" | "attachments" | "photo" | "photos"
+    )
+}
+
+fn canonical_photo_mime(
+    declared_mime: Option<&str>,
+    content: &[u8],
+) -> Result<&'static str, SessionMessageRequestError> {
+    let sniffed = sniff_photo_mime(content).ok_or_else(|| {
+        SessionMessageRequestError::bad_request("only jpeg, png, and webp photos are supported")
+    })?;
+    let dimensions = photo_dimensions(sniffed, content).ok_or_else(|| {
+        SessionMessageRequestError::bad_request("photo dimensions could not be verified")
+    })?;
+    validate_photo_dimensions(dimensions)?;
+    if let Some(declared_mime) = declared_mime
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let lower = declared_mime.to_ascii_lowercase();
+        if !lower.starts_with("image/") {
+            return Err(SessionMessageRequestError::bad_request(
+                "only photo uploads are supported",
+            ));
+        }
+        let Some(normalized) = normalize_contact_session_photo_mime(&lower) else {
+            return Err(SessionMessageRequestError::bad_request(
+                "only jpeg, png, and webp photos are supported",
+            ));
+        };
+        if normalized != sniffed {
+            return Err(SessionMessageRequestError::bad_request(
+                "photo MIME type does not match content",
+            ));
+        }
+    }
+    Ok(sniffed)
+}
+
+fn validated_upload_name(file_name: Option<&str>) -> Result<String, SessionMessageRequestError> {
+    let candidate = file_name
+        .and_then(|name| {
+            name.replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "photo".to_string());
+    if candidate.len() > MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES
+        || candidate.chars().any(char::is_control)
+    {
+        return Err(SessionMessageRequestError::bad_request(
+            "photo file name is invalid",
+        ));
+    }
+    Ok(candidate)
+}
+
+fn sniff_photo_mime(content: &[u8]) -> Option<&'static str> {
+    if content.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if content.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if content.len() >= 12 && &content[0..4] == b"RIFF" && &content[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+fn photo_dimensions(mime_type: &str, content: &[u8]) -> Option<(u32, u32)> {
+    match mime_type {
+        "image/jpeg" => jpeg_dimensions(content),
+        "image/png" => png_dimensions(content),
+        "image/webp" => webp_dimensions(content),
+        _ => None,
+    }
+}
+
+fn validate_photo_dimensions(dimensions: (u32, u32)) -> Result<(), SessionMessageRequestError> {
+    let (width, height) = dimensions;
+    if width == 0 || height == 0 {
+        return Err(SessionMessageRequestError::bad_request(
+            "photo dimensions are invalid",
+        ));
+    }
+    if width > MAX_SESSION_PHOTO_DIMENSION || height > MAX_SESSION_PHOTO_DIMENSION {
+        return Err(SessionMessageRequestError::bad_request(
+            "photo dimensions are too large",
+        ));
+    }
+    if u64::from(width) * u64::from(height) > MAX_SESSION_PHOTO_PIXELS {
+        return Err(SessionMessageRequestError::bad_request(
+            "photo pixel count is too large",
+        ));
+    }
+    Ok(())
+}
+
+fn png_dimensions(content: &[u8]) -> Option<(u32, u32)> {
+    if content.len() < 33 || !content.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+
+    let mut index = 8;
+    let mut dimensions = None;
+    let mut saw_idat = false;
+    while index + 12 <= content.len() {
+        let chunk_len = u32::from_be_bytes(content[index..index + 4].try_into().ok()?) as usize;
+        let chunk_type = &content[index + 4..index + 8];
+        let data_start = index + 8;
+        let crc_start = data_start.checked_add(chunk_len)?;
+        let next = crc_start.checked_add(4)?;
+        if next > content.len() {
+            return None;
+        }
+
+        match chunk_type {
+            b"IHDR" => {
+                if index != 8 || chunk_len != 13 {
+                    return None;
+                }
+                let width =
+                    u32::from_be_bytes(content[data_start..data_start + 4].try_into().ok()?);
+                let height =
+                    u32::from_be_bytes(content[data_start + 4..data_start + 8].try_into().ok()?);
+                dimensions = Some((width, height));
+            }
+            b"IDAT" => {
+                dimensions?;
+                saw_idat = true;
+            }
+            b"IEND" => {
+                if chunk_len != 0 {
+                    return None;
+                }
+                if !saw_idat {
+                    return None;
+                }
+                return dimensions;
+            }
+            _ => {}
+        }
+
+        index = next;
+    }
+    None
+}
+
+fn jpeg_dimensions(content: &[u8]) -> Option<(u32, u32)> {
+    if !content.starts_with(&[0xff, 0xd8]) || !content.ends_with(&[0xff, 0xd9]) {
+        return None;
+    }
+    let mut index = 2;
+    while index + 3 < content.len() {
+        while index < content.len() && content[index] == 0xff {
+            index += 1;
+        }
+        if index >= content.len() {
+            return None;
+        }
+        let marker = content[index];
+        index += 1;
+        if marker == 0xd9 || marker == 0xda {
+            return None;
+        }
+        if index + 2 > content.len() {
+            return None;
+        }
+        let segment_len = usize::from(u16::from_be_bytes(
+            content[index..index + 2].try_into().ok()?,
+        ));
+        if segment_len < 2 || index + segment_len > content.len() {
+            return None;
+        }
+        if is_jpeg_start_of_frame(marker) {
+            if segment_len < 7 {
+                return None;
+            }
+            let height = u32::from(u16::from_be_bytes(
+                content[index + 3..index + 5].try_into().ok()?,
+            ));
+            let width = u32::from(u16::from_be_bytes(
+                content[index + 5..index + 7].try_into().ok()?,
+            ));
+            return Some((width, height));
+        }
+        index += segment_len;
+    }
+    None
+}
+
+fn is_jpeg_start_of_frame(marker: u8) -> bool {
+    matches!(
+        marker,
+        0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf
+    )
+}
+
+fn webp_dimensions(content: &[u8]) -> Option<(u32, u32)> {
+    if content.len() < 30 || &content[0..4] != b"RIFF" || &content[8..12] != b"WEBP" {
+        return None;
+    }
+    let riff_len = u32::from_le_bytes(content[4..8].try_into().ok()?) as usize;
+    if riff_len.checked_add(8)? != content.len() {
+        return None;
+    }
+    match &content[12..16] {
+        b"VP8X" => {
+            let width = read_u24_le(&content[24..27])?.checked_add(1)?;
+            let height = read_u24_le(&content[27..30])?.checked_add(1)?;
+            Some((width, height))
+        }
+        b"VP8L" => {
+            if content[20] != 0x2f {
+                return None;
+            }
+            let bits = u32::from_le_bytes(content[21..25].try_into().ok()?);
+            let width = (bits & 0x3fff).checked_add(1)?;
+            let height = ((bits >> 14) & 0x3fff).checked_add(1)?;
+            Some((width, height))
+        }
+        b"VP8 " => {
+            if &content[23..26] != b"\x9d\x01\x2a" {
+                return None;
+            }
+            let width = u32::from(u16::from_le_bytes(content[26..28].try_into().ok()?) & 0x3fff);
+            let height = u32::from(u16::from_le_bytes(content[28..30].try_into().ok()?) & 0x3fff);
+            Some((width, height))
+        }
+        _ => None,
+    }
+}
+
+fn read_u24_le(bytes: &[u8]) -> Option<u32> {
+    let bytes: [u8; 3] = bytes.try_into().ok()?;
+    Some(u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16))
+}
+
+async fn persist_session_attachments(
+    state: &AppState,
+    message: &ContactSessionMessageRequest,
+    uploads: Vec<SessionAttachmentUpload>,
+) -> Result<Vec<Attachment>, MoaError> {
+    let session = state.session_store.get_session(message.session_id).await?;
+    if session.tenant_id != message.tenant_id {
+        return Err(MoaError::StorageError(format!(
+            "session `{}` does not belong to tenant `{}`",
+            message.session_id, message.tenant_id
+        )));
+    }
+    let contact_id = session.contact.as_ref().map(|contact| contact.contact_id);
+    let mut attachments = Vec::with_capacity(uploads.len());
+    for upload in uploads {
+        let attachment = match state
+            .session_store
+            .put(
+                message.tenant_id,
+                message.session_id,
+                contact_id,
+                upload.name,
+                upload.mime_type,
+                upload.content,
+            )
+            .await
+        {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                cleanup_session_attachments(
+                    state,
+                    message.tenant_id,
+                    message.session_id,
+                    &attachments,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        attachments.push(attachment);
+    }
+    Ok(attachments)
+}
+
+async fn cleanup_session_attachments(
+    state: &AppState,
+    tenant_id: TenantId,
+    session_id: SessionId,
+    attachments: &[Attachment],
+) {
+    for attachment in attachments {
+        let Some(attachment_id) = attachment.id else {
+            continue;
+        };
+        if let Err(error) = state
+            .session_store
+            .delete(tenant_id, session_id, attachment_id)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                %session_id,
+                %attachment_id,
+                "failed to clean up session attachment after message rejection"
+            );
+        }
+    }
 }
 
 async fn call_contacts_handler<I, O>(
@@ -1323,15 +1942,11 @@ async fn response_to_axum(response: reqwest::Response) -> axum::response::Respon
 }
 
 fn extract_credential(headers: &HeaderMap) -> Option<Credential> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ")?.trim();
-    if token.is_empty() {
-        return None;
-    }
+    let token = authorization_bearer_token(headers)?;
     if token.starts_with("moa_") {
-        return Some(Credential::ApiKey(token.to_string()));
+        return Some(Credential::ApiKey(token));
     }
-    Some(Credential::BearerJwt(token.to_string()))
+    Some(Credential::BearerJwt(token))
 }
 
 enum RouteTranslation {
@@ -1442,18 +2057,10 @@ where
 }
 
 fn rejects_raw_webhook_content_type(headers: &HeaderMap) -> bool {
-    let Some(content_type) = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-    else {
+    let Some(media_type) = header_media_type(headers, header::CONTENT_TYPE) else {
         return false;
     };
-    let media_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    let media_type = media_type.to_ascii_lowercase();
 
     media_type.starts_with("multipart/")
         || media_type.starts_with("image/")
@@ -1468,6 +2075,15 @@ fn rejects_raw_webhook_content_type(headers: &HeaderMap) -> bool {
                 | "application/x-tar"
                 | "application/gzip"
         )
+}
+
+fn header_media_type(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn forwarded_webhook_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -1877,6 +2493,160 @@ mod tests {
         );
         assert_eq!(request.contact_token, "token");
         assert_eq!(request.user_message, "hello");
+    }
+
+    #[test]
+    fn session_message_request_rejects_json_attachment_refs() {
+        // Pins: public clients must upload attachments as multipart so the edge can validate bytes.
+        let path_session_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("path session id should parse");
+        let body = Bytes::from_static(
+            br#"{
+                "tenant_id":"22222222-2222-2222-2222-222222222222",
+                "contact_token":"token",
+                "attachments":[{
+                    "name":"receipt.png",
+                    "mime_type":"image/png",
+                    "url":"/v1/sessions/11111111-1111-1111-1111-111111111111/attachments/33333333-3333-3333-3333-333333333333",
+                    "path":null,
+                    "size_bytes":128
+                }]
+            }"#,
+        );
+
+        let error = contact_session_message_request(path_session_id, &body)
+            .expect_err("json attachment refs should be rejected");
+
+        assert_eq!(
+            error,
+            "session message attachments must be uploaded as multipart"
+        );
+    }
+
+    #[test]
+    fn session_message_request_rejects_empty_body() {
+        // Pins: a contact message must contain either text or at least one attachment ref.
+        let path_session_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("path session id should parse");
+        let body = Bytes::from_static(
+            br#"{
+                "tenant_id":"22222222-2222-2222-2222-222222222222",
+                "contact_token":"token"
+            }"#,
+        );
+
+        let error = contact_session_message_request(path_session_id, &body)
+            .expect_err("empty message should be rejected");
+
+        assert_eq!(
+            error,
+            "contact session message requires text or an attachment"
+        );
+    }
+
+    #[test]
+    fn session_message_request_rejects_oversized_text() {
+        // Pins: public JSON contact messages cannot force huge text into Restate/session history.
+        let path_session_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("path session id should parse");
+        let body = Bytes::from(
+            serde_json::json!({
+                "tenant_id": "22222222-2222-2222-2222-222222222222",
+                "contact_token": "token",
+                "user_message": "x".repeat(moa_core::MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES + 1),
+            })
+            .to_string(),
+        );
+
+        let error = contact_session_message_request(path_session_id, &body)
+            .expect_err("oversized message should be rejected");
+
+        assert_eq!(error, "session message text is too long");
+    }
+
+    #[test]
+    fn canonical_photo_mime_requires_supported_image_content() {
+        // Pins: upload admission trusts content sniffing over caller-declared MIME type.
+        let png = png_with_dimensions(640, 480);
+        assert_eq!(
+            canonical_photo_mime(Some("image/png"), &png).expect("valid png should be accepted"),
+            "image/png"
+        );
+        assert_eq!(
+            canonical_photo_mime(Some("image/jpeg"), &png)
+                .expect_err("declared MIME mismatch should be rejected")
+                .message,
+            "photo MIME type does not match content"
+        );
+        assert_eq!(
+            canonical_photo_mime(Some("application/pdf"), b"%PDF")
+                .expect_err("non-photo bytes should be rejected")
+                .message,
+            "only jpeg, png, and webp photos are supported"
+        );
+        assert_eq!(
+            canonical_photo_mime(Some("image/gif"), &png)
+                .expect_err("unsupported declared image type should be rejected")
+                .message,
+            "only jpeg, png, and webp photos are supported"
+        );
+    }
+
+    #[test]
+    fn canonical_photo_mime_rejects_decompression_bomb_dimensions() {
+        // Pins: compressed image bytes must declare bounded dimensions before storage.
+        let huge_png = png_with_dimensions(40_000, 40_000);
+
+        let error = canonical_photo_mime(Some("image/png"), &huge_png)
+            .expect_err("huge image dimensions should be rejected");
+
+        assert_eq!(error.message, "photo dimensions are too large");
+    }
+
+    #[test]
+    fn canonical_photo_mime_rejects_header_only_png() {
+        // Pins: upload admission requires a minimally structured image container, not only magic bytes.
+        let mut header_only_png = Vec::from(&b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"[..]);
+        header_only_png.extend_from_slice(&640_u32.to_be_bytes());
+        header_only_png.extend_from_slice(&480_u32.to_be_bytes());
+        header_only_png.extend_from_slice(&[8, 2, 0, 0, 0, 0, 0, 0, 0]);
+
+        let error = canonical_photo_mime(Some("image/png"), &header_only_png)
+            .expect_err("header-only png should be rejected");
+
+        assert_eq!(error.message, "photo dimensions could not be verified");
+    }
+
+    #[test]
+    fn validated_upload_name_rejects_control_characters() {
+        // Pins: caller-supplied display names cannot carry control bytes into stored attachment metadata.
+        let error = validated_upload_name(Some("invoice\n.png"))
+            .expect_err("control characters should be rejected");
+
+        assert_eq!(error.message, "photo file name is invalid");
+    }
+
+    fn png_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::from(&b"\x89PNG\r\n\x1a\n"[..]);
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        append_png_chunk(&mut bytes, b"IHDR", &ihdr);
+        append_png_chunk(
+            &mut bytes,
+            b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        append_png_chunk(&mut bytes, b"IEND", &[]);
+        bytes
+    }
+
+    fn append_png_chunk(bytes: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
     }
 
     fn event_record(sequence_num: SequenceNum) -> EventRecord {

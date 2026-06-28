@@ -118,6 +118,45 @@ services:
       retries: 20
     restart: unless-stopped
 
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: moa-rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
+      RUSTFS_SECRET_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      RUSTFS_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+    command: ["/data"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - moa-rustfs-data:/data
+
+  rustfs-init:
+    image: rustfs/rc:latest
+    container_name: moa-rustfs-init
+    restart: "no"
+    depends_on:
+      rustfs:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        until rc alias set --quiet --bucket-lookup path --region "$${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}" rustfs http://rustfs:9000 "$${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}" "$${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}"; do
+          sleep 1
+        done
+        rc bucket create --ignore-existing --region "$${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}" "rustfs/$${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}"
+    environment:
+      MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
+      MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
+      MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
+
   restate:
     image: docker.restate.dev/restatedev/restate:1.6.2
     container_name: moa-restate
@@ -156,6 +195,8 @@ services:
         condition: service_healthy
       restate:
         condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
     environment:
       HOME: /var/lib/moa
       MOA_DATABASE_URL: postgres://moa_owner:dev@postgres:5432/moa
@@ -170,6 +211,13 @@ services:
       MOA_AUTHZ_OPENFGA_PRESHARED_KEY: ${MOA_AUTHZ_OPENFGA_PRESHARED_KEY:-localdev-preshared-key-do-not-use-in-prod}
       MOA_AUTHZ_OPENFGA_STORE_ID: ${MOA_AUTHZ_OPENFGA_STORE_ID:-}
       MOA_AUTHZ_OPENFGA_MODEL_ID: ${MOA_AUTHZ_OPENFGA_MODEL_ID:-}
+      MOA_SESSION_ATTACHMENT_ENDPOINT: http://rustfs:9000
+      MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
+      MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
+      MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
+      MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
+      MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
       MOA_PROVIDERS_OVERRIDE: ${MOA_PROVIDERS_OVERRIDE:-}
       MOA_REQUIRE_RESTATE_REGISTRATION_FOR_READINESS: "false"
       MOA_DEREGISTER_ON_SHUTDOWN: "false"
@@ -194,10 +242,19 @@ services:
     depends_on:
       moa-orchestrator:
         condition: service_started
+      rustfs-init:
+        condition: service_completed_successfully
     environment:
       MOA_EDGE_BIND: 0.0.0.0:8080
       MOA_EDGE_UPSTREAM: http://restate:8080
       MOA_DATABASE_URL: postgres://moa_owner:${POSTGRES_PASSWORD:-dev}@postgres:5432/moa?sslmode=disable
+      MOA_SESSION_ATTACHMENT_ENDPOINT: http://rustfs:9000
+      MOA_SESSION_ATTACHMENT_BUCKET: ${MOA_SESSION_ATTACHMENT_BUCKET:-moa-session-attachments}
+      MOA_SESSION_ATTACHMENT_REGION: ${MOA_SESSION_ATTACHMENT_REGION:-us-east-1}
+      MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID: ${MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID:-moaadmin}
+      MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY: ${MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY:-moa-local-dev-secret}
+      MOA_SESSION_ATTACHMENT_ALLOW_HTTP: "true"
+      MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE: "false"
       RUST_LOG: info,moa_edge=debug
     ports:
       - "10000:8080"
@@ -290,3 +347,4 @@ volumes:
   moa-audit-shipper-state:
   moa-pii-hf-cache:
   moa-restate-data:
+  moa-rustfs-data:

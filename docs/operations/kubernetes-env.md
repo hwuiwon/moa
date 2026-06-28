@@ -28,6 +28,26 @@ Postgres remains the source of truth for durable session state:
 - Trusted sandbox file manifests are carried by durable request references, not
   by process-local router memory.
 
+Session attachment bytes must use cloud object storage so any `moa-edge` pod can
+serve reload/download requests:
+
+```bash
+# AWS S3
+MOA_SESSION_ATTACHMENT_BACKEND=s3
+MOA_SESSION_ATTACHMENT_BUCKET=<attachment-bucket>
+MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
+MOA_SESSION_ATTACHMENT_REGION=<aws-region>
+MOA_SESSION_ATTACHMENT_ALLOW_HTTP=false
+
+# GCS alternative
+MOA_SESSION_ATTACHMENT_BACKEND=gcs
+MOA_SESSION_ATTACHMENT_BUCKET=<attachment-bucket>
+MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
+MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH=/var/run/secrets/gcp/application-default.json
+```
+
+Cloud startup fails if attachment storage points at a local RustFS endpoint.
+
 ## Lineage And Audit Metrics
 
 Lineage queue pressure now separates accepted, backpressured, failed, and

@@ -267,6 +267,7 @@ policy.
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
 | Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
 | Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
+| Session attachments | Postgres + object storage | `session_attachments` stores metadata and object keys; bytes live in RustFS locally or AWS S3/GCS in cloud; session events carry `Attachment` refs with durable ids |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
 | Runtime cache | Redis or memory | optional TTL cache/coordination for pacing and transient references; memory is per-process and non-authoritative |
 | Optional checkpoints | Neon | branch manager for database checkpoints |

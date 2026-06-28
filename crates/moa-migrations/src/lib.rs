@@ -37,6 +37,7 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
     "V000315__authz_outbox_claims.sql",
     "V000316__session_blobs.sql",
     "V000317__knowledge_sync_active_claims.sql",
+    "V000318__session_attachments.sql",
 ];
 
 // Schema-isolated session tests do not own artifact/experiment tables. Keep
@@ -166,6 +167,10 @@ const SESSION_SCHEMA_MIGRATIONS: &[SchemaMigration] = &[
     SchemaMigration {
         name: "V000317__knowledge_sync_active_claims.sql",
         sql: include_str!("../migrations/postgres/V000317__knowledge_sync_active_claims.sql"),
+    },
+    SchemaMigration {
+        name: "V000318__session_attachments.sql",
+        sql: include_str!("../migrations/postgres/V000318__session_attachments.sql"),
     },
 ];
 

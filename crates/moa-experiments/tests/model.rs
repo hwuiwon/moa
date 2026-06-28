@@ -20,8 +20,10 @@ fn agent_loop_target_round_trips_through_public_model_offline() {
         agent: None,
         model: ModelId::new("gpt-5.1"),
         attachments: vec![Attachment {
+            id: None,
             name: "source.md".to_string(),
             mime_type: Some("text/markdown".to_string()),
+            sha256: None,
             url: None,
             path: None,
             size_bytes: Some(42),

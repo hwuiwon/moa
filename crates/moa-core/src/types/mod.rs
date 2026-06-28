@@ -46,6 +46,7 @@ pub use channel::{
     ActionButton, Attachment, ButtonStyle, Channel, ChannelAccountId, ChannelAccountRef,
     ChannelActor, ChannelCapabilities, ChannelRef, DiffHunk, InboundMessage, MessageContent,
     MessageId, OutboundMessage, SessionChannelBinding, SessionChannelBindingId, ToolStatus,
+    render_user_message_with_attachments,
 };
 pub use completion::{
     CompletionContent, CompletionRequest, CompletionResponse, CompletionStream,
@@ -54,6 +55,7 @@ pub use completion::{
 };
 pub use contact::{
     ContactId, ContactPointId, ContactPointInput, ContactPointKind, ContactPointRef, ContactRef,
+    ContactSessionAuthorizationRequest, ContactSessionAuthorizationResponse,
     ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
     ContactSessionChannelRequest, ContactSessionInitRequest, ContactSessionInitResponse,
     ContactSessionMessageRequest, ContactSessionMessageResponse, ContactSessionProgressRequest,
@@ -61,7 +63,10 @@ pub use contact::{
     ContactTokenIssueRequest, ContactTokenIssueResponse, ContactVerificationChallengeId,
     ContactVerificationCompleteRequest, ContactVerificationCompleteResponse,
     ContactVerificationStartRequest, ContactVerificationStartResponse, ContactVerificationState,
-    SessionActorRef,
+    MAX_CONTACT_SESSION_ATTACHMENT_BYTES, MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES,
+    MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES, MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE,
+    MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES, SessionActorRef, normalize_contact_session_photo_mime,
+    validate_contact_session_message_text,
 };
 pub use context::{
     ContextMessage, ContextSourceKind, ContextSourceRef, ExcludedItem, MessageRole,
@@ -83,7 +88,8 @@ pub use hands::{
     validate_sandbox_file_path,
 };
 pub use identifiers::{
-    BrainId, ModelId, SegmentId, SessionId, StoragePartitionId, TenantId, ToolCallId, UserId,
+    BrainId, ModelId, SegmentId, SessionAttachmentId, SessionId, StoragePartitionId, TenantId,
+    ToolCallId, UserId,
 };
 pub use learning::LearningEntry;
 pub use memory::{RlsContext, SkillMetadata};

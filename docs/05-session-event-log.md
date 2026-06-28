@@ -146,6 +146,14 @@ The default cloud backend is Postgres (`session_blobs`) so a replay on another
 pod can resolve the blob reference. The local filesystem backend is explicit
 and, in cloud mode, requires a persistent mounted path.
 
+User-visible uploads are separate from claim-check blobs. Contact message
+uploads store metadata and object keys in `session_attachments`, while bytes
+are stored through `object_store` in RustFS locally or AWS S3/GCS in cloud.
+`UserMessage.attachments` stores `Attachment` metadata with durable attachment
+ids. Replaying a session does not require local pod state; any edge or worker
+pod can resolve the attachment metadata from the event and the bytes from the
+configured object store.
+
 Contact-bound sessions persist contact metadata on the `sessions` row. The
 session id is the observability anchor for turns and tool calls; the contact id
 is derived from the session metadata when needed. A contact may exist without a

@@ -54,6 +54,12 @@ async fn main() -> anyhow::Result<()> {
     let providers = moa_auth_providers::build_providers(&moa_config, pool.clone())
         .context("build providers bundle")?;
     let fga = build_fga_client(&moa_config).context("build edge OpenFGA client")?;
+    let session_store = moa_session::PostgresSessionStore::from_existing_pool_with_config(
+        &moa_config,
+        pool.as_ref().clone(),
+    )
+    .await
+    .context("build edge session store")?;
 
     let state = AppState {
         config: Arc::new(moa_config.clone()),
@@ -63,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         knowledge_webhooks: knowledge_webhook_edge_config(&moa_config)
             .context("load knowledge webhook verifier secrets")?,
         pool: pool.clone(),
+        session_store: Arc::new(session_store),
         proxy: Arc::new(OrchestratorProxy::new(&upstream).context("build orchestrator proxy")?),
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)

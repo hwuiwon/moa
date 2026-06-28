@@ -16,6 +16,7 @@ use moa_core::traits::{Identity, IdentityType, SessionChannelBindingUpdate};
 use moa_core::wire::turn::{QueueMessageRequest, SessionProgress, SessionProgressRequest};
 use moa_core::{
     ChannelAccountRef, ChannelRef, ContactId, ContactPointId, ContactRef,
+    ContactSessionAuthorizationRequest, ContactSessionAuthorizationResponse,
     ContactSessionChannelChangeRequest, ContactSessionChannelChangeResponse,
     ContactSessionInitRequest, ContactSessionInitResponse, ContactSessionMessageRequest,
     ContactSessionMessageResponse, ContactSessionProgressRequest, ContactSessionPromotionRequest,
@@ -70,6 +71,11 @@ pub trait Contacts {
     async fn send_message(
         request: Json<ContactSessionMessageRequest>,
     ) -> Result<Json<ContactSessionMessageResponse>, HandlerError>;
+
+    /// Authorizes access to an existing contact-owned session.
+    async fn authorize_session(
+        request: Json<ContactSessionAuthorizationRequest>,
+    ) -> Result<Json<ContactSessionAuthorizationResponse>, HandlerError>;
 
     /// Returns progress for an existing contact-owned session.
     async fn progress(
@@ -560,6 +566,9 @@ impl Contacts for ContactsImpl {
     ) -> Result<Json<ContactSessionMessageResponse>, HandlerError> {
         annotate_restate_handler_span("Contacts", "send_message");
         let request = request.into_inner();
+        if let Err(message) = request.validate_admitted_payload() {
+            return Err(TerminalError::new_with_code(400, message).into());
+        }
         let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
         require_contact_scope(&claims, "contact:session:message:send")
             .map_err(contact_error_handler_error)?;
@@ -613,6 +622,55 @@ impl Contacts for ContactsImpl {
             session_id,
             queued: response.queued,
             started_turn_id: response.started_turn_id,
+        }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: contact JWT verification, scope checks, and session ownership validation bind this authorization to one contact session.
+    async fn authorize_session(
+        &self,
+        ctx: Context<'_>,
+        request: Json<ContactSessionAuthorizationRequest>,
+    ) -> Result<Json<ContactSessionAuthorizationResponse>, HandlerError> {
+        annotate_restate_handler_span("Contacts", "authorize_session");
+        let request = request.into_inner();
+        let claims = verify_contact_token(&request.contact_token, request.tenant_id)?;
+        require_contact_scope(&claims, "contact:session:message:send")
+            .map_err(contact_error_handler_error)?;
+        require_contact_session_permission(&claims, Some(request.session_id))
+            .map_err(contact_error_handler_error)?;
+        let contact_id = contact_id_from_claims(&claims).map_err(contact_error_handler_error)?;
+        annotate_claim_contact_span(&claims, Some(request.session_id));
+        let session_id = request.session_id;
+        let tenant_id = claims.tenant_id;
+        let pool = OrchestratorCtx::current_graph_pool();
+        let store = OrchestratorCtx::current_session_store();
+
+        let contact = ctx
+            .run(|| async move {
+                ensure_contact_token_grant_active(&pool, &claims, contact_id)
+                    .await
+                    .map_err(contact_error_handler_error)?;
+                let meta =
+                    validate_contact_session(store.as_ref(), session_id, tenant_id, contact_id)
+                        .await?;
+                let Some(contact) = meta.contact else {
+                    return Err(TerminalError::new_with_code(
+                        403,
+                        "session has no contact binding",
+                    )
+                    .into());
+                };
+                Ok::<_, HandlerError>(Json::from(contact))
+            })
+            .name("contacts_authorize_session")
+            .await?
+            .into_inner();
+        annotate_contact_operation_span(&contact, Some(session_id));
+
+        Ok(Json::from(ContactSessionAuthorizationResponse {
+            session_id,
+            contact,
         }))
     }
 

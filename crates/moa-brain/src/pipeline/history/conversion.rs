@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use moa_core::{
     ContextMessage, ContextSourceRef, Event, EventRecord, Result, ToolCallId, ToolContent,
-    ToolOutput, ToolOutputConfig, truncate_head_tail,
+    ToolOutput, ToolOutputConfig, render_user_message_with_attachments, truncate_head_tail,
 };
 use moa_security::wrap_untrusted_tool_output;
 
@@ -25,13 +25,18 @@ fn event_to_context_message(
     file_read_paths: &HashMap<ToolCallId, String>,
 ) -> Option<Result<CompiledRecordMessage>> {
     match &record.event {
-        Event::UserMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
-            ContextMessage::user(text.clone()),
+        Event::UserMessage { text, attachments } => {
+            Some(Ok(CompiledRecordMessage::plain(sourced_message(
+                ContextMessage::user(render_user_message_with_attachments(text, attachments)),
+                record,
+            ))))
+        }
+        Event::QueuedMessage {
+            text, attachments, ..
+        } => Some(Ok(CompiledRecordMessage::plain(sourced_message(
+            ContextMessage::user(render_user_message_with_attachments(text, attachments)),
             record,
         )))),
-        Event::QueuedMessage { text, .. } => Some(Ok(CompiledRecordMessage::plain(
-            sourced_message(ContextMessage::user(text.clone()), record),
-        ))),
         Event::BrainResponse {
             text,
             thought_signature,
@@ -288,6 +293,50 @@ mod tests {
         assert_eq!(messages[1].role, moa_core::MessageRole::Assistant);
         assert_eq!(messages[1].content, "Hi there");
         assert!(tokens_added > 0);
+    }
+
+    #[test]
+    fn history_compiler_renders_attachment_refs_for_user_messages() {
+        // Pins: attachment-only user messages still carry durable attachment refs into replay.
+        let session = session();
+        let attachment_id = moa_core::SessionAttachmentId::new();
+        let events = vec![event_record(
+            &session.id,
+            0,
+            Event::UserMessage {
+                text: String::new(),
+                attachments: vec![moa_core::Attachment {
+                    id: Some(attachment_id),
+                    name: "receipt.png".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                    sha256: Some("f".repeat(64)),
+                    url: Some(format!(
+                        "/v1/sessions/{}/attachments/{attachment_id}",
+                        session.id
+                    )),
+                    path: None,
+                    size_bytes: Some(128),
+                }],
+            },
+        )];
+        let compiler = HistoryCompiler::new(Arc::new(MockSessionStore::new(
+            session.clone(),
+            events.clone(),
+        )));
+
+        let (messages, _) = compiler
+            .compile_messages(&events, 1_000)
+            .expect("compile attachment-only history message");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, moa_core::MessageRole::User);
+        assert_eq!(
+            messages[0].content,
+            format!(
+                "Attachments (stored references; contents are not embedded):\n- receipt.png id={attachment_id} mime=image/png bytes=128 url=/v1/sessions/{}/attachments/{attachment_id}",
+                session.id
+            )
+        );
     }
 
     #[test]

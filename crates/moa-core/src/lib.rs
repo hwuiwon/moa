@@ -27,7 +27,8 @@ pub use config::{
     MemoryRankingWeights, MemoryRerankerMode, MemoryRetrievalConfig, MemoryVectorConfig,
     MessagingConfig, MetricsConfig, MoaConfig, ModelsConfig, ObservabilityConfig, OpenFgaConfig,
     OrchestratorConfig, OtlpProtocol, PermissionsConfig, ProviderCredentialConfig, ProvidersConfig,
-    QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SkillBudgetConfig, ToolBudgetConfig,
+    QueryRewriteConfig, ResolutionConfig, ResolutionWeights, SessionAttachmentBackend,
+    SessionAttachmentStorageConfig, SessionBlobBackend, SkillBudgetConfig, ToolBudgetConfig,
     ToolOutputConfig, VectorEmbedderConfig,
 };
 pub use diff::compute_unified_diff;
@@ -40,8 +41,8 @@ pub use session_replay::{
 pub use traits::{
     BlobStore, BranchManager, BuiltInTool, ContextProcessor, CredentialVault, EmbeddingProvider,
     ExperienceStore, HandProvider, LLMProvider, LearningCandidateStore, LineageHandle,
-    MemoryToolExecutor, NULL_LINEAGE_HANDLE, NullLineageHandle, SegmentStore, SessionStore,
-    ToolContext,
+    MemoryToolExecutor, NULL_LINEAGE_HANDLE, NullLineageHandle, SegmentStore,
+    SessionAttachmentStore, SessionStore, ToolContext,
 };
 pub use truncation::{truncate_head_tail, truncate_head_tail_lines};
 pub use types::*;

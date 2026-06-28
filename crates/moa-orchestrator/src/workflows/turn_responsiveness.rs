@@ -734,8 +734,10 @@ mod tests {
 
     fn attachment(name: &str) -> Attachment {
         Attachment {
+            id: None,
             name: name.to_string(),
             mime_type: None,
+            sha256: None,
             url: None,
             path: None,
             size_bytes: None,

@@ -119,6 +119,13 @@ generic `session_event` frames keyed by event sequence number, and finally a
 live progress connection. `Session/progress` remains the compact
 history/recovery projection used by the stream and by reload flows.
 
+The same route accepts multipart contact messages with text, photo uploads, or
+both. Upload bytes are validated by the edge and stored through `object_store`
+before session admission continues; local development uses RustFS, while cloud
+deployments use AWS S3 or GCS. The durable session message carries only
+`Attachment` metadata with a `SessionAttachmentId`. Clients reload the session
+from events and fetch bytes through the authorized session attachment route.
+
 ## API Automation
 
 Operator and test automation call `moa-edge` public

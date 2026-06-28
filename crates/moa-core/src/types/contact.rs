@@ -10,6 +10,21 @@ use super::{
     SessionId, TenantId,
 };
 
+/// Maximum UTF-8 byte length for one contact-authored session message.
+pub const MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES: usize = 64 * 1024;
+
+/// Maximum number of attachments admitted with one contact-authored session message.
+pub const MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE: usize = 4;
+
+/// Maximum bytes for one contact-authored session attachment.
+pub const MAX_CONTACT_SESSION_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+
+/// Maximum total attachment bytes for one contact-authored session message.
+pub const MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES: usize = 10 * 1024 * 1024;
+
+/// Maximum UTF-8 byte length for one contact-authored attachment display name.
+pub const MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES: usize = 255;
+
 uuid_id!(
     /// Identifier for an agent-facing contact.
     pub struct ContactId
@@ -401,6 +416,7 @@ pub struct ContactSessionMessageRequest {
     /// Current contact token.
     pub contact_token: String,
     /// User message text to enqueue or start immediately.
+    #[serde(default)]
     pub user_message: String,
     /// Attachments included with the user message.
     #[serde(default)]
@@ -413,6 +429,97 @@ pub struct ContactSessionMessageRequest {
     pub max_turns: Option<u32>,
 }
 
+impl ContactSessionMessageRequest {
+    /// Validates size and presence invariants for an admitted contact session message.
+    pub fn validate_admitted_payload(&self) -> std::result::Result<(), &'static str> {
+        validate_contact_session_message_text(&self.user_message)?;
+        if self.attachments.len() > MAX_CONTACT_SESSION_ATTACHMENTS_PER_MESSAGE {
+            return Err("too many message attachments");
+        }
+        validate_contact_session_attachments(&self.attachments)?;
+        if self.user_message.trim().is_empty() && self.attachments.is_empty() {
+            return Err("contact session message requires text or an attachment");
+        }
+        Ok(())
+    }
+}
+
+/// Validates only the text portion of a contact-authored session message.
+pub fn validate_contact_session_message_text(text: &str) -> std::result::Result<(), &'static str> {
+    if text.len() > MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES {
+        return Err("session message text is too long");
+    }
+    Ok(())
+}
+
+/// Returns the canonical MIME type for a contact-session photo upload.
+#[must_use]
+pub fn normalize_contact_session_photo_mime(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn validate_contact_session_attachments(
+    attachments: &[Attachment],
+) -> std::result::Result<(), &'static str> {
+    let mut total_bytes = 0_usize;
+    for attachment in attachments {
+        if attachment.id.is_none() {
+            return Err("message attachment is not stored");
+        }
+        if attachment.name.is_empty()
+            || attachment.name.len() > MAX_CONTACT_SESSION_ATTACHMENT_NAME_BYTES
+        {
+            return Err("message attachment name is invalid");
+        }
+        if attachment.name.chars().any(char::is_control) {
+            return Err("message attachment name is invalid");
+        }
+        if attachment.path.is_some() {
+            return Err("message attachment path is not allowed");
+        }
+        if attachment.url.as_deref().is_none_or(str::is_empty) {
+            return Err("message attachment URL is required");
+        }
+        let Some(mime_type) = attachment.mime_type.as_deref() else {
+            return Err("message attachment MIME type is required");
+        };
+        if normalize_contact_session_photo_mime(mime_type).is_none() {
+            return Err("only photo attachments are supported");
+        }
+        let Some(size_bytes) = attachment.size_bytes else {
+            return Err("message attachment size is required");
+        };
+        let size_bytes =
+            usize::try_from(size_bytes).map_err(|_| "message attachment is too large")?;
+        if size_bytes > MAX_CONTACT_SESSION_ATTACHMENT_BYTES {
+            return Err("message attachment is too large");
+        }
+        total_bytes = total_bytes.saturating_add(size_bytes);
+        if total_bytes > MAX_CONTACT_SESSION_ATTACHMENT_TOTAL_BYTES {
+            return Err("message attachments are too large");
+        }
+        let Some(sha256) = attachment.sha256.as_deref() else {
+            return Err("message attachment digest is required");
+        };
+        if !is_sha256_hex_digest(sha256) {
+            return Err("message attachment digest is invalid");
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Response returned after admitting a contact session message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactSessionMessageResponse {
@@ -423,6 +530,26 @@ pub struct ContactSessionMessageResponse {
     /// Turn ID when the message started a workflow immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_turn_id: Option<String>,
+}
+
+/// Request to authorize access to a contact-owned session without loading progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionAuthorizationRequest {
+    /// Tenant asserted by the public route.
+    pub tenant_id: TenantId,
+    /// Session being accessed.
+    pub session_id: SessionId,
+    /// Current contact token.
+    pub contact_token: String,
+}
+
+/// Response returned after authorizing a contact-owned session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSessionAuthorizationResponse {
+    /// Session the contact token can access.
+    pub session_id: SessionId,
+    /// Contact bound to the session.
+    pub contact: ContactRef,
 }
 
 /// Request to read progress for a contact-owned session.
@@ -461,7 +588,15 @@ pub struct ContactSessionPromotionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChannelRef, ContactSessionChannelRequest};
+    use std::path::PathBuf;
+
+    use uuid::Uuid;
+
+    use super::{
+        ChannelRef, ContactSessionChannelRequest, ContactSessionMessageRequest,
+        MAX_CONTACT_SESSION_ATTACHMENT_BYTES,
+    };
+    use crate::types::{Attachment, SessionAttachmentId, SessionId, TenantId};
 
     #[test]
     fn contact_session_channel_request_supports_chat_delivery_channel() {
@@ -476,5 +611,106 @@ mod tests {
         };
 
         assert_eq!(request.channel_ref.channel(), super::Channel::Chat);
+    }
+
+    #[test]
+    fn contact_session_message_rejects_oversized_text() {
+        // Pins: every service path enforces the public contact message text limit.
+        let mut request = base_message_request();
+        request.user_message = "x".repeat(super::MAX_CONTACT_SESSION_MESSAGE_TEXT_BYTES + 1);
+
+        assert_eq!(
+            request.validate_admitted_payload(),
+            Err("session message text is too long")
+        );
+    }
+
+    #[test]
+    fn contact_session_message_accepts_stored_photo_only_body() {
+        // Pins: photo-only contact messages are valid after edge storage produces durable metadata.
+        let mut request = base_message_request();
+        request.user_message.clear();
+        request.attachments = vec![stored_photo_attachment()];
+
+        assert_eq!(request.validate_admitted_payload(), Ok(()));
+    }
+
+    #[test]
+    fn contact_session_message_rejects_unstored_attachment() {
+        // Pins: callers cannot bypass edge byte validation with JSON-only attachment metadata.
+        let mut request = base_message_request();
+        let mut attachment = stored_photo_attachment();
+        attachment.id = None;
+        request.attachments = vec![attachment];
+
+        assert_eq!(
+            request.validate_admitted_payload(),
+            Err("message attachment is not stored")
+        );
+    }
+
+    #[test]
+    fn contact_session_message_rejects_non_photo_attachment() {
+        // Pins: contact messages only admit stored photo attachments until other file types have validators.
+        let mut request = base_message_request();
+        let mut attachment = stored_photo_attachment();
+        attachment.mime_type = Some("application/zip".to_string());
+        request.attachments = vec![attachment];
+
+        assert_eq!(
+            request.validate_admitted_payload(),
+            Err("only photo attachments are supported")
+        );
+    }
+
+    #[test]
+    fn contact_session_message_rejects_unsafe_attachment_metadata() {
+        // Pins: stored attachment metadata must remain bounded and digest-addressed.
+        let mut request = base_message_request();
+        let mut attachment = stored_photo_attachment();
+        attachment.size_bytes = Some((MAX_CONTACT_SESSION_ATTACHMENT_BYTES + 1) as u64);
+        request.attachments = vec![attachment];
+        assert_eq!(
+            request.validate_admitted_payload(),
+            Err("message attachment is too large")
+        );
+
+        request.attachments = vec![stored_photo_attachment()];
+        request.attachments[0].path = Some(PathBuf::from("/tmp/photo.png"));
+        assert_eq!(
+            request.validate_admitted_payload(),
+            Err("message attachment path is not allowed")
+        );
+
+        request.attachments = vec![stored_photo_attachment()];
+        request.attachments[0].sha256 = Some("ABC".to_string());
+        assert_eq!(
+            request.validate_admitted_payload(),
+            Err("message attachment digest is invalid")
+        );
+    }
+
+    fn base_message_request() -> ContactSessionMessageRequest {
+        ContactSessionMessageRequest {
+            tenant_id: TenantId(Uuid::nil()),
+            session_id: SessionId(Uuid::nil()),
+            contact_token: "token".to_string(),
+            user_message: "hello".to_string(),
+            attachments: Vec::new(),
+            model: None,
+            max_turns: None,
+        }
+    }
+
+    fn stored_photo_attachment() -> Attachment {
+        Attachment {
+            id: Some(SessionAttachmentId(Uuid::nil())),
+            name: "photo.png".to_string(),
+            mime_type: Some("image/png".to_string()),
+            sha256: Some("a".repeat(64)),
+            url: Some("/v1/sessions/session/attachments/attachment".to_string()),
+            path: None,
+            size_bytes: Some(1024),
+        }
     }
 }

@@ -8,7 +8,7 @@ use crate::error::{MoaError, Result};
 
 use super::{
     AsyncAuthzKind, AuthProviderKind, AuthzEngine, MemoryRerankerMode, MoaConfig, OtlpProtocol,
-    RuntimeCacheBackend, SessionBlobBackend, TokenVaultKind,
+    RuntimeCacheBackend, SessionAttachmentBackend, SessionBlobBackend, TokenVaultKind,
 };
 
 /// Optional flat environment overrides for `MoaConfig`.
@@ -276,6 +276,30 @@ pub struct MoaEnvOverlay {
     pub session_blob_backend: Option<SessionBlobBackend>,
     /// `MOA_SESSION_BLOB_DIR`.
     pub session_blob_dir: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_BACKEND`.
+    pub session_attachment_backend: Option<SessionAttachmentBackend>,
+    /// `MOA_SESSION_ATTACHMENT_BUCKET`.
+    pub session_attachment_bucket: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_PREFIX`.
+    pub session_attachment_prefix: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_REGION`.
+    pub session_attachment_region: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_ENDPOINT`.
+    pub session_attachment_endpoint: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_ACCESS_KEY_ID`.
+    pub session_attachment_access_key_id: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_SECRET_ACCESS_KEY`.
+    pub session_attachment_secret_access_key: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_ALLOW_HTTP`.
+    pub session_attachment_allow_http: Option<bool>,
+    /// `MOA_SESSION_ATTACHMENT_VIRTUAL_HOSTED_STYLE`.
+    pub session_attachment_virtual_hosted_style: Option<bool>,
+    /// `MOA_SESSION_ATTACHMENT_GCP_SERVICE_ACCOUNT_PATH`.
+    pub session_attachment_gcp_service_account_path: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_GCP_SERVICE_ACCOUNT_KEY`.
+    pub session_attachment_gcp_service_account_key: Option<String>,
+    /// `MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH`.
+    pub session_attachment_gcp_application_credentials_path: Option<String>,
     /// `MOA_RUNTIME_CACHE_BACKEND`.
     pub runtime_cache_backend: Option<RuntimeCacheBackend>,
     /// `MOA_RUNTIME_CACHE_REDIS_URL`.
@@ -473,6 +497,10 @@ impl MoaEnvOverlay {
             ("MOA_ORCHESTRATOR_ENDPOINT", &self.orchestrator_endpoint),
             ("MOA_ORCHESTRATOR_HEALTH_URL", &self.orchestrator_health_url),
             ("MOA_RUNTIME_CACHE_REDIS_URL", &self.runtime_cache_redis_url),
+            (
+                "MOA_SESSION_ATTACHMENT_ENDPOINT",
+                &self.session_attachment_endpoint,
+            ),
             (
                 "MOA_OBSERVABILITY_OTLP_ENDPOINT",
                 &self.observability_otlp_endpoint,
@@ -1059,6 +1087,46 @@ mod tests {
             config.session.blob_dir.as_deref(),
             Some("/var/lib/moa/blobs")
         );
+    }
+
+    #[test]
+    fn session_attachment_overlay_applies_object_store_settings() {
+        // Pins: session upload bytes use explicit object storage config rather than Postgres bytes.
+        let overlay = MoaEnvOverlay::from_iter(env_pairs([
+            ("MOA_SESSION_ATTACHMENT_BACKEND", "gcs"),
+            ("MOA_SESSION_ATTACHMENT_BUCKET", "moa-prod-attachments"),
+            ("MOA_SESSION_ATTACHMENT_PREFIX", "prod/session-attachments"),
+            (
+                "MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH",
+                "/var/run/secrets/gcp/application-default.json",
+            ),
+            ("MOA_SESSION_ATTACHMENT_ALLOW_HTTP", "false"),
+        ]))
+        .expect("session attachment overlay should parse");
+        let mut config = MoaConfig::default();
+
+        overlay
+            .apply_to(&mut config)
+            .expect("session attachment overlay should apply");
+
+        assert_eq!(
+            config.session.attachments.backend,
+            SessionAttachmentBackend::Gcs
+        );
+        assert_eq!(config.session.attachments.bucket, "moa-prod-attachments");
+        assert_eq!(
+            config.session.attachments.prefix,
+            "prod/session-attachments"
+        );
+        assert_eq!(
+            config
+                .session
+                .attachments
+                .gcp_application_credentials_path
+                .as_deref(),
+            Some("/var/run/secrets/gcp/application-default.json")
+        );
+        assert!(!config.session.attachments.allow_http);
     }
 
     #[test]

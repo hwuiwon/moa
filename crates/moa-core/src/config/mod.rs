@@ -62,7 +62,9 @@ pub use sandbox::{
     McpTransportConfig,
 };
 pub use security::PermissionsConfig;
-pub use session::{SessionBlobBackend, SessionConfig};
+pub use session::{
+    SessionAttachmentBackend, SessionAttachmentStorageConfig, SessionBlobBackend, SessionConfig,
+};
 pub use telemetry::{MetricsConfig, ObservabilityConfig, OtlpProtocol};
 pub use token_vault::{TokenVaultConfig, TokenVaultKind};
 
@@ -155,6 +157,8 @@ impl MoaConfig {
                     .to_string(),
             ));
         }
+
+        self.session.validate(self.cloud.enabled)?;
 
         Ok(())
     }

@@ -229,8 +229,10 @@ mod tests {
         moa_core::UserMessage {
             text: text.to_string(),
             attachments: vec![Attachment {
+                id: None,
                 name: "a.txt".to_string(),
                 mime_type: Some("text/plain".to_string()),
+                sha256: None,
                 url: None,
                 path: None,
                 size_bytes: Some(3),

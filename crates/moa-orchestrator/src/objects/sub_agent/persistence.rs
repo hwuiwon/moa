@@ -15,17 +15,7 @@ pub(super) async fn persist_parent_session_event(
 }
 
 pub(super) fn render_user_message(message: &UserMessage) -> String {
-    if message.attachments.is_empty() {
-        return message.text.clone();
-    }
-
-    let attachments = message
-        .attachments
-        .iter()
-        .map(|attachment| attachment.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}\n\nAttachments: {attachments}", message.text)
+    moa_core::render_user_message_with_attachments(&message.text, &message.attachments)
 }
 
 pub(super) fn to_handler_error(error: MoaError) -> HandlerError {

@@ -532,6 +532,7 @@ async fn emit_user_turn(
     } else {
         Event::QueuedMessage {
             text: text.to_string(),
+            attachments: Vec::new(),
             queued_at: Utc::now(),
         }
     };

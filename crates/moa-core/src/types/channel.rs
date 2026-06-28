@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ActionEnvelope, ActionReviewPreview, ContactPointId, SessionId, SessionStatus, UserId,
+    ActionEnvelope, ActionReviewPreview, ContactPointId, SessionAttachmentId, SessionId,
+    SessionStatus, UserId,
 };
 
 uuid_id!(
@@ -154,16 +155,58 @@ pub struct SessionChannelBinding {
 /// File or rich attachment metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
+    /// Durable session attachment id when the attachment is stored by MOA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<SessionAttachmentId>,
     /// Attachment display name.
     pub name: String,
     /// MIME type when known.
     pub mime_type: Option<String>,
+    /// Lowercase SHA-256 hex digest when the attachment is stored by MOA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     /// Remote URL when applicable.
     pub url: Option<String>,
     /// Local filesystem path when applicable.
     pub path: Option<PathBuf>,
     /// Attachment size in bytes when known.
     pub size_bytes: Option<u64>,
+}
+
+/// Renders a user-authored text body with durable attachment references.
+#[must_use]
+pub fn render_user_message_with_attachments(text: &str, attachments: &[Attachment]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+
+    let mut rendered = String::new();
+    if !text.trim().is_empty() {
+        rendered.push_str(text);
+        rendered.push_str("\n\n");
+    }
+    rendered.push_str("Attachments (stored references; contents are not embedded):");
+    for attachment in attachments {
+        rendered.push_str("\n- ");
+        rendered.push_str(&attachment.name);
+        if let Some(id) = attachment.id {
+            rendered.push_str(" id=");
+            rendered.push_str(&id.to_string());
+        }
+        if let Some(mime_type) = attachment.mime_type.as_deref() {
+            rendered.push_str(" mime=");
+            rendered.push_str(mime_type);
+        }
+        if let Some(size_bytes) = attachment.size_bytes {
+            rendered.push_str(" bytes=");
+            rendered.push_str(&size_bytes.to_string());
+        }
+        if let Some(url) = attachment.url.as_deref().filter(|url| !url.is_empty()) {
+            rendered.push_str(" url=");
+            rendered.push_str(url);
+        }
+    }
+    rendered
 }
 
 /// Normalized inbound channel message.

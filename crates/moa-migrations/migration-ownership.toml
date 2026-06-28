@@ -74,6 +74,12 @@ owner = "moa-session"
 readers = ["moa-orchestrator", "moa-messaging"]
 
 [[table]]
+name = "session_attachments"
+schema = "public"
+owner = "moa-session"
+readers = ["moa-edge", "moa-orchestrator", "moa-brain"]
+
+[[table]]
 name = "api_keys"
 schema = "public"
 owner = "moa-auth/providers"

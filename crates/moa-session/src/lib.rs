@@ -4,6 +4,7 @@
 //! session-store queries.
 
 pub mod analytics;
+mod attachment_storage;
 pub mod blob;
 pub mod neon;
 pub mod queries;

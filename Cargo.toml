@@ -170,7 +170,7 @@ liteparse = { version = "2.2.1", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", features = ["http-listener"] }
 moka = { version = "0.12", features = ["future"] }
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.11", features = ["aws", "gcp"] }
 opentelemetry = "0.31"
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-rustls"] }
 opentelemetry_sdk = "0.31"

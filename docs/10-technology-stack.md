@@ -81,6 +81,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Restate | Durable orchestration engine |
 | Postgres/Neon | Product data store |
 | Redis | Shared runtime cache required when `MOA_CLOUD_ENABLED=true` |
+| AWS S3 or GCS | Session attachment byte storage in cloud |
 | LLM provider | Model calls and optional embeddings |
 | Hand provider | Daytona, E2B, or configured local/container execution |
 | Kubernetes or equivalent | Hosting Restate and MOA services |
@@ -97,6 +98,7 @@ Docker is used by the dev stack and optionally by local hand providers.
 | Linked integration providers | Nango and Merge for tenant knowledge linked-account flow, sync trigger, changed-record listing, and webhooks |
 | Document parsers | `liteparse` for native local file parsing; LlamaParse, Unstructured, and Reducto for configured external tenant knowledge parsing when native parsing is insufficient |
 | Redis | Optional for local development; required for cloud replicas that set `MOA_CLOUD_ENABLED=true` |
+| RustFS | Local S3-compatible attachment storage for docker-compose development |
 
 ## Build Targets
 
@@ -132,6 +134,7 @@ and deployment setup. Key groups:
 | `MOA_RESTATE_*` and `MOA_ORCHESTRATOR_*` | Restate ingress/admin endpoints and optional health URL |
 | `MOA_AUTH_*`, `MOA_AUTHZ_*`, `MOA_TOKEN_VAULT_*`, `MOA_ASYNC_AUTHZ_*`, `MOA_AUDIT_SECURITY_*` | identity, authorization, token vault, builtin async authorization challenges, and OCSF security-event audit |
 | `MOA_SESSION_BLOB_*` | claim-check blob backend, threshold, and explicit local path when filesystem blobs are used |
+| `MOA_SESSION_ATTACHMENT_*` | session upload object storage backend, bucket, prefix, endpoint, and cloud credentials |
 | `MOA_PRIVACY_*`, `MOA_LINEAGE_AUDIT_*`, and `MOA_PII_VAULT_SECRET_HEX` | privacy approval verification, DSAR/export signing, lineage audit signing, and PII-vault pseudonymization |
 | `MOA_MESSAGING_*` | messaging adapter settings |
 | `MOA_PERMISSIONS_*` | default action-policy posture for tool execution |
@@ -181,6 +184,23 @@ MOA_RUNTIME_CACHE_REDIS_URL=redis://...
 When `MOA_CLOUD_ENABLED=true`, startup fails if runtime cache resolution lands
 on the in-memory backend. Memory remains the local-development fallback and is
 per-process best effort only.
+
+Configure session attachment object storage for cloud:
+
+```bash
+# AWS S3 or S3-compatible HTTPS endpoint
+MOA_SESSION_ATTACHMENT_BACKEND=s3
+MOA_SESSION_ATTACHMENT_BUCKET=moa-session-attachments
+MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
+MOA_SESSION_ATTACHMENT_REGION=us-east-1
+MOA_SESSION_ATTACHMENT_ALLOW_HTTP=false
+
+# GCS alternative
+MOA_SESSION_ATTACHMENT_BACKEND=gcs
+MOA_SESSION_ATTACHMENT_BUCKET=moa-session-attachments
+MOA_SESSION_ATTACHMENT_PREFIX=session-attachments
+MOA_SESSION_ATTACHMENT_GCP_APPLICATION_CREDENTIALS_PATH=/var/run/secrets/gcp/application-default.json
+```
 
 Optional hand and messaging settings depend on the chosen deployment:
 

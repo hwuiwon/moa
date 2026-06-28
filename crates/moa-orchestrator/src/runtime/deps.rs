@@ -391,7 +391,6 @@ mod tests {
             runtime_cache: RuntimeCacheConfig {
                 backend: RuntimeCacheBackend::Memory,
                 redis_url: Some("redis://unused.example:6379/0".to_string()),
-                ..RuntimeCacheConfig::default()
             },
             ..MoaConfig::default()
         };
@@ -425,7 +424,6 @@ mod tests {
             runtime_cache: RuntimeCacheConfig {
                 backend: RuntimeCacheBackend::Redis,
                 redis_url: None,
-                ..RuntimeCacheConfig::default()
             },
             ..MoaConfig::default()
         };

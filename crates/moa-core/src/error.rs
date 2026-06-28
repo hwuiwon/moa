@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::types::{SessionId, ToolOutput};
+use crate::types::{SessionAttachmentId, SessionId, ToolOutput};
 
 /// Convenience result type for MOA libraries.
 pub type Result<T> = std::result::Result<T, MoaError>;
@@ -36,6 +36,14 @@ pub enum MoaError {
     /// A referenced blob payload could not be found.
     #[error("blob not found: {0}")]
     BlobNotFound(String),
+
+    /// A referenced session attachment metadata row could not be found.
+    #[error("session attachment not found: {0}")]
+    SessionAttachmentNotFound(SessionAttachmentId),
+
+    /// A referenced session attachment object could not be found.
+    #[error("session attachment object not found: {0}")]
+    SessionAttachmentObjectNotFound(String),
 
     /// Tool execution failed.
     #[error("tool error: {0}")]
@@ -194,7 +202,10 @@ impl MoaError {
             // in the "kill the app" sense nor recoverable within the
             // same session — treat them as fatal so the supervisor
             // doesn't leave a broken session in `Paused`.
-            Self::SessionNotFound(_) | Self::BlobNotFound(_) => true,
+            Self::SessionNotFound(_)
+            | Self::BlobNotFound(_)
+            | Self::SessionAttachmentNotFound(_)
+            | Self::SessionAttachmentObjectNotFound(_) => true,
             Self::Cancelled => true,
         }
     }
@@ -258,6 +269,12 @@ pub fn classify_tool_error(error: &MoaError, consecutive_timeouts: u32) -> ToolF
         },
         MoaError::BlobNotFound(message) => ToolFailureClass::Fatal {
             reason: format!("tool artifact was not found: {message}"),
+        },
+        MoaError::SessionAttachmentNotFound(attachment_id) => ToolFailureClass::Fatal {
+            reason: format!("session attachment was not found: {attachment_id}"),
+        },
+        MoaError::SessionAttachmentObjectNotFound(object_key) => ToolFailureClass::Fatal {
+            reason: format!("session attachment object was not found: {object_key}"),
         },
         MoaError::SessionNotFound(session_id) => ToolFailureClass::Fatal {
             reason: format!("session not found: {session_id}"),

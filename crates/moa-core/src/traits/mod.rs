@@ -20,16 +20,16 @@ use crate::analytics::{
 use crate::error::{MoaError, Result, ToolFailureClass, classify_tool_error};
 use crate::events::Event;
 use crate::types::{
-    Channel, ChannelAccountId, ChannelCapabilities, ChannelRef, CheckpointHandle, CheckpointInfo,
-    ClaimCheck, CompletionRequest, CompletionStream, ContactId, ContactPointId, ContextSnapshot,
-    Credential as StoredCredential, EventFilter, EventRange, EventRecord, EventType,
-    ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus, InboundMessage,
-    LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate, LearningEntry,
-    MessageId, ModelCapabilities, OutboundMessage, ProcessorOutput, SandboxFile, SegmentAssessment,
-    SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum, SessionChannelBinding,
-    SessionChannelBindingId, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionSummary,
-    SkillResolutionRate, StoragePartitionId, TaskSegment, TaskStrategySuccessRate, TenantId,
-    ToolCallId, ToolOutput, WorkingContext,
+    Attachment, Channel, ChannelAccountId, ChannelCapabilities, ChannelRef, CheckpointHandle,
+    CheckpointInfo, ClaimCheck, CompletionRequest, CompletionStream, ContactId, ContactPointId,
+    ContextSnapshot, Credential as StoredCredential, EventFilter, EventRange, EventRecord,
+    EventType, ExperienceAttribution, ExperienceRecord, HandHandle, HandSpec, HandStatus,
+    InboundMessage, LearningCandidate, LearningCandidateStatus, LearningCandidateStatusUpdate,
+    LearningEntry, MessageId, ModelCapabilities, OutboundMessage, ProcessorOutput, SandboxFile,
+    SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId, SequenceNum,
+    SessionAttachmentId, SessionChannelBinding, SessionChannelBindingId, SessionFilter, SessionId,
+    SessionMeta, SessionStatus, SessionSummary, SkillResolutionRate, StoragePartitionId,
+    TaskSegment, TaskStrategySuccessRate, TenantId, ToolCallId, ToolOutput, WorkingContext,
 };
 use crate::wire::analytics::LearningCandidateSummary;
 
@@ -472,6 +472,47 @@ pub trait BlobStore: Send + Sync {
 
     /// Returns whether a blob already exists.
     async fn exists(&self, session_id: &SessionId, blob_id: &str) -> Result<bool>;
+}
+
+/// Durable store for user-visible attachments carried by session messages.
+#[async_trait]
+pub trait SessionAttachmentStore: Send + Sync {
+    /// Stores one attachment and returns its durable metadata.
+    async fn put(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        contact_id: Option<ContactId>,
+        name: String,
+        mime_type: String,
+        content: Vec<u8>,
+    ) -> Result<Attachment>;
+
+    /// Fetches stored attachment content and metadata.
+    async fn get(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        attachment_id: SessionAttachmentId,
+    ) -> Result<(Attachment, Vec<u8>)>;
+
+    /// Deletes one stored attachment.
+    async fn delete(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+        attachment_id: SessionAttachmentId,
+    ) -> Result<()>;
+
+    /// Lists durable attachment metadata for a session in creation order.
+    async fn list_for_session(
+        &self,
+        tenant_id: TenantId,
+        session_id: SessionId,
+    ) -> Result<Vec<Attachment>>;
+
+    /// Deletes every attachment associated with the provided session.
+    async fn delete_for_session(&self, tenant_id: TenantId, session_id: SessionId) -> Result<()>;
 }
 
 /// Optional database-level state checkpointing.

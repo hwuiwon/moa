@@ -1068,9 +1068,21 @@ impl SessionStore for PostgresSessionStore {
         let pending_signals = self.table_name("pending_signals");
         let context_snapshots = self.table_name("context_snapshots");
         let task_segments = self.table_name("task_segments");
+        let session_attachments = self.table_name("session_attachments");
         let sessions = self.table_name("sessions");
 
         let mut transaction = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let Some(tenant_uuid) = sqlx::query_scalar::<_, Uuid>(&format!(
+            "SELECT tenant_id FROM {sessions} WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(session_id.0)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?
+        else {
+            return Err(MoaError::SessionNotFound(session_id));
+        };
+        let tenant_id = TenantId(tenant_uuid);
         let event_count = sqlx::query_scalar::<_, i64>(&format!(
             "SELECT COUNT(*) FROM {events} WHERE session_id = $1"
         ))
@@ -1096,6 +1108,23 @@ impl SessionStore for PostgresSessionStore {
                 .await
                 .map_err(map_sqlx_error)?;
         }
+
+        let attachment_object_keys = sqlx::query(&format!(
+            "DELETE FROM {session_attachments} \
+             WHERE tenant_id = $1 AND session_id = $2 \
+             RETURNING object_key"
+        ))
+        .bind(tenant_id.0)
+        .bind(session_id.0)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(map_sqlx_error)?
+        .into_iter()
+        .map(|row| {
+            row.try_get::<String, _>("object_key")
+                .map_err(map_sqlx_error)
+        })
+        .collect::<Result<Vec<_>>>()?;
         let deleted = sqlx::query(&format!("DELETE FROM {sessions} WHERE id = $1"))
             .bind(session_id.0)
             .execute(&mut *transaction)
@@ -1111,6 +1140,16 @@ impl SessionStore for PostgresSessionStore {
 
         if let Err(err) = self.blob_store.delete_session(&session_id).await {
             tracing::warn!(%err, session_id = %session_id, "blob cleanup failed after empty session delete");
+        }
+        for object_key in attachment_object_keys {
+            if let Err(err) = self.attachment_store.delete(&object_key).await {
+                tracing::warn!(
+                    %err,
+                    session_id = %session_id,
+                    object_key,
+                    "attachment object cleanup failed after empty session delete"
+                );
+            }
         }
 
         Ok(())

@@ -8,6 +8,10 @@ uuid_id!(
     /// Identifier for one task segment within a session.
     pub struct SegmentId
 );
+uuid_id!(
+    /// Identifier for a durable attachment linked from a session message.
+    pub struct SessionAttachmentId
+);
 string_id!(
     /// Identifier for a MOA user.
     pub struct UserId

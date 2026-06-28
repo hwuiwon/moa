@@ -13,6 +13,7 @@ moa-db = { workspace = true }
 moa-migrations = { workspace = true }
 moa-observability = { workspace = true }
 moa-security = { workspace = true }
+object_store.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

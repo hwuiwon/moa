@@ -16,9 +16,9 @@ use moa_core::{
     EventType, ExperienceAttribution, ExperienceRecord, ExperienceStore, LearningCandidate,
     LearningCandidateStatus, LearningCandidateStatusUpdate, LearningCandidateStore, LearningEntry,
     MoaConfig, MoaError, Result, SegmentAssessment, SegmentBaseline, SegmentCompletion, SegmentId,
-    SegmentStore, SessionAnalyticsSummary, SessionChannelBinding, SessionChannelBindingId,
-    SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore, SessionSummary,
-    SessionTurnMetric, SkillResolutionRate, StoragePartitionId, TaskSegment,
+    SegmentStore, SessionAnalyticsSummary, SessionAttachmentStorageConfig, SessionChannelBinding,
+    SessionChannelBindingId, SessionFilter, SessionId, SessionMeta, SessionStatus, SessionStore,
+    SessionSummary, SessionTurnMetric, SkillResolutionRate, StoragePartitionId, TaskSegment,
     TaskStrategySuccessRate, TenantAnalyticsSummary, TenantId, ToolCallId, ToolCallSummary,
     record_session_event_replay,
 };
@@ -31,6 +31,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgPoolOptions, types::
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::attachment_storage::AttachmentObjectStore;
 use crate::blob::{
     FileBlobStore, blob_store_from_config, decode_event_from_storage, encode_event_for_storage,
     preview_text,
@@ -49,9 +50,22 @@ mod experience;
 mod helpers;
 mod learning;
 mod segments;
+mod session_attachments;
 mod session_store;
 
 use helpers::*;
+
+fn local_rustfs_config() -> MoaConfig {
+    let mut config = MoaConfig::default();
+    config.session.attachments = SessionAttachmentStorageConfig::local_rustfs();
+    config
+}
+
+struct SessionStorageBackends {
+    blob_store: Arc<dyn BlobStore>,
+    blob_threshold_bytes: usize,
+    attachment_store: AttachmentObjectStore,
+}
 
 /// PostgreSQL-backed implementation of `SessionStore`.
 #[derive(Clone)]
@@ -61,6 +75,7 @@ pub struct PostgresSessionStore {
     schema_name: Option<String>,
     blob_store: Arc<dyn BlobStore>,
     blob_threshold_bytes: usize,
+    attachment_store: AttachmentObjectStore,
 }
 
 /// Request to replace a session's active channel route binding.
@@ -88,7 +103,13 @@ impl PostgresSessionStore {
     pub async fn new(database_url: &str) -> Result<Self> {
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
-        Self::new_with_options_and_blob_store(database_url, 1, 5, 10, blob_store, 65_536).await
+        let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
+        let backends = SessionStorageBackends {
+            blob_store,
+            blob_threshold_bytes: 65_536,
+            attachment_store,
+        };
+        Self::new_with_options_and_blob_store(database_url, 1, 5, 10, backends).await
     }
 
     /// Creates a session store from config using the configured `PostgreSQL` pool settings.
@@ -124,16 +145,14 @@ impl PostgresSessionStore {
     pub async fn new_in_schema(database_url: &str, schema_name: &str) -> Result<Self> {
         let blob_dir = FileBlobStore::default_dir_for_database_path(Path::new(":memory:"))?;
         let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(blob_dir));
-        Self::new_with_options_and_schema(
-            database_url,
-            1,
-            100,
-            60,
-            Some(schema_name),
+        let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
+        let backends = SessionStorageBackends {
             blob_store,
-            65_536,
-        )
-        .await
+            blob_threshold_bytes: 65_536,
+            attachment_store,
+        };
+        Self::new_with_options_and_schema(database_url, 1, 100, 60, Some(schema_name), backends)
+            .await
     }
 
     /// Creates a session store from an existing Postgres pool without running migrations.
@@ -143,12 +162,14 @@ impl PostgresSessionStore {
     pub async fn from_existing_pool(database_url: &str, pool: PgPool) -> Result<Self> {
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(FileBlobStore::new(FileBlobStore::default_dir()?));
+        let attachment_store = AttachmentObjectStore::from_config(&local_rustfs_config())?;
         let store = Self {
             url: database_url.to_string(),
             pool,
             schema_name: None,
             blob_store,
             blob_threshold_bytes: 65_536,
+            attachment_store,
         };
         store.refresh_active_session_metric().await?;
         Ok(store)
@@ -157,12 +178,14 @@ impl PostgresSessionStore {
     /// Creates a session store from an existing Postgres pool using configured blob storage.
     pub async fn from_existing_pool_with_config(config: &MoaConfig, pool: PgPool) -> Result<Self> {
         let blob_store = blob_store_from_config(config, pool.clone()).await?;
+        let attachment_store = AttachmentObjectStore::from_config(config)?;
         let store = Self {
             url: config.database.url.clone(),
             pool,
             schema_name: config.database.schema.clone(),
             blob_store,
             blob_threshold_bytes: config.session.blob_threshold_bytes,
+            attachment_store,
         };
         store.refresh_active_session_metric().await?;
         Ok(store)
@@ -302,8 +325,7 @@ impl PostgresSessionStore {
         pool_min: u32,
         pool_max: u32,
         connect_timeout_secs: u64,
-        blob_store: Arc<dyn BlobStore>,
-        blob_threshold_bytes: usize,
+        backends: SessionStorageBackends,
     ) -> Result<Self> {
         Self::new_with_options_and_schema(
             database_url,
@@ -311,8 +333,7 @@ impl PostgresSessionStore {
             pool_max,
             connect_timeout_secs,
             None,
-            blob_store,
-            blob_threshold_bytes,
+            backends,
         )
         .await
     }
@@ -323,8 +344,7 @@ impl PostgresSessionStore {
         pool_max: u32,
         connect_timeout_secs: u64,
         schema_name: Option<&str>,
-        blob_store: Arc<dyn BlobStore>,
-        blob_threshold_bytes: usize,
+        backends: SessionStorageBackends,
     ) -> Result<Self> {
         let pool = Self::connect_with_retry(
             database_url,
@@ -340,8 +360,9 @@ impl PostgresSessionStore {
             url: database_url.to_string(),
             pool,
             schema_name: schema_name.map(ToOwned::to_owned),
-            blob_store,
-            blob_threshold_bytes,
+            blob_store: backends.blob_store,
+            blob_threshold_bytes: backends.blob_threshold_bytes,
+            attachment_store: backends.attachment_store,
         };
         store.refresh_active_session_metric().await?;
         Ok(store)
@@ -366,12 +387,19 @@ impl PostgresSessionStore {
         .await?;
         migrate_database(database_url, &pool, schema_name).await?;
         let blob_store = blob_store_from_config(config, pool.clone()).await?;
+        let attachment_store = AttachmentObjectStore::from_config(config)?;
+        let backends = SessionStorageBackends {
+            blob_store,
+            blob_threshold_bytes: config.session.blob_threshold_bytes,
+            attachment_store,
+        };
         let store = Self {
             url: database_url.to_string(),
             pool,
             schema_name: schema_name.map(ToOwned::to_owned),
-            blob_store,
-            blob_threshold_bytes: config.session.blob_threshold_bytes,
+            blob_store: backends.blob_store,
+            blob_threshold_bytes: backends.blob_threshold_bytes,
+            attachment_store: backends.attachment_store,
         };
         store.refresh_active_session_metric().await?;
         Ok(store)

@@ -120,6 +120,7 @@ async fn start_edge(
         auth0_webhook_secret: None,
         knowledge_webhooks: KnowledgeWebhookEdgeConfig::default(),
         pool: Arc::new(store.pool().clone()),
+        session_store: Arc::new(store.clone()),
         proxy: Arc::new(
             OrchestratorProxy::new("http://127.0.0.1:1")
                 .expect("proxy URL should be syntactically valid"),

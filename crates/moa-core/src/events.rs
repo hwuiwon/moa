@@ -125,6 +125,8 @@ pub enum Event {
     QueuedMessage {
         /// Queued message text.
         text: String,
+        /// Attached files or media.
+        attachments: Vec<Attachment>,
         /// Queue timestamp.
         queued_at: DateTime<Utc>,
     },
