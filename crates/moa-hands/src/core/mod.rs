@@ -2,6 +2,7 @@
 
 mod construction;
 mod dispatch;
+pub mod leases;
 mod lifecycle;
 mod normalization;
 mod output_budget;
@@ -25,6 +26,7 @@ use tokio::sync::RwLock;
 use crate::adapters::local::LocalHandProvider;
 use crate::adapters::mcp::MCPClient;
 
+use leases::HandLeaseStore;
 pub use policy::{ActionOrigin, PreparedActionInvocation};
 pub use registration::{ToolExecution, ToolRegistry};
 
@@ -40,6 +42,7 @@ pub struct ToolRouter {
     mcp_servers: HashMap<String, McpServerConfig>,
     mcp_proxy: Option<Arc<MCPCredentialProxy>>,
     active_hands: RwLock<HashMap<String, HandHandle>>,
+    hand_leases: Option<Arc<dyn HandLeaseStore>>,
     trusted_sandbox_files: RwLock<HashMap<SessionId, Vec<SandboxFile>>>,
     installed_files: RwLock<HashMap<String, Vec<SandboxFile>>>,
     workspace_roots: RwLock<HashMap<TenantId, PathBuf>>,

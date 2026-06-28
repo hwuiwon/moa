@@ -5,10 +5,14 @@ use moa_core::RlsContext;
 use moa_core::TenantId;
 use moa_knowledge::{
     domain::{
-        ConnectionStatus, IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep,
-        KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun, ObjectStatus, SyncRunStatus,
+        ConnectionStatus, DocumentVersion, IngestionStepStatus, KnowledgeConnection,
+        KnowledgeIngestionStep, KnowledgeObject, KnowledgeSyncCounters, KnowledgeSyncRun,
+        ObjectStatus, SyncRunStatus,
     },
-    repository::{KnowledgeRepository, PostgresKnowledgeRepository},
+    repository::{
+        DocumentVersionIngestionClaim, KnowledgeRepository, PostgresKnowledgeRepository,
+        SyncRunClaim,
+    },
 };
 use moa_test_support::postgres;
 use serde_json::json;
@@ -107,6 +111,169 @@ fn step(
         retry_count: 0,
         error_code: None,
     }
+}
+
+#[tokio::test]
+async fn active_sync_run_claim_allows_one_runner_per_connection_db_knowledge() {
+    // Pins: two repository instances racing to start one connection sync produce one active run.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo_a = repository(&db, tenant_id);
+    let repo_b = repository(&db, tenant_id);
+
+    let connection = connection(tenant_id, "active-claim");
+    repo_a
+        .upsert_connection(connection.clone())
+        .await
+        .expect("insert connection");
+
+    let run_a = sync_run(tenant_id, connection.connection_uid);
+    let mut run_b = sync_run(tenant_id, connection.connection_uid);
+    run_b.sync_run_uid = Uuid::now_v7();
+    run_b.started_at = run_a.started_at + Duration::milliseconds(1);
+
+    let (claim_a, claim_b) = tokio::join!(
+        repo_a.claim_sync_run(run_a.clone()),
+        repo_b.claim_sync_run(run_b.clone())
+    );
+    let claim_a = claim_a.expect("first claim should complete");
+    let claim_b = claim_b.expect("second claim should complete");
+    let claimed = [&claim_a, &claim_b]
+        .iter()
+        .filter(|claim| matches!(claim, SyncRunClaim::Claimed(_)))
+        .count();
+    let already_running = [&claim_a, &claim_b]
+        .iter()
+        .filter(|claim| matches!(claim, SyncRunClaim::AlreadyRunning(_)))
+        .count();
+    assert_eq!(claimed, 1);
+    assert_eq!(already_running, 1);
+
+    let claimed_uid = match (&claim_a, &claim_b) {
+        (SyncRunClaim::Claimed(run), SyncRunClaim::AlreadyRunning(existing))
+        | (SyncRunClaim::AlreadyRunning(existing), SyncRunClaim::Claimed(run)) => {
+            assert_eq!(run.sync_run_uid, existing.sync_run_uid);
+            run.sync_run_uid
+        }
+        _ => panic!("expected one claimed run and one already-running result"),
+    };
+    assert_eq!(
+        active_sync_run_count(db.store().pool(), tenant_id, connection.connection_uid).await,
+        1
+    );
+    assert!(
+        [run_a.sync_run_uid, run_b.sync_run_uid].contains(&claimed_uid),
+        "claim should return one of the racing run IDs"
+    );
+}
+
+#[tokio::test]
+async fn document_version_claim_reclaims_stale_row_and_fences_old_token_db_knowledge() {
+    // Pins: stale object-ingestion claims are recoverable and terminal updates require the live token.
+    let db = postgres::bootstrap_test_db()
+        .await
+        .expect("bootstrap isolated knowledge DB");
+    let tenant_id = TenantId::from(Uuid::now_v7());
+    let repo = repository(&db, tenant_id);
+
+    let connection = connection(tenant_id, "stale-version-claim");
+    repo.upsert_connection(connection.clone())
+        .await
+        .expect("insert connection");
+    let object = object(
+        tenant_id,
+        connection.connection_uid,
+        "stale-version-claim",
+        "page",
+    );
+    repo.upsert_object(object.clone())
+        .await
+        .expect("insert object");
+
+    let mut first_run = sync_run(tenant_id, connection.connection_uid);
+    first_run.status = SyncRunStatus::Completed;
+    first_run.finished_at = Some(Utc::now());
+    repo.create_sync_run(first_run.clone())
+        .await
+        .expect("create first sync run");
+    let mut second_run = sync_run(tenant_id, connection.connection_uid);
+    second_run.status = SyncRunStatus::Completed;
+    second_run.finished_at = Some(Utc::now());
+    repo.create_sync_run(second_run.clone())
+        .await
+        .expect("create second sync run");
+
+    let version = DocumentVersion {
+        version_uid: Uuid::now_v7(),
+        object_uid: object.object_uid,
+        parser: "native".to_string(),
+        parser_job_id: None,
+        content_hash: "hash-stale-claim".to_string(),
+        metadata: json!({ "safe": true }),
+        created_at: Utc::now(),
+    };
+    let (claimed_version, old_token) = claimed_version_and_token(
+        repo.claim_document_version_ingestion(first_run.sync_run_uid, version.clone())
+            .await
+            .expect("first claim should start"),
+    );
+    assert_eq!(claimed_version.version_uid, version.version_uid);
+
+    expire_claim_lease(db.store().pool(), version.version_uid).await;
+    let (reclaimed_version, new_token) = claimed_version_and_token(
+        repo.claim_document_version_ingestion(second_run.sync_run_uid, version.clone())
+            .await
+            .expect("stale claim should be reclaimed"),
+    );
+    assert_eq!(reclaimed_version.version_uid, version.version_uid);
+    assert_ne!(old_token, new_token);
+
+    assert!(
+        repo.fail_document_version_ingestion(
+            first_run.sync_run_uid,
+            version.version_uid,
+            old_token
+        )
+        .await
+        .is_err(),
+        "old token must not fail a reclaimed claim"
+    );
+    let state_after_old_fail = claim_state(db.store().pool(), version.version_uid).await;
+    assert_eq!(state_after_old_fail.status, "started");
+    assert_eq!(state_after_old_fail.claim_token, new_token);
+    assert_eq!(
+        state_after_old_fail.claimed_by_sync_run_id,
+        second_run.sync_run_uid
+    );
+    assert_eq!(state_after_old_fail.completed_by_sync_run_id, None);
+
+    assert!(
+        repo.complete_document_version_ingestion(
+            first_run.sync_run_uid,
+            version.version_uid,
+            old_token
+        )
+        .await
+        .is_err(),
+        "old token must not complete a reclaimed claim"
+    );
+    repo.complete_document_version_ingestion(
+        second_run.sync_run_uid,
+        version.version_uid,
+        new_token,
+    )
+    .await
+    .expect("new token should complete reclaimed claim");
+
+    let completed_state = claim_state(db.store().pool(), version.version_uid).await;
+    assert_eq!(completed_state.status, "completed");
+    assert_eq!(completed_state.claim_token, new_token);
+    assert_eq!(
+        completed_state.completed_by_sync_run_id,
+        Some(second_run.sync_run_uid)
+    );
 }
 
 #[tokio::test]
@@ -362,6 +529,81 @@ async fn sync_run_persistence_counters_timelines_filters_and_tenant_rls_db_knowl
             .expect("tenant A lookup for tenant B steps")
             .is_empty()
     );
+}
+
+fn claimed_version_and_token(claim: DocumentVersionIngestionClaim) -> (DocumentVersion, Uuid) {
+    match claim {
+        DocumentVersionIngestionClaim::Claimed {
+            version,
+            claim_token,
+        } => (version, claim_token),
+        other => panic!("expected claimed document version, got {other:?}"),
+    }
+}
+
+async fn expire_claim_lease(pool: &sqlx::PgPool, version_uid: Uuid) {
+    let result = sqlx::query(
+        r#"
+        UPDATE moa.knowledge_object_ingestion_claims
+        SET lease_expires_at = now() - INTERVAL '1 second',
+            updated_at = now() - INTERVAL '1 second'
+        WHERE document_version_id = $1
+        "#,
+    )
+    .bind(version_uid)
+    .execute(pool)
+    .await
+    .expect("expire ingestion claim lease");
+    assert_eq!(result.rows_affected(), 1);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ClaimState {
+    status: String,
+    claim_token: Uuid,
+    claimed_by_sync_run_id: Uuid,
+    completed_by_sync_run_id: Option<Uuid>,
+}
+
+async fn claim_state(pool: &sqlx::PgPool, version_uid: Uuid) -> ClaimState {
+    let row = sqlx::query_as::<_, (String, Uuid, Uuid, Option<Uuid>)>(
+        r#"
+        SELECT status, claim_token, claimed_by_sync_run_id, completed_by_sync_run_id
+        FROM moa.knowledge_object_ingestion_claims
+        WHERE document_version_id = $1
+        "#,
+    )
+    .bind(version_uid)
+    .fetch_one(pool)
+    .await
+    .expect("read ingestion claim state");
+    ClaimState {
+        status: row.0,
+        claim_token: row.1,
+        claimed_by_sync_run_id: row.2,
+        completed_by_sync_run_id: row.3,
+    }
+}
+
+async fn active_sync_run_count(
+    pool: &sqlx::PgPool,
+    tenant_id: TenantId,
+    connection_uid: Uuid,
+) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM moa.knowledge_sync_runs
+        WHERE tenant_id = $1
+          AND connection_id = $2
+          AND status IN ('queued', 'provider_syncing', 'provider_synced', 'parse_pending', 'ingesting')
+        "#,
+    )
+    .bind(tenant_id.0)
+    .bind(connection_uid)
+    .fetch_one(pool)
+    .await
+    .expect("count active sync runs")
 }
 
 #[derive(Debug, PartialEq, Eq)]

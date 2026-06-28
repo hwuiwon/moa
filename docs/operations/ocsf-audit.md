@@ -51,14 +51,17 @@ and requests Object Lock COMPLIANCE retention on each object.
 ## Verify An Event
 
 ```sh
-curl -X POST http://localhost:10010/Audit/verify \
+curl -X POST http://localhost:8080/v1/audit/verify \
   -H "Content-Type: application/json" \
-  --data '"<event_uuid>"'
+  -H "Authorization: Bearer <edge-token>" \
+  --data '{"event_id":"<event_uuid>","tenant_id":"<tenant_uuid>"}'
 ```
 
-`PASS` means the stored canonical JSON bytes still match `signature_hex` for
-the event's `signing_key_id`. `FAIL` means the row was tampered with or the
-wrong signing key was used.
+`valid: true` means the stored canonical JSON bytes still match
+`signature_hex` for the event's `signing_key_id`. `valid: false` means the row
+was tampered with or the wrong signing key was used. This is a direct
+`moa-edge` read route with tenant-admin authorization, not a Restate read
+service.
 
 ## Shipper Configuration
 

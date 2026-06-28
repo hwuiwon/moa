@@ -10,7 +10,7 @@ use moa_knowledge::domain::{
     IngestionStepStatus, KnowledgeConnection, KnowledgeIngestionStep, KnowledgeProviderEventRecord,
     KnowledgeSyncRun, SyncRunStatus,
 };
-use moa_knowledge::repository::ProviderAccountConnectionLookup;
+use moa_knowledge::repository::{ProviderAccountConnectionLookup, SyncRunClaim};
 use moa_observability::record_knowledge_sync_run;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -130,12 +130,21 @@ impl KnowledgeService {
                     started_at: Utc::now(),
                     finished_at: None,
                 };
-                repository.create_sync_run(run.clone()).await?;
-                verify_span.record("sync_run_id", tracing::field::display(run.sync_run_uid));
-                record_knowledge_sync_run(&recorded.provider, run.status.as_str());
-                record_ingestion_enqueue_step(&*repository, &run).await?;
-                sync_run_uid = Some(run.sync_run_uid);
-                ingestion_enqueued = true;
+                match repository.claim_sync_run(run).await? {
+                    SyncRunClaim::Claimed(run) => {
+                        verify_span
+                            .record("sync_run_id", tracing::field::display(run.sync_run_uid));
+                        record_knowledge_sync_run(&recorded.provider, run.status.as_str());
+                        record_ingestion_enqueue_step(&*repository, &run).await?;
+                        sync_run_uid = Some(run.sync_run_uid);
+                        ingestion_enqueued = true;
+                    }
+                    SyncRunClaim::AlreadyRunning(run) => {
+                        verify_span
+                            .record("sync_run_id", tracing::field::display(run.sync_run_uid));
+                        sync_run_uid = Some(run.sync_run_uid);
+                    }
+                }
             }
         }
 

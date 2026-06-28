@@ -23,33 +23,42 @@ registered with Restate. At startup it:
 
 1. Loads shared `MoaConfig` from flat `MOA_...` environment variables.
 2. Connects to Postgres and runs session migrations.
-3. Builds the Postgres session store, graph memory stack, provider registry, embedding provider, and tool router.
+3. Builds the Postgres session store, graph memory stack, provider registry,
+   embedding provider, runtime cache, and tool router.
 4. Installs an `OrchestratorCtx` singleton for handlers.
 5. Binds Restate services, virtual objects, and workflows.
 6. Starts the Restate endpoint and a separate health/readiness endpoint.
 
-Default production Restate bindings:
+Core production Restate bindings:
 
 | Restate primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` |
-| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`, `Whoami` |
-| Workflow | `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy` |
+| Workflow | `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `TurnExecution`, `SubAgentTurnExecution` |
 
 Feature-gated Restate bindings:
 
 | Feature | Additional bindings |
 |---|---|
-| `internal-eval-runner` | `Eval` service and `EvalRun` workflow |
+| `experiments` | `Experiments` service plus `ExperimentRun` and `ExperimentTrialRun` workflows |
+| `internal-eval-runner` | `Eval` service |
 | `skill-learning` | `SkillLearning` workflow |
 
 Internal application boundaries for action reviews, builtin async-authz
-challenges, learning review, experiments, analytics, privacy, lineage admin,
-provider routing, and memory retrieval are in-process boundaries behind the
-handlers above. They are extraction seams inside the monolith, not a direction
-to create internal network services.
+challenges, learning review, experiments, privacy, provider routing, and memory
+retrieval are in-process boundaries behind the handlers above. Read-only
+analytics, whoami, audit verification, and lineage explain/query/verify are
+direct edge handlers over Postgres/domain stores. These boundaries are
+extraction seams inside the monolith, not a direction to create internal
+network services.
 
-Restate state is used for hot orchestration state: queued messages, status, child refs, active segment, cancellation flags, and child budgets. Product-visible history is written to Postgres.
+Restate state is used for hot orchestration state: queued messages, status,
+child refs, active segment, cancellation flags, awakeables, and child budgets.
+Product-visible history is written to Postgres. Kubernetes traffic is
+non-sticky, so correctness state shared across incoming requests must live in
+Postgres, Restate, or an explicitly configured Redis runtime cache; process
+memory is only a local cache.
 
 `Artifacts` owns import, export, listing, validation, and publish for canonical
 skills, connectors, and workflows. `Workflows` exposes artifact-backed workflow
@@ -103,15 +112,25 @@ The turn loop is durable because external calls and side effects are wrapped thr
 
 `MOA_LINEAGE_SINK` controls how the cloud orchestrator emits lineage events:
 
-- unset / `null` / `otel`: drops events at the sink boundary; lineage attributes are still attached to OpenTelemetry spans by the `restate_observability` helpers and are exported by the configured OTel exporter. This is the production default.
-- `postgres`: writes events to the `analytics.turn_lineage` and related lineage tables in the same Postgres database the orchestrator already uses. This is recommended for local development so lineage can be queried with `psql`.
+- unset / `null`: disables the lineage sink. This is the production default
+  unless a deployment explicitly enables Postgres lineage storage.
+- `otel`: emits span attributes only.
+- `postgres`: journals accepted events to the configured fjall path before
+  queueing them, then writes to `analytics.turn_lineage` and related lineage
+  tables in the same Postgres database the orchestrator already uses. In cloud,
+  the journal path must be an explicit persistent mounted path, not pod-local
+  temp storage.
 
-The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer that drains on shutdown. Maximum queue depth and batch size come from `config.observability.lineage` in `MoaConfig`.
+The Postgres sink runs an in-memory queue (`MpscSink`) and a background writer
+that drains and replays the durable journal. Queue pressure can drop only
+explicitly configured lossy telemetry; audit-class events are not accepted
+before the journal append succeeds. Maximum queue depth and batch size come
+from `config.observability.lineage` in `MoaConfig`.
 
 `TurnExecution` threads its workflow key through context compilation as the
 lineage `turn_id`. Graph-memory retrieval, compiled context, generation,
 citation, and online score records for the same user turn use that id so
-`LineageAdmin/explain` can render one turn tree. The compiled-context record
+direct lineage explain reads can render one turn tree. The compiled-context record
 also carries structured source references for event-log messages, tool
 messages, and graph-memory nodes when those sources are known.
 
@@ -166,7 +185,7 @@ Delegation is bounded by depth, active fan-out, repeated active task detection, 
 MOA has two workflow-shaped execution surfaces. Restate workflows run internal durable jobs:
 
 - `Consolidate`: one tenant/date memory consolidation pass.
-- `EvalRun`: one eval replay run.
+- `KnowledgeSyncIngestion`: one tenant knowledge sync ingestion pass.
 - `TurnExecution`: one durable session turn keyed by `turn_id`; runs the top-level session brain loop and calls back to `Session` on completion, cancellation, or failure.
 - `SubAgentTurnExecution`: one admitted sub-agent turn keyed by `turn_id`; runs child-local LLM/tool loops and calls back to `SubAgent` with turn-scoped mutations.
 

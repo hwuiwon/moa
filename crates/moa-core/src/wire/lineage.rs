@@ -46,25 +46,68 @@ pub struct LineageRecordView {
     pub summary: Option<String>,
 }
 
-/// Request payload for querying lineage records.
+/// Request payload for querying hot lineage records with typed filters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LineageQueryRequest {
-    /// Read-only SQL query using the logical `lineage` source.
-    pub sql: String,
-    /// Whether to query the cold object tier instead of the hot store.
-    #[serde(default)]
-    pub cold: bool,
-    /// Postgres interval for hot-tier time filtering.
-    pub since: String,
     /// Tenant filter for authorization and query scoping.
     pub tenant_id: TenantId,
+    /// Optional typed filters applied to `analytics.turn_lineage`.
+    #[serde(default)]
+    pub filters: LineageQueryFilters,
+    /// Timestamp order for returned records.
+    #[serde(default)]
+    pub order: LineageQueryOrder,
+    /// Maximum number of rows to return. The edge clamps this to a bounded range.
+    #[serde(default = "default_lineage_query_limit")]
+    pub limit: u32,
 }
 
-/// Response payload containing dynamic lineage query rows.
+/// Optional filters supported by the direct hot lineage query route.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineageQueryFilters {
+    /// Optional turn identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<Uuid>,
+    /// Optional session identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// Optional lineage user identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<UserId>,
+    /// Optional numeric lineage record kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_kind: Option<i16>,
+    /// Optional inclusive lower timestamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_time: Option<DateTime<Utc>>,
+    /// Optional inclusive upper timestamp bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_time: Option<DateTime<Utc>>,
+}
+
+/// Supported timestamp ordering for lineage query rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageQueryOrder {
+    /// Newest records first.
+    #[default]
+    TimestampDesc,
+    /// Oldest records first.
+    TimestampAsc,
+}
+
+/// Response payload containing typed lineage query rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineageQueryResponse {
-    /// Query rows as a JSON array or backend-specific report value.
-    pub rows: Value,
+    /// Query rows ordered by timestamp and record kind.
+    #[serde(default)]
+    pub rows: Vec<LineageRecordView>,
+}
+
+fn default_lineage_query_limit() -> u32 {
+    100
 }
 
 /// Request payload for exporting a lineage DSAR bundle.

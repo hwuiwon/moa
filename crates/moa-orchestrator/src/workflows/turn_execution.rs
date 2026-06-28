@@ -35,6 +35,7 @@ use moa_core::{
     DEFER_BRAIN_RESPONSE_METADATA_KEY, Event, EventRange, EventRecord, EventType,
     GuardrailDecision, GuardrailDirection, MoaError, ModelTier, QueryRewriteResult, SandboxFile,
     SegmentId, SessionId, SessionMeta, TaskSegment, ToolCallContent, ToolCallId, ToolInvocation,
+    TrustedSandboxFileEntry, TrustedSandboxFileManifestPayload, TrustedSandboxFileManifestRef,
     TurnOutcome as CoreTurnOutcome, TurnReplayCounters, scope_turn_replay_counters,
 };
 use moa_lineage_citation::ChunkRef;
@@ -50,6 +51,7 @@ use moa_observability::{
     record_turn_workflow_outcome, scope_turn_latency_counters,
 };
 use restate_sdk::prelude::*;
+use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
 use crate::OrchestratorCtx;
@@ -92,6 +94,7 @@ struct BuiltTurnRequest {
     request: CompletionRequest,
     active_canary: Option<String>,
     trusted_sandbox_files: Vec<SandboxFile>,
+    trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
     citation_sources: Vec<ChunkRef>,
 }
 
@@ -670,6 +673,7 @@ async fn run_once_inside_workflow(
         mut request,
         active_canary,
         trusted_sandbox_files,
+        trusted_sandbox_manifest,
         citation_sources,
     } = built_request;
     if let Some(reason) = driver_progress::cancel_requested(ctx).await? {
@@ -679,7 +683,7 @@ async fn run_once_inside_workflow(
 
     let meta = load_session_meta(ctx, session_id).await?;
     OrchestratorCtx::current_tool_router()
-        .set_trusted_sandbox_files(&meta, trusted_sandbox_files)
+        .set_trusted_sandbox_files(&meta, trusted_sandbox_files.clone())
         .await;
     let active_segment = ensure_current_segment(ctx, session_id, &meta, &mut request).await?;
     if let Some(segment) = active_segment.as_ref() {
@@ -792,6 +796,7 @@ async fn run_once_inside_workflow(
             meta: &meta,
             session_id,
             active_canary: active_canary.as_deref(),
+            trusted_sandbox_manifest: trusted_sandbox_manifest.as_ref(),
             turn_evidence,
         },
         &allowed_tools,
@@ -854,13 +859,73 @@ async fn build_request_inside_workflow(
 
     Ok(match prepared.prepared {
         PreparedTurnRequest::Idle => None,
-        PreparedTurnRequest::Request(request) => Some(BuiltTurnRequest {
-            request: *request,
-            active_canary: prepared.active_canary,
-            trusted_sandbox_files: prepared.trusted_sandbox_files,
-            citation_sources: prepared.citation_sources,
-        }),
+        PreparedTurnRequest::Request(request) => {
+            let trusted_sandbox_manifest =
+                store_trusted_sandbox_manifest(ctx, session_id, &prepared.trusted_sandbox_files)
+                    .await?;
+            Some(BuiltTurnRequest {
+                request: *request,
+                active_canary: prepared.active_canary,
+                trusted_sandbox_files: prepared.trusted_sandbox_files,
+                trusted_sandbox_manifest,
+                citation_sources: prepared.citation_sources,
+            })
+        }
     })
+}
+
+async fn store_trusted_sandbox_manifest(
+    ctx: &WorkflowContext<'_>,
+    session_id: SessionId,
+    files: &[SandboxFile],
+) -> Result<Option<TrustedSandboxFileManifestRef>, HandlerError> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    let payload = TrustedSandboxFileManifestPayload {
+        files: files.to_vec(),
+    };
+    let payload_text = serde_json::to_string(&payload)
+        .map_err(MoaError::from)
+        .map_err(to_handler_error)?;
+    let manifest_sha256 = sha256_hex(payload_text.as_bytes());
+    let entries = trusted_sandbox_file_entries(files);
+    let store = OrchestratorCtx::current_session_store();
+    let claim_check = ctx
+        .run(|| async move {
+            store
+                .store_text_artifact(session_id, &payload_text)
+                .await
+                .map(Json::from)
+                .map_err(to_handler_error)
+        })
+        .name("store_trusted_sandbox_file_manifest")
+        .await?
+        .into_inner();
+
+    Ok(Some(TrustedSandboxFileManifestRef {
+        blob_id: claim_check.blob_id,
+        size: claim_check.size,
+        manifest_sha256,
+        files: entries,
+    }))
+}
+
+fn trusted_sandbox_file_entries(files: &[SandboxFile]) -> Vec<TrustedSandboxFileEntry> {
+    files
+        .iter()
+        .map(|file| TrustedSandboxFileEntry {
+            path: file.path.clone(),
+            content_sha256: sha256_hex(&file.content),
+            size: file.content.len(),
+            executable: file.executable,
+        })
+        .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 struct RootToolContext<'a> {
@@ -868,6 +933,7 @@ struct RootToolContext<'a> {
     meta: &'a SessionMeta,
     session_id: SessionId,
     active_canary: Option<&'a str>,
+    trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
     turn_evidence: &'a mut TurnEvidence,
 }
 
@@ -937,6 +1003,7 @@ async fn handle_tool_call(
             tool_call,
             allowed_tools,
             active_canary,
+            trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::RootTurn,
             progress: GovernedInvocationProgress {
                 turn_id,
@@ -962,6 +1029,7 @@ async fn handle_tool_call(
                 session_id,
                 tool_id,
                 tool_call,
+                tool_context.trusted_sandbox_manifest,
                 turn_evidence,
             )
             .await?;
@@ -977,6 +1045,7 @@ async fn handle_delegation_tool(
     session_id: SessionId,
     tool_id: ToolCallId,
     tool_call: &ToolCallContent,
+    trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
     let invocation = tool_call.invocation.clone();
@@ -1006,6 +1075,7 @@ async fn handle_delegation_tool(
         ctx,
         crate::delegation::DelegationParent::RootSession { session_id, meta },
         tool,
+        trusted_sandbox_manifest,
     )
     .instrument(span)
     .await?;

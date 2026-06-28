@@ -21,6 +21,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::core::leases::LeaseHandle;
 use crate::tools::sandbox_descriptor::{SandboxToolCapability, supported_capability_for_tool};
 use crate::tools::{bash, file_outline, file_read, file_search, file_write, grep, str_replace};
 
@@ -352,6 +353,115 @@ impl LocalHandProvider {
         Ok(())
     }
 
+    /// Builds the durable lease payload needed to reconnect this local or Docker handle.
+    pub async fn lease_handle(&self, handle: &HandHandle) -> Result<LeaseHandle> {
+        match handle {
+            HandHandle::Local { sandbox_dir } => {
+                let sandbox = self.resolve_local_sandbox(sandbox_dir).await;
+                Ok(LeaseHandle::with_metadata(
+                    handle.clone(),
+                    serde_json::json!({
+                        "kind": "local",
+                        "execution_root": sandbox.execution_root,
+                        "extra_search_skips": sandbox.extra_search_skips,
+                    }),
+                ))
+            }
+            HandHandle::Docker { container_id } => {
+                let sandbox = self
+                    .docker_sandboxes
+                    .read()
+                    .await
+                    .get(container_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        MoaError::ProviderError(format!(
+                            "unknown docker sandbox handle: {container_id}"
+                        ))
+                    })?;
+                Ok(LeaseHandle::with_metadata(
+                    handle.clone(),
+                    serde_json::json!({
+                        "kind": "docker",
+                        "sandbox_dir": sandbox.sandbox_dir,
+                        "workspace_mount": sandbox.workspace_mount,
+                        "extra_search_skips": sandbox.extra_search_skips,
+                    }),
+                ))
+            }
+            _ => Err(MoaError::Unsupported(
+                "non-local hand handle passed to LocalHandProvider".to_string(),
+            )),
+        }
+    }
+
+    /// Rehydrates local provider caches from a durable lease payload.
+    pub async fn adopt_lease_handle(&self, lease_handle: &LeaseHandle) -> Result<HandHandle> {
+        match &lease_handle.handle {
+            HandHandle::Local { sandbox_dir } => {
+                let Some(metadata) = lease_handle.provider_metadata.as_ref() else {
+                    return Ok(lease_handle.handle.clone());
+                };
+                let execution_root = metadata
+                    .get("execution_root")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| sandbox_dir.clone());
+                let extra_search_skips = metadata
+                    .get("extra_search_skips")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|values| string_vec_from_json_array(values))
+                    .unwrap_or_default();
+                self.local_sandboxes.write().await.insert(
+                    sandbox_dir.clone(),
+                    LocalSandbox {
+                        execution_root,
+                        extra_search_skips,
+                    },
+                );
+                Ok(lease_handle.handle.clone())
+            }
+            HandHandle::Docker { container_id } => {
+                let metadata = lease_handle.provider_metadata.as_ref().ok_or_else(|| {
+                    MoaError::ProviderError(format!(
+                        "docker hand lease {container_id} is missing sandbox metadata"
+                    ))
+                })?;
+                let sandbox_dir = metadata
+                    .get("sandbox_dir")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        MoaError::ProviderError(format!(
+                            "docker hand lease {container_id} is missing sandbox_dir"
+                        ))
+                    })?;
+                let workspace_mount = metadata
+                    .get("workspace_mount")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(DEFAULT_DOCKER_WORKSPACE)
+                    .to_string();
+                let extra_search_skips = metadata
+                    .get("extra_search_skips")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|values| string_vec_from_json_array(values))
+                    .unwrap_or_default();
+                self.docker_sandboxes.write().await.insert(
+                    container_id.clone(),
+                    DockerSandbox {
+                        sandbox_dir,
+                        workspace_mount,
+                        extra_search_skips,
+                    },
+                );
+                Ok(lease_handle.handle.clone())
+            }
+            _ => Err(MoaError::Unsupported(
+                "non-local hand handle passed to LocalHandProvider".to_string(),
+            )),
+        }
+    }
+
     /// Executes a tool with cooperative cancellation support.
     pub async fn execute_with_cancel(
         &self,
@@ -494,17 +604,7 @@ impl HandProvider for LocalHandProvider {
                     Ok(HandStatus::Destroyed)
                 }
             }
-            HandHandle::Docker { container_id } => {
-                if !self
-                    .docker_sandboxes
-                    .read()
-                    .await
-                    .contains_key(container_id)
-                {
-                    return Ok(HandStatus::Destroyed);
-                }
-                docker_status(container_id).await
-            }
+            HandHandle::Docker { container_id } => docker_status(container_id).await,
             _ => Err(MoaError::Unsupported(
                 "non-local hand handle passed to LocalHandProvider".to_string(),
             )),
@@ -602,6 +702,14 @@ impl HandProvider for LocalHandProvider {
             )),
         }
     }
+}
+
+fn string_vec_from_json_array(values: &[serde_json::Value]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn sandbox_install_path(root: &Path, relative_path: &str) -> Result<PathBuf> {

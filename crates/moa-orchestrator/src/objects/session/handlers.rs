@@ -111,6 +111,7 @@ impl Session for SessionImpl {
             pending_state.active_turn_id = None;
         }
         pending_state.last_outcome = Some(outcome.clone());
+        let turn_waiters = take_turn_waiters(&mut pending_state, &outcome.turn_id);
         state.last_turn_summary = Some(outcome.message.clone());
 
         if matches_active
@@ -124,6 +125,7 @@ impl Session for SessionImpl {
             state.persist_into(&ctx);
             persist_pending_state(&ctx, &pending_state);
             sync_status(&ctx, session_id, &state).await?;
+            resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
             dispatch_turn_execution(
                 &ctx,
                 RunTurnRequest {
@@ -153,6 +155,59 @@ impl Session for SessionImpl {
             sync_status(&ctx, session_id, &state).await?;
         }
         persist_pending_state(&ctx, &pending_state);
+        resolve_turn_waiters(&ctx, turn_waiters, &outcome)?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only by authorized workflows after the turn has been admitted by Session.
+    async fn attach_turn_waiter(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<AttachSessionTurnWaiterInput>,
+    ) -> Result<Json<AttachSessionTurnWaiterOutput>, HandlerError> {
+        annotate_restate_handler_span("Session", "attach_turn_waiter");
+        let input = input.into_inner();
+        let mut pending_state = load_pending_state(&ctx).await?;
+        if let Some(outcome) = pending_state
+            .last_outcome
+            .as_ref()
+            .filter(|outcome| outcome.turn_id == input.turn_id)
+            .cloned()
+        {
+            return Ok(Json::from(AttachSessionTurnWaiterOutput {
+                outcome: Some(outcome),
+            }));
+        }
+        if !pending_state.turn_waiters.iter().any(|waiter| {
+            waiter.turn_id == input.turn_id && waiter.awakeable_id == input.awakeable_id
+        }) {
+            pending_state.turn_waiters.push(SessionTurnWaiter {
+                turn_id: input.turn_id,
+                awakeable_id: input.awakeable_id,
+            });
+            persist_pending_state(&ctx, &pending_state);
+        }
+        Ok(Json::from(AttachSessionTurnWaiterOutput { outcome: None }))
+    }
+
+    #[tracing::instrument(skip(self, ctx, input))]
+    // SAFETY: called only by authorized workflows after the turn wait deadline expires.
+    async fn remove_turn_waiter(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<RemoveSessionTurnWaiterInput>,
+    ) -> Result<(), HandlerError> {
+        annotate_restate_handler_span("Session", "remove_turn_waiter");
+        let input = input.into_inner();
+        let mut pending_state = load_pending_state(&ctx).await?;
+        let before = pending_state.turn_waiters.len();
+        pending_state.turn_waiters.retain(|waiter| {
+            waiter.turn_id != input.turn_id || waiter.awakeable_id != input.awakeable_id
+        });
+        if pending_state.turn_waiters.len() != before {
+            persist_pending_state(&ctx, &pending_state);
+        }
         Ok(())
     }
 
@@ -340,6 +395,38 @@ impl Session for SessionImpl {
         tracing::info!(key = %ctx.key(), "session VO state cleared");
         Ok(())
     }
+}
+
+fn take_turn_waiters(state: &mut SessionPendingState, turn_id: &str) -> Vec<SessionTurnWaiter> {
+    let mut matching = Vec::new();
+    state.turn_waiters.retain(|waiter| {
+        if waiter.turn_id == turn_id {
+            matching.push(waiter.clone());
+            false
+        } else {
+            true
+        }
+    });
+    matching
+}
+
+fn resolve_turn_waiters(
+    ctx: &ObjectContext<'_>,
+    waiters: Vec<SessionTurnWaiter>,
+    outcome: &ExecutionTurnOutcome,
+) -> Result<(), HandlerError> {
+    if waiters.is_empty() {
+        return Ok(());
+    }
+    let payload = serde_json::to_string(outcome).map_err(|error| {
+        TerminalError::new(format!(
+            "failed to serialize turn outcome for waiter: {error}"
+        ))
+    })?;
+    for waiter in waiters {
+        ctx.resolve_awakeable(&waiter.awakeable_id, payload.clone());
+    }
+    Ok(())
 }
 
 fn active_turn_progress_or_none(

@@ -16,9 +16,9 @@ what must stay out of Restate state.
 
 | Restate primitive | Use in MOA | Reason |
 |---|---|---|
-| Service | Stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Analytics`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
+| Service | Durable stateless calls such as `ActionReviews`, `AuthzChallenges`, `LearningReview`, `ToolExecutor`, `LLMGateway`, `SessionStore`, `Authz`, `Memory`, `Skills`, `Tenants` | Durable RPC with retries, no keyed state. |
 | Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` | Single-writer-per-key semantics and small hot state. |
-| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
+| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` | One logical run per ID with explicit progress and completion. |
 
 Use the weakest primitive that gives the needed correctness property. Do not
 use a workflow for conversational actors; do not use virtual-object state as a
@@ -34,15 +34,19 @@ product database.
 | Sub-agent turn | Workflow | `turn_id` |
 | Tool execution | Service | none |
 | LLM call | Service | none |
-| Graph-memory ingestion | Virtual Object | ingestion key |
+| Graph-memory ingestion | Virtual Object plus Postgres ingestion claim rows | ingestion key |
 | Memory consolidation | Workflow | `tenant_id:logical_date` |
+| Tenant knowledge sync ingestion | Workflow plus Postgres active-run claims | sync run id |
 | Scheduled job | Virtual Object | job name |
 | Tenant action review | Service plus Postgres row/event | review id |
+| Read-only analytics/whoami/audit/lineage reads | Direct edge handler | HTTP request |
 
 Sessions and sub-agents are virtual objects because they receive multiple
 messages over time. `TurnExecution` and `SubAgentTurnExecution` are workflows
-because one admitted turn should have one observable durable run. Consolidation
-and eval replays are workflows for the same reason.
+because one admitted turn should have one observable durable run. Artifact
+workflow execution, tenant knowledge sync ingestion, and consolidation are
+workflows for the same reason. Hosted eval status is a Postgres row; it is not
+a workflow unless the eval body gains real durable-step semantics.
 
 ## Runtime Flow
 
@@ -69,25 +73,28 @@ Current orchestrator surfaces are bound by one `moa-orchestrator` production
 binary at startup. Domain logic behind those handlers should stay in-process
 behind application services, repositories, or domain crates.
 
-Default production bindings:
+Core production bindings:
 
 | Primitive | Handlers |
 |---|---|
 | Virtual Object | `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO` |
-| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `Consolidate`, `ExperimentRun`, `ExperimentTrialRun` |
-| Service | `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`, `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`, `Whoami` |
+| Workflow | `TurnExecution`, `SubAgentTurnExecution`, `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`, `Consolidate` |
+| Service | `ActionReviews`, `AgentDefinitions`, `Agents`, `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`, `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`, `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy` |
 
 Feature-gated bindings:
 
 | Feature | Additional bindings |
 |---|---|
-| `internal-eval-runner` | `Eval` service and `EvalRun` workflow |
+| `experiments` | `Experiments` service plus `ExperimentRun` and `ExperimentTrialRun` workflows |
+| `internal-eval-runner` | `Eval` service |
 | `skill-learning` | `SkillLearning` workflow |
 
 Internal application boundaries for action reviews, builtin async-authz
-challenges, learning review, experiments, analytics, privacy, lineage admin,
-provider routing, and memory retrieval are extraction seams inside the
-monolith. They are not a direction to create internal network services.
+challenges, learning review, experiments, privacy, provider routing, and memory
+retrieval are extraction seams inside the monolith. Read-only analytics,
+whoami, audit verification, and lineage explain/query/verify stay off Restate
+and run as direct edge reads after authz. These are not a direction to create
+internal network services.
 
 When adding a handler, place it by ownership:
 
@@ -112,11 +119,19 @@ Restate state should be small, replay-safe, and useful only for orchestration.
 | Graph memory, vectors, changelog | Postgres |
 | Learning log | Postgres |
 | Security events | Postgres and audit shipper |
+| Hand leases and sandbox binding | Postgres `moa.hand_leases` |
+| Runtime cache/pacing/message refs | Redis when configured; process-local memory only for fallback |
 | Handler journal | Restate |
 
 If a user, admin, customer, or audit export needs to query it later, store it
 in Postgres. If only the in-flight handler needs it to recover, Restate state
 is appropriate.
+
+Kubernetes request routing is non-sticky. A follow-up request may land on any
+edge or orchestrator replica, so Restate handler state cannot be replaced by
+ordinary process memory. Process-local maps are allowed only as reconnect
+caches, transport demultiplexing, or performance caches whose correctness owner
+is Postgres, Restate, or explicitly configured Redis runtime cache.
 
 ## Determinism Rules
 
@@ -199,6 +214,8 @@ Deployment requirements:
 
 - Postgres/Neon for product data.
 - Restate ingress/admin URLs for handler registration and invocation.
+- Optional Redis for shared runtime cache coordination; without it the runtime
+  cache backend is process-local and must not be used for global correctness.
 - Configured LLM and embedding provider credentials.
 - Configured hand provider for code/tool execution.
 - OTel, metrics, and logs wired before tenant traffic.

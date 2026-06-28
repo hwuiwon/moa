@@ -12,6 +12,7 @@ use moa_memory_ingest::{
     ingest_turn_direct_with_ctx,
 };
 use serde::Deserialize;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use support::{
@@ -34,6 +35,14 @@ struct ExpectedFact {
     object: String,
     pii_class: String,
     confidence: f64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DurableIngestCounts {
+    graph_nodes: i64,
+    graph_creates: i64,
+    vectors: i64,
+    dedup_rows: i64,
 }
 
 #[tokio::test]
@@ -107,6 +116,51 @@ async fn slow_path_ingests_simple_document_and_writes_expected_facts_to_graph() 
             .await
             .len(),
         0
+    );
+}
+
+#[tokio::test]
+async fn duplicate_direct_ingest_attempt_skips_without_duplicate_durable_rows() {
+    // Pins: same-turn direct ingestion replay is idempotent at the DB graph/vector/dedup boundary.
+    let _guard = TEST_LOCK.lock().await;
+    let Some(test_db) = configured_test_db().await else {
+        return;
+    };
+    let storage_partition_id = Uuid::now_v7();
+    let ctx = ingest_ctx(test_db.store().pool(), storage_partition_id).await;
+    let session_turn = turn(storage_partition_id, "Fact: API uses Redis", 12);
+
+    let first = ingest_turn_direct_with_ctx(ctx.clone(), session_turn.clone())
+        .await
+        .expect("first direct slow-path ingestion should insert");
+
+    assert_eq!(first.inserted, 1);
+    assert_eq!(first.superseded, 0);
+    assert_eq!(first.skipped, 0);
+    assert_eq!(first.failed, 0);
+    let after_first = durable_ingest_counts(test_db.store().pool(), storage_partition_id).await;
+    assert_eq!(
+        after_first,
+        DurableIngestCounts {
+            graph_nodes: 3,
+            graph_creates: 5,
+            vectors: 1,
+            dedup_rows: 1,
+        }
+    );
+
+    let second = ingest_turn_direct_with_ctx(ctx, session_turn)
+        .await
+        .expect("duplicate direct slow-path ingestion should skip");
+
+    assert_eq!(second.inserted, 0);
+    assert_eq!(second.superseded, 0);
+    assert_eq!(second.skipped, 1);
+    assert_eq!(second.failed, 0);
+    assert_eq!(
+        durable_ingest_counts(test_db.store().pool(), storage_partition_id).await,
+        after_first,
+        "duplicate direct ingestion must not add graph, vector, or dedup rows"
     );
 }
 
@@ -629,4 +683,49 @@ fn fact_uid_with_subject(rows: &[moa_memory_graph::NodeIndexRow], subject: &str)
         })
         .map(|row| row.uid)
         .expect("fact with expected subject should exist")
+}
+
+async fn durable_ingest_counts(pool: &PgPool, storage_partition_id: Uuid) -> DurableIngestCounts {
+    DurableIngestCounts {
+        graph_nodes: count_storage_partition_rows(pool, storage_partition_id, "moa.node_index")
+            .await,
+        graph_creates: count_graph_create_rows(pool, storage_partition_id).await,
+        vectors: count_storage_partition_rows(pool, storage_partition_id, "moa.embeddings").await,
+        dedup_rows: count_storage_partition_rows(pool, storage_partition_id, "moa.ingest_dedup")
+            .await,
+    }
+}
+
+async fn count_storage_partition_rows(
+    pool: &PgPool,
+    storage_partition_id: Uuid,
+    table: &str,
+) -> i64 {
+    let mut conn = support::user_scoped_conn(pool, storage_partition_id).await;
+    let query = format!("SELECT COUNT(*) FROM {table} WHERE storage_partition_id = $1");
+    let count = sqlx::query_scalar::<_, i64>(&query)
+        .bind(storage_partition_id.to_string())
+        .fetch_one(conn.as_mut())
+        .await
+        .expect("count storage-partition rows");
+    conn.commit()
+        .await
+        .expect("commit storage-partition row count");
+    count
+}
+
+async fn count_graph_create_rows(pool: &PgPool, storage_partition_id: Uuid) -> i64 {
+    let mut conn = support::user_scoped_conn(pool, storage_partition_id).await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM moa.graph_changelog \
+         WHERE storage_partition_id = $1 AND op = 'create'",
+    )
+    .bind(storage_partition_id.to_string())
+    .fetch_one(conn.as_mut())
+    .await
+    .expect("count graph create changelog rows");
+    conn.commit()
+        .await
+        .expect("commit graph create changelog count");
+    count
 }

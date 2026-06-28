@@ -1,0 +1,19 @@
+[package]
+name = "moa-runtime-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+redis = ["dep:redis"]
+
+[dependencies]
+async-trait.workspace = true
+moa-core = { workspace = true }
+redis = { workspace = true, optional = true }
+tokio.workspace = true
+workspace-hack = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

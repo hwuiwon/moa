@@ -9,14 +9,13 @@ use moa_core::{
     ActionPolicyEffect, ActionReviewDecision, ActionReviewStatus, Event, EventRange, EventRecord,
     SessionId, SessionStatus, TenantId, ToolCallId,
 };
-use moa_orchestrator::objects::tenant::{
-    TenantActionPolicy, TenantActionPolicyRuleInput, TenantConfig,
-};
+use moa_orchestrator::objects::tenant::TenantConfig;
 use moa_orchestrator::services::action_reviews::{
     ActionReviewDecisionKind, ActionReviewSummary, DecideActionReviewRequest,
     ListActionReviewsRequest,
 };
 use moa_test_support::{IsolatedTest, OrchestratorTestFixture, TestApiClient};
+use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -391,7 +390,6 @@ async fn initialize_tenant(client: &TestApiClient, tenant_id: TenantId) -> Resul
                 id: tenant_id,
                 name: format!("Action policy E2E {tenant_id}"),
                 consolidation_hour_utc: 2,
-                action_policy: TenantActionPolicy::default(),
             },
         )
         .await
@@ -400,8 +398,9 @@ async fn initialize_tenant(client: &TestApiClient, tenant_id: TenantId) -> Resul
 async fn add_bash_admin_review_rule(client: &TestApiClient, tenant_id: TenantId) -> Result<()> {
     client
         .post_void(
-            &format!("/Tenant/{tenant_id}/add_action_policy_rule"),
-            &TenantActionPolicyRuleInput {
+            "/ActionPolicy/upsert_rule",
+            &TestRuleRequest {
+                tenant_id,
                 tool_name: "bash".to_string(),
                 pattern: "*".to_string(),
                 effect: ActionPolicyEffect::AdminReview,
@@ -409,6 +408,15 @@ async fn add_bash_admin_review_rule(client: &TestApiClient, tenant_id: TenantId)
             },
         )
         .await
+}
+
+#[derive(Serialize)]
+struct TestRuleRequest {
+    tenant_id: TenantId,
+    tool_name: String,
+    pattern: String,
+    effect: ActionPolicyEffect,
+    reason: Option<String>,
 }
 
 async fn list_pending_reviews(

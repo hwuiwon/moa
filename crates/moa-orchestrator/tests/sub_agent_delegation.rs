@@ -224,6 +224,7 @@ fn reserve_input(spawn: &SpawnSubAgentInput) -> ReserveSubAgentInput {
             tool_subset: spawn.tool_subset.clone(),
             budget_tokens: spawn.budget_tokens,
             max_turns: spawn.max_turns,
+            trusted_sandbox_manifest: None,
         },
         task_name: spawn.task_name.clone(),
     }

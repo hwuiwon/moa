@@ -2,6 +2,10 @@
 
 pub mod auth;
 pub mod embedding;
+pub mod runtime_cache;
+
+use std::future::Future;
+use std::pin::Pin;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,6 +35,7 @@ use crate::wire::analytics::LearningCandidateSummary;
 
 pub use auth::*;
 pub use embedding::EmbeddingProvider;
+pub use runtime_cache::RuntimeCacheStore;
 
 /// Durable append-only session store.
 #[async_trait]
@@ -586,6 +591,20 @@ pub trait ChannelAdapter: Send + Sync {
 pub trait LineageHandle: Send + Sync {
     /// Records one lineage event encoded as JSON.
     fn record(&self, evt_json: Value);
+
+    /// Records one lineage event and resolves after durable acceptance.
+    ///
+    /// Handles that do not support durable acceptance may fall back to the
+    /// nonblocking hot-path record operation.
+    fn record_durable<'a>(
+        &'a self,
+        evt_json: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.record(evt_json);
+            Ok(())
+        })
+    }
 
     /// Adds transport-specific trace span attributes for a lineage event.
     fn record_span_attributes(&self, _span: &tracing::Span, _evt_json: &Value) {}

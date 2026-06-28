@@ -34,7 +34,7 @@ use moa_eval_core::{EvalResult, ReplayConfig, token_f1};
 #[cfg(feature = "internal-eval-runner")]
 use moa_eval_core::{EvalStatus, ExpectedOutput, TestCase};
 #[cfg(feature = "internal-eval-runner")]
-use moa_lineage_core::{LineageEvent, LineageSink};
+use moa_lineage_core::LineageEvent;
 #[cfg(any(feature = "internal-eval-runner", test))]
 use moa_lineage_core::{ScoreRecord, ScoreSource, ScoreTarget, ScoreValue};
 #[cfg(feature = "internal-eval-runner")]
@@ -52,19 +52,34 @@ use repository::ScopedDatasetItem;
 use repository::load_dataset_items_for_tenant;
 use repository::{list_datasets_for_tenant, register_dataset_for_tenant};
 use restate_sdk::prelude::*;
+#[cfg(feature = "internal-eval-runner")]
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
 use crate::ctx::RequestHeaders;
 use crate::handlers::authz_shim::{require_fga_client, require_identity, translate_authz_error};
-use crate::workflows::eval_run::EvalRunClient;
-#[cfg(feature = "internal-eval-runner")]
-use crate::workflows::eval_run::EvalRunWorkflowRequest;
 
 #[cfg(feature = "internal-eval-runner")]
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+
+#[cfg(feature = "internal-eval-runner")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalRunExecutionRequest {
+    /// Server-assigned hosted eval run identifier.
+    pub run_id: Uuid,
+    /// Original client eval run request accepted by `Eval/run`.
+    pub request: EvalRunRequest,
+}
+
+#[cfg(feature = "internal-eval-runner")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct StoredEvalRunExecutionState {
+    status: EvalRunStatus,
+    response: Option<EvalRunResponse>,
+}
 
 /// Restate service surface for hosted eval operations.
 #[restate_sdk::service]
@@ -80,6 +95,12 @@ pub trait Eval {
 
     /// Runs a hosted eval suite after a tenant operator check.
     async fn run(request: Json<EvalRunRequest>) -> Result<Json<EvalRunResponse>, HandlerError>;
+
+    /// Executes an already accepted hosted eval run.
+    #[cfg(feature = "internal-eval-runner")]
+    async fn execute_run(
+        request: Json<EvalRunExecutionRequest>,
+    ) -> Result<Json<EvalRunResponse>, HandlerError>;
 
     /// Reads a hosted eval run status after a tenant operator check.
     async fn run_status(
@@ -179,6 +200,7 @@ impl Eval for EvalImpl {
 
         #[cfg(feature = "internal-eval-runner")]
         {
+            let pool = OrchestratorCtx::current_graph_pool();
             let acceptance_request = request.clone();
             let response = ctx
                 .run(|| async move {
@@ -190,23 +212,95 @@ impl Eval for EvalImpl {
                         &acceptance_request.suite_document,
                     )
                     .map_err(eval_error_to_handler_error)?;
-                    Ok::<_, HandlerError>(Json(accepted_eval_run_response(
+                    let response = accepted_eval_run_response(
                         acceptance_request.tenant_id,
                         Uuid::now_v7(),
                         suite.name,
-                    )))
+                    );
+                    persist_accepted_eval_run(&pool, &acceptance_request, &response)
+                        .await
+                        .map_err(eval_error_to_handler_error)?;
+                    Ok::<_, HandlerError>(Json(response))
                 })
                 .name("eval_run_accept")
                 .await?
                 .into_inner();
-            ctx.workflow_client::<EvalRunClient>(response.run_id.to_string())
-                .run(Json(EvalRunWorkflowRequest {
+            ctx.service_client::<EvalClient>()
+                .execute_run(Json(EvalRunExecutionRequest {
                     run_id: response.run_id,
                     request,
                 }))
                 .send();
             Ok(Json(response))
         }
+    }
+
+    #[cfg(feature = "internal-eval-runner")]
+    #[tracing::instrument(skip(self, ctx, request))]
+    // SAFETY: internal worker entrypoint; Eval/run performs the tenant operator check before dispatch.
+    async fn execute_run(
+        &self,
+        ctx: Context<'_>,
+        request: Json<EvalRunExecutionRequest>,
+    ) -> Result<Json<EvalRunResponse>, HandlerError> {
+        annotate_restate_handler_span("Eval", "execute_run");
+        let request = request.into_inner();
+        let run_id = request.run_id;
+        let tenant_id = request.request.tenant_id;
+        let pool = OrchestratorCtx::current_graph_pool();
+        let existing = ctx
+            .run(move || async move {
+                load_eval_run_execution_state(&pool, tenant_id, run_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(eval_error_to_handler_error)
+            })
+            .name("eval_run_load")
+            .await?
+            .into_inner();
+
+        if let Some(response) = existing.response {
+            if !eval_run_status_is_terminal(response.status) {
+                return Err(TerminalError::new_with_code(
+                    409,
+                    "persisted eval run response is not terminal",
+                )
+                .into());
+            }
+            return Ok(Json(response));
+        }
+        if eval_run_status_is_terminal(existing.status) {
+            return Ok(Json(failed_eval_run_response(
+                tenant_id,
+                run_id,
+                "terminal eval run is missing persisted response",
+            )));
+        }
+
+        let pool = OrchestratorCtx::current_graph_pool();
+        ctx.run(move || async move {
+            mark_eval_run_running(&pool, tenant_id, run_id)
+                .await
+                .map_err(eval_error_to_handler_error)
+        })
+        .name("eval_run_mark_running")
+        .await?;
+
+        let pool = OrchestratorCtx::current_graph_pool();
+        Ok(ctx
+            .run(move || async move {
+                let response = normalize_eval_run_response(
+                    tenant_id,
+                    run_id,
+                    execute_eval_run_request_isolated(run_id, request.request).await,
+                );
+                persist_terminal_eval_run_response(&pool, &response)
+                    .await
+                    .map_err(eval_error_to_handler_error)?;
+                Ok::<_, HandlerError>(Json(response))
+            })
+            .name("eval_run_execute")
+            .await?)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -218,15 +312,16 @@ impl Eval for EvalImpl {
         annotate_restate_handler_span("Eval", "run_status");
         let request = request.into_inner();
         authorize_tenant(&ctx, request.tenant_id, Relation::Operator).await?;
-        let response = ctx
-            .workflow_client::<EvalRunClient>(request.run_id.to_string())
-            .status(Json(request.clone()))
-            .call()
-            .await?
-            .into_inner();
-        verify_run_status_tenant(request.tenant_id, &response)
-            .map_err(eval_error_to_handler_error)?;
-        Ok(Json(response))
+        let pool = OrchestratorCtx::current_graph_pool();
+        Ok(ctx
+            .run(move || async move {
+                load_eval_run_status_response(&pool, request.tenant_id, request.run_id)
+                    .await
+                    .map(Json::from)
+                    .map_err(eval_error_to_handler_error)
+            })
+            .name("eval_run_status")
+            .await?)
     }
 
     #[tracing::instrument(skip(self, ctx, request))]
@@ -467,7 +562,7 @@ pub fn status_response_from_run_response(response: &EvalRunResponse) -> EvalRunS
     }
 }
 
-/// Builds a non-terminal accepted run response after starting a hosted workflow.
+/// Builds a non-terminal accepted run response after starting hosted execution.
 #[must_use]
 pub fn accepted_eval_run_response(
     tenant_id: TenantId,
@@ -514,7 +609,251 @@ pub fn failed_eval_run_response(
     }
 }
 
-/// Runs an already-authorized eval request inside a hosted workflow.
+#[cfg(feature = "internal-eval-runner")]
+async fn persist_accepted_eval_run(
+    pool: &PgPool,
+    request: &EvalRunRequest,
+    response: &EvalRunResponse,
+) -> Result<(), EvalServiceError> {
+    let scope_context = RlsContext::tenant(request.tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
+    sqlx::query(
+        r#"
+        INSERT INTO analytics.eval_run_status (
+            run_id,
+            tenant_id,
+            status,
+            request,
+            response,
+            error
+        )
+        VALUES ($1, $2, $3, $4, NULL, NULL)
+        ON CONFLICT (run_id) DO UPDATE
+        SET tenant_id = EXCLUDED.tenant_id,
+            status = EXCLUDED.status,
+            request = EXCLUDED.request,
+            response = NULL,
+            error = NULL,
+            updated_at = now()
+        "#,
+    )
+    .bind(response.run_id)
+    .bind(response.tenant_id.0)
+    .bind(eval_run_status_as_str(response.status))
+    .bind(sqlx::types::Json(request.clone()))
+    .execute(conn.as_mut())
+    .await?;
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(())
+}
+
+#[cfg(feature = "internal-eval-runner")]
+async fn load_eval_run_execution_state(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    run_id: Uuid,
+) -> Result<StoredEvalRunExecutionState, EvalServiceError> {
+    let scope_context = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
+    let row = sqlx::query(
+        r#"
+        SELECT status, response
+        FROM analytics.eval_run_status
+        WHERE run_id = $1 AND tenant_id = $2
+        "#,
+    )
+    .bind(run_id)
+    .bind(tenant_id.0)
+    .fetch_optional(conn.as_mut())
+    .await?
+    .ok_or(EvalServiceError::RunTenantMismatch {
+        run_id,
+        request_tenant_id: tenant_id,
+    })?;
+
+    let status: String = row.try_get("status")?;
+    let response: Option<sqlx::types::Json<EvalRunResponse>> = row.try_get("response")?;
+    let state = StoredEvalRunExecutionState {
+        status: eval_run_status_from_str(&status)?,
+        response: response.map(|json| json.0),
+    };
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(state)
+}
+
+#[cfg(feature = "internal-eval-runner")]
+async fn mark_eval_run_running(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    run_id: Uuid,
+) -> Result<(), EvalServiceError> {
+    let scope_context = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE analytics.eval_run_status
+        SET status = 'running',
+            error = NULL,
+            updated_at = now()
+        WHERE run_id = $1
+          AND tenant_id = $2
+          AND status IN ('pending', 'running')
+        "#,
+    )
+    .bind(run_id)
+    .bind(tenant_id.0)
+    .execute(conn.as_mut())
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(EvalServiceError::RunTenantMismatch {
+            run_id,
+            request_tenant_id: tenant_id,
+        });
+    }
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(())
+}
+
+#[cfg(feature = "internal-eval-runner")]
+async fn persist_terminal_eval_run_response(
+    pool: &PgPool,
+    response: &EvalRunResponse,
+) -> Result<(), EvalServiceError> {
+    let scope_context = RlsContext::tenant(response.tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE analytics.eval_run_status
+        SET status = $3,
+            response = $4,
+            error = $5,
+            updated_at = now()
+        WHERE run_id = $1 AND tenant_id = $2
+        "#,
+    )
+    .bind(response.run_id)
+    .bind(response.tenant_id.0)
+    .bind(eval_run_status_as_str(response.status))
+    .bind(sqlx::types::Json(response.clone()))
+    .bind(response.error.as_deref())
+    .execute(conn.as_mut())
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(EvalServiceError::RunTenantMismatch {
+            run_id: response.run_id,
+            request_tenant_id: response.tenant_id,
+        });
+    }
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(())
+}
+
+async fn load_eval_run_status_response(
+    pool: &PgPool,
+    tenant_id: TenantId,
+    run_id: Uuid,
+) -> Result<EvalRunStatusResponse, EvalServiceError> {
+    let scope_context = RlsContext::tenant(tenant_id);
+    let mut conn = ScopedConn::begin(pool, &scope_context)
+        .await
+        .map_err(scoped_conn_error)?;
+    let row = sqlx::query(
+        r#"
+        SELECT tenant_id, run_id, status, response, error
+        FROM analytics.eval_run_status
+        WHERE run_id = $1 AND tenant_id = $2
+        "#,
+    )
+    .bind(run_id)
+    .bind(tenant_id.0)
+    .fetch_optional(conn.as_mut())
+    .await?
+    .ok_or(EvalServiceError::RunTenantMismatch {
+        run_id,
+        request_tenant_id: tenant_id,
+    })?;
+
+    let stored_tenant_id: Uuid = row.try_get("tenant_id")?;
+    let stored_run_id: Uuid = row.try_get("run_id")?;
+    let status: String = row.try_get("status")?;
+    let response: Option<sqlx::types::Json<EvalRunResponse>> = row.try_get("response")?;
+    if let Some(response) = response {
+        let status = status_response_from_run_response(&response.0);
+        conn.commit().await.map_err(scoped_conn_error)?;
+        return Ok(status);
+    }
+    let response = EvalRunStatusResponse {
+        tenant_id: TenantId::from(stored_tenant_id),
+        run_id: stored_run_id,
+        status: eval_run_status_from_str(&status)?,
+        suite_name: None,
+        exit_code: None,
+        summary: None,
+        results: Vec::new(),
+        error: row.try_get("error")?,
+    };
+    conn.commit().await.map_err(scoped_conn_error)?;
+    Ok(response)
+}
+
+fn scoped_conn_error(error: moa_core::MoaError) -> EvalServiceError {
+    EvalServiceError::Runtime {
+        message: error.to_string(),
+    }
+}
+
+#[cfg(feature = "internal-eval-runner")]
+fn normalize_eval_run_response(
+    tenant_id: TenantId,
+    run_id: Uuid,
+    response: EvalRunResponse,
+) -> EvalRunResponse {
+    if response.run_id == run_id {
+        response
+    } else {
+        failed_eval_run_response(
+            tenant_id,
+            run_id,
+            format!("eval worker produced mismatched run id {}", response.run_id),
+        )
+    }
+}
+
+fn eval_run_status_as_str(status: EvalRunStatus) -> &'static str {
+    match status {
+        EvalRunStatus::Pending => "pending",
+        EvalRunStatus::Running => "running",
+        EvalRunStatus::Completed => "completed",
+        EvalRunStatus::Failed => "failed",
+    }
+}
+
+fn eval_run_status_from_str(status: &str) -> Result<EvalRunStatus, EvalServiceError> {
+    match status {
+        "pending" => Ok(EvalRunStatus::Pending),
+        "running" => Ok(EvalRunStatus::Running),
+        "completed" => Ok(EvalRunStatus::Completed),
+        "failed" => Ok(EvalRunStatus::Failed),
+        other => Err(EvalServiceError::InvalidDocument {
+            document_source: "analytics.eval_run_status".to_string(),
+            message: format!("stored eval run status is invalid: {other}"),
+        }),
+    }
+}
+
+fn eval_run_status_is_terminal(status: EvalRunStatus) -> bool {
+    matches!(status, EvalRunStatus::Completed | EvalRunStatus::Failed)
+}
+
+/// Runs an already-authorized eval request inside the hosted eval worker.
 pub async fn execute_eval_run_request(run_id: Uuid, request: EvalRunRequest) -> EvalRunResponse {
     #[cfg(not(feature = "internal-eval-runner"))]
     {
@@ -790,7 +1129,7 @@ async fn replay_dataset_for_tenant(
     .await?;
     let report = Box::pin(replay_items_live(
         config,
-        Arc::new(sink) as Arc<dyn LineageSink>,
+        Arc::new(sink),
         replay_config,
         items,
     ))
@@ -859,7 +1198,7 @@ struct ScopedReplayReport {
 #[cfg(feature = "internal-eval-runner")]
 async fn replay_items_live(
     config: MoaConfig,
-    sink: Arc<dyn LineageSink>,
+    sink: Arc<MpscSink>,
     replay_config: ReplayConfig,
     items: Vec<ScopedDatasetItem>,
 ) -> Result<ScopedReplayReport, EvalServiceError> {
@@ -906,7 +1245,8 @@ async fn replay_items_live(
         let records = replay_score_records_for_item(item, result, &replay_config, &evaluator);
         report.scores += records.len();
         for record in records {
-            sink.record(LineageEvent::Eval(record));
+            sink.record_durable_event(LineageEvent::Eval(record))
+                .await?;
         }
         report.items += 1;
     }
@@ -1264,6 +1604,80 @@ mod tests {
         );
         assert_dataset_run_item_target(&records[0], run_id, item_id);
         assert_numeric_score(&records[0], 1.0);
+    }
+
+    #[test]
+    fn eval_run_status_strings_match_persisted_values() {
+        // Pins: Postgres status strings decode to the wire lifecycle enum used by run_status.
+        assert_eq!(eval_run_status_as_str(EvalRunStatus::Pending), "pending");
+        assert_eq!(eval_run_status_as_str(EvalRunStatus::Running), "running");
+        assert_eq!(
+            eval_run_status_as_str(EvalRunStatus::Completed),
+            "completed"
+        );
+        assert_eq!(eval_run_status_as_str(EvalRunStatus::Failed), "failed");
+        assert_eq!(
+            eval_run_status_from_str("pending").expect("pending status should decode"),
+            EvalRunStatus::Pending
+        );
+        assert_eq!(
+            eval_run_status_from_str("running").expect("running status should decode"),
+            EvalRunStatus::Running
+        );
+        assert_eq!(
+            eval_run_status_from_str("completed").expect("completed status should decode"),
+            EvalRunStatus::Completed
+        );
+        assert_eq!(
+            eval_run_status_from_str("failed").expect("failed status should decode"),
+            EvalRunStatus::Failed
+        );
+        assert!(eval_run_status_is_terminal(EvalRunStatus::Completed));
+        assert!(eval_run_status_is_terminal(EvalRunStatus::Failed));
+        assert!(!eval_run_status_is_terminal(EvalRunStatus::Running));
+
+        let error =
+            eval_run_status_from_str("stale").expect_err("unknown persisted status should reject");
+        match error {
+            EvalServiceError::InvalidDocument {
+                document_source,
+                message,
+            } => {
+                assert_eq!(document_source, "analytics.eval_run_status");
+                assert_eq!(message, "stored eval run status is invalid: stale");
+            }
+            other => panic!("expected invalid document error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "internal-eval-runner")]
+    #[test]
+    fn eval_run_worker_mismatched_run_id_becomes_failed_response() {
+        // Pins: terminal persistence never stores a worker response under the wrong accepted run id.
+        let tenant_id = TenantId::from(uuid("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+        let accepted_run_id = uuid("11111111-1111-1111-1111-111111111111");
+        let worker_run_id = uuid("22222222-2222-2222-2222-222222222222");
+        let worker_response = EvalRunResponse {
+            tenant_id,
+            run_id: worker_run_id,
+            status: EvalRunStatus::Completed,
+            suite_name: "suite".to_string(),
+            exit_code: 0,
+            summary: serde_json::json!({"passed": 1}),
+            results: Vec::new(),
+            error: None,
+        };
+
+        let normalized = normalize_eval_run_response(tenant_id, accepted_run_id, worker_response);
+
+        assert_eq!(normalized.tenant_id, tenant_id);
+        assert_eq!(normalized.run_id, accepted_run_id);
+        assert_eq!(normalized.status, EvalRunStatus::Failed);
+        assert_eq!(normalized.exit_code, 2);
+        assert_eq!(
+            normalized.error.as_deref(),
+            Some("eval worker produced mismatched run id 22222222-2222-2222-2222-222222222222")
+        );
     }
 
     fn replay_config(run_id: Uuid, dataset_id: Uuid) -> ReplayConfig {

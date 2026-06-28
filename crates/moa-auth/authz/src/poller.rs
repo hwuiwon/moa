@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
+use uuid::Uuid;
 
 /// Tunable outbox-poller settings.
 #[derive(Debug, Clone)]
@@ -22,6 +23,8 @@ pub struct PollerConfig {
     pub backoff_base: Duration,
     /// Maximum retry delay.
     pub backoff_cap: Duration,
+    /// How long one poller owns an `in_flight` row before another worker may reclaim it.
+    pub lease_duration: Duration,
 }
 
 impl Default for PollerConfig {
@@ -32,6 +35,7 @@ impl Default for PollerConfig {
             max_attempts: 8,
             backoff_base: Duration::from_millis(200),
             backoff_cap: Duration::from_secs(60),
+            lease_duration: Duration::from_secs(300),
         }
     }
 }
@@ -87,55 +91,70 @@ impl OutboxPoller {
 
     /// Run one drain pass and return the number of rows applied successfully.
     pub async fn tick(&self) -> Result<usize, AuthzError> {
-        let mut tx = self.pool.begin().await?;
-        let claimed: Vec<OutboxRow> = sqlx::query_as(
-            r#"
-            SELECT id, idempotency_key, op, tuple_user, tuple_relation, tuple_object, attempts
-            FROM authz_outbox
-            WHERE status = 'pending'
-              AND next_attempt_at <= NOW()
-            ORDER BY next_attempt_at
-            LIMIT $1
-            FOR UPDATE SKIP LOCKED
-            "#,
-        )
-        .bind(limit_i64(self.cfg.batch_size))
-        .fetch_all(&mut *tx)
-        .await?;
-
+        let claimed = self.claim_batch().await?;
         if claimed.is_empty() {
-            tx.commit().await?;
             return Ok(0);
         }
 
-        let ids: Vec<uuid::Uuid> = claimed.iter().map(|row| row.id).collect();
-        sqlx::query(
-            "UPDATE authz_outbox SET status='in_flight', updated_at=NOW() WHERE id = ANY($1)",
-        )
-        .bind(&ids)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-
         let mut applied = 0usize;
-        for row in claimed {
-            match self.apply_row(&row).await {
+        for claim in claimed {
+            match self.apply_row(&claim.row).await {
                 Ok(()) => {
-                    sqlx::query(
-                        "UPDATE authz_outbox SET status='succeeded', updated_at=NOW() WHERE id=$1",
-                    )
-                    .bind(row.id)
-                    .execute(&self.pool)
-                    .await?;
-                    applied += 1;
+                    if self.record_success(&claim).await? {
+                        applied += 1;
+                    }
                 }
                 Err(error) => {
-                    self.record_failure(&row, &error).await?;
+                    self.record_failure(&claim, &error).await?;
                 }
             }
         }
 
         Ok(applied)
+    }
+
+    async fn claim_batch(&self) -> Result<Vec<ClaimedOutboxRow>, AuthzError> {
+        let lease_token = Uuid::new_v4();
+        let mut tx = self.pool.begin().await?;
+        let claimed: Vec<ClaimedOutboxRecord> = sqlx::query_as(
+            r#"
+            WITH candidate AS (
+                SELECT id
+                FROM authz_outbox
+                WHERE (
+                        status = 'pending'
+                        AND next_attempt_at <= NOW()
+                    )
+                    OR (
+                        status = 'in_flight'
+                        AND (
+                            lease_expires_at IS NULL
+                            OR lease_expires_at <= NOW()
+                        )
+                    )
+                ORDER BY next_attempt_at, updated_at
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE authz_outbox AS outbox
+            SET status = 'in_flight',
+                lease_token = $2,
+                lease_expires_at = NOW() + ($3 || ' milliseconds')::INTERVAL,
+                updated_at = NOW()
+            FROM candidate
+            WHERE outbox.id = candidate.id
+            RETURNING outbox.id, outbox.idempotency_key, outbox.op,
+                      outbox.tuple_user, outbox.tuple_relation, outbox.tuple_object,
+                      outbox.attempts, outbox.lease_token
+            "#,
+        )
+        .bind(limit_i64(self.cfg.batch_size))
+        .bind(lease_token)
+        .bind(duration_millis_string(self.cfg.lease_duration))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(claimed.into_iter().map(ClaimedOutboxRow::from).collect())
     }
 
     async fn apply_row(&self, row: &OutboxRow) -> Result<(), AuthzError> {
@@ -158,7 +177,40 @@ impl OutboxPoller {
         self.client.apply_raw(body).await
     }
 
-    async fn record_failure(&self, row: &OutboxRow, error: &AuthzError) -> Result<(), AuthzError> {
+    async fn record_success(&self, claim: &ClaimedOutboxRow) -> Result<bool, AuthzError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE authz_outbox
+            SET status='succeeded',
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                updated_at=NOW()
+            WHERE id=$1
+              AND status = 'in_flight'
+              AND lease_token = $2
+            "#,
+        )
+        .bind(claim.row.id)
+        .bind(claim.lease_token)
+        .execute(&self.pool)
+        .await?;
+        let completed = result.rows_affected() == 1;
+        if !completed {
+            tracing::debug!(
+                id = %claim.row.id,
+                key = %claim.row.idempotency_key,
+                "outbox row lease was lost before success could be recorded"
+            );
+        }
+        Ok(completed)
+    }
+
+    async fn record_failure(
+        &self,
+        claim: &ClaimedOutboxRow,
+        error: &AuthzError,
+    ) -> Result<(), AuthzError> {
+        let row = &claim.row;
         let next_attempts = row.attempts + 1;
         if next_attempts >= self.cfg.max_attempts {
             tracing::error!(
@@ -171,13 +223,21 @@ impl OutboxPoller {
             sqlx::query(
                 r#"
                 UPDATE authz_outbox
-                SET status='dead_letter', attempts=$2, last_error=$3, updated_at=NOW()
+                SET status='dead_letter',
+                    attempts=$2,
+                    last_error=$3,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at=NOW()
                 WHERE id=$1
+                  AND status = 'in_flight'
+                  AND lease_token = $4
                 "#,
             )
             .bind(row.id)
             .bind(next_attempts)
             .bind(error.to_string())
+            .bind(claim.lease_token)
             .execute(&self.pool)
             .await?;
             return Ok(());
@@ -199,14 +259,19 @@ impl OutboxPoller {
                 attempts=$2,
                 last_error=$3,
                 next_attempt_at=NOW() + ($4 || ' milliseconds')::INTERVAL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
                 updated_at=NOW()
             WHERE id=$1
+              AND status = 'in_flight'
+              AND lease_token = $5
             "#,
         )
         .bind(row.id)
         .bind(next_attempts)
         .bind(error.to_string())
-        .bind(backoff.as_millis().to_string())
+        .bind(duration_millis_string(backoff))
+        .bind(claim.lease_token)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -218,6 +283,47 @@ impl OutboxPoller {
         let millis = (self.cfg.backoff_base.as_millis() as u64).saturating_mul(multiplier);
         Duration::from_millis(millis).min(self.cfg.backoff_cap)
     }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ClaimedOutboxRecord {
+    id: Uuid,
+    idempotency_key: String,
+    op: String,
+    tuple_user: String,
+    tuple_relation: String,
+    tuple_object: String,
+    attempts: i32,
+    lease_token: Uuid,
+}
+
+impl ClaimedOutboxRecord {
+    fn row(&self) -> OutboxRow {
+        OutboxRow {
+            id: self.id,
+            idempotency_key: self.idempotency_key.clone(),
+            op: self.op.clone(),
+            tuple_user: self.tuple_user.clone(),
+            tuple_relation: self.tuple_relation.clone(),
+            tuple_object: self.tuple_object.clone(),
+            attempts: self.attempts,
+        }
+    }
+}
+
+impl From<ClaimedOutboxRecord> for ClaimedOutboxRow {
+    fn from(claim: ClaimedOutboxRecord) -> Self {
+        Self {
+            row: claim.row(),
+            lease_token: claim.lease_token,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClaimedOutboxRow {
+    row: OutboxRow,
+    lease_token: Uuid,
 }
 
 /// Handle for cleanly shutting down a spawned outbox poller.
@@ -238,4 +344,8 @@ impl PollerHandle {
 
 fn limit_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+fn duration_millis_string(duration: Duration) -> String {
+    duration.as_millis().to_string()
 }

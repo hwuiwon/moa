@@ -10,7 +10,7 @@ Clients
         |
         v
 Runtime boundary
-  Runtime: `moa-orchestrator` Restate handler service
+  Edge HTTP reads/writes plus `moa-orchestrator` Restate handler service
         |
         v
 Brain and execution
@@ -38,7 +38,15 @@ Learning loop
   learning log -> skill ranking, memory consolidation, rollback audit
 ```
 
-Restate owns durable cloud execution. Postgres owns product-visible data. Graph memory is the canonical memory source, with sidecar and vector indexes maintained by graph writes. Tenant knowledge-base ingestion is a separate product surface owned by `moa-knowledge`; it writes tenant knowledge into the same graph/vector substrate without turning connector sync into session memory ingestion.
+Restate owns durable cloud execution. Postgres owns product-visible data and
+cross-pod correctness records. The optional runtime cache is selected through
+typed config: Redis coordinates short-lived runtime pacing or references across
+replicas when configured, while the in-memory backend is process-local and must
+not be used as an authoritative Kubernetes store. Graph memory is the canonical
+memory source, with sidecar and vector indexes maintained by graph writes.
+Tenant knowledge-base ingestion is a separate product surface owned by
+`moa-knowledge`; it writes tenant knowledge into the same graph/vector substrate
+without turning connector sync into session memory ingestion.
 
 ## Agent Building Blocks
 
@@ -138,7 +146,8 @@ Current trait definitions live under `crates/moa-core/src/traits/` and
 |---|---|---|
 | `BrainOrchestrator` | Start, resume, signal, list, observe sessions; schedule background work | Restate services/objects through `moa-orchestrator` |
 | `SessionStore` | Append-only event log, sessions, pending signals, snapshots, task segments, experience records, learning candidates, analytics, skill rates | `PostgresSessionStore` |
-| `BlobStore` | Claim-check storage for large session artifacts | `FileBlobStore` |
+| `BlobStore` | Claim-check storage for large session artifacts | `PostgresBlobStore` by default; explicit `FileBlobStore` for local or mounted-path use |
+| `RuntimeCacheStore` | Short-lived runtime coordination/cache values with TTL | in-process memory fallback; optional Redis backend |
 | `BranchManager` | Optional database checkpoint branches | `NeonBranchManager` |
 | `HandProvider` | Provision, execute, pause/resume, destroy hands | local, Docker, Daytona, E2B |
 | `LLMProvider` | Provider completion interface | Anthropic, OpenAI, Gemini through `moa-providers` |
@@ -164,27 +173,32 @@ logic behind those handlers should live in in-process application services,
 repositories, or domain crates so a future extraction can replace a composition
 binding without changing handler contracts.
 
-Default production bindings:
+Core production bindings:
 
 - Virtual objects: `Session`, `SubAgent`, `Tenant`, `CronJob`, `IngestionVO`
-- Services: `ActionReviews`, `Agents`, `AdminMaintenance`, `Analytics`, `ApiKeys`, `Artifacts`, `Audit`, `Authz`,
-  `AuthzChallenges`, `Experiments`, `GraphMemoryMaint`, `Health`,
-  `Knowledge`, `LearningReview`, `LineageAdmin`, `LLMGateway`, `Memory`, `NeonMaint`,
-  `Privacy`, `SessionStore`, `Skills`, `Tenants`, `ToolExecutor`,
-  `Workflows`, `ActionPolicy`, `Whoami`
-- Workflows: `ArtifactWorkflowExecution`, `Consolidate`, `ExperimentRun`,
-  `ExperimentTrialRun`, `TurnExecution`, `SubAgentTurnExecution`
+- Services: `ActionReviews`, `AgentDefinitions`, `Agents`,
+  `AdminMaintenance`, `ApiKeys`, `Artifacts`, `Authz`, `AuthzChallenges`,
+  `Contacts`, `GraphMemoryMaint`, `Knowledge`, `LearningReview`,
+  `LLMGateway`, `Memory`, `NeonMaint`, `Privacy`, `SessionStore`, `Skills`,
+  `Tenants`, `ToolExecutor`, `Workflows`, `ActionPolicy`
+- Workflows: `ArtifactWorkflowExecution`, `KnowledgeSyncIngestion`,
+  `Consolidate`, `TurnExecution`, `SubAgentTurnExecution`
 
 Feature-gated bindings:
 
-- `internal-eval-runner`: `Eval` service and `EvalRun` workflow.
+- `experiments`: `Experiments` service plus `ExperimentRun` and
+  `ExperimentTrialRun` workflows.
+- `internal-eval-runner`: `Eval` service. Run status and responses live in
+  Postgres, not a Restate workflow state row.
 - `skill-learning`: detached `SkillLearning` workflow.
 
 Internal application boundaries are in-process modules or domain crates behind
 these handlers, not separate network services. Current examples include action
 review policy and storage, builtin async-authz challenge storage, learning
-review promotion, experiments, analytics, privacy, lineage admin, provider
-routing, and graph memory retrieval.
+review promotion, experiments, privacy, provider routing, and graph memory
+retrieval. Read-only analytics, identity diagnostics, audit verification, and
+lineage read routes are served directly from `moa-edge` against Postgres/domain
+stores instead of going through Restate.
 
 `Session` is the durable actor for one session key. It queues messages, admits `TurnExecution` workflows, tracks the active task segment, records tool/skill usage, and writes learning entries. Segment assessment happens at turn, segment, idle, cancellation, and timeout boundaries as an auditable learning artifact, not as a live-loop control signal. `SubAgent` owns conversational delegated state with depth and budget limits, while `SubAgentTurnExecution` runs one admitted child turn and reports turn-scoped mutations back to the VO.
 
@@ -251,7 +265,10 @@ policy.
 | Memory vectors | Postgres | pgvector embeddings for graph retrieval |
 | Skill packages | Postgres | `moa.artifact`, `moa.artifact_revision`, and `moa.artifact_file` store tenant-owned skill documents and package bytes; generated tenant updates first land as tenant-scoped draft skill artifacts plus proposed `learning_candidates` and only become active after review acceptance |
 | Learning audit | Postgres | `learning_log` append-only rows with bitemporal validity |
+| Hand leases | Postgres | `moa.hand_leases` stores session/provider sandbox bindings, serialized handles, generation fencing, status, and expiry for cross-pod reuse and cleanup |
+| Claim-check blobs | Postgres by default | large event payloads use `session_blobs`; local filesystem blobs require explicit configuration and a persistent mounted path in cloud |
 | Cloud orchestration state | Restate | VO/workflow state and journals, not product record |
+| Runtime cache | Redis or memory | optional TTL cache/coordination for pacing and transient references; memory is per-process and non-authoritative |
 | Optional checkpoints | Neon | branch manager for database checkpoints |
 | Security events | Postgres and S3 | OCSF v1.3 events in `security_events`, shipped to tenant audit buckets |
 
@@ -332,10 +349,11 @@ separate surfaces:
 - Regression eval: `moa-eval` owns deterministic datasets, replay plans,
   CI/nightly regression runs, and score comparisons. In default cloud builds
   these remain local and CI tooling; the public edge does not translate
-  `/v1/evals/*`. The `Eval` service and `EvalRun` workflow are available
-  only when the orchestrator is compiled with `internal-eval-runner`; if
-  exposed internally, their handlers enforce tenant authorization for
-  tenant-owned replay, dataset, score, or compare reads.
+  `/v1/evals/*`. The `Eval` service is available only when the orchestrator is
+  compiled with `internal-eval-runner`; hosted run status is stored in
+  `analytics.eval_run_status` so it is not a Restate workflow-state mirror. If
+  exposed internally, handlers enforce tenant authorization for tenant-owned
+  replay, dataset, score, or compare reads.
 - Live behavior experiments: `moa-experiments` owns the typed domain model and
   storage repository; the `Experiments` service accepts and tracks runs against
   production execution paths. Agent-loop targets create or reuse `Session`
@@ -357,16 +375,18 @@ separate surfaces:
   `status`, `list`, `trials`, `trial_status`, `scores`, and `compare` require
   tenant participation, tenant operator, or tenant admin authorization according
   to the target resource.
-- Analytics and insights: `Analytics` exposes curated read APIs for session,
-  tenant, tool, cache, experiment, learning-candidate, and session-search
-  use cases. `LineageAdmin` exposes protected lineage explain, query, export,
-  verify, and erase operations. Future analytics agents must call these typed
-  services, not raw SQL or unscoped `SessionStore` methods. `Analytics`
-  session stats require session participation; tenant, cache, experiment, and
+- Analytics and insights: `moa-edge` exposes direct read APIs for session,
+  tenant, tool, cache, experiment, learning-candidate, session-search, audit
+  verification, and lineage explain/query/verify use cases. These handlers read
+  Postgres/domain stores directly after authz instead of paying a Restate hop
+  for single-query reads. Future analytics agents must call these typed routes
+  or application services, not raw SQL or unscoped `SessionStore` methods.
+  Session stats require session participation; tenant, cache, experiment, and
   session-search reads require tenant authorization; tenant learning candidate
   reads require tenant admin or tenant operator authorization. Deployment-wide
   tool stats are control-plane operations limited to service identities.
-  `LineageAdmin` tenant reads, export, and erase require tenant authorization.
+  Lineage export and erase are intentionally not direct read handlers until a
+  durable product workflow owns those side effects.
 
 Live behavior experiment-derived improvements have one review boundary: they
 must become `learning_candidates` before any skill or workflow change is
@@ -385,7 +405,7 @@ is the only runtime path that publishes those drafts inside the tenant, records
 `skill_created`/`skill_improved`, and marks the candidate promoted.
 
 Future MCP support is a transport adapter over product/default services such as
-`Experiments`, `Analytics`, `LineageAdmin`, `Workflows`, and other typed
+`Experiments`, direct edge analytics/lineage reads, `Workflows`, and other typed
 surfaces. If internal eval is exposed through MCP, it must remain qualified as
 `internal-eval-runner` gated. MCP must not publish public `/v1/evals/*`
 semantics, own experiment, eval, analytics, learning, workflow, or lineage
@@ -401,10 +421,10 @@ tenant selector is populated from `analytics.turn_lineage`.
 Compliance audit is an opt-in superset of the engineering lineage tier. A
 control-plane enrollment row enables tenant-local BLAKE3 chain links on
 `analytics.turn_lineage`, periodic Merkle roots in `analytics.audit_roots`, PII
-pseudonymization side data in `pii_vault`, and DSAR tooling through the hosted
-`POST /v1/lineage/export`, `POST /v1/lineage/verify`, and
-`POST /v1/lineage/erase` APIs. Tenants that are not enabled keep the L01-L03
-behavior and store `prev_hash = NULL`.
+pseudonymization side data in `pii_vault`, and hosted verification through
+`POST /v1/lineage/verify`. Export and erase side effects stay out of direct edge
+read routes until a durable DSAR workflow owns them. Tenants that are not
+enabled keep the L01-L03 behavior and store `prev_hash = NULL`.
 
 Audit bucket bootstrap lives in `scripts/bootstrap-audit-bucket.sh`. Buckets
 must be created with Object Lock enabled at creation time; production uses

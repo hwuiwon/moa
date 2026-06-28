@@ -172,7 +172,11 @@ enum McpTransport {
 // Stdio transport — demuxed, concurrent-safe
 // ---------------------------------------------------------------------------
 
-/// Shared map of in-flight requests: id -> oneshot sender for the response.
+/// Process-local stdio transport state: id -> oneshot sender for one response.
+///
+/// This map only demultiplexes responses from a child process owned by this
+/// client. It is not cross-request correctness state and is never used by
+/// cloud-safe HTTP/SSE transports.
 type PendingMap = Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>;
 
 struct StdioTransport {

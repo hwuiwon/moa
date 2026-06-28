@@ -309,6 +309,7 @@ mod tests {
                 tenant_id: TenantId::from(Uuid::from_u128(1)),
                 user_id: UserId::new("user-1"),
                 idempotency_key: None,
+                trusted_sandbox_manifest: None,
             },
             decided_by: None,
             deny_reason: None,
@@ -351,6 +352,7 @@ mod tests {
                 tenant_id: TenantId::from(Uuid::from_u128(1)),
                 user_id: UserId::new("user-1"),
                 idempotency_key: None,
+                trusted_sandbox_manifest: None,
             },
             decided_by: Some("admin".to_string()),
             deny_reason: None,
@@ -383,6 +385,7 @@ mod tests {
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
             idempotency_key: None,
+            trusted_sandbox_manifest: None,
         };
 
         let error =

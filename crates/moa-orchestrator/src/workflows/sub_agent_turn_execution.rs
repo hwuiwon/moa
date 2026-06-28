@@ -16,7 +16,7 @@ use moa_core::{
     CompletionContent, CompletionRequest, CompletionResponse, Event, ModelTier, SessionId,
     SessionMeta, StopReason, SubAgentToolRecord, SubAgentTurnOutcomeRecord,
     SubAgentTurnPreparation, SubAgentTurnResponseRecord, TokenUsage, ToolCallContent, ToolCallId,
-    ToolInvocation, ToolOutput, TurnOutcome as CoreTurnOutcome,
+    ToolInvocation, ToolOutput, TrustedSandboxFileManifestRef, TurnOutcome as CoreTurnOutcome,
 };
 use moa_observability::restate_observability::{
     annotate_restate_handler_span, event_persist_span, llm_call_span, sub_agent_turn_span,
@@ -369,6 +369,7 @@ async fn run_sub_agent_iteration(
             meta: &input.meta,
             session_id: input.parent_session,
             active_canary: input.active_canary.as_deref(),
+            trusted_sandbox_manifest: input.request.trusted_sandbox_manifest.as_ref(),
         };
         handle_tool_call(
             ctx,
@@ -417,6 +418,7 @@ struct SubAgentToolContext<'a> {
     meta: &'a SessionMeta,
     session_id: SessionId,
     active_canary: Option<&'a str>,
+    trusted_sandbox_manifest: Option<&'a TrustedSandboxFileManifestRef>,
 }
 
 async fn handle_tool_call(
@@ -442,6 +444,7 @@ async fn handle_tool_call(
             tool_call,
             allowed_tools,
             active_canary: tool_context.active_canary,
+            trusted_sandbox_manifest: tool_context.trusted_sandbox_manifest,
             origin: GovernedInvocationOrigin::SubAgent {
                 sub_agent_id,
                 turn_id: tool_context.turn_id,
@@ -491,6 +494,7 @@ async fn handle_tool_call(
                 session_id,
                 tool_id,
                 tool_call,
+                tool_context.trusted_sandbox_manifest,
                 turn_evidence,
             )
             .await?;
@@ -506,6 +510,7 @@ async fn handle_delegation_tool(
     session_id: SessionId,
     tool_id: ToolCallId,
     tool_call: &ToolCallContent,
+    trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
     turn_evidence: &mut TurnEvidence,
 ) -> Result<(), HandlerError> {
     let invocation = tool_call.invocation.clone();
@@ -538,6 +543,7 @@ async fn handle_delegation_tool(
             session_id,
         },
         tool,
+        trusted_sandbox_manifest,
     )
     .instrument(span)
     .await?;
@@ -881,6 +887,7 @@ mod tests {
             tenant_id: moa_core::TenantId::new(),
             user_id: moa_core::UserId::new("user"),
             model: moa_core::ModelId::new("model"),
+            trusted_sandbox_manifest: None,
         };
 
         assert_eq!(

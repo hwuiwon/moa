@@ -1,7 +1,9 @@
 //! Async lineage writer worker.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::Duration;
 
 use backon::{ExponentialBuilder, Retryable};
@@ -96,6 +98,140 @@ impl WriterHandle {
 /// Spawned lineage writer marker.
 pub struct LineageWriter;
 
+/// A fjall-backed durable journal shared by the hot-path sink and writer.
+#[derive(Clone)]
+pub(crate) struct DurableJournal {
+    inner: Arc<StdMutex<Journal>>,
+    next_seq: Arc<AtomicU64>,
+}
+
+impl DurableJournal {
+    /// Opens or creates the shared durable journal.
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        let journal = Journal::open(path)?;
+        let next_seq = next_sequence(&journal)?;
+        Ok(Self {
+            inner: Arc::new(StdMutex::new(journal)),
+            next_seq: Arc::new(AtomicU64::new(next_seq)),
+        })
+    }
+
+    /// Appends an event to fjall and returns its durable sequence number.
+    pub(crate) async fn append_accepted_event(&self, evt: LineageEvent) -> Result<u64> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let (seq, _) = journal.append_event_row_sync(evt)?;
+            Ok(seq)
+        })
+        .await?
+    }
+
+    pub(crate) fn append_accepted_event_sync(&self, evt: LineageEvent) -> Result<u64> {
+        let (seq, _) = self.append_event_row_sync(evt)?;
+        Ok(seq)
+    }
+
+    fn append_event_row_sync(&self, evt: LineageEvent) -> Result<(u64, PendingRow)> {
+        let row = PendingRow::from_event(evt)?;
+        let payload = serde_json::to_vec(&row)?;
+        let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
+        self.lock()?.append(seq, &payload)?;
+        record_journal_acceptance(1);
+        Ok((seq, row))
+    }
+
+    async fn append_event_rows(&self, events: Vec<LineageEvent>) -> Result<Vec<(u64, PendingRow)>> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || {
+            events
+                .into_iter()
+                .map(|event| journal.append_event_row_sync(event))
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?
+    }
+
+    async fn replay(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || journal.lock()?.replay()).await?
+    }
+
+    async fn ack_range(&self, lo: u64, hi: u64) -> Result<()> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || journal.lock()?.ack_range(lo, hi)).await?
+    }
+
+    async fn ack_sequences(&self, seqs: &[u64]) -> Result<()> {
+        if seqs.is_empty() {
+            return Ok(());
+        }
+
+        let mut sorted = seqs.to_vec();
+        sorted.sort_unstable();
+        let mut range_start = sorted[0];
+        let mut previous = sorted[0];
+        for seq in sorted.into_iter().skip(1) {
+            if seq == previous.saturating_add(1) {
+                previous = seq;
+                continue;
+            }
+            self.ack_range(range_start, previous).await?;
+            range_start = seq;
+            previous = seq;
+        }
+        self.ack_range(range_start, previous).await
+    }
+
+    /// Returns the approximate number of unacknowledged journal rows.
+    pub(crate) fn approximate_len(&self) -> Result<usize> {
+        Ok(self.lock()?.approximate_len())
+    }
+
+    async fn approximate_len_async(&self) -> Result<usize> {
+        let journal = self.clone();
+        tokio::task::spawn_blocking(move || journal.approximate_len()).await?
+    }
+
+    fn lock(&self) -> Result<StdMutexGuard<'_, Journal>> {
+        self.inner
+            .lock()
+            .map_err(|_| Error::Invalid("lineage journal lock poisoned".to_string()))
+    }
+}
+
+pub(crate) enum WriterCommand {
+    /// Raw event that can be dropped before acceptance in lossy telemetry mode.
+    Event(Box<LineageEvent>),
+    /// Notification that an event has already been appended to the journal.
+    Journaled(u64),
+}
+
+enum WriterReceiver {
+    Raw(mpsc::Receiver<LineageEvent>),
+    Commands(mpsc::Receiver<WriterCommand>),
+}
+
+impl WriterReceiver {
+    async fn recv(&mut self) -> Option<WriterCommand> {
+        match self {
+            Self::Raw(rx) => rx
+                .recv()
+                .await
+                .map(|event| WriterCommand::Event(Box::new(event))),
+            Self::Commands(rx) => rx.recv().await,
+        }
+    }
+
+    fn try_recv(&mut self) -> std::result::Result<WriterCommand, mpsc::error::TryRecvError> {
+        match self {
+            Self::Raw(rx) => rx
+                .try_recv()
+                .map(|event| WriterCommand::Event(Box::new(event))),
+            Self::Commands(rx) => rx.try_recv(),
+        }
+    }
+}
+
 /// Spawns the lineage writer worker.
 pub async fn spawn_writer(
     rx: mpsc::Receiver<LineageEvent>,
@@ -103,15 +239,34 @@ pub async fn spawn_writer(
     pool: sqlx::PgPool,
 ) -> Result<WriterHandle> {
     ensure_schema(&pool).await?;
+    let journal = DurableJournal::open(&config.journal_path)?;
+    spawn_writer_task(WriterReceiver::Raw(rx), config, pool, journal)
+}
 
+/// Spawns the writer for the production sink command channel.
+pub(crate) async fn spawn_writer_for_sink(
+    rx: mpsc::Receiver<WriterCommand>,
+    config: MpscSinkConfig,
+    pool: sqlx::PgPool,
+    journal: DurableJournal,
+) -> Result<WriterHandle> {
+    ensure_schema(&pool).await?;
+    spawn_writer_task(WriterReceiver::Commands(rx), config, pool, journal)
+}
+
+fn spawn_writer_task(
+    rx: WriterReceiver,
+    config: MpscSinkConfig,
+    pool: sqlx::PgPool,
+    journal: DurableJournal,
+) -> Result<WriterHandle> {
     let shutdown = CancellationToken::new();
     let stats = Arc::new(SharedWriterStats::default());
     let worker_shutdown = shutdown.clone();
     let worker_stats = stats.clone();
-    let join =
-        tokio::spawn(
-            async move { run_writer(rx, config, pool, worker_shutdown, worker_stats).await },
-        );
+    let join = tokio::spawn(async move {
+        run_writer(rx, config, pool, journal, worker_shutdown, worker_stats).await
+    });
 
     Ok(WriterHandle {
         shutdown,
@@ -121,16 +276,15 @@ pub async fn spawn_writer(
 }
 
 async fn run_writer(
-    mut rx: mpsc::Receiver<LineageEvent>,
+    mut rx: WriterReceiver,
     config: MpscSinkConfig,
     pool: sqlx::PgPool,
+    journal: DurableJournal,
     shutdown: CancellationToken,
     stats: Arc<SharedWriterStats>,
 ) -> Result<WriterStats> {
-    let journal = Journal::open(&config.journal_path)?;
     replay_pending(&journal, &pool, &stats).await?;
 
-    let mut seq = next_sequence(&journal)?;
     let mut batch = Vec::with_capacity(config.batch_size);
     let mut flush_interval = tokio::time::interval(config.batch_max_age);
     flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -138,37 +292,59 @@ async fn run_writer(
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
-                while let Ok(evt) = rx.try_recv() {
-                    batch.push(evt);
-                    if batch.len() >= config.batch_size {
-                        flush_events(&journal, &pool, &stats, &mut seq, &mut batch).await?;
-                    }
+                while let Ok(command) = rx.try_recv() {
+                    handle_writer_command(command, &journal, &pool, &stats, &mut batch, config.batch_size).await?;
                 }
-                flush_events(&journal, &pool, &stats, &mut seq, &mut batch).await?;
+                flush_events(&journal, &pool, &stats, &mut batch).await?;
+                replay_pending(&journal, &pool, &stats).await?;
                 break;
             }
-            maybe_evt = rx.recv() => {
-                match maybe_evt {
-                    Some(evt) => {
-                        batch.push(evt);
-                        if batch.len() >= config.batch_size {
-                            flush_events(&journal, &pool, &stats, &mut seq, &mut batch).await?;
-                        }
+            maybe_command = rx.recv() => {
+                match maybe_command {
+                    Some(command) => {
+                        handle_writer_command(command, &journal, &pool, &stats, &mut batch, config.batch_size).await?;
                     }
                     None => {
-                        flush_events(&journal, &pool, &stats, &mut seq, &mut batch).await?;
+                        flush_events(&journal, &pool, &stats, &mut batch).await?;
+                        replay_pending(&journal, &pool, &stats).await?;
                         break;
                     }
                 }
             }
             _ = flush_interval.tick() => {
-                flush_events(&journal, &pool, &stats, &mut seq, &mut batch).await?;
+                flush_events(&journal, &pool, &stats, &mut batch).await?;
+                replay_pending(&journal, &pool, &stats).await?;
             }
         }
     }
 
-    record_journal_depth(&stats, journal.approximate_len() as u64);
+    record_journal_depth(&stats, journal.approximate_len_async().await? as u64);
     Ok(stats.snapshot())
+}
+
+async fn handle_writer_command(
+    command: WriterCommand,
+    journal: &DurableJournal,
+    pool: &sqlx::PgPool,
+    stats: &Arc<SharedWriterStats>,
+    batch: &mut Vec<LineageEvent>,
+    batch_size: usize,
+) -> Result<()> {
+    match command {
+        WriterCommand::Event(evt) => {
+            batch.push(*evt);
+            if batch.len() >= batch_size {
+                flush_events(journal, pool, stats, batch).await?;
+            }
+        }
+        WriterCommand::Journaled(seq) => {
+            metrics::counter!("moa_lineage_journal_notifications_total").increment(1);
+            tracing::trace!(seq, "received journaled lineage event notification");
+            flush_events(journal, pool, stats, batch).await?;
+            replay_pending(journal, pool, stats).await?;
+        }
+    }
+    Ok(())
 }
 
 fn next_sequence(journal: &Journal) -> Result<u64> {
@@ -183,11 +359,11 @@ fn next_sequence(journal: &Journal) -> Result<u64> {
 }
 
 async fn replay_pending(
-    journal: &Journal,
+    journal: &DurableJournal,
     pool: &sqlx::PgPool,
     stats: &Arc<SharedWriterStats>,
 ) -> Result<()> {
-    let pending = journal.replay()?;
+    let pending = journal.replay().await?;
     record_journal_depth(stats, pending.len() as u64);
     if pending.is_empty() {
         return Ok(());
@@ -201,20 +377,19 @@ async fn replay_pending(
     if should_ack_journal(disposition)
         && let (Some((lo, _)), Some((hi, _))) = (pending.first(), pending.last())
     {
-        journal.ack_range(*lo, *hi)?;
+        journal.ack_range(*lo, *hi).await?;
     }
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
-    record_journal_depth(stats, journal.approximate_len() as u64);
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
     Ok(())
 }
 
 async fn flush_events(
-    journal: &Journal,
+    journal: &DurableJournal,
     pool: &sqlx::PgPool,
     stats: &Arc<SharedWriterStats>,
-    seq: &mut u64,
     batch: &mut Vec<LineageEvent>,
 ) -> Result<()> {
     if batch.is_empty() {
@@ -223,26 +398,21 @@ async fn flush_events(
 
     let events = std::mem::take(batch);
     let mut rows = Vec::with_capacity(events.len());
-    let start_seq = *seq;
-    let mut end_seq = start_seq;
-    for evt in events {
-        let row = PendingRow::from_event(evt)?;
-        let payload = serde_json::to_vec(&row)?;
-        journal.append(*seq, &payload)?;
-        end_seq = *seq;
-        *seq = (*seq).saturating_add(1);
+    let mut seqs = Vec::with_capacity(events.len());
+    for (seq, row) in journal.append_event_rows(events).await? {
+        seqs.push(seq);
         rows.push(row);
     }
-    record_journal_depth(stats, journal.approximate_len() as u64);
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
 
     let disposition = write_pending_rows_or_dead_letter(pool, &rows).await?;
     if should_ack_journal(disposition) {
-        journal.ack_range(start_seq, end_seq)?;
+        journal.ack_sequences(&seqs).await?;
     }
     if disposition == WriteDisposition::Written {
         record_flush(stats, rows.len());
     }
-    record_journal_depth(stats, journal.approximate_len() as u64);
+    record_journal_depth(stats, journal.approximate_len_async().await? as u64);
     Ok(())
 }
 
@@ -855,6 +1025,10 @@ fn record_flush(stats: &SharedWriterStats, rows: usize) {
     );
     metrics::counter!("moa_lineage_written_total").increment(rows as u64);
     metrics::counter!("moa_lineage_flushed_total").increment(rows as u64);
+}
+
+fn record_journal_acceptance(rows: u64) {
+    metrics::counter!("moa_lineage_accepted_total", "durability" => "journal").increment(rows);
 }
 
 fn record_journal_depth(stats: &SharedWriterStats, depth: u64) {

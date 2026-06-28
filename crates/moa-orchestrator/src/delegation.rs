@@ -9,7 +9,8 @@ use moa_core::{
     MessageSubAgentInput, RemoveSubAgentResultWaiterInput, ReserveSubAgentInput, ReservedSubAgent,
     SessionId, SessionMeta, SpawnSubAgentInput, SpawnSubAgentOutput, SubAgentChildRef,
     SubAgentChildRequest, SubAgentId, SubAgentMessage, SubAgentState, SubAgentStatus,
-    SubAgentTerminalResult, ToolOutput, UserId, WaitSubAgentInput, WaitSubAgentOutput,
+    SubAgentTerminalResult, ToolOutput, TrustedSandboxFileManifestRef, UserId, WaitSubAgentInput,
+    WaitSubAgentOutput,
 };
 use restate_sdk::prelude::*;
 use serde::Serialize;
@@ -64,10 +65,11 @@ pub(crate) async fn execute_delegation_tool(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
     tool: DelegationTool,
+    trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
 ) -> Result<ToolOutput, HandlerError> {
     let output = match tool {
         DelegationTool::Spawn(input) => {
-            spawn_output(spawn_child_detached(ctx, parent, input).await?)
+            spawn_output(spawn_child_detached(ctx, parent, input, trusted_sandbox_manifest).await?)
         }
         DelegationTool::Wait(input) => wait_output(wait_child(ctx, parent, input).await?),
         DelegationTool::Message(input) => {
@@ -165,6 +167,7 @@ async fn spawn_child_detached(
     ctx: &WorkflowContext<'_>,
     parent: DelegationParent<'_>,
     request: SpawnSubAgentInput,
+    trusted_sandbox_manifest: Option<&TrustedSandboxFileManifestRef>,
 ) -> Result<SpawnSubAgentOutput, HandlerError> {
     let task_name = request.task_name.clone();
     let child_request = SubAgentChildRequest {
@@ -172,6 +175,7 @@ async fn spawn_child_detached(
         tool_subset: request.tool_subset,
         budget_tokens: request.budget_tokens,
         max_turns: request.max_turns,
+        trusted_sandbox_manifest: trusted_sandbox_manifest.cloned(),
     };
     let reservation =
         reserve_and_start_child(ctx, parent, child_request, task_name, "spawn_sub_agent_id")

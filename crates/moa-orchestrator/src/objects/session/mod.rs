@@ -42,6 +42,39 @@ struct SessionPendingState {
     active_turn_id: Option<String>,
     pending_messages: VecDeque<PendingMessage>,
     last_outcome: Option<ExecutionTurnOutcome>,
+    #[serde(default)]
+    turn_waiters: Vec<SessionTurnWaiter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SessionTurnWaiter {
+    turn_id: String,
+    awakeable_id: String,
+}
+
+/// Input for registering a workflow awakeable that resolves when a session turn completes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttachSessionTurnWaiterInput {
+    /// Stable turn id returned when the turn was admitted.
+    pub turn_id: String,
+    /// Awakeable id owned by the waiting workflow.
+    pub awakeable_id: String,
+}
+
+/// Output returned after registering a session turn waiter.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttachSessionTurnWaiterOutput {
+    /// Already available terminal outcome, if the turn completed before registration.
+    pub outcome: Option<ExecutionTurnOutcome>,
+}
+
+/// Input for removing a workflow awakeable after a bounded turn wait times out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoveSessionTurnWaiterInput {
+    /// Stable turn id the waiter was attached to.
+    pub turn_id: String,
+    /// Awakeable id that should no longer be resolved by the session.
+    pub awakeable_id: String,
 }
 
 /// Restate virtual object surface for one durable session key.
@@ -67,6 +100,16 @@ pub trait Session {
 
     /// Records the terminal outcome delivered by a `TurnExecution` workflow.
     async fn record_turn_outcome(outcome: Json<ExecutionTurnOutcome>) -> Result<(), HandlerError>;
+
+    /// Registers a workflow awakeable that should resolve when the turn completes.
+    async fn attach_turn_waiter(
+        input: Json<AttachSessionTurnWaiterInput>,
+    ) -> Result<Json<AttachSessionTurnWaiterOutput>, HandlerError>;
+
+    /// Removes a workflow awakeable after a bounded turn wait times out.
+    async fn remove_turn_waiter(
+        input: Json<RemoveSessionTurnWaiterInput>,
+    ) -> Result<(), HandlerError>;
 
     /// Forwards a cancellation request to the active `TurnExecution` workflow.
     async fn request_cancel(reason: Json<String>) -> Result<Json<CancelResponse>, HandlerError>;

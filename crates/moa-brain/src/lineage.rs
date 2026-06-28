@@ -201,7 +201,9 @@ pub async fn emit_generation_lineage(
     match serde_json::to_value(LineageEvent::Generation(record.clone())) {
         Ok(json) => {
             lineage.record_span_attributes(span, &json);
-            lineage.record(json);
+            if let Err(error) = lineage.record_durable(json).await {
+                tracing::warn!(%error, "failed to durably record generation lineage");
+            }
         }
         Err(error) => tracing::warn!(%error, "failed to serialize generation lineage"),
     }
@@ -220,7 +222,11 @@ pub async fn emit_generation_lineage(
         comment: None,
     };
     match serde_json::to_value(LineageEvent::Eval(score)) {
-        Ok(json) => lineage.record(json),
+        Ok(json) => {
+            if let Err(error) = lineage.record_durable(json).await {
+                tracing::warn!(%error, "failed to durably record generation score");
+            }
+        }
         Err(error) => tracing::warn!(%error, "failed to serialize generation score"),
     }
     metrics::gauge!(
@@ -233,10 +239,14 @@ pub async fn emit_generation_lineage(
     let citation =
         build_citation_lineage(turn_id, session, response, citation_sources, response_event).await;
     match serde_json::to_value(LineageEvent::Citation(citation.clone())) {
-        Ok(json) => lineage.record(json),
+        Ok(json) => {
+            if let Err(error) = lineage.record_durable(json).await {
+                tracing::warn!(%error, "failed to durably record citation lineage");
+            }
+        }
         Err(error) => tracing::warn!(%error, "failed to serialize citation lineage"),
     }
-    emit_citation_scores(lineage, &citation);
+    emit_citation_scores(lineage, &citation).await;
 }
 
 async fn build_citation_lineage(
@@ -306,7 +316,7 @@ fn context_citation_verifier() -> CascadeVerifier {
     )
 }
 
-fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage) {
+async fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage) {
     for source in &citation.citations {
         let score = ScoreRecord {
             score_id: uuid::Uuid::now_v7(),
@@ -325,7 +335,11 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
             comment: None,
         };
         match serde_json::to_value(LineageEvent::Eval(score)) {
-            Ok(json) => lineage.record(json),
+            Ok(json) => {
+                if let Err(error) = lineage.record_durable(json).await {
+                    tracing::warn!(%error, "failed to durably record citation score");
+                }
+            }
             Err(error) => tracing::warn!(%error, "failed to serialize citation score"),
         }
         metrics::gauge!(
@@ -352,7 +366,11 @@ fn emit_citation_scores(lineage: &dyn LineageHandle, citation: &CitationLineage)
                 comment: None,
             };
             match serde_json::to_value(LineageEvent::Eval(score)) {
-                Ok(json) => lineage.record(json),
+                Ok(json) => {
+                    if let Err(error) = lineage.record_durable(json).await {
+                        tracing::warn!(%error, "failed to durably record citation NLI score");
+                    }
+                }
                 Err(error) => tracing::warn!(%error, "failed to serialize nli score"),
             }
         }

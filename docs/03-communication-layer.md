@@ -142,4 +142,10 @@ email addresses, or phone numbers.
 
 Notification connectors are transport clients, not durable schedulers. Caller-owned alert or notification workflows that must survive process restarts should invoke them from Restate handlers or workflows. Twilio and Postmark handle safe API-level rate limits locally by retrying HTTP 429 responses with `Retry-After`; Slack uses the Slack SDK rate-control path and maps exhausted rate limits to MOA's typed `RateLimited` error. Terminal or provider-level failures such as Twilio A2P 10DLC `30034`, Postmark inactive-recipient `ErrorCode` values, and Slack `ok:false` API errors are classified and observed so the durable caller can decide whether a new send is allowed.
 
+Slack channel pacing and multi-chunk outbound message references use
+`RuntimeCacheStore` when configured. With Redis selected, replicas coordinate
+per-channel send slots and edit/delete references. With the memory backend,
+those values are per-pod best effort; durable conversation routing still comes
+from Postgres session/channel bindings and session events.
+
 Current implementation caveats are documented in `implementation-caveats.md`, especially around callback normalization and outbound routing anchors.

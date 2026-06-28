@@ -61,6 +61,7 @@ fn tool_request(
         tenant_id: meta.tenant_id,
         user_id: fallback_tool_user_id(meta),
         idempotency_key: None,
+        trusted_sandbox_manifest: None,
     }
 }
 
@@ -82,6 +83,7 @@ fn tool_request_with_provider_id(
         tenant_id: meta.tenant_id,
         user_id: fallback_tool_user_id(meta),
         idempotency_key: None,
+        trusted_sandbox_manifest: None,
     }
 }
 

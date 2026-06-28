@@ -4,30 +4,247 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration, time::Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use moa_core::traits::ChannelAdapter;
+use moa_core::traits::{ChannelAdapter, RuntimeCacheStore};
 use moa_core::{
     Channel, ChannelActor, ChannelCapabilities, ChannelRef, InboundMessage, MessageId, MoaConfig,
     MoaError, OutboundMessage, Result,
 };
+use serde::{Deserialize, Serialize};
 use slack_morphism::errors::SlackClientError;
 use slack_morphism::prelude::*;
-use tokio::sync::{RwLock, mpsc};
+use tokio::{
+    sync::{RwLock, mpsc},
+    time::sleep,
+};
 use tracing::{Instrument, field, warn};
 use uuid::Uuid;
 
 use crate::{
     action_review::prepare_outbound_message,
     messaging_receive_span,
+    rate_limit::MessagingRateLimiter,
     renderer::{SlackRenderChunk, SlackRenderer},
 };
 
 const SLACK_RATE_LIMIT_RETRIES: usize = 3;
 const SLACK_MESSAGE_ID_PREFIX: &str = "slack:";
+const SLACK_OUTBOUND_REF_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const SLACK_OUTBOUND_REF_LOCK_TTL: Duration = Duration::from_secs(120);
+const SLACK_OUTBOUND_REF_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const SLACK_OUTBOUND_REF_LOCK_RELEASE_TTL: Duration = Duration::from_millis(1);
 
 #[derive(Clone)]
 struct SlackListenerState {
     event_tx: mpsc::Sender<InboundMessage>,
     inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
+}
+
+#[derive(Clone)]
+struct SlackOutboundMessageRefs {
+    hot_refs: Arc<RwLock<HashMap<String, Vec<SlackMessageRef>>>>,
+    runtime_cache: Option<Arc<dyn RuntimeCacheStore>>,
+}
+
+struct SlackOutboundRefUpdateLock {
+    runtime_cache: Arc<dyn RuntimeCacheStore>,
+    key: String,
+    token: Vec<u8>,
+}
+
+impl SlackOutboundRefUpdateLock {
+    async fn release(self) -> Result<()> {
+        self.runtime_cache
+            .compare_and_set(
+                &self.key,
+                Some(&self.token),
+                b"released".to_vec(),
+                SLACK_OUTBOUND_REF_LOCK_RELEASE_TTL,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl SlackOutboundMessageRefs {
+    fn new(runtime_cache: Option<Arc<dyn RuntimeCacheStore>>) -> Self {
+        Self {
+            hot_refs: Arc::new(RwLock::new(HashMap::new())),
+            runtime_cache,
+        }
+    }
+
+    async fn resolve(&self, msg_id: &MessageId) -> Result<Vec<SlackMessageRef>> {
+        if let Some(refs) = self.load(msg_id).await? {
+            return Ok(refs);
+        }
+
+        let Some(message_ref) = slack_message_ref_from_id(msg_id) else {
+            return Err(MoaError::ValidationError(format!(
+                "unknown slack message id: {msg_id}"
+            )));
+        };
+        let refs = vec![message_ref];
+        self.refresh_shared_refs_best_effort(msg_id, &refs, "resolve_single_ref")
+            .await;
+        Ok(refs)
+    }
+
+    #[cfg(test)]
+    async fn store(&self, msg_id: &MessageId, refs: Vec<SlackMessageRef>) -> Result<()> {
+        self.remember_hot_refs(msg_id, &refs).await;
+        self.write_shared_refs(msg_id, &refs).await?;
+
+        Ok(())
+    }
+
+    async fn record_after_external_side_effect(
+        &self,
+        msg_id: &MessageId,
+        refs: Vec<SlackMessageRef>,
+        operation: &'static str,
+    ) {
+        self.remember_hot_refs(msg_id, &refs).await;
+        self.refresh_shared_refs_best_effort(msg_id, &refs, operation)
+            .await;
+    }
+
+    async fn load(&self, msg_id: &MessageId) -> Result<Option<Vec<SlackMessageRef>>> {
+        if let Some(runtime_cache) = &self.runtime_cache {
+            let key = slack_outbound_refs_cache_key(msg_id);
+            match runtime_cache.get(&key).await {
+                Ok(Some(value)) => {
+                    let refs = decode_slack_message_refs(&value)?;
+                    self.remember_hot_refs(msg_id, &refs).await;
+                    if let Err(error) = runtime_cache
+                        .expire(&key, SLACK_OUTBOUND_REF_CACHE_TTL)
+                        .await
+                    {
+                        warn!(
+                            message_id = %msg_id,
+                            error = %error,
+                            "slack outbound refs loaded but shared TTL refresh failed"
+                        );
+                    }
+                    return Ok(Some(refs));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(refs) = self.hot_refs.read().await.get(msg_id.as_str()).cloned() {
+                        warn!(
+                            message_id = %msg_id,
+                            error = %error,
+                            "using process-local Slack outbound refs after shared cache read failed"
+                        );
+                        return Ok(Some(refs));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        let refs = self.hot_refs.read().await.get(msg_id.as_str()).cloned();
+        if let Some(refs) = refs {
+            self.refresh_shared_refs_best_effort(msg_id, &refs, "load_hot_refs")
+                .await;
+            return Ok(Some(refs));
+        }
+
+        Ok(None)
+    }
+
+    async fn remove_after_external_side_effect(&self, msg_id: &MessageId, operation: &'static str) {
+        self.hot_refs.write().await.remove(msg_id.as_str());
+        if let Some(runtime_cache) = &self.runtime_cache {
+            if let Err(error) = runtime_cache
+                .delete(&slack_outbound_refs_cache_key(msg_id))
+                .await
+            {
+                warn!(
+                    message_id = %msg_id,
+                    operation,
+                    error = %error,
+                    "Slack accepted external side effect but shared outbound ref cleanup failed"
+                );
+            }
+        }
+    }
+
+    async fn acquire_update_lock(
+        &self,
+        msg_id: &MessageId,
+    ) -> Result<Option<SlackOutboundRefUpdateLock>> {
+        let Some(runtime_cache) = &self.runtime_cache else {
+            return Ok(None);
+        };
+        let key = slack_outbound_refs_lock_key(msg_id);
+        let token = Uuid::now_v7().to_string().into_bytes();
+
+        loop {
+            let current = runtime_cache.get(&key).await?;
+            if current.is_none()
+                && runtime_cache
+                    .compare_and_set(&key, None, token.clone(), SLACK_OUTBOUND_REF_LOCK_TTL)
+                    .await?
+            {
+                return Ok(Some(SlackOutboundRefUpdateLock {
+                    runtime_cache: runtime_cache.clone(),
+                    key,
+                    token,
+                }));
+            }
+
+            sleep(SLACK_OUTBOUND_REF_LOCK_RETRY_INTERVAL).await;
+        }
+    }
+
+    async fn release_update_lock(&self, update_lock: Option<SlackOutboundRefUpdateLock>) {
+        let Some(update_lock) = update_lock else {
+            return;
+        };
+        if let Err(error) = update_lock.release().await {
+            warn!(
+                error = %error,
+                "Slack outbound ref update lock release failed"
+            );
+        }
+    }
+
+    async fn remember_hot_refs(&self, msg_id: &MessageId, refs: &[SlackMessageRef]) {
+        self.hot_refs
+            .write()
+            .await
+            .insert(msg_id.as_str().to_string(), refs.to_vec());
+    }
+
+    async fn write_shared_refs(&self, msg_id: &MessageId, refs: &[SlackMessageRef]) -> Result<()> {
+        let Some(runtime_cache) = &self.runtime_cache else {
+            return Ok(());
+        };
+        runtime_cache
+            .set(
+                &slack_outbound_refs_cache_key(msg_id),
+                encode_slack_message_refs(refs)?,
+                SLACK_OUTBOUND_REF_CACHE_TTL,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn refresh_shared_refs_best_effort(
+        &self,
+        msg_id: &MessageId,
+        refs: &[SlackMessageRef],
+        operation: &'static str,
+    ) {
+        if let Err(error) = self.write_shared_refs(msg_id, refs).await {
+            warn!(
+                message_id = %msg_id,
+                operation,
+                error = %error,
+                "Slack outbound ref storage failed; using process-local refs when available"
+            );
+        }
+    }
 }
 
 /// Slack adapter implementing the generic channel abstraction.
@@ -38,7 +255,8 @@ pub struct SlackAdapter {
     app_token: SlackApiToken,
     renderer: SlackRenderer,
     inbound_contexts: Arc<RwLock<HashMap<String, SlackMessageRef>>>,
-    outbound_messages: Arc<RwLock<HashMap<String, Vec<SlackMessageRef>>>>,
+    outbound_refs: SlackOutboundMessageRefs,
+    rate_limiter: MessagingRateLimiter,
     last_edits: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
@@ -69,9 +287,22 @@ impl SlackAdapter {
             },
             renderer: SlackRenderer::new(),
             inbound_contexts: Arc::new(RwLock::new(HashMap::new())),
-            outbound_messages: Arc::new(RwLock::new(HashMap::new())),
+            outbound_refs: SlackOutboundMessageRefs::new(None),
+            rate_limiter: MessagingRateLimiter::for_channel(Channel::Slack),
             last_edits: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Uses a runtime cache for Slack pacing and outbound message references.
+    ///
+    /// Redis-backed stores coordinate across replicas. The memory backend is
+    /// process-local and only coordinates adapters that share the same store
+    /// instance, so it is a local-development best-effort fallback.
+    #[must_use]
+    pub fn with_runtime_cache(mut self, runtime_cache: Arc<dyn RuntimeCacheStore>) -> Self {
+        self.rate_limiter = self.rate_limiter.with_runtime_cache(runtime_cache.clone());
+        self.outbound_refs.runtime_cache = Some(runtime_cache);
+        self
     }
 
     /// Creates a Slack adapter using the configured token environment variables.
@@ -85,17 +316,25 @@ impl SlackAdapter {
         Self::new(bot_token, app_token)
     }
 
+    /// Creates a Slack adapter using configured tokens and a shared runtime cache.
+    pub fn from_config_with_runtime_cache(
+        config: &MoaConfig,
+        runtime_cache: Arc<dyn RuntimeCacheStore>,
+    ) -> Result<Self> {
+        Self::from_config(config).map(|adapter| adapter.with_runtime_cache(runtime_cache))
+    }
+
     async fn resolve_target(
         &self,
         reply_to: Option<&str>,
         channel_ref: Option<&ChannelRef>,
     ) -> Result<SlackTarget> {
         if let Some(reply_to) = reply_to {
+            let reply_to_id = MessageId::new(reply_to.to_string());
             if let Some(last_ref) = self
-                .outbound_messages
-                .read()
-                .await
-                .get(reply_to)
+                .outbound_refs
+                .load(&reply_to_id)
+                .await?
                 .and_then(|refs| refs.last().cloned())
             {
                 return Ok(last_ref.target());
@@ -120,6 +359,9 @@ impl SlackAdapter {
         target: &SlackTarget,
         chunk: &SlackRenderChunk,
     ) -> Result<SlackMessageRef> {
+        self.rate_limiter
+            .wait_for_channel_slot(target.channel_id.as_ref())
+            .await?;
         let session = self.client.open_session(&self.bot_token);
         let request = SlackApiChatPostMessageRequest {
             channel: SlackChannelId(target.channel_id.to_string()),
@@ -156,6 +398,9 @@ impl SlackAdapter {
         message_ref: &SlackMessageRef,
         chunk: &SlackRenderChunk,
     ) -> Result<()> {
+        self.rate_limiter
+            .wait_for_channel_slot(message_ref.channel_id.as_ref())
+            .await?;
         let session = self.client.open_session(&self.bot_token);
         let request = SlackApiChatUpdateRequest {
             channel: SlackChannelId(message_ref.channel_id.to_string()),
@@ -195,6 +440,27 @@ impl SlackAdapter {
                 );
             }
         }
+    }
+
+    #[cfg(test)]
+    async fn test_store_outbound_refs(
+        &self,
+        msg_id: &MessageId,
+        refs: Vec<SlackMessageRef>,
+    ) -> Result<()> {
+        self.outbound_refs.store(msg_id, refs).await
+    }
+
+    #[cfg(test)]
+    async fn test_resolve_outbound_refs(&self, msg_id: &MessageId) -> Result<Vec<SlackMessageRef>> {
+        self.outbound_refs.resolve(msg_id).await
+    }
+
+    #[cfg(test)]
+    async fn test_remove_outbound_refs_after_external_side_effect(&self, msg_id: &MessageId) {
+        self.outbound_refs
+            .remove_after_external_side_effect(msg_id, "test")
+            .await
     }
 }
 
@@ -275,28 +541,35 @@ impl ChannelAdapter for SlackAdapter {
         } else {
             MessageId::new(Uuid::now_v7().to_string())
         };
-        self.outbound_messages
-            .write()
-            .await
-            .insert(message_id.as_str().to_string(), sent_refs);
+        self.outbound_refs
+            .record_after_external_side_effect(&message_id, sent_refs, "chat.postMessage")
+            .await;
         Ok(message_id)
     }
 
     /// Edits an existing outbound Slack message in place.
     async fn edit(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
+        let update_lock = self.outbound_refs.acquire_update_lock(msg_id).await?;
+        let result = self.edit_locked(msg_id, msg).await;
+        self.outbound_refs.release_update_lock(update_lock).await;
+        result
+    }
+
+    /// Deletes a Slack message sent through this adapter.
+    async fn delete(&self, msg_id: &MessageId) -> Result<()> {
+        let update_lock = self.outbound_refs.acquire_update_lock(msg_id).await?;
+        let result = self.delete_locked(msg_id).await;
+        self.outbound_refs.release_update_lock(update_lock).await;
+        result
+    }
+}
+
+impl SlackAdapter {
+    async fn edit_locked(&self, msg_id: &MessageId, msg: OutboundMessage) -> Result<()> {
         self.record_edit_attempt(msg_id).await;
         let msg = prepare_outbound_message(self.channel(), &self.capabilities(), msg);
 
-        let existing = self
-            .outbound_messages
-            .read()
-            .await
-            .get(msg_id.as_str())
-            .cloned()
-            .or_else(|| slack_message_ref_from_id(msg_id).map(|message_ref| vec![message_ref]))
-            .ok_or_else(|| {
-                MoaError::ValidationError(format!("unknown slack message id: {msg_id}"))
-            })?;
+        let existing = self.outbound_refs.resolve(msg_id).await?;
         let rendered = self.renderer.render(&msg);
         let overlap = existing.len().min(rendered.len());
         let mut updated_refs = Vec::with_capacity(rendered.len());
@@ -324,6 +597,9 @@ impl ChannelAdapter for SlackAdapter {
         if existing.len() > rendered.len() {
             let session = self.client.open_session(&self.bot_token);
             for message_ref in existing.iter().skip(rendered.len()) {
+                self.rate_limiter
+                    .wait_for_channel_slot(message_ref.channel_id.as_ref())
+                    .await?;
                 let request = SlackApiChatDeleteRequest {
                     channel: SlackChannelId(message_ref.channel_id.to_string()),
                     ts: SlackTs(message_ref.ts.clone()),
@@ -336,36 +612,40 @@ impl ChannelAdapter for SlackAdapter {
             }
         }
 
-        self.outbound_messages
-            .write()
-            .await
-            .insert(msg_id.as_str().to_string(), updated_refs);
+        self.outbound_refs
+            .record_after_external_side_effect(msg_id, updated_refs, "chat.update")
+            .await;
         Ok(())
     }
 
-    /// Deletes a Slack message sent through this adapter.
-    async fn delete(&self, msg_id: &MessageId) -> Result<()> {
-        let refs = self
-            .outbound_messages
-            .write()
-            .await
-            .remove(msg_id.as_str())
-            .or_else(|| slack_message_ref_from_id(msg_id).map(|message_ref| vec![message_ref]))
-            .ok_or_else(|| {
-                MoaError::ValidationError(format!("unknown slack message id: {msg_id}"))
-            })?;
+    async fn delete_locked(&self, msg_id: &MessageId) -> Result<()> {
+        let refs = self.outbound_refs.resolve(msg_id).await?;
         let session = self.client.open_session(&self.bot_token);
         for message_ref in refs {
+            self.rate_limiter
+                .wait_for_channel_slot(message_ref.channel_id.as_ref())
+                .await?;
             let request = SlackApiChatDeleteRequest {
                 channel: SlackChannelId(message_ref.channel_id.to_string()),
                 ts: SlackTs(message_ref.ts),
                 as_user: None,
             };
-            session
-                .chat_delete(&request)
-                .await
-                .map_err(|error| slack_client_error("chat.delete", error))?;
+            match session.chat_delete(&request).await {
+                Ok(_) => {}
+                Err(SlackClientError::ApiError(api)) if api.code == "message_not_found" => {
+                    tracing::debug!(
+                        message_id = %msg_id,
+                        slack.channel_id = %message_ref.channel_id,
+                        slack.ts = %request.ts.0,
+                        "Slack delete retried a chunk that was already absent"
+                    );
+                }
+                Err(error) => return Err(slack_client_error("chat.delete", error)),
+            }
         }
+        self.outbound_refs
+            .remove_after_external_side_effect(msg_id, "chat.delete")
+            .await;
         Ok(())
     }
 }
@@ -623,6 +903,13 @@ struct SlackMessageRef {
     thread_ts: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SlackMessageRefRecord {
+    channel_id: String,
+    ts: String,
+    thread_ts: Option<String>,
+}
+
 impl SlackMessageRef {
     fn target(&self) -> SlackTarget {
         SlackTarget {
@@ -634,6 +921,45 @@ impl SlackMessageRef {
     fn thread_anchor(&self) -> &str {
         self.thread_ts.as_deref().unwrap_or(self.ts.as_str())
     }
+}
+
+impl From<&SlackMessageRef> for SlackMessageRefRecord {
+    fn from(message_ref: &SlackMessageRef) -> Self {
+        Self {
+            channel_id: message_ref.channel_id.to_string(),
+            ts: message_ref.ts.clone(),
+            thread_ts: message_ref.thread_ts.clone(),
+        }
+    }
+}
+
+impl From<SlackMessageRefRecord> for SlackMessageRef {
+    fn from(record: SlackMessageRefRecord) -> Self {
+        Self {
+            channel_id: Arc::<str>::from(record.channel_id),
+            ts: record.ts,
+            thread_ts: record.thread_ts,
+        }
+    }
+}
+
+fn encode_slack_message_refs(refs: &[SlackMessageRef]) -> Result<Vec<u8>> {
+    let records: Vec<SlackMessageRefRecord> =
+        refs.iter().map(SlackMessageRefRecord::from).collect();
+    Ok(serde_json::to_vec(&records)?)
+}
+
+fn decode_slack_message_refs(value: &[u8]) -> Result<Vec<SlackMessageRef>> {
+    let records: Vec<SlackMessageRefRecord> = serde_json::from_slice(value)?;
+    Ok(records.into_iter().map(SlackMessageRef::from).collect())
+}
+
+fn slack_outbound_refs_cache_key(message_id: &MessageId) -> String {
+    format!("moa:messaging:slack:outbound_refs:{message_id}")
+}
+
+fn slack_outbound_refs_lock_key(message_id: &MessageId) -> String {
+    format!("moa:messaging:slack:outbound_refs_lock:{message_id}")
 }
 
 fn slack_message_id_from_ref(message_ref: &SlackMessageRef) -> MessageId {
@@ -823,8 +1149,51 @@ fn slack_ts_to_datetime(value: &str) -> chrono::DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use moa_runtime_store::MemoryRuntimeCacheStore;
     use serde_json::json;
     use slack_morphism::errors::{SlackClientApiError, SlackRateLimitError};
+    use tokio::time::timeout;
+
+    #[derive(Debug)]
+    struct FailingSetRuntimeCacheStore;
+
+    #[async_trait]
+    impl RuntimeCacheStore for FailingSetRuntimeCacheStore {
+        async fn get(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        async fn set(&self, _key: &str, _value: Vec<u8>, _ttl: Duration) -> Result<()> {
+            Err(MoaError::StorageError(
+                "runtime cache set failed".to_string(),
+            ))
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Err(MoaError::StorageError(
+                "runtime cache delete failed".to_string(),
+            ))
+        }
+
+        async fn compare_and_set(
+            &self,
+            _key: &str,
+            _expected: Option<&[u8]>,
+            _value: Vec<u8>,
+            _ttl: Duration,
+        ) -> Result<bool> {
+            Err(MoaError::StorageError(
+                "runtime cache CAS failed".to_string(),
+            ))
+        }
+
+        async fn expire(&self, _key: &str, _ttl: Duration) -> Result<()> {
+            Err(MoaError::StorageError(
+                "runtime cache expire failed".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn parses_inbound_message_from_push_event() {
@@ -900,6 +1269,245 @@ mod tests {
         assert_eq!(restored.ts, "1712668800.000100");
         assert_eq!(restored.thread_ts, None);
         assert!(slack_message_ref_from_id(&MessageId::new("other-id")).is_none());
+    }
+
+    #[tokio::test]
+    async fn slack_multi_chunk_refs_survive_adapter_instance_boundaries_with_runtime_cache() {
+        // Pins: multi-chunk Slack edit/delete continuity does not depend on one adapter instance.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let cache = Arc::new(MemoryRuntimeCacheStore::new());
+        let first = SlackAdapter::new("xoxb-first", "xapp-first")
+            .expect("setup: first Slack adapter should construct")
+            .with_runtime_cache(cache.clone());
+        let second = SlackAdapter::new("xoxb-second", "xapp-second")
+            .expect("setup: second Slack adapter should construct")
+            .with_runtime_cache(cache);
+        let message_id = MessageId::new("multi-chunk-message");
+        let refs = vec![
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668800.000100".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668801.000200".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+        ];
+
+        first
+            .test_store_outbound_refs(&message_id, refs.clone())
+            .await
+            .expect("first adapter state should write refs to runtime cache");
+
+        assert_eq!(
+            second
+                .test_resolve_outbound_refs(&message_id)
+                .await
+                .expect("second adapter state should load refs from runtime cache"),
+            refs
+        );
+        assert_eq!(
+            second
+                .test_resolve_outbound_refs(&message_id)
+                .await
+                .expect("edit/delete should resolve shared refs")
+                .last()
+                .expect("refs should contain the last chunk")
+                .target(),
+            SlackTarget {
+                channel_id: Arc::<str>::from("C123"),
+                thread_ts: Some("1712668800.000100".to_string()),
+            }
+        );
+        assert_eq!(
+            second
+                .test_resolve_outbound_refs(&message_id)
+                .await
+                .expect("refs should remain available until Slack delete succeeds"),
+            refs
+        );
+        second
+            .test_remove_outbound_refs_after_external_side_effect(&message_id)
+            .await;
+        assert!(
+            second
+                .test_resolve_outbound_refs(&message_id)
+                .await
+                .is_err(),
+            "second adapter should not resolve refs after successful Slack delete cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_ref_storage_failure_after_side_effect_keeps_local_refs() {
+        // Pins: Slack send/edit success is not reported as failed solely because shared ref storage failed.
+        let refs = SlackOutboundMessageRefs::new(Some(Arc::new(FailingSetRuntimeCacheStore)));
+        let message_id = MessageId::new("multi-chunk-side-effect");
+        let sent_refs = vec![
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668800.000100".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668801.000200".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+        ];
+
+        refs.record_after_external_side_effect(&message_id, sent_refs.clone(), "chat.postMessage")
+            .await;
+
+        assert_eq!(
+            refs.resolve(&message_id)
+                .await
+                .expect("process-local refs should remain after shared storage failure"),
+            sent_refs
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_hot_multi_chunk_refs_refresh_shared_cache_after_ttl_loss() {
+        // Pins: loading hot multi-chunk refs refreshes shared refs instead of degrading to one chunk.
+        let cache = Arc::new(MemoryRuntimeCacheStore::new());
+        let first = SlackOutboundMessageRefs::new(Some(cache.clone()));
+        let second = SlackOutboundMessageRefs::new(Some(cache.clone()));
+        let message_id = MessageId::new("multi-chunk-refresh");
+        let refs = vec![
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668800.000100".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668801.000200".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+        ];
+
+        first
+            .store(&message_id, refs.clone())
+            .await
+            .expect("setup: refs should write to shared cache");
+        cache
+            .delete(&slack_outbound_refs_cache_key(&message_id))
+            .await
+            .expect("setup: deleting cache key simulates TTL expiration");
+
+        assert_eq!(
+            first
+                .resolve(&message_id)
+                .await
+                .expect("hot refs should resolve after shared TTL loss"),
+            refs
+        );
+        assert_eq!(
+            second
+                .resolve(&message_id)
+                .await
+                .expect("hot load should refresh shared cache for other adapters"),
+            refs
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_shared_update_lock_serializes_cross_instance_ref_updates() {
+        // Pins: cross-pod Slack edits cannot race shared ref updates for the same message id.
+        let cache = Arc::new(MemoryRuntimeCacheStore::new());
+        let first = SlackOutboundMessageRefs::new(Some(cache.clone()));
+        let second = SlackOutboundMessageRefs::new(Some(cache));
+        let message_id = MessageId::new("multi-chunk-lock");
+        let initial_refs = vec![
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668800.000100".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668801.000200".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+        ];
+        let expanded_refs = vec![
+            initial_refs[0].clone(),
+            initial_refs[1].clone(),
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668802.000300".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+        ];
+
+        first
+            .store(&message_id, initial_refs)
+            .await
+            .expect("setup: initial refs should write to shared cache");
+        let first_lock = first
+            .acquire_update_lock(&message_id)
+            .await
+            .expect("first edit should acquire the shared ref lock");
+
+        assert!(
+            timeout(
+                SLACK_OUTBOUND_REF_LOCK_RETRY_INTERVAL / 2,
+                second.acquire_update_lock(&message_id)
+            )
+            .await
+            .is_err(),
+            "second edit acquired the Slack ref lock while the first edit still held it"
+        );
+
+        first
+            .record_after_external_side_effect(&message_id, expanded_refs.clone(), "chat.update")
+            .await;
+        first.release_update_lock(first_lock).await;
+        let second_lock = second
+            .acquire_update_lock(&message_id)
+            .await
+            .expect("second edit should acquire the lock after release");
+        assert_eq!(
+            second
+                .resolve(&message_id)
+                .await
+                .expect("second edit should load refs written by the first edit"),
+            expanded_refs
+        );
+        second.release_update_lock(second_lock).await;
+    }
+
+    #[tokio::test]
+    async fn slack_memory_runtime_cache_is_per_pod_best_effort() {
+        // Pins: separate memory runtime-cache stores do not provide cross-pod Slack ref sharing.
+        let first = SlackOutboundMessageRefs::new(Some(Arc::new(MemoryRuntimeCacheStore::new())));
+        let second = SlackOutboundMessageRefs::new(Some(Arc::new(MemoryRuntimeCacheStore::new())));
+        let message_id = MessageId::new("multi-chunk-per-pod");
+        let refs = vec![
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668800.000100".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+            SlackMessageRef {
+                channel_id: Arc::<str>::from("C123"),
+                ts: "1712668801.000200".to_string(),
+                thread_ts: Some("1712668800.000100".to_string()),
+            },
+        ];
+
+        first
+            .store(&message_id, refs)
+            .await
+            .expect("first pod should store refs in its process-local memory cache");
+
+        assert!(
+            second.resolve(&message_id).await.is_err(),
+            "second pod should not see refs stored in a different memory backend instance"
+        );
     }
 
     #[test]

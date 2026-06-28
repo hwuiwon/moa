@@ -17,6 +17,7 @@ pub(super) const K_TENANT_ID: &str = "tenant_id";
 pub(super) const K_USER_ID: &str = "user_id";
 pub(super) const K_MODEL: &str = "model";
 pub(super) const K_MAX_TURNS: &str = "max_turns";
+pub(super) const K_TRUSTED_SANDBOX_MANIFEST: &str = "trusted_sandbox_manifest";
 pub(super) const K_HISTORY: &str = "history";
 pub(super) const K_TOOLS_INVOKED: &str = "tools_invoked";
 pub(super) const K_CANCEL_REASON: &str = "cancel_reason";
@@ -53,6 +54,8 @@ pub struct SubAgentVoState {
     pub model: Option<ModelId>,
     /// Optional maximum autonomous turns for this child.
     pub max_turns: Option<u32>,
+    /// Trusted sandbox file manifest inherited from the parent turn.
+    pub trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
     /// Buffered parent messages waiting for the next turn.
     pub pending: Vec<UserMessage>,
     /// Buffered conversation history carried across turns.
@@ -89,6 +92,7 @@ impl SubAgentVoState {
             tenant_id,
             user_id,
             model,
+            trusted_sandbox_manifest,
         } = msg
         else {
             return Err(MoaError::ValidationError(
@@ -113,6 +117,7 @@ impl SubAgentVoState {
         self.user_id = Some(user_id.clone());
         self.model = Some(model.clone());
         self.max_turns = *max_turns;
+        self.trusted_sandbox_manifest = trusted_sandbox_manifest.clone();
         self.pending = vec![UserMessage {
             text: task.clone(),
             attachments: Vec::new(),
@@ -294,6 +299,7 @@ impl VoState for SubAgentVoState {
             user_id: reader.get_json(K_USER_ID).await?,
             model: reader.get_json(K_MODEL).await?,
             max_turns: reader.get_json(K_MAX_TURNS).await?,
+            trusted_sandbox_manifest: reader.get_json(K_TRUSTED_SANDBOX_MANIFEST).await?,
             pending: reader.get_json(K_PENDING).await?.unwrap_or_default(),
             history: reader.get_json(K_HISTORY).await?.unwrap_or_default(),
             children: reader.get_json(K_CHILDREN).await?.unwrap_or_default(),
@@ -323,6 +329,11 @@ impl VoState for SubAgentVoState {
         set_or_clear_opt(ctx, K_USER_ID, self.user_id.as_ref());
         set_or_clear_opt(ctx, K_MODEL, self.model.as_ref());
         set_or_clear_opt(ctx, K_MAX_TURNS, self.max_turns.as_ref());
+        set_or_clear_opt(
+            ctx,
+            K_TRUSTED_SANDBOX_MANIFEST,
+            self.trusted_sandbox_manifest.as_ref(),
+        );
         set_or_clear_vec(ctx, K_PENDING, &self.pending);
         set_or_clear_vec(ctx, K_HISTORY, &self.history);
         set_or_clear_vec(ctx, K_CHILDREN, &self.children);
@@ -434,6 +445,7 @@ mod tests {
             tenant_id: TenantId::new(),
             user_id: UserId::new("user-1"),
             model: ModelId::new("test-model"),
+            trusted_sandbox_manifest: None,
         }
     }
 

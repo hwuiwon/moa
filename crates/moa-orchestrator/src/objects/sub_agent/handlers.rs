@@ -34,10 +34,11 @@ impl SubAgent for SubAgentImpl {
             None
         };
         let max_turns = state.max_turns;
+        let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist_into(&ctx);
 
         if let Some(turn_id) = turn_id {
-            start_sub_agent_turn_execution(&ctx, turn_id, max_turns);
+            start_sub_agent_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
         }
         Ok(())
     }
@@ -323,10 +324,11 @@ impl SubAgent for SubAgentImpl {
             None
         };
         let max_turns = state.max_turns;
+        let trusted_sandbox_manifest = state.trusted_sandbox_manifest.clone();
         state.persist_into(&ctx);
 
         if let Some(turn_id) = next_turn_id {
-            start_sub_agent_turn_execution(&ctx, turn_id, max_turns);
+            start_sub_agent_turn_execution(&ctx, turn_id, max_turns, trusted_sandbox_manifest);
             return Ok(());
         }
         maybe_resolve_parent_awakeable(&ctx).await
@@ -573,12 +575,14 @@ fn start_sub_agent_turn_execution(
     ctx: &ObjectContext<'_>,
     turn_id: String,
     max_turns: Option<u32>,
+    trusted_sandbox_manifest: Option<TrustedSandboxFileManifestRef>,
 ) {
     ctx.workflow_client::<SubAgentTurnExecutionClient>(turn_id.clone())
         .run(Json::from(RunSubAgentTurnRequest {
             sub_agent_id: ctx.key().to_string(),
             turn_id,
             max_turns,
+            trusted_sandbox_manifest,
         }))
         .send();
 }

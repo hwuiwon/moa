@@ -3,18 +3,22 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+use moa_core::traits::SessionRepository;
 use moa_core::wire::session_store::AppendEventRequest;
 use moa_core::wire::tools::{ToolDescriptor, tool_descriptor};
 use moa_core::{
-    Event, EventRecord, EventType, IdempotencyClass, MoaError, SessionId, SessionMeta,
-    SessionStatus, TenantId, ToolCallId, ToolCallRequest, ToolDefinition, ToolFailureClass,
-    ToolInvocation, ToolOutput, classify_tool_error,
+    ClaimCheck, Event, EventRecord, EventType, IdempotencyClass, MoaError, SandboxFile, SessionId,
+    SessionMeta, SessionStatus, TenantId, ToolCallId, ToolCallRequest, ToolDefinition,
+    ToolFailureClass, ToolInvocation, ToolOutput, TrustedSandboxFileEntry,
+    TrustedSandboxFileManifestPayload, TrustedSandboxFileManifestRef, classify_tool_error,
 };
 use moa_hands::ToolRouter;
 use moa_memory_ingest::{execute_memory_tool, is_fast_memory_tool};
 use moa_observability::record_tool_idempotency_scan;
 use moa_security::{ToolInputCanaryScreening, screen_tool_input_for_canary};
 use restate_sdk::prelude::*;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::OrchestratorCtx;
@@ -47,13 +51,27 @@ pub struct ToolRunPlan {
 #[derive(Clone)]
 pub struct ToolExecutorImpl {
     router: Arc<ToolRouter>,
+    trusted_manifest_store: Arc<dyn TrustedSandboxFileManifestStore>,
 }
 
 impl ToolExecutorImpl {
     /// Creates a new Restate tool executor over a shared router.
     #[must_use]
     pub fn new(router: Arc<ToolRouter>) -> Self {
-        Self { router }
+        Self {
+            router,
+            trusted_manifest_store: Arc::new(SessionStoreTrustedSandboxFileManifestStore),
+        }
+    }
+
+    /// Overrides the trusted sandbox file manifest store.
+    #[must_use]
+    pub fn with_trusted_manifest_store(
+        mut self,
+        trusted_manifest_store: Arc<dyn TrustedSandboxFileManifestStore>,
+    ) -> Self {
+        self.trusted_manifest_store = trusted_manifest_store;
+        self
     }
 
     async fn execute_buffered(
@@ -70,11 +88,31 @@ impl ToolExecutorImpl {
             name: request.tool_name.clone(),
             input: request.input.clone(),
         };
+        let trusted_sandbox_files = self.trusted_sandbox_files_for_request(request).await?;
+        self.router
+            .set_trusted_sandbox_files(session, trusted_sandbox_files)
+            .await;
         let (_hand_id, output) = self
             .router
             .execute_authorized_with_recovery(session, &invocation)
             .await?;
         Ok(output)
+    }
+
+    async fn trusted_sandbox_files_for_request(
+        &self,
+        request: &ToolCallRequest,
+    ) -> moa_core::Result<Vec<SandboxFile>> {
+        let Some(manifest) = request.trusted_sandbox_manifest.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let session_id = request.session_id.ok_or_else(|| {
+            MoaError::ValidationError(format!(
+                "tool {} supplied trusted_sandbox_manifest without session_id",
+                request.tool_name
+            ))
+        })?;
+        self.trusted_manifest_store.load(session_id, manifest).await
     }
 
     /// Returns the registered tool descriptors in stable name order.
@@ -84,6 +122,32 @@ impl ToolExecutorImpl {
             .into_iter()
             .map(tool_descriptor)
             .collect()
+    }
+}
+
+/// Durable loader for trusted sandbox file manifests referenced by tool requests.
+#[async_trait]
+pub trait TrustedSandboxFileManifestStore: Send + Sync {
+    /// Loads and validates files for a session-scoped manifest reference.
+    async fn load(
+        &self,
+        session_id: SessionId,
+        manifest: &TrustedSandboxFileManifestRef,
+    ) -> moa_core::Result<Vec<SandboxFile>>;
+}
+
+#[derive(Clone, Copy)]
+struct SessionStoreTrustedSandboxFileManifestStore;
+
+#[async_trait]
+impl TrustedSandboxFileManifestStore for SessionStoreTrustedSandboxFileManifestStore {
+    async fn load(
+        &self,
+        session_id: SessionId,
+        manifest: &TrustedSandboxFileManifestRef,
+    ) -> moa_core::Result<Vec<SandboxFile>> {
+        let store = OrchestratorCtx::current_session_store();
+        load_trusted_sandbox_manifest_from_store(store.as_ref(), session_id, manifest).await
     }
 }
 
@@ -324,6 +388,76 @@ fn annotate_tool_execution_span(session: &SessionMeta, request: &ToolCallRequest
         span.set_attribute("moa.contact.id", contact.contact_id.to_string());
         span.set_attribute("moa.contact.state", contact.state.as_str().to_string());
     }
+}
+
+async fn load_trusted_sandbox_manifest_from_store(
+    store: &(dyn SessionRepository + '_),
+    session_id: SessionId,
+    manifest: &TrustedSandboxFileManifestRef,
+) -> moa_core::Result<Vec<SandboxFile>> {
+    let claim_check = ClaimCheck {
+        blob_id: manifest.blob_id.clone(),
+        size: manifest.size,
+        preview: String::new(),
+    };
+    let payload = store.load_text_artifact(session_id, &claim_check).await?;
+    trusted_sandbox_files_from_manifest_payload(manifest, &payload)
+}
+
+/// Validates and decodes a trusted sandbox file manifest payload.
+pub fn trusted_sandbox_files_from_manifest_payload(
+    manifest: &TrustedSandboxFileManifestRef,
+    payload: &str,
+) -> moa_core::Result<Vec<SandboxFile>> {
+    let actual_manifest_hash = sha256_hex(payload.as_bytes());
+    if actual_manifest_hash != manifest.manifest_sha256 {
+        return Err(MoaError::StorageError(format!(
+            "trusted sandbox file manifest {} hash mismatch",
+            manifest.blob_id
+        )));
+    }
+    let payload: TrustedSandboxFileManifestPayload =
+        serde_json::from_str(payload).map_err(|error| {
+            MoaError::StorageError(format!(
+                "trusted sandbox file manifest {} could not be decoded: {error}",
+                manifest.blob_id
+            ))
+        })?;
+    validate_trusted_sandbox_manifest_files(manifest, &payload.files)?;
+    Ok(payload.files)
+}
+
+fn validate_trusted_sandbox_manifest_files(
+    manifest: &TrustedSandboxFileManifestRef,
+    files: &[SandboxFile],
+) -> moa_core::Result<()> {
+    if manifest.files.len() != files.len() {
+        return Err(MoaError::StorageError(format!(
+            "trusted sandbox file manifest {} expected {} files but loaded {}",
+            manifest.blob_id,
+            manifest.files.len(),
+            files.len()
+        )));
+    }
+    for (expected, file) in manifest.files.iter().zip(files) {
+        let actual = TrustedSandboxFileEntry {
+            path: file.path.clone(),
+            content_sha256: sha256_hex(&file.content),
+            size: file.content.len(),
+            executable: file.executable,
+        };
+        if &actual != expected {
+            return Err(MoaError::StorageError(format!(
+                "trusted sandbox file manifest {} entry mismatch for {}",
+                manifest.blob_id, expected.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 async fn resolve_session(
@@ -624,17 +758,100 @@ fn to_handler_error(error: MoaError) -> HandlerError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
     use chrono::Utc;
     use moa_core::{
         AgentContext, AgentPolicySnapshot, AgentToolPolicy, AgentToolPolicyMode, Event,
-        EventRecord, EventType, SessionMeta, TenantId, ToolCallId, ToolCallRequest, UserId,
+        EventRecord, EventType, HandHandle, HandProvider, HandSpec, HandStatus, IdempotencyClass,
+        RiskLevel, SandboxFile, SandboxTier, SessionId, SessionMeta, TenantId, ToolCallId,
+        ToolCallRequest, ToolDiffStrategy, ToolInputShape, ToolOutput, ToolPolicySpec,
+        TrustedSandboxFileEntry, TrustedSandboxFileManifestRef, UserId,
     };
+    use moa_hands::{ToolRegistry, ToolRouter};
     use uuid::Uuid;
 
     use super::{
-        agent_tool_policy_denied_output, blocked_canary_output, has_prior_tool_call_event,
-        synthetic_session_id,
+        ToolExecutorImpl, TrustedSandboxFileManifestStore, agent_tool_policy_denied_output,
+        blocked_canary_output, has_prior_tool_call_event, synthetic_session_id,
     };
+
+    #[derive(Default)]
+    struct InstallingProvider {
+        installed_files: Mutex<Vec<SandboxFile>>,
+    }
+
+    impl InstallingProvider {
+        fn installed_files(&self) -> Vec<SandboxFile> {
+            self.installed_files
+                .lock()
+                .expect("lock installed files")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl HandProvider for InstallingProvider {
+        fn provider_name(&self) -> &str {
+            "install-provider"
+        }
+
+        async fn provision(&self, _spec: HandSpec) -> moa_core::Result<HandHandle> {
+            Ok(HandHandle::docker("install-provider-1"))
+        }
+
+        async fn execute(
+            &self,
+            _handle: &HandHandle,
+            _tool: &str,
+            _input: &str,
+        ) -> moa_core::Result<ToolOutput> {
+            Ok(ToolOutput::text("ok", Duration::from_millis(1)))
+        }
+
+        async fn install_files(
+            &self,
+            _handle: &HandHandle,
+            files: &[SandboxFile],
+        ) -> moa_core::Result<()> {
+            *self.installed_files.lock().expect("lock installed files") = files.to_vec();
+            Ok(())
+        }
+
+        async fn status(&self, _handle: &HandHandle) -> moa_core::Result<HandStatus> {
+            Ok(HandStatus::Running)
+        }
+
+        async fn pause(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+            Ok(())
+        }
+
+        async fn destroy(&self, _handle: &HandHandle) -> moa_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StaticTrustedManifestStore {
+        files: Vec<SandboxFile>,
+    }
+
+    #[async_trait]
+    impl TrustedSandboxFileManifestStore for StaticTrustedManifestStore {
+        async fn load(
+            &self,
+            _session_id: SessionId,
+            _manifest: &TrustedSandboxFileManifestRef,
+        ) -> moa_core::Result<Vec<SandboxFile>> {
+            Ok(self.files.clone())
+        }
+    }
 
     fn tool_call_record(tool_call_id: ToolCallId) -> EventRecord {
         EventRecord {
@@ -745,6 +962,78 @@ mod tests {
             tenant_id: TenantId::from(Uuid::from_u128(1)),
             user_id: UserId::new("user-1"),
             idempotency_key: None,
+            trusted_sandbox_manifest: None,
         }
+    }
+
+    #[tokio::test]
+    async fn execute_buffered_installs_files_from_durable_request_manifest() {
+        // Pins: ToolExecutor does not rely on trusted-file state from the turn-loop router.
+        let provider = Arc::new(InstallingProvider::default());
+        let mut registry = ToolRegistry::default_local();
+        registry.register_hand(
+            "bash",
+            "test shell command",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string" }
+                },
+                "required": ["cmd"]
+            }),
+            ToolPolicySpec {
+                risk_level: RiskLevel::High,
+                default_effect: moa_core::ActionPolicyEffect::Allow,
+                action_class: moa_core::ActionClass::CommandExecution,
+                input_shape: ToolInputShape::Json,
+                diff_strategy: ToolDiffStrategy::None,
+            },
+            IdempotencyClass::Idempotent,
+        );
+        registry.retarget_hand_tools(provider.provider_name(), SandboxTier::Container);
+        registry.retain_only(["bash"]);
+        let provider_trait: Arc<dyn HandProvider> = provider.clone();
+        let mut providers = HashMap::new();
+        providers.insert(provider_trait.provider_name().to_string(), provider_trait);
+        let files = vec![SandboxFile {
+            path: ".moa/skills/test/SKILL.md".to_string(),
+            content: b"use this skill".to_vec(),
+            executable: false,
+        }];
+        let manifest = TrustedSandboxFileManifestRef {
+            blob_id: "session-blob-1".to_string(),
+            size: 128,
+            manifest_sha256: "manifest-sha256".to_string(),
+            files: vec![TrustedSandboxFileEntry {
+                path: ".moa/skills/test/SKILL.md".to_string(),
+                content_sha256: "content-sha256".to_string(),
+                size: b"use this skill".len(),
+                executable: false,
+            }],
+        };
+        let executor = ToolExecutorImpl::new(Arc::new(ToolRouter::new(registry, providers)))
+            .with_trusted_manifest_store(Arc::new(StaticTrustedManifestStore {
+                files: files.clone(),
+            }));
+        let request = ToolCallRequest {
+            tool_call_id: ToolCallId::new(),
+            provider_tool_use_id: Some("provider-tool-use".to_string()),
+            tool_name: "bash".to_string(),
+            input: serde_json::json!({"cmd": "cat .moa/skills/test/SKILL.md"}),
+            active_canary: None,
+            session_id: Some(SessionId::new()),
+            tenant_id: TenantId::from(Uuid::from_u128(1)),
+            user_id: UserId::new("user-1"),
+            idempotency_key: None,
+            trusted_sandbox_manifest: Some(manifest),
+        };
+
+        let output = executor
+            .execute_buffered(&SessionMeta::default(), &request)
+            .await
+            .expect("tool execution should use request manifest");
+
+        assert!(!output.is_error);
+        assert_eq!(provider.installed_files(), files);
     }
 }

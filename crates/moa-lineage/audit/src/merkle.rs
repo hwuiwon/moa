@@ -140,6 +140,20 @@ impl MerkleRootPublisher {
 
     /// Publishes one available window and returns the inserted root id.
     pub async fn publish_one_window(&self) -> Result<Option<Uuid>> {
+        let mut tx = self.pool.begin().await?;
+        let lock_acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext($1))")
+                .bind(format!(
+                    "audit-merkle-publisher:{}",
+                    self.storage_partition_id
+                ))
+                .fetch_one(&mut *tx)
+                .await?;
+        if !lock_acquired {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
         let rows = sqlx::query(
             r#"
             SELECT turn_id, record_kind, ts, integrity_hash
@@ -159,9 +173,10 @@ impl MerkleRootPublisher {
         )
         .bind(&self.storage_partition_id)
         .bind(i64::try_from(self.cfg.max_window_records).unwrap_or(i64::MAX))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
         if rows.is_empty() {
+            tx.rollback().await?;
             return Ok(None);
         }
 
@@ -177,12 +192,12 @@ impl MerkleRootPublisher {
         }
 
         let root = blake3_merkle_root(&leaves)?;
-        let root_id = Uuid::now_v7();
         let window_start =
             window_start.ok_or_else(|| AuditError::Invalid("empty root window".to_string()))?;
         let window_end =
             window_end.ok_or_else(|| AuditError::Invalid("empty root window".to_string()))?;
-        let retain_until = Utc::now()
+        let root_id = stable_root_id(&self.storage_partition_id, window_start, window_end, &root);
+        let retain_until = window_end
             + chrono::Duration::days(i64::from(self.cfg.retention_years).saturating_mul(365));
         let signature_payload = AuditRootSignaturePayload::new(
             root_id,
@@ -209,10 +224,12 @@ impl MerkleRootPublisher {
             object_lock_mode: self.cfg.object_lock_mode,
             retain_until,
         };
-        let object_path = object_store::path::Path::from(format!(
-            "storage_partition={}/window={}.json",
-            self.storage_partition_id, root_id
-        ));
+        let object_path = audit_root_object_path(
+            &self.storage_partition_id,
+            window_start,
+            window_end,
+            root_id,
+        );
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
         self.store
             .put(&object_path, manifest_bytes.clone().into())
@@ -242,7 +259,7 @@ impl MerkleRootPublisher {
         .bind(blake3::hash(&manifest_bytes).to_hex().to_string())
         .bind(self.cfg.object_lock_mode.as_str())
         .bind(retain_until)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         sqlx::query(
@@ -254,9 +271,10 @@ impl MerkleRootPublisher {
         )
         .bind(&self.storage_partition_id)
         .bind(root_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(Some(root_id))
     }
 }
@@ -281,6 +299,37 @@ pub fn blake3_merkle_root(leaves: &[Vec<u8>]) -> Result<Hash> {
         level = next;
     }
     Ok(level[0])
+}
+
+fn stable_root_id(
+    storage_partition_id: &str,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    root: &Hash,
+) -> Uuid {
+    let mut hasher = Hasher::new();
+    hasher.update(b"moa.audit-root.v1");
+    hasher.update(storage_partition_id.as_bytes());
+    hasher.update(&window_start.timestamp_millis().to_be_bytes());
+    hasher.update(&window_end.timestamp_millis().to_be_bytes());
+    hasher.update(root.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn audit_root_object_path(
+    storage_partition_id: &str,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    root_id: Uuid,
+) -> object_store::path::Path {
+    object_store::path::Path::from(format!(
+        "storage_partition={storage_partition_id}/window_start={}/window_end={}/root={root_id}.json",
+        window_start.timestamp_millis(),
+        window_end.timestamp_millis()
+    ))
 }
 
 /// Returns an RFC-6962-shaped SHA-256 root via `ct-merkle`.
@@ -380,8 +429,11 @@ fn hash_from_vec(bytes: &[u8]) -> Result<Hash> {
 #[cfg(test)]
 mod tests {
     use super::{
-        blake3_inclusion_proof, blake3_merkle_root, ct_sha256_root, verify_blake3_inclusion,
+        audit_root_object_path, blake3_inclusion_proof, blake3_merkle_root, ct_sha256_root,
+        stable_root_id, verify_blake3_inclusion,
     };
+
+    use chrono::{Duration as ChronoDuration, Utc};
 
     #[test]
     fn merkle_inclusion_round_trips() {
@@ -400,5 +452,24 @@ mod tests {
         let root = ct_sha256_root(&leaves).expect("ct root");
 
         assert_eq!(root.len(), 32);
+    }
+
+    #[test]
+    fn audit_root_identity_is_stable_for_replayed_window() {
+        // Pins: retry after object-store success but before DB commit targets
+        // the same manifest identity instead of publishing duplicate root objects.
+        let leaves = vec![b"alpha".to_vec(), b"beta".to_vec()];
+        let root = blake3_merkle_root(&leaves).expect("root");
+        let window_start = Utc::now() - ChronoDuration::minutes(10);
+        let window_end = window_start + ChronoDuration::minutes(5);
+
+        let first = stable_root_id("partition-a", window_start, window_end, &root);
+        let second = stable_root_id("partition-a", window_start, window_end, &root);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            audit_root_object_path("partition-a", window_start, window_end, first),
+            audit_root_object_path("partition-a", window_start, window_end, second)
+        );
     }
 }

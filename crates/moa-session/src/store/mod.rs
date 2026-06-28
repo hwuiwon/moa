@@ -32,7 +32,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::blob::{
-    FileBlobStore, decode_event_from_storage, encode_event_for_storage, preview_text,
+    FileBlobStore, blob_store_from_config, decode_event_from_storage, encode_event_for_storage,
+    preview_text,
 };
 use crate::queries::{
     EVENT_COLUMNS, EXPERIENCE_ATTRIBUTION_COLUMNS, EXPERIENCE_RECORD_COLUMNS,
@@ -92,28 +93,26 @@ impl PostgresSessionStore {
 
     /// Creates a session store from config using the configured `PostgreSQL` pool settings.
     pub async fn from_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options_and_schema(
+        Self::new_with_options_and_config(
             config.database.runtime_url(),
             1,
             config.database.max_connections,
             config.database.connect_timeout_seconds,
             config.database.schema.as_deref(),
-            Arc::new(FileBlobStore::from_config(config)?),
-            config.session.blob_threshold_bytes,
+            config,
         )
         .await
     }
 
     /// Creates a session store from config using the direct/admin `PostgreSQL` URL when present.
     pub async fn from_admin_config(config: &MoaConfig) -> Result<Self> {
-        Self::new_with_options_and_schema(
+        Self::new_with_options_and_config(
             config.database.admin_url(),
             1,
             config.database.max_connections,
             config.database.connect_timeout_seconds,
             config.database.schema.as_deref(),
-            Arc::new(FileBlobStore::from_config(config)?),
-            config.session.blob_threshold_bytes,
+            config,
         )
         .await
     }
@@ -150,6 +149,20 @@ impl PostgresSessionStore {
             schema_name: None,
             blob_store,
             blob_threshold_bytes: 65_536,
+        };
+        store.refresh_active_session_metric().await?;
+        Ok(store)
+    }
+
+    /// Creates a session store from an existing Postgres pool using configured blob storage.
+    pub async fn from_existing_pool_with_config(config: &MoaConfig, pool: PgPool) -> Result<Self> {
+        let blob_store = blob_store_from_config(config, pool.clone()).await?;
+        let store = Self {
+            url: config.database.url.clone(),
+            pool,
+            schema_name: config.database.schema.clone(),
+            blob_store,
+            blob_threshold_bytes: config.session.blob_threshold_bytes,
         };
         store.refresh_active_session_metric().await?;
         Ok(store)
@@ -329,6 +342,36 @@ impl PostgresSessionStore {
             schema_name: schema_name.map(ToOwned::to_owned),
             blob_store,
             blob_threshold_bytes,
+        };
+        store.refresh_active_session_metric().await?;
+        Ok(store)
+    }
+
+    async fn new_with_options_and_config(
+        database_url: &str,
+        pool_min: u32,
+        pool_max: u32,
+        connect_timeout_secs: u64,
+        schema_name: Option<&str>,
+        config: &MoaConfig,
+    ) -> Result<Self> {
+        let pool = Self::connect_with_retry(
+            database_url,
+            pool_min,
+            pool_max,
+            connect_timeout_secs,
+            3,
+            schema_name,
+        )
+        .await?;
+        migrate_database(database_url, &pool, schema_name).await?;
+        let blob_store = blob_store_from_config(config, pool.clone()).await?;
+        let store = Self {
+            url: database_url.to_string(),
+            pool,
+            schema_name: schema_name.map(ToOwned::to_owned),
+            blob_store,
+            blob_threshold_bytes: config.session.blob_threshold_bytes,
         };
         store.refresh_active_session_metric().await?;
         Ok(store)

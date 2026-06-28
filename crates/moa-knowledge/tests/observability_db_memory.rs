@@ -425,7 +425,7 @@ async fn create_counter_seed_run(
             connection_uid,
             parser: Some("test_parser".to_string()),
             max_records: None,
-            status: SyncRunStatus::Ingesting,
+            status: SyncRunStatus::Completed,
             records_seen: 11,
             records_changed: 22,
             records_deleted: 33,
@@ -437,7 +437,7 @@ async fn create_counter_seed_run(
             graph_edges_upserted: 99,
             error_code: Some("seed_error_code".to_string()),
             started_at: Utc::now(),
-            finished_at: None,
+            finished_at: Some(Utc::now()),
         })
         .await
         .expect("create counter seed run");
