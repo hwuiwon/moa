@@ -360,6 +360,7 @@ fn load_compliance_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<Complian
 #[cfg(test)]
 mod tests {
     use super::{AuditRootRow, ComplianceRow, verify_audit_root_window, verify_compliance_rows};
+    use crate::AuditError;
     use crate::blake3_merkle_root;
     use chrono::Utc;
     use moa_lineage_core::chain::HashChain;
@@ -436,7 +437,7 @@ mod tests {
         let error = verify_compliance_rows(rows, None)
             .expect_err("broken chain link should fail verification");
 
-        assert!(error.to_string().contains("chain link mismatch"));
+        assert!(matches!(error, AuditError::ChainMismatch { index: 1, .. }));
     }
 
     #[test]
@@ -477,7 +478,9 @@ mod tests {
         let error = verify_audit_root_window(rows, &root, &key)
             .expect_err("record-count mismatch should fail");
 
-        assert!(error.to_string().contains("record count mismatch"));
+        assert!(
+            matches!(error, AuditError::Invalid(message) if message.contains("record count mismatch"))
+        );
     }
 
     #[test]

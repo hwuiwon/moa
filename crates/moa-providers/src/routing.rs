@@ -251,7 +251,7 @@ impl std::str::FromStr for ProviderId {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::models::{CATALOG, PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI};
+    use crate::core::models::CATALOG;
 
     use super::{
         ProviderId, infer_provider_id, provider_descriptor_by_name, split_explicit_provider,
@@ -270,9 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_prefixes_resolve_to_provider_ids() {
+    fn explicit_prefixes_resolve_to_trimmed_provider_and_model() {
         assert_eq!(
-            split_explicit_provider("openai:gpt-5.4"),
+            split_explicit_provider("openai: gpt-5.4 "),
             Some((ProviderId::OpenAI, "gpt-5.4"))
         );
         assert_eq!(
@@ -283,10 +283,12 @@ mod tests {
             split_explicit_provider("google:gemini-3-flash-preview"),
             Some((ProviderId::Google, "gemini-3-flash-preview"))
         );
+        assert_eq!(split_explicit_provider("openai:"), None);
+        assert_eq!(split_explicit_provider("unknown:gpt-5.4"), None);
     }
 
     #[test]
-    fn catalog_and_prefix_inference_resolve_provider_ids() {
+    fn model_inference_uses_catalog_and_known_family_prefixes() {
         assert_eq!(infer_provider_id("gpt-5.4"), Some(ProviderId::OpenAI));
         assert_eq!(
             infer_provider_id("claude-sonnet-4-6"),
@@ -296,8 +298,6 @@ mod tests {
             infer_provider_id("gemini-3-flash-preview"),
             Some(ProviderId::Google)
         );
-        assert_eq!(PROVIDER_OPENAI, ProviderId::OpenAI.as_str());
-        assert_eq!(PROVIDER_ANTHROPIC, ProviderId::Anthropic.as_str());
-        assert_eq!(PROVIDER_GOOGLE, ProviderId::Google.as_str());
+        assert_eq!(infer_provider_id("unowned-model-family"), None);
     }
 }

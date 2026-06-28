@@ -122,13 +122,35 @@ mod tests {
         };
 
         let user_prompt = build_rewriter_user_prompt(&input, &ctx);
+        let stable_system_prompt = REWRITER_SYSTEM_PROMPT;
 
-        assert!(REWRITER_SYSTEM_PROMPT.starts_with("You are a query rewriter"));
-        assert!(!REWRITER_SYSTEM_PROMPT.contains("auth/refresh.rs"));
-        assert!(!REWRITER_SYSTEM_PROMPT.contains("Available tools"));
+        let mut changed_ctx = WorkingContext::new(&session, ModelCapabilities::default());
+        changed_ctx.set_tools(vec![json!({"name": "sql_query"})]);
+        changed_ctx.append_message(ContextMessage::system(
+            "- skill-b: inspect billing incidents".to_string(),
+        ));
+        let changed_input = RewriteInput {
+            query: "summarize that".to_string(),
+            history: vec![ContextMessage::user(
+                "The invoice sync incident is in billing/sync.rs",
+            )],
+            user_message_count: 2,
+        };
+        let changed_user_prompt = build_rewriter_user_prompt(&changed_input, &changed_ctx);
+
+        assert!(stable_system_prompt.starts_with("You are a query rewriter"));
+        assert_eq!(stable_system_prompt, REWRITER_SYSTEM_PROMPT);
+        assert!(!stable_system_prompt.contains("auth/refresh.rs"));
+        assert!(!stable_system_prompt.contains("billing/sync.rs"));
+        assert!(!stable_system_prompt.contains("Available tools"));
         assert!(user_prompt.contains("Available tools: bash"));
         assert!(user_prompt.contains("- skill-a: inspect auth failures"));
         assert!(user_prompt.contains("auth/refresh.rs"));
         assert!(user_prompt.contains("Current query:\nfix that"));
+        assert!(changed_user_prompt.contains("Available tools: sql_query"));
+        assert!(changed_user_prompt.contains("- skill-b: inspect billing incidents"));
+        assert!(changed_user_prompt.contains("billing/sync.rs"));
+        assert!(changed_user_prompt.contains("Current query:\nsummarize that"));
+        assert!(!changed_user_prompt.contains("auth/refresh.rs"));
     }
 }

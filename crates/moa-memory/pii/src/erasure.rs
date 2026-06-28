@@ -67,6 +67,7 @@ pub async fn enumerate_erase_candidates(
     subject_user_id: &str,
 ) -> Result<Vec<EraseCandidate>> {
     let storage_partition_id = StoragePartitionId::for_tenant(tenant_id).to_string();
+    let contact_user_id = contact_id_from_subject(subject_user_id)?.to_string();
     let mut tx = begin_app_scoped_tx(pool, tenant_id, subject_user_id).await?;
     let rows = sqlx::query_as::<_, EraseCandidate>(
         r#"
@@ -77,12 +78,15 @@ pub async fn enumerate_erase_candidates(
           AND (
               user_id = $2
               OR properties_summary->>'user_id' = $2
+              OR user_id = $3
+              OR properties_summary->>'user_id' = $3
           )
         ORDER BY uid
         "#,
     )
     .bind(storage_partition_id)
     .bind(subject_user_id)
+    .bind(contact_user_id)
     .fetch_all(tx.as_mut())
     .await?;
     tx.commit().await?;
@@ -142,17 +146,23 @@ fn erase_graph_store(
 }
 
 fn contact_scope_from_subject(tenant_id: TenantId, subject_user_id: &str) -> Result<RlsContext> {
+    Ok(RlsContext::contact(
+        tenant_id,
+        contact_id_from_subject(subject_user_id)?,
+    ))
+}
+
+fn contact_id_from_subject(subject_user_id: &str) -> Result<ContactId> {
     let contact_subject = subject_user_id
         .strip_prefix(CONTACT_SUBJECT_PREFIX)
         .unwrap_or(subject_user_id);
-    let contact_id = Uuid::parse_str(contact_subject)
+    Uuid::parse_str(contact_subject)
         .map(ContactId)
         .map_err(|error| {
             ErasureError::Scope(moa_core::MoaError::ValidationError(format!(
                 "privacy erasure subject_user_id must be a contact UUID or contact:<UUID> for contact-scoped memory: {error}"
             )))
-        })?;
-    Ok(RlsContext::contact(tenant_id, contact_id))
+        })
 }
 
 fn erase_audit_metadata(audit: &GraphErasureAudit) -> Value {
@@ -172,13 +182,14 @@ async fn emit_erase_summary(
     erased_count: usize,
 ) -> Result<()> {
     let storage_partition_id = StoragePartitionId::for_tenant(audit.tenant_id).to_string();
+    let contact_id = contact_id_from_subject(&audit.subject_user_id)?;
     let mut tx = begin_app_scoped_tx(pool, audit.tenant_id, &audit.subject_user_id).await?;
     write_and_bump(
         tx.as_mut(),
         ChangelogRecord {
             storage_partition_id: Some(storage_partition_id),
-            contact_id: None,
-            scope: "tenant".to_string(),
+            contact_id: Some(contact_id.to_string()),
+            scope: "contact".to_string(),
             actor_id: Some(audit.approver_id.clone()),
             actor_kind: "admin".to_string(),
             op: "erase".to_string(),

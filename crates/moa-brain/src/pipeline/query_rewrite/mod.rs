@@ -259,9 +259,9 @@ mod tests {
     use moa_core::{
         Channel, CompletionRequest, CompletionResponse, CompletionStream, ContextMessage,
         ContextProcessor, Event, EventRecord, LLMProvider, ModelCapabilities, ModelId, ModelTier,
-        QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason, RewriteSource, SessionId,
-        SessionMeta, StopReason, TenantId, TokenPricing, TokenUsage, ToolCallFormat,
-        WorkingContext,
+        ProcessorOutput, QueryRewriteConfig, QueryRewriteResult, Result, RewriteReason,
+        RewriteSource, SessionId, SessionMeta, StopReason, TenantId, TokenPricing, TokenUsage,
+        ToolCallFormat, WorkingContext,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -394,13 +394,37 @@ mod tests {
         .expect("rewrite metadata should deserialize")
     }
 
+    fn assert_decision_metadata(
+        output: &ProcessorOutput,
+        decision: &str,
+        reason: &str,
+        llm_called: bool,
+    ) {
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.decision"),
+            Some(&json!(decision))
+        );
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.reason"),
+            Some(&json!(reason))
+        );
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.llm_called"),
+            Some(&json!(llm_called))
+        );
+        assert_eq!(
+            output.metadata.get("rewrite_source"),
+            Some(&json!(decision))
+        );
+    }
+
     #[tokio::test]
     async fn skips_single_turn_short_query() {
         // Pins: skipped first-turn queries store the original text and do not call the LLM.
         let (rewriter, calls) = rewriter_with_response(response_json("hello there"));
         let mut ctx = context_with_messages(vec![ContextMessage::user("hello")]);
 
-        rewriter
+        let output = rewriter
             .process(&mut ctx)
             .await
             .expect("query rewrite should process");
@@ -409,6 +433,7 @@ mod tests {
         assert_eq!(result.source, RewriteSource::Original);
         assert_eq!(result.retrieval_query, "hello");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_decision_metadata(&output, "skip", "no_rewrite_signal", false);
     }
 
     #[tokio::test]
@@ -521,6 +546,14 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
+            output.metadata.get("moa.query_rewrite.decision"),
+            Some(&json!("cached"))
+        );
+        assert_eq!(
+            output.metadata.get("moa.query_rewrite.llm_called"),
+            Some(&json!(false))
+        );
+        assert_eq!(
             output.metadata.get("rewrite_source"),
             Some(&json!("cached"))
         );
@@ -594,10 +627,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(result.source, RewriteSource::Original);
         assert_eq!(result.retrieval_query, "fix that and add tests");
-        assert_eq!(
-            output.metadata.get("moa.query_rewrite.reason"),
-            Some(&json!("no_vector_retrieval"))
-        );
+        assert_decision_metadata(&output, "skip", "no_vector_retrieval", false);
     }
 
     #[tokio::test]
@@ -620,7 +650,7 @@ mod tests {
             ContextMessage::user("fix that"),
         ]);
 
-        rewriter
+        let output = rewriter
             .process(&mut ctx)
             .await
             .expect("timeout should fail open");
@@ -629,6 +659,7 @@ mod tests {
         assert_eq!(result.source, RewriteSource::Original);
         assert_eq!(result.retrieval_query, "fix that");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_decision_metadata(&output, "fallback", "timeout", true);
     }
 
     #[tokio::test]
@@ -641,17 +672,19 @@ mod tests {
         ]);
         let mut second = first.clone();
 
-        rewriter
+        let first_output = rewriter
             .process(&mut first)
             .await
             .expect("first failure should fail open");
-        rewriter
+        let second_output = rewriter
             .process(&mut second)
             .await
             .expect("open circuit should skip");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(metadata_result(&second).source, RewriteSource::Original);
+        assert_decision_metadata(&first_output, "fallback", "llm_error", true);
+        assert_decision_metadata(&second_output, "skip", "circuit_open", false);
     }
 
     #[tokio::test]

@@ -4,11 +4,6 @@ use moa_test_support::postgres::TestDb;
 use sqlx::{PgPool, postgres::PgQueryResult};
 use uuid::Uuid;
 
-/// Returns whether Prompt 04 Postgres tests should connect to the configured database.
-pub fn postgres_url_is_configured() -> bool {
-    std::env::var_os("MOA_DATABASE_URL").is_some()
-}
-
 /// Returns a double-quoted PostgreSQL identifier.
 pub fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
@@ -143,11 +138,24 @@ async fn assume_app_role(
         .execute(&mut **tx)
         .await
         .expect("set tenant GUC");
+    sqlx::query("SELECT pg_catalog.set_config('moa.storage_partition_id', $1, true)")
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await
+        .expect("set storage-partition GUC");
     sqlx::query("SELECT pg_catalog.set_config('moa.contact_id', $1, true)")
         .bind(contact_id)
         .execute(&mut **tx)
         .await
         .expect("set contact GUC");
+    sqlx::query("SELECT pg_catalog.set_config('moa.user_id', '', true)")
+        .execute(&mut **tx)
+        .await
+        .expect("set user GUC");
+    sqlx::query("SELECT pg_catalog.set_config('moa.scope_tier', 'tenant', true)")
+        .execute(&mut **tx)
+        .await
+        .expect("set scope-tier GUC");
     sqlx::query("SELECT pg_catalog.set_config('moa.control_plane', 'false', true)")
         .execute(&mut **tx)
         .await

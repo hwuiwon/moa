@@ -219,118 +219,14 @@ pub trait AsyncAuthzProvider: Send + Sync {
 mod tests {
     use super::*;
 
-    struct DummyAuthProvider;
+    fn assert_object_safe<T: ?Sized>() {}
 
-    #[async_trait]
-    impl AuthProvider for DummyAuthProvider {
-        async fn authenticate(&self, _credential: &Credential) -> Result<Identity, AuthError> {
-            Ok(Identity {
-                identity_type: IdentityType::User,
-                id: Uuid::from_u128(1),
-                tenant_id: TenantId::from(Uuid::from_u128(2)),
-                api_key_id: Some(Uuid::from_u128(3)),
-                acting_on_behalf_of: None,
-            })
-        }
-
-        fn name(&self) -> &'static str {
-            "dummy-auth"
-        }
-    }
-
-    struct DummyTokenVaultProvider;
-
-    #[async_trait]
-    impl TokenVaultProvider for DummyTokenVaultProvider {
-        async fn get_token(
-            &self,
-            _user_id: Uuid,
-            _connection_name: &str,
-        ) -> Result<VaultToken, TokenVaultError> {
-            Err(TokenVaultError::NotConfigured)
-        }
-
-        async fn list_connections(&self, _user_id: Uuid) -> Result<Vec<String>, TokenVaultError> {
-            Ok(vec!["github".to_string(), "drive".to_string()])
-        }
-
-        fn name(&self) -> &'static str {
-            "dummy-vault"
-        }
-    }
-
-    struct DummyAsyncAuthzProvider;
-
-    #[async_trait]
-    impl AsyncAuthzProvider for DummyAsyncAuthzProvider {
-        async fn request_approval(
-            &self,
-            request: ApprovalRequest,
-        ) -> Result<ApprovalHandle, AsyncAuthzError> {
-            Ok(ApprovalHandle {
-                id: Uuid::from_u128(4),
-                awakeable_id: request.awakeable_id,
-                provider_specific: serde_json::json!({"provider": "dummy"}),
-            })
-        }
-
-        fn name(&self) -> &'static str {
-            "dummy-async-authz"
-        }
-    }
-
-    #[tokio::test]
-    async fn auth_provider_trait_object_authenticates_identity() {
-        // Pins: AuthProvider remains object-safe and returns the resolved identity contract.
-        let provider: Box<dyn AuthProvider> = Box::new(DummyAuthProvider);
-        let identity = provider
-            .authenticate(&Credential::ApiKey("moa_dev_example".to_string()))
-            .await
-            .expect("dummy auth provider should resolve identity");
-
-        assert_eq!(provider.name(), "dummy-auth");
-        assert_eq!(identity.identity_type, IdentityType::User);
-        assert_eq!(identity.id, Uuid::from_u128(1));
-        assert_eq!(identity.tenant_id, TenantId::from(Uuid::from_u128(2)));
-        assert_eq!(identity.api_key_id, Some(Uuid::from_u128(3)));
-        assert_eq!(identity.acting_on_behalf_of, None);
-    }
-
-    #[tokio::test]
-    async fn token_vault_provider_trait_object_lists_connections() {
-        // Pins: TokenVaultProvider remains object-safe for downstream crates.
-        let provider: Box<dyn TokenVaultProvider> = Box::new(DummyTokenVaultProvider);
-        let connections = provider
-            .list_connections(Uuid::from_u128(1))
-            .await
-            .expect("dummy vault should list connections");
-
-        assert_eq!(provider.name(), "dummy-vault");
-        assert_eq!(connections, vec!["github".to_string(), "drive".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn async_authz_provider_trait_object_returns_handle() {
-        // Pins: AsyncAuthzProvider remains object-safe and preserves awakeable IDs.
-        let provider: Box<dyn AsyncAuthzProvider> = Box::new(DummyAsyncAuthzProvider);
-        let handle = provider
-            .request_approval(ApprovalRequest {
-                session_id: Uuid::from_u128(1),
-                deciding_user_id: Uuid::from_u128(2),
-                action_summary: "run command".to_string(),
-                action_details: serde_json::json!({"tool": "bash"}),
-                awakeable_id: "awakeable-1".to_string(),
-                timeout: Duration::from_secs(30),
-            })
-            .await
-            .expect("dummy async authz should return handle");
-
-        assert_eq!(provider.name(), "dummy-async-authz");
-        assert_eq!(handle.id, Uuid::from_u128(4));
-        assert_eq!(handle.awakeable_id, "awakeable-1");
-        assert_eq!(
-            handle.provider_specific,
-            serde_json::json!({"provider": "dummy"})
-        );
+    #[test]
+    fn auth_traits_remain_object_safe() {
+        // Pins: downstream crates can continue storing provider implementations
+        // behind trait objects without asserting behavior on dummy providers.
+        assert_object_safe::<dyn AuthProvider>();
+        assert_object_safe::<dyn TokenVaultProvider>();
+        assert_object_safe::<dyn AsyncAuthzProvider>();
     }
 }

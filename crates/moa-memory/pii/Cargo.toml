@@ -20,5 +20,7 @@ uuid.workspace = true
 workspace-hack = { workspace = true }
 
 [dev-dependencies]
+chrono.workspace = true
+moa-session = { workspace = true }
 tokio.workspace = true
 wiremock.workspace = true

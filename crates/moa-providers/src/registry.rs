@@ -585,7 +585,7 @@ mod tests {
     use async_trait::async_trait;
     use moa_core::{
         CompletionRequest, CompletionResponse, CompletionStream, LLMProvider, ModelCapabilities,
-        ModelId, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
+        ModelId, QueryRewriteConfig, StopReason, TokenPricing, TokenUsage, ToolCallFormat,
     };
 
     use super::{ProviderFactory, ProviderId, ProviderRegistry};
@@ -643,6 +643,15 @@ mod tests {
         })
     }
 
+    fn model_factory(builds: Arc<AtomicUsize>) -> ProviderFactory {
+        Arc::new(move |model| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(CacheTestProvider {
+                model: model.to_string(),
+            }))
+        })
+    }
+
     #[test]
     fn from_config_uses_configured_api_key() {
         // Pins: provider registry availability follows direct MoaConfig provider API keys.
@@ -659,39 +668,41 @@ mod tests {
     }
 
     #[test]
-    fn provider_registry_uses_deterministic_provider_id_map() {
-        // Pins: provider registration is a deterministic map, not provider-specific slots.
-        let registry = ProviderRegistry::with_static_providers(
-            Some(provider("claude-sonnet-4-6")),
-            Some(provider("gpt-5.4")),
-            Some(provider("gemini-3-flash-preview")),
+    fn default_model_resolution_prefers_configured_openai_for_main_loop() {
+        // Pins: when several families are configured, main-loop routing uses provider priority,
+        // not BTreeMap insertion order or a hard-coded provider slot.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            ProviderId::Anthropic.descriptor(),
+            model_factory(builds.clone()),
+        );
+        registry.register_factory(
+            ProviderId::OpenAI.descriptor(),
+            model_factory(builds.clone()),
+        );
+        registry.register_factory(
+            ProviderId::Google.descriptor(),
+            model_factory(builds.clone()),
         );
 
-        let provider_ids = registry.providers.keys().copied().collect::<Vec<_>>();
+        let provider = registry
+            .provider_for_model(None)
+            .expect("default provider should resolve");
 
-        assert_eq!(
-            provider_ids,
-            vec![
-                ProviderId::OpenAI,
-                ProviderId::Anthropic,
-                ProviderId::Google
-            ]
-        );
+        assert_eq!(provider.capabilities().model_id, ModelId::new("gpt-5.4"));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn provider_registry_reuses_factory_provider_for_same_model() {
         // Pins: repeated provider resolution does not rebuild factory-backed clients.
         let builds = Arc::new(AtomicUsize::new(0));
-        let builds_for_factory = builds.clone();
-        let factory: ProviderFactory = Arc::new(move |model| {
-            builds_for_factory.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(CacheTestProvider {
-                model: model.to_string(),
-            }))
-        });
         let mut registry = ProviderRegistry::default();
-        registry.register_factory(ProviderId::OpenAI.descriptor(), factory);
+        registry.register_factory(
+            ProviderId::OpenAI.descriptor(),
+            model_factory(builds.clone()),
+        );
 
         let first = registry
             .provider_for_model(Some("openai:gpt-cache"))
@@ -706,6 +717,37 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &third));
         assert_eq!(builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn rewriter_resolution_prefers_anthropic_small_model_when_available() {
+        // Pins: query rewrite selects by rewriter priority and builds the provider's
+        // rewriter model, not the main-loop default model.
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mut registry = ProviderRegistry::default();
+        registry.register_factory(
+            ProviderId::OpenAI.descriptor(),
+            model_factory(builds.clone()),
+        );
+        registry.register_factory(
+            ProviderId::Anthropic.descriptor(),
+            model_factory(builds.clone()),
+        );
+
+        let provider = registry
+            .resolve_rewriter_provider(&QueryRewriteConfig {
+                enabled: true,
+                model: None,
+                ..QueryRewriteConfig::default()
+            })
+            .expect("rewriter resolution should succeed")
+            .expect("enabled query rewrite should return a provider");
+
+        assert_eq!(
+            provider.capabilities().model_id,
+            ModelId::new("claude-haiku-4-5")
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
     }
 
     #[test]

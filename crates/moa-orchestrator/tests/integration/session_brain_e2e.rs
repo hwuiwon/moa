@@ -136,7 +136,14 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
             .error_for_status()
             .context("post_message should succeed")?;
 
-        let status = wait_for_status(&client, ingress, session_id, SessionStatus::Paused).await?;
+        let status = wait_for_status(
+            &client,
+            ingress,
+            &identity,
+            session_id,
+            SessionStatus::Paused,
+        )
+        .await?;
         assert_eq!(
             status,
             SessionStatus::Paused,
@@ -173,12 +180,13 @@ async fn session_brain_round_trip_through_restate() -> Result<()> {
 async fn wait_for_status(
     client: &reqwest::Client,
     ingress: &str,
+    identity: &moa_core::traits::Identity,
     session_id: SessionId,
     expected: SessionStatus,
 ) -> Result<SessionStatus> {
     for _attempt in 0..30 {
-        let status = client
-            .post(object_url(ingress, session_id, "status"))
+        let request = client.post(object_url(ingress, session_id, "status"));
+        let status = with_identity(request, identity)
             .send()
             .await
             .context("call Session/status")?

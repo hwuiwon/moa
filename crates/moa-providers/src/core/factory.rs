@@ -86,15 +86,6 @@ pub fn resolve_rewriter_provider(config: &MoaConfig) -> Result<Arc<dyn LLMProvid
         })
 }
 
-#[cfg(test)]
-fn default_rewriter_model(config: &MoaConfig) -> String {
-    let provider_id = provider_descriptor_by_name(config.general.default_provider.trim())
-        .map(|descriptor| descriptor.id)
-        .or_else(|| infer_provider_id(config.models.main.as_str()))
-        .unwrap_or(ProviderId::OpenAI);
-    provider_id.descriptor().rewriter_default_model.to_string()
-}
-
 fn normalize_model_for_provider(provider_name: &str, model: &str) -> String {
     let _provider_name = provider_name;
     model.trim().to_string()
@@ -116,7 +107,7 @@ mod tests {
 
     use crate::core::models::{PROVIDER_ANTHROPIC, PROVIDER_GOOGLE, PROVIDER_OPENAI};
 
-    use super::{default_rewriter_model, resolve_provider_selection};
+    use super::resolve_provider_selection;
 
     #[test]
     fn infers_openai_for_gpt_models() {
@@ -160,18 +151,5 @@ mod tests {
                 .to_string()
                 .contains("vendor-prefixed model ids are not supported")
         );
-    }
-
-    #[test]
-    fn default_rewriter_model_prefers_provider_family_small_model() {
-        let mut config = MoaConfig::default();
-        config.general.default_provider = "anthropic".to_string();
-        assert_eq!(default_rewriter_model(&config), "claude-haiku-4-5");
-
-        config.general.default_provider = "google".to_string();
-        assert_eq!(default_rewriter_model(&config), "gemini-3-flash-preview");
-
-        config.general.default_provider = "openai".to_string();
-        assert_eq!(default_rewriter_model(&config), "gpt-5.4-mini");
     }
 }

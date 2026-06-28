@@ -36,13 +36,21 @@ async fn docker_container_runs_with_hardening() {
                 &handle,
                 "bash",
                 r#"{
-                    "cmd": "cat /proc/self/status; echo '---MOUNTS---'; awk '$2==\"/\"{print $4}' /proc/mounts; echo '---NET---'; (wget -q -T 2 -O- http://169.254.169.254 >/dev/null 2>&1 && echo metadata=reachable) || echo metadata=blocked"
+                    "cmd": "echo \"uid=$(id -u)\"; echo \"gid=$(id -g)\"; cat /proc/self/status; echo '---MOUNTS---'; awk '$2==\"/\"{print $4}' /proc/mounts; echo '---NET---'; (wget -q -T 2 -O- http://169.254.169.254 >/dev/null 2>&1 && echo metadata=reachable) || echo metadata=blocked"
                 }"#,
             )
             .await
             .unwrap();
 
         let rendered = output.to_text();
+        assert!(
+            !rendered.contains("uid=0"),
+            "tier-1 Docker sandbox must not run as root:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("gid="),
+            "Docker sandbox should report its effective group:\n{rendered}"
+        );
         assert!(rendered.contains("NoNewPrivs:\t1"));
         assert!(rendered.contains("Seccomp:\t2"));
         let mounts = rendered

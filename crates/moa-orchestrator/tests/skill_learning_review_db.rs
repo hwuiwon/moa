@@ -326,48 +326,6 @@ mod skill_learning_review {
         );
     }
 
-    #[test]
-    fn accept_reject_requires_tenant_operator() {
-        // Pins: LearningReview handlers authorize tenant operator access before candidate payload reads.
-        let source = include_str!("../src/services/learning_review.rs");
-        assert!(
-            source.contains("ObjectType::Tenant") && source.contains("Relation::Operator"),
-            "LearningReview must authorize Tenant:Operator"
-        );
-
-        for handler in [
-            "async fn get(\n        &self",
-            "async fn accept_skill(\n        &self",
-            "async fn reject(\n        &self",
-        ] {
-            let handler_start = source.find(handler).expect("handler exists in source");
-            let handler_source = &source[handler_start..];
-            let auth_pos = handler_source
-                .find("authorize_tenant_operator(&ctx, request.tenant_id).await?")
-                .expect("handler authorizes tenant operator");
-            let boundary_pos = handler_source
-                .find(".run(|| async move")
-                .or_else(|| handler_source.find("let runtime = OrchestratorCtx::current();"))
-                .expect("handler enters protected runtime work after authorization");
-            assert!(
-                auth_pos < boundary_pos,
-                "{handler} must authorize before reading or mutating candidate state"
-            );
-        }
-
-        assert_eq!(
-            source
-                .matches("request.reviewer_subject = fga_subject(&identity);")
-                .count(),
-            2,
-            "mutating handlers must derive reviewer_subject from authenticated identity"
-        );
-        assert!(
-            source.contains(".name(\"learning_review_accept_skill\")"),
-            "accept_skill must run promotion and regression work in a named durable step"
-        );
-    }
-
     #[tokio::test]
     async fn accept_refuses_non_skill_and_reject_handles_workflow_candidate() {
         // Pins: accept stays skill-specific, while reject can disposition workflow proposals.

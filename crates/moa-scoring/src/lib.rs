@@ -744,35 +744,3 @@ impl ScopeParts {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Single cheap tripwire on the tenant-isolation shape of the shared score
-    // SQL. The actual cross-tenant filtering, NULL-delta, and consecutive-row
-    // grouping behaviors are pinned by execution in `tests/scoring_db_memory.rs`.
-    #[test]
-    fn score_queries_scope_every_run_id_by_tenant_storage_partition() {
-        // Pins: shared score SQL constrains every requested run by the authorized tenant storage partition.
-        assert!(
-            SCORES_BY_RUN_SQL.contains("WHERE run_id = $1 AND storage_partition_id = $2"),
-            "scores query must scope the run id by tenant storage partition"
-        );
-        assert!(
-            COMPARE_NUMERIC_RUNS_SQL.contains("WHERE run_id = $1 AND storage_partition_id = $3"),
-            "compare base run must be scoped by tenant storage partition"
-        );
-        assert!(
-            COMPARE_NUMERIC_RUNS_SQL.contains("WHERE run_id = $2 AND storage_partition_id = $3"),
-            "compare new run must be scoped by tenant storage partition"
-        );
-        assert_eq!(
-            COMPARE_NUMERIC_RUNS_SQL
-                .matches("storage_partition_id = $3")
-                .count(),
-            2,
-            "compare SQL must constrain both run IDs by the same authorized tenant storage partition"
-        );
-    }
-}

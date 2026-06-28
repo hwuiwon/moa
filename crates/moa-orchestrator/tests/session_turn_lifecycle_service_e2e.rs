@@ -178,8 +178,8 @@ async fn request_cancel(
     session: &InitializedSession,
     reason: &str,
 ) -> Result<CancelResponse> {
-    client
-        .post(session_url(&session.id, "request_cancel"))
+    let request = client.post(session_url(&session.id, "request_cancel"));
+    with_identity(request, &session.identity)
         .json(&serde_json::json!(reason))
         .send()
         .await

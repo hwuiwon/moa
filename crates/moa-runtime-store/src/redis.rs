@@ -151,7 +151,12 @@ mod tests {
     async fn redis_runtime_cache_set_get_expire_and_cas_round_trip_docker() {
         // Accept common truthy values (1/true/yes/on) so a developer's `.env` enables it.
         let redis_enabled = std::env::var("MOA_RUN_LIVE_REDIS")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false);
         if !redis_enabled {
             panic!("MOA_RUN_LIVE_REDIS=1 is required to run the live Redis CAS test");

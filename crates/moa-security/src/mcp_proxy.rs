@@ -104,10 +104,7 @@ impl MCPCredentialProxy {
             .await
             .remove(token.as_str())
             .ok_or_else(|| {
-                MoaError::PermissionDenied(format!(
-                    "unknown or expired MCP proxy token: {}",
-                    token.as_str()
-                ))
+                MoaError::PermissionDenied("unknown or expired MCP proxy token".to_string())
             })
     }
 
@@ -335,7 +332,11 @@ mod tests {
             .expect_err("second proxy enrichment should reject the consumed grant");
 
         assert!(
-            matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+            matches!(error, moa_core::MoaError::PermissionDenied(ref message) if message.contains("unknown or expired MCP proxy token"))
+        );
+        assert!(
+            !error.to_string().contains(token.as_str()),
+            "proxy errors must not echo the full opaque grant"
         );
     }
 
@@ -361,7 +362,11 @@ mod tests {
             .await
             .expect_err("an expired proxy token must not resolve credentials");
         assert!(
-            matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+            matches!(error, moa_core::MoaError::PermissionDenied(ref message) if message.contains("unknown or expired MCP proxy token"))
+        );
+        assert!(
+            !error.to_string().contains(token.as_str()),
+            "expired-token errors must not echo the full opaque grant"
         );
     }
 
@@ -387,7 +392,11 @@ mod tests {
             .await
             .expect_err("a revoked proxy token must not resolve credentials");
         assert!(
-            matches!(error, moa_core::MoaError::PermissionDenied(message) if message.contains("unknown or expired MCP proxy token"))
+            matches!(error, moa_core::MoaError::PermissionDenied(ref message) if message.contains("unknown or expired MCP proxy token"))
+        );
+        assert!(
+            !error.to_string().contains(token.as_str()),
+            "revoked-token errors must not echo the full opaque grant"
         );
     }
 

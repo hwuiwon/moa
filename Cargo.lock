@@ -3790,10 +3790,12 @@ name = "moa-memory-pii"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "moa-core",
  "moa-db",
  "moa-memory-graph",
  "moa-memory-types",
+ "moa-session",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

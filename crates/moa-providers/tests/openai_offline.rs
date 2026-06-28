@@ -9,7 +9,7 @@ use moa_core::{
     CompletionContent, LLMProvider, MoaError, StopReason, ToolCallContent, ToolInvocation,
 };
 use moa_providers::OpenAIProvider;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::time::{advance, timeout};
 use wiremock::MockServer;
 
@@ -44,6 +44,34 @@ async fn openai_offline_completion_returns_text_for_minimal_request() {
     assert_eq!(response.text, "Hello");
     assert_eq!(response.usage.input_tokens_cache_read, 2);
     assert_eq!(request_count(&server).await, 1);
+    assert_eq!(
+        single_received_json_body(&server).await,
+        json!({
+            "input": [
+                {
+                    "content": "What is 2+2?",
+                    "role": "user",
+                    "type": "message"
+                }
+            ],
+            "max_output_tokens": 64,
+            "model": OPENAI_MODEL,
+            "parallel_tool_calls": true,
+            "prompt_cache_key": "moa:gpt-5.4:910d7ae1cf1d035e",
+            "prompt_cache_retention": "in_memory",
+            "reasoning": {
+                "effort": "medium"
+            },
+            "store": false,
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [
+                {
+                    "type": "web_search"
+                }
+            ]
+        })
+    );
 }
 
 #[tokio::test]
@@ -330,4 +358,13 @@ fn provider(server: &MockServer, max_retries: usize) -> OpenAIProvider {
         .with_api_base(format!("{}/v1", server.uri()))
         .expect("test API base")
         .with_max_retries(max_retries)
+}
+
+async fn single_received_json_body(server: &MockServer) -> Value {
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should expose captured OpenAI requests");
+    assert_eq!(requests.len(), 1, "expected exactly one OpenAI request");
+    serde_json::from_slice(&requests[0].body).expect("OpenAI request body should be JSON")
 }
